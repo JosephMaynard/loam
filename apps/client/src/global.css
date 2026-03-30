@@ -1,5 +1,22 @@
 @import "tailwindcss";
 
+:root {
+  color: #1d1712;
+  background:
+    radial-gradient(circle at top left, rgba(228, 186, 132, 0.55), transparent 28%),
+    radial-gradient(circle at 80% 18%, rgba(134, 180, 214, 0.4), transparent 24%),
+    linear-gradient(180deg, #fbf6ee 0%, #f2e5d1 100%);
+}
+
+body {
+  min-height: 100vh;
+  background: transparent;
+}
+
+#app {
+  min-height: 100vh;
+}
+
 @utility noise-overlay {
   position: fixed;
   top: 0;
