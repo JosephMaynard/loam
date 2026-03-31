@@ -105,6 +105,35 @@ describe("generateAvatar", () => {
     expect(ada.darkMode).toBe(ben.darkMode);
     expect(ada).not.toBe(ben);
   });
+
+  it("renders a mirrored abstract pattern mode", () => {
+    const result = generateAvatar("pattern-user", { mode: "pattern" });
+    const doc = new DOMParser().parseFromString(result.html, "image/svg+xml");
+
+    expect(result.html).not.toContain("clipPath");
+    expect(doc.querySelectorAll("path").length).toBe(0);
+    expect((result.html.match(/<rect x="/g) ?? []).length).toBeGreaterThanOrEqual(6);
+    expect(result).toBe(generateAvatar("pattern-user", { mode: "pattern" }));
+  });
+
+  it("produces multiple distinct pattern silhouettes across seeds", () => {
+    const silhouettes = new Set(
+      ["pattern-a", "pattern-b", "pattern-c", "pattern-d", "pattern-e"].map((id) => {
+        const doc = new DOMParser().parseFromString(
+          generateAvatar(id, { mode: "pattern" }).html,
+          "image/svg+xml",
+        );
+
+        return Array.from(doc.querySelectorAll('rect[x][y]'), (node) =>
+          `${node.getAttribute("x")},${node.getAttribute("y")}`,
+        )
+          .sort()
+          .join("|");
+      }),
+    );
+
+    expect(silhouettes.size).toBeGreaterThan(3);
+  });
 });
 
 describe("getAvatarColors", () => {
@@ -113,6 +142,7 @@ describe("getAvatarColors", () => {
 
     expect(contrastRatio(colors.lightMode, LIGHT_SURFACE)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(colors.darkMode, DARK_SURFACE)).toBeGreaterThanOrEqual(4.5);
+    expect(colors.tertiary).toMatch(/^#[0-9a-f]{6}$/i);
   });
 
   it("produces a wider spread of background colours than the old fixed palette", () => {

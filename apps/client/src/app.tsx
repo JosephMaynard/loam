@@ -72,7 +72,7 @@ export function App() {
             <div className="rounded-3xl border border-black/10 bg-white/55 px-4 py-3 backdrop-blur-sm">
               <p className="text-[11px] tracking-[0.22em] uppercase text-black/45">Palette Output</p>
               <div className="mt-2 flex gap-2">
-                {[colors.bg, colors.shade, colors.accent].map((color) => (
+                {[colors.bg, colors.shade, colors.accent, colors.tertiary].map((color) => (
                   <span
                     key={color}
                     className="h-9 flex-1 rounded-full ring-1 ring-black/10"
@@ -95,6 +95,7 @@ export function App() {
                 <div className="flex flex-wrap justify-center gap-2">
                   <ModeButton current={mode} value="face" label="Face" onClick={setMode} />
                   <ModeButton current={mode} value="initial" label="Initial" onClick={setMode} />
+                  <ModeButton current={mode} value="pattern" label="Pattern" onClick={setMode} />
                 </div>
               </div>
 
@@ -168,7 +169,7 @@ export function App() {
               <ul className="mt-4 space-y-3 text-sm leading-6 text-black/68">
                 <li>Parses the SVG template once and caches direct-child counts for every facial feature.</li>
                 <li>Generates deterministic face variants with one active mouth, eye, brow and nose per id.</li>
-                <li>Supports a second initial mode using the same palette and accessible username colours.</li>
+                <li>Supports initial and mirrored pattern modes using the same seeded OKLCH colour system.</li>
               </ul>
             </div>
 
@@ -186,6 +187,10 @@ export function App() {
                 <div className="flex items-center justify-between gap-4 border-b border-black/8 pb-3">
                   <dt>Light Username</dt>
                   <dd>{colors.lightMode}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-4 border-b border-black/8 pb-3">
+                  <dt>Tertiary</dt>
+                  <dd>{colors.tertiary}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-4">
                   <dt>Dark Username</dt>

@@ -1,4 +1,4 @@
-export type AvatarMode = "face" | "initial";
+export type AvatarMode = "face" | "initial" | "pattern";
 
 export interface AvatarResult {
   html: string;
@@ -10,6 +10,7 @@ export interface AvatarColors {
   bg: string;
   shade: string;
   accent: string;
+  tertiary: string;
   lightMode: string;
   darkMode: string;
 }
@@ -432,12 +433,19 @@ function ensureContrast(color: string, surface: string, minContrast: number): st
     : BACKGROUND_PAPER;
 }
 
-function deriveAccent(seed: number): string {
-  const base = createBaseColor(seed);
+function deriveAccent(seed: number, base: OKLCH): string {
   return oklchToHex({
-    l: clamp(base.l + (toUnitInterval(seed, 0xf5f5f5f5) - 0.5) * 0.22, 0.52, 0.88),
-    c: clamp(base.c + 0.06 + toUnitInterval(seed, 0x5a17c9b5) * 0.09, 0.16, 0.32),
-    h: base.h + 110 + toUnitInterval(seed, 0x08f02d31) * 160,
+    l: clamp(base.l + (toUnitInterval(seed, 0xf5f5f5f5) - 0.5) * 0.18, 0.46, 0.82),
+    c: clamp(base.c + 0.08 + toUnitInterval(seed, 0x5a17c9b5) * 0.1, 0.18, 0.34),
+    h: base.h + 108 + toUnitInterval(seed, 0x08f02d31) * 28,
+  });
+}
+
+function deriveTertiary(seed: number, base: OKLCH): string {
+  return oklchToHex({
+    l: clamp(base.l + (toUnitInterval(seed, 0x541b4dd1) - 0.5) * 0.22, 0.42, 0.84),
+    c: clamp(base.c + 0.07 + toUnitInterval(seed, 0x1d872b41) * 0.11, 0.18, 0.34),
+    h: base.h + 228 + toUnitInterval(seed, 0x7f4a7c15) * 26,
   });
 }
 
@@ -451,8 +459,8 @@ function createBaseColor(seed: number): OKLCH {
 
 function deriveShade(seed: number, base: OKLCH): string {
   return oklchToHex({
-    l: clamp(base.l - (0.12 + toUnitInterval(seed, 0x37c7e57a) * 0.1), 0.38, 0.78),
-    c: clamp(base.c + 0.03 + toUnitInterval(seed, 0x94d049bb) * 0.06, 0.08, 0.28),
+    l: clamp(base.l - (0.2 + toUnitInterval(seed, 0x37c7e57a) * 0.12), 0.28, 0.72),
+    c: clamp(base.c + 0.06 + toUnitInterval(seed, 0x94d049bb) * 0.08, 0.14, 0.32),
     h: base.h - 10 + toUnitInterval(seed, 0x6ef372fe) * 24,
   });
 }
@@ -475,6 +483,200 @@ function getInitialInk(bg: string): string {
   const darkContrast = contrastRatio(BACKGROUND_INK, bg);
   const lightContrast = contrastRatio(BACKGROUND_PAPER, bg);
   return darkContrast >= lightContrast ? BACKGROUND_INK : BACKGROUND_PAPER;
+}
+
+function renderPatternTile(x: number, y: number, fill: string): string {
+  return `<rect x="${x}" y="${y}" width="25.6" height="25.6" fill="${fill}"/>`;
+}
+
+function patternTilePosition(index: number): number {
+  return index * 25.6;
+}
+
+function setMirroredPatternCell(
+  grid: Array<Array<boolean>>,
+  row: number,
+  col: number,
+  value: boolean,
+): void {
+  for (const column of col === 2 ? [col] : [col, 4 - col]) {
+    grid[row][column] = value;
+  }
+}
+
+function countPatternCells(grid: Array<Array<boolean>>): number {
+  return grid.flat().filter(Boolean).length;
+}
+
+function countPatternNeighbors(grid: Array<Array<boolean>>, row: number, col: number): number {
+  let neighbors = 0;
+
+  for (let rowOffset = -1; rowOffset <= 1; rowOffset += 1) {
+    for (let colOffset = -1; colOffset <= 1; colOffset += 1) {
+      if (!rowOffset && !colOffset) {
+        continue;
+      }
+
+      const nextRow = row + rowOffset;
+      const nextCol = col + colOffset;
+
+      if (nextRow < 0 || nextRow > 4 || nextCol < 0 || nextCol > 4) {
+        continue;
+      }
+
+      if (grid[nextRow][nextCol]) {
+        neighbors += 1;
+      }
+    }
+  }
+
+  return neighbors;
+}
+
+function scorePatternCandidate(seed: number, row: number, col: number): number {
+  return toUnitInterval(seed, 0x3c6ef372 ^ (row << 8) ^ col);
+}
+
+function buildPatternMask(seed: number): Array<Array<boolean>> {
+  const grid = Array.from({ length: 5 }, () => Array<boolean>(5).fill(false));
+  const profile = mix32(seed ^ 0x45d9f3b) % 4;
+  const profileBias = [0.02, -0.03, 0.06, -0.01][profile];
+
+  for (let row = 0; row < 5; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const score = scorePatternCandidate(seed ^ (row * 0x9e3779b9), row, col);
+      const rowBias = row === 2 ? -0.06 : row === 0 || row === 4 ? 0.04 : 0;
+      const colBias = col === 1 ? 0.05 : 0;
+      const active = score > 0.5 - profileBias - rowBias - colBias;
+      setMirroredPatternCell(grid, row, col, active);
+    }
+  }
+
+  if (!grid[2].some(Boolean)) {
+    setMirroredPatternCell(grid, 2, mix32(seed ^ 0xa511e9b3) % 3, true);
+  }
+
+  if (!grid[0].some(Boolean)) {
+    setMirroredPatternCell(grid, 0, mix32(seed ^ 0xf39cc060) % 3, true);
+  }
+
+  if (!grid[4].some(Boolean)) {
+    setMirroredPatternCell(grid, 4, mix32(seed ^ 0x62992fc1) % 3, true);
+  }
+
+  for (let row = 0; row < 5; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const mirroredCol = col === 2 ? 2 : 4 - col;
+      const active = grid[row][col];
+      const neighbors = countPatternNeighbors(grid, row, col);
+
+      if (active && neighbors <= 1 && scorePatternCandidate(seed ^ 0x7f4a7c15, row, col) < 0.7) {
+        setMirroredPatternCell(grid, row, col, false);
+      } else if (
+        !active &&
+        neighbors >= 4 &&
+        scorePatternCandidate(seed ^ 0x1d872b41, row, col) > 0.28
+      ) {
+        grid[row][col] = true;
+        grid[row][mirroredCol] = true;
+      }
+    }
+  }
+
+  const minCells = 8;
+  const maxCells = 17;
+
+  while (countPatternCells(grid) < minCells) {
+    let bestRow = 0;
+    let bestCol = 0;
+    let bestScore = -1;
+
+    for (let row = 0; row < 5; row += 1) {
+      for (let col = 0; col < 3; col += 1) {
+        if (grid[row][col]) {
+          continue;
+        }
+
+        const score =
+          countPatternNeighbors(grid, row, col) * 0.25 + scorePatternCandidate(seed ^ 0x94d049bb, row, col);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestRow = row;
+          bestCol = col;
+        }
+      }
+    }
+
+    setMirroredPatternCell(grid, bestRow, bestCol, true);
+  }
+
+  while (countPatternCells(grid) > maxCells) {
+    let worstRow = -1;
+    let worstCol = -1;
+    let worstScore = Number.POSITIVE_INFINITY;
+
+    for (let row = 0; row < 5; row += 1) {
+      for (let col = 0; col < 3; col += 1) {
+        if (!grid[row][col]) {
+          continue;
+        }
+
+        const protectedCell =
+          (row === 2 && col === 1) ||
+          (row === 0 && grid[0].filter(Boolean).length === (col === 2 ? 1 : 2)) ||
+          (row === 4 && grid[4].filter(Boolean).length === (col === 2 ? 1 : 2));
+
+        if (protectedCell) {
+          continue;
+        }
+
+        const score =
+          countPatternNeighbors(grid, row, col) * 0.3 + scorePatternCandidate(seed ^ 0x243f6a88, row, col);
+
+        if (score < worstScore) {
+          worstScore = score;
+          worstRow = row;
+          worstCol = col;
+        }
+      }
+    }
+
+    if (worstRow === -1) {
+      break;
+    }
+
+    setMirroredPatternCell(grid, worstRow, worstCol, false);
+  }
+
+  return grid;
+}
+
+function renderPatternAvatar(id: string, colors: AvatarColors): string {
+  const seed = hashString(id);
+  const grid = buildPatternMask(seed);
+  const fillOrder = [colors.shade, colors.accent, colors.tertiary];
+
+  const tiles = grid.flatMap((row, rowIndex) =>
+    row.flatMap((fill, colIndex) =>
+      fill
+        ? [
+            renderPatternTile(
+              patternTilePosition(colIndex),
+              patternTilePosition(rowIndex),
+              fillOrder[mix32(seed ^ (rowIndex * 0x85ebca6b) ^ (colIndex * 0xc2b2ae35)) % fillOrder.length],
+            ),
+          ]
+        : [],
+    ),
+  );
+
+  return [
+    `<svg xmlns="${SVG_NS}" viewBox="0 0 128 128" aria-hidden="true" focusable="false">`,
+    `<rect width="128" height="128" rx="30" fill="${colors.bg}"/>`,
+    `<g>${tiles.join("")}</g>`,
+    `</svg>`,
+  ].join("");
 }
 
 function renderInitialAvatar(label: string, colors: AvatarColors): string {
@@ -568,11 +770,13 @@ export function getAvatarColors(id: string): AvatarColors {
   const base = createBaseColor(seed);
   const bg = oklchToHex(base);
   const shade = deriveShade(seed, base);
-  const accent = deriveAccent(seed);
+  const accent = deriveAccent(seed, base);
+  const tertiary = deriveTertiary(seed, base);
   const colors: AvatarColors = {
     bg,
     shade,
     accent,
+    tertiary,
     lightMode: ensureContrast(bg, LIGHT_SURFACE, MIN_TEXT_CONTRAST),
     darkMode: ensureContrast(bg, DARK_SURFACE, MIN_TEXT_CONTRAST),
   };
@@ -594,7 +798,11 @@ export function generateAvatar(id: string, options: AvatarOptions = {}): AvatarR
 
   const colors = getAvatarColors(id);
   const html =
-    mode === "initial" ? renderInitialAvatar(label || id, colors) : createFaceAvatar(id, colors);
+    mode === "initial"
+      ? renderInitialAvatar(label || id, colors)
+      : mode === "pattern"
+        ? renderPatternAvatar(id, colors)
+        : createFaceAvatar(id, colors);
   const result: AvatarResult = {
     html,
     lightMode: colors.lightMode,
