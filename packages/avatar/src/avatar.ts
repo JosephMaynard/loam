@@ -53,6 +53,12 @@ interface HSL {
   l: number;
 }
 
+interface OKLCH {
+  l: number;
+  c: number;
+  h: number;
+}
+
 const STORE_KEY = Symbol.for("loam.avatar.store");
 const SVG_NS = "http://www.w3.org/2000/svg";
 const FEATURE_IDS: Record<FeatureKey, string> = {
@@ -76,33 +82,12 @@ const RUNTIME_STYLE = `
   display: inline;
 }
 `.trim();
-const PALETTE = [
-  "#f2c572",
-  "#e8a878",
-  "#e8897c",
-  "#d9748c",
-  "#c76bba",
-  "#9a78dc",
-  "#7b8ae5",
-  "#68a3e4",
-  "#63b8d9",
-  "#67c5c0",
-  "#78cdab",
-  "#97d183",
-  "#bed46d",
-  "#d6ca72",
-  "#e7b86c",
-  "#eaa18d",
-  "#d998bb",
-  "#b88bcd",
-  "#8fa0d9",
-  "#80c0e0",
-];
 const LIGHT_SURFACE = "#f7f2eb";
 const DARK_SURFACE = "#14161b";
 const MIN_TEXT_CONTRAST = 4.5;
 const BACKGROUND_INK = "#171411";
 const BACKGROUND_PAPER = "#fffdf8";
+const SVG_TEXT_STACK = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 
 type AvatarGlobal = typeof globalThis & {
   [STORE_KEY]?: AvatarStore;
@@ -235,8 +220,16 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 function clampChannel(value: number): number {
   return Math.min(255, Math.max(0, Math.round(value)));
+}
+
+function toUnitInterval(seed: number, salt: number): number {
+  return mix32(seed ^ salt) / 0xffffffff;
 }
 
 function hexToRgb(hex: string): RGB {
@@ -257,6 +250,67 @@ function rgbToHex({ r, g, b }: RGB): string {
   return `#${[r, g, b]
     .map((channel) => clampChannel(channel).toString(16).padStart(2, "0"))
     .join("")}`;
+}
+
+function normalizeHue(hue: number): number {
+  return ((hue % 360) + 360) % 360;
+}
+
+function oklchToLinearRgb({ l, c, h }: OKLCH): RGB {
+  const angle = (normalizeHue(h) * Math.PI) / 180;
+  const a = c * Math.cos(angle);
+  const b = c * Math.sin(angle);
+
+  const lPrime = l + 0.3963377774 * a + 0.2158037573 * b;
+  const mPrime = l - 0.1055613458 * a - 0.0638541728 * b;
+  const sPrime = l - 0.0894841775 * a - 1.291485548 * b;
+
+  const lCubed = lPrime ** 3;
+  const mCubed = mPrime ** 3;
+  const sCubed = sPrime ** 3;
+
+  return {
+    r: 4.0767416621 * lCubed - 3.3077115913 * mCubed + 0.2309699292 * sCubed,
+    g: -1.2684380046 * lCubed + 2.6097574011 * mCubed - 0.3413193965 * sCubed,
+    b: -0.0041960863 * lCubed - 0.7034186147 * mCubed + 1.707614701 * sCubed,
+  };
+}
+
+function linearChannelToSrgb(value: number): number {
+  const channel = clamp01(value);
+  return channel <= 0.0031308 ? 12.92 * channel : 1.055 * channel ** (1 / 2.4) - 0.055;
+}
+
+function isInSrgbGamut({ r, g, b }: RGB): boolean {
+  return r >= 0 && r <= 1 && g >= 0 && g <= 1 && b >= 0 && b <= 1;
+}
+
+function oklchToHex(color: OKLCH): string {
+  let candidate = { ...color };
+
+  for (let step = 0; step < 24; step += 1) {
+    const linear = oklchToLinearRgb(candidate);
+
+    if (isInSrgbGamut(linear)) {
+      return rgbToHex({
+        r: linearChannelToSrgb(linear.r) * 255,
+        g: linearChannelToSrgb(linear.g) * 255,
+        b: linearChannelToSrgb(linear.b) * 255,
+      });
+    }
+
+    candidate = {
+      ...candidate,
+      c: candidate.c * 0.92,
+    };
+  }
+
+  const linear = oklchToLinearRgb(candidate);
+  return rgbToHex({
+    r: linearChannelToSrgb(linear.r) * 255,
+    g: linearChannelToSrgb(linear.g) * 255,
+    b: linearChannelToSrgb(linear.b) * 255,
+  });
 }
 
 function rgbToHsl({ r, g, b }: RGB): HSL {
@@ -340,17 +394,6 @@ function hslToRgb({ h, s, l }: HSL): RGB {
   };
 }
 
-function shiftColor(hex: string, lightnessDelta: number, saturationDelta = 0, hueDelta = 0): string {
-  const hsl = rgbToHsl(hexToRgb(hex));
-  return rgbToHex(
-    hslToRgb({
-      h: hsl.h + hueDelta,
-      s: clamp01(hsl.s + saturationDelta),
-      l: clamp01(hsl.l + lightnessDelta),
-    }),
-  );
-}
-
 function relativeLuminance(color: string): number {
   const { r, g, b } = hexToRgb(color);
   const channels = [r, g, b].map((channel) => {
@@ -389,15 +432,29 @@ function ensureContrast(color: string, surface: string, minContrast: number): st
     : BACKGROUND_PAPER;
 }
 
-function deriveAccent(bg: string, seed: number): string {
-  const hsl = rgbToHsl(hexToRgb(bg));
-  return rgbToHex(
-    hslToRgb({
-      h: hsl.h + 145 + (seed % 55),
-      s: clamp01(Math.max(0.45, hsl.s + 0.08)),
-      l: clamp01(hsl.l < 0.56 ? 0.62 : 0.42),
-    }),
-  );
+function deriveAccent(seed: number): string {
+  const base = createBaseColor(seed);
+  return oklchToHex({
+    l: clamp(base.l + (toUnitInterval(seed, 0xf5f5f5f5) - 0.5) * 0.22, 0.52, 0.88),
+    c: clamp(base.c + 0.06 + toUnitInterval(seed, 0x5a17c9b5) * 0.09, 0.16, 0.32),
+    h: base.h + 110 + toUnitInterval(seed, 0x08f02d31) * 160,
+  });
+}
+
+function createBaseColor(seed: number): OKLCH {
+  return {
+    l: 0.72 + toUnitInterval(seed, 0x243f6a88) * 0.16,
+    c: 0.11 + toUnitInterval(seed, 0x85a308d3) * 0.13,
+    h: toUnitInterval(seed, 0x13198a2e) * 360,
+  };
+}
+
+function deriveShade(seed: number, base: OKLCH): string {
+  return oklchToHex({
+    l: clamp(base.l - (0.12 + toUnitInterval(seed, 0x37c7e57a) * 0.1), 0.38, 0.78),
+    c: clamp(base.c + 0.03 + toUnitInterval(seed, 0x94d049bb) * 0.06, 0.08, 0.28),
+    h: base.h - 10 + toUnitInterval(seed, 0x6ef372fe) * 24,
+  });
 }
 
 function getInitialCharacter(label: string): string {
@@ -427,9 +484,9 @@ function renderInitialAvatar(label: string, colors: AvatarColors): string {
   return [
     `<svg xmlns="${SVG_NS}" viewBox="0 0 128 128" aria-hidden="true" focusable="false">`,
     `<rect width="128" height="128" rx="30" fill="${colors.bg}"/>`,
-    `<circle cx="101" cy="29" r="18" fill="${colors.accent}" opacity="0.5"/>`,
+    `<circle cx="101" cy="29" r="18" fill="${colors.accent}" opacity="0.82"/>`,
     `<path d="M0 100C18 90 34 85 50 86C78 87 100 102 128 90V128H0Z" fill="${colors.shade}" opacity="0.72"/>`,
-    `<text x="64" y="70" fill="${ink}" font-size="56" font-weight="700" text-anchor="middle" dominant-baseline="middle">${initial}</text>`,
+    `<text x="64" y="70" fill="${ink}" font-size="56" font-weight="700" text-anchor="middle" dominant-baseline="middle" font-family="${SVG_TEXT_STACK}">${initial}</text>`,
     `</svg>`,
   ].join("");
 }
@@ -508,9 +565,10 @@ export function getAvatarColors(id: string): AvatarColors {
   }
 
   const seed = hashString(id);
-  const bg = PALETTE[seed % PALETTE.length];
-  const shade = shiftColor(bg, -0.16, 0.04);
-  const accent = deriveAccent(bg, seed);
+  const base = createBaseColor(seed);
+  const bg = oklchToHex(base);
+  const shade = deriveShade(seed, base);
+  const accent = deriveAccent(seed);
   const colors: AvatarColors = {
     bg,
     shade,

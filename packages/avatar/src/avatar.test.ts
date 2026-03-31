@@ -114,4 +114,12 @@ describe("getAvatarColors", () => {
     expect(contrastRatio(colors.lightMode, LIGHT_SURFACE)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(colors.darkMode, DARK_SURFACE)).toBeGreaterThanOrEqual(4.5);
   });
+
+  it("produces a wider spread of background colours than the old fixed palette", () => {
+    const backgrounds = new Set(
+      Array.from({ length: 64 }, (_, index) => getAvatarColors(`seed-${index}`).bg),
+    );
+
+    expect(backgrounds.size).toBeGreaterThan(40);
+  });
 });
