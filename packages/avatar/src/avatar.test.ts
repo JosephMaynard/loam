@@ -112,7 +112,7 @@ describe("generateAvatar", () => {
 
     expect(result.html).not.toContain("clipPath");
     expect(doc.querySelectorAll("path").length).toBe(0);
-    expect((result.html.match(/<rect x="/g) ?? []).length).toBeGreaterThanOrEqual(6);
+    expect(doc.querySelectorAll("circle").length).toBeGreaterThanOrEqual(6);
     expect(result).toBe(generateAvatar("pattern-user", { mode: "pattern" }));
   });
 
@@ -124,8 +124,8 @@ describe("generateAvatar", () => {
           "image/svg+xml",
         );
 
-        return Array.from(doc.querySelectorAll('rect[x][y]'), (node) =>
-          `${node.getAttribute("x")},${node.getAttribute("y")}`,
+        return Array.from(doc.querySelectorAll("circle"), (node) =>
+          `${node.getAttribute("cx")},${node.getAttribute("cy")}`,
         )
           .sort()
           .join("|");

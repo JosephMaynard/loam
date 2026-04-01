@@ -486,7 +486,7 @@ function getInitialInk(bg: string): string {
 }
 
 function renderPatternTile(x: number, y: number, fill: string): string {
-  return `<rect x="${x}" y="${y}" width="25.6" height="25.6" fill="${fill}"/>`;
+  return `<circle cx="${x + 12.8}" cy="${y + 12.8}" r="18.4" fill="${fill}"/>`;
 }
 
 function patternTilePosition(index: number): number {
