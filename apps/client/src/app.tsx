@@ -2,14 +2,15 @@ import { useMemo, useState } from "preact/hooks";
 
 import { Avatar } from "./components/Avatar";
 import { getAvatarColors, getAvatarCounts } from "./lib/avatar";
+import { generateDisplayName } from "./lib/display-name";
 import type { AvatarMode } from "./lib/avatar";
 
 const EXAMPLES = [
-  "fern.ridge",
-  "sable.field",
-  "glass.cove",
-  "moss.lake",
-  "ember.wren",
+  "Qm9yZWFsLXVzZXItMDE=",
+  "c2F0dXJuLmJhc2U2NA==",
+  "d2F2ZS1jb3JlLTAyNA==",
+  "bW9zcy1sYWtlLXV1aWQ=",
+  "ZW1iZXItd3Jlbi0xNw==",
 ];
 const FACE_SURFACE = "#f7f2eb";
 const DARK_SURFACE = "#171a20";
@@ -44,9 +45,10 @@ function ModeButton({
 }
 
 export function App() {
-  const [value, setValue] = useState("fern.ridge");
+  const [value, setValue] = useState("Qm9yZWFsLXVzZXItMDE=");
   const [mode, setMode] = useState<AvatarMode>("face");
   const colors = useMemo(() => getAvatarColors(value), [value]);
+  const displayName = useMemo(() => generateDisplayName(value), [value]);
   const counts = getAvatarCounts();
 
   return (
@@ -90,7 +92,7 @@ export function App() {
             <div className="grid gap-8 xl:grid-cols-[220px_minmax(0,1fr)] xl:items-center">
               <div className="mx-auto flex w-full max-w-[220px] flex-col items-center gap-4">
                 <div className="relative w-full rounded-[2rem] border border-black/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.9),rgba(244,230,212,0.9))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
-                  <Avatar id={value} label={value} mode={mode} className="w-full" />
+                  <Avatar id={value} label={displayName} mode={mode} className="w-full" />
                 </div>
                 <div className="flex flex-wrap justify-center gap-2">
                   <ModeButton current={mode} value="face" label="Face" onClick={setMode} />
@@ -106,8 +108,11 @@ export function App() {
                     value={value}
                     onInput={(event) => setValue(event.currentTarget.value)}
                     className="mt-3 w-full rounded-[1.4rem] border border-black/10 bg-white/85 px-5 py-4 text-lg outline-none transition placeholder:text-black/30 focus:border-black/35 focus:bg-white"
-                    placeholder="type any id or handle"
+                    placeholder="type any uuid or base64 id"
                   />
+                  <p className="mt-3 text-sm text-black/55">
+                    Generated display name: <span className="font-medium text-black/75">{displayName}</span>
+                  </p>
                 </div>
 
                 <div className="grid gap-3">
@@ -133,11 +138,11 @@ export function App() {
                   >
                     <p className="text-[11px] tracking-[0.26em] uppercase text-black/45">Light Surface</p>
                     <div className="mt-4 flex items-center gap-3">
-                      <Avatar id={value} label={value} mode={mode} className="size-14" />
+                      <Avatar id={value} label={displayName} mode={mode} className="size-14" />
                       <div>
                         <p className="text-xs uppercase tracking-[0.22em] text-black/35">username</p>
                         <p className="text-xl" style={{ color: colors.lightMode }}>
-                          {value}
+                          {displayName}
                         </p>
                       </div>
                     </div>
@@ -149,11 +154,11 @@ export function App() {
                   >
                     <p className="text-[11px] tracking-[0.26em] uppercase text-white/45">Dark Surface</p>
                     <div className="mt-4 flex items-center gap-3">
-                      <Avatar id={value} label={value} mode={mode} className="size-14" />
+                      <Avatar id={value} label={displayName} mode={mode} className="size-14" />
                       <div>
                         <p className="text-xs uppercase tracking-[0.22em] text-white/35">username</p>
                         <p className="text-xl" style={{ color: colors.darkMode }}>
-                          {value}
+                          {displayName}
                         </p>
                       </div>
                     </div>
@@ -183,6 +188,10 @@ export function App() {
                 <div className="flex items-center justify-between gap-4 border-b border-black/8 pb-3">
                   <dt>Avatar Background</dt>
                   <dd>{colors.bg}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-4 border-b border-black/8 pb-3">
+                  <dt>Display Name</dt>
+                  <dd>{displayName}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 border-b border-black/8 pb-3">
                   <dt>Light Username</dt>

@@ -1,4 +1,5 @@
 import avatarTemplate from "../assets/avatars.svg?raw";
+import { generateDisplayName } from "./display-name";
 
 import {
   generateAvatar as generatePackageAvatar,
@@ -18,7 +19,8 @@ export function generateAvatar(
   id: string,
   options?: { mode?: AvatarMode; label?: string },
 ): AvatarResult {
-  return generatePackageAvatar(id, options);
+  const label = options?.label ?? (options?.mode === "initial" ? generateDisplayName(id) : undefined);
+  return generatePackageAvatar(id, { ...options, label });
 }
 
 export function getAvatarColors(id: string): AvatarColors {

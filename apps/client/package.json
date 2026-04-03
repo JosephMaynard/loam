@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@loam/avatar": "workspace:*",
+    "@loam/display-name": "workspace:*",
     "preact": "^10.29.0",
     "preact-iso": "^2.11.1"
   },

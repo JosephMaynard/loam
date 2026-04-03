@@ -9,6 +9,7 @@
     "skipLibCheck": true,
     "paths": {
       "@loam/avatar": ["../../packages/avatar/src/index.ts"],
+      "@loam/display-name": ["../../packages/display-name/src/index.ts"],
       "react": ["./node_modules/preact/compat/"],
       "react-dom": ["./node_modules/preact/compat/"]
     },

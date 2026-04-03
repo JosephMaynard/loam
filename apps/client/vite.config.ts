@@ -10,6 +10,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@loam/avatar": resolve(__dirname, "../../packages/avatar/src/index.ts"),
+      "@loam/display-name": resolve(__dirname, "../../packages/display-name/src/index.ts"),
     },
   },
 });
