@@ -109,10 +109,13 @@ describe("generateAvatar", () => {
   it("renders a mirrored abstract pattern mode", () => {
     const result = generateAvatar("pattern-user", { mode: "pattern" });
     const doc = new DOMParser().parseFromString(result.html, "image/svg+xml");
+    const shapes = Array.from(doc.querySelectorAll("[data-shape]"), (node) =>
+      node.getAttribute("data-shape"),
+    );
 
     expect(result.html).not.toContain("clipPath");
-    expect(doc.querySelectorAll("path").length).toBe(0);
-    expect(doc.querySelectorAll("circle").length).toBeGreaterThanOrEqual(6);
+    expect(shapes.length).toBeGreaterThanOrEqual(6);
+    expect(new Set(shapes).size).toBe(1);
     expect(result).toBe(generateAvatar("pattern-user", { mode: "pattern" }));
   });
 
@@ -124,15 +127,37 @@ describe("generateAvatar", () => {
           "image/svg+xml",
         );
 
-        return Array.from(doc.querySelectorAll("circle"), (node) =>
-          `${node.getAttribute("cx")},${node.getAttribute("cy")}`,
-        )
+        return [
+          ...Array.from(doc.querySelectorAll("circle"), (node) =>
+            `c:${node.getAttribute("cx")},${node.getAttribute("cy")}`,
+          ),
+          ...Array.from(doc.querySelectorAll('rect[x][y]'), (node) =>
+            `r:${node.getAttribute("x")},${node.getAttribute("y")}`,
+          ),
+          ...Array.from(doc.querySelectorAll("polygon"), (node) => `g:${node.getAttribute("points")}`),
+          ...Array.from(doc.querySelectorAll("path"), (node) => `p:${node.getAttribute("d")}`),
+        ]
           .sort()
           .join("|");
       }),
     );
 
     expect(silhouettes.size).toBeGreaterThan(3);
+  });
+
+  it("uses multiple shape families across a small seed sample", () => {
+    const shapeFamilies = new Set(
+      ["pattern-a", "pattern-b", "pattern-c", "pattern-d", "pattern-e", "pattern-f", "pattern-g"].flatMap((id) => {
+        const doc = new DOMParser().parseFromString(
+          generateAvatar(id, { mode: "pattern" }).html,
+          "image/svg+xml",
+        );
+
+        return Array.from(doc.querySelectorAll("[data-shape]"), (node) => node.getAttribute("data-shape") ?? "");
+      }),
+    );
+
+    expect(shapeFamilies.size).toBeGreaterThan(2);
   });
 });
 

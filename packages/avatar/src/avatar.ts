@@ -60,6 +60,8 @@ interface OKLCH {
   h: number;
 }
 
+type PatternShape = "circle" | "square" | "triangle" | "half" | "star";
+
 const STORE_KEY = Symbol.for("loam.avatar.store");
 const SVG_NS = "http://www.w3.org/2000/svg";
 const FEATURE_IDS: Record<FeatureKey, string> = {
@@ -485,8 +487,69 @@ function getInitialInk(bg: string): string {
   return darkContrast >= lightContrast ? BACKGROUND_INK : BACKGROUND_PAPER;
 }
 
-function renderPatternTile(x: number, y: number, fill: string): string {
-  return `<circle cx="${x + 12.8}" cy="${y + 12.8}" r="18.4" fill="${fill}"/>`;
+function starPoints(cx: number, cy: number, outerRadius: number, innerRadius: number, rotation: number): string {
+  return Array.from({ length: 10 }, (_, index) => {
+    const radius = index % 2 === 0 ? outerRadius : innerRadius;
+    const angle = rotation + (Math.PI / 5) * index;
+    const x = cx + Math.cos(angle) * radius;
+    const y = cy + Math.sin(angle) * radius;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function renderHalfCircle(x: number, y: number, fill: string, orientation: number): string {
+  const left = x - 7.8;
+  const right = x + 33.4;
+  const top = y - 7.8;
+  const bottom = y + 33.4;
+  const centerX = x + 12.8;
+  const centerY = y + 12.8;
+
+  switch (orientation % 4) {
+    case 0:
+      return `<path data-shape="half" d="M ${left.toFixed(2)} ${centerY.toFixed(2)} A 20.6 20.6 0 0 1 ${right.toFixed(2)} ${centerY.toFixed(2)} L ${right.toFixed(2)} ${bottom.toFixed(2)} L ${left.toFixed(2)} ${bottom.toFixed(2)} Z" fill="${fill}"/>`;
+    case 1:
+      return `<path data-shape="half" d="M ${centerX.toFixed(2)} ${top.toFixed(2)} A 20.6 20.6 0 0 1 ${centerX.toFixed(2)} ${bottom.toFixed(2)} L ${left.toFixed(2)} ${bottom.toFixed(2)} L ${left.toFixed(2)} ${top.toFixed(2)} Z" fill="${fill}"/>`;
+    case 2:
+      return `<path data-shape="half" d="M ${left.toFixed(2)} ${centerY.toFixed(2)} A 20.6 20.6 0 0 0 ${right.toFixed(2)} ${centerY.toFixed(2)} L ${right.toFixed(2)} ${top.toFixed(2)} L ${left.toFixed(2)} ${top.toFixed(2)} Z" fill="${fill}"/>`;
+    default:
+      return `<path data-shape="half" d="M ${centerX.toFixed(2)} ${top.toFixed(2)} A 20.6 20.6 0 0 0 ${centerX.toFixed(2)} ${bottom.toFixed(2)} L ${right.toFixed(2)} ${bottom.toFixed(2)} L ${right.toFixed(2)} ${top.toFixed(2)} Z" fill="${fill}"/>`;
+  }
+}
+
+function renderTriangle(x: number, y: number, fill: string, orientation: number): string {
+  const left = x - 8.8;
+  const right = x + 34.4;
+  const top = y - 8.8;
+  const bottom = y + 34.4;
+  const centerX = x + 12.8;
+  const centerY = y + 12.8;
+
+  switch (orientation % 4) {
+    case 0:
+      return `<polygon data-shape="triangle" points="${centerX.toFixed(2)},${top.toFixed(2)} ${right.toFixed(2)},${bottom.toFixed(2)} ${left.toFixed(2)},${bottom.toFixed(2)}" fill="${fill}"/>`;
+    case 1:
+      return `<polygon data-shape="triangle" points="${right.toFixed(2)},${centerY.toFixed(2)} ${left.toFixed(2)},${top.toFixed(2)} ${left.toFixed(2)},${bottom.toFixed(2)}" fill="${fill}"/>`;
+    case 2:
+      return `<polygon data-shape="triangle" points="${centerX.toFixed(2)},${bottom.toFixed(2)} ${right.toFixed(2)},${top.toFixed(2)} ${left.toFixed(2)},${top.toFixed(2)}" fill="${fill}"/>`;
+    default:
+      return `<polygon data-shape="triangle" points="${left.toFixed(2)},${centerY.toFixed(2)} ${right.toFixed(2)},${top.toFixed(2)} ${right.toFixed(2)},${bottom.toFixed(2)}" fill="${fill}"/>`;
+  }
+}
+
+function renderPatternTile(x: number, y: number, fill: string, shape: PatternShape, orientation: number): string {
+  switch (shape) {
+    case "circle":
+      return `<circle data-shape="circle" cx="${x + 12.8}" cy="${y + 12.8}" r="18.4" fill="${fill}"/>`;
+    case "square":
+      return `<rect data-shape="square" x="${(x - 6.2).toFixed(2)}" y="${(y - 6.2).toFixed(2)}" width="38" height="38" fill="${fill}"/>`;
+    case "triangle":
+      return renderTriangle(x, y, fill, orientation);
+    case "half":
+      return renderHalfCircle(x, y, fill, orientation);
+    case "star":
+      return `<polygon data-shape="star" points="${starPoints(x + 12.8, y + 12.8, 20.2, 9.4, -Math.PI / 2 + (Math.PI / 2) * (orientation % 4))}" fill="${fill}"/>`;
+  }
 }
 
 function patternTilePosition(index: number): number {
@@ -652,20 +715,47 @@ function buildPatternMask(seed: number): Array<Array<boolean>> {
   return grid;
 }
 
+function getPatternShape(seed: number): PatternShape {
+  const shapes: PatternShape[] = ["circle", "square", "triangle", "half", "star"];
+  return shapes[mix32(seed ^ 0x632be5ab) % shapes.length];
+}
+
+function getPatternOrientation(shape: PatternShape): number {
+  switch (shape) {
+    case "triangle":
+      return 0;
+    case "half":
+      return 0;
+    case "star":
+      return 0;
+    default:
+      return 0;
+  }
+}
+
 function renderPatternAvatar(id: string, colors: AvatarColors): string {
   const seed = hashString(id);
   const grid = buildPatternMask(seed);
   const fillOrder = [colors.shade, colors.accent, colors.tertiary];
+  const shape = getPatternShape(seed);
+  const orientation = getPatternOrientation(shape);
 
   const tiles = grid.flatMap((row, rowIndex) =>
     row.flatMap((fill, colIndex) =>
       fill
         ? [
-            renderPatternTile(
-              patternTilePosition(colIndex),
-              patternTilePosition(rowIndex),
-              fillOrder[mix32(seed ^ (rowIndex * 0x85ebca6b) ^ (colIndex * 0xc2b2ae35)) % fillOrder.length],
-            ),
+            (() => {
+              const cellSeed = mix32(seed ^ (rowIndex * 0x85ebca6b) ^ (colIndex * 0xc2b2ae35));
+              const fillColor = fillOrder[mix32(cellSeed ^ 0x165667b1) % fillOrder.length];
+
+              return renderPatternTile(
+                patternTilePosition(colIndex),
+                patternTilePosition(rowIndex),
+                fillColor,
+                shape,
+                orientation,
+              );
+            })(),
           ]
         : [],
     ),
