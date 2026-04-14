@@ -11,14 +11,15 @@
   "dependencies": {
     "@loam/avatar": "workspace:*",
     "@loam/display-name": "workspace:*",
+    "@loam/qr": "workspace:*",
+    "@loam/schema": "workspace:*",
     "preact": "^10.29.0",
-    "preact-iso": "^2.11.1"
+    "preact-iso": "^2.11.1",
+    "snarkdown": "^2.0.0"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.4",
-    "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^24.12.0",
-    "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
     "vite": "^8.0.1"
   }

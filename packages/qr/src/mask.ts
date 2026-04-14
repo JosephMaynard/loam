@@ -51,7 +51,7 @@ function applyMask(matrix: InternalMatrix, maskId: number): InternalMatrix {
   return masked;
 }
 
-function finderPenaltyCountPatterns(runHistory: number[], size: number): number {
+function finderPenaltyCountPatterns(runHistory: number[], _size: number): number {
   const n = runHistory[1];
   const core =
     n > 0 &&

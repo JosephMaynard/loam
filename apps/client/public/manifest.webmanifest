@@ -1,0 +1,18 @@
+{
+  "name": "LOAM",
+  "short_name": "LOAM",
+  "description": "Local-first team chat for a nearby LOAM node.",
+  "start_url": "/channels",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f7ef",
+  "theme_color": "#2f5f4c",
+  "icons": [
+    {
+      "src": "/loam.svg",
+      "sizes": "1024x1024",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

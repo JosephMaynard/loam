@@ -5,6 +5,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "dev": "PORT=3001 CLIENT_PORT=3000 pnpm --parallel --filter @loam/server --filter client dev",
     "build": "pnpm -r --if-present build",
     "test": "pnpm -r --if-present test"
   },

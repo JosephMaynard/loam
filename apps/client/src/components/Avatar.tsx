@@ -12,10 +12,7 @@ export interface AvatarProps {
 
 export function Avatar({ id, className, mode = "face", label }: AvatarProps) {
   const avatar = useMemo(() => generateAvatar(id, { mode, label }), [id, label, mode]);
-  const wrapperClassName = [
-    "inline-grid aspect-square shrink-0 overflow-hidden rounded-[28%] ring-1 ring-black/8 [&>svg]:block [&>svg]:size-full",
-    className,
-  ]
+  const wrapperClassName = ["avatar", className]
     .filter(Boolean)
     .join(" ");
 
