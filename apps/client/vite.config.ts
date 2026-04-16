@@ -3,6 +3,10 @@ import { resolve } from "node:path";
 import preact from "@preact/preset-vite";
 import { defineConfig } from "vite";
 
+const apiPort = process.env.LOAM_API_PORT ?? "3001";
+const apiTarget = `http://localhost:${apiPort}`;
+const wsTarget = `ws://localhost:${apiPort}`;
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [preact()],
@@ -19,9 +23,9 @@ export default defineConfig({
     port: 3000,
     strictPort: true,
     proxy: {
-      "/api": "http://localhost:3001",
+      "/api": apiTarget,
       "/ws": {
-        target: "ws://localhost:3001",
+        target: wsTarget,
         ws: true,
       },
     },

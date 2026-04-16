@@ -5,9 +5,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "PORT=3001 CLIENT_PORT=3000 pnpm --parallel --filter @loam/server --filter client dev",
+    "dev": "tsx scripts/dev.ts",
     "build": "pnpm -r --if-present build",
     "test": "pnpm -r --if-present test"
+  },
+  "devDependencies": {
+    "@loam/qr": "workspace:*",
+    "tsx": "^4.21.0"
   },
   "keywords": [],
   "author": "",

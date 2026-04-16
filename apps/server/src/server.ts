@@ -78,6 +78,7 @@ const clientDistDir = join(rootDir, "apps/client/dist");
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
 const host = process.env.HOST ?? "0.0.0.0";
+const joinHost = process.env.LOAM_JOIN_HOST ?? localIPv4();
 const server = Fastify({
   logger: true,
   serverFactory: (handler) => createServer(handler),
@@ -312,7 +313,7 @@ await registerStaticFiles();
 
 server.get("/api/config", async () => ({
   nodeName: "LOAM local",
-  joinUrl: `http://${localIPv4()}:${clientPort}`,
+  joinUrl: `http://${joinHost}:${clientPort}`,
   websocketPath: "/ws",
   networkConfig: {
     enablePublicChannels: true,
