@@ -150,6 +150,8 @@ a {
   text-decoration: none;
   font-size: 0.95rem;
   overflow: hidden;
+  gap: 8px;
+  user-select: none;
 }
 
 .nav-link .avatar {

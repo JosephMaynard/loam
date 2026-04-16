@@ -644,7 +644,7 @@ function NavLink({ active, children, href }: NavLinkProps) {
   return (
     <a
       aria-current={active ? "page" : undefined}
-      className={`${active ? "nav-link active" : "nav-link"} flex gap2`}
+      className={`nav-link${active ? " active" : ""}`}
       href={href}
       onClick={(event) => {
         event.preventDefault();
