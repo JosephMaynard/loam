@@ -723,11 +723,11 @@ function getPatternShape(seed: number): PatternShape {
 function getPatternOrientation(shape: PatternShape): number {
   switch (shape) {
     case "triangle":
-      return 0;
+      return 1;
     case "half":
-      return 0;
+      return 2;
     case "star":
-      return 0;
+      return 3;
     default:
       return 0;
   }
@@ -841,6 +841,7 @@ export function initAvatarTemplate(svgText: string): void {
     counts: countFeatures(ids),
   };
   store.results.clear();
+  store.colors.clear();
 }
 
 export function getAvatarCounts(): AvatarFeatureCounts {

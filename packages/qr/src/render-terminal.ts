@@ -4,6 +4,14 @@ type TerminalOptions = {
   quietZone?: number;
 };
 
+function normalizeQuietZone(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return 2;
+  }
+
+  return Math.max(0, Math.floor(value));
+}
+
 function getModule(matrix: QRMatrix, row: number, col: number, quietZone: number): boolean {
   if (
     row < quietZone ||
@@ -20,7 +28,7 @@ function getModule(matrix: QRMatrix, row: number, col: number, quietZone: number
 }
 
 export function renderQRToTerminal(matrix: QRMatrix, opts: TerminalOptions = {}): string {
-  const quietZone = opts.quietZone ?? 2;
+  const quietZone = normalizeQuietZone(opts.quietZone);
   const totalSize = matrix.size + quietZone * 2;
   const lines: string[] = [];
 

@@ -108,6 +108,28 @@ describe("@loam/schema", () => {
         createdAt: 1712850000,
       }),
     ).toThrow();
+
+    expect(() =>
+      MessageSchema.parse({
+        id: "msg_2",
+        type: "channelPost",
+        authorId: "usr_123",
+        channelId: "chn_general",
+        body: "",
+        createdAt: 1712850000,
+      }),
+    ).toThrow();
+
+    expect(() =>
+      MessageSchema.parse({
+        id: "msg_3",
+        type: "dm",
+        authorId: "usr_123",
+        recipientUserId: "usr_456",
+        body: "   ",
+        createdAt: 1712850000,
+      }),
+    ).toThrow();
   });
 
   it("validates LLM stream events", () => {

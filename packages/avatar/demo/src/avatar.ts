@@ -1,4 +1,4 @@
-import avatarTemplate from "../../../../apps/client/src/assets/avatars.svg?raw";
+import avatarTemplate from "../assets/avatars.svg?raw";
 import { generateDisplayName } from "./display-name";
 
 import {

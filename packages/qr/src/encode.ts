@@ -52,7 +52,7 @@ function splitIntoBlocks(version: QRVersion, dataCodewords: Uint8Array) {
 
       blocks.push({
         data,
-        ecc: rsEncodeBlock(data, versionInfo.ecCodewordsPerBlock),
+        ecc: rsEncodeBlock(data, group.ecCodewordsPerBlock ?? versionInfo.ecCodewordsPerBlock),
       });
     }
   }

@@ -37,6 +37,11 @@ function start(name: string, args: string[], env: NodeJS.ProcessEnv): void {
   child.stderr.on("data", (chunk: Buffer) => {
     process.stderr.write(prefixLines(name, chunk.toString()));
   });
+  child.on("error", (error) => {
+    process.stderr.write(prefixLines(name, `Failed to start child process: ${String(error)}\n`));
+    stopAll();
+    process.exit(1);
+  });
   child.on("exit", (code, signal) => {
     if (signal === "SIGTERM" || signal === "SIGINT") {
       return;

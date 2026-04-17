@@ -49,7 +49,10 @@ function openDatabase(): Promise<IDBDatabase> {
       };
 
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => {
+        databasePromise = undefined;
+        reject(request.error);
+      };
     });
   }
 

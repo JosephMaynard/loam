@@ -13,6 +13,7 @@
     "@loam/display-name": "workspace:*",
     "@loam/qr": "workspace:*",
     "@loam/schema": "workspace:*",
+    "dompurify": "^3.4.0",
     "preact": "^10.29.0",
     "preact-iso": "^2.11.1",
     "snarkdown": "^2.0.0"

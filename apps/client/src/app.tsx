@@ -3,7 +3,7 @@ import type { Channel, Message, User } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import { LocationProvider, useLocation } from "preact-iso";
 import type { ComponentChildren } from "preact";
-import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
@@ -34,31 +34,28 @@ type Config = {
   nodeName: string;
   joinUrl: string;
   websocketPath: string;
+  currentUser: User;
 };
 
 type MessageCreateRequest =
   | {
       type: "channelPost";
-      authorId: string;
       channelId: string;
       body: string;
     }
   | {
       type: "channelReply";
-      authorId: string;
       channelId: string;
       parentMessageId: string;
       body: string;
     }
   | {
       type: "dm";
-      authorId: string;
       recipientUserId: string;
       body: string;
     }
   | {
       type: "reaction";
-      authorId: string;
       targetMessageId: string;
       reaction: string;
     };
@@ -127,6 +124,11 @@ function getOrCreateCurrentUser(): User {
   };
 }
 
+function rememberCurrentUser(user: User): void {
+  localStorage.setItem(CURRENT_USER_KEY, user.id);
+  localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
+}
+
 function parseRoute(path: string): RouteState {
   if (path === "/" || path === "/channels") {
     return { screen: "channels" };
@@ -185,7 +187,7 @@ function apiUrl(path: string): string {
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(apiUrl(path));
+  const response = await fetch(apiUrl(path), { credentials: "include" });
 
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
@@ -305,7 +307,7 @@ export function App() {
 }
 
 function LoamApp() {
-  const currentUser = useMemo(() => getOrCreateCurrentUser(), []);
+  const [currentUser, setCurrentUser] = useState(getOrCreateCurrentUser);
   const location = useLocation();
   const routeState = parseRoute(location.path);
   const activeConversation = routeState.screen === "channels" ? routeState.conversation : undefined;
@@ -362,6 +364,7 @@ function LoamApp() {
     async (request: MessageCreateRequest) => {
       const response = await fetch(apiUrl("/api/messages"), {
         method: "POST",
+        credentials: "include",
         headers: {
           "content-type": "application/json",
         },
@@ -421,8 +424,17 @@ function LoamApp() {
         }
 
         setConfig(nextConfig);
+        rememberCurrentUser(nextConfig.currentUser);
+        setCurrentUser((previous) =>
+          previous.id === nextConfig.currentUser.id && previous.createdAt === nextConfig.currentUser.createdAt
+            ? previous
+            : nextConfig.currentUser,
+        );
+        setUsers((previous) =>
+          previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
+        );
         setChannels(nextChannels);
-        upsertUsers([currentUser, ...nextUsers]);
+        upsertUsers([nextConfig.currentUser, ...nextUsers]);
         void putRecords("channels", nextChannels);
       })
       .catch((nextError: unknown) => {
@@ -515,7 +527,6 @@ function LoamApp() {
           onReact={(messageId, reaction) =>
             sendMessage({
               type: "reaction",
-              authorId: currentUser.id,
               targetMessageId: messageId,
               reaction,
             })
@@ -528,7 +539,6 @@ function LoamApp() {
             if (activeConversation.kind === "channel") {
               return sendMessage({
                 type: "channelPost",
-                authorId: currentUser.id,
                 channelId: activeConversation.id,
                 body,
               });
@@ -536,7 +546,6 @@ function LoamApp() {
 
             return sendMessage({
               type: "dm",
-              authorId: currentUser.id,
               recipientUserId: activeConversation.id,
               body,
             });
@@ -548,7 +557,6 @@ function LoamApp() {
 
             return sendMessage({
               type: "channelReply",
-              authorId: currentUser.id,
               channelId: activeConversation.id,
               parentMessageId,
               body,
@@ -635,16 +643,18 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
 interface NavLinkProps {
   active: boolean;
   children: ComponentChildren;
+  className?: string;
   href: string;
 }
 
-function NavLink({ active, children, href }: NavLinkProps) {
+function NavLink({ active, children, className, href }: NavLinkProps) {
   const location = useLocation();
+  const linkClassName = className ?? `nav-link${active ? " active" : ""}`;
 
   return (
     <a
       aria-current={active ? "page" : undefined}
-      className={`nav-link${active ? " active" : ""}`}
+      className={linkClassName}
       href={href}
       onClick={(event) => {
         event.preventDefault();
@@ -728,7 +738,6 @@ function ConversationView({
 
       {threadParent ? (
         <ThreadPanel
-          conversation={conversation}
           currentUser={currentUser}
           messages={messages}
           onClose={() => location.route(backRouteForThread(conversation))}
@@ -745,9 +754,9 @@ function ConversationView({
 function ConversationHeader({ conversation, title }: { conversation: Conversation; title: string }) {
   return (
     <header className="conversation-header">
-      <a className="mobile-back" href="/channels">
+      <NavLink active={false} className="mobile-back" href="/channels">
         ←
-      </a>
+      </NavLink>
       <div>
         <p className="eyebrow">{conversation.kind === "channel" ? "Channel" : "Direct message"}</p>
         <h1>{title}</h1>
@@ -887,6 +896,7 @@ interface MessageComposerProps {
 function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
+  const composerId = useId();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -925,11 +935,11 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
         void submit();
       }}
     >
-      <label className="sr-only" for="message-composer">
+      <label className="sr-only" for={composerId}>
         {label}
       </label>
       <textarea
-        id="message-composer"
+        id={composerId}
         onInput={(event) => setValue(event.currentTarget.value)}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) {
@@ -950,7 +960,6 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
 }
 
 interface ThreadPanelProps {
-  conversation: Conversation;
   currentUser: User;
   messages: Message[];
   onClose: () => void;
@@ -961,7 +970,6 @@ interface ThreadPanelProps {
 }
 
 function ThreadPanel({
-  conversation,
   currentUser,
   messages,
   onClose,
@@ -975,12 +983,9 @@ function ThreadPanel({
   return (
     <aside className="thread-panel">
       <header className="thread-header">
-        <a className="mobile-back" href={backRouteForThread(conversation)} onClick={(event) => {
-          event.preventDefault();
-          onClose();
-        }}>
+        <button className="mobile-back" onClick={onClose} type="button">
           ←
-        </a>
+        </button>
         <div>
           <p className="eyebrow">Thread</p>
           <h2>Replies</h2>
@@ -1029,9 +1034,9 @@ function SettingsView({ config, currentUser }: { config?: Config; currentUser: U
   return (
     <section className="settings-view">
       <header className="conversation-header">
-        <a className="mobile-back" href="/channels">
+        <NavLink active={false} className="mobile-back" href="/channels">
           ←
-        </a>
+        </NavLink>
         <div>
           <p className="eyebrow">Local access</p>
           <h1>Join this LOAM node</h1>

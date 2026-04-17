@@ -16,8 +16,34 @@ function escapeXmlAttribute(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+function normalizeQuietZone(value: number | undefined): number {
+  if (value === undefined) {
+    return 4;
+  }
+
+  if (!Number.isFinite(value)) {
+    throw new TypeError("quietZone must be a finite number");
+  }
+
+  return Math.max(0, Math.floor(value));
+}
+
+function isAllowedLogoHref(href: string): boolean {
+  const normalized = href.trim();
+
+  if (/^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(normalized)) {
+    return true;
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(normalized)) {
+    return false;
+  }
+
+  return !normalized.startsWith("//");
+}
+
 export function renderQRToSvg(matrix: QRMatrix, opts: SvgOptions = {}): string {
-  const quietZone = opts.quietZone ?? 4;
+  const quietZone = normalizeQuietZone(opts.quietZone);
   const dark = opts.dark ?? "#000";
   const light = opts.light ?? "#fff";
   const totalSize = matrix.size + quietZone * 2;
@@ -32,7 +58,7 @@ export function renderQRToSvg(matrix: QRMatrix, opts: SvgOptions = {}): string {
   }
 
   let logoMarkup = "";
-  if (opts.logoHref) {
+  if (opts.logoHref && isAllowedLogoHref(opts.logoHref)) {
     const logoScale = Math.min(Math.max(opts.logoScale ?? 0.18, 0), 0.24);
     const logoSize = matrix.size * logoScale;
     const backdropPadding = Math.max(1, logoSize * 0.18);

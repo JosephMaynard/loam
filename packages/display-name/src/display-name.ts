@@ -111,7 +111,7 @@ export function getDisplayNameParts(id: string, pack: WordPack = englishWordPack
   const cached = cache.get(id);
 
   if (cached) {
-    return cached;
+    return { ...cached };
   }
 
   const seed = hashString(id);
@@ -122,7 +122,7 @@ export function getDisplayNameParts(id: string, pack: WordPack = englishWordPack
   };
 
   cache.set(id, parts);
-  return parts;
+  return { ...parts };
 }
 
 export function generateDisplayName(id: string, pack: WordPack = englishWordPack): string {

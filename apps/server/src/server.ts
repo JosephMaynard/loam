@@ -9,13 +9,14 @@ import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
 import {
   ChannelSchema,
+  IdSchema,
   MessageSchema,
   UserSchema,
   type Channel,
   type Message,
   type User,
 } from "@loam/schema";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
 type DataFile = "users" | "channels" | "messages";
 type SocketClient = {
@@ -34,26 +35,22 @@ type AppData = {
 type CreateMessageRequest =
   | {
       type: "channelPost";
-      authorId: string;
       channelId: string;
       body: string;
     }
   | {
       type: "channelReply";
-      authorId: string;
       channelId: string;
       parentMessageId: string;
       body: string;
     }
   | {
       type: "dm";
-      authorId: string;
       recipientUserId: string;
       body: string;
     }
   | {
       type: "reaction";
-      authorId: string;
       targetMessageId: string;
       reaction: string;
     };
@@ -79,6 +76,8 @@ const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
 const host = process.env.HOST ?? "0.0.0.0";
 const joinHost = process.env.LOAM_JOIN_HOST ?? localIPv4();
+const sessionCookieName = "loam_user_id";
+const sessionCookieMaxAge = 60 * 60 * 24 * 365;
 const server = Fastify({
   logger: true,
   serverFactory: (handler) => createServer(handler),
@@ -152,6 +151,47 @@ function makeUser(id: string, isAdmin = false): User {
   });
 }
 
+function makeSessionUserId(): string {
+  return `user.${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
+}
+
+function encodeCookieValue(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
+  for (const cookie of cookieHeader?.split(";") ?? []) {
+    const [rawName, ...rawValue] = cookie.trim().split("=");
+
+    if (rawName !== name) {
+      continue;
+    }
+
+    try {
+      return decodeURIComponent(rawValue.join("="));
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string {
+  const cookieUserId = readCookie(request.headers.cookie, sessionCookieName);
+
+  if (cookieUserId && IdSchema.safeParse(cookieUserId).success) {
+    return cookieUserId;
+  }
+
+  const userId = makeSessionUserId();
+  reply.header(
+    "set-cookie",
+    `${sessionCookieName}=${encodeCookieValue(userId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}`,
+  );
+  return userId;
+}
+
 function ensureUser(id: string, isAdmin = false): User {
   const existing = data.users.find((user) => user.id === id);
 
@@ -164,6 +204,10 @@ function ensureUser(id: string, isAdmin = false): User {
   dirty = true;
   broadcast({ type: "userUpserted", user });
   return user;
+}
+
+function ensureChannel(id: string): Channel | undefined {
+  return data.channels.find((channel) => channel.id === id);
 }
 
 function localIPv4(): string {
@@ -222,14 +266,41 @@ function newMessageId(prefix = "msg"): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
-function createMessage(input: CreateMessageRequest): { message?: Message; deletedMessageId?: string } {
-  ensureUser(input.authorId);
+function createMessage(
+  input: CreateMessageRequest,
+  authorId: string,
+): { message?: Message; deletedMessageId?: string; error?: string } {
+  ensureUser(authorId);
+
+  if (input.type === "channelPost" && !ensureChannel(input.channelId)) {
+    return { error: "Channel does not exist" };
+  }
+
+  if (input.type === "channelReply") {
+    if (!ensureChannel(input.channelId)) {
+      return { error: "Channel does not exist" };
+    }
+
+    const parent = data.messages.find((message) => message.id === input.parentMessageId);
+
+    if (!parent || !("channelId" in parent)) {
+      return { error: "Parent message does not exist" };
+    }
+
+    if (parent.channelId !== input.channelId) {
+      return { error: "Parent message belongs to a different channel" };
+    }
+  }
+
+  if (input.type === "reaction" && !data.messages.some((message) => message.id === input.targetMessageId)) {
+    return { error: "Target message does not exist" };
+  }
 
   if (input.type === "reaction") {
     const existingIndex = data.messages.findIndex(
       (message) =>
         message.type === "reaction" &&
-        message.authorId === input.authorId &&
+        message.authorId === authorId &&
         message.targetMessageId === input.targetMessageId &&
         message.reaction === input.reaction,
     );
@@ -247,11 +318,11 @@ function createMessage(input: CreateMessageRequest): { message?: Message; delete
 
   const base = {
     id: newMessageId(input.type === "reaction" ? "react" : "msg"),
-    authorId: input.authorId,
+    authorId,
     createdAt: Date.now(),
     meta: input.type === "reaction" ? undefined : { markdown: true, source: "human" as const },
   };
-  const message = MessageSchema.parse({ ...base, ...input });
+  const message = MessageSchema.parse({ ...input, ...base });
   data.messages.push(message);
   dirty = true;
   return { message };
@@ -281,12 +352,17 @@ async function saveAllData(): Promise<void> {
     return;
   }
 
-  dirty = false;
-  await Promise.all([
-    writeJson("users", data.users),
-    writeJson("channels", data.channels),
-    writeJson("messages", data.messages),
-  ]);
+  try {
+    await Promise.all([
+      writeJson("users", data.users),
+      writeJson("channels", data.channels),
+      writeJson("messages", data.messages),
+    ]);
+    dirty = false;
+  } catch (error) {
+    dirty = true;
+    throw error;
+  }
 }
 
 async function registerStaticFiles(): Promise<void> {
@@ -311,21 +387,26 @@ await loadData();
 await server.register(fastifyWebsocket);
 await registerStaticFiles();
 
-server.get("/api/config", async () => ({
-  nodeName: "LOAM local",
-  joinUrl: `http://${joinHost}:${clientPort}`,
-  websocketPath: "/ws",
-  networkConfig: {
-    enablePublicChannels: true,
-    enablePrivateChannels: false,
-    enableUserChannels: true,
-    enableReplies: true,
-    enableDMs: true,
-    enableReactions: true,
-    enableMarkdown: true,
-    enableLLMStreaming: false,
-  },
-}));
+server.get("/api/config", async (request, reply) => {
+  const currentUser = ensureUser(getSessionUserId(request, reply));
+
+  return {
+    nodeName: "LOAM local",
+    joinUrl: `http://${joinHost}:${clientPort}`,
+    websocketPath: "/ws",
+    currentUser,
+    networkConfig: {
+      enablePublicChannels: true,
+      enablePrivateChannels: false,
+      enableUserChannels: true,
+      enableReplies: true,
+      enableDMs: true,
+      enableReactions: true,
+      enableMarkdown: true,
+      enableLLMStreaming: false,
+    },
+  };
+});
 
 server.get("/api/users", async () => data.users);
 server.get("/api/channels", async () => data.channels.filter((channel) => !channel.archived));
@@ -338,7 +419,11 @@ server.get<{ Params: { userId: string }; Querystring: { currentUserId?: string }
 );
 
 server.post<{ Body: CreateMessageRequest }>("/api/messages", async (request, reply) => {
-  const result = createMessage(request.body);
+  const result = createMessage(request.body, getSessionUserId(request, reply));
+
+  if (result.error) {
+    return reply.code(400).send({ error: result.error });
+  }
 
   if (result.deletedMessageId) {
     broadcast({ type: "messageDeleted", messageId: result.deletedMessageId });

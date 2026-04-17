@@ -32,7 +32,7 @@ function Avatar({ id, className, mode = "face", label }: AvatarProps) {
 
   return (
     <span
-      aria-hidden="true"
+      aria-hidden={label ? undefined : true}
       className={wrapperClassName}
       dangerouslySetInnerHTML={{ __html: avatar.html }}
     />

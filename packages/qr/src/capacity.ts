@@ -3,6 +3,7 @@ import type { QRVersion } from "./types";
 export type QRBlockGroup = {
   count: number;
   dataCodewords: number;
+  ecCodewordsPerBlock?: number;
 };
 
 export type QRVersionInfo = {

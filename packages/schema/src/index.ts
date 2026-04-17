@@ -88,7 +88,9 @@ export const BaseMessageSchema = z.object({
 });
 export type BaseMessage = z.infer<typeof BaseMessageSchema>;
 
-const MessageBodySchema = z.string();
+const MessageBodySchema = z.string().refine((body) => body.trim().length > 0, {
+  message: "Message body cannot be empty",
+});
 
 export const ChannelPostMessageSchema = BaseMessageSchema.extend({
   type: z.literal("channelPost"),

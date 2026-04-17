@@ -33,12 +33,19 @@ self.addEventListener("fetch", (event) => {
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+            const cacheWrite = caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+            event.waitUntil(cacheWrite);
           }
 
           return response;
         })
-        .catch(() => caches.match("/channels"));
+        .catch(() => {
+          if (request.mode === "navigate" || request.destination === "document") {
+            return caches.match("/channels");
+          }
+
+          return Response.error();
+        });
     }),
   );
 });

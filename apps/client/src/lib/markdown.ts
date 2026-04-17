@@ -1,3 +1,4 @@
+import DOMPurify from "dompurify";
 import snarkdown from "snarkdown";
 
 function escapeHtml(value: string): string {
@@ -21,7 +22,7 @@ function isSafeLink(href: string): boolean {
 export function renderMarkdown(markdown: string): string {
   const html = snarkdown(escapeHtml(markdown));
   const template = document.createElement("template");
-  template.innerHTML = html;
+  template.innerHTML = DOMPurify.sanitize(html);
 
   for (const link of Array.from(template.content.querySelectorAll("a"))) {
     const href = link.getAttribute("href") ?? "";

@@ -21,6 +21,10 @@ function setFormatModule(matrix: InternalMatrix, row: number, col: number, dark:
 }
 
 export function placeFormatInfo(matrix: InternalMatrix, maskId: number): void {
+  if (!Number.isInteger(maskId) || maskId < 0 || maskId >= FORMAT_INFO_H.length) {
+    throw new RangeError(`Mask id must be an integer from 0 to ${FORMAT_INFO_H.length - 1}`);
+  }
+
   const bits = FORMAT_INFO_H[maskId];
 
   for (let i = 0; i <= 5; i += 1) {

@@ -22,9 +22,11 @@ The goal is to provide a reliable, easy-to-use communication layer that works ev
 This repository is a small pnpm workspace.
 
 - `apps/client`: Preact client application and local demo surface
+- `apps/server`: backend server application and API surface
 - `packages/avatar`: deterministic avatar generation from a shared SVG template
 - `packages/display-name`: deterministic anonymous display-name generation from an id
 - `packages/qr`: QR-related shared utilities
+- `packages/schema`: shared data and schema definitions
 
 ## Development
 

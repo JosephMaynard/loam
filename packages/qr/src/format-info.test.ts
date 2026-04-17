@@ -14,7 +14,9 @@ describe("format info", () => {
       matrix.modules[26 + index][8] ? 1 : 0,
     );
 
+    // QR format string 001011010001001 is the H/mask-0 test vector, read MSB to LSB.
     expect(rowBits).toEqual([0, 0, 1, 0, 1, 1, 1, 0, 1]);
+    // The lower column strip stores the same format information in layout order, top to bottom.
     expect(lowerColumnBits).toEqual([0, 1, 1, 0, 1, 0, 0]);
   });
 });

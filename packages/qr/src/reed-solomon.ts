@@ -5,7 +5,7 @@ const generatorCache = new Map<number, Uint8Array>();
 export function rsGeneratorPoly(ecCount: number): Uint8Array {
   const cached = generatorCache.get(ecCount);
   if (cached) {
-    return cached;
+    return cached.slice();
   }
 
   let poly = Uint8Array.from([1]);
@@ -21,8 +21,8 @@ export function rsGeneratorPoly(ecCount: number): Uint8Array {
     poly = next;
   }
 
-  generatorCache.set(ecCount, poly);
-  return poly;
+  generatorCache.set(ecCount, poly.slice());
+  return poly.slice();
 }
 
 export function rsEncodeBlock(data: Uint8Array, ecCount: number): Uint8Array {

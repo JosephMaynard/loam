@@ -13,5 +13,6 @@ describe("GF(256)", () => {
     expect(gfPow(0)).toBe(1);
     expect(gfPow(8)).toBe(29);
     expect(gfDiv(29, 29)).toBe(1);
+    expect(() => gfDiv(1, 0)).toThrow();
   });
 });

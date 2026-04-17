@@ -41,7 +41,7 @@ describe("encodeQR", () => {
   it("renders compact SVG and terminal output from the encoded matrix", () => {
     const result = encodeQRDetailed("http://loam.local/channel/general");
     const svg = renderQRToSvg(result.matrix, {
-      logoHref: "https://example.com/logo.png",
+      logoHref: "data:image/png;base64,iVBORw0KGgo=",
     });
     const terminal = renderQRToTerminal(result.matrix);
 
@@ -50,5 +50,14 @@ describe("encodeQR", () => {
     expect(svg).toContain('shape-rendering="crispEdges"');
     expect(terminal).toContain("█");
     expect(terminal.split("\n").length).toBeGreaterThan(10);
+  });
+
+  it("does not embed untrusted external logo URLs", () => {
+    const result = encodeQRDetailed("http://loam.local/channel/general");
+    const svg = renderQRToSvg(result.matrix, {
+      logoHref: "https://example.com/logo.png",
+    });
+
+    expect(svg).not.toContain("<image");
   });
 });
