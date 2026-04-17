@@ -457,7 +457,7 @@ function LoamApp() {
     const path =
       activeConversation.kind === "channel"
         ? `/api/messages/${encodeURIComponent(activeConversation.id)}`
-        : `/api/dms/${encodeURIComponent(activeConversation.id)}?currentUserId=${encodeURIComponent(currentUser.id)}`;
+        : `/api/dms/${encodeURIComponent(activeConversation.id)}`;
 
     fetchJson<Message[]>(path)
       .then((nextMessages) => upsertMessages(nextMessages))
@@ -467,6 +467,10 @@ function LoamApp() {
   }, [activeConversation?.id, activeConversation?.kind, currentUser.id, upsertMessages]);
 
   useEffect(() => {
+    if (!config?.currentUser.id) {
+      return;
+    }
+
     const configuredServer = localStorage.getItem(SERVER_URL_KEY);
     const socketUrl = configuredServer
       ? `${configuredServer.replace(/^http/, "ws")}/ws`
@@ -489,11 +493,13 @@ function LoamApp() {
         return;
       }
 
-      upsertUsers([payload.user]);
+      if (payload.type === "userUpserted") {
+        upsertUsers([payload.user]);
+      }
     };
 
     return () => socket.close();
-  }, [removeMessage, upsertMessages, upsertUsers]);
+  }, [config?.currentUser.id, removeMessage, upsertMessages, upsertUsers]);
 
   const usersById = useMemo(() => {
     const indexed = new Map(users.map((user) => [user.id, user]));

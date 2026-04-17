@@ -9,7 +9,6 @@ import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
 import {
   ChannelSchema,
-  IdSchema,
   MessageSchema,
   UserSchema,
   type Channel,
@@ -23,7 +22,12 @@ type SocketClient = {
   OPEN: number;
   readyState: number;
   send: (payload: string) => void;
+  close: () => void;
   on: (event: "close", listener: () => void) => void;
+};
+type SocketSession = {
+  socket: SocketClient;
+  userId: string;
 };
 
 type AppData = {
@@ -63,6 +67,7 @@ type ClientEvent =
   | {
       type: "messageDeleted";
       messageId: string;
+      message: Message;
     }
   | {
       type: "userUpserted";
@@ -76,13 +81,14 @@ const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
 const host = process.env.HOST ?? "0.0.0.0";
 const joinHost = process.env.LOAM_JOIN_HOST ?? localIPv4();
-const sessionCookieName = "loam_user_id";
+const sessionCookieName = "loam_session";
 const sessionCookieMaxAge = 60 * 60 * 24 * 365;
 const server = Fastify({
   logger: true,
   serverFactory: (handler) => createServer(handler),
 });
-const sockets = new Set<SocketClient>();
+const sockets = new Set<SocketSession>();
+const sessions = new Map<string, string>();
 let staticFilesRegistered = false;
 
 let data: AppData = {
@@ -91,6 +97,7 @@ let data: AppData = {
   messages: [],
 };
 let dirty = false;
+let dataRev = 0;
 
 const defaultChannels: Channel[] = [
   {
@@ -155,6 +162,15 @@ function makeSessionUserId(): string {
   return `user.${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
+function makeSessionToken(): string {
+  return crypto.randomUUID();
+}
+
+function markDirty(): void {
+  dirty = true;
+  dataRev += 1;
+}
+
 function encodeCookieValue(value: string): string {
   return encodeURIComponent(value);
 }
@@ -178,18 +194,26 @@ function readCookie(cookieHeader: string | undefined, name: string): string | un
 }
 
 function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string {
-  const cookieUserId = readCookie(request.headers.cookie, sessionCookieName);
+  const cookieToken = readCookie(request.headers.cookie, sessionCookieName);
+  const cookieUserId = cookieToken ? sessions.get(cookieToken) : undefined;
 
-  if (cookieUserId && IdSchema.safeParse(cookieUserId).success) {
+  if (cookieUserId) {
     return cookieUserId;
   }
 
   const userId = makeSessionUserId();
+  const token = makeSessionToken();
+  sessions.set(token, userId);
   reply.header(
     "set-cookie",
-    `${sessionCookieName}=${encodeCookieValue(userId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}`,
+    `${sessionCookieName}=${encodeCookieValue(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}`,
   );
   return userId;
+}
+
+function getSessionUserIdFromRequest(request: FastifyRequest): string | undefined {
+  const cookieToken = readCookie(request.headers.cookie, sessionCookieName);
+  return cookieToken ? sessions.get(cookieToken) : undefined;
 }
 
 function ensureUser(id: string, isAdmin = false): User {
@@ -201,7 +225,7 @@ function ensureUser(id: string, isAdmin = false): User {
 
   const user = makeUser(id, isAdmin);
   data.users.push(user);
-  dirty = true;
+  markDirty();
   broadcast({ type: "userUpserted", user });
   return user;
 }
@@ -252,11 +276,34 @@ function dmMessages(peerId: string, currentUserId: string): Message[] {
   return [...directMessages, ...reactions].sort((a, b) => a.createdAt - b.createdAt);
 }
 
+function messageAudienceUserIds(message: Message): Set<string> | undefined {
+  if (message.type === "dm") {
+    return new Set([message.authorId, message.recipientUserId]);
+  }
+
+  if (message.type === "reaction") {
+    const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
+    return target ? messageAudienceUserIds(target) : new Set([message.authorId]);
+  }
+
+  return undefined;
+}
+
+function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
+  if (event.type === "userUpserted") {
+    return true;
+  }
+
+  const message = event.type === "messageCreated" ? event.message : event.message;
+  const audience = messageAudienceUserIds(message);
+  return !audience || audience.has(userId);
+}
+
 function broadcast(event: ClientEvent): void {
   const payload = JSON.stringify(event);
 
-  for (const socket of sockets) {
-    if (socket.readyState === socket.OPEN) {
+  for (const { socket, userId } of sockets) {
+    if (socket.readyState === socket.OPEN && socketCanReceiveEvent(userId, event)) {
       socket.send(payload);
     }
   }
@@ -269,7 +316,7 @@ function newMessageId(prefix = "msg"): string {
 function createMessage(
   input: CreateMessageRequest,
   authorId: string,
-): { message?: Message; deletedMessageId?: string; error?: string } {
+): { message?: Message; deletedMessage?: Message; deletedMessageId?: string; error?: string } {
   ensureUser(authorId);
 
   if (input.type === "channelPost" && !ensureChannel(input.channelId)) {
@@ -307,8 +354,8 @@ function createMessage(
 
     if (existingIndex >= 0) {
       const [deleted] = data.messages.splice(existingIndex, 1);
-      dirty = true;
-      return { deletedMessageId: deleted?.id };
+      markDirty();
+      return { deletedMessageId: deleted?.id, deletedMessage: deleted };
     }
   }
 
@@ -324,7 +371,7 @@ function createMessage(
   };
   const message = MessageSchema.parse({ ...input, ...base });
   data.messages.push(message);
-  dirty = true;
+  markDirty();
   return { message };
 }
 
@@ -339,7 +386,7 @@ async function loadData(): Promise<void> {
 
   if (!data.channels.length) {
     data.channels = defaultChannels;
-    dirty = true;
+    markDirty();
   }
 
   for (const id of seedUsers) {
@@ -352,13 +399,18 @@ async function saveAllData(): Promise<void> {
     return;
   }
 
+  const startRev = dataRev;
+
   try {
     await Promise.all([
       writeJson("users", data.users),
       writeJson("channels", data.channels),
       writeJson("messages", data.messages),
     ]);
-    dirty = false;
+
+    if (dataRev === startRev) {
+      dirty = false;
+    }
   } catch (error) {
     dirty = true;
     throw error;
@@ -413,9 +465,9 @@ server.get("/api/channels", async () => data.channels.filter((channel) => !chann
 server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request) =>
   channelMessages(request.params.channelId),
 );
-server.get<{ Params: { userId: string }; Querystring: { currentUserId?: string } }>(
+server.get<{ Params: { userId: string } }>(
   "/api/dms/:userId",
-  async (request) => dmMessages(request.params.userId, request.query.currentUserId ?? "user.1234"),
+  async (request, reply) => dmMessages(request.params.userId, getSessionUserId(request, reply)),
 );
 
 server.post<{ Body: CreateMessageRequest }>("/api/messages", async (request, reply) => {
@@ -425,8 +477,12 @@ server.post<{ Body: CreateMessageRequest }>("/api/messages", async (request, rep
     return reply.code(400).send({ error: result.error });
   }
 
-  if (result.deletedMessageId) {
-    broadcast({ type: "messageDeleted", messageId: result.deletedMessageId });
+  if (result.deletedMessageId && result.deletedMessage) {
+    broadcast({
+      type: "messageDeleted",
+      messageId: result.deletedMessageId,
+      message: result.deletedMessage,
+    });
     return reply.send(result);
   }
 
@@ -438,9 +494,18 @@ server.post<{ Body: CreateMessageRequest }>("/api/messages", async (request, rep
   return reply.code(201).send(result);
 });
 
-server.get("/ws", { websocket: true }, (connection: SocketClient) => {
-  sockets.add(connection);
-  connection.on("close", () => sockets.delete(connection));
+server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
+  const userId = getSessionUserIdFromRequest(request);
+
+  if (!userId) {
+    connection.send(JSON.stringify({ type: "error", error: "Unauthenticated websocket" }));
+    connection.close();
+    return;
+  }
+
+  const socketSession = { socket: connection, userId };
+  sockets.add(socketSession);
+  connection.on("close", () => sockets.delete(socketSession));
 });
 
 server.setNotFoundHandler((request, reply) => {

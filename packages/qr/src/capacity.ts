@@ -50,6 +50,10 @@ export function getVersionInfo(version: QRVersion): QRVersionInfo {
 }
 
 export function chooseVersion(byteLength: number): QRVersion {
+  if (!Number.isInteger(byteLength) || byteLength < 0) {
+    throw new Error(`Byte length must be a non-negative integer, received ${byteLength}`);
+  }
+
   if (byteLength <= QR_VERSION_INFO[4].byteCapacityH) {
     return 4;
   }

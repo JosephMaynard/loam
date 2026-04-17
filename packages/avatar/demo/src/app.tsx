@@ -55,6 +55,7 @@ function ModeButton({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       onClick={() => onClick(value)}
       className={[
         "rounded-full border px-4 py-2 text-xs tracking-[0.26em] uppercase transition",
@@ -127,8 +128,14 @@ export function App() {
 
               <div className="flex flex-col gap-6">
                 <div>
-                  <p className="text-[11px] tracking-[0.3em] uppercase text-black/45">Seed String</p>
+                  <label
+                    htmlFor="seed-input"
+                    className="text-[11px] tracking-[0.3em] uppercase text-black/45"
+                  >
+                    Seed String
+                  </label>
                   <input
+                    id="seed-input"
                     value={value}
                     onInput={(event) => setValue(event.currentTarget.value)}
                     className="mt-3 w-full rounded-[1.4rem] border border-black/10 bg-white/85 px-5 py-4 text-lg outline-none transition placeholder:text-black/30 focus:border-black/35 focus:bg-white"

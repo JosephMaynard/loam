@@ -91,6 +91,7 @@ const MIN_TEXT_CONTRAST = 4.5;
 const BACKGROUND_INK = "#171411";
 const BACKGROUND_PAPER = "#fffdf8";
 const SVG_TEXT_STACK = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+const MAX_CACHE_SIZE = 500;
 
 type AvatarGlobal = typeof globalThis & {
   [STORE_KEY]?: AvatarStore;
@@ -107,6 +108,24 @@ function getStore(): AvatarStore {
   }
 
   return host[STORE_KEY];
+}
+
+function setBoundedCache<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+
+  cache.set(key, value);
+
+  while (cache.size > MAX_CACHE_SIZE) {
+    const oldestKey = cache.keys().next().value as K | undefined;
+
+    if (oldestKey === undefined) {
+      return;
+    }
+
+    cache.delete(oldestKey);
+  }
 }
 
 function assertDomSupport(): void {
@@ -872,7 +891,7 @@ export function getAvatarColors(id: string): AvatarColors {
     darkMode: ensureContrast(bg, DARK_SURFACE, MIN_TEXT_CONTRAST),
   };
 
-  store.colors.set(id, colors);
+  setBoundedCache(store.colors, id, colors);
   return colors;
 }
 
@@ -900,6 +919,6 @@ export function generateAvatar(id: string, options: AvatarOptions = {}): AvatarR
     darkMode: colors.darkMode,
   };
 
-  store.results.set(cacheKey, result);
+  setBoundedCache(store.results, cacheKey, result);
   return result;
 }

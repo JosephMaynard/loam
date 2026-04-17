@@ -1,0 +1,15 @@
+{
+  "rules": {
+    "at-rule-no-unknown": [
+      true,
+      {
+        "ignoreAtRules": [
+          "utility",
+          "theme",
+          "source",
+          "apply"
+        ]
+      }
+    ]
+  }
+}

@@ -14,4 +14,9 @@ describe("chooseVersion", () => {
   it("throws when the payload exceeds version 6-H", () => {
     expect(() => chooseVersion(59)).toThrow(/exceeds QR version 6-H capacity/);
   });
+
+  it("throws when byte length is not a non-negative integer", () => {
+    expect(() => chooseVersion(-1)).toThrow(/non-negative integer/);
+    expect(() => chooseVersion(1.5)).toThrow(/non-negative integer/);
+  });
 });
