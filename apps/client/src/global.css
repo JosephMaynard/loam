@@ -19,7 +19,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100svh;
   background:
     linear-gradient(90deg, rgba(47, 95, 76, 0.08) 1px, transparent 1px),
     linear-gradient(180deg, rgba(47, 95, 76, 0.08) 1px, transparent 1px),
@@ -47,13 +47,13 @@ a {
 }
 
 #app {
-  min-height: 100vh;
+  height: 100svh;
 }
 
 .app-shell {
   display: grid;
   grid-template-columns: 284px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100svh;
   color: #17231d;
 }
 
@@ -65,7 +65,7 @@ a {
 .conversation,
 .thread-panel,
 .settings-view {
-  min-height: 100vh;
+  height: 100svh;
 }
 
 .sidebar {
@@ -583,7 +583,7 @@ a {
   .conversation,
   .thread-panel,
   .settings-view {
-    min-height: 100vh;
+    min-height: 100svh;
   }
 
   .app-shell.has-conversation .sidebar,

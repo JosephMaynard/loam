@@ -1,3 +1,4 @@
 **/node_modules/
 **/dist/
 .loam/
+.DS_Store
