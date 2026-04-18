@@ -1,5 +1,5 @@
 import { encodeQR, renderQRToSvg } from "@loam/qr";
-import type { Channel, Message, User } from "@loam/schema";
+import { MessageSchema, UserSchema, type Channel, type Message, type User } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import { LocationProvider, useLocation } from "preact-iso";
 import type { ComponentChildren } from "preact";
@@ -93,7 +93,7 @@ const DEFAULT_CHANNEL_ID = "general";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 
 function makeClientUserId(): string {
-  const bytes = new Uint8Array(2);
+  const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   const suffix = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `user.${suffix}`;
@@ -186,14 +186,59 @@ function apiUrl(path: string): string {
   return `${localStorage.getItem(SERVER_URL_KEY) ?? ""}${path}`;
 }
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(apiUrl(path), { credentials: "include" });
+async function fetchJson<T>(path: string, timeoutMs = 10_000): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+  try {
+    const response = await fetch(apiUrl(path), {
+      credentials: "include",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
+
+    return response.json() as Promise<T>;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function parseSocketEvent(data: unknown): SocketEvent | undefined {
+  let payload: unknown;
+
+  try {
+    payload = JSON.parse(String(data));
+  } catch (error) {
+    console.warn("Ignoring invalid websocket payload.", error);
+    return undefined;
   }
 
-  return response.json() as Promise<T>;
+  if (!payload || typeof payload !== "object" || !("type" in payload)) {
+    return undefined;
+  }
+
+  const candidate = payload as { type: unknown; message?: unknown; messageId?: unknown; user?: unknown };
+
+  if (candidate.type === "messageCreated") {
+    const message = MessageSchema.safeParse(candidate.message);
+    return message.success ? { type: "messageCreated", message: message.data } : undefined;
+  }
+
+  if (candidate.type === "messageDeleted") {
+    return typeof candidate.messageId === "string"
+      ? { type: "messageDeleted", messageId: candidate.messageId }
+      : undefined;
+  }
+
+  if (candidate.type === "userUpserted") {
+    const user = UserSchema.safeParse(candidate.user);
+    return user.success ? { type: "userUpserted", user: user.data } : undefined;
+  }
+
+  return undefined;
 }
 
 function isConversationMessage(
@@ -475,30 +520,96 @@ function LoamApp() {
     const socketUrl = configuredServer
       ? `${configuredServer.replace(/^http/, "ws")}/ws`
       : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`;
-    const socket = new WebSocket(socketUrl);
+    let disposed = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer: number | undefined;
+    let socket: WebSocket | undefined;
+    let socketAttempt = 0;
 
-    socket.onopen = () => setConnection("live");
-    socket.onclose = () => setConnection("offline");
-    socket.onerror = () => setConnection("offline");
-    socket.onmessage = (event) => {
-      const payload = JSON.parse(String(event.data)) as SocketEvent;
-
-      if (payload.type === "messageCreated") {
-        upsertMessages([payload.message]);
+    function scheduleReconnect(): void {
+      if (disposed || reconnectTimer !== undefined) {
         return;
       }
 
-      if (payload.type === "messageDeleted") {
-        removeMessage(payload.messageId);
+      const delay = Math.min(30_000, 1_000 * 2 ** reconnectAttempts);
+      reconnectAttempts += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined;
+        connectWebSocket();
+      }, delay);
+    }
+
+    function connectWebSocket(): void {
+      if (disposed) {
         return;
       }
 
-      if (payload.type === "userUpserted") {
+      socketAttempt += 1;
+      const attempt = socketAttempt;
+      const nextSocket = new WebSocket(socketUrl);
+      socket = nextSocket;
+      setConnection("connecting");
+
+      nextSocket.onopen = () => {
+        if (disposed || attempt !== socketAttempt) {
+          return;
+        }
+
+        reconnectAttempts = 0;
+        setConnection("live");
+      };
+      nextSocket.onclose = () => {
+        if (disposed || attempt !== socketAttempt) {
+          return;
+        }
+
+        setConnection("offline");
+        scheduleReconnect();
+      };
+      nextSocket.onerror = () => {
+        if (disposed || attempt !== socketAttempt) {
+          return;
+        }
+
+        setConnection("offline");
+        nextSocket.close();
+      };
+      nextSocket.onmessage = (event) => {
+        if (disposed || attempt !== socketAttempt) {
+          return;
+        }
+
+        const payload = parseSocketEvent(event.data);
+
+        if (!payload) {
+          return;
+        }
+
+        if (payload.type === "messageCreated") {
+          upsertMessages([payload.message]);
+          return;
+        }
+
+        if (payload.type === "messageDeleted") {
+          removeMessage(payload.messageId);
+          return;
+        }
+
         upsertUsers([payload.user]);
-      }
-    };
+      };
+    }
 
-    return () => socket.close();
+    connectWebSocket();
+
+    return () => {
+      disposed = true;
+
+      if (reconnectTimer !== undefined) {
+        window.clearTimeout(reconnectTimer);
+      }
+
+      socket?.close();
+    };
   }, [config?.currentUser.id, removeMessage, upsertMessages, upsertUsers]);
 
   const usersById = useMemo(() => {

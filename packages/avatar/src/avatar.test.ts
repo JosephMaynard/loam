@@ -68,6 +68,29 @@ describe("template loading", () => {
       noses: 5,
     });
   });
+
+  it("sanitizes unsafe SVG template content before caching", () => {
+    initAvatarTemplate(`
+      <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" onload="alert(1)" viewBox="0 0 128 128">
+        <defs><style>@import url("https://example.com/style.css"); .x { fill: red; }</style></defs>
+        <script>alert(1)</script>
+        <g id="mouths"><g id="mouth-1" onclick="alert(1)"><path href="javascript:alert(1)" style="fill: url(https://example.com/a.svg)"/></g></g>
+        <g id="eyes"><g id="eye-1"><foreignObject><p>unsafe</p></foreignObject><path xlink:href="data:image/svg+xml;base64,AAAA"/></g></g>
+        <g id="eyebrows"><g id="eyebrow-1"><path/></g></g>
+        <g id="noses"><g id="nose-1"><path/></g></g>
+      </svg>
+    `);
+
+    const result = generateAvatar("sanitize-template").html;
+
+    expect(result).not.toContain("onload");
+    expect(result).not.toContain("onclick");
+    expect(result).not.toContain("javascript:");
+    expect(result).not.toContain("data:image");
+    expect(result).not.toContain("foreignObject");
+    expect(result).not.toContain("@import");
+    expect(result).not.toContain("https://example.com");
+  });
 });
 
 describe("generateAvatar", () => {

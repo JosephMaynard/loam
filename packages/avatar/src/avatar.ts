@@ -144,7 +144,58 @@ function parseSvg(svgText: string): SVGSVGElement {
     throw new Error("Invalid avatar SVG template.");
   }
 
+  sanitizeSvgTree(svg);
+
   return svg as unknown as SVGSVGElement;
+}
+
+function isDangerousUrl(value: string): boolean {
+  const normalized = value.trim().replace(/[\u0000-\u001f\u007f\s]+/g, "").toLowerCase();
+  return normalized.startsWith("javascript:") || normalized.startsWith("data:");
+}
+
+function isLocalFragmentReference(value: string): boolean {
+  return value.trim().startsWith("#");
+}
+
+function sanitizeSvgTree(root: Element): void {
+  const blockedElements = new Set(["script", "foreignobject", "iframe", "meta", "link"]);
+
+  for (const element of Array.from(root.querySelectorAll("*"))) {
+    if (blockedElements.has(element.tagName.toLowerCase())) {
+      element.remove();
+    }
+  }
+
+  for (const element of [root, ...Array.from(root.querySelectorAll("*"))]) {
+    if (element.tagName.toLowerCase() === "style" && /@import|url\(|javascript:|data:|expression\(/i.test(element.textContent ?? "")) {
+      element.textContent = "";
+    }
+
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value;
+
+      if (name.startsWith("on") || name === "style") {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+
+      if ((name === "href" || name === "xlink:href") && (isDangerousUrl(value) || !isLocalFragmentReference(value))) {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+
+      if (name === "xmlns:xlink" && isDangerousUrl(value)) {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+
+      if (value.includes("url(") && !value.includes("url(#")) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
 }
 
 function ensureRuntimeStyle(svg: SVGSVGElement): void {
