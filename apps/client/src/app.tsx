@@ -91,6 +91,7 @@ const LAST_CONVERSATION_KEY = "loam.lastConversation";
 const SERVER_URL_KEY = "loam.serverUrl";
 const DEFAULT_CHANNEL_ID = "general";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
+const REQUEST_TIMEOUT_MS = 10_000;
 
 function makeClientUserId(): string {
   const bytes = new Uint8Array(16);
@@ -186,7 +187,7 @@ function apiUrl(path: string): string {
   return `${localStorage.getItem(SERVER_URL_KEY) ?? ""}${path}`;
 }
 
-async function fetchJson<T>(path: string, timeoutMs = 10_000): Promise<T> {
+async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -239,6 +240,35 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
   }
 
   return undefined;
+}
+
+function parseMessageResponse(payload: unknown): MessageResponse | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+
+  const candidate = payload as { message?: unknown; deletedMessageId?: unknown };
+  const result: MessageResponse = {};
+
+  if (candidate.message !== undefined) {
+    const message = MessageSchema.safeParse(candidate.message);
+
+    if (!message.success) {
+      return undefined;
+    }
+
+    result.message = message.data;
+  }
+
+  if (candidate.deletedMessageId !== undefined) {
+    if (typeof candidate.deletedMessageId !== "string") {
+      return undefined;
+    }
+
+    result.deletedMessageId = candidate.deletedMessageId;
+  }
+
+  return result.message || result.deletedMessageId ? result : undefined;
 }
 
 function isConversationMessage(
@@ -407,27 +437,47 @@ function LoamApp() {
 
   const sendMessage = useCallback(
     async (request: MessageCreateRequest) => {
-      const response = await fetch(apiUrl("/api/messages"), {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(request),
-      });
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-      if (!response.ok) {
-        throw new Error(`Message send failed: ${response.status}`);
-      }
+      try {
+        const response = await fetch(apiUrl("/api/messages"), {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify(request),
+        });
 
-      const result = (await response.json()) as MessageResponse;
+        if (!response.ok) {
+          throw new Error(`Message send failed: ${response.status}`);
+        }
 
-      if (result.message) {
-        upsertMessages([result.message]);
-      }
+        let payload: unknown;
 
-      if (result.deletedMessageId) {
-        removeMessage(result.deletedMessageId);
+        try {
+          payload = await response.json();
+        } catch (error) {
+          throw new Error("Message send failed: invalid JSON response.", { cause: error });
+        }
+
+        const result = parseMessageResponse(payload);
+
+        if (!result) {
+          throw new Error("Message send failed: invalid response payload.");
+        }
+
+        if (result.message) {
+          upsertMessages([result.message]);
+        }
+
+        if (result.deletedMessageId) {
+          removeMessage(result.deletedMessageId);
+        }
+      } finally {
+        window.clearTimeout(timeout);
       }
     },
     [removeMessage, upsertMessages],
@@ -902,9 +952,24 @@ function MessageList({
   usersById,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
+  const previousScrollHeightRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+    const el = listRef.current;
+
+    if (!el) {
+      return;
+    }
+
+    const previousScrollHeight = previousScrollHeightRef.current;
+    const distanceFromBottom =
+      previousScrollHeight === undefined ? 0 : previousScrollHeight - el.scrollTop - el.clientHeight;
+
+    previousScrollHeightRef.current = el.scrollHeight;
+
+    if (distanceFromBottom < 100) {
+      el.scrollTo({ top: el.scrollHeight });
+    }
   }, [topMessages.length]);
 
   return (

@@ -76,7 +76,7 @@ export function App() {
   const [mode, setMode] = useState<AvatarMode>("face");
   const colors = useMemo(() => getAvatarColors(value), [value]);
   const displayName = useMemo(() => generateDisplayName(value), [value]);
-  const counts = getAvatarCounts();
+  const counts = useMemo(() => getAvatarCounts(), []);
 
   return (
     <main className="relative isolate min-h-screen overflow-hidden px-5 py-6 md:px-10 md:py-8">
@@ -101,9 +101,9 @@ export function App() {
             <div className="rounded-3xl border border-black/10 bg-white/55 px-4 py-3 backdrop-blur-sm">
               <p className="text-[11px] tracking-[0.22em] uppercase text-black/45">Palette Output</p>
               <div className="mt-2 flex gap-2">
-                {[colors.bg, colors.shade, colors.accent, colors.tertiary].map((color) => (
+                {[colors.bg, colors.shade, colors.accent, colors.tertiary].map((color, index) => (
                   <span
-                    key={color}
+                    key={`${color}-${index}`}
                     className="h-9 flex-1 rounded-full ring-1 ring-black/10"
                     style={{ backgroundColor: color }}
                     title={color}
