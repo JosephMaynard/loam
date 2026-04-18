@@ -1,5 +1,12 @@
 import { encodeQR, renderQRToSvg } from "@loam/qr";
-import { MessageSchema, UserSchema, type Channel, type Message, type User } from "@loam/schema";
+import {
+  MessageSchema,
+  UserSchema,
+  type Channel,
+  type Message,
+  type MessageCreateRequest,
+  type User,
+} from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import { LocationProvider, useLocation } from "preact-iso";
 import type { ComponentChildren } from "preact";
@@ -36,29 +43,6 @@ type Config = {
   websocketPath: string;
   currentUser: User;
 };
-
-type MessageCreateRequest =
-  | {
-      type: "channelPost";
-      channelId: string;
-      body: string;
-    }
-  | {
-      type: "channelReply";
-      channelId: string;
-      parentMessageId: string;
-      body: string;
-    }
-  | {
-      type: "dm";
-      recipientUserId: string;
-      body: string;
-    }
-  | {
-      type: "reaction";
-      targetMessageId: string;
-      reaction: string;
-    };
 
 type MessageResponse = {
   message?: Message;
@@ -542,7 +526,7 @@ function LoamApp() {
     return () => {
       active = false;
     };
-  }, [currentUser, upsertUsers]);
+  }, [currentUser.id, upsertUsers]);
 
   useEffect(() => {
     if (!activeConversation) {

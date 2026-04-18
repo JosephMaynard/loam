@@ -19,7 +19,7 @@ import {
 } from "@loam/schema";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-type DataFile = "users" | "channels" | "messages";
+type DataFile = "users" | "channels" | "messages" | "sessions";
 type SocketClient = {
   OPEN: number;
   readyState: number;
@@ -36,6 +36,10 @@ type AppData = {
   users: User[];
   channels: Channel[];
   messages: Message[];
+};
+type SessionRecord = {
+  token: string;
+  userId: string;
 };
 
 type ClientEvent =
@@ -62,6 +66,7 @@ const host = process.env.HOST ?? "0.0.0.0";
 const joinHost = process.env.LOAM_JOIN_HOST ?? localIPv4();
 const sessionCookieName = "loam_session";
 const sessionCookieMaxAge = 60 * 60 * 24 * 365;
+const defaultChannelCreatedAt = 1_704_067_200_000;
 const isProduction = process.env.NODE_ENV === "production";
 const server = Fastify({
   logger: true,
@@ -89,7 +94,7 @@ const defaultChannels: Channel[] = [
     allowPosting: "everyone",
     allowReplies: true,
     discoverable: true,
-    createdAt: Date.now(),
+    createdAt: defaultChannelCreatedAt,
   },
   {
     id: "general",
@@ -99,7 +104,7 @@ const defaultChannels: Channel[] = [
     allowPosting: "everyone",
     allowReplies: true,
     discoverable: true,
-    createdAt: Date.now(),
+    createdAt: defaultChannelCreatedAt,
   },
 ];
 
@@ -152,6 +157,24 @@ function markDirty(): void {
   dataRev += 1;
 }
 
+function sessionRecords(): SessionRecord[] {
+  return Array.from(sessions, ([token, userId]) => ({ token, userId }));
+}
+
+function isSessionRecord(value: unknown): value is SessionRecord {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Partial<SessionRecord>;
+  return (
+    typeof record.token === "string" &&
+    record.token.length > 0 &&
+    typeof record.userId === "string" &&
+    record.userId.length > 0
+  );
+}
+
 function encodeCookieValue(value: string): string {
   return encodeURIComponent(value);
 }
@@ -185,6 +208,7 @@ function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string 
   const userId = makeSessionUserId();
   const token = makeSessionToken();
   sessions.set(token, userId);
+  markDirty();
   const cookie = `${sessionCookieName}=${encodeCookieValue(
     token,
   )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${isProduction ? "; Secure" : ""}`;
@@ -341,7 +365,11 @@ function createMessage(
   }
 
   if (input.type === "dm") {
-    ensureUser(input.recipientUserId);
+    const recipient = data.users.find((user) => user.id === input.recipientUserId);
+
+    if (!recipient) {
+      return { error: "Recipient user does not exist" };
+    }
   }
 
   const base = {
@@ -364,9 +392,16 @@ async function loadData(): Promise<void> {
     channels: (await readJsonArray<Channel>("channels")).map((channel) => ChannelSchema.parse(channel)),
     messages: (await readJsonArray<Message>("messages")).map((message) => MessageSchema.parse(message)),
   };
+  sessions.clear();
+
+  for (const session of await readJsonArray<SessionRecord>("sessions")) {
+    if (isSessionRecord(session)) {
+      sessions.set(session.token, session.userId);
+    }
+  }
 
   if (!data.channels.length) {
-    data.channels = defaultChannels;
+    data.channels = defaultChannels.map((channel) => ({ ...channel }));
     markDirty();
   }
 
@@ -393,6 +428,7 @@ async function saveAllData(): Promise<void> {
         writeJson("users", data.users),
         writeJson("channels", data.channels),
         writeJson("messages", data.messages),
+        writeJson("sessions", sessionRecords()),
       ]);
 
       if (dataRev === startRev) {
