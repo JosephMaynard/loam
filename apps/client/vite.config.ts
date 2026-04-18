@@ -1,8 +1,10 @@
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import preact from "@preact/preset-vite";
 import { defineConfig } from "vite";
 
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const apiPort = process.env.LOAM_API_PORT ?? "3001";
 const apiTarget = `http://localhost:${apiPort}`;
 const wsTarget = `ws://localhost:${apiPort}`;

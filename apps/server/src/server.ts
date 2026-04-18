@@ -9,10 +9,12 @@ import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
 import {
   ChannelSchema,
+  MessageCreateRequestSchema,
   MessageSchema,
   UserSchema,
   type Channel,
   type Message,
+  type MessageCreateRequest,
   type User,
 } from "@loam/schema";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
@@ -35,29 +37,6 @@ type AppData = {
   channels: Channel[];
   messages: Message[];
 };
-
-type CreateMessageRequest =
-  | {
-      type: "channelPost";
-      channelId: string;
-      body: string;
-    }
-  | {
-      type: "channelReply";
-      channelId: string;
-      parentMessageId: string;
-      body: string;
-    }
-  | {
-      type: "dm";
-      recipientUserId: string;
-      body: string;
-    }
-  | {
-      type: "reaction";
-      targetMessageId: string;
-      reaction: string;
-    };
 
 type ClientEvent =
   | {
@@ -83,6 +62,7 @@ const host = process.env.HOST ?? "0.0.0.0";
 const joinHost = process.env.LOAM_JOIN_HOST ?? localIPv4();
 const sessionCookieName = "loam_session";
 const sessionCookieMaxAge = 60 * 60 * 24 * 365;
+const isProduction = process.env.NODE_ENV === "production";
 const server = Fastify({
   logger: true,
   serverFactory: (handler) => createServer(handler),
@@ -98,6 +78,7 @@ let data: AppData = {
 };
 let dirty = false;
 let dataRev = 0;
+let saveInProgress: Promise<void> | undefined;
 
 const defaultChannels: Channel[] = [
   {
@@ -204,10 +185,10 @@ function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string 
   const userId = makeSessionUserId();
   const token = makeSessionToken();
   sessions.set(token, userId);
-  reply.header(
-    "set-cookie",
-    `${sessionCookieName}=${encodeCookieValue(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}`,
-  );
+  const cookie = `${sessionCookieName}=${encodeCookieValue(
+    token,
+  )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${isProduction ? "; Secure" : ""}`;
+  reply.header("set-cookie", cookie);
   return userId;
 }
 
@@ -294,7 +275,7 @@ function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
     return true;
   }
 
-  const message = event.type === "messageCreated" ? event.message : event.message;
+  const message = event.message;
   const audience = messageAudienceUserIds(message);
   return !audience || audience.has(userId);
 }
@@ -314,7 +295,7 @@ function newMessageId(prefix = "msg"): string {
 }
 
 function createMessage(
-  input: CreateMessageRequest,
+  input: MessageCreateRequest,
   authorId: string,
 ): { message?: Message; deletedMessage?: Message; deletedMessageId?: string; error?: string } {
   ensureUser(authorId);
@@ -399,22 +380,33 @@ async function saveAllData(): Promise<void> {
     return;
   }
 
+  if (saveInProgress) {
+    await saveInProgress;
+    return saveAllData();
+  }
+
   const startRev = dataRev;
 
-  try {
-    await Promise.all([
-      writeJson("users", data.users),
-      writeJson("channels", data.channels),
-      writeJson("messages", data.messages),
-    ]);
+  saveInProgress = (async () => {
+    try {
+      await Promise.all([
+        writeJson("users", data.users),
+        writeJson("channels", data.channels),
+        writeJson("messages", data.messages),
+      ]);
 
-    if (dataRev === startRev) {
-      dirty = false;
+      if (dataRev === startRev) {
+        dirty = false;
+      }
+    } catch (error) {
+      dirty = true;
+      throw error;
+    } finally {
+      saveInProgress = undefined;
     }
-  } catch (error) {
-    dirty = true;
-    throw error;
-  }
+  })();
+
+  await saveInProgress;
 }
 
 async function registerStaticFiles(): Promise<void> {
@@ -470,8 +462,14 @@ server.get<{ Params: { userId: string } }>(
   async (request, reply) => dmMessages(request.params.userId, getSessionUserId(request, reply)),
 );
 
-server.post<{ Body: CreateMessageRequest }>("/api/messages", async (request, reply) => {
-  const result = createMessage(request.body, getSessionUserId(request, reply));
+server.post("/api/messages", async (request, reply) => {
+  const body = MessageCreateRequestSchema.safeParse(request.body);
+
+  if (!body.success) {
+    return reply.code(400).send({ error: "Invalid message request" });
+  }
+
+  const result = createMessage(body.data, getSessionUserId(request, reply));
 
   if (result.error) {
     return reply.code(400).send({ error: result.error });

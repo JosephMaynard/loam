@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ChannelSchema,
+  MessageCreateRequestSchema,
   MessageSchema,
   NetworkConfigSchema,
   StreamEventSchema,
@@ -128,6 +129,25 @@ describe("@loam/schema", () => {
         recipientUserId: "usr_456",
         body: "   ",
         createdAt: 1712850000,
+      }),
+    ).toThrow();
+  });
+
+  it("validates message creation requests", () => {
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "channelReply",
+        channelId: "chn_general",
+        parentMessageId: "msg_1",
+        body: "Replying",
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "dm",
+        recipientUserId: "usr_456",
+        body: "   ",
       }),
     ).toThrow();
   });

@@ -92,6 +92,31 @@ const MessageBodySchema = z.string().refine((body) => body.trim().length > 0, {
   message: "Message body cannot be empty",
 });
 
+export const MessageCreateRequestSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("channelPost"),
+    channelId: IdSchema,
+    body: MessageBodySchema,
+  }),
+  z.object({
+    type: z.literal("channelReply"),
+    channelId: IdSchema,
+    parentMessageId: IdSchema,
+    body: MessageBodySchema,
+  }),
+  z.object({
+    type: z.literal("dm"),
+    recipientUserId: IdSchema,
+    body: MessageBodySchema,
+  }),
+  z.object({
+    type: z.literal("reaction"),
+    targetMessageId: IdSchema,
+    reaction: z.string().min(1),
+  }),
+]);
+export type MessageCreateRequest = z.infer<typeof MessageCreateRequestSchema>;
+
 export const ChannelPostMessageSchema = BaseMessageSchema.extend({
   type: z.literal("channelPost"),
   channelId: IdSchema,
