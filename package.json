@@ -1,0 +1,19 @@
+{
+  "name": "loam",
+  "private": true,
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "dev": "tsx scripts/dev.ts",
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test"
+  },
+  "devDependencies": {
+    "@loam/qr": "workspace:*",
+    "tsx": "^4.21.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.30.2"
+}

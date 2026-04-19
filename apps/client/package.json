@@ -1,0 +1,27 @@
+{
+  "name": "client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@loam/avatar": "workspace:*",
+    "@loam/display-name": "workspace:*",
+    "@loam/qr": "workspace:*",
+    "@loam/schema": "workspace:*",
+    "dompurify": "^3.4.0",
+    "preact": "^10.29.0",
+    "preact-iso": "^2.11.1",
+    "snarkdown": "^2.0.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.4",
+    "@types/node": "^24.12.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.1"
+  }
+}
