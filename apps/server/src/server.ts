@@ -12,10 +12,13 @@ import {
   MessageCreateRequestSchema,
   MessageSchema,
   UserSchema,
+  UserUpdateRequestSchema,
   type Channel,
   type Message,
   type MessageCreateRequest,
+  type NetworkConfig,
   type User,
+  type UserUpdateRequest,
 } from "@loam/schema";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
@@ -48,6 +51,10 @@ type ClientEvent =
       message: Message;
     }
   | {
+      type: "messageUpdated";
+      message: Message;
+    }
+  | {
       type: "messageDeleted";
       messageId: string;
       message: Message;
@@ -57,8 +64,31 @@ type ClientEvent =
       user: User;
     };
 
+type IdentityConfig = {
+  allowUserDisplayNameEdit: boolean;
+  allowUserAvatarEdit: boolean;
+  allowAdminUserEdit: boolean;
+};
+
+type OllamaConfig = {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  botId: string;
+  botDisplayName: string;
+  systemPrompt?: string;
+};
+
+type LoamConfig = {
+  identity: IdentityConfig;
+  llm: {
+    ollama: OllamaConfig;
+  };
+};
+
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
 const dataDir = process.env.LOAM_DATA_DIR ?? join(rootDir, ".loam");
+const configPath = process.env.LOAM_CONFIG_FILE ?? join(dataDir, "config.json");
 const clientDistDir = join(rootDir, "apps/client/dist");
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
@@ -75,6 +105,7 @@ const server = Fastify({
 const sockets = new Set<SocketSession>();
 const sessions = new Map<string, string>();
 let staticFilesRegistered = false;
+let appConfig: LoamConfig = defaultLoamConfig();
 
 let data: AppData = {
   users: [],
@@ -110,6 +141,86 @@ const defaultChannels: Channel[] = [
 
 const seedUsers = ["user.1234", "user.5678"];
 
+function defaultLoamConfig(): LoamConfig {
+  return {
+    identity: {
+      allowUserDisplayNameEdit: false,
+      allowUserAvatarEdit: false,
+      allowAdminUserEdit: true,
+    },
+    llm: {
+      ollama: {
+        enabled: false,
+        baseUrl: "http://localhost:11434",
+        model: "gemma4",
+        botId: "llm.ollama.gemma4",
+        botDisplayName: "Gemma",
+      },
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+async function loadAppConfig(): Promise<void> {
+  const defaults = defaultLoamConfig();
+
+  try {
+    const raw = await readFile(configPath, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+
+    if (!isRecord(parsed)) {
+      appConfig = defaults;
+      return;
+    }
+
+    const identity = isRecord(parsed.identity) ? parsed.identity : {};
+    const llm = isRecord(parsed.llm) ? parsed.llm : {};
+    const ollama = isRecord(llm.ollama) ? llm.ollama : {};
+
+    appConfig = {
+      identity: {
+        allowUserDisplayNameEdit: readBoolean(
+          identity.allowUserDisplayNameEdit,
+          defaults.identity.allowUserDisplayNameEdit,
+        ),
+        allowUserAvatarEdit: readBoolean(identity.allowUserAvatarEdit, defaults.identity.allowUserAvatarEdit),
+        allowAdminUserEdit: readBoolean(identity.allowAdminUserEdit, defaults.identity.allowAdminUserEdit),
+      },
+      llm: {
+        ollama: {
+          enabled: readBoolean(ollama.enabled, defaults.llm.ollama.enabled),
+          baseUrl: readString(ollama.baseUrl, defaults.llm.ollama.baseUrl),
+          model: readString(ollama.model, defaults.llm.ollama.model),
+          botId: readString(ollama.botId, defaults.llm.ollama.botId),
+          botDisplayName: readString(ollama.botDisplayName, defaults.llm.ollama.botDisplayName),
+          systemPrompt:
+            typeof ollama.systemPrompt === "string" && ollama.systemPrompt.trim()
+              ? ollama.systemPrompt.trim()
+              : undefined,
+        },
+      },
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      appConfig = defaults;
+      return;
+    }
+
+    throw error;
+  }
+}
+
 function dataPath(file: DataFile): string {
   return join(dataDir, `${file}.json`);
 }
@@ -139,6 +250,21 @@ function makeUser(id: string, isAdmin = false): User {
     displayName: generateDisplayName(id),
     type: "human",
     isAdmin,
+    createdAt: Date.now(),
+    ephemeral: false,
+  });
+}
+
+function makeBotUser(config: OllamaConfig): User {
+  return UserSchema.parse({
+    id: config.botId,
+    displayName: config.botDisplayName,
+    avatar: {
+      seed: config.botId,
+      mode: "pattern",
+    },
+    type: "bot",
+    isAdmin: false,
     createdAt: Date.now(),
     ephemeral: false,
   });
@@ -233,6 +359,70 @@ function ensureUser(id: string, isAdmin = false): User {
   markDirty();
   broadcast({ type: "userUpserted", user });
   return user;
+}
+
+function ensureOllamaBotUser(): User | undefined {
+  if (!appConfig.llm.ollama.enabled) {
+    return undefined;
+  }
+
+  const existing = data.users.find((user) => user.id === appConfig.llm.ollama.botId);
+
+  if (existing) {
+    const next = {
+      ...existing,
+      displayName: appConfig.llm.ollama.botDisplayName,
+      type: "bot" as const,
+      isAdmin: false,
+      avatar: existing.avatar ?? {
+        seed: appConfig.llm.ollama.botId,
+        mode: "pattern" as const,
+      },
+    };
+    const parsed = UserSchema.parse(next);
+    Object.assign(existing, parsed);
+    markDirty();
+    broadcast({ type: "userUpserted", user: existing });
+    return existing;
+  }
+
+  const user = makeBotUser(appConfig.llm.ollama);
+  data.users.push(user);
+  markDirty();
+  broadcast({ type: "userUpserted", user });
+  return user;
+}
+
+function currentNetworkConfig(): NetworkConfig {
+  return {
+    enablePublicChannels: true,
+    enablePrivateChannels: false,
+    enableUserChannels: true,
+    enableReplies: true,
+    enableDMs: true,
+    enableReactions: true,
+    enableMarkdown: true,
+    enableLLMChat: appConfig.llm.ollama.enabled,
+    enableLLMStreaming: appConfig.llm.ollama.enabled,
+    allowUserDisplayNameEdit: appConfig.identity.allowUserDisplayNameEdit,
+    allowUserAvatarEdit: appConfig.identity.allowUserAvatarEdit,
+  };
+}
+
+function applyUserUpdate(user: User, update: UserUpdateRequest): User {
+  const next = UserSchema.parse({
+    ...user,
+    displayName: update.displayName ?? user.displayName,
+    avatar: update.avatar === undefined ? user.avatar : update.avatar,
+  });
+  Object.assign(user, next);
+  markDirty();
+  broadcast({ type: "userUpserted", user });
+  return user;
+}
+
+function visibleUsers(): User[] {
+  return appConfig.llm.ollama.enabled ? data.users : data.users.filter((user) => user.type !== "bot");
 }
 
 function ensureChannel(id: string): Channel | undefined {
@@ -384,6 +574,159 @@ function createMessage(
   return { message };
 }
 
+function updateMessage(message: Message, nextBody: string, streaming: boolean): Message {
+  if (!("body" in message)) {
+    return message;
+  }
+
+  const updated = MessageSchema.parse({
+    ...message,
+    body: nextBody,
+    editedAt: Date.now(),
+    meta: {
+      ...message.meta,
+      streaming,
+    },
+  });
+  Object.assign(message, updated);
+  markDirty();
+  broadcast({ type: "messageUpdated", message });
+  return message;
+}
+
+function llmMessagesForUser(botId: string, currentUserId: string): { role: "system" | "user" | "assistant"; content: string }[] {
+  const messages = dmMessages(botId, currentUserId).flatMap((message) => {
+    if (message.type !== "dm" || !message.body.trim()) {
+      return [];
+    }
+
+    return [
+      {
+        role: message.authorId === botId ? ("assistant" as const) : ("user" as const),
+        content: message.body,
+      },
+    ];
+  });
+
+  return appConfig.llm.ollama.systemPrompt
+    ? [{ role: "system", content: appConfig.llm.ollama.systemPrompt }, ...messages]
+    : messages;
+}
+
+function ollamaUrl(path: string): string {
+  return `${appConfig.llm.ollama.baseUrl.replace(/\/+$/, "")}${path}`;
+}
+
+async function* streamOllamaChat(
+  messages: { role: "system" | "user" | "assistant"; content: string }[],
+): AsyncGenerator<string> {
+  const response = await fetch(ollamaUrl("/api/chat"), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: appConfig.llm.ollama.model,
+      stream: true,
+      messages,
+    }),
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Ollama request failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        continue;
+      }
+
+      const parsed: unknown = JSON.parse(trimmed);
+
+      if (!isRecord(parsed)) {
+        continue;
+      }
+
+      if (typeof parsed.error === "string") {
+        throw new Error(parsed.error);
+      }
+
+      const message = isRecord(parsed.message) ? parsed.message : undefined;
+      const content = message && typeof message.content === "string" ? message.content : "";
+
+      if (content) {
+        yield content;
+      }
+
+      if (parsed.done === true) {
+        return;
+      }
+    }
+  }
+}
+
+async function createOllamaResponse(userMessage: Message): Promise<void> {
+  if (!appConfig.llm.ollama.enabled || userMessage.type !== "dm") {
+    return;
+  }
+
+  const bot = data.users.find((user) => user.id === appConfig.llm.ollama.botId);
+
+  if (!bot || userMessage.recipientUserId !== bot.id || userMessage.authorId === bot.id) {
+    return;
+  }
+
+  const assistantMessage = MessageSchema.parse({
+    id: newMessageId("llm"),
+    type: "dm",
+    authorId: bot.id,
+    recipientUserId: userMessage.authorId,
+    body: "",
+    createdAt: Date.now(),
+    meta: {
+      source: "llm",
+      model: appConfig.llm.ollama.model,
+      markdown: true,
+      streaming: true,
+    },
+  });
+  data.messages.push(assistantMessage);
+  markDirty();
+  broadcast({ type: "messageCreated", message: assistantMessage });
+
+  let body = "";
+
+  try {
+    for await (const delta of streamOllamaChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
+      body += delta;
+      updateMessage(assistantMessage, body, true);
+    }
+
+    updateMessage(assistantMessage, body.trim() || "(No response.)", false);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown Ollama error.";
+    updateMessage(assistantMessage, `${body}\n\nLLM error: ${message}`.trim(), false);
+    server.log.error(error);
+  }
+}
+
 async function loadData(): Promise<void> {
   await mkdir(dataDir, { recursive: true });
 
@@ -408,6 +751,8 @@ async function loadData(): Promise<void> {
   for (const id of seedUsers) {
     ensureUser(id, id === "user.1234");
   }
+
+  ensureOllamaBotUser();
 }
 
 async function saveAllData(): Promise<void> {
@@ -463,6 +808,7 @@ async function registerStaticFiles(): Promise<void> {
   staticFilesRegistered = true;
 }
 
+await loadAppConfig();
 await loadData();
 await server.register(fastifyWebsocket);
 await registerStaticFiles();
@@ -475,20 +821,49 @@ server.get("/api/config", async (request, reply) => {
     joinUrl: `http://${joinHost}:${clientPort}`,
     websocketPath: "/ws",
     currentUser,
-    networkConfig: {
-      enablePublicChannels: true,
-      enablePrivateChannels: false,
-      enableUserChannels: true,
-      enableReplies: true,
-      enableDMs: true,
-      enableReactions: true,
-      enableMarkdown: true,
-      enableLLMStreaming: false,
-    },
+    networkConfig: currentNetworkConfig(),
   };
 });
 
-server.get("/api/users", async () => data.users);
+server.get("/api/users", async () => visibleUsers());
+server.patch("/api/users/me", async (request, reply) => {
+  const body = UserUpdateRequestSchema.safeParse(request.body);
+
+  if (!body.success) {
+    return reply.code(400).send({ error: "Invalid user update request" });
+  }
+
+  if (
+    (body.data.displayName !== undefined && !appConfig.identity.allowUserDisplayNameEdit) ||
+    (body.data.avatar !== undefined && !appConfig.identity.allowUserAvatarEdit)
+  ) {
+    return reply.code(403).send({ error: "User profile editing is disabled on this LOAM node" });
+  }
+
+  const user = ensureUser(getSessionUserId(request, reply));
+  return applyUserUpdate(user, body.data);
+});
+server.patch<{ Params: { userId: string } }>("/api/users/:userId", async (request, reply) => {
+  const body = UserUpdateRequestSchema.safeParse(request.body);
+
+  if (!body.success) {
+    return reply.code(400).send({ error: "Invalid user update request" });
+  }
+
+  const currentUser = ensureUser(getSessionUserId(request, reply));
+
+  if (!currentUser.isAdmin || !appConfig.identity.allowAdminUserEdit) {
+    return reply.code(403).send({ error: "Admin user editing is disabled on this LOAM node" });
+  }
+
+  const user = data.users.find((candidate) => candidate.id === request.params.userId);
+
+  if (!user) {
+    return reply.code(404).send({ error: "User does not exist" });
+  }
+
+  return applyUserUpdate(user, body.data);
+});
 server.get("/api/channels", async () => data.channels.filter((channel) => !channel.archived));
 server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request) =>
   channelMessages(request.params.channelId),
@@ -525,6 +900,7 @@ server.post("/api/messages", async (request, reply) => {
   }
 
   broadcast({ type: "messageCreated", message: result.message });
+  void createOllamaResponse(result.message);
   return reply.code(201).send(result);
 });
 

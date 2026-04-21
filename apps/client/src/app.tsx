@@ -5,7 +5,9 @@ import {
   type Channel,
   type Message,
   type MessageCreateRequest,
+  type NetworkConfig,
   type User,
+  type UserUpdateRequest,
 } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import { LocationProvider, useLocation } from "preact-iso";
@@ -42,6 +44,7 @@ type Config = {
   joinUrl: string;
   websocketPath: string;
   currentUser: User;
+  networkConfig: NetworkConfig;
 };
 
 type MessageResponse = {
@@ -52,6 +55,10 @@ type MessageResponse = {
 type SocketEvent =
   | {
       type: "messageCreated";
+      message: Message;
+    }
+  | {
+      type: "messageUpdated";
       message: Message;
     }
   | {
@@ -76,6 +83,7 @@ const SERVER_URL_KEY = "loam.serverUrl";
 const DEFAULT_CHANNEL_ID = "general";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 const REQUEST_TIMEOUT_MS = 10_000;
+const AVATAR_MODES = ["face", "initial", "pattern"] as const;
 
 function makeClientUserId(): string {
   const bytes = new Uint8Array(16);
@@ -212,6 +220,11 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
     return message.success ? { type: "messageCreated", message: message.data } : undefined;
   }
 
+  if (candidate.type === "messageUpdated") {
+    const message = MessageSchema.safeParse(candidate.message);
+    return message.success ? { type: "messageUpdated", message: message.data } : undefined;
+  }
+
   if (candidate.type === "messageDeleted") {
     return typeof candidate.messageId === "string"
       ? { type: "messageDeleted", messageId: candidate.messageId }
@@ -338,7 +351,11 @@ function displayTime(timestamp: number): string {
 }
 
 function bodyFor(message: Message): string {
-  return "body" in message ? message.body : "";
+  if (!("body" in message)) {
+    return "";
+  }
+
+  return message.body || (message.meta?.streaming ? "Thinking..." : "");
 }
 
 function routeForConversation(conversation: Conversation): string {
@@ -467,6 +484,36 @@ function LoamApp() {
     [removeMessage, upsertMessages],
   );
 
+  const updateCurrentUser = useCallback(
+    async (request: UserUpdateRequest) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(apiUrl("/api/users/me"), {
+          method: "PATCH",
+          credentials: "include",
+          headers: {
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify(request),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Profile update failed: ${response.status}`);
+        }
+
+        const user = UserSchema.parse(await response.json());
+        setCurrentUser(user);
+        upsertUsers([user]);
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
   useEffect(() => {
     if (location.path === "/") {
       location.route("/channels", true);
@@ -504,11 +551,7 @@ function LoamApp() {
 
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
-        setCurrentUser((previous) =>
-          previous.id === nextConfig.currentUser.id && previous.createdAt === nextConfig.currentUser.createdAt
-            ? previous
-            : nextConfig.currentUser,
-        );
+        setCurrentUser(nextConfig.currentUser);
         setUsers((previous) =>
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
@@ -619,7 +662,7 @@ function LoamApp() {
           return;
         }
 
-        if (payload.type === "messageCreated") {
+        if (payload.type === "messageCreated" || payload.type === "messageUpdated") {
           upsertMessages([payload.message]);
           return;
         }
@@ -669,7 +712,7 @@ function LoamApp() {
         users={users}
       />
       {routeState.screen === "settings" ? (
-        <SettingsView config={config} currentUser={currentUser} />
+        <SettingsView config={config} currentUser={currentUser} onUpdateCurrentUser={updateCurrentUser} />
       ) : (
         <ConversationView
           conversation={activeConversation}
@@ -767,7 +810,7 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
               href={`/dm/${encodeURIComponent(user.id)}`}
               key={user.id}
             >
-              <Avatar id={user.id} />
+              <Avatar avatar={user.avatar} id={user.id} />
               {user.displayName}
             </NavLink>
           ))}
@@ -780,7 +823,7 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
           Join QR and settings
         </NavLink>
         <div className="current-user">
-          <Avatar id={currentUser.id} />
+          <Avatar avatar={currentUser.avatar} id={currentUser.id} />
           <div>
             <strong>{currentUser.displayName}</strong>
             <span>{currentUser.id}</span>
@@ -1006,10 +1049,13 @@ function MessageItem({
     ephemeral: true,
   };
   const isMine = message.authorId === currentUser.id;
+  const messageClassName = ["message", isMine ? "mine" : undefined, message.meta?.streaming ? "streaming" : undefined]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <article className={isMine ? "message mine" : "message"}>
-      <Avatar id={author.id} />
+    <article className={messageClassName}>
+      <Avatar avatar={author.avatar} id={author.id} />
       <div className="message-main">
         <div className="message-meta">
           <strong>{author.displayName}</strong>
@@ -1020,7 +1066,8 @@ function MessageItem({
           dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
         />
         <div className="message-actions">
-          {reactions.map((reaction) => (
+          {message.meta?.streaming ? <span className="streaming-pill">Streaming</span> : null}
+          {!message.meta?.streaming && reactions.map((reaction) => (
             <button
               className={reaction.active ? "reaction active" : "reaction"}
               key={reaction.reaction}
@@ -1030,7 +1077,7 @@ function MessageItem({
               {reaction.reaction} {reaction.count}
             </button>
           ))}
-          {QUICK_REACTIONS.filter(
+          {!message.meta?.streaming && QUICK_REACTIONS.filter(
             (reaction) => !reactions.some((summary) => summary.reaction === reaction),
           ).map((reaction) => (
             <button
@@ -1042,7 +1089,7 @@ function MessageItem({
               {reaction}
             </button>
           ))}
-          {onOpenThread ? (
+          {onOpenThread && !message.meta?.streaming ? (
             <button className="thread-button" onClick={() => onOpenThread(message.id)} type="button">
               {replyCount ? `${replyCount} repl${replyCount === 1 ? "y" : "ies"}` : "Reply"}
             </button>
@@ -1185,7 +1232,22 @@ function ThreadPanel({
   );
 }
 
-function SettingsView({ config, currentUser }: { config?: Config; currentUser: User }) {
+function SettingsView({
+  config,
+  currentUser,
+  onUpdateCurrentUser,
+}: {
+  config?: Config;
+  currentUser: User;
+  onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
+}) {
+  const [displayName, setDisplayName] = useState(currentUser.displayName);
+  const [avatarSeed, setAvatarSeed] = useState(currentUser.avatar?.seed ?? currentUser.id);
+  const [avatarMode, setAvatarMode] = useState(currentUser.avatar?.mode ?? "face");
+  const [saving, setSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string>();
+  const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
+  const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
   const qrSvg = useMemo(() => {
     if (!config?.joinUrl) {
       return "";
@@ -1196,6 +1258,56 @@ function SettingsView({ config, currentUser }: { config?: Config; currentUser: U
       light: "#ffffff",
     });
   }, [config?.joinUrl]);
+  const previewUser: User = {
+    ...currentUser,
+    displayName,
+    avatar: {
+      seed: avatarSeed,
+      mode: avatarMode,
+    },
+  };
+
+  useEffect(() => {
+    setDisplayName(currentUser.displayName);
+    setAvatarSeed(currentUser.avatar?.seed ?? currentUser.id);
+    setAvatarMode(currentUser.avatar?.mode ?? "face");
+  }, [currentUser.avatar?.mode, currentUser.avatar?.seed, currentUser.displayName, currentUser.id]);
+
+  async function saveProfile(): Promise<void> {
+    const update: UserUpdateRequest = {};
+
+    if (allowDisplayNameEdit) {
+      update.displayName = displayName.trim();
+    }
+
+    if (allowAvatarEdit) {
+      update.avatar = {
+        seed: avatarSeed.trim() || currentUser.id,
+        mode: avatarMode,
+      };
+    }
+
+    if (!update.displayName && !update.avatar) {
+      return;
+    }
+
+    setSaving(true);
+    setProfileError(undefined);
+
+    try {
+      await onUpdateCurrentUser(update);
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Unable to update profile.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function randomizeAvatar(): void {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    setAvatarSeed(`avatar.${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`);
+  }
 
   return (
     <section className="settings-view">
@@ -1214,13 +1326,60 @@ function SettingsView({ config, currentUser }: { config?: Config; currentUser: U
           <p>{config?.joinUrl ?? window.location.origin}</p>
         </div>
         <div className="identity-panel">
-          <Avatar id={currentUser.id} />
+          <Avatar avatar={previewUser.avatar} id={currentUser.id} />
           <div>
             <p className="eyebrow">This browser</p>
-            <h2>{currentUser.displayName}</h2>
+            <h2>{displayName}</h2>
             <p>{currentUser.id}</p>
           </div>
         </div>
+        <form
+          className="profile-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveProfile();
+          }}
+        >
+          <div>
+            <p className="eyebrow">Profile</p>
+            <h2>Local identity</h2>
+          </div>
+          <label>
+            Display name
+            <input
+              disabled={!allowDisplayNameEdit || saving}
+              maxLength={80}
+              onInput={(event) => setDisplayName(event.currentTarget.value)}
+              value={displayName}
+            />
+          </label>
+          <label>
+            Avatar style
+            <select
+              disabled={!allowAvatarEdit || saving}
+              onInput={(event) => setAvatarMode(event.currentTarget.value as (typeof AVATAR_MODES)[number])}
+              value={avatarMode}
+            >
+              {AVATAR_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {mode}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="profile-actions">
+            <button disabled={!allowAvatarEdit || saving} onClick={randomizeAvatar} type="button">
+              New avatar
+            </button>
+            <button disabled={saving || (!allowDisplayNameEdit && !allowAvatarEdit)} type="submit">
+              {saving ? "Saving" : "Save profile"}
+            </button>
+          </div>
+          {!allowDisplayNameEdit && !allowAvatarEdit ? (
+            <p className="form-note">Profile editing is disabled on this LOAM node.</p>
+          ) : null}
+          {profileError ? <p className="form-error">{profileError}</p> : null}
+        </form>
       </div>
     </section>
   );

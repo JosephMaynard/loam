@@ -47,3 +47,34 @@ Run the workspace test suite:
 ```bash
 pnpm test
 ```
+
+## Optional local configuration
+
+LOAM runs without a config file. Optional identity and LLM features can be enabled by creating
+`.loam/config.json`, or by setting `LOAM_CONFIG_FILE` to another JSON file path.
+
+See `config.example.json` for a complete example. With Ollama running locally, the important
+settings are:
+
+```json
+{
+  "identity": {
+    "allowUserDisplayNameEdit": true,
+    "allowUserAvatarEdit": true,
+    "allowAdminUserEdit": true
+  },
+  "llm": {
+    "ollama": {
+      "enabled": true,
+      "baseUrl": "http://localhost:11434",
+      "model": "gemma4",
+      "botId": "llm.ollama.gemma4",
+      "botDisplayName": "Gemma"
+    }
+  }
+}
+```
+
+When enabled, the Ollama bot appears as a direct-message contact. Sending it a DM creates a
+streaming assistant response in the same LOAM conversation. If the config is absent or
+`llm.ollama.enabled` is `false`, no LLM user or LLM routes are active.

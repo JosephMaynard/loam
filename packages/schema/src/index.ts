@@ -6,9 +6,14 @@ export type Id = z.infer<typeof IdSchema>;
 export const TimestampSchema = z.number().int().nonnegative();
 export type Timestamp = z.infer<typeof TimestampSchema>;
 
+export const AvatarModeSchema = z.enum(["face", "initial", "pattern"]);
+export type AvatarMode = z.infer<typeof AvatarModeSchema>;
+
 export const UserAvatarSchema = z.object({
-  palette: z.string().min(1),
-  face: z.string().min(1),
+  seed: z.string().min(1).max(128).optional(),
+  mode: AvatarModeSchema.optional(),
+  palette: z.string().min(1).optional(),
+  face: z.string().min(1).optional(),
   accessory: z.string().min(1).optional(),
 });
 export type UserAvatar = z.infer<typeof UserAvatarSchema>;
@@ -55,9 +60,18 @@ export const NetworkConfigSchema = z.object({
   enableDMs: z.boolean(),
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
+  enableLLMChat: z.boolean(),
   enableLLMStreaming: z.boolean(),
+  allowUserDisplayNameEdit: z.boolean(),
+  allowUserAvatarEdit: z.boolean(),
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
+
+export const UserUpdateRequestSchema = z.object({
+  displayName: z.string().trim().min(1).max(80).optional(),
+  avatar: UserAvatarSchema.optional(),
+});
+export type UserUpdateRequest = z.infer<typeof UserUpdateRequestSchema>;
 
 export const MessageTypeSchema = z.enum([
   "channelPost",
@@ -88,7 +102,8 @@ export const BaseMessageSchema = z.object({
 });
 export type BaseMessage = z.infer<typeof BaseMessageSchema>;
 
-const MessageBodySchema = z.string().refine((body) => body.trim().length > 0, {
+const MessageBodySchema = z.string();
+const MessageCreateBodySchema = MessageBodySchema.refine((body) => body.trim().length > 0, {
   message: "Message body cannot be empty",
 });
 
@@ -96,18 +111,18 @@ export const MessageCreateRequestSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("channelPost"),
     channelId: IdSchema,
-    body: MessageBodySchema,
+    body: MessageCreateBodySchema,
   }),
   z.object({
     type: z.literal("channelReply"),
     channelId: IdSchema,
     parentMessageId: IdSchema,
-    body: MessageBodySchema,
+    body: MessageCreateBodySchema,
   }),
   z.object({
     type: z.literal("dm"),
     recipientUserId: IdSchema,
-    body: MessageBodySchema,
+    body: MessageCreateBodySchema,
   }),
   z.object({
     type: z.literal("reaction"),

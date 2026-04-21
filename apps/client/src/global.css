@@ -28,6 +28,8 @@ body {
 }
 
 button,
+input,
+select,
 textarea {
   font: inherit;
 }
@@ -285,6 +287,10 @@ a {
   background: rgba(204, 233, 165, 0.22);
 }
 
+.message.streaming .markdown-body {
+  color: #425a4f;
+}
+
 .avatar {
   display: inline-grid;
   aspect-ratio: 1;
@@ -385,13 +391,21 @@ a {
 
 .reaction,
 .quick-reaction,
-.thread-button {
+.thread-button,
+.streaming-pill {
   min-height: 28px;
   border-radius: 8px;
   background: #e3eee4;
   color: #203f34;
   padding: 3px 8px;
   font-size: 0.84rem;
+}
+
+.streaming-pill {
+  display: inline-flex;
+  align-items: center;
+  background: #dce8dd;
+  color: #5e7468;
 }
 
 .reaction.active,
@@ -524,7 +538,8 @@ a {
 }
 
 .join-panel,
-.identity-panel {
+.identity-panel,
+.profile-panel {
   border: 1px solid #c9d8cd;
   border-radius: 8px;
   background: #ffffff;
@@ -560,6 +575,69 @@ a {
 .identity-panel .avatar {
   width: 72px;
   height: 72px;
+}
+
+.profile-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 14px;
+}
+
+.profile-panel label {
+  display: grid;
+  gap: 6px;
+  color: #425a4f;
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.profile-panel input,
+.profile-panel select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #b7cabd;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17231d;
+  padding: 9px 10px;
+  font-weight: 500;
+}
+
+.profile-panel input:focus,
+.profile-panel select:focus {
+  border-color: #2f5f4c;
+  outline: 3px solid rgba(47, 95, 76, 0.18);
+}
+
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.profile-actions button {
+  min-height: 40px;
+  border-radius: 8px;
+  background: #d14900;
+  color: #ffffff;
+  padding: 8px 12px;
+  font-weight: 800;
+}
+
+.profile-actions button[type="button"] {
+  background: #dce8dd;
+  color: #203f34;
+}
+
+.form-note,
+.form-error {
+  margin: 0;
+  color: #5e7468;
+  line-height: 1.5;
+}
+
+.form-error {
+  color: #8b2b17;
 }
 
 .sr-only {
