@@ -9,9 +9,16 @@ export type Timestamp = z.infer<typeof TimestampSchema>;
 export const AvatarModeSchema = z.enum(["face", "initial", "pattern"]);
 export type AvatarMode = z.infer<typeof AvatarModeSchema>;
 
+export const AvatarImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/webp"]);
+export type AvatarImageMimeType = z.infer<typeof AvatarImageMimeTypeSchema>;
+
 export const UserAvatarSchema = z.object({
+  kind: z.enum(["generated", "image"]).optional(),
   seed: z.string().min(1).max(128).optional(),
   mode: AvatarModeSchema.optional(),
+  imageId: IdSchema.optional(),
+  mimeType: AvatarImageMimeTypeSchema.optional(),
+  uploadedAt: TimestampSchema.optional(),
   palette: z.string().min(1).optional(),
   face: z.string().min(1).optional(),
   accessory: z.string().min(1).optional(),
@@ -64,6 +71,7 @@ export const NetworkConfigSchema = z.object({
   enableLLMStreaming: z.boolean(),
   allowUserDisplayNameEdit: z.boolean(),
   allowUserAvatarEdit: z.boolean(),
+  allowUserAvatarUpload: z.boolean(),
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
 
@@ -72,6 +80,12 @@ export const UserUpdateRequestSchema = z.object({
   avatar: UserAvatarSchema.optional(),
 });
 export type UserUpdateRequest = z.infer<typeof UserUpdateRequestSchema>;
+
+export const AvatarImageUploadRequestSchema = z.object({
+  mimeType: AvatarImageMimeTypeSchema,
+  data: z.string().min(1).max(256_000),
+});
+export type AvatarImageUploadRequest = z.infer<typeof AvatarImageUploadRequestSchema>;
 
 export const MessageTypeSchema = z.enum([
   "channelPost",

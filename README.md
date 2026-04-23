@@ -61,6 +61,7 @@ settings are:
   "identity": {
     "allowUserDisplayNameEdit": true,
     "allowUserAvatarEdit": true,
+    "allowUserAvatarUpload": true,
     "allowAdminUserEdit": true
   },
   "llm": {
@@ -78,3 +79,7 @@ settings are:
 When enabled, the Ollama bot appears as a direct-message contact. Sending it a DM creates a
 streaming assistant response in the same LOAM conversation. If the config is absent or
 `llm.ollama.enabled` is `false`, no LLM user or LLM routes are active.
+
+When `allowUserAvatarUpload` is enabled, users can choose an image in the settings screen,
+crop it locally in the browser, and upload only the final 256 x 256 PNG/WebP avatar. Original
+image files are never sent to the server.

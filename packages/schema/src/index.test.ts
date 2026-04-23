@@ -51,6 +51,7 @@ describe("@loam/schema", () => {
         enableLLMStreaming: false,
         allowUserDisplayNameEdit: false,
         allowUserAvatarEdit: false,
+        allowUserAvatarUpload: false,
       }),
     ).not.toThrow();
   });

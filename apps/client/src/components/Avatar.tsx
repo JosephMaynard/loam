@@ -12,7 +12,17 @@ export interface AvatarProps {
   label?: string;
 }
 
+function avatarImagePath(avatar: UserAvatar): string | undefined {
+  if (avatar.kind !== "image" || !avatar.imageId || !avatar.mimeType) {
+    return undefined;
+  }
+
+  const extension = avatar.mimeType === "image/png" ? "png" : avatar.mimeType === "image/jpeg" ? "jpg" : "webp";
+  return `/api/avatars/${encodeURIComponent(`${avatar.imageId}.${extension}`)}`;
+}
+
 export function Avatar({ id, avatar: userAvatar, className, mode = "face", label }: AvatarProps) {
+  const imagePath = userAvatar ? avatarImagePath(userAvatar) : undefined;
   const avatarSeed = userAvatar?.seed ?? id;
   const avatarMode = userAvatar?.mode ?? mode;
   const avatar = useMemo(
@@ -23,7 +33,11 @@ export function Avatar({ id, avatar: userAvatar, className, mode = "face", label
     .filter(Boolean)
     .join(" ");
 
-  return (
+  return imagePath ? (
+    <span aria-hidden="true" className={wrapperClassName}>
+      <img alt="" src={imagePath} />
+    </span>
+  ) : (
     <span
       aria-hidden="true"
       className={wrapperClassName}

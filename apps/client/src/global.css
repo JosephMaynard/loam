@@ -306,6 +306,13 @@ a {
   height: 100%;
 }
 
+.avatar > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .message > .avatar {
   width: 38px;
   height: 38px;
@@ -603,6 +610,13 @@ a {
   font-weight: 500;
 }
 
+.profile-panel input[type="range"] {
+  min-height: 28px;
+  border: 0;
+  padding: 0;
+  accent-color: #2f5f4c;
+}
+
 .profile-panel input:focus,
 .profile-panel select:focus {
   border-color: #2f5f4c;
@@ -638,6 +652,67 @@ a {
 
 .form-error {
   color: #8b2b17;
+}
+
+.avatar-upload-panel,
+.avatar-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.avatar-upload-panel {
+  border-top: 1px solid #dce8dd;
+  padding-top: 16px;
+}
+
+.avatar-editor {
+  max-width: 380px;
+}
+
+.avatar-crop-canvas {
+  width: 256px;
+  max-width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid #b7cabd;
+  border-radius: 8px;
+  background:
+    linear-gradient(45deg, #edf5ed 25%, transparent 25%),
+    linear-gradient(-45deg, #edf5ed 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #edf5ed 75%),
+    linear-gradient(-45deg, transparent 75%, #edf5ed 75%),
+    #ffffff;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.avatar-crop-canvas:active {
+  cursor: grabbing;
+}
+
+.avatar-editor-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.avatar-editor-controls button {
+  min-height: 40px;
+  border-radius: 8px;
+  background: #dce8dd;
+  color: #203f34;
+  padding: 8px 12px;
+  font-weight: 800;
+}
+
+.avatar-editor-controls button:last-child {
+  background: #d14900;
+  color: #ffffff;
 }
 
 .sr-only {

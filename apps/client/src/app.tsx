@@ -84,6 +84,8 @@ const DEFAULT_CHANNEL_ID = "general";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 const REQUEST_TIMEOUT_MS = 10_000;
 const AVATAR_MODES = ["face", "initial", "pattern"] as const;
+const AVATAR_OUTPUT_SIZE = 256;
+const AVATAR_MAX_UPLOAD_BYTES = 128 * 1024;
 
 function makeClientUserId(): string {
   const bytes = new Uint8Array(16);
@@ -514,6 +516,46 @@ function LoamApp() {
     [upsertUsers],
   );
 
+  const uploadAvatarImage = useCallback(
+    async (blob: Blob) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+
+      try {
+        const response = await fetch(apiUrl("/api/users/me/avatar-image"), {
+          method: "PUT",
+          credentials: "include",
+          headers: {
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            mimeType: blob.type || "image/png",
+            data: btoa(binary),
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Avatar upload failed: ${response.status}`);
+        }
+
+        const user = UserSchema.parse(await response.json());
+        setCurrentUser(user);
+        upsertUsers([user]);
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
   useEffect(() => {
     if (location.path === "/") {
       location.route("/channels", true);
@@ -712,7 +754,12 @@ function LoamApp() {
         users={users}
       />
       {routeState.screen === "settings" ? (
-        <SettingsView config={config} currentUser={currentUser} onUpdateCurrentUser={updateCurrentUser} />
+        <SettingsView
+          config={config}
+          currentUser={currentUser}
+          onUpdateCurrentUser={updateCurrentUser}
+          onUploadAvatarImage={uploadAvatarImage}
+        />
       ) : (
         <ConversationView
           conversation={activeConversation}
@@ -1232,22 +1279,340 @@ function ThreadPanel({
   );
 }
 
+type AvatarCrop = {
+  offsetX: number;
+  offsetY: number;
+  rotation: number;
+  zoom: number;
+};
+
+type CanvasPointer = {
+  x: number;
+  y: number;
+};
+
+interface AvatarImageEditorProps {
+  disabled: boolean;
+  onUpload: (blob: Blob) => Promise<void>;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function canvasPoint(canvas: HTMLCanvasElement, event: PointerEvent): CanvasPointer {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((event.clientX - rect.left) / rect.width) * AVATAR_OUTPUT_SIZE,
+    y: ((event.clientY - rect.top) / rect.height) * AVATAR_OUTPUT_SIZE,
+  };
+}
+
+function pointerDistance(left: CanvasPointer, right: CanvasPointer): number {
+  return Math.hypot(left.x - right.x, left.y - right.y);
+}
+
+function pointerAngle(left: CanvasPointer, right: CanvasPointer): number {
+  return Math.atan2(right.y - left.y, right.x - left.x);
+}
+
+function drawAvatarCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, crop: AvatarCrop): void {
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    return;
+  }
+
+  const baseScale = AVATAR_OUTPUT_SIZE / Math.min(image.naturalWidth, image.naturalHeight);
+  context.clearRect(0, 0, AVATAR_OUTPUT_SIZE, AVATAR_OUTPUT_SIZE);
+  context.fillStyle = "#f8fbf6";
+  context.fillRect(0, 0, AVATAR_OUTPUT_SIZE, AVATAR_OUTPUT_SIZE);
+  context.save();
+  context.translate(AVATAR_OUTPUT_SIZE / 2 + crop.offsetX, AVATAR_OUTPUT_SIZE / 2 + crop.offsetY);
+  context.rotate((crop.rotation * Math.PI) / 180);
+  context.scale(baseScale * crop.zoom, baseScale * crop.zoom);
+  context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
+  context.restore();
+}
+
+function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
+  const formats: { type: "image/webp" | "image/png"; quality?: number }[] = [
+    { type: "image/webp", quality: 0.82 },
+    { type: "image/webp", quality: 0.72 },
+    { type: "image/png" },
+  ];
+
+  return new Promise((resolve, reject) => {
+    function tryFormat(index: number): void {
+      const format = formats[index];
+
+      if (!format) {
+        reject(new Error("Avatar image is too large after resizing."));
+        return;
+      }
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            tryFormat(index + 1);
+            return;
+          }
+
+          if (blob.size <= AVATAR_MAX_UPLOAD_BYTES) {
+            resolve(blob);
+            return;
+          }
+
+          tryFormat(index + 1);
+        },
+        format.type,
+        format.quality,
+      );
+    }
+
+    tryFormat(0);
+  });
+}
+
+function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLImageElement>();
+  const pointersRef = useRef(new Map<number, CanvasPointer>());
+  const dragRef = useRef<{ point: CanvasPointer; offsetX: number; offsetY: number }>();
+  const gestureRef = useRef<{
+    angle: number;
+    distance: number;
+    rotation: number;
+    zoom: number;
+  }>();
+  const [crop, setCrop] = useState<AvatarCrop>({ offsetX: 0, offsetY: 0, rotation: 0, zoom: 1 });
+  const [hasImage, setHasImage] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const image = imageRef.current;
+
+    if (!canvas || !image) {
+      return;
+    }
+
+    drawAvatarCanvas(canvas, image, crop);
+  }, [crop, hasImage]);
+
+  function startDrag(event: PointerEvent): void {
+    const canvas = canvasRef.current;
+
+    if (!canvas || disabled || !hasImage) {
+      return;
+    }
+
+    canvas.setPointerCapture(event.pointerId);
+    pointersRef.current.set(event.pointerId, canvasPoint(canvas, event));
+
+    if (pointersRef.current.size === 1) {
+      dragRef.current = {
+        point: canvasPoint(canvas, event),
+        offsetX: crop.offsetX,
+        offsetY: crop.offsetY,
+      };
+      gestureRef.current = undefined;
+      return;
+    }
+
+    const points = Array.from(pointersRef.current.values());
+    const [first, second] = points;
+
+    if (first && second) {
+      gestureRef.current = {
+        angle: pointerAngle(first, second),
+        distance: pointerDistance(first, second),
+        rotation: crop.rotation,
+        zoom: crop.zoom,
+      };
+      dragRef.current = undefined;
+    }
+  }
+
+  function moveDrag(event: PointerEvent): void {
+    const canvas = canvasRef.current;
+
+    if (!canvas || disabled || !hasImage || !pointersRef.current.has(event.pointerId)) {
+      return;
+    }
+
+    const point = canvasPoint(canvas, event);
+    pointersRef.current.set(event.pointerId, point);
+
+    if (pointersRef.current.size >= 2 && gestureRef.current) {
+      const points = Array.from(pointersRef.current.values());
+      const [first, second] = points;
+
+      if (!first || !second) {
+        return;
+      }
+
+      const distance = pointerDistance(first, second);
+      const angle = pointerAngle(first, second);
+      const nextZoom = clamp(gestureRef.current.zoom * (distance / gestureRef.current.distance), 1, 3);
+      const nextRotation = gestureRef.current.rotation + ((angle - gestureRef.current.angle) * 180) / Math.PI;
+      setCrop((previous) => ({ ...previous, rotation: nextRotation, zoom: nextZoom }));
+      return;
+    }
+
+    const drag = dragRef.current;
+
+    if (!drag) {
+      return;
+    }
+
+    setCrop((previous) => ({
+      ...previous,
+      offsetX: clamp(drag.offsetX + point.x - drag.point.x, -128, 128),
+      offsetY: clamp(drag.offsetY + point.y - drag.point.y, -128, 128),
+    }));
+  }
+
+  function endDrag(event: PointerEvent): void {
+    pointersRef.current.delete(event.pointerId);
+    dragRef.current = undefined;
+    gestureRef.current = undefined;
+  }
+
+  async function selectImage(file: File): Promise<void> {
+    if (!file.type.startsWith("image/") || file.type === "image/svg+xml") {
+      setError("Choose a PNG, JPEG, or WebP image.");
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error("Unable to load image."));
+        image.src = url;
+      });
+
+      imageRef.current = image;
+      setCrop({ offsetX: 0, offsetY: 0, rotation: 0, zoom: 1 });
+      setHasImage(true);
+      setError(undefined);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to load image.");
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function upload(): Promise<void> {
+    const canvas = canvasRef.current;
+
+    if (!canvas || !hasImage) {
+      return;
+    }
+
+    setUploading(true);
+    setError(undefined);
+
+    try {
+      const blob = await blobFromCanvas(canvas);
+      await onUpload(blob);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to upload avatar.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div className="avatar-editor">
+      <canvas
+        aria-label="Avatar crop preview"
+        className="avatar-crop-canvas"
+        height={AVATAR_OUTPUT_SIZE}
+        onPointerDown={startDrag}
+        onPointerCancel={endDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        ref={canvasRef}
+        role="img"
+        width={AVATAR_OUTPUT_SIZE}
+      />
+      <input
+        accept="image/png,image/jpeg,image/webp,image/*"
+        className="sr-only"
+        disabled={disabled || uploading}
+        onInput={(event) => {
+          const file = event.currentTarget.files?.[0];
+
+          if (file) {
+            void selectImage(file);
+          }
+        }}
+        ref={fileInputRef}
+        type="file"
+      />
+      <div className="avatar-editor-controls">
+        <button disabled={disabled || uploading} onClick={() => fileInputRef.current?.click()} type="button">
+          Choose image
+        </button>
+        <button disabled={disabled || uploading || !hasImage} onClick={() => void upload()} type="button">
+          {uploading ? "Uploading" : "Use cropped image"}
+        </button>
+      </div>
+      <label>
+        Zoom
+        <input
+          disabled={disabled || uploading || !hasImage}
+          max="3"
+          min="1"
+          onInput={(event) => setCrop((previous) => ({ ...previous, zoom: Number(event.currentTarget.value) }))}
+          step="0.01"
+          type="range"
+          value={crop.zoom}
+        />
+      </label>
+      <label>
+        Rotate
+        <input
+          disabled={disabled || uploading || !hasImage}
+          max="180"
+          min="-180"
+          onInput={(event) => setCrop((previous) => ({ ...previous, rotation: Number(event.currentTarget.value) }))}
+          step="1"
+          type="range"
+          value={crop.rotation}
+        />
+      </label>
+      {error ? <p className="form-error">{error}</p> : null}
+    </div>
+  );
+}
+
 function SettingsView({
   config,
   currentUser,
   onUpdateCurrentUser,
+  onUploadAvatarImage,
 }: {
   config?: Config;
   currentUser: User;
   onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
+  onUploadAvatarImage: (blob: Blob) => Promise<void>;
 }) {
   const [displayName, setDisplayName] = useState(currentUser.displayName);
+  const [avatarKind, setAvatarKind] = useState(currentUser.avatar?.kind === "image" ? "image" : "generated");
   const [avatarSeed, setAvatarSeed] = useState(currentUser.avatar?.seed ?? currentUser.id);
   const [avatarMode, setAvatarMode] = useState(currentUser.avatar?.mode ?? "face");
   const [saving, setSaving] = useState(false);
   const [profileError, setProfileError] = useState<string>();
   const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
   const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
+  const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
   const qrSvg = useMemo(() => {
     if (!config?.joinUrl) {
       return "";
@@ -1261,17 +1626,29 @@ function SettingsView({
   const previewUser: User = {
     ...currentUser,
     displayName,
-    avatar: {
-      seed: avatarSeed,
-      mode: avatarMode,
-    },
+    avatar:
+      avatarKind === "image"
+        ? currentUser.avatar
+        : {
+            kind: "generated",
+            seed: avatarSeed,
+            mode: avatarMode,
+          },
   };
 
   useEffect(() => {
     setDisplayName(currentUser.displayName);
+    setAvatarKind(currentUser.avatar?.kind === "image" ? "image" : "generated");
     setAvatarSeed(currentUser.avatar?.seed ?? currentUser.id);
     setAvatarMode(currentUser.avatar?.mode ?? "face");
-  }, [currentUser.avatar?.mode, currentUser.avatar?.seed, currentUser.displayName, currentUser.id]);
+  }, [
+    currentUser.avatar?.imageId,
+    currentUser.avatar?.kind,
+    currentUser.avatar?.mode,
+    currentUser.avatar?.seed,
+    currentUser.displayName,
+    currentUser.id,
+  ]);
 
   async function saveProfile(): Promise<void> {
     const update: UserUpdateRequest = {};
@@ -1280,8 +1657,9 @@ function SettingsView({
       update.displayName = displayName.trim();
     }
 
-    if (allowAvatarEdit) {
+    if (allowAvatarEdit && avatarKind !== "image") {
       update.avatar = {
+        kind: "generated",
         seed: avatarSeed.trim() || currentUser.id,
         mode: avatarMode,
       };
@@ -1306,6 +1684,7 @@ function SettingsView({
   function randomizeAvatar(): void {
     const bytes = new Uint8Array(8);
     crypto.getRandomValues(bytes);
+    setAvatarKind("generated");
     setAvatarSeed(`avatar.${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`);
   }
 
@@ -1356,8 +1735,11 @@ function SettingsView({
           <label>
             Avatar style
             <select
-              disabled={!allowAvatarEdit || saving}
-              onInput={(event) => setAvatarMode(event.currentTarget.value as (typeof AVATAR_MODES)[number])}
+              disabled={!allowAvatarEdit || saving || avatarKind === "image"}
+              onInput={(event) => {
+                setAvatarKind("generated");
+                setAvatarMode(event.currentTarget.value as (typeof AVATAR_MODES)[number]);
+              }}
               value={avatarMode}
             >
               {AVATAR_MODES.map((mode) => (
@@ -1374,6 +1756,19 @@ function SettingsView({
             <button disabled={saving || (!allowDisplayNameEdit && !allowAvatarEdit)} type="submit">
               {saving ? "Saving" : "Save profile"}
             </button>
+          </div>
+          <div className="avatar-upload-panel">
+            <div>
+              <p className="eyebrow">Image avatar</p>
+              <h2>Crop upload</h2>
+            </div>
+            <AvatarImageEditor
+              disabled={!allowAvatarEdit || !allowAvatarUpload || saving}
+              onUpload={onUploadAvatarImage}
+            />
+            {!allowAvatarUpload ? (
+              <p className="form-note">Image avatar uploads are disabled on this LOAM node.</p>
+            ) : null}
           </div>
           {!allowDisplayNameEdit && !allowAvatarEdit ? (
             <p className="form-note">Profile editing is disabled on this LOAM node.</p>

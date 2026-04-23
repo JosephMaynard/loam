@@ -8,11 +8,13 @@ import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
 import {
+  AvatarImageUploadRequestSchema,
   ChannelSchema,
   MessageCreateRequestSchema,
   MessageSchema,
   UserSchema,
   UserUpdateRequestSchema,
+  type AvatarImageMimeType,
   type Channel,
   type Message,
   type MessageCreateRequest,
@@ -67,6 +69,7 @@ type ClientEvent =
 type IdentityConfig = {
   allowUserDisplayNameEdit: boolean;
   allowUserAvatarEdit: boolean;
+  allowUserAvatarUpload: boolean;
   allowAdminUserEdit: boolean;
 };
 
@@ -88,6 +91,7 @@ type LoamConfig = {
 
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
 const dataDir = process.env.LOAM_DATA_DIR ?? join(rootDir, ".loam");
+const avatarsDir = join(dataDir, "avatars");
 const configPath = process.env.LOAM_CONFIG_FILE ?? join(dataDir, "config.json");
 const clientDistDir = join(rootDir, "apps/client/dist");
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
@@ -146,6 +150,7 @@ function defaultLoamConfig(): LoamConfig {
     identity: {
       allowUserDisplayNameEdit: false,
       allowUserAvatarEdit: false,
+      allowUserAvatarUpload: false,
       allowAdminUserEdit: true,
     },
     llm: {
@@ -195,6 +200,7 @@ async function loadAppConfig(): Promise<void> {
           defaults.identity.allowUserDisplayNameEdit,
         ),
         allowUserAvatarEdit: readBoolean(identity.allowUserAvatarEdit, defaults.identity.allowUserAvatarEdit),
+        allowUserAvatarUpload: readBoolean(identity.allowUserAvatarUpload, defaults.identity.allowUserAvatarUpload),
         allowAdminUserEdit: readBoolean(identity.allowAdminUserEdit, defaults.identity.allowAdminUserEdit),
       },
       llm: {
@@ -406,6 +412,7 @@ function currentNetworkConfig(): NetworkConfig {
     enableLLMStreaming: appConfig.llm.ollama.enabled,
     allowUserDisplayNameEdit: appConfig.identity.allowUserDisplayNameEdit,
     allowUserAvatarEdit: appConfig.identity.allowUserAvatarEdit,
+    allowUserAvatarUpload: appConfig.identity.allowUserAvatarUpload,
   };
 }
 
@@ -423,6 +430,55 @@ function applyUserUpdate(user: User, update: UserUpdateRequest): User {
 
 function visibleUsers(): User[] {
   return appConfig.llm.ollama.enabled ? data.users : data.users.filter((user) => user.type !== "bot");
+}
+
+function newAvatarImageId(): string {
+  return `avt_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+}
+
+function avatarImageExtension(mimeType: AvatarImageMimeType): string {
+  if (mimeType === "image/png") {
+    return "png";
+  }
+
+  if (mimeType === "image/jpeg") {
+    return "jpg";
+  }
+
+  return "webp";
+}
+
+function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
+  return join(avatarsDir, `${imageId}.${avatarImageExtension(mimeType)}`);
+}
+
+function parseAvatarImageId(value: string): { imageId: string; mimeType: AvatarImageMimeType } | undefined {
+  const match = value.match(/^(avt_[a-f0-9]{16})\.(png|jpg|webp)$/);
+
+  if (!match) {
+    return undefined;
+  }
+
+  const extension = match[2];
+  const mimeType =
+    extension === "png" ? "image/png" : extension === "jpg" ? "image/jpeg" : "image/webp";
+
+  return {
+    imageId: match[1] ?? "",
+    mimeType,
+  };
+}
+
+function avatarImageHasExpectedSignature(buffer: Buffer, mimeType: AvatarImageMimeType): boolean {
+  if (mimeType === "image/png") {
+    return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+
+  if (mimeType === "image/jpeg") {
+    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
+  }
+
+  return buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
 }
 
 function ensureChannel(id: string): Channel | undefined {
@@ -843,6 +899,41 @@ server.patch("/api/users/me", async (request, reply) => {
   const user = ensureUser(getSessionUserId(request, reply));
   return applyUserUpdate(user, body.data);
 });
+server.put("/api/users/me/avatar-image", async (request, reply) => {
+  if (!appConfig.identity.allowUserAvatarEdit || !appConfig.identity.allowUserAvatarUpload) {
+    return reply.code(403).send({ error: "User avatar uploads are disabled on this LOAM node" });
+  }
+
+  const body = AvatarImageUploadRequestSchema.safeParse(request.body);
+
+  if (!body.success) {
+    return reply.code(400).send({ error: "Invalid avatar image upload request" });
+  }
+
+  const image = Buffer.from(body.data.data, "base64");
+
+  if (image.length === 0 || image.length > 128 * 1024) {
+    return reply.code(400).send({ error: "Avatar image must be 128KB or smaller" });
+  }
+
+  if (!avatarImageHasExpectedSignature(image, body.data.mimeType)) {
+    return reply.code(400).send({ error: "Avatar image type does not match the uploaded data" });
+  }
+
+  const user = ensureUser(getSessionUserId(request, reply));
+  const imageId = newAvatarImageId();
+  await mkdir(avatarsDir, { recursive: true });
+  await writeFile(avatarImagePath(imageId, body.data.mimeType), image);
+
+  return applyUserUpdate(user, {
+    avatar: {
+      kind: "image",
+      imageId,
+      mimeType: body.data.mimeType,
+      uploadedAt: Date.now(),
+    },
+  });
+});
 server.patch<{ Params: { userId: string } }>("/api/users/:userId", async (request, reply) => {
   const body = UserUpdateRequestSchema.safeParse(request.body);
 
@@ -863,6 +954,24 @@ server.patch<{ Params: { userId: string } }>("/api/users/:userId", async (reques
   }
 
   return applyUserUpdate(user, body.data);
+});
+server.get<{ Params: { fileName: string } }>("/api/avatars/:fileName", async (request, reply) => {
+  const avatar = parseAvatarImageId(request.params.fileName);
+
+  if (!avatar) {
+    return reply.code(404).send({ error: "Avatar image does not exist" });
+  }
+
+  try {
+    const image = await readFile(avatarImagePath(avatar.imageId, avatar.mimeType));
+    return reply.type(avatar.mimeType).header("cache-control", "private, max-age=3600").send(image);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return reply.code(404).send({ error: "Avatar image does not exist" });
+    }
+
+    throw error;
+  }
 });
 server.get("/api/channels", async () => data.channels.filter((channel) => !channel.archived));
 server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request) =>

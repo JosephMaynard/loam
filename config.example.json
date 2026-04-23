@@ -2,6 +2,7 @@
   "identity": {
     "allowUserDisplayNameEdit": true,
     "allowUserAvatarEdit": true,
+    "allowUserAvatarUpload": true,
     "allowAdminUserEdit": true
   },
   "llm": {
