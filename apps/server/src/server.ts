@@ -447,20 +447,24 @@ function ensureOllamaBotUser(): User | undefined {
   const existing = data.users.find((user) => user.id === appConfig.llm.ollama.botId);
 
   if (existing) {
-    const next = {
-      ...existing,
+    const parsedExisting = UserSchema.parse(existing);
+    const next = UserSchema.parse({
+      ...parsedExisting,
       displayName: appConfig.llm.ollama.botDisplayName,
       type: "bot" as const,
       isAdmin: false,
-      avatar: existing.avatar ?? {
+      avatar: parsedExisting.avatar ?? {
         seed: appConfig.llm.ollama.botId,
         mode: "pattern" as const,
       },
-    };
-    const parsed = UserSchema.parse(next);
-    Object.assign(existing, parsed);
-    markDirty();
-    broadcast({ type: "userUpserted", user: existing });
+    });
+
+    if (JSON.stringify(parsedExisting) !== JSON.stringify(next)) {
+      Object.assign(existing, next);
+      markDirty();
+      broadcast({ type: "userUpserted", user: existing });
+    }
+
     return existing;
   }
 
@@ -600,7 +604,13 @@ function avatarImageHasExpectedSignature(buffer: Buffer, mimeType: AvatarImageMi
   }
 
   if (mimeType === "image/jpeg") {
-    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
+    return (
+      buffer.length >= 4 &&
+      buffer[0] === 0xff &&
+      buffer[1] === 0xd8 &&
+      buffer[buffer.length - 2] === 0xff &&
+      buffer[buffer.length - 1] === 0xd9
+    );
   }
 
   return buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
@@ -836,65 +846,90 @@ function ollamaUrl(path: string): string {
 async function* streamOllamaChat(
   messages: { role: "system" | "user" | "assistant"; content: string }[],
 ): AsyncGenerator<string> {
-  const response = await fetch(ollamaUrl("/api/chat"), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: appConfig.llm.ollama.model,
-      stream: true,
-      messages,
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
-  if (!response.ok || !response.body) {
-    throw new Error(`Ollama request failed: ${response.status}`);
-  }
+  try {
+    const response = await fetch(ollamaUrl("/api/chat"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: appConfig.llm.ollama.model,
+        stream: true,
+        messages,
+      }),
+    });
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-
-    if (done) {
-      break;
+    if (!response.ok || !response.body) {
+      throw new Error(`Ollama request failed: ${response.status}`);
     }
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
 
-    for (const line of lines) {
-      const trimmed = line.trim();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
 
-      if (!trimmed) {
-        continue;
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+
+          if (!trimmed) {
+            continue;
+          }
+
+          const parsed: unknown = JSON.parse(trimmed);
+
+          if (!isRecord(parsed)) {
+            continue;
+          }
+
+          if (typeof parsed.error === "string") {
+            throw new Error(parsed.error);
+          }
+
+          const message = isRecord(parsed.message) ? parsed.message : undefined;
+          const content = message && typeof message.content === "string" ? message.content : "";
+
+          if (content) {
+            yield content;
+          }
+
+          if (parsed.done === true) {
+            return;
+          }
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("Ollama request timed out while streaming.");
       }
 
-      const parsed: unknown = JSON.parse(trimmed);
-
-      if (!isRecord(parsed)) {
-        continue;
-      }
-
-      if (typeof parsed.error === "string") {
-        throw new Error(parsed.error);
-      }
-
-      const message = isRecord(parsed.message) ? parsed.message : undefined;
-      const content = message && typeof message.content === "string" ? message.content : "";
-
-      if (content) {
-        yield content;
-      }
-
-      if (parsed.done === true) {
-        return;
-      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      void reader.cancel().catch(() => undefined);
     }
+  } catch (error) {
+    clearTimeout(timeout);
+
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Ollama request timed out before streaming started.");
+    }
+
+    throw error;
   }
 }
 
