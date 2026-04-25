@@ -12,6 +12,12 @@ export interface AvatarProps {
   label?: string;
 }
 
+/**
+ * Compute a server URL path for a UserAvatar that is stored as an image.
+ *
+ * @param avatar - The UserAvatar to inspect; must have `kind === "image"` and contain both `imageId` and `mimeType` to produce a path.
+ * @returns The `/api/avatars/<encoded>` path for the avatar's image (`.png`, `.jpg`, or `.webp` based on `mimeType`), or `undefined` if the avatar is not an image or lacks required fields.
+ */
 function avatarImagePath(avatar: UserAvatar): string | undefined {
   if (avatar.kind !== "image" || !avatar.imageId || !avatar.mimeType) {
     return undefined;
@@ -21,6 +27,16 @@ function avatarImagePath(avatar: UserAvatar): string | undefined {
   return `/api/avatars/${encodeURIComponent(`${avatar.imageId}.${extension}`)}`;
 }
 
+/**
+ * Render a user avatar as either an image (when the provided avatar is an image) or generated avatar HTML.
+ *
+ * @param id - Identifier used as the fallback seed for generated avatars when `avatar` does not provide a seed
+ * @param avatar - Optional user avatar metadata; may supply an image to render or seed/mode for generated avatars
+ * @param className - Optional additional CSS class(es) applied to the avatar wrapper
+ * @param mode - Default avatar mode to use when `avatar` does not specify one
+ * @param label - Optional label forwarded to avatar generation (e.g., for display or accessibility)
+ * @returns A Preact element representing the avatar
+ */
 export function Avatar({ id, avatar: userAvatar, className, mode = "face", label }: AvatarProps) {
   const imagePath = userAvatar ? avatarImagePath(userAvatar) : undefined;
   const avatarSeed = userAvatar?.seed ?? id;

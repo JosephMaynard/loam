@@ -87,6 +87,11 @@ const AVATAR_MODES = ["face", "initial", "pattern"] as const;
 const AVATAR_OUTPUT_SIZE = 256;
 const AVATAR_MAX_UPLOAD_BYTES = 128 * 1024;
 
+/**
+ * Generates a random client user identifier.
+ *
+ * @returns A string of the form `user.<32-hex-chars>` where the suffix is 16 random bytes encoded as lowercase hex.
+ */
 function makeClientUserId(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
@@ -201,6 +206,18 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
   }
 }
 
+/**
+ * Parses a raw websocket message payload into a validated SocketEvent.
+ *
+ * Accepts any input (commonly a JSON string), attempts to JSON-parse it, and validates the resulting object.
+ * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, and `userUpserted`.
+ * `messageCreated` and `messageUpdated` require a valid `message` that passes `MessageSchema`.
+ * `messageDeleted` requires a string `messageId`.
+ * `userUpserted` requires a valid `user` that passes `UserSchema`.
+ *
+ * @param data - The raw websocket payload to parse (typically a JSON string)
+ * @returns A validated `SocketEvent` when the payload is recognized and passes schema validation, `undefined` otherwise.
+ */
 function parseSocketEvent(data: unknown): SocketEvent | undefined {
   let payload: unknown;
 
@@ -345,6 +362,12 @@ function reactionSummary(
     .sort((left, right) => right.count - left.count || left.reaction.localeCompare(right.reaction));
 }
 
+/**
+ * Format a numeric timestamp into a localized hours-and-minutes time string.
+ *
+ * @param timestamp - Milliseconds since the UNIX epoch
+ * @returns The time formatted as hours and minutes according to the current locale (e.g., "09:05")
+ */
 function displayTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
@@ -352,6 +375,12 @@ function displayTime(timestamp: number): string {
   }).format(timestamp);
 }
 
+/**
+ * Get the display text for a message, substituting a streaming placeholder when appropriate.
+ *
+ * @param message - The message to extract text from; may be any Message variant.
+ * @returns The message `body` if present and non-empty, `"Thinking..."` when `body` is empty and `message.meta?.streaming` is true, or an empty string when no body is available.
+ */
 function bodyFor(message: Message): string {
   if (!("body" in message)) {
     return "";
@@ -360,6 +389,12 @@ function bodyFor(message: Message): string {
   return message.body || (message.meta?.streaming ? "Thinking..." : "");
 }
 
+/**
+ * Builds the route path for a conversation (channel or direct message).
+ *
+ * @param conversation - The conversation to route to; for channels may include `threadId` to target a thread.
+ * @returns The URL path for the conversation, e.g. `/channels/<id>`, `/channel/<id>/thread/<threadId>`, or `/dm/<id>`
+ */
 function routeForConversation(conversation: Conversation): string {
   if (conversation.kind === "channel") {
     return conversation.threadId
@@ -384,6 +419,13 @@ export function App() {
   );
 }
 
+/**
+ * Root application component that manages client state, local persistence, server sync (REST + WebSocket), and renders the LOAM chat UI.
+ *
+ * Manages users/channels/messages/config, performs initial hydration and server loading, provides message send/update/delete flows, handles live websocket events and reconnection, and wires profile/avatar update and upload handlers into the settings view.
+ *
+ * @returns The main application element containing the sidebar, the conversation or settings view, and connection/error UI.
+ */
 function LoamApp() {
   const [currentUser, setCurrentUser] = useState(getOrCreateCurrentUser);
   const location = useLocation();
@@ -819,6 +861,16 @@ interface SidebarProps {
   users: User[];
 }
 
+/**
+ * Render the application sidebar with channels, direct-message peers, connection status, and current user info.
+ *
+ * @param activeConversation - The currently selected conversation (used to mark the active channel or DM).
+ * @param channels - List of channels to display in the Channels section.
+ * @param connection - Current connection status string (used to display the status pill).
+ * @param currentUser - The currently signed-in user (used for the footer identity display).
+ * @param users - All known users; peers (other users) are shown in the Direct Messages section.
+ * @returns The sidebar element containing navigation links for channels, direct messages, settings, and a current-user panel.
+ */
 function Sidebar({ activeConversation, channels, connection, currentUser, users }: SidebarProps) {
   const peers = users.filter((user) => user.id !== currentUser.id);
 
@@ -1078,6 +1130,18 @@ interface MessageItemProps {
   usersById: Map<string, User>;
 }
 
+/**
+ * Render a single chat message including avatar, author metadata, formatted body, reactions, and thread/reply controls.
+ *
+ * @param currentUser - The currently signed-in user (used to determine message ownership).
+ * @param message - The message to render.
+ * @param onOpenThread - Optional callback invoked with the message id to open its thread view.
+ * @param onReact - Callback invoked with the message id and reaction string when a reaction or quick reaction is triggered.
+ * @param reactions - Aggregated reaction summaries for this message (used to render reaction buttons and active state).
+ * @param replyCount - Number of replies to this message; used to label the thread button.
+ * @param usersById - Map of users keyed by id; used to resolve the message author (falls back to a generated ephemeral author when missing).
+ * @returns A JSX element representing the message item.
+ */
 function MessageItem({
   currentUser,
   message,
@@ -1229,6 +1293,19 @@ interface ThreadPanelProps {
   usersById: Map<string, User>;
 }
 
+/**
+ * Renders the thread side panel containing the thread parent message, its replies, and a reply composer.
+ *
+ * @param currentUser - The currently signed-in user (used to determine ownership and reaction state).
+ * @param messages - All messages in the store; used to compute replies and reaction summaries for the thread.
+ * @param parent - The parent message that the thread is showing replies for.
+ * @param usersById - Map of user id to User objects used to resolve author information for displayed messages.
+ * @param onClose - Callback invoked when the panel should be closed (e.g., back or close button).
+ * @param onReact - Callback invoked when a reaction action is triggered for a message.
+ * @param onReply - Callback invoked with the reply body when the composer submits a new thread reply.
+ *
+ * @returns The thread panel JSX element.
+ */
 function ThreadPanel({
   currentUser,
   messages,
@@ -1296,10 +1373,25 @@ interface AvatarImageEditorProps {
   onUpload: (blob: Blob) => Promise<void>;
 }
 
+/**
+ * Constrains a number to the inclusive [min, max] range.
+ *
+ * @param value - The number to clamp.
+ * @param min - The minimum allowed value.
+ * @param max - The maximum allowed value.
+ * @returns The input value limited to the inclusive range between `min` and `max`.
+ */
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/**
+ * Convert a pointer event's client coordinates into canvas coordinates scaled to the avatar output size.
+ *
+ * @param canvas - The target HTML canvas element.
+ * @param event - The pointer event whose `clientX`/`clientY` will be mapped.
+ * @returns An object with `x` and `y` coordinates in the canvas coordinate space (0..AVATAR_OUTPUT_SIZE).
+ */
 function canvasPoint(canvas: HTMLCanvasElement, event: PointerEvent): CanvasPointer {
   const rect = canvas.getBoundingClientRect();
   return {
@@ -1308,14 +1400,43 @@ function canvasPoint(canvas: HTMLCanvasElement, event: PointerEvent): CanvasPoin
   };
 }
 
+/**
+ * Compute the Euclidean distance between two canvas pointer coordinates.
+ *
+ * @param left - The first canvas pointer (with `x` and `y`).
+ * @param right - The second canvas pointer (with `x` and `y`).
+ * @returns The straight-line distance between `left` and `right` in canvas coordinate units.
+ */
 function pointerDistance(left: CanvasPointer, right: CanvasPointer): number {
   return Math.hypot(left.x - right.x, left.y - right.y);
 }
 
+/**
+ * Compute the angle in radians from the `left` point to the `right` point.
+ *
+ * @param left - The origin point from which the angle is measured
+ * @param right - The target point to which the angle is measured
+ * @returns The angle in radians measured from the positive X axis to the vector from `left` to `right` (range approximately -π to π)
+ */
 function pointerAngle(left: CanvasPointer, right: CanvasPointer): number {
   return Math.atan2(right.y - left.y, right.x - left.x);
 }
 
+/**
+ * Renders the provided image into the given canvas using the specified crop transform.
+ *
+ * The canvas is cleared and painted with a neutral background, then the image is drawn
+ * centered and transformed by `crop.offsetX`, `crop.offsetY` (pixel offsets from center),
+ * `crop.rotation` (degrees), and `crop.zoom` (scale multiplier). The image is scaled
+ * so its smaller dimension fits the avatar output size before applying `crop.zoom`.
+ *
+ * @param canvas - Target canvas element sized to `AVATAR_OUTPUT_SIZE`
+ * @param image - Source HTMLImageElement to draw (uses `naturalWidth`/`naturalHeight`)
+ * @param crop - Crop transform containing:
+ *   - `offsetX` and `offsetY`: pixel translations from canvas center
+ *   - `rotation`: degrees to rotate the image
+ *   - `zoom`: multiplicative scale applied after fitting the image to the output size
+ */
 function drawAvatarCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, crop: AvatarCrop): void {
   const context = canvas.getContext("2d");
 
@@ -1335,6 +1456,14 @@ function drawAvatarCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, cr
   context.restore();
 }
 
+/**
+ * Create an image Blob from a canvas suitable for avatar upload.
+ *
+ * Attempts to encode and compress the provided canvas into an image Blob whose size does not exceed AVATAR_MAX_UPLOAD_BYTES; rejects if no acceptable Blob can be produced.
+ *
+ * @param canvas - The source HTMLCanvasElement to convert
+ * @returns A Blob containing the encoded image ready for upload
+ */
 function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
   const formats: { type: "image/webp" | "image/png"; quality?: number }[] = [
     { type: "image/webp", quality: 0.82 },
@@ -1374,6 +1503,15 @@ function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
+/**
+ * Renders an avatar image crop-and-upload editor.
+ *
+ * Allows selecting an image, interactively panning/zooming/rotating a square crop on a 256px canvas, and uploading a compressed/cropped Blob.
+ *
+ * @param disabled - When true, user interactions and controls are disabled.
+ * @param onUpload - Callback invoked with the cropped image Blob when the user chooses "Use cropped image"; the Blob is compressed and sized to meet upload limits.
+ * @returns The avatar editor's JSX element.
+ */
 function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1593,6 +1731,19 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
   );
 }
 
+/**
+ * Renders the settings screen for the current user, including join QR, identity preview,
+ * profile form (display name and generated avatar style), and an image crop upload editor.
+ *
+ * The UI respects node feature flags from `config.networkConfig`: it enables or disables
+ * display name editing, avatar style editing, and image uploads accordingly. Saving the
+ * profile will invoke `onUpdateCurrentUser` with any changed display name or generated
+ * avatar settings. Image avatar uploads produced by the crop editor are forwarded to
+ * `onUploadAvatarImage`.
+ *
+ * @param onUpdateCurrentUser - Called with a `UserUpdateRequest` when the user saves profile changes.
+ * @param onUploadAvatarImage - Called with the cropped avatar `Blob` when the user uploads an image avatar.
+ */
 function SettingsView({
   config,
   currentUser,

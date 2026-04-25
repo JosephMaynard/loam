@@ -145,6 +145,11 @@ const defaultChannels: Channel[] = [
 
 const seedUsers = ["user.1234", "user.5678"];
 
+/**
+ * Create the default LOAM configuration for identity and LLM (Ollama) behavior.
+ *
+ * @returns A `LoamConfig` populated with conservative defaults: user display name and avatar edits/uploads disabled, admin user editing enabled, and Ollama LLM disabled with a localhost `baseUrl`, default `model`, `botId`, and `botDisplayName`.
+ */
 function defaultLoamConfig(): LoamConfig {
   return {
     identity: {
@@ -165,18 +170,45 @@ function defaultLoamConfig(): LoamConfig {
   };
 }
 
+/**
+ * Checks whether a value is a non-null object that is not an array.
+ *
+ * @param value - The value to test
+ * @returns `true` if `value` is a non-null object and not an array, `false` otherwise.
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Select the input boolean when it's strictly a boolean; otherwise select the fallback.
+ *
+ * @param value - The value to validate as a boolean
+ * @param fallback - The boolean to use if `value` is not a boolean
+ * @returns `value` if it's a boolean, `fallback` otherwise
+ */
 function readBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+/**
+ * Get the trimmed string when the input is a non-empty string; otherwise use the fallback.
+ *
+ * @param value - Value to evaluate and trim if it is a non-empty string
+ * @param fallback - String to return when `value` is not a non-empty string
+ * @returns The trimmed `value` when it is a non-empty string, otherwise `fallback`
+ */
 function readString(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+/**
+ * Loads the server configuration from disk and applies the validated settings to the global `appConfig`.
+ *
+ * Reads JSON from `configPath`. If the file is missing or the top-level shape is not an object, the default
+ * configuration is used. Identity and LLM (ollama) sub-settings are validated and merged with sensible defaults;
+ * unexpected I/O or parse errors are propagated.
+ */
 async function loadAppConfig(): Promise<void> {
   const defaults = defaultLoamConfig();
 
@@ -227,6 +259,12 @@ async function loadAppConfig(): Promise<void> {
   }
 }
 
+/**
+ * Get the filesystem path for the given data file.
+ *
+ * @param file - One of the data file names ("users", "channels", "messages", or "sessions")
+ * @returns The absolute path to the JSON file corresponding to `file`
+ */
 function dataPath(file: DataFile): string {
   return join(dataDir, `${file}.json`);
 }
@@ -250,6 +288,13 @@ async function writeJson(file: DataFile, value: unknown): Promise<void> {
   await writeFile(dataPath(file), `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+/**
+ * Create a human user record with a generated display name and creation timestamp.
+ *
+ * @param id - The unique user identifier
+ * @param isAdmin - Whether the user has administrative privileges
+ * @returns A validated `User` object constructed from the provided values
+ */
 function makeUser(id: string, isAdmin = false): User {
   return UserSchema.parse({
     id,
@@ -261,6 +306,12 @@ function makeUser(id: string, isAdmin = false): User {
   });
 }
 
+/**
+ * Create a User record representing the configured Ollama bot.
+ *
+ * @param config - Ollama integration config containing the bot identifiers and display name
+ * @returns A `User` object for the bot with `type: "bot"`, `isAdmin: false`, a patterned avatar seeded from the bot ID, and the current timestamp as `createdAt`
+ */
 function makeBotUser(config: OllamaConfig): User {
   return UserSchema.parse({
     id: config.botId,
@@ -276,6 +327,11 @@ function makeBotUser(config: OllamaConfig): User {
   });
 }
 
+/**
+ * Create a new user identifier for an anonymous session.
+ *
+ * @returns A string of the form `user.<8hex>` where the suffix is the first 8 hexadecimal characters of a UUID with dashes removed.
+ */
 function makeSessionUserId(): string {
   return `user.${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
@@ -353,6 +409,13 @@ function getSessionUserIdFromRequest(request: FastifyRequest): string | undefine
   return cookieToken ? sessions.get(cookieToken) : undefined;
 }
 
+/**
+ * Ensures a user with the specified id exists in the application's in-memory user list, creating, persisting, and broadcasting a new user when absent.
+ *
+ * @param id - The unique user id to ensure exists
+ * @param isAdmin - If a new user is created, whether they should be marked as an administrator
+ * @returns The existing or newly created User
+ */
 function ensureUser(id: string, isAdmin = false): User {
   const existing = data.users.find((user) => user.id === id);
 
@@ -367,6 +430,15 @@ function ensureUser(id: string, isAdmin = false): User {
   return user;
 }
 
+/**
+ * Ensures the configured Ollama bot user exists in the in-memory user store and is up to date.
+ *
+ * If Ollama is disabled in the current configuration, no changes are made.
+ *
+ * Side effects: may create or update a user record, mark data as dirty for persistence, and broadcast a `userUpserted` client event.
+ *
+ * @returns The bot `User` after creation or update, or `undefined` if Ollama is disabled.
+ */
 function ensureOllamaBotUser(): User | undefined {
   if (!appConfig.llm.ollama.enabled) {
     return undefined;
@@ -399,6 +471,11 @@ function ensureOllamaBotUser(): User | undefined {
   return user;
 }
 
+/**
+ * Provides the current network configuration reflecting enabled features and identity permissions.
+ *
+ * @returns The NetworkConfig object containing feature flags for channels, replies, DMs, reactions, markdown, LLM chat/streaming, and user avatar/display edit/upload permissions.
+ */
 function currentNetworkConfig(): NetworkConfig {
   return {
     enablePublicChannels: true,
@@ -416,6 +493,16 @@ function currentNetworkConfig(): NetworkConfig {
   };
 }
 
+/**
+ * Apply validated user update fields to an existing user object.
+ *
+ * Validates the merged user record, mutates the provided `user` in-place with validated values,
+ * marks persistent data as dirty, and broadcasts a `userUpserted` client event.
+ *
+ * @param user - The existing user object to update (mutated in-place)
+ * @param update - Partial update fields for the user; `undefined` avatar preserves existing avatar
+ * @returns The mutated and validated `User` object
+ */
 function applyUserUpdate(user: User, update: UserUpdateRequest): User {
   const next = UserSchema.parse({
     ...user,
@@ -428,14 +515,30 @@ function applyUserUpdate(user: User, update: UserUpdateRequest): User {
   return user;
 }
 
+/**
+ * Determine which users should be exposed to clients based on the LLM bot visibility setting.
+ *
+ * @returns The array of users to expose: when Ollama LLM is enabled, all users; otherwise users excluding those whose `type` is `"bot"`.
+ */
 function visibleUsers(): User[] {
   return appConfig.llm.ollama.enabled ? data.users : data.users.filter((user) => user.type !== "bot");
 }
 
+/**
+ * Generates a new unique avatar image identifier.
+ *
+ * @returns A string in the form `avt_<16-hex-chars>` suitable for use as an avatar image filename base
+ */
 function newAvatarImageId(): string {
   return `avt_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
+/**
+ * Map an avatar image MIME type to its canonical file extension.
+ *
+ * @param mimeType - The avatar image MIME type
+ * @returns The corresponding file extension: `png` for `image/png`, `jpg` for `image/jpeg`, otherwise `webp`
+ */
 function avatarImageExtension(mimeType: AvatarImageMimeType): string {
   if (mimeType === "image/png") {
     return "png";
@@ -448,10 +551,23 @@ function avatarImageExtension(mimeType: AvatarImageMimeType): string {
   return "webp";
 }
 
+/**
+ * Build the filesystem path for a stored avatar image file.
+ *
+ * @param imageId - The image identifier (without file extension)
+ * @param mimeType - The avatar image MIME type used to determine the file extension
+ * @returns The path to the avatar image file inside the avatars directory
+ */
 function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
   return join(avatarsDir, `${imageId}.${avatarImageExtension(mimeType)}`);
 }
 
+/**
+ * Parses an avatar filename into its image ID and MIME type.
+ *
+ * @param value - Avatar filename expected in the form `avt_<16-hex>.<ext>` where `<ext>` is `png`, `jpg`, or `webp`
+ * @returns An object with `imageId` and `mimeType` when `value` matches the expected pattern, `undefined` otherwise
+ */
 function parseAvatarImageId(value: string): { imageId: string; mimeType: AvatarImageMimeType } | undefined {
   const match = value.match(/^(avt_[a-f0-9]{16})\.(png|jpg|webp)$/);
 
@@ -469,6 +585,15 @@ function parseAvatarImageId(value: string): { imageId: string; mimeType: AvatarI
   };
 }
 
+/**
+ * Checks that a binary image buffer matches the expected file signature for the provided MIME type.
+ *
+ * Supports `image/png`, `image/jpeg`, and `image/webp`.
+ *
+ * @param buffer - The image file data to inspect
+ * @param mimeType - The expected MIME type of the image
+ * @returns `true` if the buffer's file signature matches the expected MIME type, `false` otherwise
+ */
 function avatarImageHasExpectedSignature(buffer: Buffer, mimeType: AvatarImageMimeType): boolean {
   if (mimeType === "image/png") {
     return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -481,6 +606,12 @@ function avatarImageHasExpectedSignature(buffer: Buffer, mimeType: AvatarImageMi
   return buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
 }
 
+/**
+ * Finds the in-memory channel matching the provided id.
+ *
+ * @param id - The channel id to look up
+ * @returns The matching Channel if found, `undefined` otherwise
+ */
 function ensureChannel(id: string): Channel | undefined {
   return data.channels.find((channel) => channel.id === id);
 }
@@ -564,6 +695,13 @@ function newMessageId(prefix = "msg"): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
+/**
+ * Validate input and create a new message record, or remove an existing reaction when toggled.
+ *
+ * @param input - The message creation payload specifying type-specific fields (channelId, parentMessageId, targetMessageId, recipientUserId, etc.)
+ * @param authorId - The ID of the user creating the message
+ * @returns An object containing either `message` with the created Message, `deletedMessageId` and `deletedMessage` when a reaction was toggled off, or `error` with a human-readable failure reason
+ */
 function createMessage(
   input: MessageCreateRequest,
   authorId: string,
@@ -630,6 +768,16 @@ function createMessage(
   return { message };
 }
 
+/**
+ * Update a message's body and edited metadata in-place.
+ *
+ * Mutates the provided message (same object), sets `editedAt` to now, updates `meta.streaming` to the provided value, marks in-memory data dirty, and broadcasts a `messageUpdated` client event. If the message has no `body` field, it is returned unchanged.
+ *
+ * @param message - The message object to update
+ * @param nextBody - The new body content to set on the message
+ * @param streaming - Whether the message is currently streaming (sets `meta.streaming`)
+ * @returns The updated message instance
+ */
 function updateMessage(message: Message, nextBody: string, streaming: boolean): Message {
   if (!("body" in message)) {
     return message;
@@ -650,6 +798,12 @@ function updateMessage(message: Message, nextBody: string, streaming: boolean): 
   return message;
 }
 
+/**
+ * Build a sequence of chat messages for the configured Ollama model from the DM history between a bot and a user.
+ *
+ * @param botId - The bot user's id whose messages should be mapped to the `assistant` role
+ * @param currentUserId - The current human user's id whose messages should be mapped to the `user` role
+ * @returns An array of chat message objects with `role` (`system` | `user` | `assistant`) and `content`; when a system prompt is configured it is prepended as the first message.
 function llmMessagesForUser(botId: string, currentUserId: string): { role: "system" | "user" | "assistant"; content: string }[] {
   const messages = dmMessages(botId, currentUserId).flatMap((message) => {
     if (message.type !== "dm" || !message.body.trim()) {
@@ -669,6 +823,12 @@ function llmMessagesForUser(botId: string, currentUserId: string): { role: "syst
     : messages;
 }
 
+/**
+ * Build a full Ollama API URL by joining the configured base URL and the given path.
+ *
+ * @param path - The path to append to the Ollama base URL (e.g., `/api/chat`).
+ * @returns The full URL formed by concatenating the configured Ollama base URL with trailing slashes removed and `path`.
+ */
 function ollamaUrl(path: string): string {
   return `${appConfig.llm.ollama.baseUrl.replace(/\/+$/, "")}${path}`;
 }
@@ -738,6 +898,15 @@ async function* streamOllamaChat(
   }
 }
 
+/**
+ * Triggers an Ollama LLM assistant reply to a direct message and streams the assistant's content into a new DM message.
+ *
+ * If Ollama is disabled, the message is not a DM, the configured bot user is missing, the DM is not addressed to the bot, or the bot authored the message, the function returns without performing any action.
+ *
+ * Creates a streaming assistant DM message, appends and broadcasts it, incrementally updates its body with streamed deltas from Ollama, finalizes the message on completion, and on error appends an `LLM error` note and logs the error.
+ *
+ * @param userMessage - The incoming DM message that may trigger the bot response
+ */
 async function createOllamaResponse(userMessage: Message): Promise<void> {
   if (!appConfig.llm.ollama.enabled || userMessage.type !== "dm") {
     return;
@@ -783,6 +952,14 @@ async function createOllamaResponse(userMessage: Message): Promise<void> {
   }
 }
 
+/**
+ * Loads persisted application data into memory and initializes derived in-memory state.
+ *
+ * Ensures the data directory exists, reads and validates persisted `users`, `channels`, `messages`,
+ * and `sessions` into the module-level `data` and `sessions` stores. If no channels are persisted,
+ * seeds the default channels and marks the data as dirty. Ensures predefined seed users exist and
+ * creates or updates the Ollama bot user if configured.
+ */
 async function loadData(): Promise<void> {
   await mkdir(dataDir, { recursive: true });
 
@@ -811,6 +988,11 @@ async function loadData(): Promise<void> {
   ensureOllamaBotUser();
 }
 
+/**
+ * Persist in-memory application data to disk when there are pending changes.
+ *
+ * Writes the `users`, `channels`, `messages`, and `sessions` data files, coalesces concurrent callers by awaiting an in-progress save, and clears the pending-changes flag only if no new modifications occurred during the save. If a write fails, the pending-changes flag is kept set and the error is rethrown.
+ */
 async function saveAllData(): Promise<void> {
   if (!dirty) {
     return;
@@ -846,6 +1028,11 @@ async function saveAllData(): Promise<void> {
   await saveInProgress;
 }
 
+/**
+ * Registers the client distribution directory as the server's static file root when that directory exists.
+ *
+ * If the client distribution directory is found and mounted at `/`, sets `staticFilesRegistered = true`.
+ */
 async function registerStaticFiles(): Promise<void> {
   try {
     const stats = await stat(clientDistDir);
