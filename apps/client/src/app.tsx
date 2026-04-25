@@ -1524,6 +1524,9 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
     rotation: number;
     zoom: number;
   }>();
+  const objectUrlRef = useRef<string>();
+  const loadingImageRef = useRef<HTMLImageElement>();
+  const mountedRef = useRef(true);
   const [crop, setCrop] = useState<AvatarCrop>({ offsetX: 0, offsetY: 0, rotation: 0, zoom: 1 });
   const [hasImage, setHasImage] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -1539,6 +1542,24 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
 
     drawAvatarCanvas(canvas, image, crop);
   }, [crop, hasImage]);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = undefined;
+      }
+
+      if (loadingImageRef.current) {
+        loadingImageRef.current.onload = null;
+        loadingImageRef.current.onerror = null;
+        loadingImageRef.current.src = "";
+        loadingImageRef.current = undefined;
+      }
+    };
+  }, []);
 
   function startDrag(event: PointerEvent): void {
     const canvas = canvasRef.current;
@@ -1625,24 +1646,59 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       return;
     }
 
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = undefined;
+    }
+
+    if (loadingImageRef.current) {
+      loadingImageRef.current.onload = null;
+      loadingImageRef.current.onerror = null;
+      loadingImageRef.current.src = "";
+      loadingImageRef.current = undefined;
+    }
+
     const url = URL.createObjectURL(file);
     const image = new Image();
+    objectUrlRef.current = url;
+    loadingImageRef.current = image;
 
     try {
       await new Promise<void>((resolve, reject) => {
-        image.onload = () => resolve();
-        image.onerror = () => reject(new Error("Unable to load image."));
+        image.onload = () => {
+          image.onload = null;
+          image.onerror = null;
+          resolve();
+        };
+        image.onerror = () => {
+          image.onload = null;
+          image.onerror = null;
+          reject(new Error("Unable to load image."));
+        };
         image.src = url;
       });
+
+      if (!mountedRef.current || objectUrlRef.current !== url) {
+        return;
+      }
 
       imageRef.current = image;
       setCrop({ offsetX: 0, offsetY: 0, rotation: 0, zoom: 1 });
       setHasImage(true);
       setError(undefined);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Unable to load image.");
+      if (mountedRef.current && objectUrlRef.current === url) {
+        setError(nextError instanceof Error ? nextError.message : "Unable to load image.");
+      }
     } finally {
-      URL.revokeObjectURL(url);
+      if (objectUrlRef.current === url) {
+        URL.revokeObjectURL(url);
+        objectUrlRef.current = undefined;
+      }
+
+      if (loadingImageRef.current === image) {
+        loadingImageRef.current = undefined;
+      }
     }
   }
 
