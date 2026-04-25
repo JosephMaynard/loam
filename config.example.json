@@ -1,0 +1,18 @@
+{
+  "identity": {
+    "allowUserDisplayNameEdit": true,
+    "allowUserAvatarEdit": true,
+    "allowUserAvatarUpload": true,
+    "allowAdminUserEdit": true
+  },
+  "llm": {
+    "ollama": {
+      "enabled": true,
+      "baseUrl": "http://localhost:11434",
+      "model": "gemma4",
+      "botId": "llm.ollama.gemma4",
+      "botDisplayName": "Gemma",
+      "systemPrompt": "You are a friendly, clear assistant inside LOAM. Keep answers concise and suitable for a younger user."
+    }
+  }
+}

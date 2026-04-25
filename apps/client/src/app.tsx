@@ -5,7 +5,9 @@ import {
   type Channel,
   type Message,
   type MessageCreateRequest,
+  type NetworkConfig,
   type User,
+  type UserUpdateRequest,
 } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import { LocationProvider, useLocation } from "preact-iso";
@@ -42,6 +44,7 @@ type Config = {
   joinUrl: string;
   websocketPath: string;
   currentUser: User;
+  networkConfig: NetworkConfig;
 };
 
 type MessageResponse = {
@@ -52,6 +55,10 @@ type MessageResponse = {
 type SocketEvent =
   | {
       type: "messageCreated";
+      message: Message;
+    }
+  | {
+      type: "messageUpdated";
       message: Message;
     }
   | {
@@ -76,7 +83,15 @@ const SERVER_URL_KEY = "loam.serverUrl";
 const DEFAULT_CHANNEL_ID = "general";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 const REQUEST_TIMEOUT_MS = 10_000;
+const AVATAR_MODES = ["face", "initial", "pattern"] as const;
+const AVATAR_OUTPUT_SIZE = 256;
+const AVATAR_MAX_UPLOAD_BYTES = 128 * 1024;
 
+/**
+ * Generates a random client user identifier.
+ *
+ * @returns A string of the form `user.<32-hex-chars>` where the suffix is 16 random bytes encoded as lowercase hex.
+ */
 function makeClientUserId(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
@@ -191,6 +206,18 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
   }
 }
 
+/**
+ * Parses a raw websocket message payload into a validated SocketEvent.
+ *
+ * Accepts any input (commonly a JSON string), attempts to JSON-parse it, and validates the resulting object.
+ * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, and `userUpserted`.
+ * `messageCreated` and `messageUpdated` require a valid `message` that passes `MessageSchema`.
+ * `messageDeleted` requires a string `messageId`.
+ * `userUpserted` requires a valid `user` that passes `UserSchema`.
+ *
+ * @param data - The raw websocket payload to parse (typically a JSON string)
+ * @returns A validated `SocketEvent` when the payload is recognized and passes schema validation, `undefined` otherwise.
+ */
 function parseSocketEvent(data: unknown): SocketEvent | undefined {
   let payload: unknown;
 
@@ -210,6 +237,11 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
   if (candidate.type === "messageCreated") {
     const message = MessageSchema.safeParse(candidate.message);
     return message.success ? { type: "messageCreated", message: message.data } : undefined;
+  }
+
+  if (candidate.type === "messageUpdated") {
+    const message = MessageSchema.safeParse(candidate.message);
+    return message.success ? { type: "messageUpdated", message: message.data } : undefined;
   }
 
   if (candidate.type === "messageDeleted") {
@@ -330,6 +362,12 @@ function reactionSummary(
     .sort((left, right) => right.count - left.count || left.reaction.localeCompare(right.reaction));
 }
 
+/**
+ * Format a numeric timestamp into a localized hours-and-minutes time string.
+ *
+ * @param timestamp - Milliseconds since the UNIX epoch
+ * @returns The time formatted as hours and minutes according to the current locale (e.g., "09:05")
+ */
 function displayTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
@@ -337,10 +375,26 @@ function displayTime(timestamp: number): string {
   }).format(timestamp);
 }
 
+/**
+ * Get the display text for a message, substituting a streaming placeholder when appropriate.
+ *
+ * @param message - The message to extract text from; may be any Message variant.
+ * @returns The message `body` if present and non-empty, `"Thinking..."` when `body` is empty and `message.meta?.streaming` is true, or an empty string when no body is available.
+ */
 function bodyFor(message: Message): string {
-  return "body" in message ? message.body : "";
+  if (!("body" in message)) {
+    return "";
+  }
+
+  return message.body || (message.meta?.streaming ? "Thinking..." : "");
 }
 
+/**
+ * Builds the route path for a conversation (channel or direct message).
+ *
+ * @param conversation - The conversation to route to; for channels may include `threadId` to target a thread.
+ * @returns The URL path for the conversation, e.g. `/channels/<id>`, `/channel/<id>/thread/<threadId>`, or `/dm/<id>`
+ */
 function routeForConversation(conversation: Conversation): string {
   if (conversation.kind === "channel") {
     return conversation.threadId
@@ -365,6 +419,13 @@ export function App() {
   );
 }
 
+/**
+ * Root application component that manages client state, local persistence, server sync (REST + WebSocket), and renders the LOAM chat UI.
+ *
+ * Manages users/channels/messages/config, performs initial hydration and server loading, provides message send/update/delete flows, handles live websocket events and reconnection, and wires profile/avatar update and upload handlers into the settings view.
+ *
+ * @returns The main application element containing the sidebar, the conversation or settings view, and connection/error UI.
+ */
 function LoamApp() {
   const [currentUser, setCurrentUser] = useState(getOrCreateCurrentUser);
   const location = useLocation();
@@ -467,6 +528,76 @@ function LoamApp() {
     [removeMessage, upsertMessages],
   );
 
+  const updateCurrentUser = useCallback(
+    async (request: UserUpdateRequest) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(apiUrl("/api/users/me"), {
+          method: "PATCH",
+          credentials: "include",
+          headers: {
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify(request),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Profile update failed: ${response.status}`);
+        }
+
+        const user = UserSchema.parse(await response.json());
+        setCurrentUser(user);
+        upsertUsers([user]);
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
+  const uploadAvatarImage = useCallback(
+    async (blob: Blob) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+
+      try {
+        const response = await fetch(apiUrl("/api/users/me/avatar-image"), {
+          method: "PUT",
+          credentials: "include",
+          headers: {
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            mimeType: blob.type || "image/png",
+            data: btoa(binary),
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Avatar upload failed: ${response.status}`);
+        }
+
+        const user = UserSchema.parse(await response.json());
+        setCurrentUser(user);
+        upsertUsers([user]);
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
   useEffect(() => {
     if (location.path === "/") {
       location.route("/channels", true);
@@ -504,11 +635,7 @@ function LoamApp() {
 
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
-        setCurrentUser((previous) =>
-          previous.id === nextConfig.currentUser.id && previous.createdAt === nextConfig.currentUser.createdAt
-            ? previous
-            : nextConfig.currentUser,
-        );
+        setCurrentUser(nextConfig.currentUser);
         setUsers((previous) =>
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
@@ -619,7 +746,7 @@ function LoamApp() {
           return;
         }
 
-        if (payload.type === "messageCreated") {
+        if (payload.type === "messageCreated" || payload.type === "messageUpdated") {
           upsertMessages([payload.message]);
           return;
         }
@@ -669,7 +796,12 @@ function LoamApp() {
         users={users}
       />
       {routeState.screen === "settings" ? (
-        <SettingsView config={config} currentUser={currentUser} />
+        <SettingsView
+          config={config}
+          currentUser={currentUser}
+          onUpdateCurrentUser={updateCurrentUser}
+          onUploadAvatarImage={uploadAvatarImage}
+        />
       ) : (
         <ConversationView
           conversation={activeConversation}
@@ -729,6 +861,16 @@ interface SidebarProps {
   users: User[];
 }
 
+/**
+ * Render the application sidebar with channels, direct-message peers, connection status, and current user info.
+ *
+ * @param activeConversation - The currently selected conversation (used to mark the active channel or DM).
+ * @param channels - List of channels to display in the Channels section.
+ * @param connection - Current connection status string (used to display the status pill).
+ * @param currentUser - The currently signed-in user (used for the footer identity display).
+ * @param users - All known users; peers (other users) are shown in the Direct Messages section.
+ * @returns The sidebar element containing navigation links for channels, direct messages, settings, and a current-user panel.
+ */
 function Sidebar({ activeConversation, channels, connection, currentUser, users }: SidebarProps) {
   const peers = users.filter((user) => user.id !== currentUser.id);
 
@@ -767,7 +909,7 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
               href={`/dm/${encodeURIComponent(user.id)}`}
               key={user.id}
             >
-              <Avatar id={user.id} />
+              <Avatar avatar={user.avatar} id={user.id} />
               {user.displayName}
             </NavLink>
           ))}
@@ -780,7 +922,7 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
           Join QR and settings
         </NavLink>
         <div className="current-user">
-          <Avatar id={currentUser.id} />
+          <Avatar avatar={currentUser.avatar} id={currentUser.id} />
           <div>
             <strong>{currentUser.displayName}</strong>
             <span>{currentUser.id}</span>
@@ -988,6 +1130,18 @@ interface MessageItemProps {
   usersById: Map<string, User>;
 }
 
+/**
+ * Render a single chat message including avatar, author metadata, formatted body, reactions, and thread/reply controls.
+ *
+ * @param currentUser - The currently signed-in user (used to determine message ownership).
+ * @param message - The message to render.
+ * @param onOpenThread - Optional callback invoked with the message id to open its thread view.
+ * @param onReact - Callback invoked with the message id and reaction string when a reaction or quick reaction is triggered.
+ * @param reactions - Aggregated reaction summaries for this message (used to render reaction buttons and active state).
+ * @param replyCount - Number of replies to this message; used to label the thread button.
+ * @param usersById - Map of users keyed by id; used to resolve the message author (falls back to a generated ephemeral author when missing).
+ * @returns A JSX element representing the message item.
+ */
 function MessageItem({
   currentUser,
   message,
@@ -1006,10 +1160,13 @@ function MessageItem({
     ephemeral: true,
   };
   const isMine = message.authorId === currentUser.id;
+  const messageClassName = ["message", isMine ? "mine" : undefined, message.meta?.streaming ? "streaming" : undefined]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <article className={isMine ? "message mine" : "message"}>
-      <Avatar id={author.id} />
+    <article className={messageClassName}>
+      <Avatar avatar={author.avatar} id={author.id} />
       <div className="message-main">
         <div className="message-meta">
           <strong>{author.displayName}</strong>
@@ -1020,7 +1177,8 @@ function MessageItem({
           dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
         />
         <div className="message-actions">
-          {reactions.map((reaction) => (
+          {message.meta?.streaming ? <span className="streaming-pill">Streaming</span> : null}
+          {!message.meta?.streaming && reactions.map((reaction) => (
             <button
               className={reaction.active ? "reaction active" : "reaction"}
               key={reaction.reaction}
@@ -1030,7 +1188,7 @@ function MessageItem({
               {reaction.reaction} {reaction.count}
             </button>
           ))}
-          {QUICK_REACTIONS.filter(
+          {!message.meta?.streaming && QUICK_REACTIONS.filter(
             (reaction) => !reactions.some((summary) => summary.reaction === reaction),
           ).map((reaction) => (
             <button
@@ -1042,7 +1200,7 @@ function MessageItem({
               {reaction}
             </button>
           ))}
-          {onOpenThread ? (
+          {onOpenThread && !message.meta?.streaming ? (
             <button className="thread-button" onClick={() => onOpenThread(message.id)} type="button">
               {replyCount ? `${replyCount} repl${replyCount === 1 ? "y" : "ies"}` : "Reply"}
             </button>
@@ -1135,6 +1293,19 @@ interface ThreadPanelProps {
   usersById: Map<string, User>;
 }
 
+/**
+ * Renders the thread side panel containing the thread parent message, its replies, and a reply composer.
+ *
+ * @param currentUser - The currently signed-in user (used to determine ownership and reaction state).
+ * @param messages - All messages in the store; used to compute replies and reaction summaries for the thread.
+ * @param parent - The parent message that the thread is showing replies for.
+ * @param usersById - Map of user id to User objects used to resolve author information for displayed messages.
+ * @param onClose - Callback invoked when the panel should be closed (e.g., back or close button).
+ * @param onReact - Callback invoked when a reaction action is triggered for a message.
+ * @param onReply - Callback invoked with the reply body when the composer submits a new thread reply.
+ *
+ * @returns The thread panel JSX element.
+ */
 function ThreadPanel({
   currentUser,
   messages,
@@ -1185,7 +1356,470 @@ function ThreadPanel({
   );
 }
 
-function SettingsView({ config, currentUser }: { config?: Config; currentUser: User }) {
+type AvatarCrop = {
+  offsetX: number;
+  offsetY: number;
+  rotation: number;
+  zoom: number;
+};
+
+type CanvasPointer = {
+  x: number;
+  y: number;
+};
+
+interface AvatarImageEditorProps {
+  disabled: boolean;
+  onUpload: (blob: Blob) => Promise<void>;
+}
+
+/**
+ * Constrains a number to the inclusive [min, max] range.
+ *
+ * @param value - The number to clamp.
+ * @param min - The minimum allowed value.
+ * @param max - The maximum allowed value.
+ * @returns The input value limited to the inclusive range between `min` and `max`.
+ */
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+/**
+ * Convert a pointer event's client coordinates into canvas coordinates scaled to the avatar output size.
+ *
+ * @param canvas - The target HTML canvas element.
+ * @param event - The pointer event whose `clientX`/`clientY` will be mapped.
+ * @returns An object with `x` and `y` coordinates in the canvas coordinate space (0..AVATAR_OUTPUT_SIZE).
+ */
+function canvasPoint(canvas: HTMLCanvasElement, event: PointerEvent): CanvasPointer {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((event.clientX - rect.left) / rect.width) * AVATAR_OUTPUT_SIZE,
+    y: ((event.clientY - rect.top) / rect.height) * AVATAR_OUTPUT_SIZE,
+  };
+}
+
+/**
+ * Compute the Euclidean distance between two canvas pointer coordinates.
+ *
+ * @param left - The first canvas pointer (with `x` and `y`).
+ * @param right - The second canvas pointer (with `x` and `y`).
+ * @returns The straight-line distance between `left` and `right` in canvas coordinate units.
+ */
+function pointerDistance(left: CanvasPointer, right: CanvasPointer): number {
+  return Math.hypot(left.x - right.x, left.y - right.y);
+}
+
+/**
+ * Compute the angle in radians from the `left` point to the `right` point.
+ *
+ * @param left - The origin point from which the angle is measured
+ * @param right - The target point to which the angle is measured
+ * @returns The angle in radians measured from the positive X axis to the vector from `left` to `right` (range approximately -π to π)
+ */
+function pointerAngle(left: CanvasPointer, right: CanvasPointer): number {
+  return Math.atan2(right.y - left.y, right.x - left.x);
+}
+
+/**
+ * Renders the provided image into the given canvas using the specified crop transform.
+ *
+ * The canvas is cleared and painted with a neutral background, then the image is drawn
+ * centered and transformed by `crop.offsetX`, `crop.offsetY` (pixel offsets from center),
+ * `crop.rotation` (degrees), and `crop.zoom` (scale multiplier). The image is scaled
+ * so its smaller dimension fits the avatar output size before applying `crop.zoom`.
+ *
+ * @param canvas - Target canvas element sized to `AVATAR_OUTPUT_SIZE`
+ * @param image - Source HTMLImageElement to draw (uses `naturalWidth`/`naturalHeight`)
+ * @param crop - Crop transform containing:
+ *   - `offsetX` and `offsetY`: pixel translations from canvas center
+ *   - `rotation`: degrees to rotate the image
+ *   - `zoom`: multiplicative scale applied after fitting the image to the output size
+ */
+function drawAvatarCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, crop: AvatarCrop): void {
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    return;
+  }
+
+  const baseScale = AVATAR_OUTPUT_SIZE / Math.min(image.naturalWidth, image.naturalHeight);
+  context.clearRect(0, 0, AVATAR_OUTPUT_SIZE, AVATAR_OUTPUT_SIZE);
+  context.fillStyle = "#f8fbf6";
+  context.fillRect(0, 0, AVATAR_OUTPUT_SIZE, AVATAR_OUTPUT_SIZE);
+  context.save();
+  context.translate(AVATAR_OUTPUT_SIZE / 2 + crop.offsetX, AVATAR_OUTPUT_SIZE / 2 + crop.offsetY);
+  context.rotate((crop.rotation * Math.PI) / 180);
+  context.scale(baseScale * crop.zoom, baseScale * crop.zoom);
+  context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
+  context.restore();
+}
+
+/**
+ * Create an image Blob from a canvas suitable for avatar upload.
+ *
+ * Attempts to encode and compress the provided canvas into an image Blob whose size does not exceed AVATAR_MAX_UPLOAD_BYTES; rejects if no acceptable Blob can be produced.
+ *
+ * @param canvas - The source HTMLCanvasElement to convert
+ * @returns A Blob containing the encoded image ready for upload
+ */
+function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
+  const formats: { type: "image/webp" | "image/png"; quality?: number }[] = [
+    { type: "image/webp", quality: 0.82 },
+    { type: "image/webp", quality: 0.72 },
+    { type: "image/png" },
+  ];
+
+  return new Promise((resolve, reject) => {
+    function tryFormat(index: number): void {
+      const format = formats[index];
+
+      if (!format) {
+        reject(new Error("Avatar image is too large after resizing."));
+        return;
+      }
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            tryFormat(index + 1);
+            return;
+          }
+
+          if (blob.size <= AVATAR_MAX_UPLOAD_BYTES) {
+            resolve(blob);
+            return;
+          }
+
+          tryFormat(index + 1);
+        },
+        format.type,
+        format.quality,
+      );
+    }
+
+    tryFormat(0);
+  });
+}
+
+/**
+ * Renders an avatar image crop-and-upload editor.
+ *
+ * Allows selecting an image, interactively panning/zooming/rotating a square crop on a 256px canvas, and uploading a compressed/cropped Blob.
+ *
+ * @param disabled - When true, user interactions and controls are disabled.
+ * @param onUpload - Callback invoked with the cropped image Blob when the user chooses "Use cropped image"; the Blob is compressed and sized to meet upload limits.
+ * @returns The avatar editor's JSX element.
+ */
+function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLImageElement>();
+  const pointersRef = useRef(new Map<number, CanvasPointer>());
+  const dragRef = useRef<{ point: CanvasPointer; offsetX: number; offsetY: number }>();
+  const gestureRef = useRef<{
+    angle: number;
+    distance: number;
+    rotation: number;
+    zoom: number;
+  }>();
+  const objectUrlRef = useRef<string>();
+  const loadingImageRef = useRef<HTMLImageElement>();
+  const mountedRef = useRef(true);
+  const [crop, setCrop] = useState<AvatarCrop>({ offsetX: 0, offsetY: 0, rotation: 0, zoom: 1 });
+  const [hasImage, setHasImage] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const image = imageRef.current;
+
+    if (!canvas || !image) {
+      return;
+    }
+
+    drawAvatarCanvas(canvas, image, crop);
+  }, [crop, hasImage]);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = undefined;
+      }
+
+      if (loadingImageRef.current) {
+        loadingImageRef.current.onload = null;
+        loadingImageRef.current.onerror = null;
+        loadingImageRef.current.src = "";
+        loadingImageRef.current = undefined;
+      }
+    };
+  }, []);
+
+  function startDrag(event: PointerEvent): void {
+    const canvas = canvasRef.current;
+
+    if (!canvas || disabled || !hasImage) {
+      return;
+    }
+
+    canvas.setPointerCapture(event.pointerId);
+    pointersRef.current.set(event.pointerId, canvasPoint(canvas, event));
+
+    if (pointersRef.current.size === 1) {
+      dragRef.current = {
+        point: canvasPoint(canvas, event),
+        offsetX: crop.offsetX,
+        offsetY: crop.offsetY,
+      };
+      gestureRef.current = undefined;
+      return;
+    }
+
+    const points = Array.from(pointersRef.current.values());
+    const [first, second] = points;
+
+    if (first && second) {
+      gestureRef.current = {
+        angle: pointerAngle(first, second),
+        distance: pointerDistance(first, second),
+        rotation: crop.rotation,
+        zoom: crop.zoom,
+      };
+      dragRef.current = undefined;
+    }
+  }
+
+  function moveDrag(event: PointerEvent): void {
+    const canvas = canvasRef.current;
+
+    if (!canvas || disabled || !hasImage || !pointersRef.current.has(event.pointerId)) {
+      return;
+    }
+
+    const point = canvasPoint(canvas, event);
+    pointersRef.current.set(event.pointerId, point);
+
+    if (pointersRef.current.size >= 2 && gestureRef.current) {
+      const points = Array.from(pointersRef.current.values());
+      const [first, second] = points;
+
+      if (!first || !second) {
+        return;
+      }
+
+      const distance = pointerDistance(first, second);
+      const angle = pointerAngle(first, second);
+      const nextZoom = clamp(gestureRef.current.zoom * (distance / gestureRef.current.distance), 1, 3);
+      const nextRotation = gestureRef.current.rotation + ((angle - gestureRef.current.angle) * 180) / Math.PI;
+      setCrop((previous) => ({ ...previous, rotation: nextRotation, zoom: nextZoom }));
+      return;
+    }
+
+    const drag = dragRef.current;
+
+    if (!drag) {
+      return;
+    }
+
+    setCrop((previous) => ({
+      ...previous,
+      offsetX: clamp(drag.offsetX + point.x - drag.point.x, -128, 128),
+      offsetY: clamp(drag.offsetY + point.y - drag.point.y, -128, 128),
+    }));
+  }
+
+  function endDrag(event: PointerEvent): void {
+    pointersRef.current.delete(event.pointerId);
+    dragRef.current = undefined;
+    gestureRef.current = undefined;
+  }
+
+  async function selectImage(file: File): Promise<void> {
+    if (!file.type.startsWith("image/") || file.type === "image/svg+xml") {
+      setError("Choose a PNG, JPEG, or WebP image.");
+      return;
+    }
+
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = undefined;
+    }
+
+    if (loadingImageRef.current) {
+      loadingImageRef.current.onload = null;
+      loadingImageRef.current.onerror = null;
+      loadingImageRef.current.src = "";
+      loadingImageRef.current = undefined;
+    }
+
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    objectUrlRef.current = url;
+    loadingImageRef.current = image;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => {
+          image.onload = null;
+          image.onerror = null;
+          resolve();
+        };
+        image.onerror = () => {
+          image.onload = null;
+          image.onerror = null;
+          reject(new Error("Unable to load image."));
+        };
+        image.src = url;
+      });
+
+      if (!mountedRef.current || objectUrlRef.current !== url) {
+        return;
+      }
+
+      imageRef.current = image;
+      setCrop({ offsetX: 0, offsetY: 0, rotation: 0, zoom: 1 });
+      setHasImage(true);
+      setError(undefined);
+    } catch (nextError) {
+      if (mountedRef.current && objectUrlRef.current === url) {
+        setError(nextError instanceof Error ? nextError.message : "Unable to load image.");
+      }
+    } finally {
+      if (objectUrlRef.current === url) {
+        URL.revokeObjectURL(url);
+        objectUrlRef.current = undefined;
+      }
+
+      if (loadingImageRef.current === image) {
+        loadingImageRef.current = undefined;
+      }
+    }
+  }
+
+  async function upload(): Promise<void> {
+    const canvas = canvasRef.current;
+
+    if (!canvas || !hasImage) {
+      return;
+    }
+
+    setUploading(true);
+    setError(undefined);
+
+    try {
+      const blob = await blobFromCanvas(canvas);
+      await onUpload(blob);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to upload avatar.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div className="avatar-editor">
+      <canvas
+        aria-label="Avatar crop preview"
+        className="avatar-crop-canvas"
+        height={AVATAR_OUTPUT_SIZE}
+        onPointerDown={startDrag}
+        onPointerCancel={endDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        ref={canvasRef}
+        role="img"
+        width={AVATAR_OUTPUT_SIZE}
+      />
+      <input
+        accept="image/png,image/jpeg,image/webp,image/*"
+        className="sr-only"
+        disabled={disabled || uploading}
+        onInput={(event) => {
+          const file = event.currentTarget.files?.[0];
+
+          if (file) {
+            void selectImage(file);
+          }
+        }}
+        ref={fileInputRef}
+        type="file"
+      />
+      <div className="avatar-editor-controls">
+        <button disabled={disabled || uploading} onClick={() => fileInputRef.current?.click()} type="button">
+          Choose image
+        </button>
+        <button disabled={disabled || uploading || !hasImage} onClick={() => void upload()} type="button">
+          {uploading ? "Uploading" : "Use cropped image"}
+        </button>
+      </div>
+      <label>
+        Zoom
+        <input
+          disabled={disabled || uploading || !hasImage}
+          max="3"
+          min="1"
+          onInput={(event) => setCrop((previous) => ({ ...previous, zoom: Number(event.currentTarget.value) }))}
+          step="0.01"
+          type="range"
+          value={crop.zoom}
+        />
+      </label>
+      <label>
+        Rotate
+        <input
+          disabled={disabled || uploading || !hasImage}
+          max="180"
+          min="-180"
+          onInput={(event) => setCrop((previous) => ({ ...previous, rotation: Number(event.currentTarget.value) }))}
+          step="1"
+          type="range"
+          value={crop.rotation}
+        />
+      </label>
+      {error ? <p className="form-error">{error}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * Renders the settings screen for the current user, including join QR, identity preview,
+ * profile form (display name and generated avatar style), and an image crop upload editor.
+ *
+ * The UI respects node feature flags from `config.networkConfig`: it enables or disables
+ * display name editing, avatar style editing, and image uploads accordingly. Saving the
+ * profile will invoke `onUpdateCurrentUser` with any changed display name or generated
+ * avatar settings. Image avatar uploads produced by the crop editor are forwarded to
+ * `onUploadAvatarImage`.
+ *
+ * @param onUpdateCurrentUser - Called with a `UserUpdateRequest` when the user saves profile changes.
+ * @param onUploadAvatarImage - Called with the cropped avatar `Blob` when the user uploads an image avatar.
+ */
+function SettingsView({
+  config,
+  currentUser,
+  onUpdateCurrentUser,
+  onUploadAvatarImage,
+}: {
+  config?: Config;
+  currentUser: User;
+  onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
+  onUploadAvatarImage: (blob: Blob) => Promise<void>;
+}) {
+  const [displayName, setDisplayName] = useState(currentUser.displayName);
+  const [avatarKind, setAvatarKind] = useState(currentUser.avatar?.kind === "image" ? "image" : "generated");
+  const [avatarSeed, setAvatarSeed] = useState(currentUser.avatar?.seed ?? currentUser.id);
+  const [avatarMode, setAvatarMode] = useState(currentUser.avatar?.mode ?? "face");
+  const [saving, setSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string>();
+  const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
+  const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
+  const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
   const qrSvg = useMemo(() => {
     if (!config?.joinUrl) {
       return "";
@@ -1196,6 +1830,70 @@ function SettingsView({ config, currentUser }: { config?: Config; currentUser: U
       light: "#ffffff",
     });
   }, [config?.joinUrl]);
+  const previewUser: User = {
+    ...currentUser,
+    displayName,
+    avatar:
+      avatarKind === "image"
+        ? currentUser.avatar
+        : {
+            kind: "generated",
+            seed: avatarSeed,
+            mode: avatarMode,
+          },
+  };
+
+  useEffect(() => {
+    setDisplayName(currentUser.displayName);
+    setAvatarKind(currentUser.avatar?.kind === "image" ? "image" : "generated");
+    setAvatarSeed(currentUser.avatar?.seed ?? currentUser.id);
+    setAvatarMode(currentUser.avatar?.mode ?? "face");
+  }, [
+    currentUser.avatar?.imageId,
+    currentUser.avatar?.kind,
+    currentUser.avatar?.mode,
+    currentUser.avatar?.seed,
+    currentUser.displayName,
+    currentUser.id,
+  ]);
+
+  async function saveProfile(): Promise<void> {
+    const update: UserUpdateRequest = {};
+
+    if (allowDisplayNameEdit) {
+      update.displayName = displayName.trim();
+    }
+
+    if (allowAvatarEdit && avatarKind !== "image") {
+      update.avatar = {
+        kind: "generated",
+        seed: avatarSeed.trim() || currentUser.id,
+        mode: avatarMode,
+      };
+    }
+
+    if (!update.displayName && !update.avatar) {
+      return;
+    }
+
+    setSaving(true);
+    setProfileError(undefined);
+
+    try {
+      await onUpdateCurrentUser(update);
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Unable to update profile.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function randomizeAvatar(): void {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    setAvatarKind("generated");
+    setAvatarSeed(`avatar.${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`);
+  }
 
   return (
     <section className="settings-view">
@@ -1214,13 +1912,76 @@ function SettingsView({ config, currentUser }: { config?: Config; currentUser: U
           <p>{config?.joinUrl ?? window.location.origin}</p>
         </div>
         <div className="identity-panel">
-          <Avatar id={currentUser.id} />
+          <Avatar avatar={previewUser.avatar} id={currentUser.id} />
           <div>
             <p className="eyebrow">This browser</p>
-            <h2>{currentUser.displayName}</h2>
+            <h2>{displayName}</h2>
             <p>{currentUser.id}</p>
           </div>
         </div>
+        <form
+          className="profile-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveProfile();
+          }}
+        >
+          <div>
+            <p className="eyebrow">Profile</p>
+            <h2>Local identity</h2>
+          </div>
+          <label>
+            Display name
+            <input
+              disabled={!allowDisplayNameEdit || saving}
+              maxLength={80}
+              onInput={(event) => setDisplayName(event.currentTarget.value)}
+              value={displayName}
+            />
+          </label>
+          <label>
+            Avatar style
+            <select
+              disabled={!allowAvatarEdit || saving || avatarKind === "image"}
+              onInput={(event) => {
+                setAvatarKind("generated");
+                setAvatarMode(event.currentTarget.value as (typeof AVATAR_MODES)[number]);
+              }}
+              value={avatarMode}
+            >
+              {AVATAR_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {mode}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="profile-actions">
+            <button disabled={!allowAvatarEdit || saving} onClick={randomizeAvatar} type="button">
+              New avatar
+            </button>
+            <button disabled={saving || (!allowDisplayNameEdit && !allowAvatarEdit)} type="submit">
+              {saving ? "Saving" : "Save profile"}
+            </button>
+          </div>
+          <div className="avatar-upload-panel">
+            <div>
+              <p className="eyebrow">Image avatar</p>
+              <h2>Crop upload</h2>
+            </div>
+            <AvatarImageEditor
+              disabled={!allowAvatarEdit || !allowAvatarUpload || saving}
+              onUpload={onUploadAvatarImage}
+            />
+            {!allowAvatarUpload ? (
+              <p className="form-note">Image avatar uploads are disabled on this LOAM node.</p>
+            ) : null}
+          </div>
+          {!allowDisplayNameEdit && !allowAvatarEdit ? (
+            <p className="form-note">Profile editing is disabled on this LOAM node.</p>
+          ) : null}
+          {profileError ? <p className="form-error">{profileError}</p> : null}
+        </form>
       </div>
     </section>
   );

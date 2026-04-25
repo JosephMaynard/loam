@@ -47,7 +47,11 @@ describe("@loam/schema", () => {
         enableDMs: false,
         enableReactions: true,
         enableMarkdown: true,
+        enableLLMChat: false,
         enableLLMStreaming: false,
+        allowUserDisplayNameEdit: false,
+        allowUserAvatarEdit: false,
+        allowUserAvatarUpload: false,
       }),
     ).not.toThrow();
   });
@@ -118,17 +122,17 @@ describe("@loam/schema", () => {
         channelId: "chn_general",
         body: "",
         createdAt: 1712850000,
+        meta: {
+          streaming: true,
+        },
       }),
-    ).toThrow();
+    ).not.toThrow();
 
     expect(() =>
-      MessageSchema.parse({
-        id: "msg_3",
+      MessageCreateRequestSchema.parse({
         type: "dm",
-        authorId: "usr_123",
         recipientUserId: "usr_456",
         body: "   ",
-        createdAt: 1712850000,
       }),
     ).toThrow();
   });
