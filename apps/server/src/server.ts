@@ -814,6 +814,7 @@ function updateMessage(message: Message, nextBody: string, streaming: boolean): 
  * @param botId - The bot user's id whose messages should be mapped to the `assistant` role
  * @param currentUserId - The current human user's id whose messages should be mapped to the `user` role
  * @returns An array of chat message objects with `role` (`system` | `user` | `assistant`) and `content`; when a system prompt is configured it is prepended as the first message.
+ */
 function llmMessagesForUser(botId: string, currentUserId: string): { role: "system" | "user" | "assistant"; content: string }[] {
   const messages = dmMessages(botId, currentUserId).flatMap((message) => {
     if (message.type !== "dm" || !message.body.trim()) {
