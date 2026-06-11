@@ -50,7 +50,7 @@ This policy covers security issues in:
 
 It does not cover:
 
-- vulnerabilities in third party dependencies outside LOAM’s own code, unless LOAM uses them in an unsafe way
+- vulnerabilities in third-party dependencies outside LOAM’s own code, unless LOAM uses them in an unsafe way
 - general usage questions or feature requests
 - issues in unofficial forks, deployments, devices, or infrastructure not maintained by the LOAM project
 - reports about insecure local networks, routers, browsers, operating systems, or hardware that are not caused by LOAM itself
