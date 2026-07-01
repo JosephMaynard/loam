@@ -1,9 +1,15 @@
 import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
+  AdminBootstrapStrategySchema,
+  LoamConfigSchema,
   MessageSchema,
+  NetworkConfigSchema,
   StreamEventSchema,
   UserSchema,
   type Channel,
+  type FeatureFlags,
+  type IdentityConfig,
+  type LoamConfig,
   type Message,
   type MessageCreateRequest,
   type NetworkConfig,
@@ -39,6 +45,9 @@ type RouteState =
     }
   | {
       screen: "settings";
+    }
+  | {
+      screen: "admin";
     };
 
 type Config = {
@@ -70,6 +79,10 @@ type SocketEvent =
   | {
       type: "userUpserted";
       user: User;
+    }
+  | {
+      type: "configUpdated";
+      networkConfig: NetworkConfig;
     }
   | {
       type: "stream";
@@ -142,6 +155,10 @@ function parseRoute(path: string): RouteState {
 
   if (path === "/settings") {
     return { screen: "settings" };
+  }
+
+  if (path === "/admin") {
+    return { screen: "admin" };
   }
 
   const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);
@@ -240,7 +257,13 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
     return undefined;
   }
 
-  const candidate = payload as { type: unknown; message?: unknown; messageId?: unknown; user?: unknown };
+  const candidate = payload as {
+    type: unknown;
+    message?: unknown;
+    messageId?: unknown;
+    user?: unknown;
+    networkConfig?: unknown;
+  };
 
   if (candidate.type === "messageCreated") {
     const message = MessageSchema.safeParse(candidate.message);
@@ -261,6 +284,11 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
   if (candidate.type === "userUpserted") {
     const user = UserSchema.safeParse(candidate.user);
     return user.success ? { type: "userUpserted", user: user.data } : undefined;
+  }
+
+  if (candidate.type === "configUpdated") {
+    const networkConfig = NetworkConfigSchema.safeParse(candidate.networkConfig);
+    return networkConfig.success ? { type: "configUpdated", networkConfig: networkConfig.data } : undefined;
   }
 
   if (
@@ -594,6 +622,42 @@ function LoamApp() {
     [upsertUsers],
   );
 
+  const claimAdmin = useCallback(
+    async (secret: string) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(apiUrl("/api/admin/claim"), {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({ secret }),
+        });
+        const payload: unknown = await response.json().catch(() => undefined);
+
+        if (!response.ok) {
+          const message =
+            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+              ? payload.error
+              : `Admin claim failed: ${response.status}`;
+          throw new Error(message);
+        }
+
+        const user = UserSchema.parse(payload);
+        setCurrentUser(user);
+        upsertUsers([user]);
+        setConfig((previous) => (previous ? { ...previous, currentUser: user } : previous));
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
   const uploadAvatarImage = useCallback(
     async (blob: Blob) => {
       const controller = new AbortController();
@@ -797,6 +861,13 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "configUpdated") {
+          setConfig((previous) =>
+            previous ? { ...previous, networkConfig: payload.networkConfig } : previous,
+          );
+          return;
+        }
+
         upsertUsers([payload.user]);
       };
     }
@@ -836,10 +907,13 @@ function LoamApp() {
         currentUser={currentUser}
         users={users}
       />
-      {routeState.screen === "settings" ? (
+      {routeState.screen === "admin" ? (
+        <AdminView currentUser={currentUser} />
+      ) : routeState.screen === "settings" ? (
         <SettingsView
           config={config}
           currentUser={currentUser}
+          onClaimAdmin={claimAdmin}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
         />
@@ -958,6 +1032,12 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
       </section>
 
       <div className="sidebar-footer">
+        {currentUser.isAdmin ? (
+          <NavLink active={false} href="/admin">
+            <span className="nav-glyph">⚙</span>
+            Admin
+          </NavLink>
+        ) : null}
         <NavLink active={false} href="/settings">
           <span className="nav-glyph">⌁</span>
           Join QR and settings
@@ -1844,11 +1924,13 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
 function SettingsView({
   config,
   currentUser,
+  onClaimAdmin,
   onUpdateCurrentUser,
   onUploadAvatarImage,
 }: {
   config?: Config;
   currentUser: User;
+  onClaimAdmin: (secret: string) => Promise<void>;
   onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
   onUploadAvatarImage: (blob: Blob) => Promise<void>;
 }) {
@@ -2023,7 +2105,409 @@ function SettingsView({
           ) : null}
           {profileError ? <p className="form-error">{profileError}</p> : null}
         </form>
+        <AdminAccessPanel
+          allowAdminClaim={config?.networkConfig.allowAdminClaim ?? false}
+          currentUser={currentUser}
+          onClaimAdmin={onClaimAdmin}
+        />
       </div>
+    </section>
+  );
+}
+
+/**
+ * Settings panel granting entry to the admin area: a link for admins, a secret claim form when the
+ * node's bootstrap strategy allows claiming, or an explanatory note otherwise.
+ */
+function AdminAccessPanel({
+  allowAdminClaim,
+  currentUser,
+  onClaimAdmin,
+}: {
+  allowAdminClaim: boolean;
+  currentUser: User;
+  onClaimAdmin: (secret: string) => Promise<void>;
+}) {
+  const [secret, setSecret] = useState("");
+  const [claiming, setClaiming] = useState(false);
+  const [claimError, setClaimError] = useState<string>();
+
+  async function claim(): Promise<void> {
+    setClaiming(true);
+    setClaimError(undefined);
+
+    try {
+      await onClaimAdmin(secret.trim());
+      setSecret("");
+    } catch (error) {
+      setClaimError(error instanceof Error ? error.message : "Unable to claim admin access.");
+    } finally {
+      setClaiming(false);
+    }
+  }
+
+  return (
+    <div className="profile-panel">
+      <div>
+        <p className="eyebrow">Administration</p>
+        <h2>{currentUser.isAdmin ? "Admin tools" : "Admin access"}</h2>
+      </div>
+      {currentUser.isAdmin ? (
+        <NavLink active={false} className="nav-link" href="/admin">
+          Open the admin area →
+        </NavLink>
+      ) : allowAdminClaim ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void claim();
+          }}
+        >
+          <label>
+            Setup code or passphrase
+            <input
+              autoComplete="off"
+              disabled={claiming}
+              onInput={(event) => setSecret(event.currentTarget.value)}
+              type="password"
+              value={secret}
+            />
+          </label>
+          <div className="profile-actions">
+            <button disabled={claiming || !secret.trim()} type="submit">
+              {claiming ? "Checking" : "Unlock admin"}
+            </button>
+          </div>
+          {claimError ? <p className="form-error">{claimError}</p> : null}
+        </form>
+      ) : (
+        <p className="form-note">Admin claiming is not enabled on this LOAM node.</p>
+      )}
+    </div>
+  );
+}
+
+const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
+  ["enablePublicChannels", "Public channels"],
+  ["enablePrivateChannels", "Private channels (not implemented yet)"],
+  ["enableUserChannels", "User-created channels (not implemented yet)"],
+  ["enableReplies", "Thread replies"],
+  ["enableDMs", "Direct messages"],
+  ["enableReactions", "Reactions"],
+  ["enableMarkdown", "Markdown rendering"],
+];
+
+const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
+  ["allowUserDisplayNameEdit", "Users can edit their display name"],
+  ["allowUserAvatarEdit", "Users can edit their avatar"],
+  ["allowUserAvatarUpload", "Users can upload avatar images"],
+  ["allowAdminUserEdit", "Admins can edit other users"],
+];
+
+/**
+ * Admin-only configuration area: edits node feature flags, identity permissions, LLM settings, and
+ * the admin bootstrap strategy via the /api/admin/config endpoints. Client gating is cosmetic —
+ * the server enforces admin on every request.
+ */
+function AdminView({ currentUser }: { currentUser: User }) {
+  const [adminConfig, setAdminConfig] = useState<LoamConfig>();
+  const [loadError, setLoadError] = useState<string>();
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string>();
+  const [passphrase, setPassphrase] = useState("");
+
+  useEffect(() => {
+    if (!currentUser.isAdmin) {
+      return;
+    }
+
+    let active = true;
+
+    fetchJson<unknown>("/api/admin/config")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        const parsed = LoamConfigSchema.safeParse(payload);
+
+        if (parsed.success) {
+          setAdminConfig(parsed.data);
+        } else {
+          setLoadError("Received an invalid config payload from the server.");
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setLoadError(error instanceof Error ? error.message : "Unable to load the node config.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [currentUser.isAdmin]);
+
+  async function save(): Promise<void> {
+    if (!adminConfig) {
+      return;
+    }
+
+    setSaving(true);
+    setSaved(false);
+    setSaveError(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const update = {
+        identity: adminConfig.identity,
+        features: adminConfig.features,
+        llm: { ollama: adminConfig.llm.ollama },
+        admin: {
+          bootstrap: adminConfig.admin.bootstrap,
+          ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
+        },
+        security: adminConfig.security,
+      };
+      const response = await fetch(apiUrl("/api/admin/config"), {
+        method: "PATCH",
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+        },
+        signal: controller.signal,
+        body: JSON.stringify(update),
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Config update failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      const parsed = LoamConfigSchema.safeParse(payload);
+
+      if (parsed.success) {
+        setAdminConfig(parsed.data);
+      }
+
+      setPassphrase("");
+      setSaved(true);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Unable to save the node config.");
+    } finally {
+      window.clearTimeout(timeout);
+      setSaving(false);
+    }
+  }
+
+  function setFeature(key: keyof FeatureFlags, value: boolean): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, features: { ...previous.features, [key]: value } } : previous,
+    );
+  }
+
+  function setIdentity(key: keyof IdentityConfig, value: boolean): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, identity: { ...previous.identity, [key]: value } } : previous,
+    );
+  }
+
+  function setOllama(update: Partial<LoamConfig["llm"]["ollama"]>): void {
+    setAdminConfig((previous) =>
+      previous
+        ? { ...previous, llm: { ollama: { ...previous.llm.ollama, ...update } } }
+        : previous,
+    );
+  }
+
+  if (!currentUser.isAdmin) {
+    return (
+      <section className="settings-view">
+        <header className="conversation-header">
+          <NavLink active={false} className="mobile-back" href="/channels">
+            ←
+          </NavLink>
+          <div>
+            <p className="eyebrow">Admin</p>
+            <h1>Not authorized</h1>
+          </div>
+        </header>
+        <p className="form-note">
+          This area is for node administrators. Claim admin access from the settings page if this
+          node allows it.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="settings-view">
+      <header className="conversation-header">
+        <NavLink active={false} className="mobile-back" href="/channels">
+          ←
+        </NavLink>
+        <div>
+          <p className="eyebrow">Admin</p>
+          <h1>Node configuration</h1>
+        </div>
+      </header>
+      {loadError ? <p className="form-error">{loadError}</p> : null}
+      {!adminConfig && !loadError ? <p className="form-note">Loading node config…</p> : null}
+      {adminConfig ? (
+        <form
+          className="settings-grid"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Features</p>
+              <h2>Messaging</h2>
+            </div>
+            {FEATURE_FLAG_LABELS.map(([key, label]) => (
+              <label className="admin-toggle" key={key}>
+                <input
+                  checked={adminConfig.features[key]}
+                  disabled={saving}
+                  onInput={(event) => setFeature(key, event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Identity</p>
+              <h2>Profiles</h2>
+            </div>
+            {IDENTITY_LABELS.map(([key, label]) => (
+              <label className="admin-toggle" key={key}>
+                <input
+                  checked={adminConfig.identity[key]}
+                  disabled={saving}
+                  onInput={(event) => setIdentity(key, event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">LLM</p>
+              <h2>Assistant (Ollama)</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.llm.ollama.enabled}
+                disabled={saving}
+                onInput={(event) => setOllama({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Enable the LLM assistant
+            </label>
+            <label>
+              Ollama base URL
+              <input
+                disabled={saving}
+                onInput={(event) => setOllama({ baseUrl: event.currentTarget.value })}
+                value={adminConfig.llm.ollama.baseUrl}
+              />
+            </label>
+            <label>
+              Model
+              <input
+                disabled={saving}
+                onInput={(event) => setOllama({ model: event.currentTarget.value })}
+                value={adminConfig.llm.ollama.model}
+              />
+            </label>
+            <label>
+              Bot display name
+              <input
+                disabled={saving}
+                maxLength={80}
+                onInput={(event) => setOllama({ botDisplayName: event.currentTarget.value })}
+                value={adminConfig.llm.ollama.botDisplayName}
+              />
+            </label>
+            <label>
+              System prompt (optional)
+              <textarea
+                disabled={saving}
+                onInput={(event) => setOllama({ systemPrompt: event.currentTarget.value || undefined })}
+                rows={3}
+                value={adminConfig.llm.ollama.systemPrompt ?? ""}
+              />
+            </label>
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Admin access</p>
+              <h2>Bootstrap</h2>
+            </div>
+            <label>
+              Strategy
+              <select
+                disabled={saving}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          admin: {
+                            ...previous.admin,
+                            bootstrap: AdminBootstrapStrategySchema.parse(event.currentTarget.value),
+                          },
+                        }
+                      : previous,
+                  )
+                }
+                value={adminConfig.admin.bootstrap}
+              >
+                {AdminBootstrapStrategySchema.options.map((strategy) => (
+                  <option key={strategy} value={strategy}>
+                    {strategy}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {adminConfig.admin.bootstrap === "passphrase" ? (
+              <label>
+                New admin passphrase (min 8 chars; leave blank to keep the current one)
+                <input
+                  autoComplete="off"
+                  disabled={saving}
+                  maxLength={256}
+                  onInput={(event) => setPassphrase(event.currentTarget.value)}
+                  type="password"
+                  value={passphrase}
+                />
+              </label>
+            ) : null}
+            <p className="form-note">
+              The setup-code strategy prints a one-time claim code in the server logs at startup.
+            </p>
+            <div className="profile-actions">
+              <button disabled={saving} type="submit">
+                {saving ? "Saving" : "Save node config"}
+              </button>
+            </div>
+            {saved ? <p className="form-note">Saved. Connected clients pick the change up live.</p> : null}
+            {saveError ? <p className="form-error">{saveError}</p> : null}
+          </div>
+        </form>
+      ) : null}
     </section>
   );
 }

@@ -618,9 +618,35 @@ a {
 }
 
 .profile-panel input:focus,
-.profile-panel select:focus {
+.profile-panel select:focus,
+.profile-panel textarea:focus {
   border-color: #2f5f4c;
   outline: 3px solid rgba(47, 95, 76, 0.18);
+}
+
+.profile-panel textarea {
+  width: 100%;
+  border: 1px solid #b7cabd;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17231d;
+  padding: 9px 10px;
+  font-family: inherit;
+  font-weight: 500;
+  resize: vertical;
+}
+
+.profile-panel label.admin-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.profile-panel .admin-toggle input[type="checkbox"] {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  accent-color: #2f5f4c;
 }
 
 .profile-actions {
