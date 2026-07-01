@@ -1401,7 +1401,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     return applyUserUpdate(user, body.data);
   });
-  server.get<{ Params: { fileName: string } }>("/api/avatars/:fileName", async (request, reply) => {
+  server.get<{ Params: { fileName: string } }>(
+    "/api/avatars/:fileName",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     const avatar = parseAvatarImageId(request.params.fileName);
 
     if (!avatar) {
@@ -1459,7 +1462,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return reply.code(201).send(result);
   });
 
-  server.post("/api/admin/claim", async (request, reply) => {
+  server.post(
+    "/api/admin/claim",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     const body = AdminClaimRequestSchema.safeParse(request.body);
 
     if (!body.success) {
@@ -1542,7 +1548,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Unauthenticated panic trigger: fires the kill switch with a pre-shared token so a wipe can be
   // set off fast (bookmark/NFC/second device) without navigating the admin UI. 404s unless a token
   // is configured, so the route stays indistinguishable from absent on ordinary nodes.
-  server.post("/api/panic", async (request, reply) => {
+  server.post(
+    "/api/panic",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     if (!appConfig.killSwitch.enabled || !appConfig.killSwitch.panicToken) {
       return reply.code(404).send({ error: "Not found" });
     }
