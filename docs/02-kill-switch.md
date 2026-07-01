@@ -1,5 +1,15 @@
 # 02 — Kill switch (fast data wipe)
 
+> **Status: landed.** `killSwitch: { enabled (default false), requireConfirmation (default true),
+> panicToken? }` in the shared config schema; `POST /api/admin/kill-switch` (admin + enabled
+> required) and unauthenticated `POST /api/panic` (404 unless a token ≥16 chars is configured;
+> rate-limited, constant-time compare). The wipe empties all tables via the DAL's `wipeAll()`,
+> deletes `avatars/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
+> re-seeds defaults — config survives so the switch can fire again. Clients purge IndexedDB,
+> localStorage, service worker + caches, and show a neutral "Disconnected" screen. Admin UI has a
+> Safety panel with type-to-confirm arming. Remaining (future): duress/decoy passphrase; key-discard
+> wipe once encryption at rest lands (see the caveat below — a `DELETE` is not secure erasure).
+
 ## Goal & threat model
 
 A **config-gated, admin-triggered** action that deletes all LOAM data quickly. Primary threat model:

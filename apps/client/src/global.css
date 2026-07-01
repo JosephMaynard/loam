@@ -649,6 +649,32 @@ a {
   accent-color: #2f5f4c;
 }
 
+.danger-zone {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #d9a08c;
+  border-radius: 10px;
+  background: #fdf3ef;
+  padding: 14px;
+}
+
+.profile-actions .danger-button {
+  background: #8b2b17;
+}
+
+.wiped-screen {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  text-align: center;
+  color: #425a4f;
+}
+
+.wiped-screen h1 {
+  margin: 8px 0;
+  color: #17231d;
+}
+
 .profile-actions {
   display: flex;
   flex-wrap: wrap;

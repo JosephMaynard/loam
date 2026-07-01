@@ -119,13 +119,21 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   validated against the shared `LoamConfigSchema`. `PATCH /api/admin/config` merges, persists,
   hot-reloads, and broadcasts `configUpdated`. Feature flags are **enforced server-side** in
   `createMessage()`.
+- **Kill switch** (off by default; `killSwitch.enabled`): `executeKillSwitch()` wipes all tables
+  (`store.wipeAll()`), deletes avatars, invalidates sessions, broadcasts `wipe` (clients purge
+  IndexedDB/localStorage/SW caches and show a neutral disconnected screen), closes sockets, and
+  re-seeds defaults. Config survives the wipe. Optional unauthenticated panic token
+  (`killSwitch.panicToken`) fires it via `POST /api/panic`. Note: without encryption at rest this
+  is a delete, **not** secure erasure (docs/02).
 - **Broadcast filtering**: `broadcast()` sends to all sockets but `socketCanReceiveEvent` restricts DM
   and DM-reaction events to their participants; channel messages and `userUpserted` go to everyone.
 - **REST endpoints**: `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
   `GET /api/channels`, `GET /api/messages/:channelId`, `GET /api/dms/:userId`, `POST /api/messages`,
-  `POST /api/admin/claim`, `GET/PATCH /api/admin/config` (admin). WebSocket at `GET /ws` (requires
-  the session cookie to already be set — the client opens it only after `/api/config` resolves).
+  `POST /api/admin/claim`, `GET/PATCH /api/admin/config` (admin), `POST /api/admin/kill-switch`
+  (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless
+  configured). WebSocket at `GET /ws` (requires the session cookie to already be set — the client
+  opens it only after `/api/config` resolves).
 - **Avatar uploads**: base64 JSON body, ≤128KB, magic-byte signature checked against declared MIME,
   written to `.loam/avatars/`. Original files never leave the browser (cropped client-side to 256×256).
 - **LLM (optional)**: when `llm.ollama.enabled`, a bot user appears as a DM contact. DMing it streams

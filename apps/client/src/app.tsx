@@ -24,7 +24,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
-import { deleteRecord, getAllRecords, putRecords } from "./lib/local-store";
+import { deleteRecord, destroyDatabase, getAllRecords, putRecords } from "./lib/local-store";
 import { renderMarkdown } from "./lib/markdown";
 
 type Conversation =
@@ -83,6 +83,9 @@ type SocketEvent =
   | {
       type: "configUpdated";
       networkConfig: NetworkConfig;
+    }
+  | {
+      type: "wipe";
     }
   | {
       type: "stream";
@@ -291,6 +294,10 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
     return networkConfig.success ? { type: "configUpdated", networkConfig: networkConfig.data } : undefined;
   }
 
+  if (candidate.type === "wipe") {
+    return { type: "wipe" };
+  }
+
   if (
     candidate.type === "start" ||
     candidate.type === "delta" ||
@@ -492,6 +499,7 @@ function LoamApp() {
   const [config, setConfig] = useState<Config>();
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string>();
+  const [wiped, setWiped] = useState(false);
 
   const upsertUsers = useCallback((incomingUsers: User[]) => {
     setUsers((previous) => {
@@ -524,6 +532,36 @@ function LoamApp() {
   const removeMessage = useCallback((messageId: string) => {
     setMessages((previous) => previous.filter((message) => message.id !== messageId));
     void deleteRecord("messages", messageId);
+  }, []);
+
+  const purgeLocalData = useCallback(async () => {
+    // Remote wipe (kill switch): drop everything this browser knows, then show a neutral
+    // disconnected screen. Best-effort on every step — nothing here may block another.
+    setWiped(true);
+    setMessages([]);
+    setChannels([]);
+    setUsers([]);
+    setConfig(undefined);
+    localStorage.removeItem(CURRENT_USER_KEY);
+    localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
+    localStorage.removeItem(LAST_CONVERSATION_KEY);
+    localStorage.removeItem(SERVER_URL_KEY);
+
+    try {
+      await destroyDatabase();
+    } catch {
+      // best effort
+    }
+
+    if ("serviceWorker" in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations().catch(() => []);
+      await Promise.all(registrations.map((registration) => registration.unregister().catch(() => false)));
+    }
+
+    if (typeof caches !== "undefined") {
+      const cacheKeys = await caches.keys().catch(() => []);
+      await Promise.all(cacheKeys.map((key) => caches.delete(key).catch(() => false)));
+    }
   }, []);
 
   const applyStreamEvent = useCallback((event: StreamEvent) => {
@@ -868,6 +906,11 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "wipe") {
+          void purgeLocalData();
+          return;
+        }
+
         upsertUsers([payload.user]);
       };
     }
@@ -883,7 +926,7 @@ function LoamApp() {
 
       socket?.close();
     };
-  }, [applyStreamEvent, config?.currentUser.id, removeMessage, upsertMessages, upsertUsers]);
+  }, [applyStreamEvent, config?.currentUser.id, purgeLocalData, removeMessage, upsertMessages, upsertUsers]);
 
   const usersById = useMemo(() => {
     const indexed = new Map(users.map((user) => [user.id, user]));
@@ -897,6 +940,18 @@ function LoamApp() {
         : [],
     [activeConversation, currentUser.id, messages],
   );
+
+  if (wiped) {
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <h1>Disconnected</h1>
+          <p>This node is no longer available.</p>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className={shellClassName}>
@@ -2216,6 +2271,10 @@ function AdminView({ currentUser }: { currentUser: User }) {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string>();
   const [passphrase, setPassphrase] = useState("");
+  const [panicToken, setPanicToken] = useState("");
+  const [wipeConfirmText, setWipeConfirmText] = useState("");
+  const [firing, setFiring] = useState(false);
+  const [fireError, setFireError] = useState<string>();
 
   useEffect(() => {
     if (!currentUser.isAdmin) {
@@ -2270,6 +2329,11 @@ function AdminView({ currentUser }: { currentUser: User }) {
           bootstrap: adminConfig.admin.bootstrap,
           ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
         },
+        killSwitch: {
+          enabled: adminConfig.killSwitch.enabled,
+          requireConfirmation: adminConfig.killSwitch.requireConfirmation,
+          ...(panicToken.trim() ? { panicToken: panicToken.trim() } : {}),
+        },
         security: adminConfig.security,
       };
       const response = await fetch(apiUrl("/api/admin/config"), {
@@ -2298,6 +2362,7 @@ function AdminView({ currentUser }: { currentUser: User }) {
       }
 
       setPassphrase("");
+      setPanicToken("");
       setSaved(true);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "Unable to save the node config.");
@@ -2325,6 +2390,44 @@ function AdminView({ currentUser }: { currentUser: User }) {
         ? { ...previous, llm: { ollama: { ...previous.llm.ollama, ...update } } }
         : previous,
     );
+  }
+
+  function setKillSwitch(update: Partial<LoamConfig["killSwitch"]>): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, killSwitch: { ...previous.killSwitch, ...update } } : previous,
+    );
+  }
+
+  async function fireKillSwitch(): Promise<void> {
+    setFiring(true);
+    setFireError(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(apiUrl("/api/admin/kill-switch"), {
+        method: "POST",
+        credentials: "include",
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const payload: unknown = await response.json().catch(() => undefined);
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Kill switch failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      // Success: the server broadcasts a wipe event and this client purges itself via the socket.
+    } catch (error) {
+      setFireError(error instanceof Error ? error.message : "Unable to trigger the kill switch.");
+      setFiring(false);
+    } finally {
+      window.clearTimeout(timeout);
+    }
   }
 
   if (!currentUser.isAdmin) {
@@ -2450,6 +2553,76 @@ function AdminView({ currentUser }: { currentUser: User }) {
                 value={adminConfig.llm.ollama.systemPrompt ?? ""}
               />
             </label>
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Safety</p>
+              <h2>Kill switch</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.killSwitch.enabled}
+                disabled={saving}
+                onInput={(event) => setKillSwitch({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Enable the kill switch (instant wipe of all node data)
+            </label>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.killSwitch.requireConfirmation}
+                disabled={saving || !adminConfig.killSwitch.enabled}
+                onInput={(event) => setKillSwitch({ requireConfirmation: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Require typed confirmation before firing
+            </label>
+            <label>
+              Panic token (optional, min 16 chars; enables unauthenticated POST /api/panic; leave
+              blank to keep the current one)
+              <input
+                autoComplete="off"
+                disabled={saving || !adminConfig.killSwitch.enabled}
+                maxLength={256}
+                onInput={(event) => setPanicToken(event.currentTarget.value)}
+                type="password"
+                value={panicToken}
+              />
+            </label>
+            {adminConfig.killSwitch.enabled ? (
+              <div className="danger-zone">
+                <p className="form-note">
+                  Firing the kill switch permanently deletes all messages, users, sessions, and
+                  avatars on this node and remotely purges every connected client. Node settings
+                  survive.
+                </p>
+                {adminConfig.killSwitch.requireConfirmation ? (
+                  <label>
+                    Type <strong>wipe</strong> to arm the button
+                    <input
+                      autoComplete="off"
+                      disabled={firing}
+                      onInput={(event) => setWipeConfirmText(event.currentTarget.value)}
+                      value={wipeConfirmText}
+                    />
+                  </label>
+                ) : null}
+                <div className="profile-actions">
+                  <button
+                    className="danger-button"
+                    disabled={
+                      firing ||
+                      (adminConfig.killSwitch.requireConfirmation && wipeConfirmText.trim() !== "wipe")
+                    }
+                    onClick={() => void fireKillSwitch()}
+                    type="button"
+                  >
+                    {firing ? "Wiping…" : "Wipe this node now"}
+                  </button>
+                </div>
+                {fireError ? <p className="form-error">{fireError}</p> : null}
+              </div>
+            ) : null}
           </div>
           <div className="profile-panel">
             <div>

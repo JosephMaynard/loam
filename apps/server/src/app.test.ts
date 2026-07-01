@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,7 +16,7 @@ afterEach(async () => {
   }
 });
 
-async function makeApp(config?: unknown): Promise<LoamApp> {
+async function makeApp(config?: unknown): Promise<{ app: LoamApp; dataDir: string } & LoamApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
 
   if (config !== undefined) {
@@ -28,7 +28,7 @@ async function makeApp(config?: unknown): Promise<LoamApp> {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
-  return app;
+  return { ...app, app, dataDir };
 }
 
 /** Reopen an app on an existing data dir (restart simulation). */
@@ -280,6 +280,22 @@ describe("admin config API", () => {
     expect(reopened.currentUser.isAdmin).toBe(true);
   });
 
+  it("redacts the panic token and never returns it", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+    const admin = await newSession(app);
+
+    const response = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+    });
+    const config = response.json() as { killSwitch: { enabled: boolean; panicToken?: string } };
+    expect(config.killSwitch.enabled).toBe(true);
+    expect(config.killSwitch.panicToken).toBeUndefined();
+  });
+
   it("clears the passphrase when patched to an empty string", async () => {
     const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
     const admin = await newSession(app);
@@ -295,5 +311,114 @@ describe("admin config API", () => {
 
     const session = await newSession(app);
     expect((await claim(app, session.cookie, "correct horse battery")).statusCode).toBe(403);
+  });
+});
+
+describe("kill switch", () => {
+  async function postKillSwitch(app: LoamApp, cookie: string) {
+    return app.server.inject({ method: "POST", url: "/api/admin/kill-switch", headers: { cookie } });
+  }
+
+  it("rejects non-admins and admins on nodes where it is disabled", async () => {
+    const disabled = await makeApp();
+    const admin = await newSession(disabled);
+    const visitor = await newSession(disabled);
+
+    expect((await postKillSwitch(disabled, visitor.cookie)).statusCode).toBe(403);
+    expect((await postKillSwitch(disabled, admin.cookie)).statusCode).toBe(403);
+    expect(disabled.store.loadMessages().length).toBe(0);
+  });
+
+  it("wipes all data, invalidates sessions, clears avatars, and re-seeds defaults", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+
+    const avatarsDir = join(dataDir, "avatars");
+    mkdirSync(avatarsDir, { recursive: true });
+    writeFileSync(join(avatarsDir, "avt_deadbeefdeadbeef.webp"), "fake");
+
+    const post = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "to be wiped" },
+    });
+    expect(post.statusCode).toBe(201);
+
+    const wipe = await postKillSwitch(app, admin.cookie);
+    expect(wipe.statusCode).toBe(200);
+
+    expect(app.store.loadMessages()).toEqual([]);
+    expect(app.store.loadSessions()).toEqual([]);
+    expect(app.store.loadUsers().every((user) => !user.isAdmin)).toBe(true);
+    expect(app.store.loadChannels().map((channel) => channel.id).sort()).toEqual(["announcements", "general"]);
+    expect(existsSync(join(avatarsDir, "avt_deadbeefdeadbeef.webp"))).toBe(false);
+
+    const returning = await app.server.inject({
+      method: "GET",
+      url: "/api/config",
+      headers: { cookie: admin.cookie },
+    });
+    const returningUser = (returning.json() as { currentUser: { id: string; isAdmin: boolean } }).currentUser;
+    expect(returningUser.id).not.toBe(admin.userId);
+
+    const fresh = await newSession(app);
+    expect(fresh.isAdmin).toBe(false);
+  });
+
+  it("keeps the kill switch enabled after a wipe so it can fire again", async () => {
+    const app = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    expect((await postKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+    const nextAdmin = await newSession(app);
+    expect(nextAdmin.isAdmin).toBe(true);
+    expect((await postKillSwitch(app, nextAdmin.cookie)).statusCode).toBe(200);
+  });
+});
+
+describe("panic endpoint", () => {
+  async function panic(app: LoamApp, token: string) {
+    return app.server.inject({ method: "POST", url: "/api/panic", payload: { token } });
+  }
+
+  it("404s when the kill switch or token is not configured", async () => {
+    const noKillSwitch = await makeApp();
+    expect((await panic(noKillSwitch, "whatever")).statusCode).toBe(404);
+
+    const noToken = await makeApp({ killSwitch: { enabled: true } });
+    expect((await panic(noToken, "whatever")).statusCode).toBe(404);
+  });
+
+  it("wipes without authentication given the correct token, rejects wrong tokens", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+    const admin = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "to be wiped" },
+    });
+
+    expect((await panic(app, "wrong-token")).statusCode).toBe(403);
+    expect(app.store.loadMessages().length).toBe(1);
+
+    expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(200);
+    expect(app.store.loadMessages()).toEqual([]);
+  });
+
+  it("rate-limits repeated wrong tokens", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await panic(app, `wrong-${attempt}`)).statusCode).toBe(403);
+    }
+
+    expect((await panic(app, "wrong-again")).statusCode).toBe(429);
   });
 });

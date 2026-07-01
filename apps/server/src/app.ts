@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import {
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
   MessageSchema,
+  PanicRequestSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -70,6 +71,9 @@ type ClientEvent =
   | {
       type: "configUpdated";
       networkConfig: NetworkConfig;
+    }
+  | {
+      type: "wipe";
     };
 
 export type AppOptions = {
@@ -159,6 +163,10 @@ export function defaultLoamConfig(): LoamConfig {
     admin: {
       bootstrap: "firstUser",
     },
+    killSwitch: {
+      enabled: false,
+      requireConfirmation: true,
+    },
     security: {
       profile: "standard",
     },
@@ -189,12 +197,15 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     features: { ...base.features, ...update.features },
     llm: { ollama: { ...base.llm.ollama, ...update.llm?.ollama } },
     admin: { ...base.admin, ...update.admin },
+    killSwitch: { ...base.killSwitch, ...update.killSwitch },
     security: { ...base.security, ...update.security },
   };
   const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
   merged.llm.ollama.systemPrompt = systemPrompt || undefined;
   const passphrase = merged.admin.passphrase?.trim();
   merged.admin.passphrase = passphrase || undefined;
+  const panicToken = merged.killSwitch.panicToken?.trim();
+  merged.killSwitch.panicToken = panicToken || undefined;
   return LoamConfigSchema.parse(merged);
 }
 
@@ -395,6 +406,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sockets = new Set<SocketSession>();
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
+  const panicAttempts = new Map<string, { count: number; resetAt: number }>();
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -562,11 +574,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     };
   }
 
-  /** The effective config as exposed to admins — the passphrase value is never returned. */
+  /** The effective config as exposed to admins — secret values are never returned. */
   function redactedConfig(): LoamConfig {
     return {
       ...appConfig,
       admin: { ...appConfig.admin, passphrase: undefined },
+      killSwitch: { ...appConfig.killSwitch, panicToken: undefined },
     };
   }
 
@@ -644,7 +657,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
-    if (event.type === "userUpserted" || event.type === "configUpdated") {
+    if (event.type === "userUpserted" || event.type === "configUpdated" || event.type === "wipe") {
       return true;
     }
 
@@ -1030,19 +1043,51 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Track a claim attempt for the given user and report whether they are over the limit.
+   * Track a secret-guess attempt under the given key (session user id or IP) and report whether
+   * that key is over the limit for the current window.
    */
-  function claimRateLimited(userId: string): boolean {
+  function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean {
     const now = Date.now();
-    const entry = claimAttempts.get(userId);
+    const entry = attempts.get(key);
 
     if (!entry || entry.resetAt <= now) {
-      claimAttempts.set(userId, { count: 1, resetAt: now + claimAttemptWindowMs });
+      attempts.set(key, { count: 1, resetAt: now + claimAttemptWindowMs });
       return false;
     }
 
     entry.count += 1;
     return entry.count > claimAttemptLimit;
+  }
+
+  /**
+   * Execute the kill switch: wipe all persisted and in-memory data (messages, users, channels,
+   * sessions, avatar files), signal connected clients to purge their local caches, close their
+   * sockets, and re-seed the node's defaults so it comes back factory-fresh. Config (including the
+   * kill-switch settings themselves) survives — the wipe destroys data, not settings.
+   */
+  async function executeKillSwitch(): Promise<void> {
+    store.wipeAll();
+    await rm(avatarsDir, { recursive: true, force: true });
+    sessions.clear();
+    claimAttempts.clear();
+
+    broadcast({ type: "wipe" });
+
+    for (const { socket } of sockets) {
+      socket.close();
+    }
+
+    sockets.clear();
+
+    data = { users: [], channels: [], messages: [] };
+    loadData();
+
+    if (appConfig.admin.bootstrap === "setupCode") {
+      adminSetupCode = makeAdminSetupCode();
+      server.log.info(`Admin setup code (single use): ${adminSetupCode}`);
+    }
+
+    server.log.warn("Kill switch executed: all data wiped, defaults re-seeded");
   }
 
   /**
@@ -1243,7 +1288,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send({ error: "Admin claiming is not enabled on this LOAM node" });
     }
 
-    if (claimRateLimited(currentUser.id)) {
+    if (attemptRateLimited(claimAttempts, currentUser.id)) {
       return reply.code(429).send({ error: "Too many claim attempts; try again later" });
     }
 
@@ -1271,6 +1316,47 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     return redactedConfig();
+  });
+
+  server.post("/api/admin/kill-switch", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    if (!appConfig.killSwitch.enabled) {
+      return reply.code(403).send({ error: "The kill switch is not enabled on this LOAM node" });
+    }
+
+    await executeKillSwitch();
+    return { ok: true };
+  });
+
+  // Unauthenticated panic trigger: fires the kill switch with a pre-shared token so a wipe can be
+  // set off fast (bookmark/NFC/second device) without navigating the admin UI. 404s unless a token
+  // is configured, so the route stays indistinguishable from absent on ordinary nodes.
+  server.post("/api/panic", async (request, reply) => {
+    if (!appConfig.killSwitch.enabled || !appConfig.killSwitch.panicToken) {
+      return reply.code(404).send({ error: "Not found" });
+    }
+
+    const body = PanicRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid request" });
+    }
+
+    if (attemptRateLimited(panicAttempts, request.ip)) {
+      return reply.code(429).send({ error: "Too many attempts" });
+    }
+
+    if (!timingSafeEqualStrings(body.data.token, appConfig.killSwitch.panicToken)) {
+      return reply.code(403).send({ error: "Invalid token" });
+    }
+
+    await executeKillSwitch();
+    return { ok: true };
   });
 
   server.patch("/api/admin/config", async (request, reply) => {

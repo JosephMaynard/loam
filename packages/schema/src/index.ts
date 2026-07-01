@@ -120,6 +120,13 @@ export const AdminConfigSchema = z.object({
 });
 export type AdminConfig = z.infer<typeof AdminConfigSchema>;
 
+export const KillSwitchConfigSchema = z.object({
+  enabled: z.boolean(),
+  requireConfirmation: z.boolean(),
+  panicToken: z.string().min(16).max(256).optional(),
+});
+export type KillSwitchConfig = z.infer<typeof KillSwitchConfigSchema>;
+
 export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
 export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
 
@@ -133,6 +140,7 @@ export const LoamConfigSchema = z.object({
   features: FeatureFlagsSchema,
   llm: z.object({ ollama: OllamaConfigSchema }),
   admin: AdminConfigSchema,
+  killSwitch: KillSwitchConfigSchema,
   security: SecurityConfigSchema,
 });
 export type LoamConfig = z.infer<typeof LoamConfigSchema>;
@@ -152,6 +160,11 @@ export const LoamConfigUpdateSchema = z.object({
       passphrase: z.string().max(256).optional(),
     })
     .optional(),
+  killSwitch: KillSwitchConfigSchema.partial()
+    .extend({
+      panicToken: z.string().max(256).optional(),
+    })
+    .optional(),
   security: SecurityConfigSchema.partial().optional(),
 });
 export type LoamConfigUpdate = z.infer<typeof LoamConfigUpdateSchema>;
@@ -160,6 +173,11 @@ export const AdminClaimRequestSchema = z.object({
   secret: z.string().min(1).max(256),
 });
 export type AdminClaimRequest = z.infer<typeof AdminClaimRequestSchema>;
+
+export const PanicRequestSchema = z.object({
+  token: z.string().min(1).max(256),
+});
+export type PanicRequest = z.infer<typeof PanicRequestSchema>;
 
 export const UserUpdateRequestSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),

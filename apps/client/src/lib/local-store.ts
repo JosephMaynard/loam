@@ -107,3 +107,27 @@ export async function deleteRecord(storeName: StoreName, id: string): Promise<vo
   transaction.objectStore(storeName).delete(id);
   await transactionDone(transaction);
 }
+
+/**
+ * Delete the entire local database (kill-switch purge). Closes the cached connection first, since
+ * deletion blocks while a connection is open.
+ */
+export async function destroyDatabase(): Promise<void> {
+  if (!hasIndexedDb()) {
+    return;
+  }
+
+  if (databasePromise) {
+    const database = await databasePromise.catch(() => undefined);
+    database?.close();
+    databasePromise = undefined;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    // Another tab still holds a connection; deletion completes once it closes.
+    request.onblocked = () => resolve();
+  });
+}
