@@ -1,11 +1,13 @@
 import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
   MessageSchema,
+  StreamEventSchema,
   UserSchema,
   type Channel,
   type Message,
   type MessageCreateRequest,
   type NetworkConfig,
+  type StreamEvent,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -68,6 +70,10 @@ type SocketEvent =
   | {
       type: "userUpserted";
       user: User;
+    }
+  | {
+      type: "stream";
+      event: StreamEvent;
     };
 
 type ReactionSummary = {
@@ -210,10 +216,12 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
  * Parses a raw websocket message payload into a validated SocketEvent.
  *
  * Accepts any input (commonly a JSON string), attempts to JSON-parse it, and validates the resulting object.
- * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, and `userUpserted`.
+ * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, `userUpserted`, and
+ * the LLM stream events (`start`/`delta`/`end`/`error`, wrapped as `{ type: "stream", event }`).
  * `messageCreated` and `messageUpdated` require a valid `message` that passes `MessageSchema`.
  * `messageDeleted` requires a string `messageId`.
  * `userUpserted` requires a valid `user` that passes `UserSchema`.
+ * Stream events must pass `StreamEventSchema`.
  *
  * @param data - The raw websocket payload to parse (typically a JSON string)
  * @returns A validated `SocketEvent` when the payload is recognized and passes schema validation, `undefined` otherwise.
@@ -253,6 +261,16 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
   if (candidate.type === "userUpserted") {
     const user = UserSchema.safeParse(candidate.user);
     return user.success ? { type: "userUpserted", user: user.data } : undefined;
+  }
+
+  if (
+    candidate.type === "start" ||
+    candidate.type === "delta" ||
+    candidate.type === "end" ||
+    candidate.type === "error"
+  ) {
+    const stream = StreamEventSchema.safeParse(payload);
+    return stream.success ? { type: "stream", event: stream.data } : undefined;
   }
 
   return undefined;
@@ -478,6 +496,24 @@ function LoamApp() {
   const removeMessage = useCallback((messageId: string) => {
     setMessages((previous) => previous.filter((message) => message.id !== messageId));
     void deleteRecord("messages", messageId);
+  }, []);
+
+  const applyStreamEvent = useCallback((event: StreamEvent) => {
+    if (event.type !== "delta") {
+      // start/end/error carry no body text; the final authoritative message arrives via the
+      // regular messageUpdated broadcast, which also persists it to IndexedDB.
+      return;
+    }
+
+    // Append in memory only — per-delta IndexedDB writes would be wasteful, and the closing
+    // messageUpdated stores the complete message.
+    setMessages((previous) =>
+      previous.map((message) =>
+        message.id === event.messageId && "body" in message
+          ? { ...message, body: message.body + event.text }
+          : message,
+      ),
+    );
   }, []);
 
   const sendMessage = useCallback(
@@ -756,6 +792,11 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "stream") {
+          applyStreamEvent(payload.event);
+          return;
+        }
+
         upsertUsers([payload.user]);
       };
     }
@@ -771,7 +812,7 @@ function LoamApp() {
 
       socket?.close();
     };
-  }, [config?.currentUser.id, removeMessage, upsertMessages, upsertUsers]);
+  }, [applyStreamEvent, config?.currentUser.id, removeMessage, upsertMessages, upsertUsers]);
 
   const usersById = useMemo(() => {
     const indexed = new Map(users.map((user) => [user.id, user]));

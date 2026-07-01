@@ -77,8 +77,9 @@ Env vars the server/dev script read: `PORT`, `CLIENT_PORT`, `HOST`, `LOAM_JOIN_H
   `createdAt`, `meta`).
 - **User**: `{ id, displayName, avatar?, type: human|bot|system, isAdmin, createdAt, ephemeral }`.
   `avatar` is either generated (`seed`+`mode`) or an uploaded `image` (`imageId`+`mimeType`).
-- **StreamEvent**: `start | delta | end | error` — for LLM streaming (currently server→client is done
-  by re-broadcasting `messageUpdated`, not raw stream events, but the schema exists).
+- **StreamEvent**: `start | delta | end | error` — the LLM streaming protocol over the WebSocket.
+  Deltas carry only the new text (sent just to the DM participants); the final complete message is
+  persisted and broadcast once via `messageUpdated`, so non-streaming clients still converge.
 - **NetworkConfig**: feature flags sent to the client from `/api/config`.
 
 **Gotcha — build the schema package after editing it.** The server imports `@loam/schema` which

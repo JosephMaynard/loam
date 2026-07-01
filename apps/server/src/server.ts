@@ -18,6 +18,7 @@ import {
   type Message,
   type MessageCreateRequest,
   type NetworkConfig,
+  type StreamEvent,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -643,6 +644,22 @@ function broadcast(event: ClientEvent): void {
   }
 }
 
+/**
+ * Send a streaming event to the sockets of the given users only.
+ *
+ * @param audience - User ids allowed to receive the event (e.g. the two DM participants)
+ * @param event - The stream event to deliver
+ */
+function broadcastStreamEvent(audience: Set<string>, event: StreamEvent): void {
+  const payload = JSON.stringify(event);
+
+  for (const { socket, userId } of sockets) {
+    if (socket.readyState === socket.OPEN && audience.has(userId)) {
+      socket.send(payload);
+    }
+  }
+}
+
 function newMessageId(prefix = "msg"): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
@@ -918,18 +935,29 @@ async function createOllamaResponse(userMessage: Message): Promise<void> {
   store.insertMessage(assistantMessage);
   broadcast({ type: "messageCreated", message: assistantMessage });
 
+  const audience = new Set([bot.id, userMessage.authorId]);
   let body = "";
+  broadcastStreamEvent(audience, { type: "start", messageId: assistantMessage.id });
 
   try {
     for await (const delta of streamOllamaChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
       body += delta;
-      updateMessage(assistantMessage, body, true);
+
+      // Keep the in-memory copy current for mid-stream REST reads, but defer persistence and the
+      // full-message broadcast to the end — clients follow the incremental delta events instead.
+      if ("body" in assistantMessage) {
+        assistantMessage.body = body;
+      }
+
+      broadcastStreamEvent(audience, { type: "delta", messageId: assistantMessage.id, text: delta });
     }
 
     updateMessage(assistantMessage, body.trim() || "(No response.)", false);
+    broadcastStreamEvent(audience, { type: "end", messageId: assistantMessage.id });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Ollama error.";
     updateMessage(assistantMessage, `${body}\n\nLLM error: ${message}`.trim(), false);
+    broadcastStreamEvent(audience, { type: "error", messageId: assistantMessage.id, error: message });
     server.log.error(error);
   }
 }
