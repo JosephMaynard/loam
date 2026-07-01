@@ -50,7 +50,8 @@ found the embedded Android Node is **18.20.4 (ABI 108)**, where `node:sqlite` **
   synchronous API/build system as better-sqlite3, encryption via SQLite3MultipleCiphers (**no
   OpenSSL**; ChaCha20-Poly1305 default, SQLCipher-compatible mode). The Android path is proven by
   **`digidem/better-sqlite3-nodejs-mobile`**, which publishes plain better-sqlite3 prebuilds against
-  ABI 108 for android-arm/arm64 (CoMapeo ships them in production); its CI compiles the SQLite
+  ABI 108 for android-arm/arm64 (CoMapeo ships them in production) — and the phase-2 spike **ran
+  that prebuild on-device in LOAM's own app** (CREATE/INSERT/SELECT OK). Its CI compiles the SQLite
   amalgamation directly, so swapping in the MultipleCiphers amalgamation is a contained change. The
   same driver runs on Pi/laptop via upstream prebuilds — one driver everywhere.
 - **Fallback:** plain `better-sqlite3` (Android prebuilds exist today) + application-level encryption

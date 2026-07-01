@@ -25,7 +25,7 @@ function localIPv4(): string {
 const app = await buildApp({
   dataDir,
   configPath: process.env.LOAM_CONFIG_FILE,
-  clientDistDir: join(rootDir, "apps/client/dist"),
+  clientDistDir: process.env.LOAM_CLIENT_DIST ?? join(rootDir, "apps/client/dist"),
   joinHost: process.env.LOAM_JOIN_HOST ?? localIPv4(),
   clientPort,
 });

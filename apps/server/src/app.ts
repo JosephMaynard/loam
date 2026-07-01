@@ -1,6 +1,6 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 
 import fastifyStatic from "@fastify/static";
@@ -252,15 +252,15 @@ function makeBotUser(config: OllamaConfig): User {
  * @returns A string of the form `user.<8hex>` where the suffix is the first 8 hexadecimal characters of a UUID with dashes removed.
  */
 function makeSessionUserId(): string {
-  return `user.${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
+  return `user.${randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
 function makeSessionToken(): string {
-  return crypto.randomUUID();
+  return randomUUID();
 }
 
 function makeAdminSetupCode(): string {
-  return crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+  return randomUUID().replaceAll("-", "").slice(0, 12);
 }
 
 function encodeCookieValue(value: string): string {
@@ -291,7 +291,7 @@ function readCookie(cookieHeader: string | undefined, name: string): string | un
  * @returns A string in the form `avt_<16-hex-chars>` suitable for use as an avatar image filename base
  */
 function newAvatarImageId(): string {
-  return `avt_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+  return `avt_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
 /**
@@ -370,7 +370,7 @@ function isChannelMessage(message: Message, channelId: string): boolean {
 }
 
 function newMessageId(prefix = "msg"): string {
-  return `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+  return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
 /**
