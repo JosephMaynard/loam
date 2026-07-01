@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ChannelSchema,
+  LoamConfigSchema,
+  LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
   MessageSchema,
   NetworkConfigSchema,
@@ -52,8 +54,52 @@ describe("@loam/schema", () => {
         allowUserDisplayNameEdit: false,
         allowUserAvatarEdit: false,
         allowUserAvatarUpload: false,
+        allowAdminClaim: false,
       }),
     ).not.toThrow();
+  });
+
+  it("validates the node configuration and partial updates", () => {
+    expect(() =>
+      LoamConfigSchema.parse({
+        identity: {
+          allowUserDisplayNameEdit: true,
+          allowUserAvatarEdit: true,
+          allowUserAvatarUpload: false,
+          allowAdminUserEdit: true,
+        },
+        features: {
+          enablePublicChannels: true,
+          enablePrivateChannels: false,
+          enableUserChannels: true,
+          enableReplies: true,
+          enableDMs: true,
+          enableReactions: true,
+          enableMarkdown: true,
+        },
+        llm: {
+          ollama: {
+            enabled: false,
+            baseUrl: "http://localhost:11434",
+            model: "gemma4",
+            botId: "llm.ollama.gemma4",
+            botDisplayName: "Gemma",
+          },
+        },
+        admin: { bootstrap: "firstUser" },
+        security: { profile: "standard" },
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      LoamConfigUpdateSchema.parse({
+        features: { enableReplies: false },
+        admin: { bootstrap: "passphrase", passphrase: "" },
+      }),
+    ).not.toThrow();
+
+    expect(LoamConfigUpdateSchema.safeParse({ admin: { bootstrap: "dictator" } }).success).toBe(false);
+    expect(LoamConfigUpdateSchema.safeParse({ features: { enableReplies: "yes" } }).success).toBe(false);
   });
 
   it("validates all message variants through the message union", () => {

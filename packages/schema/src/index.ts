@@ -72,8 +72,94 @@ export const NetworkConfigSchema = z.object({
   allowUserDisplayNameEdit: z.boolean(),
   allowUserAvatarEdit: z.boolean(),
   allowUserAvatarUpload: z.boolean(),
+  allowAdminClaim: z.boolean(),
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
+
+export const FeatureFlagsSchema = z.object({
+  enablePublicChannels: z.boolean(),
+  enablePrivateChannels: z.boolean(),
+  enableUserChannels: z.boolean(),
+  enableReplies: z.boolean(),
+  enableDMs: z.boolean(),
+  enableReactions: z.boolean(),
+  enableMarkdown: z.boolean(),
+});
+export type FeatureFlags = z.infer<typeof FeatureFlagsSchema>;
+
+export const IdentityConfigSchema = z.object({
+  allowUserDisplayNameEdit: z.boolean(),
+  allowUserAvatarEdit: z.boolean(),
+  allowUserAvatarUpload: z.boolean(),
+  allowAdminUserEdit: z.boolean(),
+});
+export type IdentityConfig = z.infer<typeof IdentityConfigSchema>;
+
+export const OllamaConfigSchema = z.object({
+  enabled: z.boolean(),
+  baseUrl: z.string().min(1),
+  model: z.string().min(1),
+  botId: IdSchema,
+  botDisplayName: z.string().min(1),
+  systemPrompt: z.string().min(1).optional(),
+});
+export type OllamaConfig = z.infer<typeof OllamaConfigSchema>;
+
+export const AdminBootstrapStrategySchema = z.enum([
+  "none",
+  "firstUser",
+  "setupCode",
+  "passphrase",
+  "hostDevice",
+]);
+export type AdminBootstrapStrategy = z.infer<typeof AdminBootstrapStrategySchema>;
+
+export const AdminConfigSchema = z.object({
+  bootstrap: AdminBootstrapStrategySchema,
+  passphrase: z.string().min(8).max(256).optional(),
+});
+export type AdminConfig = z.infer<typeof AdminConfigSchema>;
+
+export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
+export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
+
+export const SecurityConfigSchema = z.object({
+  profile: SecurityProfileSchema,
+});
+export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
+
+export const LoamConfigSchema = z.object({
+  identity: IdentityConfigSchema,
+  features: FeatureFlagsSchema,
+  llm: z.object({ ollama: OllamaConfigSchema }),
+  admin: AdminConfigSchema,
+  security: SecurityConfigSchema,
+});
+export type LoamConfig = z.infer<typeof LoamConfigSchema>;
+
+export const LoamConfigUpdateSchema = z.object({
+  identity: IdentityConfigSchema.partial().optional(),
+  features: FeatureFlagsSchema.partial().optional(),
+  llm: z
+    .object({
+      ollama: OllamaConfigSchema.partial().extend({
+        systemPrompt: z.string().max(4000).optional(),
+      }),
+    })
+    .optional(),
+  admin: AdminConfigSchema.partial()
+    .extend({
+      passphrase: z.string().max(256).optional(),
+    })
+    .optional(),
+  security: SecurityConfigSchema.partial().optional(),
+});
+export type LoamConfigUpdate = z.infer<typeof LoamConfigUpdateSchema>;
+
+export const AdminClaimRequestSchema = z.object({
+  secret: z.string().min(1).max(256),
+});
+export type AdminClaimRequest = z.infer<typeof AdminClaimRequestSchema>;
 
 export const UserUpdateRequestSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),

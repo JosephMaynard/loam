@@ -1,0 +1,299 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { buildApp, type LoamApp } from "./app.js";
+
+type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
+
+const cleanups: (() => Promise<void> | void)[] = [];
+
+afterEach(async () => {
+  while (cleanups.length) {
+    await cleanups.pop()?.();
+  }
+});
+
+async function makeApp(config?: unknown): Promise<LoamApp> {
+  const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+
+  if (config !== undefined) {
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
+  }
+
+  const app = await buildApp({ dataDir, logger: false });
+  cleanups.push(async () => {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+  return app;
+}
+
+/** Reopen an app on an existing data dir (restart simulation). */
+async function reopenApp(app: LoamApp, dataDir: string): Promise<LoamApp> {
+  await app.close();
+  const next = await buildApp({ dataDir, logger: false });
+  cleanups.push(() => next.close());
+  return next;
+}
+
+function sessionCookie(response: InjectResponse): string {
+  const header = response.headers["set-cookie"];
+  const first = Array.isArray(header) ? header[0] : header;
+  const cookie = first?.split(";")[0];
+
+  if (!cookie?.startsWith("loam_session=")) {
+    throw new Error("No session cookie in response");
+  }
+
+  return cookie;
+}
+
+async function newSession(app: LoamApp): Promise<{ cookie: string; userId: string; isAdmin: boolean }> {
+  const response = await app.server.inject({ method: "GET", url: "/api/config" });
+  const body = response.json() as { currentUser: { id: string; isAdmin: boolean } };
+  return { cookie: sessionCookie(response), userId: body.currentUser.id, isAdmin: body.currentUser.isAdmin };
+}
+
+async function claim(app: LoamApp, cookie: string, secret: string): Promise<InjectResponse> {
+  return app.server.inject({
+    method: "POST",
+    url: "/api/admin/claim",
+    headers: { cookie },
+    payload: { secret },
+  });
+}
+
+describe("admin bootstrap", () => {
+  it("firstUser (default): the first session becomes admin, later ones do not", async () => {
+    const app = await makeApp();
+
+    const first = await newSession(app);
+    expect(first.isAdmin).toBe(true);
+
+    const second = await newSession(app);
+    expect(second.isAdmin).toBe(false);
+  });
+
+  it("demotes legacy admin seed users so bootstrap governs admin", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    writeFileSync(
+      join(dataDir, "users.json"),
+      JSON.stringify([
+        {
+          id: "user.1234",
+          displayName: "Seed",
+          type: "human",
+          isAdmin: true,
+          createdAt: 1_704_067_200_000,
+          ephemeral: false,
+        },
+      ]),
+    );
+
+    const app = await buildApp({ dataDir, logger: false });
+    cleanups.push(async () => {
+      await app.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    const users = app.store.loadUsers();
+    expect(users.find((user) => user.id === "user.1234")?.isAdmin).toBe(false);
+
+    const first = await newSession(app);
+    expect(first.isAdmin).toBe(true);
+  });
+
+  it("setupCode: exposes a one-time code that grants admin exactly once", async () => {
+    const app = await makeApp({ admin: { bootstrap: "setupCode" } });
+    expect(app.adminSetupCode).toMatch(/^[a-f0-9]{12}$/);
+
+    const session = await newSession(app);
+    expect(session.isAdmin).toBe(false);
+
+    const wrong = await claim(app, session.cookie, "not-the-code");
+    expect(wrong.statusCode).toBe(403);
+
+    const right = await claim(app, session.cookie, app.adminSetupCode ?? "");
+    expect(right.statusCode).toBe(200);
+    expect((right.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+
+    const again = await claim(app, (await newSession(app)).cookie, app.adminSetupCode ?? "");
+    expect(again.statusCode).toBe(403);
+  });
+
+  it("passphrase: grants admin for the configured passphrase only", async () => {
+    const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
+
+    const session = await newSession(app);
+    expect(session.isAdmin).toBe(false);
+
+    expect((await claim(app, session.cookie, "wrong horse")).statusCode).toBe(403);
+
+    const right = await claim(app, session.cookie, "correct horse battery");
+    expect(right.statusCode).toBe(200);
+    expect((right.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+  });
+
+  it("none: claiming is rejected and nobody becomes admin", async () => {
+    const app = await makeApp({ admin: { bootstrap: "none" } });
+
+    const session = await newSession(app);
+    expect(session.isAdmin).toBe(false);
+    expect((await claim(app, session.cookie, "anything")).statusCode).toBe(403);
+  });
+
+  it("rate-limits repeated claim attempts", async () => {
+    const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
+    const session = await newSession(app);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await claim(app, session.cookie, `wrong-${attempt}`)).statusCode).toBe(403);
+    }
+
+    expect((await claim(app, session.cookie, "wrong-again")).statusCode).toBe(429);
+  });
+
+  it("exposes allowAdminClaim in the network config only for claimable strategies", async () => {
+    const claimable = await makeApp({ admin: { bootstrap: "setupCode" } });
+    const claimableConfig = (await claimable.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { allowAdminClaim: boolean };
+    };
+    expect(claimableConfig.networkConfig.allowAdminClaim).toBe(true);
+
+    const notClaimable = await makeApp();
+    const notClaimableConfig = (await notClaimable.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { allowAdminClaim: boolean };
+    };
+    expect(notClaimableConfig.networkConfig.allowAdminClaim).toBe(false);
+  });
+});
+
+describe("admin config API", () => {
+  it("rejects non-admins", async () => {
+    const app = await makeApp({ admin: { bootstrap: "none" } });
+    const session = await newSession(app);
+
+    const get = await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: session.cookie } });
+    expect(get.statusCode).toBe(403);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: session.cookie },
+      payload: { features: { enableReplies: false } },
+    });
+    expect(patch.statusCode).toBe(403);
+  });
+
+  it("returns the effective config with the passphrase redacted", async () => {
+    const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
+    const session = await newSession(app);
+    await claim(app, session.cookie, "correct horse battery");
+
+    const response = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: session.cookie },
+    });
+    expect(response.statusCode).toBe(200);
+    const config = response.json() as { admin: { bootstrap: string; passphrase?: string }; features: { enableReplies: boolean } };
+    expect(config.admin.bootstrap).toBe("passphrase");
+    expect(config.admin.passphrase).toBeUndefined();
+    expect(config.features.enableReplies).toBe(true);
+  });
+
+  it("rejects invalid config updates", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const response = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { features: { enableReplies: "nope" } },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("applies, enforces, broadcasts shape, and persists feature flag changes", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    let app = await buildApp({ dataDir, logger: false });
+    cleanups.push(() => app.close());
+
+    const admin = await newSession(app);
+    expect(admin.isAdmin).toBe(true);
+
+    const post = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "root post" },
+    });
+    expect(post.statusCode).toBe(201);
+    const postId = (post.json() as { message: { id: string } }).message.id;
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { features: { enableReplies: false, enableReactions: false } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const reply = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelReply", channelId: "general", parentMessageId: postId, body: "reply" },
+    });
+    expect(reply.statusCode).toBe(400);
+    expect((reply.json() as { error: string }).error).toMatch(/Replies are disabled/);
+
+    const reaction = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "reaction", targetMessageId: postId, reaction: "👍" },
+    });
+    expect(reaction.statusCode).toBe(400);
+
+    const networkConfig = (
+      (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).json() as {
+        networkConfig: { enableReplies: boolean; enableReactions: boolean };
+      }
+    ).networkConfig;
+    expect(networkConfig.enableReplies).toBe(false);
+    expect(networkConfig.enableReactions).toBe(false);
+
+    app = await reopenApp(app, dataDir);
+    const reopened = (
+      (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).json() as {
+        currentUser: { isAdmin: boolean };
+        networkConfig: { enableReplies: boolean };
+      }
+    );
+    expect(reopened.networkConfig.enableReplies).toBe(false);
+    expect(reopened.currentUser.isAdmin).toBe(true);
+  });
+
+  it("clears the passphrase when patched to an empty string", async () => {
+    const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
+    const admin = await newSession(app);
+    await claim(app, admin.cookie, "correct horse battery");
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { admin: { passphrase: "" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const session = await newSession(app);
+    expect((await claim(app, session.cookie, "correct horse battery")).statusCode).toBe(403);
+  });
+});

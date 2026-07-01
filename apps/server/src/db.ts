@@ -71,6 +71,7 @@ function messageColumns(message: Message): [string, string, string | null, strin
  */
 export function openStore(path: string): LoamStore {
   const db = new DatabaseSync(path);
+  let closed = false;
 
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
@@ -215,7 +216,10 @@ export function openStore(path: string): LoamStore {
       });
     },
     close() {
-      db.close();
+      if (!closed) {
+        closed = true;
+        db.close();
+      }
     },
   };
 
