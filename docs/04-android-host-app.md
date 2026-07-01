@@ -134,13 +134,12 @@ support it); avoid Android-only Easy Connect for v1.
 - The client already supports a configurable server origin (`loam.serverUrl` in localStorage) and uses
   `credentials: "include"` — but same-origin (WebView → localhost) is simplest; prefer that.
 
-## Monorepo question
+## Monorepo question — settled
 
-Bringing the RN app into this repo as **`apps/mobile`** lets it share `@loam/qr` and `@loam/schema`
-directly (one source of truth for the wire contract and QR helpers) and share CI. The tradeoff is a
-heavier install (Expo/RN toolchain) in the workspace. Alternatively keep it separate and copy/publish the
-contract. **Recommendation:** co-locate as `apps/mobile` for the shared packages, but gate its install so
-the existing web/server workflow stays light. See [decisions.md](decisions.md).
+The RN app lives in this repo at **`apps/app`**, sharing `@loam/qr` and `@loam/schema` directly (one
+source of truth for the wire contract and QR helpers) and CI. The accepted tradeoff is a heavier
+workspace install (Expo/RN toolchain); gating its install remains an open nicety. See
+[decisions.md](decisions.md) #4.
 
 ## Suggested next spikes (de-risk before building UI)
 1. ~~nodejs-mobile viability~~ — **done, passed** (phase 1).

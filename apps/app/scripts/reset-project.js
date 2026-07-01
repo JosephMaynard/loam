@@ -50,6 +50,12 @@ const rl = readline.createInterface({
 const moveDirectories = async (userInput) => {
   try {
     if (userInput === "y") {
+      // A leftover backup would make the renames below fail halfway through a rerun.
+      if (fs.existsSync(exampleDirPath)) {
+        console.log(`❌ /${exampleDir} already exists. Remove or rename it, then rerun this script.`);
+        return;
+      }
+
       // Create the app-example directory
       await fs.promises.mkdir(exampleDirPath, { recursive: true });
       console.log(`📁 /${exampleDir} directory created.`);

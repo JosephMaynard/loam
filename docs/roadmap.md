@@ -32,9 +32,10 @@ Researched but not committed — briefings for Fable/owner to prioritize.
   data-access abstraction) so 2 and 3 build on it instead of the JSON files.
 - **2 and 3 share a surface.** The kill switch is *triggered from* the admin UI and *configured in* the
   admin config. Build the admin config plumbing once; both use it.
-- **3 has a hard prerequisite: admin bootstrap.** Today no real session user is ever an admin — only
-  seed ids `user.1234`/`user.5678` are admins, and sessions get random ids (see `CLAUDE.md`). An
-  admin-only UI is meaningless until there's a way to *become* admin. Solve this inside initiative 3.
+- **3 has a hard prerequisite: admin bootstrap.** *(Solved — landed with initiative 3 part A.)*
+  Admin now comes from the pluggable `admin.bootstrap` strategies (`firstUser` default, `setupCode`,
+  `passphrase`, `none`; `hostDevice` reserved for the Android host) via `POST /api/admin/claim`;
+  the legacy admin seed ids were demoted. See `CLAUDE.md` and 03.
 - **4 pulls on everything.** If the phone hosts the server, the storage/kill-switch/admin work must run
   under whatever Android runtime you choose, which constrains the SQLite driver (initiative 1). Decide
   the Android hosting model early even if you build it last.
@@ -60,7 +61,7 @@ top few are worth confirming with the project owner before Fable commits.
    workflow) or is it a thin host UI? Biggest fork; see 04.
 3. **Admin bootstrap mechanism** — first-user-claims-admin, console/QR setup code, or config passphrase?
    See 03.
-4. **Monorepo the RN app?** Bring it in as `apps/mobile` to share `packages/qr` + `packages/schema`, or
-   keep it a separate repo with a copied contract? See 04.
+4. **Monorepo the RN app?** *(Settled by action — it lives at `apps/app`.)* Co-located to share
+   `packages/qr` + `packages/schema`. See 04.
 5. **Kill-switch UX** — instant vs. confirmation vs. duress code; and whether it remote-wipes connected
    clients (strongly recommended: yes). See 02.
