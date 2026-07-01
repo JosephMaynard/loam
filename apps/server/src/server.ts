@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import fastifyStatic from "@fastify/static";
@@ -9,7 +9,6 @@ import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
 import {
   AvatarImageUploadRequestSchema,
-  ChannelSchema,
   MessageCreateRequestSchema,
   MessageSchema,
   UserSchema,
@@ -24,7 +23,8 @@ import {
 } from "@loam/schema";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-type DataFile = "users" | "channels" | "messages" | "sessions";
+import { importLegacyJsonData, openStore, type LoamStore } from "./db.js";
+
 type SocketClient = {
   OPEN: number;
   readyState: number;
@@ -41,10 +41,6 @@ type AppData = {
   users: User[];
   channels: Channel[];
   messages: Message[];
-};
-type SessionRecord = {
-  token: string;
-  userId: string;
 };
 
 type ClientEvent =
@@ -110,15 +106,13 @@ const sockets = new Set<SocketSession>();
 const sessions = new Map<string, string>();
 let staticFilesRegistered = false;
 let appConfig: LoamConfig = defaultLoamConfig();
+let store: LoamStore;
 
 let data: AppData = {
   users: [],
   channels: [],
   messages: [],
 };
-let dirty = false;
-let dataRev = 0;
-let saveInProgress: Promise<void> | undefined;
 
 const defaultChannels: Channel[] = [
   {
@@ -260,35 +254,6 @@ async function loadAppConfig(): Promise<void> {
 }
 
 /**
- * Get the filesystem path for the given data file.
- *
- * @param file - One of the data file names ("users", "channels", "messages", or "sessions")
- * @returns The absolute path to the JSON file corresponding to `file`
- */
-function dataPath(file: DataFile): string {
-  return join(dataDir, `${file}.json`);
-}
-
-async function readJsonArray<T>(file: DataFile): Promise<T[]> {
-  try {
-    const raw = await readFile(dataPath(file), "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-
-    throw error;
-  }
-}
-
-async function writeJson(file: DataFile, value: unknown): Promise<void> {
-  await mkdir(dirname(dataPath(file)), { recursive: true });
-  await writeFile(dataPath(file), `${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-
-/**
  * Create a human user record with a generated display name and creation timestamp.
  *
  * @param id - The unique user identifier
@@ -340,29 +305,6 @@ function makeSessionToken(): string {
   return crypto.randomUUID();
 }
 
-function markDirty(): void {
-  dirty = true;
-  dataRev += 1;
-}
-
-function sessionRecords(): SessionRecord[] {
-  return Array.from(sessions, ([token, userId]) => ({ token, userId }));
-}
-
-function isSessionRecord(value: unknown): value is SessionRecord {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const record = value as Partial<SessionRecord>;
-  return (
-    typeof record.token === "string" &&
-    record.token.length > 0 &&
-    typeof record.userId === "string" &&
-    record.userId.length > 0
-  );
-}
-
 function encodeCookieValue(value: string): string {
   return encodeURIComponent(value);
 }
@@ -396,7 +338,7 @@ function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string 
   const userId = makeSessionUserId();
   const token = makeSessionToken();
   sessions.set(token, userId);
-  markDirty();
+  store.putSession(token, userId);
   const cookie = `${sessionCookieName}=${encodeCookieValue(
     token,
   )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${isProduction ? "; Secure" : ""}`;
@@ -425,7 +367,7 @@ function ensureUser(id: string, isAdmin = false): User {
 
   const user = makeUser(id, isAdmin);
   data.users.push(user);
-  markDirty();
+  store.upsertUser(user);
   broadcast({ type: "userUpserted", user });
   return user;
 }
@@ -461,7 +403,7 @@ function ensureOllamaBotUser(): User | undefined {
 
     if (JSON.stringify(parsedExisting) !== JSON.stringify(next)) {
       Object.assign(existing, next);
-      markDirty();
+      store.upsertUser(existing);
       broadcast({ type: "userUpserted", user: existing });
     }
 
@@ -470,7 +412,7 @@ function ensureOllamaBotUser(): User | undefined {
 
   const user = makeBotUser(appConfig.llm.ollama);
   data.users.push(user);
-  markDirty();
+  store.upsertUser(user);
   broadcast({ type: "userUpserted", user });
   return user;
 }
@@ -514,7 +456,7 @@ function applyUserUpdate(user: User, update: UserUpdateRequest): User {
     avatar: update.avatar === undefined ? user.avatar : update.avatar,
   });
   Object.assign(user, next);
-  markDirty();
+  store.upsertUser(user);
   broadcast({ type: "userUpserted", user });
   return user;
 }
@@ -753,7 +695,11 @@ function createMessage(
 
     if (existingIndex >= 0) {
       const [deleted] = data.messages.splice(existingIndex, 1);
-      markDirty();
+
+      if (deleted) {
+        store.deleteMessage(deleted.id);
+      }
+
       return { deletedMessageId: deleted?.id, deletedMessage: deleted };
     }
   }
@@ -774,7 +720,7 @@ function createMessage(
   };
   const message = MessageSchema.parse({ ...input, ...base });
   data.messages.push(message);
-  markDirty();
+  store.insertMessage(message);
   return { message };
 }
 
@@ -803,7 +749,7 @@ function updateMessage(message: Message, nextBody: string, streaming: boolean): 
     },
   });
   Object.assign(message, updated);
-  markDirty();
+  store.updateMessage(message);
   broadcast({ type: "messageUpdated", message });
   return message;
 }
@@ -969,7 +915,7 @@ async function createOllamaResponse(userMessage: Message): Promise<void> {
     },
   });
   data.messages.push(assistantMessage);
-  markDirty();
+  store.insertMessage(assistantMessage);
   broadcast({ type: "messageCreated", message: assistantMessage });
 
   let body = "";
@@ -989,32 +935,39 @@ async function createOllamaResponse(userMessage: Message): Promise<void> {
 }
 
 /**
- * Loads persisted application data into memory and initializes derived in-memory state.
+ * Opens the SQLite store and loads persisted application data into memory.
  *
- * Ensures the data directory exists, reads and validates persisted `users`, `channels`, `messages`,
- * and `sessions` into the module-level `data` and `sessions` stores. If no channels are persisted,
- * seeds the default channels and marks the data as dirty. Ensures predefined seed users exist and
- * creates or updates the Ollama bot user if configured.
+ * Ensures the data directory exists, runs the one-time legacy JSON import when applicable, then
+ * loads `users`, `channels`, `messages`, and `sessions` into the module-level `data` and `sessions`
+ * stores. If no channels are persisted, seeds the default channels. Ensures predefined seed users
+ * exist and creates or updates the Ollama bot user if configured.
  */
 async function loadData(): Promise<void> {
   await mkdir(dataDir, { recursive: true });
+  store = openStore(join(dataDir, "loam.db"));
+
+  if (importLegacyJsonData(store, dataDir)) {
+    server.log.info("Imported legacy .loam JSON data into SQLite (originals renamed to *.json.bak)");
+  }
 
   data = {
-    users: (await readJsonArray<User>("users")).map((user) => UserSchema.parse(user)),
-    channels: (await readJsonArray<Channel>("channels")).map((channel) => ChannelSchema.parse(channel)),
-    messages: (await readJsonArray<Message>("messages")).map((message) => MessageSchema.parse(message)),
+    users: store.loadUsers(),
+    channels: store.loadChannels(),
+    messages: store.loadMessages(),
   };
   sessions.clear();
 
-  for (const session of await readJsonArray<SessionRecord>("sessions")) {
-    if (isSessionRecord(session)) {
-      sessions.set(session.token, session.userId);
-    }
+  for (const session of store.loadSessions()) {
+    sessions.set(session.token, session.userId);
   }
 
   if (!data.channels.length) {
     data.channels = defaultChannels.map((channel) => ({ ...channel }));
-    markDirty();
+    store.transaction(() => {
+      for (const channel of data.channels) {
+        store.upsertChannel(channel);
+      }
+    });
   }
 
   for (const id of seedUsers) {
@@ -1022,46 +975,6 @@ async function loadData(): Promise<void> {
   }
 
   ensureOllamaBotUser();
-}
-
-/**
- * Persist in-memory application data to disk when there are pending changes.
- *
- * Writes the `users`, `channels`, `messages`, and `sessions` data files, coalesces concurrent callers by awaiting an in-progress save, and clears the pending-changes flag only if no new modifications occurred during the save. If a write fails, the pending-changes flag is kept set and the error is rethrown.
- */
-async function saveAllData(): Promise<void> {
-  if (!dirty) {
-    return;
-  }
-
-  if (saveInProgress) {
-    await saveInProgress;
-    return saveAllData();
-  }
-
-  const startRev = dataRev;
-
-  saveInProgress = (async () => {
-    try {
-      await Promise.all([
-        writeJson("users", data.users),
-        writeJson("channels", data.channels),
-        writeJson("messages", data.messages),
-        writeJson("sessions", sessionRecords()),
-      ]);
-
-      if (dataRev === startRev) {
-        dirty = false;
-      }
-    } catch (error) {
-      dirty = true;
-      throw error;
-    } finally {
-      saveInProgress = undefined;
-    }
-  })();
-
-  await saveInProgress;
 }
 
 /**
@@ -1264,14 +1177,9 @@ server.setNotFoundHandler((request, reply) => {
   void reply.type("text/html").send("<h1>LOAM server is running</h1><p>Start the client with pnpm dev and open http://localhost:3000.</p>");
 });
 
-setInterval(() => {
-  saveAllData().catch((error) => server.log.error(error));
-}, 1000);
-
 process.on("SIGINT", () => {
-  saveAllData()
-    .catch((error) => server.log.error(error))
-    .finally(() => process.exit(0));
+  store.close();
+  process.exit(0);
 });
 
 await server.listen({ host, port });

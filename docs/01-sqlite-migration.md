@@ -1,5 +1,10 @@
 # 01 — SQLite migration
 
+> **Status:** Phase A landed — `node:sqlite` behind the driver-agnostic `LoamStore` DAL
+> (`apps/server/src/db.ts`), write-through mutations, one-time JSON importer, and the first
+> `apps/server` test suite. Encrypted-driver choice awaits the nodejs-mobile spike verdict; Phase B
+> (hot reads via SQL) deferred as recommended.
+
 ## Goal
 
 Replace the flat-JSON persistence with SQLite, behind a small data-access layer (DAL), without

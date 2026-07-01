@@ -21,7 +21,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 
 | Path | Role |
 |------|------|
-| `apps/server` | Fastify backend: REST + WebSocket, flat-file persistence, optional Ollama LLM. Single file: `src/server.ts` (~1.3k lines). |
+| `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. Routes/app logic: `src/server.ts` (~1.2k lines). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2k lines, all components). Libs in `src/lib/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
@@ -35,16 +35,17 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 pnpm install          # install workspace deps
 pnpm dev              # root: runs server + client together, prints join QR (see ports below)
 pnpm build            # pnpm -r build: builds all packages, then server (tsc) and client (tsc -b && vite build)
-pnpm test             # pnpm -r --if-present test: runs vitest in the 4 packages
+pnpm test             # pnpm -r --if-present test: runs vitest in the 4 packages + apps/server
 ```
 
 There is **no lint script and no typecheck-only script**. Type-checking happens as part of `build`
 (`tsc`). A `.stylelintrc.json` exists but is not wired to any script. CI (`.github/workflows/ci.yml`)
 runs exactly `pnpm build` then `pnpm test` on push/PR to `master`.
 
-**Tests live only in `packages/*`** (42 tests: schema, display-name, avatar, qr). `apps/client` and
-`apps/server` have **no test script**, so `pnpm test` skips them entirely. There is no server or
-client test harness yet — adding one is a good early win.
+**Tests**: `packages/*` (42 tests: schema, display-name, avatar, qr) plus `apps/server`
+(`src/db.test.ts`, DAL + legacy-import tests). `apps/client` has **no test script**, so `pnpm test`
+skips it — a Vitest+jsdom client harness is still a good early win. There are no route-level server
+tests yet either (the Fastify app isn't factored for injection).
 
 ## How dev mode wires together (important)
 
@@ -89,11 +90,15 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
 
 ## Server architecture (`apps/server/src/server.ts`)
 
-- **Storage**: everything lives in in-memory arrays (`data.users/channels/messages`) + a `sessions`
-  Map. Persisted as **flat JSON files** in `.loam/` (`users.json`, `channels.json`, `messages.json`,
-  `sessions.json`), plus `config.json` and an `avatars/` dir. A `setInterval` flushes dirty state
-  every **1s**; SIGINT flushes once more. `markDirty()` must be called after any mutation. No DB, no
-  migrations. `.loam/` is gitignored.
+- **Storage**: reads are served from in-memory arrays (`data.users/channels/messages`) + a
+  `sessions` Map; every mutation **writes through synchronously** to SQLite (`.loam/loam.db`, WAL
+  mode) via the DAL in `src/db.ts` (`LoamStore`, opened with `node:sqlite` — emits an
+  ExperimentalWarning, that's expected). The DAL is deliberately **driver-agnostic** so an encrypted
+  driver (SQLCipher/libsql) can replace `node:sqlite` (see `docs/01-sqlite-migration.md`). On first
+  boot with legacy data, `importLegacyJsonData()` migrates the old `*.json` files into the DB and
+  renames them `*.json.bak`. `config.json` and the `avatars/` dir remain plain files. There is no
+  `markDirty`/flush interval any more — call the matching `store.*` method after mutating in-memory
+  state, then `broadcast(...)`. `.loam/` is gitignored.
 - **Sessions/identity**: `getSessionUserId` reads the `loam_session` cookie; if absent it mints a new
   `user.<8hex>` id + token and `Set-Cookie`s it (HttpOnly, SameSite=Lax). The **server session cookie
   is the real identity**; the client's locally generated id is a pre-hydration placeholder that gets
@@ -144,12 +149,16 @@ config or enforced server-side. Treat them as "intended surface," not live switc
 - ESM only (`"type": "module"`). Server uses `NodeNext` resolution; client uses bundler resolution.
 - Named functions with JSDoc are the house style (see existing code). Match the surrounding density.
 - Validate at boundaries with the shared Zod schemas rather than trusting `any`.
-- After mutating server state, call `markDirty()` and `broadcast(...)` as the existing handlers do.
+- After mutating server state, write through to the store (`store.upsertUser(...)`,
+  `store.insertMessage(...)`, etc.) and `broadcast(...)` as the existing handlers do.
+- Relative imports inside `packages/*/src` must use explicit `.js` extensions — the compiled `dist/`
+  runs under Node ESM (the server consumes it), which rejects extensionless specifiers.
 
 ## Good first areas / known gaps
 
-- No tests for `apps/server` or `apps/client` — a Fastify integration test or a Vitest+jsdom client
-  test would be high value and easy to slot into CI.
+- No tests for `apps/client`, and no route-level tests for `apps/server` (only the DAL is covered) —
+  a Fastify integration test (needs factoring the app for `inject`) or a Vitest+jsdom client test
+  would be high value and easy to slot into CI.
 - Admin has no promotion path beyond the two seed ids.
 - Several `NetworkConfig` flags are decorative (see caveat above) — wiring them to config + enforcing
   them server-side is a natural feature.
