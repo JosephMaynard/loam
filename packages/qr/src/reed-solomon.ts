@@ -1,4 +1,4 @@
-import { gfMul, gfPow } from "./gf256";
+import { gfMul, gfPow } from "./gf256.js";
 
 const generatorCache = new Map<number, Uint8Array>();
 

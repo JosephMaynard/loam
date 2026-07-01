@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { encodeQRDetailed } from "./encode";
-import { renderQRToTerminal } from "./render-terminal";
-import { renderQRToSvg } from "./render-svg";
+import { encodeQRDetailed } from "./encode.js";
+import { renderQRToTerminal } from "./render-terminal.js";
+import { renderQRToSvg } from "./render-svg.js";
 
 function matrixRows(data: boolean[], size: number): string[] {
   return Array.from({ length: size }, (_, row) =>

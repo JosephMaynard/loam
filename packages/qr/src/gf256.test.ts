@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { gfDiv, gfMul, gfPow } from "./gf256";
+import { gfDiv, gfMul, gfPow } from "./gf256.js";
 
 describe("GF(256)", () => {
   it("multiplies known values with polynomial 0x11d", () => {

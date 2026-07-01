@@ -1,5 +1,5 @@
-import { getVersionInfo } from "./capacity";
-import type { InternalMatrix, QRVersion } from "./types";
+import { getVersionInfo } from "./capacity.js";
+import type { InternalMatrix, QRVersion } from "./types.js";
 
 function create2DArray(size: number, initial: boolean): boolean[][] {
   return Array.from({ length: size }, () => Array.from({ length: size }, () => initial));

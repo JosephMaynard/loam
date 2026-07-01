@@ -1,5 +1,5 @@
-import type { InternalMatrix } from "./types";
-import { placeFormatInfo } from "./format-info";
+import type { InternalMatrix } from "./types.js";
+import { placeFormatInfo } from "./format-info.js";
 
 const PENALTY_N1 = 3;
 const PENALTY_N2 = 3;

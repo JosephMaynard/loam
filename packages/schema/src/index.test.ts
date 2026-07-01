@@ -6,7 +6,7 @@ import {
   NetworkConfigSchema,
   StreamEventSchema,
   UserSchema,
-} from "./index";
+} from "./index.js";
 
 describe("@loam/schema", () => {
   it("validates users", () => {

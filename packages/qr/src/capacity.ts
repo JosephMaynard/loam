@@ -1,4 +1,4 @@
-import type { QRVersion } from "./types";
+import type { QRVersion } from "./types.js";
 
 export type QRBlockGroup = {
   count: number;

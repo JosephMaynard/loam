@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { chooseVersion } from "./capacity";
+import { chooseVersion } from "./capacity.js";
 
 describe("chooseVersion", () => {
   it("picks the smallest version that fits byte mode H payloads", () => {

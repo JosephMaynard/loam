@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildMatrix } from "./matrix";
+import { buildMatrix } from "./matrix.js";
 
 describe("matrix builder", () => {
   it("creates the right size and reserves core function modules", () => {

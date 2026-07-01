@@ -1,4 +1,4 @@
-import type { QRMatrix } from "./types";
+import type { QRMatrix } from "./types.js";
 
 type TerminalOptions = {
   quietZone?: number;

@@ -1,10 +1,10 @@
-import { BitBuffer } from "./bit-buffer";
-import { chooseVersion, getVersionInfo } from "./capacity";
-import { placeFormatInfo } from "./format-info";
-import { applyBestMask } from "./mask";
-import { buildMatrix, flattenMatrix } from "./matrix";
-import { interleaveBlocks, rsEncodeBlock } from "./reed-solomon";
-import type { EncodeOptions, QRMatrix, QRVersion } from "./types";
+import { BitBuffer } from "./bit-buffer.js";
+import { chooseVersion, getVersionInfo } from "./capacity.js";
+import { placeFormatInfo } from "./format-info.js";
+import { applyBestMask } from "./mask.js";
+import { buildMatrix, flattenMatrix } from "./matrix.js";
+import { interleaveBlocks, rsEncodeBlock } from "./reed-solomon.js";
+import type { EncodeOptions, QRMatrix, QRVersion } from "./types.js";
 
 type EncodedDetails = {
   matrix: QRMatrix;

@@ -9,7 +9,7 @@ import {
   getAvatarCounts,
   hashString,
   initAvatarTemplate,
-} from "./avatar";
+} from "./avatar.js";
 
 const STORE_KEY = Symbol.for("loam.avatar.store");
 const LIGHT_SURFACE = "#f7f2eb";
