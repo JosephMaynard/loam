@@ -119,7 +119,11 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
 - **Config**: layered defaults ← `config.json` ← DB-persisted admin edits (`config` table), all
   validated against the shared `LoamConfigSchema`. `PATCH /api/admin/config` merges, persists,
   hot-reloads, and broadcasts `configUpdated`. Feature flags are **enforced server-side** in
-  `createMessage()`.
+  `createMessage()`. Secrets (`admin.passphrase`, `killSwitch.panicToken`) are stored
+  **scrypt-hashed** (`scrypt:<salt>:<hash>`) — plaintext from a config file or PATCH is hashed at
+  merge time and verified with `verifySecret()`; never store or compare them in the clear.
+- **Rate limiting**: `@fastify/rate-limit` runs globally (300/min/IP) with a tighter per-route cap
+  on avatar uploads; claim/panic add their own semantic attempt limiters on top.
 - **Ephemeral messages** (off by default; `retention.messageTtlMs`): a 30s reaper (+ boot sweep)
   deletes expired messages and broadcasts `messageDeleted`; streaming LLM messages are spared until
   complete.

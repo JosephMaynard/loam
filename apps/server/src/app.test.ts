@@ -712,3 +712,56 @@ describe("public-channel flag", () => {
     expect((reply.json() as { error: string }).error).toMatch(/Channel posting is disabled/);
   });
 });
+
+describe("secret storage", () => {
+  it("persists the passphrase and panic token scrypt-hashed, never in the clear", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: {
+        admin: { bootstrap: "passphrase", passphrase: "correct horse battery" },
+        killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+      },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const persisted = app.store.getConfigValue("config") ?? "";
+    expect(persisted).not.toContain("correct horse battery");
+    expect(persisted).not.toContain("panic-token-0123456789");
+    expect(persisted).toContain("scrypt:");
+
+    // The plaintext still verifies after a restart (hash round-trips through the DB).
+    const { dataDir } = app as unknown as { dataDir: string };
+    const reopened = await reopenApp(app, dataDir);
+    const session = await newSession(reopened);
+    expect((await claim(reopened, session.cookie, "correct horse battery")).statusCode).toBe(200);
+  });
+
+  it("rate-limits avatar uploads per route", async () => {
+    const app = await makeApp({
+      identity: { allowUserAvatarEdit: true, allowUserAvatarUpload: true },
+    });
+    const session = await newSession(app);
+    const webp = Buffer.from("RIFF\0\0\0\0WEBP").toString("base64");
+    let limited = 0;
+
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await app.server.inject({
+        method: "PUT",
+        url: "/api/users/me/avatar-image",
+        headers: { cookie: session.cookie },
+        payload: { mimeType: "image/webp", data: webp },
+      });
+
+      if (response.statusCode === 429) {
+        limited += 1;
+      }
+    }
+
+    expect(limited).toBeGreaterThan(0);
+  });
+});

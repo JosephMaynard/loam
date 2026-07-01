@@ -1,8 +1,9 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 
+import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
@@ -207,21 +208,68 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
   };
   const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
   merged.llm.ollama.systemPrompt = systemPrompt || undefined;
+
+  // Secrets are stored scrypt-hashed, never in the clear; plaintext arriving from a config file or
+  // an admin update is hashed here (already-hashed values pass through unchanged).
   const passphrase = merged.admin.passphrase?.trim();
-  merged.admin.passphrase = passphrase || undefined;
+  merged.admin.passphrase = passphrase ? (isHashedSecret(passphrase) ? passphrase : hashSecret(passphrase)) : undefined;
   const panicToken = merged.killSwitch.panicToken?.trim();
-  merged.killSwitch.panicToken = panicToken || undefined;
+  merged.killSwitch.panicToken = panicToken
+    ? isHashedSecret(panicToken)
+      ? panicToken
+      : hashSecret(panicToken)
+    : undefined;
+
   merged.retention.messageTtlMs = merged.retention.messageTtlMs ?? undefined;
   return LoamConfigSchema.parse(merged);
 }
 
+const secretHashPrefix = "scrypt:";
+const secretHashPattern = /^scrypt:[0-9a-f]{32}:[0-9a-f]{64}$/;
+const secretCompareLength = 256;
+
 /**
- * Compare two secrets in constant time (via SHA-256 digests, so lengths never leak).
+ * Compare two short secrets in constant time by padding both to a fixed length. Suitable only for
+ * high-entropy, memory-only values (the one-time setup code) — stored secrets use scrypt instead.
  */
 function timingSafeEqualStrings(left: string, right: string): boolean {
-  const leftHash = createHash("sha256").update(left).digest();
-  const rightHash = createHash("sha256").update(right).digest();
-  return timingSafeEqual(leftHash, rightHash);
+  const leftPadded = Buffer.alloc(secretCompareLength);
+  const rightPadded = Buffer.alloc(secretCompareLength);
+  Buffer.from(left).copy(leftPadded);
+  Buffer.from(right).copy(rightPadded);
+  return timingSafeEqual(leftPadded, rightPadded) && left.length === right.length;
+}
+
+/**
+ * Hash a user-chosen secret (admin passphrase / panic token) for storage, so a seized node's
+ * config never reveals the secret itself.
+ *
+ * @returns A self-describing `scrypt:<salt-hex>:<hash-hex>` string
+ */
+function hashSecret(secret: string): string {
+  const salt = randomBytes(16);
+  const hash = scryptSync(secret, salt, 32);
+  return `${secretHashPrefix}${salt.toString("hex")}:${hash.toString("hex")}`;
+}
+
+function isHashedSecret(value: string): boolean {
+  // Match the full format, not just the prefix — a malformed "scrypt:…" value is treated as a
+  // plaintext secret and hashed, rather than stored unverifiable.
+  return secretHashPattern.test(value);
+}
+
+/**
+ * Verify a candidate secret against a stored `scrypt:` hash in constant time.
+ */
+function verifySecret(candidate: string, stored: string): boolean {
+  if (!isHashedSecret(stored)) {
+    return timingSafeEqualStrings(candidate, stored);
+  }
+
+  const [saltHex = "", hashHex = ""] = stored.slice(secretHashPrefix.length).split(":");
+  const expected = Buffer.from(hashHex, "hex");
+  const actual = scryptSync(candidate, Buffer.from(saltHex, "hex"), expected.length);
+  return timingSafeEqual(actual, expected);
 }
 
 /**
@@ -413,7 +461,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
-  const avatarUploadAttempts = new Map<string, { count: number; resetAt: number }>();
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -1245,6 +1292,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }, 30_000);
 
+  // Blanket per-IP throttle for every HTTP route; the abuse-sensitive endpoints (claim, panic,
+  // avatar upload) add their own tighter semantic limits on top.
+  await server.register(fastifyRateLimit, {
+    global: true,
+    max: 300,
+    timeWindow: "1 minute",
+  });
   await server.register(fastifyWebsocket);
   await registerStaticFiles();
 
@@ -1278,7 +1332,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const user = ensureSessionUser(getSessionUserId(request, reply));
     return applyUserUpdate(user, body.data);
   });
-  server.put("/api/users/me/avatar-image", async (request, reply) => {
+  server.put(
+    "/api/users/me/avatar-image",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     if (!appConfig.identity.allowUserAvatarEdit || !appConfig.identity.allowUserAvatarUpload) {
       return reply.code(403).send({ error: "User avatar uploads are disabled on this LOAM node" });
     }
@@ -1300,11 +1357,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const user = ensureSessionUser(getSessionUserId(request, reply));
-
-    if (attemptRateLimited(avatarUploadAttempts, user.id)) {
-      return reply.code(429).send({ error: "Too many avatar uploads; try again later" });
-    }
-
     const previousAvatar = user.avatar;
     const imageId = newAvatarImageId();
     await mkdir(avatarsDir, { recursive: true });
@@ -1432,8 +1484,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const expected = strategy === "setupCode" ? adminSetupCode : appConfig.admin.passphrase;
+    const secretMatches =
+      !!expected &&
+      (strategy === "setupCode"
+        ? timingSafeEqualStrings(body.data.secret, expected)
+        : verifySecret(body.data.secret, expected));
 
-    if (!expected || !timingSafeEqualStrings(body.data.secret, expected)) {
+    if (!secretMatches) {
       return reply.code(403).send({ error: "Invalid admin secret" });
     }
 
@@ -1500,7 +1557,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(429).send({ error: "Too many attempts" });
     }
 
-    if (!timingSafeEqualStrings(body.data.token, appConfig.killSwitch.panicToken)) {
+    if (!verifySecret(body.data.token, appConfig.killSwitch.panicToken)) {
       return reply.code(403).send({ error: "Invalid token" });
     }
 
