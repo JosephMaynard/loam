@@ -9,11 +9,13 @@ restricted there).
 
 ## What already exists
 
-A sibling Expo project at `../react-native-test-app` (separate git repo, single "Initial commit"). It is
-the **stock Expo Router tabs starter** — Expo SDK **52**, React Native **0.76.6** — and already includes
-the two dependencies that matter here: **`react-native-webview` 13.12.5** and `expo-web-browser`. There
-is **no LOAM-specific code, no hotspot/native module, and no embedded server** yet. It is currently a
-**managed** Expo app (`expo-router/entry`, no `android/` project checked in).
+The Expo app now lives **in this repo at `apps/app`** (commit `107acf5` — the old sibling
+`../react-native-test-app` description is obsolete, and the monorepo question below is settled by
+action). It is a stock Expo Router starter on **Expo SDK 57 / React Native 0.86.0 / React 19.2.3**,
+with the **new architecture (Fabric) enabled** (mandatory on this RN). There is **no LOAM-specific
+code, no hotspot/native module, no embedded server, and no `react-native-webview` dependency yet**
+(add it for the host WebView). It is a **managed** Expo app (`expo-router/entry`, no `android/`
+checked in) — prebuild is required for nodejs-mobile.
 
 ## The pivotal decision: where does the server run?
 
@@ -33,11 +35,35 @@ to run somewhere on the phone. Options:
    LOAM," so probably not the intent — but worth confirming.
 
 **Decision (settled): option 1 — the phone runs the server** via nodejs-mobile, and leaving pure-managed
-Expo (prebuild) is accepted (see [decisions.md](decisions.md) #2). The compounding risk to spike first:
-**encryption at rest is also required (decision #1), so an encrypted SQLite driver must build under
-nodejs-mobile** — the hardest single unknown in the whole roadmap. If SQLCipher/libsql won't compile
-there, fall back to application-level encryption over `node:sqlite` (see 01). Verify this before building
-any host UI.
+Expo (prebuild) is accepted (see [decisions.md](decisions.md) #2).
+
+### Spike verdict (2026-07-01): viable-as-is ✅
+
+The de-risking spike **built and ran** `nodejs-mobile-react-native@18.20.4` under Expo SDK 57 /
+RN 0.86 / new architecture (legacy-module interop layer) on an arm64 API-35 emulator — embedded Node
+HTTP server answering requests. Findings that bind future work:
+
+- **Use the maintained fork `@comapeo/nodejs-mobile-react-native@18.20.4-2`** — upstream works, but
+  the fork adds the **16KB page-size alignment** Google Play requires (Nov 2025) which upstream's
+  released binaries lack, and it is actively maintained (upstream is dormant since Oct 2024).
+- **Embedded Node is 18.20.4 (ABI 108, EOL)** — the Node 22 upgrade upstream is stalled. Plan for
+  Node 18 indefinitely. `node:sqlite` is absent on-device; the encrypted-driver verdict
+  (better-sqlite3-multiple-ciphers) lives in [01](01-sqlite-migration.md).
+- **ARM ABIs only** (`arm64-v8a`/`armeabi-v7a`): the x86 CMake build is broken upstream (#78/#88).
+  Irrelevant in practice — devices and Apple-silicon emulators are arm64.
+- **Ship native-module prebuilds; never rebuild npm modules on-device** — CoMapeo's
+  `download-prebuilds` + patch-package pattern is the model.
+- **`apps/server` is ESM; nodejs-mobile boots a CJS `main.js`** — a bundle step (esbuild/rollup →
+  single CJS file) is needed, which also inlines the workspace packages (`@loam/schema` etc.).
+- **Top remaining unknown: Fastify 5 on Node 18.** Fastify v5's support policy is Node 20+ (though
+  `fastify@5.6.2` declares no `engines` field, so it installs fine). Phase-2 spike answers it
+  empirically; the fallback is pinning `fastify@4` for the embedded build.
+- **Production precedent:** `digidem/comapeo-mobile` (Expo 54, the @comapeo fork, better-sqlite3 +
+  drizzle inside the embedded Node) is in production and actively developed.
+- Build-env notes: needs a real JDK (Android Studio's JBR 17 — a bare JRE fails with "No Java
+  compiler found"); pnpm blocks the package's postinstall (scaffold `nodejs-assets/` manually); the
+  module is CJS with no `.default` export; an Expo 53/Gradle strict-validation failure (#95) exists
+  that the fork fixes — watch for it in EAS builds.
 
 ## Hotspot
 
@@ -91,17 +117,22 @@ heavier install (Expo/RN toolchain) in the workspace. Alternatively keep it sepa
 contract. **Recommendation:** co-locate as `apps/mobile` for the shared packages, but gate its install so
 the existing web/server workflow stays light. See [decisions.md](decisions.md).
 
-## Suggested first spikes (de-risk before building UI)
-1. **Encrypted SQLite under nodejs-mobile** — Expo prebuild + `nodejs-mobile-react-native` running the
-   current `apps/server` on-device, with a SQLCipher/libsql (or app-level-encrypted) DB. This is the
-   highest-risk unknown (decisions #1 + #2 combined); prove it before anything else.
-2. `LocalOnlyHotspot` native module returning SSID/password.
-3. WebView loading the served client over the hotspot, with cookies + WebSocket working end to end.
+## Suggested next spikes (de-risk before building UI)
+1. ~~nodejs-mobile viability~~ — **done, passed** (verdict above). Remaining phase 2: switch to the
+   @comapeo fork, **bundle the real `apps/server` (esbuild → single CJS) into
+   `nodejs-assets/nodejs-project` and boot it on-device**, serving `apps/client/dist`. This answers
+   the Fastify-5-on-Node-18 question empirically.
+2. **Encrypted driver prebuilds**: fork `digidem/better-sqlite3-nodejs-mobile` CI, swap in the
+   better-sqlite3-multiple-ciphers amalgamation, produce ABI-108 android-arm64 prebuilds, verify
+   `PRAGMA key`/rekey on-device (see [01](01-sqlite-migration.md)).
+3. `LocalOnlyHotspot` native module returning SSID/password.
+4. WebView loading the served client over the hotspot, with cookies + WebSocket working end to end.
 
-Only after those three pass is the QR/host UI mostly glue over `packages/qr`.
+Only after those pass is the QR/host UI mostly glue over `packages/qr`.
 
 ## Open questions
-- Server hosting model (option 1 vs 3) and OK to leave managed Expo? — see [decisions.md](decisions.md).
-- What exactly are the "two hotspot QR codes"?
-- Co-locate the RN app in this monorepo, or keep separate?
+- ~~Server hosting model~~ — settled: embedded Node (spike-verified).
+- ~~Co-locate the RN app in this monorepo?~~ — settled by action: `apps/app`.
+- ~~The "two hotspot QR codes"~~ — settled: WiFi-join QR + LOAM-URL QR, shown sequentially.
 - iOS in scope at all for v1? (Recommend no.)
+- Fastify 5 vs pin fastify@4 for the embedded Node 18 (phase-2 spike decides).

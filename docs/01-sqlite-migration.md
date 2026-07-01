@@ -2,8 +2,9 @@
 
 > **Status:** Phase A landed — `node:sqlite` behind the driver-agnostic `LoamStore` DAL
 > (`apps/server/src/db.ts`), write-through mutations, one-time JSON importer, and the first
-> `apps/server` test suite. Encrypted-driver choice awaits the nodejs-mobile spike verdict; Phase B
-> (hot reads via SQL) deferred as recommended.
+> `apps/server` test suite. The nodejs-mobile spike (2026-07-01) settled the encrypted driver:
+> **better-sqlite3-multiple-ciphers** (see below); swap it in behind `LoamStore` once Android
+> ABI-108 prebuilds exist. Phase B (hot reads via SQL) deferred as recommended.
 
 ## Goal
 
@@ -34,27 +35,34 @@ a discriminated union on `type`). `SessionRecord = { token, userId }` is defined
 
 | Option | Native build? | Encryption at rest | Notes |
 |--------|---------------|--------------------|-------|
-| **`node:sqlite`** (built-in) | None | No | Verified working on the repo's Node **24.13.1** (`DatabaseSync`, sync API, emits an ExperimentalWarning). Zero deps — best fit for "runs on a Pi." **But** availability under nodejs-mobile depends on its Node version (may lag / need a flag) — verify before committing if Android-hosting (04) uses an embedded Node. |
-| **better-sqlite3** | Yes (prebuilt binaries for common targets) | Via SQLCipher variants | Mature, fast, synchronous. Native module is painful to cross-compile for nodejs-mobile/ARM. Pick this if you need SQLCipher encryption at rest. |
-| **libsql / @libsql/client** | Yes | Yes (encryption at rest) | Heavier; encryption built in. Overkill unless encryption is a hard requirement. |
+| **`node:sqlite`** (built-in) | None | No | Verified working on the repo's Node **24.13.1** (`DatabaseSync`, sync API, emits an ExperimentalWarning). Zero deps — powers the interim Phase-A DAL. **Verified ABSENT under nodejs-mobile** (Node 18.20.4) — cannot be the Android-host driver. |
+| **better-sqlite3** family | Yes (prebuilt binaries for common targets; ABI-108 Android prebuilds proven by digidem) | Via **better-sqlite3-multiple-ciphers** (no OpenSSL) | Mature, fast, synchronous. **Chosen path** — see spike verdict below. |
+| **libsql / @libsql/client** | Yes | Yes (encryption at rest) | **Ruled out**: ships no Android prebuilds (darwin/linux/win32 only); would need an unprecedented Rust cross-compile against Node 18 ABI 108. |
 
 **Decision (settled): encryption at rest is REQUIRED** — see [decisions.md](decisions.md) #1. So
-`node:sqlite` is out (no encryption). The driver must be SQLCipher-capable. Two realistic candidates:
+`node:sqlite` cannot be the final driver (no encryption).
 
-- **better-sqlite3 + SQLCipher** (e.g. `@journeyapps/sqlcipher`) — mature, synchronous, the classic
-  encrypted-SQLite path. Native module; cross-compiling it for **nodejs-mobile** on Android (initiative
-  4) is the hard part.
-- **libsql** (`@libsql/client`) — built-in encryption at rest and ships prebuilt binaries for many
-  targets, which *may* be friendlier to the on-device Android runtime.
+**Spike verdict (2026-07-01) — the driver question is settled.** The nodejs-mobile spike (see 04)
+found the embedded Android Node is **18.20.4 (ABI 108)**, where `node:sqlite` **does not exist**
+(verified on-device: `ERR_UNKNOWN_BUILTIN_MODULE`; it needs Node ≥ 22.5). Outcomes:
 
-**Because the same driver has to run on a Pi/laptop AND inside the Android app's embedded Node
-(initiative 4 is settled: the phone runs the server), the first task is a spike: get an encrypted driver
-building and running under nodejs-mobile before writing the DAL.** If neither compiles cleanly there, the
-fallback is **application-level encryption** (encrypt the DB file / encrypt row payloads with a key held
-only in memory) on top of `node:sqlite` — less clean than SQLCipher but portable. Keep the DAL
-driver-agnostic so this choice stays swappable. The encryption key derivation/storage (passphrase,
-device keystore, or ephemeral) is its own sub-decision — for the protest model an **ephemeral or
-passphrase-derived key that is never written to disk** makes the kill switch a key-discard.
+- **Chosen: `better-sqlite3-multiple-ciphers`** — actively maintained (v12.11.1, June 2026), same
+  synchronous API/build system as better-sqlite3, encryption via SQLite3MultipleCiphers (**no
+  OpenSSL**; ChaCha20-Poly1305 default, SQLCipher-compatible mode). The Android path is proven by
+  **`digidem/better-sqlite3-nodejs-mobile`**, which publishes plain better-sqlite3 prebuilds against
+  ABI 108 for android-arm/arm64 (CoMapeo ships them in production); its CI compiles the SQLite
+  amalgamation directly, so swapping in the MultipleCiphers amalgamation is a contained change. The
+  same driver runs on Pi/laptop via upstream prebuilds — one driver everywhere.
+- **Fallback:** plain `better-sqlite3` (Android prebuilds exist today) + application-level encryption
+  of row payloads/DB file. Note the fallback can **not** ride `node:sqlite` (absent on-device).
+- **Ruled out:** `libsql` (no Android prebuilds at all — darwin/linux/win32 only) and
+  `@journeyapps/sqlcipher` (async API; no public nodejs-mobile success story, one report of it
+  silently not encrypting there).
+
+Keep the DAL driver-agnostic so the swap (and the fallback) stay cheap. The encryption key
+derivation/storage (passphrase, device keystore, or ephemeral) is its own sub-decision — for the
+protest model an **ephemeral or passphrase-derived key that is never written to disk** makes the
+kill switch a key-discard.
 
 ## Proposed shape
 

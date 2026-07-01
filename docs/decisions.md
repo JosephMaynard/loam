@@ -6,10 +6,10 @@ Update the "Decision" column as they're settled.
 
 | # | Question | Options | Recommendation | Decision |
 |---|----------|---------|----------------|----------|
-| ★1 | **Encryption at rest?** Drives the SQLite driver and strengthens the kill switch. | none (`node:sqlite`) / SQLCipher (`better-sqlite3`) / `libsql` | — | **✅ YES — encrypt at rest.** Driver must be SQLCipher-capable; kill switch discards the key. Spike which encrypted driver runs under nodejs-mobile (see 01/04). |
-| ★2 | **Android hosting model.** | embedded Node (nodejs-mobile, needs Expo prebuild) / thin host UI + external server | — | **✅ Phone runs the server** via nodejs-mobile; leaving pure-managed Expo (prebuild) is OK. |
+| ★1 | **Encryption at rest?** Drives the SQLite driver and strengthens the kill switch. | none (`node:sqlite`) / SQLCipher (`better-sqlite3`) / `libsql` | — | **✅ YES — encrypt at rest.** Spike (2026-07-01) settled the driver: **better-sqlite3-multiple-ciphers** (SQLCipher-compatible, no OpenSSL; digidem prebuild path for Android ABI 108). libsql ruled out (no Android prebuilds); `node:sqlite` verified absent on-device (Node 18.20.4). Kill switch discards the key. See 01. |
+| ★2 | **Android hosting model.** | embedded Node (nodejs-mobile, needs Expo prebuild) / thin host UI + external server | — | **✅ Phone runs the server** via nodejs-mobile — **spike-verified on Expo 57/RN 0.86 new-arch** (build + on-device run). Use the `@comapeo` fork (16KB pages, maintained), ARM ABIs only, prebuilds not on-device rebuilds. Embedded Node is 18 (EOL): Fastify-5 compat is the open item (fallback: pin fastify@4). See 04. |
 | ★3 | **Admin bootstrap.** No real user can be admin today. | setup code / first-user / passphrase / host-device | — | **✅ Per-deployment, pluggable.** RN app: the host phone is admin (device owner). Pi: first user becomes admin. Keep other strategies (setup code / passphrase) available via config. |
-| 4 | **Co-locate the RN app** as `apps/mobile`? | monorepo / separate repo | Monorepo, to share `@loam/qr` + `@loam/schema`; gate its install. | _TBD_ |
+| 4 | **Co-locate the RN app** as `apps/mobile`? | monorepo / separate repo | Monorepo, to share `@loam/qr` + `@loam/schema`; gate its install. | **✅ Settled by action** — the app lives at `apps/app` (commit `107acf5`, Expo SDK 57/RN 0.86). |
 | 5 | **Kill-switch UX.** | instant / confirm / duress code; remote-wipe clients? | Config `requireConfirmation` (default on for team use) + fast path (hold/panic token) for protest; **do** remote-wipe connected clients. | _TBD_ |
 | 6 | **"Two hotspot QR codes"** — what are they? | WiFi-join + LOAM-URL / Android-format + plain SSID / other | — | **✅ WiFi-join QR + LOAM-URL QR** (two-step: connect, then open), open to a manual SSID/password fallback. See 04 for the refined scheme. |
 | 7 | **Wire the hardcoded `NetworkConfig` flags** now or later? | with admin UI / separate pass | Do it during initiative 3 and enforce server-side. | _TBD_ |
@@ -27,10 +27,14 @@ Update the "Decision" column as they're settled.
 ## Notes captured during research (2026)
 
 - `node:sqlite` is present and working on the repo's Node **24.13.1** (`DatabaseSync`, sync API,
-  ExperimentalWarning). Zero external deps — attractive for Pi hosting; unverified under nodejs-mobile.
-- The RN app (`../react-native-test-app`) is a stock **Expo SDK 52 / RN 0.76.6** managed starter with
-  `react-native-webview` and `expo-web-browser` already present; no LOAM/native/server code yet.
+  ExperimentalWarning) — it powers the interim Phase-A DAL. **Verified ABSENT under nodejs-mobile**
+  (embedded Node is 18.20.4; `ERR_UNKNOWN_BUILTIN_MODULE` on-device), so it cannot be the final
+  Android-host driver.
+- The RN app lives in-repo at **`apps/app`**: stock **Expo SDK 57 / RN 0.86.0** managed starter, new
+  architecture enabled; no LOAM/native/server code and no `react-native-webview` dependency yet.
+  (The earlier `../react-native-test-app` sibling-repo note is obsolete.)
 - `packages/qr` already exports `wifiPayload()` (standard `WIFI:…` string) and `encodeQR()` /
   `renderQRToSvg()` — the QR generation for both the hotspot-join and LOAM-access codes is largely done.
-- Current server persistence is flat JSON in `.loam/` flushed every 1s (`saveAllData` + `setInterval`),
-  which SQLite replaces with transactional writes.
+- Server persistence is now SQLite behind the `LoamStore` DAL (`apps/server/src/db.ts`), write-through
+  transactional writes; the flat-JSON 1s-flush store it replaced auto-imports to `*.json.bak` on first
+  boot.
