@@ -53,7 +53,7 @@ phone.
   "wipe" })` before closing sockets.
 - **Optional panic trigger**: an unauthenticated `POST /api/panic` accepting a pre-shared `panicToken`
   (from config), so a wipe can be fired fast (bookmark/NFC/second device) without navigating the admin
-  UI during a raid. Off unless a token is configured. Rate-limit/ःconstant-time compare the token.
+  UI during a raid. Off unless a token is configured. Rate-limit and constant-time compare the token.
 
 ### Client
 - Handle the `wipe` WS event: clear IndexedDB (delete the `loam-poc` database), remove the localStorage

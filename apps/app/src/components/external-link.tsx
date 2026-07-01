@@ -8,6 +8,7 @@ export function ExternalLink({ href, ...rest }: Props) {
   return (
     <Link
       target="_blank"
+      rel="noopener noreferrer"
       {...rest}
       href={href}
       onPress={async (event) => {

@@ -75,7 +75,9 @@ branches on security settings:
 - **Capability negotiation.** The node's active profile is surfaced to clients (extend the existing
   `/api/config` `networkConfig` pattern) plus encoded in the QR, and the client adapts: do the handshake
   iff encryption is on, prompt for a token iff admission is `token`, enable the E2EE UI iff on. One
-  conditional path, not scattered flags.
+  conditional path, not scattered flags. **Negotiation is client UX only, never authorization** — the
+  server must independently enforce the active profile on every path (message creation, admin routes,
+  kill switch), exactly as the existing `createMessage()`/admin checks in `app.ts` already do.
 - **Config lives in the admin area** (03), selectable as a profile with an "advanced/custom" override
   that exposes the raw axes.
 

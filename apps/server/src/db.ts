@@ -248,7 +248,13 @@ function readLegacyJsonArray(dataDir: string, file: string): unknown[] {
   }
 
   const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-  return Array.isArray(parsed) ? parsed : [];
+
+  if (!Array.isArray(parsed)) {
+    // Coercing to [] would "import" nothing and rename the file to .bak — silent data loss.
+    throw new Error(`Legacy data file ${path} does not contain a JSON array`);
+  }
+
+  return parsed;
 }
 
 /**

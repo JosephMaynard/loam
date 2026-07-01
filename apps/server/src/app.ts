@@ -413,6 +413,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
+  const avatarUploadAttempts = new Map<string, { count: number; resetAt: number }>();
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -591,8 +592,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowUserDisplayNameEdit: appConfig.identity.allowUserDisplayNameEdit,
       allowUserAvatarEdit: appConfig.identity.allowUserAvatarEdit,
       allowUserAvatarUpload: appConfig.identity.allowUserAvatarUpload,
+      // Only advertise claiming when a usable secret actually exists (the setup code is
+      // single-use, and passphrase mode may have no passphrase configured).
       allowAdminClaim:
-        appConfig.admin.bootstrap === "setupCode" || appConfig.admin.bootstrap === "passphrase",
+        (appConfig.admin.bootstrap === "setupCode" && adminSetupCode !== undefined) ||
+        (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
     };
   }
 
@@ -761,7 +765,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   ): { message?: Message; deletedMessage?: Message; deletedMessageId?: string; error?: string } {
     ensureSessionUser(authorId);
 
-    if (input.type === "channelPost" && !appConfig.features.enablePublicChannels) {
+    if (
+      (input.type === "channelPost" || input.type === "channelReply") &&
+      !appConfig.features.enablePublicChannels
+    ) {
       return { error: "Channel posting is disabled on this LOAM node" };
     }
 
@@ -1181,17 +1188,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const expiredIds = new Set(expired.map((message) => message.id));
-    data.messages = data.messages.filter((message) => !expiredIds.has(message.id));
     store.transaction(() => {
       for (const id of expiredIds) {
         store.deleteMessage(id);
       }
     });
 
+    // Broadcast while the in-memory mirror is still intact: the DM-audience lookup for expired
+    // reactions needs to resolve their target messages, which may be expiring in the same sweep.
     for (const message of expired) {
       broadcast({ type: "messageDeleted", messageId: message.id, message });
     }
 
+    data.messages = data.messages.filter((message) => !expiredIds.has(message.id));
     server.log.info(`Retention reaper deleted ${expired.length} expired message(s)`);
   }
 
@@ -1291,11 +1300,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const user = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (attemptRateLimited(avatarUploadAttempts, user.id)) {
+      return reply.code(429).send({ error: "Too many avatar uploads; try again later" });
+    }
+
+    const previousAvatar = user.avatar;
     const imageId = newAvatarImageId();
     await mkdir(avatarsDir, { recursive: true });
     await writeFile(avatarImagePath(imageId, body.data.mimeType), image);
 
-    return applyUserUpdate(user, {
+    const updated = applyUserUpdate(user, {
       avatar: {
         kind: "image",
         imageId,
@@ -1303,6 +1318,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         uploadedAt: Date.now(),
       },
     });
+
+    // Keep only the latest image per user — remove the replaced file (best effort).
+    if (previousAvatar?.kind === "image" && previousAvatar.imageId && previousAvatar.mimeType) {
+      await rm(avatarImagePath(previousAvatar.imageId, previousAvatar.mimeType), { force: true }).catch(
+        (error: unknown) => server.log.warn(error),
+      );
+    }
+
+    return updated;
   });
   server.patch<{ Params: { userId: string } }>("/api/users/:userId", async (request, reply) => {
     const body = UserUpdateRequestSchema.safeParse(request.body);
@@ -1402,7 +1426,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send({ error: "Admin claiming is not enabled on this LOAM node" });
     }
 
-    if (attemptRateLimited(claimAttempts, currentUser.id)) {
+    // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie.
+    if (attemptRateLimited(claimAttempts, request.ip)) {
       return reply.code(429).send({ error: "Too many claim attempts; try again later" });
     }
 
@@ -1502,6 +1527,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       next = mergeConfig(appConfig, body.data);
     } catch {
       return reply.code(400).send({ error: "Invalid config values" });
+    }
+
+    // Passphrase bootstrap without a passphrase would advertise a claim flow that can never
+    // succeed (and clearing the passphrase while the mode is active would lock admins out).
+    if (next.admin.bootstrap === "passphrase" && !next.admin.passphrase) {
+      return reply.code(400).send({ error: "The passphrase bootstrap strategy requires a passphrase" });
     }
 
     appConfig = next;

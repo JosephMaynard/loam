@@ -156,18 +156,24 @@ describe("admin bootstrap", () => {
     expect((await claim(app, session.cookie, "wrong-again")).statusCode).toBe(429);
   });
 
-  it("exposes allowAdminClaim in the network config only for claimable strategies", async () => {
+  it("exposes allowAdminClaim only while a usable claim secret exists", async () => {
     const claimable = await makeApp({ admin: { bootstrap: "setupCode" } });
-    const claimableConfig = (await claimable.server.inject({ method: "GET", url: "/api/config" })).json() as {
-      networkConfig: { allowAdminClaim: boolean };
-    };
-    expect(claimableConfig.networkConfig.allowAdminClaim).toBe(true);
+    const readClaimFlag = async (app: LoamApp) =>
+      (
+        (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+          networkConfig: { allowAdminClaim: boolean };
+        }
+      ).networkConfig.allowAdminClaim;
+
+    expect(await readClaimFlag(claimable)).toBe(true);
+
+    // Once the one-time code is spent, stop advertising a claim flow that cannot succeed.
+    const session = await newSession(claimable);
+    await claim(claimable, session.cookie, claimable.adminSetupCode ?? "");
+    expect(await readClaimFlag(claimable)).toBe(false);
 
     const notClaimable = await makeApp();
-    const notClaimableConfig = (await notClaimable.server.inject({ method: "GET", url: "/api/config" })).json() as {
-      networkConfig: { allowAdminClaim: boolean };
-    };
-    expect(notClaimableConfig.networkConfig.allowAdminClaim).toBe(false);
+    expect(await readClaimFlag(notClaimable)).toBe(false);
   });
 });
 
@@ -297,18 +303,27 @@ describe("admin config API", () => {
     expect(config.killSwitch.panicToken).toBeUndefined();
   });
 
-  it("clears the passphrase when patched to an empty string", async () => {
+  it("refuses to clear the passphrase while the passphrase strategy is active", async () => {
     const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
     const admin = await newSession(app);
     await claim(app, admin.cookie, "correct horse battery");
 
-    const patch = await app.server.inject({
+    const clearWhileActive = await app.server.inject({
       method: "PATCH",
       url: "/api/admin/config",
       headers: { cookie: admin.cookie },
       payload: { admin: { passphrase: "" } },
     });
-    expect(patch.statusCode).toBe(200);
+    expect(clearWhileActive.statusCode).toBe(400);
+
+    // Switching strategy and clearing together is fine — and claiming stops working.
+    const switchAndClear = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { admin: { bootstrap: "none", passphrase: "" } },
+    });
+    expect(switchAndClear.statusCode).toBe(200);
 
     const session = await newSession(app);
     expect((await claim(app, session.cookie, "correct horse battery")).statusCode).toBe(403);
@@ -448,7 +463,9 @@ describe("panic endpoint", () => {
 
 describe("message retention (ephemeral messages)", () => {
   it("reaps messages older than the configured TTL and keeps newer ones", async () => {
-    const app = await makeApp({ retention: { messageTtlMs: 60 } });
+    // Generous margins keep this deterministic on slow CI: the old message is ~700ms old at reap
+    // time (TTL 500ms) while the fresh one is only as old as the two intervening inject calls.
+    const app = await makeApp({ retention: { messageTtlMs: 500 } });
     const session = await newSession(app);
 
     const oldPost = await app.server.inject({
@@ -459,7 +476,7 @@ describe("message retention (ephemeral messages)", () => {
     });
     expect(oldPost.statusCode).toBe(201);
 
-    await new Promise((resolve) => setTimeout(resolve, 90));
+    await new Promise((resolve) => setTimeout(resolve, 700));
 
     const freshPost = await app.server.inject({
       method: "POST",
@@ -640,5 +657,58 @@ describe("config robustness", () => {
     expect((await patch({ killSwitch: { panicToken: "tooshort" } })).statusCode).toBe(400);
     expect((await patch({ admin: { passphrase: "" } })).statusCode).toBe(200);
     expect((await patch({ admin: { passphrase: "long enough passphrase" } })).statusCode).toBe(200);
+  });
+});
+
+describe("avatar uploads", () => {
+  it("keeps only the latest uploaded avatar image per user", async () => {
+    const { app, dataDir } = await makeApp({
+      identity: { allowUserAvatarEdit: true, allowUserAvatarUpload: true },
+    });
+    const session = await newSession(app);
+    const webp = Buffer.from("RIFF\0\0\0\0WEBP").toString("base64");
+    const upload = () =>
+      app.server.inject({
+        method: "PUT",
+        url: "/api/users/me/avatar-image",
+        headers: { cookie: session.cookie },
+        payload: { mimeType: "image/webp", data: webp },
+      });
+
+    const first = await upload();
+    expect(first.statusCode).toBe(200);
+    const firstImageId = (first.json() as { avatar: { imageId: string } }).avatar.imageId;
+    expect(existsSync(join(dataDir, "avatars", `${firstImageId}.webp`))).toBe(true);
+
+    const second = await upload();
+    expect(second.statusCode).toBe(200);
+    const secondImageId = (second.json() as { avatar: { imageId: string } }).avatar.imageId;
+
+    expect(existsSync(join(dataDir, "avatars", `${secondImageId}.webp`))).toBe(true);
+    expect(existsSync(join(dataDir, "avatars", `${firstImageId}.webp`))).toBe(false);
+  });
+});
+
+describe("public-channel flag", () => {
+  it("blocks replies as well as posts when enablePublicChannels is off", async () => {
+    const app = await makeApp({ features: { enablePublicChannels: false } });
+    const session = await newSession(app);
+
+    const post = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "nope" },
+    });
+    expect(post.statusCode).toBe(400);
+
+    const reply = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelReply", channelId: "general", parentMessageId: "msg_whatever", body: "nope" },
+    });
+    expect(reply.statusCode).toBe(400);
+    expect((reply.json() as { error: string }).error).toMatch(/Channel posting is disabled/);
   });
 });

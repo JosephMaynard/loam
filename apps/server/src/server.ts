@@ -34,8 +34,11 @@ if (app.adminSetupCode) {
   app.server.log.info(`Admin setup code (single use): ${app.adminSetupCode}`);
 }
 
-process.on("SIGINT", () => {
+function shutdown(): void {
   void app.close().finally(() => process.exit(0));
-});
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 await app.server.listen({ host, port });

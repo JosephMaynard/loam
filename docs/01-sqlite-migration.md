@@ -46,9 +46,11 @@ a discriminated union on `type`). `SessionRecord = { token, userId }` is defined
 found the embedded Android Node is **18.20.4 (ABI 108)**, where `node:sqlite` **does not exist**
 (verified on-device: `ERR_UNKNOWN_BUILTIN_MODULE`; it needs Node ≥ 22.5). Outcomes:
 
-- **Chosen: `better-sqlite3-multiple-ciphers`** — actively maintained (v12.11.1, June 2026), same
-  synchronous API/build system as better-sqlite3, encryption via SQLite3MultipleCiphers (**no
-  OpenSSL**; ChaCha20-Poly1305 default, SQLCipher-compatible mode). The Android path is proven by
+- **Chosen: `better-sqlite3-multiple-ciphers`** (decision recorded; the dependency itself is not yet
+  in the workspace manifests — it lands with the initiative-4 embedding work once the ABI-108
+  prebuilds exist) — actively maintained (v12.11.1, June 2026), same synchronous API/build system as
+  better-sqlite3, encryption via SQLite3MultipleCiphers (**no OpenSSL**; ChaCha20-Poly1305 default,
+  SQLCipher-compatible mode). The Android path is proven by
   **`digidem/better-sqlite3-nodejs-mobile`**, which publishes plain better-sqlite3 prebuilds against
   ABI 108 for android-arm/arm64 (CoMapeo ships them in production) — and the phase-2 spike **ran
   that prebuild on-device in LOAM's own app** (CREATE/INSERT/SELECT OK). Its CI compiles the SQLite

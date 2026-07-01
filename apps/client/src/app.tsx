@@ -963,7 +963,7 @@ function LoamApp() {
         users={users}
       />
       {routeState.screen === "admin" ? (
-        <AdminView currentUser={currentUser} />
+        <AdminView currentUser={currentUser} onWiped={purgeLocalData} />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           config={config}
@@ -2264,7 +2264,7 @@ const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
  * the admin bootstrap strategy via the /api/admin/config endpoints. Client gating is cosmetic —
  * the server enforces admin on every request.
  */
-function AdminView({ currentUser }: { currentUser: User }) {
+function AdminView({ currentUser, onWiped }: { currentUser: User; onWiped: () => Promise<void> }) {
   const [adminConfig, setAdminConfig] = useState<LoamConfig>();
   const [loadError, setLoadError] = useState<string>();
   const [saving, setSaving] = useState(false);
@@ -2358,10 +2358,11 @@ function AdminView({ currentUser }: { currentUser: User }) {
 
       const parsed = LoamConfigSchema.safeParse(payload);
 
-      if (parsed.success) {
-        setAdminConfig(parsed.data);
+      if (!parsed.success) {
+        throw new Error("The server accepted the update but returned an unrecognised config payload.");
       }
 
+      setAdminConfig(parsed.data);
       setPassphrase("");
       setPanicToken("");
       setSaved(true);
@@ -2431,7 +2432,9 @@ function AdminView({ currentUser }: { currentUser: User }) {
         throw new Error(message);
       }
 
-      // Success: the server broadcasts a wipe event and this client purges itself via the socket.
+      // The server also broadcasts a wipe event, but purge directly on HTTP success too so the
+      // admin's own browser is cleaned even if its socket is closed (purging twice is harmless).
+      await onWiped();
     } catch (error) {
       setFireError(error instanceof Error ? error.message : "Unable to trigger the kill switch.");
       setFiring(false);

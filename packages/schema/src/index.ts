@@ -97,7 +97,7 @@ export type IdentityConfig = z.infer<typeof IdentityConfigSchema>;
 
 export const OllamaConfigSchema = z.object({
   enabled: z.boolean(),
-  baseUrl: z.string().min(1),
+  baseUrl: z.url({ protocol: /^https?$/ }),
   model: z.string().min(1),
   botId: IdSchema,
   botDisplayName: z.string().min(1),
