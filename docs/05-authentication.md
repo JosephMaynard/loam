@@ -12,8 +12,8 @@ Make identity a first-class, config-selected mode rather than bolting auth onto 
 
 | Mode | Who it's for | Identity | Default where |
 |------|--------------|----------|----------------|
-| `anonymous` (today) | protest / off-grid / event | client-generated id + `loam_session` cookie, ephemeral, no login | Android host, Raspberry Pi |
-| `authenticated` | team chat / open-Slack / public website | real accounts (email/passkey/social/atproto), persistent | internet-hosted website |
+| `anonymous` (today) | protest / off-grid / event | server-minted id via the `loam_session` cookie, ephemeral, no login | Android host, Raspberry Pi |
+| `authenticated` | team chat / open-Slack / public website | real accounts (email/passkey/social/atproto), persistent; first-admin bootstrap still handled separately (see 03) | internet-hosted website |
 
 The `User` schema already has the hooks: `type: human|bot|system`, `ephemeral: boolean`, `isAdmin`. In
 `authenticated` mode an account maps to a `User` with `ephemeral: false` and a real `displayName`; roles

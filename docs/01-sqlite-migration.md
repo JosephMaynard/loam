@@ -89,12 +89,13 @@ kill switch a key-discard.
 5. **Retire**: `dirty`, `dataRev`, `saveInProgress`, `saveAllData`, the `setInterval`, `readJsonArray`,
    `writeJson`, `dataPath`. The `SIGINT` handler just closes the DB.
 
-## Testing (new — there are currently no server tests)
+## Testing (landed with Phase A)
 
-This is the natural place to introduce the first `apps/server` test suite (Vitest). Test the DAL against
-a `:memory:` (or temp-file) DB: insert/list round-trips, the discriminated-union message variants,
-reaction toggle delete, DM audience filtering, session persistence, and the JSON→SQLite importer. Add a
-`test` script to `apps/server/package.json` so CI (`pnpm test`) picks it up.
+The first `apps/server` suite exists: `src/db.test.ts` covers the DAL against `:memory:`/temp-file DBs
+(insert/list round-trips, all discriminated-union message variants, reaction toggle delete, session
+persistence, transaction rollback, `wipeAll()`, and the JSON→SQLite importer), and `src/app.test.ts`
+covers routes via `buildApp()` + `server.inject()`. The `test` script in `apps/server/package.json` is
+picked up by CI (`pnpm test`).
 
 ## Open questions
 

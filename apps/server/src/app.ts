@@ -9,6 +9,7 @@ import { generateDisplayName } from "@loam/display-name";
 import {
   AdminClaimRequestSchema,
   AvatarImageUploadRequestSchema,
+  KillSwitchRequestSchema,
   LoamConfigSchema,
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
@@ -426,6 +427,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const store = openStore(join(dataDir, "loam.db"));
 
   /**
+   * Parse one config layer, tolerating malformed JSON and invalid shapes: both are logged and
+   * ignored rather than aborting startup.
+   */
+  function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate | undefined {
+    try {
+      const parsed = LoamConfigUpdateSchema.safeParse(JSON.parse(raw));
+
+      if (parsed.success) {
+        return parsed.data;
+      }
+    } catch {
+      // Malformed JSON — fall through to the shared warning below.
+    }
+
+    server.log.warn(`Ignoring invalid config from ${source}`);
+    return undefined;
+  }
+
+  /**
    * Load the effective configuration: defaults, overlaid by the config file (when present and
    * valid), overlaid by admin edits persisted in the DB `config` table.
    */
@@ -434,12 +454,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     try {
       const raw = await readFile(configPath, "utf8");
-      const fileUpdate = LoamConfigUpdateSchema.safeParse(JSON.parse(raw));
+      const fileUpdate = parseConfigUpdate(raw, configPath);
 
-      if (fileUpdate.success) {
-        config = mergeConfig(config, fileUpdate.data);
-      } else {
-        server.log.warn(`Ignoring invalid config file at ${configPath}`);
+      if (fileUpdate) {
+        config = mergeConfig(config, fileUpdate);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -450,12 +468,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const stored = store.getConfigValue("config");
 
     if (stored) {
-      const storedUpdate = LoamConfigUpdateSchema.safeParse(JSON.parse(stored));
+      const storedUpdate = parseConfigUpdate(stored, "the persisted config table");
 
-      if (storedUpdate.success) {
-        config = mergeConfig(config, storedUpdate.data);
-      } else {
-        server.log.warn("Ignoring invalid persisted config; falling back to file/defaults");
+      if (storedUpdate) {
+        config = mergeConfig(config, storedUpdate);
       }
     }
 
@@ -505,9 +521,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return existing;
     }
 
+    // Persist first, then mirror in memory — if the store write throws, nothing diverges.
     const user = makeUser(id, isAdmin);
-    data.users.push(user);
     store.upsertUser(user);
+    data.users.push(user);
     broadcast({ type: "userUpserted", user });
     return user;
   }
@@ -548,8 +565,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       });
 
       if (JSON.stringify(parsedExisting) !== JSON.stringify(next)) {
+        store.upsertUser(next);
         Object.assign(existing, next);
-        store.upsertUser(existing);
         broadcast({ type: "userUpserted", user: existing });
       }
 
@@ -557,8 +574,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const user = makeBotUser(appConfig.llm.ollama);
-    data.users.push(user);
     store.upsertUser(user);
+    data.users.push(user);
     broadcast({ type: "userUpserted", user });
     return user;
   }
@@ -601,8 +618,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       displayName: update.displayName ?? user.displayName,
       avatar: update.avatar === undefined ? user.avatar : update.avatar,
     });
+    store.upsertUser(next);
     Object.assign(user, next);
-    store.upsertUser(user);
     broadcast({ type: "userUpserted", user });
     return user;
   }
@@ -623,6 +640,38 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function ensureChannel(id: string): Channel | undefined {
     return data.channels.find((channel) => channel.id === id);
+  }
+
+  /**
+   * Enforce a channel's posting policy server-side.
+   *
+   * @param channel - The target channel
+   * @param authorId - The user attempting to post
+   * @param isReply - Whether the message is a thread reply
+   * @returns A human-readable rejection reason, or `undefined` when posting is allowed
+   */
+  function channelPostingError(channel: Channel, authorId: string, isReply: boolean): string | undefined {
+    if (channel.archived) {
+      return "Channel is archived";
+    }
+
+    if (isReply && !channel.allowReplies) {
+      return "Replies are disabled in this channel";
+    }
+
+    if (channel.allowPosting === "owner" && channel.ownerUserId !== authorId) {
+      return "Only the channel owner can post in this channel";
+    }
+
+    if (channel.allowPosting === "admins") {
+      const author = data.users.find((user) => user.id === authorId);
+
+      if (!author?.isAdmin) {
+        return "Only admins can post in this channel";
+      }
+    }
+
+    return undefined;
   }
 
   function channelMessages(channelId: string): Message[] {
@@ -728,15 +777,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { error: "Reactions are disabled on this LOAM node" };
     }
 
-    if (input.type === "channelPost" && !ensureChannel(input.channelId)) {
-      return { error: "Channel does not exist" };
-    }
+    if (input.type === "channelPost" || input.type === "channelReply") {
+      const channel = ensureChannel(input.channelId);
 
-    if (input.type === "channelReply") {
-      if (!ensureChannel(input.channelId)) {
+      if (!channel) {
         return { error: "Channel does not exist" };
       }
 
+      const policyError = channelPostingError(channel, authorId, input.type === "channelReply");
+
+      if (policyError) {
+        return { error: policyError };
+      }
+    }
+
+    if (input.type === "channelReply") {
       const parent = data.messages.find((message) => message.id === input.parentMessageId);
 
       if (!parent || !("channelId" in parent)) {
@@ -748,11 +803,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    if (input.type === "reaction" && !data.messages.some((message) => message.id === input.targetMessageId)) {
-      return { error: "Target message does not exist" };
-    }
-
     if (input.type === "reaction") {
+      const target = data.messages.find((message) => message.id === input.targetMessageId);
+
+      if (!target) {
+        return { error: "Target message does not exist" };
+      }
+
+      // DM (and DM-reaction) targets are only reactable by their participants.
+      const audience = messageAudienceUserIds(target);
+
+      if (audience && !audience.has(authorId)) {
+        return { error: "Cannot react to this message" };
+      }
+
       const existingIndex = data.messages.findIndex(
         (message) =>
           message.type === "reaction" &&
@@ -762,10 +826,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       );
 
       if (existingIndex >= 0) {
-        const [deleted] = data.messages.splice(existingIndex, 1);
+        const deleted = data.messages[existingIndex];
 
         if (deleted) {
           store.deleteMessage(deleted.id);
+          data.messages.splice(existingIndex, 1);
         }
 
         return { deletedMessageId: deleted?.id, deletedMessage: deleted };
@@ -790,8 +855,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           : { markdown: appConfig.features.enableMarkdown, source: "human" as const },
     };
     const message = MessageSchema.parse({ ...input, ...base });
-    data.messages.push(message);
     store.insertMessage(message);
+    data.messages.push(message);
     return { message };
   }
 
@@ -817,8 +882,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         streaming,
       },
     });
+    store.updateMessage(updated);
     Object.assign(message, updated);
-    store.updateMessage(message);
     broadcast({ type: "messageUpdated", message });
     return message;
   }
@@ -973,8 +1038,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         streaming: true,
       },
     });
-    data.messages.push(assistantMessage);
     store.insertMessage(assistantMessage);
+    data.messages.push(assistantMessage);
     broadcast({ type: "messageCreated", message: assistantMessage });
 
     const audience = new Set([bot.id, userMessage.authorId]);
@@ -1376,6 +1441,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (!appConfig.killSwitch.enabled) {
       return reply.code(403).send({ error: "The kill switch is not enabled on this LOAM node" });
+    }
+
+    const body = KillSwitchRequestSchema.safeParse(request.body ?? {});
+
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid kill-switch request" });
+    }
+
+    if (appConfig.killSwitch.requireConfirmation && body.data.confirm !== "wipe") {
+      return reply.code(400).send({ error: 'Confirmation required: send { "confirm": "wipe" }' });
     }
 
     await executeKillSwitch();

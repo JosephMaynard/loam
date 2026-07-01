@@ -164,12 +164,14 @@ export const LoamConfigUpdateSchema = z.object({
     .optional(),
   admin: AdminConfigSchema.partial()
     .extend({
-      passphrase: z.string().max(256).optional(),
+      // Empty string clears the stored value; non-empty must meet the same minimum as AdminConfigSchema.
+      passphrase: z.literal("").or(z.string().min(8).max(256)).optional(),
     })
     .optional(),
   killSwitch: KillSwitchConfigSchema.partial()
     .extend({
-      panicToken: z.string().max(256).optional(),
+      // Empty string clears the stored value; non-empty must meet the same minimum as KillSwitchConfigSchema.
+      panicToken: z.literal("").or(z.string().min(16).max(256)).optional(),
     })
     .optional(),
   retention: z
@@ -191,6 +193,12 @@ export const PanicRequestSchema = z.object({
   token: z.string().min(1).max(256),
 });
 export type PanicRequest = z.infer<typeof PanicRequestSchema>;
+
+export const KillSwitchRequestSchema = z.object({
+  /** Must be the literal "wipe" when the node's killSwitch.requireConfirmation is enabled. */
+  confirm: z.string().max(64).optional(),
+});
+export type KillSwitchRequest = z.infer<typeof KillSwitchRequestSchema>;
 
 export const UserUpdateRequestSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),

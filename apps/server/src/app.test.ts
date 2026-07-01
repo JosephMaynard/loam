@@ -221,8 +221,9 @@ describe("admin config API", () => {
   it("applies, enforces, broadcasts shape, and persists feature flag changes", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-    let app = await buildApp({ dataDir, logger: false });
-    cleanups.push(() => app.close());
+    const initialApp = await buildApp({ dataDir, logger: false });
+    let app: LoamApp = initialApp;
+    cleanups.push(() => initialApp.close());
 
     const admin = await newSession(app);
     expect(admin.isAdmin).toBe(true);
@@ -315,9 +316,31 @@ describe("admin config API", () => {
 });
 
 describe("kill switch", () => {
-  async function postKillSwitch(app: LoamApp, cookie: string) {
-    return app.server.inject({ method: "POST", url: "/api/admin/kill-switch", headers: { cookie } });
+  async function postKillSwitch(
+    app: LoamApp,
+    cookie: string,
+    payload: Record<string, unknown> = { confirm: "wipe" },
+  ) {
+    return app.server.inject({ method: "POST", url: "/api/admin/kill-switch", headers: { cookie }, payload });
   }
+
+  it("requires typed confirmation when requireConfirmation is on (the default)", async () => {
+    const app = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+
+    expect((await postKillSwitch(app, admin.cookie, {})).statusCode).toBe(400);
+    expect((await postKillSwitch(app, admin.cookie, { confirm: "yes" })).statusCode).toBe(400);
+    expect(app.store.loadSessions().length).toBeGreaterThan(0);
+    expect((await postKillSwitch(app, admin.cookie, { confirm: "wipe" })).statusCode).toBe(200);
+    expect(app.store.loadSessions()).toEqual([]);
+  });
+
+  it("fires without confirmation when requireConfirmation is off", async () => {
+    const app = await makeApp({ killSwitch: { enabled: true, requireConfirmation: false } });
+    const admin = await newSession(app);
+
+    expect((await postKillSwitch(app, admin.cookie, {})).statusCode).toBe(200);
+  });
 
   it("rejects non-admins and admins on nodes where it is disabled", async () => {
     const disabled = await makeApp();
@@ -504,5 +527,118 @@ describe("message retention (ephemeral messages)", () => {
     expect(clear.statusCode).toBe(200);
     const cleared = clear.json() as { retention: { messageTtlMs?: number } };
     expect(cleared.retention.messageTtlMs).toBeUndefined();
+  });
+});
+
+describe("message authorization", () => {
+  it("blocks reactions on DMs from non-participants", async () => {
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const mallory = await newSession(app);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "dm", recipientUserId: bob.userId, body: "secret" },
+    });
+    expect(dm.statusCode).toBe(201);
+    const dmId = (dm.json() as { message: { id: string } }).message.id;
+
+    const outsider = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: mallory.cookie },
+      payload: { type: "reaction", targetMessageId: dmId, reaction: "👀" },
+    });
+    expect(outsider.statusCode).toBe(400);
+    expect((outsider.json() as { error: string }).error).toMatch(/Cannot react/);
+
+    const participant = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: bob.cookie },
+      payload: { type: "reaction", targetMessageId: dmId, reaction: "👍" },
+    });
+    expect(participant.statusCode).toBe(201);
+  });
+
+  it("enforces channel posting policy server-side", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    const base = {
+      visibility: "public",
+      allowPosting: "everyone",
+      allowReplies: true,
+      discoverable: true,
+      createdAt: 1_704_067_200_000,
+    };
+    writeFileSync(
+      join(dataDir, "channels.json"),
+      JSON.stringify([
+        { id: "general", name: "General", ...base },
+        { id: "notices", name: "Notices", ...base, allowPosting: "admins" },
+        { id: "old", name: "Old", ...base, archived: true },
+      ]),
+    );
+    const app = await buildApp({ dataDir, logger: false });
+    cleanups.push(async () => {
+      await app.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    const admin = await newSession(app);
+    const visitor = await newSession(app);
+    const post = (cookie: string, channelId: string) =>
+      app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie },
+        payload: { type: "channelPost", channelId, body: "hello" },
+      });
+
+    expect((await post(visitor.cookie, "old")).statusCode).toBe(400);
+    expect((await post(visitor.cookie, "notices")).statusCode).toBe(400);
+    expect((await post(admin.cookie, "notices")).statusCode).toBe(201);
+    expect((await post(visitor.cookie, "general")).statusCode).toBe(201);
+  });
+});
+
+describe("config robustness", () => {
+  it("boots with defaults when the config file is malformed JSON", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    writeFileSync(join(dataDir, "config.json"), "{ this is not json");
+    const app = await buildApp({ dataDir, logger: false });
+    cleanups.push(async () => {
+      await app.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    const first = await newSession(app);
+    expect(first.isAdmin).toBe(true);
+  });
+
+  it("boots when the persisted config row is malformed", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const initialApp = await buildApp({ dataDir, logger: false });
+    cleanups.push(() => initialApp.close());
+    initialApp.store.setConfigValue("config", "{ broken");
+
+    const reopened = await reopenApp(initialApp, dataDir);
+    const session = await newSession(reopened);
+    expect(session.isAdmin).toBe(true);
+  });
+
+  it("rejects update secrets shorter than their configured minimums", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const patch = (payload: Record<string, unknown>) =>
+      app.server.inject({ method: "PATCH", url: "/api/admin/config", headers: { cookie: admin.cookie }, payload });
+
+    expect((await patch({ admin: { passphrase: "short" } })).statusCode).toBe(400);
+    expect((await patch({ killSwitch: { panicToken: "tooshort" } })).statusCode).toBe(400);
+    expect((await patch({ admin: { passphrase: "" } })).statusCode).toBe(200);
+    expect((await patch({ admin: { passphrase: "long enough passphrase" } })).statusCode).toBe(200);
   });
 });

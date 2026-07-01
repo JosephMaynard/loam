@@ -2407,10 +2407,19 @@ function AdminView({ currentUser }: { currentUser: User }) {
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
+      // The server independently requires { confirm: "wipe" } when requireConfirmation is on, so
+      // pass through what the admin actually typed rather than asserting it.
+      const body = adminConfig?.killSwitch.requireConfirmation
+        ? { confirm: wipeConfirmText.trim() }
+        : {};
       const response = await fetch(apiUrl("/api/admin/kill-switch"), {
         method: "POST",
         credentials: "include",
+        headers: {
+          "content-type": "application/json",
+        },
         signal: controller.signal,
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {

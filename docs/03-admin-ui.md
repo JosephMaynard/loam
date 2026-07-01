@@ -35,9 +35,11 @@ Model it as a config strategy (e.g. `admin.bootstrap: "hostDevice" | "firstUser"
 "passphrase"`) with a sensible default per platform:
 
 - **Android host app** → `hostDevice`: the phone owner is the admin. Since the RN app *is* the embedded
-  server (initiative 4), the app can grant admin to the local host session directly — e.g. the embedded
-  server issues an admin session for connections from `localhost`/the host WebView, or the app injects a
-  local-only admin token the server trusts. Remote joiners over the hotspot are never auto-admin.
+  server (initiative 4), the app mints a **bootstrap secret** (random, ideally device-keystore-backed)
+  and passes it to the embedded server at startup; the host WebView then exchanges that secret for an
+  admin session (the existing claim flow). **Do not treat `localhost` provenance as identity** — other
+  apps on the phone can reach `127.0.0.1`, so the secret, not the source address, is what proves the
+  caller is the host app. Remote joiners over the hotspot are never auto-admin.
 - **Raspberry Pi / headless** → `firstUser`: the first session on a fresh node becomes admin (accept the
   minor first-boot race, or pair with a short console-printed code to close it).
 - Keep `setupCode` (console/QR claim code) and `passphrase` available for other setups.

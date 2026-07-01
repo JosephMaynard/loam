@@ -127,7 +127,9 @@ export async function destroyDatabase(): Promise<void> {
     const request = indexedDB.deleteDatabase(DB_NAME);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
-    // Another tab still holds a connection; deletion completes once it closes.
-    request.onblocked = () => resolve();
+    // Another tab still holds a connection: the browser defers the deletion until it closes
+    // (that tab purges itself too on the wipe event). Surface it so callers know the wipe is
+    // deferred rather than complete.
+    request.onblocked = () => reject(new Error("Database deletion deferred: another tab holds a connection."));
   });
 }
