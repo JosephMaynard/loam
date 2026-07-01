@@ -21,7 +21,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 
 | Path | Role |
 |------|------|
-| `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. Routes/app logic: `src/server.ts` (~1.2k lines). |
+| `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. App factory: `src/app.ts` (`buildApp()`, all routes/logic — testable via `inject`); `src/server.ts` is the thin entry point (env, listen, SIGINT). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2k lines, all components). Libs in `src/lib/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
@@ -42,10 +42,10 @@ There is **no lint script and no typecheck-only script**. Type-checking happens 
 (`tsc`). A `.stylelintrc.json` exists but is not wired to any script. CI (`.github/workflows/ci.yml`)
 runs exactly `pnpm build` then `pnpm test` on push/PR to `master`.
 
-**Tests**: `packages/*` (42 tests: schema, display-name, avatar, qr) plus `apps/server`
-(`src/db.test.ts`, DAL + legacy-import tests). `apps/client` has **no test script**, so `pnpm test`
-skips it — a Vitest+jsdom client harness is still a good early win. There are no route-level server
-tests yet either (the Fastify app isn't factored for injection).
+**Tests**: `packages/*` (43 tests: schema, display-name, avatar, qr) plus `apps/server` (27 tests:
+`src/db.test.ts` for the DAL/importer, `src/app.test.ts` for routes via `buildApp()` +
+`server.inject()` — admin bootstrap matrix, config API, flag enforcement). `apps/client` has **no
+test script**, so `pnpm test` skips it — a Vitest+jsdom client harness is still a good early win.
 
 ## How dev mode wires together (important)
 
@@ -80,7 +80,11 @@ Env vars the server/dev script read: `PORT`, `CLIENT_PORT`, `HOST`, `LOAM_JOIN_H
 - **StreamEvent**: `start | delta | end | error` — the LLM streaming protocol over the WebSocket.
   Deltas carry only the new text (sent just to the DM participants); the final complete message is
   persisted and broadcast once via `messageUpdated`, so non-streaming clients still converge.
-- **NetworkConfig**: feature flags sent to the client from `/api/config`.
+- **NetworkConfig**: feature flags sent to the client from `/api/config` (and re-broadcast live via
+  the `configUpdated` WS event when an admin edits config).
+- **LoamConfig / LoamConfigUpdate**: the full node configuration (identity, features, llm, admin
+  bootstrap, security profile) and its PATCH shape — shared by the server config loader, the
+  `/api/admin/config` endpoints, and the client admin UI.
 
 **Gotcha — build the schema package after editing it.** The server imports `@loam/schema` which
 resolves to the compiled **`dist/`** (`package.json` `main`). `tsx watch` does *not* rebuild the
@@ -89,7 +93,7 @@ package, so schema edits are invisible to the running server until you rebuild i
 via **Vite aliases to `src/`** (see `vite.config.ts` / `tsconfig.app.json` `paths`), so it picks up
 edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-name, qr).
 
-## Server architecture (`apps/server/src/server.ts`)
+## Server architecture (`apps/server/src/app.ts`)
 
 - **Storage**: reads are served from in-memory arrays (`data.users/channels/messages`) + a
   `sessions` Map; every mutation **writes through synchronously** to SQLite (`.loam/loam.db`, WAL
@@ -104,31 +108,42 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   `user.<8hex>` id + token and `Set-Cookie`s it (HttpOnly, SameSite=Lax). The **server session cookie
   is the real identity**; the client's locally generated id is a pre-hydration placeholder that gets
   replaced by `config.currentUser` on first load.
-- **Admin**: seed users `user.1234` (admin) and `user.5678` always exist. Admin-only endpoints check
-  `currentUser.isAdmin`. Because real sessions get random ids, **no ordinary user is ever admin** —
-  there is currently no promotion path. Note this before building anything gated on admin.
+- **Admin**: comes only from the config-selected **bootstrap strategy** (`admin.bootstrap`):
+  `firstUser` (default — the first session on a fresh node becomes admin), `setupCode` (a one-time
+  code logged at startup, exchanged via `POST /api/admin/claim`, rate-limited + constant-time
+  compared), `passphrase` (same endpoint, reusable secret from config), `hostDevice` (reserved for
+  the Android host, initiative 4), or `none`. Seed users `user.1234`/`user.5678` still exist but are
+  **never admins** (legacy admin seeds are demoted at boot). Admin-only endpoints check
+  `currentUser.isAdmin`; client gating is cosmetic.
+- **Config**: layered defaults ← `config.json` ← DB-persisted admin edits (`config` table), all
+  validated against the shared `LoamConfigSchema`. `PATCH /api/admin/config` merges, persists,
+  hot-reloads, and broadcasts `configUpdated`. Feature flags are **enforced server-side** in
+  `createMessage()`.
 - **Broadcast filtering**: `broadcast()` sends to all sockets but `socketCanReceiveEvent` restricts DM
   and DM-reaction events to their participants; channel messages and `userUpserted` go to everyone.
 - **REST endpoints**: `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
-  `GET /api/channels`, `GET /api/messages/:channelId`, `GET /api/dms/:userId`, `POST /api/messages`.
-  WebSocket at `GET /ws` (requires the session cookie to already be set — the client opens it only
-  after `/api/config` resolves).
+  `GET /api/channels`, `GET /api/messages/:channelId`, `GET /api/dms/:userId`, `POST /api/messages`,
+  `POST /api/admin/claim`, `GET/PATCH /api/admin/config` (admin). WebSocket at `GET /ws` (requires
+  the session cookie to already be set — the client opens it only after `/api/config` resolves).
 - **Avatar uploads**: base64 JSON body, ≤128KB, magic-byte signature checked against declared MIME,
   written to `.loam/avatars/`. Original files never leave the browser (cropped client-side to 256×256).
 - **LLM (optional)**: when `llm.ollama.enabled`, a bot user appears as a DM contact. DMing it streams
   a reply from Ollama's `/api/chat` into a new assistant message, updated incrementally. All gated on
   config; absent config = no bot, no LLM routes.
 
-**Feature-flag caveat**: only `identity.*` and `llm.ollama.*` are read from `config.json`
-(`loadAppConfig`). The other `NetworkConfig` flags in `currentNetworkConfig()` (e.g.
-`enablePrivateChannels: false`, `enableReplies: true`) are **hardcoded constants**, not yet wired to
-config or enforced server-side. Treat them as "intended surface," not live switches.
+**Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
+`enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`.
+`enablePrivateChannels`/`enableUserChannels` are stored and surfaced but have nothing to gate yet
+(no channel creation or private channels exist). `security.profile` is stored but does not drive
+any behaviour yet (see `docs/09-security-profiles.md`).
 
 ## Client architecture (`apps/client/src/app.tsx`)
 
 - Preact + `preact-iso` for routing (hash-free paths: `/channels`, `/channel/:id`,
-  `/channel/:id/thread/:tid`, `/dm/:id`, `/settings`). `parseRoute` maps path → `RouteState`.
+  `/channel/:id/thread/:tid`, `/dm/:id`, `/settings`, `/admin`). `parseRoute` maps path →
+  `RouteState`. The admin area (`AdminView`) and the claim form in settings appear per
+  `currentUser.isAdmin` / `networkConfig.allowAdminClaim` — cosmetic only; the server enforces.
 - State is plain `useState` in `LoamApp` (no store lib). Flow: hydrate from **IndexedDB**
   (`src/lib/local-store.ts`, db `loam-poc`) → fetch `/api/config`, `/api/channels`, `/api/users` →
   open WebSocket → apply live `messageCreated/Updated/Deleted` and `userUpserted` events. Reconnect
@@ -157,12 +172,11 @@ config or enforced server-side. Treat them as "intended surface," not live switc
 
 ## Good first areas / known gaps
 
-- No tests for `apps/client`, and no route-level tests for `apps/server` (only the DAL is covered) —
-  a Fastify integration test (needs factoring the app for `inject`) or a Vitest+jsdom client test
-  would be high value and easy to slot into CI.
-- Admin has no promotion path beyond the two seed ids.
-- Several `NetworkConfig` flags are decorative (see caveat above) — wiring them to config + enforcing
-  them server-side is a natural feature.
+- No tests for `apps/client` — a Vitest+jsdom client test harness would be high value and easy to
+  slot into CI.
+- `enablePrivateChannels`/`enableUserChannels` gate nothing yet — channel creation and private
+  channels are the natural features to hang off them.
+- `security.profile` config exists but no preset logic consumes it yet (docs/09).
 - LoRa / alternate transports are a stated design goal but unimplemented.
 - Channel creation, private channels, and message editing/deletion by users are not exposed yet
   though schema/data structures partially anticipate them.

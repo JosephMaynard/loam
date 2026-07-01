@@ -1,5 +1,14 @@
 # 03 — Admin UI
 
+> **Status: part A landed.** Admin bootstrap (`firstUser` default / `setupCode` / `passphrase` /
+> `none`; `hostDevice` reserved for initiative 4), `POST /api/admin/claim` (rate-limited,
+> constant-time), `GET`/`PATCH /api/admin/config` (layered defaults ← file ← DB, hot-reload,
+> `configUpdated` broadcast), the messaging feature flags wired to config and **enforced in
+> `createMessage()`**, shared `LoamConfigSchema` in `packages/schema` (with the doc-09
+> `security.profile` field reserved), legacy admin seeds demoted, `/admin` client UI + claim form
+> in settings, and 12 route tests via the new `buildApp()` factory. **Part B remaining:** user
+> management, channel create/archive, session revocation, kill-switch section (02).
+
 ## Goal
 
 Move node configuration out of hand-edited text files into an **admin-only area in the client app**.
