@@ -2334,6 +2334,7 @@ function AdminView({ currentUser }: { currentUser: User }) {
           requireConfirmation: adminConfig.killSwitch.requireConfirmation,
           ...(panicToken.trim() ? { panicToken: panicToken.trim() } : {}),
         },
+        retention: { messageTtlMs: adminConfig.retention.messageTtlMs ?? null },
         security: adminConfig.security,
       };
       const response = await fetch(apiUrl("/api/admin/config"), {
@@ -2553,6 +2554,43 @@ function AdminView({ currentUser }: { currentUser: User }) {
                 value={adminConfig.llm.ollama.systemPrompt ?? ""}
               />
             </label>
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Privacy</p>
+              <h2>Message retention</h2>
+            </div>
+            <label>
+              Delete messages after (minutes; blank = keep forever)
+              <input
+                disabled={saving}
+                min={1}
+                onInput={(event) => {
+                  const minutes = Number.parseInt(event.currentTarget.value, 10);
+                  setAdminConfig((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          retention: {
+                            messageTtlMs:
+                              Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined,
+                          },
+                        }
+                      : previous,
+                  );
+                }}
+                type="number"
+                value={
+                  adminConfig.retention.messageTtlMs
+                    ? String(Math.round(adminConfig.retention.messageTtlMs / 60_000))
+                    : ""
+                }
+              />
+            </label>
+            <p className="form-note">
+              Expired messages are deleted from the node and from connected clients (checked every
+              30 seconds). The proactive companion to the kill switch below.
+            </p>
           </div>
           <div className="profile-panel">
             <div>

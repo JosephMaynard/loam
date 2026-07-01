@@ -34,6 +34,12 @@ server-side LLM/search for those conversations. Key exchange can lean on LOAM's 
 its own initiative and a top-level decision, not a quick add.
 
 ### Ephemeral messages (recommended early, cheap, high threat-fit)
+> **Status: landed** (global TTL) — `retention.messageTtlMs` in the shared config, a 30s reaper
+> (+ boot-time sweep) that deletes expired messages from memory + SQLite and broadcasts
+> `messageDeleted` so connected clients purge their caches; in-flight LLM streaming messages are
+> spared until they finish; editable live from the admin UI (minutes field, blank = keep). Not yet:
+> per-channel TTLs, and offline clients only reconcile when they receive live delete events.
+
 A per-channel/global `retentionMs` config + a periodic reaper (`DELETE FROM messages WHERE created_at <
 now - ttl`) gives disappearing messages almost for free once on SQLite. It's the *proactive* complement
 to the kill switch: minimize what exists to be seized in the first place. Broadcast a `messageDeleted`

@@ -422,3 +422,87 @@ describe("panic endpoint", () => {
     expect((await panic(app, "wrong-again")).statusCode).toBe(429);
   });
 });
+
+describe("message retention (ephemeral messages)", () => {
+  it("reaps messages older than the configured TTL and keeps newer ones", async () => {
+    const app = await makeApp({ retention: { messageTtlMs: 60 } });
+    const session = await newSession(app);
+
+    const oldPost = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "old enough to expire" },
+    });
+    expect(oldPost.statusCode).toBe(201);
+
+    await new Promise((resolve) => setTimeout(resolve, 90));
+
+    const freshPost = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "still fresh" },
+    });
+    expect(freshPost.statusCode).toBe(201);
+
+    app.reapExpiredMessages();
+
+    const bodies = app.store.loadMessages().map((message) => ("body" in message ? message.body : ""));
+    expect(bodies).toEqual(["still fresh"]);
+
+    const served = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: session.cookie } })
+    ).json() as { body?: string }[];
+    expect(served.map((message) => message.body)).toEqual(["still fresh"]);
+  });
+
+  it("does nothing when no TTL is configured", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "kept forever" },
+    });
+
+    app.reapExpiredMessages();
+    expect(app.store.loadMessages().length).toBe(1);
+  });
+
+  it("applies a TTL set via the admin config API and clears it with null", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "doomed" },
+    });
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { retention: { messageTtlMs: 1 } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    app.reapExpiredMessages();
+    expect(app.store.loadMessages()).toEqual([]);
+
+    const clear = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { retention: { messageTtlMs: null } },
+    });
+    expect(clear.statusCode).toBe(200);
+    const cleared = clear.json() as { retention: { messageTtlMs?: number } };
+    expect(cleared.retention.messageTtlMs).toBeUndefined();
+  });
+});

@@ -120,6 +120,12 @@ export const AdminConfigSchema = z.object({
 });
 export type AdminConfig = z.infer<typeof AdminConfigSchema>;
 
+export const RetentionConfigSchema = z.object({
+  /** Delete messages older than this many milliseconds; unset = keep forever. */
+  messageTtlMs: z.number().int().positive().optional(),
+});
+export type RetentionConfig = z.infer<typeof RetentionConfigSchema>;
+
 export const KillSwitchConfigSchema = z.object({
   enabled: z.boolean(),
   requireConfirmation: z.boolean(),
@@ -141,6 +147,7 @@ export const LoamConfigSchema = z.object({
   llm: z.object({ ollama: OllamaConfigSchema }),
   admin: AdminConfigSchema,
   killSwitch: KillSwitchConfigSchema,
+  retention: RetentionConfigSchema,
   security: SecurityConfigSchema,
 });
 export type LoamConfig = z.infer<typeof LoamConfigSchema>;
@@ -163,6 +170,12 @@ export const LoamConfigUpdateSchema = z.object({
   killSwitch: KillSwitchConfigSchema.partial()
     .extend({
       panicToken: z.string().max(256).optional(),
+    })
+    .optional(),
+  retention: z
+    .object({
+      // null clears the TTL back to keep-forever.
+      messageTtlMs: z.number().int().positive().nullable().optional(),
     })
     .optional(),
   security: SecurityConfigSchema.partial().optional(),

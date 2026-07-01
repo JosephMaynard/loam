@@ -88,6 +88,7 @@ describe("@loam/schema", () => {
         },
         admin: { bootstrap: "firstUser" },
         killSwitch: { enabled: false, requireConfirmation: true },
+        retention: {},
         security: { profile: "standard" },
       }),
     ).not.toThrow();

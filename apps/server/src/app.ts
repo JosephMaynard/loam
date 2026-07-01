@@ -95,6 +95,8 @@ export type LoamApp = {
   store: LoamStore;
   /** One-time admin claim code, present when bootstrap is `setupCode` and no admin exists yet. */
   adminSetupCode?: string;
+  /** Delete messages older than the configured retention TTL now (also runs on a timer). */
+  reapExpiredMessages(): void;
   close(): Promise<void>;
 };
 
@@ -167,6 +169,7 @@ export function defaultLoamConfig(): LoamConfig {
       enabled: false,
       requireConfirmation: true,
     },
+    retention: {},
     security: {
       profile: "standard",
     },
@@ -198,6 +201,7 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     llm: { ollama: { ...base.llm.ollama, ...update.llm?.ollama } },
     admin: { ...base.admin, ...update.admin },
     killSwitch: { ...base.killSwitch, ...update.killSwitch },
+    retention: { ...base.retention, ...update.retention },
     security: { ...base.security, ...update.security },
   };
   const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
@@ -206,6 +210,7 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
   merged.admin.passphrase = passphrase || undefined;
   const panicToken = merged.killSwitch.panicToken?.trim();
   merged.killSwitch.panicToken = panicToken || undefined;
+  merged.retention.messageTtlMs = merged.retention.messageTtlMs ?? undefined;
   return LoamConfigSchema.parse(merged);
 }
 
@@ -1091,6 +1096,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Delete messages older than the configured retention TTL (ephemeral messages): remove them from
+   * memory and the store, and broadcast `messageDeleted` so connected clients drop them from their
+   * local caches too. In-flight streaming messages are spared until they finish. No-op when no TTL
+   * is configured.
+   */
+  function reapExpiredMessages(): void {
+    const ttl = appConfig.retention.messageTtlMs;
+
+    if (!ttl) {
+      return;
+    }
+
+    const cutoff = Date.now() - ttl;
+    const expired = data.messages.filter((message) => message.createdAt < cutoff && !message.meta?.streaming);
+
+    if (!expired.length) {
+      return;
+    }
+
+    const expiredIds = new Set(expired.map((message) => message.id));
+    data.messages = data.messages.filter((message) => !expiredIds.has(message.id));
+    store.transaction(() => {
+      for (const id of expiredIds) {
+        store.deleteMessage(id);
+      }
+    });
+
+    for (const message of expired) {
+      broadcast({ type: "messageDeleted", messageId: message.id, message });
+    }
+
+    server.log.info(`Retention reaper deleted ${expired.length} expired message(s)`);
+  }
+
+  /**
    * Registers the client distribution directory as the server's static file root when it exists.
    */
   async function registerStaticFiles(): Promise<void> {
@@ -1117,10 +1157,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   await loadAppConfig();
   loadData();
+  reapExpiredMessages();
 
   if (appConfig.admin.bootstrap === "setupCode" && !anyAdminExists()) {
     adminSetupCode = makeAdminSetupCode();
   }
+
+  const reaperTimer = setInterval(() => {
+    try {
+      reapExpiredMessages();
+    } catch (error) {
+      server.log.error(error);
+    }
+  }, 30_000);
 
   await server.register(fastifyWebsocket);
   await registerStaticFiles();
@@ -1419,7 +1468,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     server,
     store,
     adminSetupCode,
+    reapExpiredMessages,
     async close() {
+      clearInterval(reaperTimer);
       await server.close();
       store.close();
     },

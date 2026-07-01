@@ -119,6 +119,9 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   validated against the shared `LoamConfigSchema`. `PATCH /api/admin/config` merges, persists,
   hot-reloads, and broadcasts `configUpdated`. Feature flags are **enforced server-side** in
   `createMessage()`.
+- **Ephemeral messages** (off by default; `retention.messageTtlMs`): a 30s reaper (+ boot sweep)
+  deletes expired messages and broadcasts `messageDeleted`; streaming LLM messages are spared until
+  complete.
 - **Kill switch** (off by default; `killSwitch.enabled`): `executeKillSwitch()` wipes all tables
   (`store.wipeAll()`), deletes avatars, invalidates sessions, broadcasts `wipe` (clients purge
   IndexedDB/localStorage/SW caches and show a neutral disconnected screen), closes sockets, and
