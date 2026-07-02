@@ -45,6 +45,14 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     throw new Error("LOAM_DATA_DIR must be set for the embedded server (a writable app directory).");
   }
 
+  const clientDistDir = process.env.LOAM_CLIENT_DIST;
+
+  if (!clientDistDir) {
+    // The embedded host exists to serve the client to hotspot joiners; without it they'd only get
+    // the bare fallback page, which defeats the purpose — fail fast rather than start half-usable.
+    throw new Error("LOAM_CLIENT_DIST must be set for the embedded server (the built web client to serve).");
+  }
+
   const port = parsePort(process.env.PORT, 3000);
   const host = process.env.HOST ?? "0.0.0.0";
   const clientPort = parsePort(process.env.CLIENT_PORT, port);
@@ -52,7 +60,7 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
   const app = await buildApp({
     dataDir,
     configPath: process.env.LOAM_CONFIG_FILE,
-    clientDistDir: process.env.LOAM_CLIENT_DIST,
+    clientDistDir,
     joinHost: process.env.LOAM_JOIN_HOST ?? firstLanIPv4(),
     clientPort,
   });
@@ -62,7 +70,11 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
   }
 
   const shutdown = (): void => {
-    void app.close().finally(() => process.exit(0));
+    app.server.log.info("Shutting down embedded LOAM server…");
+    app
+      .close()
+      .catch((error) => app.server.log.error(error, "Error during embedded server shutdown"))
+      .finally(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
