@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LOAM — off-grid, local-first messaging</title>
+    <meta
+      name="description"
+      content="LOAM is a local-first, off-grid messaging network. A host runs it on a laptop, Raspberry Pi, or phone; nearby people scan a QR code and join over the local network. No internet, no accounts, no cloud."
+    />
+    <link rel="icon" href="/loam.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/loam-512.png" />
+    <meta name="theme-color" content="#17231d" />
+    <meta property="og:title" content="LOAM — off-grid, local-first messaging" />
+    <meta
+      property="og:description"
+      content="A message network that works with no internet, no accounts, and no cloud. Scan a QR code and join over local WiFi."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://loamnet.com" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <nav class="nav" aria-label="Primary">
+        <a class="brand" href="#top" aria-label="LOAM home">
+          <img src="/loam.svg" alt="" class="brand-mark" width="36" height="36" />
+          <span class="brand-word">LOAM</span>
+        </a>
+        <button class="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Menu">
+          <span class="nav-toggle-bar"></span>
+          <span class="nav-toggle-bar"></span>
+        </button>
+        <ul class="nav-links" id="nav-links">
+          <li><a href="#how">How it works</a></li>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#who">Who it's for</a></li>
+          <li><a href="#open">Open source</a></li>
+          <li>
+            <a class="btn btn-nav" href="https://github.com/JosephMaynard/loam" rel="noreferrer">
+              GitHub
+            </a>
+          </li>
+        </ul>
+      </nav>
+    </header>
+
+    <main id="main">
+      <span id="top"></span>
+
+      <!-- Hero -->
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="wrap hero-grid">
+          <div class="hero-copy reveal">
+            <p class="eyebrow">Local-first · off-grid · open source</p>
+            <h1 id="hero-title">Messaging that grows where you are.</h1>
+            <p class="lede">
+              LOAM is a messaging network with <strong>no internet, no accounts, and no cloud</strong>.
+              One person hosts it on a laptop, a Raspberry&nbsp;Pi, or a phone. Everyone nearby scans a
+              QR code and joins over local&nbsp;WiFi.
+            </p>
+            <div class="hero-actions">
+              <a class="btn btn-primary" href="https://github.com/JosephMaynard/loam" rel="noreferrer">
+                Get LOAM on GitHub
+              </a>
+              <a class="btn btn-ghost" href="#how">See how it works</a>
+            </div>
+            <p class="hero-note">Runs offline. Anonymous by default. AGPL-licensed.</p>
+          </div>
+
+          <div class="hero-visual reveal" aria-hidden="true">
+            <div class="phone">
+              <div class="phone-notch"></div>
+              <div class="phone-screen">
+                <div class="chat-head">
+                  <span class="chat-dot"></span>
+                  <span># general</span>
+                </div>
+                <div class="bubble them"><span class="who">river.stone.owl</span>Meeting point is the north gate 🌲</div>
+                <div class="bubble me">On our way — 5 min</div>
+                <div class="bubble them"><span class="who">amber.clay.wren</span>Bringing water + the map</div>
+                <div class="chat-input"><span>Message #general</span></div>
+              </div>
+            </div>
+            <div class="join-card">
+              <div class="qr" role="img" aria-label="Join QR code"></div>
+              <div class="join-text">
+                <strong>Scan to join</strong>
+                <span>No app store. No sign-up.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- How it works -->
+      <section id="how" class="band" aria-labelledby="how-title">
+        <div class="wrap">
+          <p class="eyebrow center">How it works</p>
+          <h2 id="how-title" class="section-title center">Three steps to a network of your own</h2>
+          <ol class="steps">
+            <li class="step reveal">
+              <span class="step-num">1</span>
+              <h3>Someone hosts</h3>
+              <p>
+                Run LOAM on a laptop, a Raspberry&nbsp;Pi, or an Android phone. It starts a local WiFi
+                hotspot and prints a join QR — no servers, no setup.
+              </p>
+            </li>
+            <li class="step reveal">
+              <span class="step-num">2</span>
+              <h3>People scan &amp; join</h3>
+              <p>
+                Nearby devices scan the QR to connect and open LOAM in the browser. Everyone gets an
+                anonymous, ephemeral identity — no email, no phone number.
+              </p>
+            </li>
+            <li class="step reveal">
+              <span class="step-num">3</span>
+              <h3>You talk, locally</h3>
+              <p>
+                Post to channels, reply in threads, DM, react — and optionally chat with a local AI
+                assistant. Everything stays on the local network.
+              </p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- Features -->
+      <section id="features" class="section" aria-labelledby="features-title">
+        <div class="wrap">
+          <p class="eyebrow center">What you get</p>
+          <h2 id="features-title" class="section-title center">Small, private, and resilient</h2>
+          <div class="feature-grid">
+            <article class="feature reveal">
+              <div class="feature-icon">◈</div>
+              <h3>Local-first</h3>
+              <p>Messages live on the local network and in your browser's cache. No cloud round-trips, works with zero internet.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">◑</div>
+              <h3>Anonymous &amp; ephemeral</h3>
+              <p>A generated name and avatar, no account. Optional disappearing-message timers keep history minimal.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">▤</div>
+              <h3>Channels, threads &amp; DMs</h3>
+              <p>Public channels for coordination, threaded replies for focus, and private direct messages between two people.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">⤓</div>
+              <h3>Installable PWA</h3>
+              <p>Add it to your home screen and keep reading against the local cache even when the signal drops.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">✦</div>
+              <h3>Optional local AI</h3>
+              <p>Point it at a local Ollama model and an assistant appears as a contact — answers stay on the host, offline.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">◲</div>
+              <h3>Phone as the host</h3>
+              <p>The Android app turns a phone into the node: it runs the server, starts the hotspot, and shows the join QR.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Who it's for -->
+      <section id="who" class="band band-deep" aria-labelledby="who-title">
+        <div class="wrap who-grid">
+          <div class="reveal">
+            <p class="eyebrow">Who it's for</p>
+            <h2 id="who-title" class="section-title">For people, where the network isn't.</h2>
+            <p class="who-lede">
+              LOAM is built for moments the internet can't reach — and for keeping ordinary people
+              connected when staying in touch is what matters most.
+            </p>
+          </div>
+          <ul class="who-list reveal">
+            <li><strong>Communities off the grid</strong> — remote areas, boats, camps, anywhere without coverage.</li>
+            <li><strong>Events &amp; gatherings</strong> — a room, a venue, a field: a private space to coordinate.</li>
+            <li><strong>When infrastructure fails</strong> — outages and disasters, where a hotspot is the only link.</li>
+            <li><strong>Organisers &amp; helpers</strong> — a simple, no-account way to reach the people around you.</li>
+          </ul>
+        </div>
+        <p class="wrap ethos">
+          These protections exist to keep everyday people safe and connected — not to hide wrongdoing.
+        </p>
+      </section>
+
+      <!-- Open source -->
+      <section id="open" class="section" aria-labelledby="open-title">
+        <div class="wrap open-grid">
+          <div class="reveal">
+            <p class="eyebrow">Open source</p>
+            <h2 id="open-title" class="section-title">Yours to run, read, and improve.</h2>
+            <p class="lede">
+              LOAM is free and open source under the AGPL. Read every line, run your own node, and help
+              build the roadmap — from encrypted storage to LoRa relays that reach beyond one hotspot.
+            </p>
+            <div class="hero-actions">
+              <a class="btn btn-primary" href="https://github.com/JosephMaynard/loam" rel="noreferrer">
+                View the source
+              </a>
+              <a class="btn btn-ghost" href="https://github.com/JosephMaynard/loam#readme" rel="noreferrer">
+                Read the docs
+              </a>
+            </div>
+          </div>
+          <ul class="stack reveal" aria-label="Built with">
+            <li>Fastify server &middot; WebSocket + REST</li>
+            <li>Preact PWA client</li>
+            <li>SQLite storage, encrypted at rest</li>
+            <li>Deterministic anonymous identities</li>
+            <li>Dependency-free QR encoder</li>
+            <li>Expo / React&nbsp;Native Android host</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap footer-grid">
+        <div class="footer-brand">
+          <img src="/loam.svg" alt="" class="brand-mark" width="32" height="32" />
+          <div>
+            <p class="brand-word">LOAM</p>
+            <p class="footer-tag">Off-grid, local-first messaging.</p>
+          </div>
+        </div>
+        <nav class="footer-links" aria-label="Footer">
+          <a href="#how">How it works</a>
+          <a href="#features">Features</a>
+          <a href="#open">Open source</a>
+          <a href="https://github.com/JosephMaynard/loam" rel="noreferrer">GitHub</a>
+        </nav>
+      </div>
+      <div class="wrap footer-legal">
+        <span>loamnet.com</span>
+        <span>AGPL-3.0 &middot; &copy; <span id="year">2026</span> LOAM contributors</span>
+      </div>
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
