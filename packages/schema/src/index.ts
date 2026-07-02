@@ -59,6 +59,31 @@ export const ChannelSchema = z.object({
 });
 export type Channel = z.infer<typeof ChannelSchema>;
 
+/**
+ * Admin request to create a channel. The server assigns `id`, `createdAt`, and `ownerUserId`, and
+ * currently forces `visibility: "public"` / `discoverable: true` (private channels need a
+ * membership + enforcement model that does not exist yet, so they are deliberately not creatable).
+ */
+export const ChannelCreateRequestSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  description: z.string().trim().max(280).optional(),
+  allowPosting: ChannelPostingPolicySchema.optional(),
+  allowReplies: z.boolean().optional(),
+});
+export type ChannelCreateRequest = z.infer<typeof ChannelCreateRequestSchema>;
+
+/** Admin request to update an existing channel. Every field is optional; omitted fields are left as-is. */
+export const ChannelUpdateRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80),
+    description: z.string().trim().max(280),
+    allowPosting: ChannelPostingPolicySchema,
+    allowReplies: z.boolean(),
+    archived: z.boolean(),
+  })
+  .partial();
+export type ChannelUpdateRequest = z.infer<typeof ChannelUpdateRequestSchema>;
+
 export const NetworkConfigSchema = z.object({
   enablePublicChannels: z.boolean(),
   enablePrivateChannels: z.boolean(),

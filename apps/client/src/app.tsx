@@ -1,9 +1,11 @@
 import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
   AdminBootstrapStrategySchema,
+  ChannelSchema,
   LoamConfigSchema,
   UserSchema,
   type Channel,
+  type ChannelPostingPolicy,
   type FeatureFlags,
   type IdentityConfig,
   type LoamConfig,
@@ -293,6 +295,35 @@ function LoamApp() {
       );
     });
     void putRecords("users", incomingUsers);
+  }, []);
+
+  const upsertChannels = useCallback((incomingChannels: Channel[]) => {
+    setChannels((previous) => {
+      // Map upsert preserves insertion order: existing channels stay put, new ones append. No
+      // re-sort, so the seeded Announcements/General keep their position. Archived channels are
+      // dropped from the nav, so archiving hides a channel live and restoring re-adds it.
+      const next = new Map(previous.map((channel) => [channel.id, channel]));
+
+      for (const channel of incomingChannels) {
+        if (channel.archived) {
+          next.delete(channel.id);
+        } else {
+          next.set(channel.id, channel);
+        }
+      }
+
+      return Array.from(next.values());
+    });
+
+    for (const channel of incomingChannels) {
+      if (channel.archived) {
+        void deleteRecord("channels", channel.id);
+      }
+    }
+    void putRecords(
+      "channels",
+      incomingChannels.filter((channel) => !channel.archived),
+    );
   }, []);
 
   const upsertMessages = useCallback((incomingMessages: Message[]) => {
@@ -690,6 +721,11 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "channelUpserted") {
+          upsertChannels([payload.channel]);
+          return;
+        }
+
         upsertUsers([payload.user]);
       };
     }
@@ -705,7 +741,15 @@ function LoamApp() {
 
       socket?.close();
     };
-  }, [applyStreamEvent, config?.currentUser.id, purgeLocalData, removeMessage, upsertMessages, upsertUsers]);
+  }, [
+    applyStreamEvent,
+    config?.currentUser.id,
+    purgeLocalData,
+    removeMessage,
+    upsertChannels,
+    upsertMessages,
+    upsertUsers,
+  ]);
 
   const usersById = useMemo(() => {
     const indexed = new Map(users.map((user) => [user.id, user]));
@@ -742,7 +786,7 @@ function LoamApp() {
         users={users}
       />
       {routeState.screen === "admin" ? (
-        <AdminView currentUser={currentUser} onWiped={purgeLocalData} />
+        <AdminView currentUser={currentUser} onChannelUpsert={upsertChannels} onWiped={purgeLocalData} />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           config={config}
@@ -2043,7 +2087,15 @@ const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
  * the admin bootstrap strategy via the /api/admin/config endpoints. Client gating is cosmetic —
  * the server enforces admin on every request.
  */
-function AdminView({ currentUser, onWiped }: { currentUser: User; onWiped: () => Promise<void> }) {
+function AdminView({
+  currentUser,
+  onChannelUpsert,
+  onWiped,
+}: {
+  currentUser: User;
+  onChannelUpsert: (channels: Channel[]) => void;
+  onWiped: () => Promise<void>;
+}) {
   const [adminConfig, setAdminConfig] = useState<LoamConfig>();
   const [loadError, setLoadError] = useState<string>();
   const [saving, setSaving] = useState(false);
@@ -2510,6 +2562,291 @@ function AdminView({ currentUser, onWiped }: { currentUser: User; onWiped: () =>
           </div>
         </form>
       ) : null}
+      <AdminChannelsPanel currentUser={currentUser} onChannelUpsert={onChannelUpsert} />
     </section>
+  );
+}
+
+/**
+ * Sends an admin channel create/update request and returns the validated channel the server echoes
+ * back. Throws with the server's error message (or a status fallback) on failure.
+ */
+async function requestChannel(method: "POST" | "PATCH", path: string, body: unknown): Promise<Channel> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(apiUrl(path), {
+      method,
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify(body),
+    });
+    const payload: unknown = await response.json().catch(() => undefined);
+
+    if (!response.ok) {
+      const message =
+        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+          ? payload.error
+          : `Request failed: ${response.status}`;
+      throw new Error(message);
+    }
+
+    const parsed = ChannelSchema.safeParse(payload);
+
+    if (!parsed.success) {
+      throw new Error("The server returned an unrecognised channel payload.");
+    }
+
+    return parsed.data;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+/**
+ * Admin-only channel management: create public channels and rename/archive existing ones. Channels
+ * are created public + discoverable (private channels need a membership model that does not exist
+ * yet). Fetches its own full list from `/api/admin/channels` so archived channels remain visible
+ * and restorable here even though they are hidden from the sidebar. The server is the enforcer.
+ */
+function AdminChannelsPanel({
+  currentUser,
+  onChannelUpsert,
+}: {
+  currentUser: User;
+  onChannelUpsert: (channels: Channel[]) => void;
+}) {
+  const [adminChannels, setAdminChannels] = useState<Channel[]>([]);
+  const [listError, setListError] = useState<string>();
+  const [loaded, setLoaded] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [allowPosting, setAllowPosting] = useState<ChannelPostingPolicy>("everyone");
+  const [allowReplies, setAllowReplies] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string>();
+
+  /** Upsert a channel into the local admin list (preserving order) and the sidebar in one step. */
+  const applyChannel = useCallback(
+    (channel: Channel) => {
+      setAdminChannels((previous) => {
+        const next = new Map(previous.map((entry) => [entry.id, entry]));
+        next.set(channel.id, channel);
+        return Array.from(next.values());
+      });
+      onChannelUpsert([channel]);
+    },
+    [onChannelUpsert],
+  );
+
+  useEffect(() => {
+    if (!currentUser.isAdmin) {
+      return;
+    }
+
+    let active = true;
+
+    fetchJson<unknown>("/api/admin/channels")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        const list = Array.isArray(payload)
+          ? payload.flatMap((item) => {
+              const parsed = ChannelSchema.safeParse(item);
+              return parsed.success ? [parsed.data] : [];
+            })
+          : [];
+        setAdminChannels(list);
+        setLoaded(true);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setListError(error instanceof Error ? error.message : "Unable to load channels.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [currentUser.isAdmin]);
+
+  async function create(): Promise<void> {
+    if (!name.trim()) {
+      return;
+    }
+
+    setCreating(true);
+    setCreateError(undefined);
+
+    try {
+      const channel = await requestChannel("POST", "/api/admin/channels", {
+        name: name.trim(),
+        description: description.trim() || undefined,
+        allowPosting,
+        allowReplies,
+      });
+      applyChannel(channel);
+      setName("");
+      setDescription("");
+      setAllowPosting("everyone");
+      setAllowReplies(true);
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : "Unable to create the channel.");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <div className="settings-grid">
+      <div className="profile-panel">
+        <div>
+          <p className="eyebrow">Channels</p>
+          <h2>Create a channel</h2>
+        </div>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void create();
+          }}
+        >
+          <label>
+            Name
+            <input
+              disabled={creating}
+              maxLength={80}
+              onInput={(event) => setName(event.currentTarget.value)}
+              placeholder="e.g. Logistics"
+              value={name}
+            />
+          </label>
+          <label>
+            Description (optional)
+            <input
+              disabled={creating}
+              maxLength={280}
+              onInput={(event) => setDescription(event.currentTarget.value)}
+              value={description}
+            />
+          </label>
+          <label>
+            Who can post
+            <select
+              disabled={creating}
+              onInput={(event) =>
+                setAllowPosting(event.currentTarget.value === "admins" ? "admins" : "everyone")
+              }
+              value={allowPosting}
+            >
+              <option value="everyone">Everyone</option>
+              <option value="admins">Admins only</option>
+            </select>
+          </label>
+          <label className="admin-toggle">
+            <input
+              checked={allowReplies}
+              disabled={creating}
+              onInput={(event) => setAllowReplies(event.currentTarget.checked)}
+              type="checkbox"
+            />
+            Allow threaded replies
+          </label>
+          <div className="profile-actions">
+            <button disabled={creating || !name.trim()} type="submit">
+              {creating ? "Creating…" : "Create channel"}
+            </button>
+          </div>
+          {createError ? <p className="form-error">{createError}</p> : null}
+        </form>
+      </div>
+      <div className="profile-panel">
+        <div>
+          <p className="eyebrow">Channels</p>
+          <h2>Existing channels</h2>
+        </div>
+        {listError ? <p className="form-error">{listError}</p> : null}
+        {!loaded && !listError ? <p className="form-note">Loading channels…</p> : null}
+        {loaded && adminChannels.length === 0 ? (
+          <p className="form-note">No channels yet. Create one above.</p>
+        ) : null}
+        {adminChannels.length > 0 ? (
+          <ul className="admin-channel-list">
+            {adminChannels.map((channel) => (
+              <AdminChannelRow channel={channel} key={channel.id} onApply={applyChannel} />
+            ))}
+          </ul>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One row in the admin channel list: rename the channel or archive/restore it. Holds its own draft
+ * name so editing one channel never disturbs another.
+ */
+function AdminChannelRow({
+  channel,
+  onApply,
+}: {
+  channel: Channel;
+  onApply: (channel: Channel) => void;
+}) {
+  const [name, setName] = useState(channel.name);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const trimmedName = name.trim();
+  const renameDisabled = busy || !trimmedName || trimmedName === channel.name;
+
+  async function patch(update: Record<string, unknown>): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+
+    try {
+      const updated = await requestChannel("PATCH", `/api/admin/channels/${channel.id}`, update);
+      onApply(updated);
+      setName(updated.name);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to update the channel.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li className={channel.archived ? "admin-channel archived" : "admin-channel"}>
+      <div className="admin-channel-main">
+        <input
+          aria-label={`Channel name for ${channel.name}`}
+          disabled={busy}
+          maxLength={80}
+          onInput={(event) => setName(event.currentTarget.value)}
+          value={name}
+        />
+        <span className="admin-channel-meta">
+          {channel.allowPosting === "admins" ? "Admins post" : "Open posting"}
+          {channel.archived ? " · Archived" : ""}
+        </span>
+      </div>
+      <div className="admin-channel-actions">
+        <button disabled={renameDisabled} onClick={() => void patch({ name: trimmedName })} type="button">
+          Rename
+        </button>
+        <button
+          className={channel.archived ? undefined : "danger-button"}
+          disabled={busy}
+          onClick={() => void patch({ archived: !channel.archived })}
+          type="button"
+        >
+          {channel.archived ? "Restore" : "Archive"}
+        </button>
+      </div>
+      {error ? <p className="form-error">{error}</p> : null}
+    </li>
   );
 }
