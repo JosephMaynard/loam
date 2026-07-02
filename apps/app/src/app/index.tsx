@@ -12,11 +12,14 @@ import { MaxContentWidth, Spacing } from '@/constants/theme';
 // WebView loads it over loopback. Remote joiners use the hotspot IP (initiative 4).
 const LOAM_URL = 'http://localhost:3000';
 
-// nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice.
-let nodeStarted = false;
-
 type HostStatus = 'starting' | 'ready' | 'error';
 type StatusPayload = { status?: HostStatus; message?: string };
+
+// nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
+// and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
+// so a remount reflects reality instead of resetting to "starting" forever.
+let nodeStarted = false;
+let nodeStatus: HostStatus = 'starting';
 
 /**
  * The LOAM Android host screen. Boots the embedded Node server on first mount, waits for its
@@ -25,7 +28,9 @@ type StatusPayload = { status?: HostStatus; message?: string };
  * cold start can take ~80s (docs/04).
  */
 export default function HostScreen() {
-  const [status, setStatus] = useState<HostStatus>('starting');
+  // Initialise from the module-level status so a remount after the node is already ready/errored
+  // doesn't get stuck showing "starting" (the runtime won't re-emit).
+  const [status, setStatus] = useState<HostStatus>(() => nodeStatus);
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
   const webViewRef = useRef<WebView>(null);
 
@@ -36,8 +41,11 @@ export default function HostScreen() {
 
     const onStatus = (payload: StatusPayload) => {
       if (payload?.status === 'ready') {
+        nodeStatus = 'ready';
         setStatus('ready');
+        setErrorMessage(undefined);
       } else if (payload?.status === 'error') {
+        nodeStatus = 'error';
         setStatus('error');
         setErrorMessage(payload.message);
       }
@@ -53,6 +61,13 @@ export default function HostScreen() {
 
     return () => nodejs.channel.removeListener('loam-status', onStatus);
   }, []);
+
+  // A WebView load failure after the node is ready is usually transient (page fetched mid-cold-start).
+  // Surface the error UI; Retry remounts the WebView (a fresh load) as long as the node is still up.
+  const failWebView = (message: string) => {
+    setStatus('error');
+    setErrorMessage(message);
+  };
 
   if (Platform.OS !== 'android') {
     return (
@@ -79,14 +94,21 @@ export default function HostScreen() {
           thirdPartyCookiesEnabled
           sharedCookiesEnabled
           cacheEnabled
-          originWhitelist={['*']}
+          // Keep the WebView pinned to the embedded server's origin — external links (opened by the
+          // client with target=_blank) must not navigate the host frame away from LOAM.
+          originWhitelist={['http://localhost:3000']}
           mixedContentMode="always"
-          onError={({ nativeEvent }) =>
-            console.warn('LOAM WebView error', nativeEvent.description)
-          }
-          onHttpError={({ nativeEvent }) =>
-            console.warn('LOAM WebView HTTP error', nativeEvent.statusCode)
-          }
+          onError={({ nativeEvent }) => {
+            console.warn('LOAM WebView error', nativeEvent.description);
+            failWebView(nativeEvent.description || 'The LOAM page failed to load.');
+          }}
+          onHttpError={({ nativeEvent }) => {
+            console.warn('LOAM WebView HTTP error', nativeEvent.statusCode, nativeEvent.url);
+            // Only the main document failing is fatal; a sub-resource 404 shouldn't blank the app.
+            if (nativeEvent.url === LOAM_URL || nativeEvent.url === `${LOAM_URL}/`) {
+              failWebView(`The LOAM server returned HTTP ${nativeEvent.statusCode}.`);
+            }
+          }}
         />
       </SafeAreaView>
     );
@@ -105,19 +127,29 @@ export default function HostScreen() {
         </>
       ) : (
         <>
-          <ThemedText type="subtitle">Host failed to start</ThemedText>
+          <ThemedText type="subtitle">
+            {nodeStatus === 'ready' ? 'Couldn’t load LOAM' : 'Host failed to start'}
+          </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {errorMessage ?? 'The embedded server did not become ready.'}
           </ThemedText>
-          <Pressable
-            onPress={() => {
-              setStatus('starting');
-              setErrorMessage(undefined);
-            }}>
-            <ThemedView type="backgroundElement" style={styles.retry}>
-              <ThemedText type="link">Retry</ThemedText>
-            </ThemedView>
-          </Pressable>
+          {nodeStatus === 'ready' ? (
+            // The server is up; a Retry just remounts the WebView for a fresh load.
+            <Pressable
+              onPress={() => {
+                setErrorMessage(undefined);
+                setStatus('ready');
+              }}>
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">Retry</ThemedText>
+              </ThemedView>
+            </Pressable>
+          ) : (
+            // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process).
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              Close and reopen the app to try again.
+            </ThemedText>
+          )}
         </>
       )}
     </ThemedView>

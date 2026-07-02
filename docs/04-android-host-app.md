@@ -54,8 +54,11 @@ the matching ABI-108 (Node 18) android-arm64 binary from
 `digidem/better-sqlite3-nodejs-mobile` (tag `12.10.0`, asset
 `better-sqlite3-12.10.0-node-108-android-arm64.tar.gz`), placing `better_sqlite3.node` at
 `node_modules/better-sqlite3/build/Release/` where `bindings` resolves it. **Not committed** (native
-binary) — re-run `fetch:native` after a clean checkout. The JS-wrapper version and the `.node` source
-version must stay in lockstep; fallback if it ever fails to load: `11.10.0` (the version CoMapeo ships).
+binary) — re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` verifies the
+tarball against a pinned sha256 before installing it. The JS-wrapper npm version and the `.node`
+release must stay in lockstep — if it ever fails to load, fall back to `11.10.0` (the version CoMapeo
+ships) by changing **both** the npm wrapper version and the digidem release tag together (and update
+the pinned `PREBUILD_SHA256`).
 
 ### What's committed vs generated
 - **Committed (source):** `apps/server/src/db.ts` (`driver` option), `embedded.ts`
