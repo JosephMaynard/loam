@@ -47,10 +47,12 @@ runs exactly `pnpm build` then `pnpm test` on push/PR to `master`.
 DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
 matrix, config API, flag enforcement, kill switch, retention), and `apps/client` (Vitest + jsdom:
 `src/lib/markdown.test.ts` sanitizer/XSS, `src/lib/local-store.test.ts` IndexedDB round-trips +
-kill-switch purge via `fake-indexeddb`). Client tests use a standalone `vitest.config.ts` (jsdom, no
-Preact plugin — the tested lib modules are plain TS); `*.test.ts` is excluded from the `tsc -b`
-build. Component/route-parser tests would be the next client gap to close. `apps/app` has no test
-script, so `pnpm test` skips it — validate with `cd apps/app && npx tsc --noEmit`.
+kill-switch purge via `fake-indexeddb`, `src/lib/protocol.test.ts` route + WS-event + message-response
+parsers). Client tests use a standalone `vitest.config.ts` (jsdom, no Preact plugin — the tested lib
+modules are plain TS); `*.test.ts` is excluded from the `tsc -b` build. The pure route/protocol
+parsers live in `src/lib/protocol.ts` (extracted from `app.tsx`); rendered-component tests are the
+next client gap. `apps/app` has no test script, so `pnpm test` skips it — validate with `cd apps/app
+&& npx tsc --noEmit`.
 
 ## How dev mode wires together (important)
 
