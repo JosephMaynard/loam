@@ -26,6 +26,9 @@ private class HotspotException(message: String, cause: Throwable? = null) :
  * JS before `startHotspot`; a missing grant surfaces here as a `SecurityException`.
  */
 class LoamHotspotModule : Module() {
+  // Touched from both the JS/module thread (start/stopHotspot) and the main-thread hotspot callback;
+  // @Volatile gives the cross-thread visibility those reads/writes need.
+  @Volatile
   private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
 
   override fun definition() = ModuleDefinition {

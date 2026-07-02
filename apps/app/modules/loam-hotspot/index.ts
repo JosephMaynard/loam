@@ -29,7 +29,12 @@ export async function startHotspot(): Promise<HotspotCredentials> {
   return LoamHotspotModule.startHotspot();
 }
 
-/** Stops the hotspot if one is running. A no-op when unsupported. */
+/** Stops the hotspot if one is running. A no-op when unsupported, and never throws. */
 export function stopHotspot(): void {
-  LoamHotspotModule?.stopHotspot();
+  try {
+    LoamHotspotModule?.stopHotspot();
+  } catch {
+    // Best effort: releasing a hotspot that's already gone (or a native hiccup during teardown)
+    // must not surface — callers treat stop as fire-and-forget.
+  }
 }

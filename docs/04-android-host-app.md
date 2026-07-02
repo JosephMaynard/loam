@@ -269,7 +269,8 @@ Only after those pass is the QR/host UI mostly glue over `packages/qr`.
 
 ### Physical-device test (owner)
 The emulator can't create a real hotspot (no WiFi radio), so the end-to-end join is a two-phone test:
-1. Install + launch the APK; wait for LOAM to load, tap **Share · Host**, grant location permission.
+1. Install + launch the APK; wait for LOAM to load, tap **Share · Host**, and grant the permission
+   prompt(s) — location always, plus a nearby-WiFi-devices prompt on Android 13+ (API 33+).
 2. Confirm **Step 1** shows a real SSID + password. On a second phone, scan the Step-1 WiFi QR (or type
    the creds) to join the hotspot.
 3. Once connected, scan the **Step-2** QR (`http://192.168.49.1:3000`) → LOAM opens over the hotspot.

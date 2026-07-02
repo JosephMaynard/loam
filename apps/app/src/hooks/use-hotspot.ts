@@ -30,6 +30,10 @@ export type HotspotState = {
 // subscribes to it — mirroring the single-runtime pattern used for nodejs-mobile in index.tsx.
 let sharedState: HotspotState = { phase: 'idle' };
 let inFlight = false;
+// Bumped on every start and every shutdown. An in-flight start compares its captured value against
+// this to detect that it was superseded (by a shutdown or a newer start) and must not publish stale
+// state or leave an orphaned reservation running.
+let generation = 0;
 const listeners = new Set<(state: HotspotState) => void>();
 
 // Guard against a native callback that never fires (some emulators neither resolve nor call
@@ -37,23 +41,33 @@ const listeners = new Set<(state: HotspotState) => void>();
 // spinner and shows the graceful-degradation message + Step-2 QR instead of hanging.
 const START_TIMEOUT_MS = 20_000;
 
-/** Reject if `promise` hasn't settled within `START_TIMEOUT_MS`. */
-function withStartTimeout<T>(promise: Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
+/**
+ * Race the native start against a timeout. Crucially, if the native start resolves *after* the
+ * timeout already fired, the reservation it created is orphaned — release it — so a hotspot is never
+ * left running invisibly after we've given up on it.
+ */
+function startWithTimeout(): Promise<HotspotCredentials> {
+  const start = startHotspot();
+  let timedOut = false;
+
+  const timeout = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => {
+      timedOut = true;
       reject(new Error("The hotspot didn't start in time. This device may not support one."));
     }, START_TIMEOUT_MS);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
   });
+
+  // Attach a cleanup handler to the real start; if it wins after the timeout, stop the orphan.
+  void start.then(
+    () => {
+      if (timedOut) {
+        stopHotspot();
+      }
+    },
+    () => undefined,
+  );
+
+  return Promise.race([start, timeout]);
 }
 
 /** Update the shared state and notify every subscribed hook. */
@@ -100,10 +114,15 @@ export async function ensureHotspot(): Promise<void> {
     return;
   }
 
+  const myGen = ++generation;
   inFlight = true;
   publish({ phase: 'requesting' });
   try {
     const granted = await requestHotspotPermissions();
+    if (myGen !== generation) {
+      // Superseded during the permission dialog. Nothing native has started yet, so just bail.
+      return;
+    }
     if (!granted) {
       publish({
         phase: 'error',
@@ -114,20 +133,34 @@ export async function ensureHotspot(): Promise<void> {
     }
 
     publish({ phase: 'starting' });
-    const credentials = await withStartTimeout(startHotspot());
+    const credentials = await startWithTimeout();
+    if (myGen !== generation) {
+      // A shutdown (or newer start) landed while we were starting: release the hotspot we just
+      // created rather than publishing stale "running" over the newer state.
+      stopHotspot();
+      return;
+    }
     publish({ phase: 'running', credentials });
   } catch (error) {
-    publish({
-      phase: 'error',
-      error: error instanceof Error ? error.message : String(error),
-    });
+    if (myGen === generation) {
+      publish({
+        phase: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   } finally {
-    inFlight = false;
+    // Only clear the flag if we're still the current attempt — a newer start owns it otherwise.
+    if (myGen === generation) {
+      inFlight = false;
+    }
   }
 }
 
-/** Stop the hotspot and return to idle. */
+/** Stop the hotspot and return to idle, invalidating any in-flight start. */
 export function shutdownHotspot(): void {
+  // Bumping the generation cancels an in-flight start (its late resolve releases its own reservation).
+  generation += 1;
+  inFlight = false;
   stopHotspot();
   publish({ phase: 'idle' });
 }
