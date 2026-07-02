@@ -3,10 +3,13 @@ import { networkInterfaces } from "node:os";
 import { buildApp, type LoamApp } from "./app.js";
 
 /**
- * Entry point for running the LOAM server embedded in a host process (the Android app's
- * nodejs-mobile runtime, per docs/04). Unlike `server.ts`, this uses no top-level await and no
- * `import.meta.url` — both are unavailable once esbuild bundles it to a single CJS file for the
- * Node 18 runtime — so every path comes from an env var with an explicit fallback.
+ * Logic for running the LOAM server embedded in a host process (the Android app's nodejs-mobile
+ * runtime, per docs/04). Unlike `server.ts`, this uses no top-level await and no `import.meta.url`
+ * — both are unavailable once esbuild bundles it to a single CJS file for the Node 18 runtime — so
+ * every path comes from an env var with an explicit fallback.
+ *
+ * This module has **no import-time side effects** (importable from tests/tools); the actual boot
+ * lives in the tiny `embedded-main.ts` entry, which is the esbuild bundle entry point.
  *
  * Required/notable env:
  * - `LOAM_DATA_DIR`   — writable directory for the SQLite DB + avatars (app sandbox on device).
@@ -14,7 +17,7 @@ import { buildApp, type LoamApp } from "./app.js";
  * - `PORT` / `HOST`   — listen address (defaults 3000 / 0.0.0.0 for hotspot reachability).
  * - `LOAM_JOIN_HOST`  — host shown in the join URL (defaults to the first non-internal IPv4).
  */
-function firstLanIPv4(): string {
+export function firstLanIPv4(): string {
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
       if (address.family === "IPv4" && !address.internal) {
@@ -26,6 +29,15 @@ function firstLanIPv4(): string {
   return "localhost";
 }
 
+/**
+ * Parse a TCP port from an env value, falling back to `fallback` for missing/invalid/out-of-range
+ * input (so a bad `PORT` can never reach `server.listen` as `NaN`).
+ */
+export function parsePort(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : fallback;
+}
+
 export async function startEmbeddedServer(): Promise<LoamApp> {
   const dataDir = process.env.LOAM_DATA_DIR;
 
@@ -33,9 +45,9 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     throw new Error("LOAM_DATA_DIR must be set for the embedded server (a writable app directory).");
   }
 
-  const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+  const port = parsePort(process.env.PORT, 3000);
   const host = process.env.HOST ?? "0.0.0.0";
-  const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? String(port), 10);
+  const clientPort = parsePort(process.env.CLIENT_PORT, port);
 
   const app = await buildApp({
     dataDir,
@@ -59,9 +71,3 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
   app.server.log.info(`LOAM embedded server listening on ${host}:${port}`);
   return app;
 }
-
-// Boot immediately when this module is the process entry (the nodejs-mobile launcher requires it).
-startEmbeddedServer().catch((error) => {
-  console.error("Failed to start embedded LOAM server:", error);
-  process.exit(1);
-});

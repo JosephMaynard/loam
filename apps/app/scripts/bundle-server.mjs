@@ -19,7 +19,7 @@ import { build } from "esbuild";
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = join(here, "..");
 const repoRoot = join(appDir, "..", "..");
-const serverEntry = join(repoRoot, "apps/server/src/embedded.ts");
+const serverEntry = join(repoRoot, "apps/server/src/embedded-main.ts");
 const clientDist = join(repoRoot, "apps/client/dist");
 
 // Output lands under nodejs-assets/nodejs-project — the layout nodejs-mobile expects.

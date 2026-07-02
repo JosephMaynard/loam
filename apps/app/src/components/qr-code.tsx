@@ -1,5 +1,5 @@
 import { encodeQR } from '@loam/qr';
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 type QRCodeProps = {
@@ -18,8 +18,11 @@ const LIGHT = '#ffffff';
 /**
  * Renders a QR code from `@loam/qr` as plain React Native views (no SVG / WebView / native module),
  * so it works in any RN runtime. Each matrix row is one flex row of light/dark cells.
+ *
+ * Wrapped in `memo`: the cell tree is hundreds of views, so skip re-rendering when `value`/`size`
+ * are unchanged (e.g. when the parent re-renders on unrelated host-state updates).
  */
-export function QRCode({ value, size = 220 }: QRCodeProps) {
+export const QRCode = memo(function QRCode({ value, size = 220 }: QRCodeProps) {
   const rows = useMemo(() => {
     let matrix;
 
@@ -68,7 +71,7 @@ export function QRCode({ value, size = 220 }: QRCodeProps) {
       ))}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   frame: {
