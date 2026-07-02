@@ -91,6 +91,13 @@ export type AppOptions = {
   clientPort?: number;
   /** When set, encrypt the database at rest (SQLCipher). Requires a real data dir, not in-memory. */
   dbEncryptionKey?: string;
+  /**
+   * Encrypt at rest with a **random, RAM-only key** generated at startup and never written to disk
+   * (takes precedence over `dbEncryptionKey`). Data is readable only while this process runs — a
+   * reboot loses the key permanently — and the kill switch rotates to a fresh key so any
+   * flash-recoverable ciphertext becomes unreadable. See `docs/02-kill-switch.md`.
+   */
+  ephemeralDbKey?: boolean;
   logger?: boolean;
 };
 
@@ -474,7 +481,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   };
 
   await mkdir(dataDir, { recursive: true });
-  const store = openStore(join(dataDir, "loam.db"), { encryptionKey: options.dbEncryptionKey });
+
+  const dbPath = join(dataDir, "loam.db");
+  const ephemeralDbKey = options.ephemeralDbKey ?? false;
+  // The active encryption key. Ephemeral mode generates a random RAM-only key (never persisted);
+  // the kill switch rotates it (see executeKillSwitch). A provided key is reused across wipes.
+  let dbKey: string | undefined = ephemeralDbKey
+    ? randomBytes(32).toString("hex")
+    : options.dbEncryptionKey;
+  const encryptionEnabled = dbKey !== undefined;
+
+  const openLoamStore = (): LoamStore => openStore(dbPath, { encryptionKey: dbKey });
+  let store = openLoamStore();
 
   /**
    * Parse one config layer, tolerating malformed JSON and invalid shapes: both are logged and
@@ -1192,7 +1210,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * kill-switch settings themselves) survives — the wipe destroys data, not settings.
    */
   async function executeKillSwitch(): Promise<void> {
-    store.wipeAll();
+    if (encryptionEnabled) {
+      // Cryptographic wipe: destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh
+      // key, so any bytes a forensic tool recovers from flash are unreadable — stronger than a
+      // logical DELETE, which leaves recoverable pages behind. See docs/02-kill-switch.md.
+      store.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        await rm(`${dbPath}${suffix}`, { force: true });
+      }
+
+      if (ephemeralDbKey) {
+        // Drop the old key by overwriting the reference; a fresh random key encrypts the new DB.
+        // (Node strings can't be reliably zeroed in RAM — documented as a known limitation.)
+        dbKey = randomBytes(32).toString("hex");
+      }
+
+      store = openLoamStore();
+    } else {
+      // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
+      store.wipeAll();
+    }
+
     await rm(avatarsDir, { recursive: true, force: true });
     sessions.clear();
     claimAttempts.clear();
@@ -1640,7 +1678,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   return {
     server,
-    store,
+    // Getter, not a snapshot: the kill switch may close and reopen the store (encrypted wipe).
+    get store() {
+      return store;
+    },
     adminSetupCode,
     reapExpiredMessages,
     async close() {

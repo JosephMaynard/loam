@@ -7,9 +7,10 @@
 > native module. Wired through `buildApp({ dbEncryptionKey })` from the `LOAM_DB_KEY` env var.
 > Verified: the same DAL test suite passes against both drivers, the encrypted DB file leaks no
 > plaintext and rejects the wrong key, and a live server booted with `LOAM_DB_KEY` writes an
-> encrypted DB. **Remaining:** key management/derivation (currently a raw env passphrase — see the
-> sub-decision below), config/security-profile integration (docs/09), kill-switch key-discard, and
-> the Android on-device ABI-108 prebuild. Phase B (hot reads via SQL) still deferred.
+> encrypted DB. **`LOAM_DB_KEY=ephemeral`** uses a random RAM-only key (never persisted), and the
+> **kill switch now does a cryptographic wipe** (delete files + rotate key) — see docs/02.
+> **Remaining:** passphrase key-derivation hardening, config/security-profile integration (docs/09),
+> RAM key-zeroing, and the Android on-device ABI-108 prebuild. Phase B (hot reads via SQL) deferred.
 
 ## Goal
 

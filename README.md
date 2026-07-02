@@ -83,3 +83,35 @@ streaming assistant response in the same LOAM conversation. If the config is abs
 When `allowUserAvatarUpload` is enabled, users can choose an image in the settings screen,
 crop it locally in the browser, and upload only the final 256 x 256 PNG/WebP avatar. Original
 image files are never sent to the server.
+
+---
+
+## Encryption at rest (optional)
+
+LOAM can encrypt its on-disk database so that a lost or seized host device does not readily give
+up its stored messages. This is **off by default** and set via the `LOAM_DB_KEY` environment
+variable when starting the server:
+
+- **unset** — no encryption (the database is a plain SQLite file).
+- **a passphrase** — the database is encrypted at rest with SQLCipher (AES-256). The same
+  passphrase must be provided on every start.
+- **`ephemeral`** — the server generates a random key in memory that is **never written to disk**.
+  The data is readable only while the server process is running; a reboot or power-off loses the
+  key permanently, and the [kill switch](docs/02-kill-switch.md) rotates to a fresh key so any
+  data still physically present on flash storage becomes unreadable.
+
+```bash
+LOAM_DB_KEY=ephemeral pnpm --filter @loam/server start
+```
+
+**Honest limitations.** This raises the bar; it is not a guarantee of safety. The host still
+processes messages in plaintext while running, so a compromised host, a device seized while
+powered on with the key in memory, or coercion of a known passphrase can still expose data. On
+flash storage, ordinary deletion does not reliably erase data — which is precisely why the kill
+switch pairs deletion with discarding the encryption key. Anyone whose safety depends on this
+should seek a professional security review; do not treat LOAM as sufficient on its own.
+
+> A note on intent: these protections exist to protect ordinary people — activists, journalists,
+> people organising in places where that is dangerous, communities cut off from the internet.
+> They are deliberately not marketed as a way to hide wrongdoing, and LOAM's other design choices
+> (a trusted host who can read and wipe everything, admin moderation) reflect that.
