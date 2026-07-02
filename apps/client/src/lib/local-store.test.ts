@@ -56,8 +56,9 @@ describe("local-store", () => {
 
     await destroyDatabase();
 
-    // A fresh factory stands in for the reopened, now-empty database after the purge.
-    globalThis.indexedDB = new IDBFactory();
+    // Reopen on the SAME factory: the data written above must be gone (destroyDatabase deleted the
+    // database and cleared the cached connection, so this opens a fresh empty one). Swapping in a
+    // new factory here would trivially pass without proving the purge did anything.
     expect(await getAllRecords<Channel>("channels")).toEqual([]);
     expect(await getAllRecords("messages")).toEqual([]);
   });
