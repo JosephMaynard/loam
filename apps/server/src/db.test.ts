@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -293,16 +293,24 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     }
   });
 
-  it("writes an encrypted file — message plaintext never touches disk", () => {
+  it("writes an encrypted file — message plaintext never touches disk, incl. WAL sidecars", () => {
     const store = openStore(dbPath, { encryptionKey: KEY });
     store.insertMessage(makeChannelPost("msg_secret", 1_704_067_200_000));
-    // Give the message a recognizable body to search for on disk.
     store.upsertUser(makeUser("user.needle", { displayName: "SUPER_SECRET_NEEDLE" }));
-    store.close();
 
-    const raw = readFileSync(dbPath);
-    expect(raw.includes(Buffer.from("SUPER_SECRET_NEEDLE"))).toBe(false);
-    expect(raw.subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+    // Scan every file in the data dir WHILE the store is open — WAL mode may hold recent writes in
+    // the -wal sidecar before checkpoint, so checking only the main DB (or only after close) could
+    // miss plaintext. SQLCipher encrypts the WAL too, so nothing should leak anywhere.
+    const needle = Buffer.from("SUPER_SECRET_NEEDLE");
+    const files = readdirSync(dataDir);
+    expect(files.some((name) => name.startsWith("loam.db"))).toBe(true);
+    for (const name of files) {
+      const raw = readFileSync(join(dataDir, name));
+      expect(raw.includes(needle)).toBe(false);
+    }
+    expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+
+    store.close();
   });
 
   it("persists across reopen with the right key and rejects the wrong key", () => {
@@ -311,13 +319,14 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     first.close();
 
     const reopened = openStore(dbPath, { encryptionKey: KEY });
-    expect(reopened.loadUsers()).toEqual([makeUser("user.persist")]);
-    reopened.close();
+    try {
+      expect(reopened.loadUsers()).toEqual([makeUser("user.persist")]);
+    } finally {
+      reopened.close();
+    }
 
-    expect(() => {
-      const wrong = openStore(dbPath, { encryptionKey: "the wrong key entirely" });
-      wrong.loadUsers();
-    }).toThrow();
+    // openStore closes its own connection when setup fails, so no handle leaks here.
+    expect(() => openStore(dbPath, { encryptionKey: "the wrong key entirely" })).toThrow();
   });
 
   it("refuses to key an in-memory database", () => {

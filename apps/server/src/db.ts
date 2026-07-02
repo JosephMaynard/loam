@@ -120,6 +120,21 @@ function messageColumns(message: Message): [string, string, string | null, strin
  */
 export function openStore(path: string, options: OpenStoreOptions = {}): LoamStore {
   const db = openConnection(path, options);
+
+  try {
+    return buildStore(db);
+  } catch (error) {
+    // A wrong encryption key surfaces here (the first pragma/DDL fails); don't leak the handle.
+    db.close();
+    throw error;
+  }
+}
+
+/**
+ * Initialise the schema and prepared statements on an open connection and return the store.
+ * Split out so `openStore` can close the connection if any setup step throws.
+ */
+function buildStore(db: SqliteConnection): LoamStore {
   let closed = false;
 
   db.exec("PRAGMA journal_mode = WAL");
