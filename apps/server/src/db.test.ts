@@ -295,22 +295,24 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
 
   it("writes an encrypted file — message plaintext never touches disk, incl. WAL sidecars", () => {
     const store = openStore(dbPath, { encryptionKey: KEY });
-    store.insertMessage(makeChannelPost("msg_secret", 1_704_067_200_000));
-    store.upsertUser(makeUser("user.needle", { displayName: "SUPER_SECRET_NEEDLE" }));
+    try {
+      store.insertMessage(makeChannelPost("msg_secret", 1_704_067_200_000));
+      store.upsertUser(makeUser("user.needle", { displayName: "SUPER_SECRET_NEEDLE" }));
 
-    // Scan every file in the data dir WHILE the store is open — WAL mode may hold recent writes in
-    // the -wal sidecar before checkpoint, so checking only the main DB (or only after close) could
-    // miss plaintext. SQLCipher encrypts the WAL too, so nothing should leak anywhere.
-    const needle = Buffer.from("SUPER_SECRET_NEEDLE");
-    const files = readdirSync(dataDir);
-    expect(files.some((name) => name.startsWith("loam.db"))).toBe(true);
-    for (const name of files) {
-      const raw = readFileSync(join(dataDir, name));
-      expect(raw.includes(needle)).toBe(false);
+      // Scan every file in the data dir WHILE the store is open — WAL mode may hold recent writes in
+      // the -wal sidecar before checkpoint, so checking only the main DB (or only after close) could
+      // miss plaintext. SQLCipher encrypts the WAL too, so nothing should leak anywhere.
+      const needle = Buffer.from("SUPER_SECRET_NEEDLE");
+      const files = readdirSync(dataDir);
+      expect(files.some((name) => name.startsWith("loam.db"))).toBe(true);
+      for (const name of files) {
+        const raw = readFileSync(join(dataDir, name));
+        expect(raw.includes(needle)).toBe(false);
+      }
+      expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+    } finally {
+      store.close();
     }
-    expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
-
-    store.close();
   });
 
   it("persists across reopen with the right key and rejects the wrong key", () => {
