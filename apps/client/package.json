@@ -15,7 +15,7 @@
     "@loam/qr": "workspace:*",
     "@loam/schema": "workspace:*",
     "dompurify": "^3.4.0",
-    "preact": "^10.29.0",
+    "preact": "^10.29.3",
     "preact-iso": "^2.11.1",
     "snarkdown": "^2.0.0"
   },
@@ -23,9 +23,9 @@
     "@preact/preset-vite": "^2.10.4",
     "@types/node": "^24.12.0",
     "fake-indexeddb": "^6.2.5",
-    "jsdom": "^26.1.0",
+    "jsdom": "^29.1.1",
     "typescript": "~5.9.3",
     "vite": "^8.0.1",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.9"
   }
 }
