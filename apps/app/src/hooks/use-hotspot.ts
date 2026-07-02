@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import { PermissionsAndroid, Platform } from 'react-native';
 
 import {
@@ -34,7 +34,7 @@ let inFlight = false;
 // this to detect that it was superseded (by a shutdown or a newer start) and must not publish stale
 // state or leave an orphaned reservation running.
 let generation = 0;
-const listeners = new Set<(state: HotspotState) => void>();
+const listeners = new Set<() => void>();
 
 // Guard against a native callback that never fires (some emulators neither resolve nor call
 // onFailed): if start hasn't settled by now, treat it as a failure so the UI leaves the "starting"
@@ -74,7 +74,7 @@ function startWithTimeout(): Promise<HotspotCredentials> {
 function publish(next: HotspotState): void {
   sharedState = next;
   for (const listener of listeners) {
-    listener(sharedState);
+    listener();
   }
 }
 
@@ -165,16 +165,15 @@ export function shutdownHotspot(): void {
   publish({ phase: 'idle' });
 }
 
-/** Subscribe a component to the shared hotspot state. */
+/** Subscribe a React tree to the shared hotspot store. */
+function subscribe(onStoreChange: () => void): () => void {
+  listeners.add(onStoreChange);
+  return () => {
+    listeners.delete(onStoreChange);
+  };
+}
+
+/** Subscribe a component to the shared hotspot state (concurrent-safe external store). */
 export function useHotspot(): HotspotState {
-  const [state, setState] = useState<HotspotState>(sharedState);
-  useEffect(() => {
-    listeners.add(setState);
-    // Re-sync in case the shared state changed between render and effect.
-    setState(sharedState);
-    return () => {
-      listeners.delete(setState);
-    };
-  }, []);
-  return state;
+  return useSyncExternalStore(subscribe, () => sharedState);
 }

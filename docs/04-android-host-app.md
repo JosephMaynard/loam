@@ -206,9 +206,12 @@ view layered over it, so an on-top button wouldn't register). It opens `HostShar
 full-screen modal). The overlay starts the hotspot on open and feeds
 `{ssid,password}` + the fixed gateway `serverUrl` into the presentational `HostPanel`, which shows
 **Step 1** (WiFi-join QR + SSID/password text) and **Step 2** (LOAM-URL QR + address text). The LOAM
-access URL for joiners is the LocalOnlyHotspot **gateway `http://192.168.49.1:3000`** (fixed by
-Android), known before the hotspot starts — so **Step 2 always renders**, and when the hotspot can't
-start, `HostPanel` shows the error in Step 1 while keeping Step 2 (graceful degradation).
+access URL for joiners is the LocalOnlyHotspot **gateway `http://192.168.49.1:3000`** (the AOSP
+default for local-only hotspots, hardcoded in Android's tethering config), known before the hotspot
+starts — so **Step 2 always renders**, and when the hotspot can't start, `HostPanel` shows the error
+in Step 1 while keeping Step 2 (graceful degradation). A rare OEM could assign a different gateway;
+detecting the AP interface address at runtime is a fragile, hard-to-test follow-up, so we ship the
+AOSP-standard address (correct on the overwhelming majority of devices).
 
 ## QR codes (mostly already solved)
 

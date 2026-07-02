@@ -31,6 +31,10 @@ class LoamHotspotModule : Module() {
   @Volatile
   private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
 
+  // Set while a start is in progress so two overlapping startHotspot calls can't both reach
+  // startLocalOnlyHotspot (the reservation @Volatile read alone gives visibility, not atomicity).
+  private val starting = AtomicBoolean(false)
+
   override fun definition() = ModuleDefinition {
     Name("LoamHotspot")
 
@@ -61,11 +65,22 @@ class LoamHotspotModule : Module() {
       return
     }
 
-    val context: Context = appContext.reactContext
-      ?: return promise.reject(HotspotException("The Android context is unavailable."))
+    // Serialize concurrent starts: only the caller that flips this from false→true proceeds; a
+    // second overlapping call is rejected instead of also invoking startLocalOnlyHotspot.
+    if (!starting.compareAndSet(false, true)) {
+      return promise.reject(HotspotException("A hotspot start is already in progress."))
+    }
 
-    val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-      ?: return promise.reject(HotspotException("WifiManager is unavailable on this device."))
+    val context: Context = appContext.reactContext ?: run {
+      starting.set(false)
+      return promise.reject(HotspotException("The Android context is unavailable."))
+    }
+
+    val wifiManager =
+      context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: run {
+        starting.set(false)
+        return promise.reject(HotspotException("WifiManager is unavailable on this device."))
+      }
 
     // The callback fires asynchronously on the main thread after this method returns; guard so the
     // promise settles exactly once even if start throws and a late callback also arrives.
@@ -74,6 +89,7 @@ class LoamHotspotModule : Module() {
     val callback = object : WifiManager.LocalOnlyHotspotCallback() {
       override fun onStarted(res: WifiManager.LocalOnlyHotspotReservation) {
         reservation = res
+        starting.set(false)
         if (!settled.compareAndSet(false, true)) {
           return
         }
@@ -86,6 +102,7 @@ class LoamHotspotModule : Module() {
       }
 
       override fun onFailed(reason: Int) {
+        starting.set(false)
         if (!settled.compareAndSet(false, true)) {
           return
         }
@@ -100,10 +117,12 @@ class LoamHotspotModule : Module() {
     try {
       wifiManager.startLocalOnlyHotspot(callback, Handler(Looper.getMainLooper()))
     } catch (e: SecurityException) {
+      starting.set(false)
       if (settled.compareAndSet(false, true)) {
         promise.reject(HotspotException("Location permission is required to start the hotspot.", e))
       }
     } catch (e: Throwable) {
+      starting.set(false)
       if (settled.compareAndSet(false, true)) {
         promise.reject(HotspotException("Couldn't start the hotspot: ${e.message ?: e.javaClass.simpleName}", e))
       }
@@ -125,19 +144,28 @@ class LoamHotspotModule : Module() {
       ssid = name
       password = config.passphrase
     } else {
+      // Pre-30 WifiConfiguration returns the SSID/key wrapped in double quotes for ASCII values, so
+      // strip them — an un-stripped value would put literal quotes into the WiFi-join QR.
       @Suppress("DEPRECATION")
       val config = res.wifiConfiguration
       @Suppress("DEPRECATION")
-      val name = config?.SSID
-      ssid = name
+      ssid = unquote(config?.SSID)
       @Suppress("DEPRECATION")
-      password = config?.preSharedKey
+      password = unquote(config?.preSharedKey)
     }
     if (ssid.isNullOrEmpty() || password.isNullOrEmpty()) {
       return null
     }
     return mapOf("ssid" to ssid, "password" to password)
   }
+
+  /** Strip a single pair of surrounding double quotes, as pre-30 `WifiConfiguration` adds. */
+  private fun unquote(value: String?): String? =
+    if (value != null && value.length >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+      value.substring(1, value.length - 1)
+    } else {
+      value
+    }
 
   private fun releaseReservation() {
     reservation?.close()
