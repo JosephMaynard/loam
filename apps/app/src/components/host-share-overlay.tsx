@@ -1,0 +1,98 @@
+import { useEffect } from 'react';
+import { Modal, Pressable, ScrollView, StyleSheet } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+
+import { HostPanel, type HostState } from '@/components/host-panel';
+import { ThemedText } from '@/components/themed-text';
+import { ThemedView } from '@/components/themed-view';
+import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { ensureHotspot, useHotspot, type HotspotState } from '@/hooks/use-hotspot';
+
+/** Project the hotspot lifecycle onto the presentational HostPanel state (docs/04 two-step flow). */
+function toHostState(hotspot: HotspotState, serverUrl: string): HostState {
+  if (hotspot.phase === 'running' && hotspot.credentials) {
+    return { status: 'running', hotspot: hotspot.credentials, serverUrl };
+  }
+  if (hotspot.phase === 'error') {
+    // Hotspot couldn't start — surface the reason in Step 1 but keep Step 2's URL QR so LOAM stays
+    // reachable to anyone already on this network (the graceful-degradation path the emulator hits).
+    return { status: 'stopped', hotspotError: hotspot.error, serverUrl };
+  }
+  return { status: 'starting', serverUrl };
+}
+
+type HostShareOverlayProps = {
+  visible: boolean;
+  onClose: () => void;
+  /**
+   * The LAN URL joiners open once connected — the fixed LocalOnlyHotspot gateway
+   * `http://192.168.49.1:3000` (docs/04). Known ahead of the hotspot, so Step 2's QR renders even
+   * when the hotspot itself fails to start.
+   */
+  serverUrl: string;
+};
+
+/**
+ * A full-screen modal over the host WebView that shares this node: it starts the local-only hotspot
+ * (requesting permission first) and renders the two-step join flow via `HostPanel`. If the hotspot
+ * can't start — no WiFi hardware on an emulator, or a denied permission — it shows a clear message
+ * and still renders the Step-2 LOAM-URL QR, never crashing or hanging (docs/04).
+ */
+export function HostShareOverlay({ visible, onClose, serverUrl }: HostShareOverlayProps) {
+  const hotspot = useHotspot();
+
+  // Start the hotspot the first time the overlay opens. `ensureHotspot` is idempotent (no-ops while
+  // in flight or already running), and we intentionally leave the hotspot up after close so joiners
+  // stay connected while the host app runs.
+  useEffect(() => {
+    if (visible) {
+      void ensureHotspot();
+    }
+  }, [visible]);
+
+  const state = toHostState(hotspot, serverUrl);
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaProvider>
+        <ThemedView style={styles.container}>
+          <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+            <ThemedView style={styles.header}>
+              <Pressable onPress={onClose} accessibilityRole="button" hitSlop={Spacing.two}>
+                <ThemedText type="link">Done</ThemedText>
+              </Pressable>
+            </ThemedView>
+            <ScrollView
+              contentContainerStyle={styles.scrollContent}
+              showsVerticalScrollIndicator={false}>
+              <HostPanel state={state} />
+            </ScrollView>
+          </SafeAreaView>
+        </ThemedView>
+      </SafeAreaProvider>
+    </Modal>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  safeArea: {
+    flex: 1,
+    width: '100%',
+    maxWidth: MaxContentWidth,
+    alignSelf: 'center',
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
+  },
+  scrollContent: {
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.five,
+    gap: Spacing.three,
+  },
+});

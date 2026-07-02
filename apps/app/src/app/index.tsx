@@ -4,13 +4,18 @@ import { ActivityIndicator, Linking, Platform, Pressable, StyleSheet } from 'rea
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
+import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
-// WebView loads it over loopback. Remote joiners use the hotspot IP (initiative 4).
+// WebView loads it over loopback. Remote joiners use the hotspot IP (below).
 const LOAM_URL = 'http://localhost:3000';
+// Android's WifiManager.LocalOnlyHotspot always assigns the host device this fixed gateway IP, so a
+// joiner on the hotspot reaches the embedded server here (docs/04). Known before the hotspot even
+// starts, which is why Step 2's URL QR can render regardless of hotspot success.
+const HOTSPOT_GATEWAY_URL = 'http://192.168.49.1:3000';
 // Cold start is ~80s (docs/04); give it comfortably more before declaring the runtime hung.
 const STARTUP_TIMEOUT_MS = 150_000;
 
@@ -46,6 +51,8 @@ export default function HostScreen() {
   // doesn't get stuck showing "starting" (the runtime won't re-emit).
   const [status, setStatus] = useState<HostStatus>(() => nodeStatus);
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
+  // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
+  const [shareOpen, setShareOpen] = useState(false);
   const webViewRef = useRef<WebView>(null);
 
   useEffect(() => {
@@ -112,6 +119,21 @@ export default function HostScreen() {
   if (status === 'ready') {
     return (
       <SafeAreaView style={styles.flex} edges={['top']}>
+        {/* Compact host bar above the WebView. Kept as a sibling *above* (not overlapping) the
+            WebView: an Android WebView swallows touches on any native view layered over it, so a
+            floating button on top wouldn't register — a top bar reliably does. */}
+        <ThemedView type="backgroundElement" style={styles.topBar}>
+          <ThemedText type="smallBold">LOAM host</ThemedText>
+          <Pressable
+            onPress={() => setShareOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Share or host this LOAM node"
+            style={styles.shareButton}>
+            <ThemedText type="smallBold" style={styles.shareButtonLabel}>
+              Share · Host
+            </ThemedText>
+          </Pressable>
+        </ThemedView>
         <WebView
           ref={webViewRef}
           source={{ uri: LOAM_URL }}
@@ -150,6 +172,11 @@ export default function HostScreen() {
               failWebView(`The LOAM server returned HTTP ${nativeEvent.statusCode}.`);
             }
           }}
+        />
+        <HostShareOverlay
+          visible={shareOpen}
+          onClose={() => setShareOpen(false)}
+          serverUrl={HOTSPOT_GATEWAY_URL}
         />
       </SafeAreaView>
     );
@@ -221,5 +248,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     borderRadius: Spacing.four,
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+  },
+  shareButton: {
+    backgroundColor: '#208AEF',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.five,
+  },
+  // Fixed white on the brand-blue pill so the label reads regardless of the active theme.
+  shareButtonLabel: {
+    color: '#ffffff',
   },
 });

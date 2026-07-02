@@ -1,15 +1,26 @@
 # 04 — Android host app (React Native)
 
-> **Status: RUNS ON-DEVICE ✅ (headline goal met).** Landed on `feat/android-host-runnable`: a
+> **Status: RUNS ON-DEVICE ✅ + HOTSPOT JOIN UI ✅.** Landed on `feat/android-host-runnable`: a
 > release APK boots the **real embedded LOAM server** inside `@comapeo/nodejs-mobile-react-native`'s
 > Node 18 and shows the **LOAM web client in a WebView** — verified on an arm64 API-35 emulator.
 > On-device proof: `Server listening on 0.0.0.0:3000`, `GET /api/config` → 200 (session minted),
 > `POST /api/messages` → 201 with read-back, and the client rendered live (channels, DMs, avatars,
 > "live" WS badge). DB uses plain **better-sqlite3** (unencrypted) via the digidem ABI-108
-> android-arm64 prebuild. See **[Runnable build](#runnable-build)** below for exact commands. Prior
-> desktop-verifiable work (bundler, host UI QR flow) still stands. **Follow-ups:** encryption at rest
-> on-device, the `LocalOnlyHotspot` native module, and wiring the two-step QR join UI over the
-> WebView host.
+> android-arm64 prebuild. Then on `feat/android-hotspot-join`: a **`LocalOnlyHotspot` native module**
+> (`apps/app/modules/loam-hotspot`, Kotlin via the Expo Modules API) plus a **"Share · Host" host bar**
+> above the WebView that opens a modal rendering the two-step QR join flow (`HostShareOverlay` →
+> `HostPanel`). Emulator-verified (arm64 API-35): LOAM still loads, the bar's button opens the modal,
+> tapping it prompts for `ACCESS_FINE_LOCATION` then `NEARBY_WIFI_DEVICES`, and `startHotspot()` runs.
+> This emulator's virtual WiFi actually supported LocalOnlyHotspot, so the **happy path** rendered —
+> "Host running", Step 1 with a real SSID/password (`AndroidShare_1065` / a generated passphrase) +
+> WiFi QR, and Step 2's LOAM-URL QR (`http://192.168.49.1:3000`); Done closes back to the WebView.
+> Graceful degradation (permission denied / no SoftAP / a callback that never fires) is code-complete
+> — `requireOptionalNativeModule` for unlinked runtimes, a native reject on `onFailed`/`SecurityException`,
+> a 20s JS start-timeout, and an error message in Step 1 while Step 2's QR stays — but wasn't the path
+> this emulator took. The full two-phone join (a second device scans Step 1, connects, scans Step 2) is
+> the **physical-device** test. See
+> **[Runnable build](#runnable-build)** below for exact commands. **Follow-ups:** encryption at rest
+> on-device; 32-bit `armeabi-v7a`; raising `@loam/qr` capacity for long creds.
 >
 > Earlier status (kept for context): `apps/app/scripts/bundle-server.mjs` esbuild-bundles the real
 > server (`apps/server/src/embedded.ts`, a TLA-free, env-driven CJS entry) →
@@ -64,11 +75,16 @@ the pinned `PREBUILD_SHA256`).
 - **Committed (source):** `apps/server/src/db.ts` (`driver` option), `embedded.ts`
   (`LOAM_DB_DRIVER`), `apps/app/scripts/{bundle-server.mjs,fetch-native-modules.mjs}`,
   `apps/app/nodejs-project-template/{main.js,package.json}` (the CJS launcher template),
-  `apps/app/plugins/with-loam-host.js` (config plugin: cleartext localhost + arm64-only ABIs),
-  `apps/app/nodejs-assets/BUILD_NATIVE_MODULES.txt` (`0`), `apps/app/app.json` (package
-  `app.loam.host`, plugin), `apps/app/src/app/index.tsx` (host WebView screen), `package.json` deps.
-- **Generated at build time (gitignored):** `apps/app/android/` (prebuild),
-  `apps/app/nodejs-assets/nodejs-project/` (bundle output + web client + native prebuild), the APK.
+  `apps/app/plugins/with-loam-host.js` (config plugin: cleartext localhost + arm64-only ABIs +
+  hotspot/WiFi permissions), `apps/app/nodejs-assets/BUILD_NATIVE_MODULES.txt` (`0`),
+  `apps/app/app.json` (package `app.loam.host`, plugin), `apps/app/src/app/index.tsx` (host WebView
+  screen + "Share · Host" button + overlay), `apps/app/src/components/{host-panel,host-share-overlay,
+  qr-code}.tsx`, `apps/app/src/hooks/use-hotspot.ts`, **`apps/app/modules/loam-hotspot/`** (the local
+  Expo module: `expo-module.config.json`, `index.ts`, `src/*.ts`, `android/build.gradle` +
+  `LoamHotspotModule.kt`), `package.json` deps.
+- **Generated at build time (gitignored):** `apps/app/android/` (prebuild — local modules are
+  autolinked into it, not committed), `apps/app/nodejs-assets/nodejs-project/` (bundle output + web
+  client + native prebuild), the APK.
 
 ## Goal
 
@@ -169,6 +185,31 @@ system-settings trip, no root. Caveats: needs location permission, one local hot
 **native module** (no managed-Expo API) — reinforcing the prebuild/bare direction above. iOS has no
 equivalent public API (Personal Hotspot is user-driven), so iOS hosting is out of scope for v1.
 
+**Implemented (`feat/android-hotspot-join`):** `apps/app/modules/loam-hotspot` is a local **Expo
+Module** (Kotlin, `LoamHotspotModule.kt`) exposing `startHotspot(): Promise<{ssid,password}>` and
+`stopHotspot(): void`. `startHotspot` calls `WifiManager.startLocalOnlyHotspot(callback, handler)` and,
+on `onStarted`, resolves with the reservation's credentials — `SoftApConfiguration.getSsid()`/
+`getPassphrase()` on API 30+, falling back to `WifiConfiguration.SSID`/`preSharedKey` on older. It holds
+the single reservation, resolves each promise exactly once, and rejects (code `ERR_HOTSPOT`) with a
+readable reason on `onFailed`, a `SecurityException` (missing permission), or any other failure — so the
+emulator's no-WiFi failure surfaces cleanly instead of hanging. The JS wrapper
+(`modules/loam-hotspot/index.ts`) loads the module with `requireOptionalNativeModule`, so importing it
+off-Android yields `null` rather than a crash. `src/hooks/use-hotspot.ts` requests the runtime
+permissions (`ACCESS_FINE_LOCATION`, plus `NEARBY_WIFI_DEVICES` on API 33+) via
+`PermissionsAndroid.requestMultiple` **before** starting, tracks a module-scope singleton state
+(Android allows one hotspot per process), and never throws — denial/failure lands in an `error` phase.
+The permissions are declared in the manifest by the config plugin (`with-loam-host.js`).
+
+**Host UI:** `src/app/index.tsx` renders a compact host bar above the LOAM WebView with a **"Share ·
+Host"** button (a top bar, not a floating overlay — an Android WebView swallows touches on any native
+view layered over it, so an on-top button wouldn't register). It opens `HostShareOverlay` (a
+full-screen modal). The overlay starts the hotspot on open and feeds
+`{ssid,password}` + the fixed gateway `serverUrl` into the presentational `HostPanel`, which shows
+**Step 1** (WiFi-join QR + SSID/password text) and **Step 2** (LOAM-URL QR + address text). The LOAM
+access URL for joiners is the LocalOnlyHotspot **gateway `http://192.168.49.1:3000`** (fixed by
+Android), known before the hotspot starts — so **Step 2 always renders**, and when the hotspot can't
+start, `HostPanel` shows the error in Step 1 while keeping Step 2 (graceful degradation).
+
 ## QR codes (mostly already solved)
 
 `packages/qr` already has what's needed:
@@ -218,10 +259,21 @@ workspace install (Expo/RN toolchain); gating its install remains an open nicety
    better-sqlite3-multiple-ciphers amalgamation, produce ABI-108 android-arm64 prebuilds, verify
    `PRAGMA key`/rekey on-device (see [01](01-sqlite-migration.md)). The plain-prebuild half is
    already proven on-device (phase 2 stretch goal).
-4. `LocalOnlyHotspot` native module returning SSID/password.
-5. WebView loading the served client over the hotspot, with cookies + WebSocket working end to end.
+4. ~~`LocalOnlyHotspot` native module returning SSID/password~~ — **done** (`apps/app/modules/loam-hotspot`);
+   emulator-verified end to end (the API-35 emulator's virtual WiFi returned a real SSID/passphrase).
+   Physical-device SoftAP behaviour may differ, so the two-phone join below remains the owner's test.
+5. WebView loading the served client over the hotspot, with cookies + WebSocket working end to end —
+   **needs a physical device** (a second phone joins the hotspot and opens `http://192.168.49.1:3000`).
 
 Only after those pass is the QR/host UI mostly glue over `packages/qr`.
+
+### Physical-device test (owner)
+The emulator can't create a real hotspot (no WiFi radio), so the end-to-end join is a two-phone test:
+1. Install + launch the APK; wait for LOAM to load, tap **Share · Host**, grant location permission.
+2. Confirm **Step 1** shows a real SSID + password. On a second phone, scan the Step-1 WiFi QR (or type
+   the creds) to join the hotspot.
+3. Once connected, scan the **Step-2** QR (`http://192.168.49.1:3000`) → LOAM opens over the hotspot.
+4. Post a message from the second phone; confirm it appears on the host (proves the WS/LAN path).
 
 ## Open questions
 - ~~Server hosting model~~ — settled: embedded Node (spike-verified twice, incl. the real server).

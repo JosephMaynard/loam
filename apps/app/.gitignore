@@ -42,5 +42,9 @@ app-example/
 /ios
 /android
 
+# local Expo modules: commit the source, ignore per-module gradle build output
+/modules/*/android/build/
+/modules/*/android/.cxx/
+
 # embedded server bundle output (produced by pnpm bundle:server)
 /nodejs-assets/nodejs-project
