@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 // Importing this module must not boot a server (the auto-start lives in embedded-main.ts) — if it
 // did, this test file would try to listen on load. That it imports cleanly is itself the assertion
 // behind CodeRabbit's "unsafe to load" finding.
-import { firstLanIPv4, parsePort, startEmbeddedServer } from "./embedded.js";
+import { firstLanIPv4, parseDbDriver, parsePort, startEmbeddedServer } from "./embedded.js";
 
 describe("parsePort", () => {
   it("parses a valid port", () => {
@@ -28,6 +28,21 @@ describe("parsePort", () => {
 describe("firstLanIPv4", () => {
   it("returns a string (an address or the localhost fallback)", () => {
     expect(typeof firstLanIPv4()).toBe("string");
+  });
+});
+
+describe("parseDbDriver", () => {
+  it("returns the supported driver values verbatim", () => {
+    expect(parseDbDriver("better-sqlite3")).toBe("better-sqlite3");
+    expect(parseDbDriver("node-sqlite")).toBe("node-sqlite");
+  });
+
+  it("returns undefined for missing or unrecognised values (leaving the buildApp default)", () => {
+    expect(parseDbDriver(undefined)).toBeUndefined();
+    expect(parseDbDriver("")).toBeUndefined();
+    expect(parseDbDriver("better_sqlite3")).toBeUndefined();
+    expect(parseDbDriver("sqlite")).toBeUndefined();
+    expect(parseDbDriver("node:sqlite")).toBeUndefined();
   });
 });
 

@@ -1,0 +1,7 @@
+{
+  "name": "loam-embedded-server",
+  "version": "0.0.0",
+  "private": true,
+  "main": "main.js",
+  "description": "nodejs-mobile project that boots the embedded LOAM server. main.js + this file are committed templates; loam-server.js, client/, and node_modules/better-sqlite3/ are produced by the build (see apps/app/scripts)."
+}

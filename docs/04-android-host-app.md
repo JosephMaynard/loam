@@ -1,17 +1,74 @@
 # 04 — Android host app (React Native)
 
-> **Status: build-out started (desktop-verifiable parts).** Landed on `feat/android-host`:
-> `apps/app/scripts/bundle-server.mjs` esbuild-bundles the real server (`apps/server/src/embedded.ts`,
-> a TLA-free, env-driven CJS entry) → `nodejs-assets/nodejs-project/loam-server.js` + a copy of the
-> built web client — **verified booting on desktop Node** (serves `/api/config`, the static client,
-> and accepts a POST). Plus the host UI: a dependency-free `QRCode` (renders `@loam/qr` matrices as
-> RN views — no SVG/WebView) and a `HostPanel` implementing the two-step join flow, wired into the
-> home screen; `apps/app` type-checks. **Still device-bound (need the emulator/prebuild):** wiring
-> `@comapeo/nodejs-mobile-react-native` to boot the bundle, aliasing `node:sqlite` → an encrypted
-> better-sqlite3 driver, the `LocalOnlyHotspot` native module, and the WebView. Caveat: `@loam/qr`
-> tops out at version 6-H (~58 bytes) — fine for real LocalOnlyHotspot creds (~45 bytes) but a long
-> SSID+password can overflow; `QRCode` degrades to the manual text. Raising QR capacity (lower ECC /
-> higher versions) is a `packages/qr` follow-up.
+> **Status: RUNS ON-DEVICE ✅ (headline goal met).** Landed on `feat/android-host-runnable`: a
+> release APK boots the **real embedded LOAM server** inside `@comapeo/nodejs-mobile-react-native`'s
+> Node 18 and shows the **LOAM web client in a WebView** — verified on an arm64 API-35 emulator.
+> On-device proof: `Server listening on 0.0.0.0:3000`, `GET /api/config` → 200 (session minted),
+> `POST /api/messages` → 201 with read-back, and the client rendered live (channels, DMs, avatars,
+> "live" WS badge). DB uses plain **better-sqlite3** (unencrypted) via the digidem ABI-108
+> android-arm64 prebuild. See **[Runnable build](#runnable-build)** below for exact commands. Prior
+> desktop-verifiable work (bundler, host UI QR flow) still stands. **Follow-ups:** encryption at rest
+> on-device, the `LocalOnlyHotspot` native module, and wiring the two-step QR join UI over the
+> WebView host.
+>
+> Earlier status (kept for context): `apps/app/scripts/bundle-server.mjs` esbuild-bundles the real
+> server (`apps/server/src/embedded.ts`, a TLA-free, env-driven CJS entry) →
+> `nodejs-assets/nodejs-project/loam-server.js` + a copy of the built web client. Plus a
+> dependency-free `QRCode` and a `HostPanel` implementing the two-step join flow (now unused by the
+> home screen, which shows the WebView; kept for the hotspot UI follow-up). Caveat: `@loam/qr` tops
+> out at version 6-H (~58 bytes) — fine for real LocalOnlyHotspot creds but a long SSID+password can
+> overflow; raising QR capacity is a `packages/qr` follow-up.
+
+## Runnable build
+
+The `apps/app` Expo app builds an installable Android APK that runs the embedded server + WebView.
+
+### Prerequisites
+- Node `24.13.1`, pnpm `10.30.2` (repo pins). A real JDK (Android Studio's JBR:
+  `/Applications/Android Studio.app/Contents/jbr/Contents/Home` on macOS — a bare JRE fails "No Java
+  compiler found"). Android SDK with platform-tools + NDK r27+ (16KB page alignment). `ANDROID_HOME`
+  set; `adb`/`emulator` on `PATH`.
+
+### Build the APK (reproducible)
+```bash
+pnpm install                                   # nodejs-mobile's postinstall is (correctly) blocked by pnpm
+pnpm -r build                                  # builds packages + server + web client (client dist is bundled)
+pnpm --filter app fetch:native                 # downloads + places the better-sqlite3 android-arm64 prebuild
+pnpm --filter app bundle:server                # esbuild → nodejs-assets/nodejs-project/{loam-server.js,client,main.js,...}
+cd apps/app
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+CI=1 npx expo prebuild --platform android --no-install     # generates android/ (gitignored)
+cd android
+./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+# → app/build/outputs/apk/release/app-release.apk (~91 MB; signed with the debug keystore, installable)
+```
+
+Install on a device/emulator: `adb install -r app/build/outputs/apk/release/app-release.apk`, then
+launch it. First cold start takes ~1 minute (asset copy + first `require`); the screen shows
+"Starting host…" until the server answers, then swaps to the WebView.
+
+### Native prebuild (better-sqlite3)
+`fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) pins `better-sqlite3@12.10.0` and downloads
+the matching ABI-108 (Node 18) android-arm64 binary from
+`digidem/better-sqlite3-nodejs-mobile` (tag `12.10.0`, asset
+`better-sqlite3-12.10.0-node-108-android-arm64.tar.gz`), placing `better_sqlite3.node` at
+`node_modules/better-sqlite3/build/Release/` where `bindings` resolves it. **Not committed** (native
+binary) — re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` verifies the
+tarball against a pinned sha256 before installing it. The JS-wrapper npm version and the `.node`
+release must stay in lockstep — if it ever fails to load, fall back to `11.10.0` (the version CoMapeo
+ships) by changing **both** the npm wrapper version and the digidem release tag together (and update
+the pinned `PREBUILD_SHA256`).
+
+### What's committed vs generated
+- **Committed (source):** `apps/server/src/db.ts` (`driver` option), `embedded.ts`
+  (`LOAM_DB_DRIVER`), `apps/app/scripts/{bundle-server.mjs,fetch-native-modules.mjs}`,
+  `apps/app/nodejs-project-template/{main.js,package.json}` (the CJS launcher template),
+  `apps/app/plugins/with-loam-host.js` (config plugin: cleartext localhost + arm64-only ABIs),
+  `apps/app/nodejs-assets/BUILD_NATIVE_MODULES.txt` (`0`), `apps/app/app.json` (package
+  `app.loam.host`, plugin), `apps/app/src/app/index.tsx` (host WebView screen), `package.json` deps.
+- **Generated at build time (gitignored):** `apps/app/android/` (prebuild),
+  `apps/app/nodejs-assets/nodejs-project/` (bundle output + web client + native prebuild), the APK.
 
 ## Goal
 

@@ -10,7 +10,13 @@
 > encrypted DB. **`LOAM_DB_KEY=ephemeral`** uses a random RAM-only key (never persisted), and the
 > **kill switch now does a cryptographic wipe** (delete files + rotate key) — see docs/02.
 > **Remaining:** passphrase key-derivation hardening, config/security-profile integration (docs/09),
-> RAM key-zeroing, and the Android on-device ABI-108 prebuild. Phase B (hot reads via SQL) deferred.
+> RAM key-zeroing, and encryption at rest **on-device** (needs a multiple-ciphers ABI-108 android
+> prebuild). Phase B (hot reads via SQL) deferred. **Update:** `openStore` now takes a
+> `driver?: "node-sqlite" | "better-sqlite3"` option (threaded via `buildApp({ dbDriver })` ←
+> `LOAM_DB_DRIVER`), and the plain (unencrypted) **better-sqlite3** driver on the digidem ABI-108
+> android-arm64 prebuild now runs the **real server on-device** in the LOAM app (docs/04) —
+> CREATE/INSERT/SELECT via the full REST API. `node:sqlite` stays the desktop/CI default and is now
+> lazy-`require`d so the bundle never eagerly loads it on the device's Node 18.
 
 ## Goal
 
