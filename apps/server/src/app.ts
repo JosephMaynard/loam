@@ -89,6 +89,8 @@ export type AppOptions = {
   joinHost?: string;
   /** Port used in the join URL returned by /api/config. */
   clientPort?: number;
+  /** When set, encrypt the database at rest (SQLCipher). Requires a real data dir, not in-memory. */
+  dbEncryptionKey?: string;
   logger?: boolean;
 };
 
@@ -472,7 +474,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   };
 
   await mkdir(dataDir, { recursive: true });
-  const store = openStore(join(dataDir, "loam.db"));
+  const store = openStore(join(dataDir, "loam.db"), { encryptionKey: options.dbEncryptionKey });
 
   /**
    * Parse one config layer, tolerating malformed JSON and invalid shapes: both are logged and

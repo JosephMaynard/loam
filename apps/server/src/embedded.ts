@@ -63,6 +63,7 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     clientDistDir,
     joinHost: process.env.LOAM_JOIN_HOST ?? firstLanIPv4(),
     clientPort,
+    dbEncryptionKey: process.env.LOAM_DB_KEY,
   });
 
   if (app.adminSetupCode) {

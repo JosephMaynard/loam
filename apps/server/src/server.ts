@@ -28,6 +28,7 @@ const app = await buildApp({
   clientDistDir: process.env.LOAM_CLIENT_DIST ?? join(rootDir, "apps/client/dist"),
   joinHost: process.env.LOAM_JOIN_HOST ?? localIPv4(),
   clientPort,
+  dbEncryptionKey: process.env.LOAM_DB_KEY,
 });
 
 if (app.adminSetupCode) {

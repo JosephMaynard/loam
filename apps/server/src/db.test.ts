@@ -257,3 +257,82 @@ describe("importLegacyJsonData", () => {
     expect(existsSync(join(dataDir, "users.json.bak"))).toBe(false);
   });
 });
+
+describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () => {
+  let dataDir: string;
+  let dbPath: string;
+  const KEY = "correct horse battery staple";
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "loam-enc-test-"));
+    dbPath = join(dataDir, "loam.db");
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("round-trips every entity through the same DAL surface as node:sqlite", () => {
+    const store = openStore(dbPath, { encryptionKey: KEY });
+    try {
+      store.upsertUser(makeUser("user.enc"));
+      store.upsertChannel(makeChannel("general"));
+      for (const message of allMessageVariants) {
+        store.insertMessage(message);
+      }
+      store.putSession("tok", "user.enc");
+      store.setConfigValue("k", "v");
+
+      expect(store.loadUsers()).toEqual([makeUser("user.enc")]);
+      expect(store.loadChannels()).toEqual([makeChannel("general")]);
+      expect(store.loadMessages()).toEqual(allMessageVariants);
+      expect(store.loadSessions()).toEqual([{ token: "tok", userId: "user.enc" }]);
+      expect(store.getConfigValue("k")).toBe("v");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("writes an encrypted file — message plaintext never touches disk", () => {
+    const store = openStore(dbPath, { encryptionKey: KEY });
+    store.insertMessage(makeChannelPost("msg_secret", 1_704_067_200_000));
+    // Give the message a recognizable body to search for on disk.
+    store.upsertUser(makeUser("user.needle", { displayName: "SUPER_SECRET_NEEDLE" }));
+    store.close();
+
+    const raw = readFileSync(dbPath);
+    expect(raw.includes(Buffer.from("SUPER_SECRET_NEEDLE"))).toBe(false);
+    expect(raw.subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+  });
+
+  it("persists across reopen with the right key and rejects the wrong key", () => {
+    const first = openStore(dbPath, { encryptionKey: KEY });
+    first.upsertUser(makeUser("user.persist"));
+    first.close();
+
+    const reopened = openStore(dbPath, { encryptionKey: KEY });
+    expect(reopened.loadUsers()).toEqual([makeUser("user.persist")]);
+    reopened.close();
+
+    expect(() => {
+      const wrong = openStore(dbPath, { encryptionKey: "the wrong key entirely" });
+      wrong.loadUsers();
+    }).toThrow();
+  });
+
+  it("refuses to key an in-memory database", () => {
+    expect(() => openStore(":memory:", { encryptionKey: KEY })).toThrow(/in-memory/);
+  });
+
+  it("wipeAll clears an encrypted store", () => {
+    const store = openStore(dbPath, { encryptionKey: KEY });
+    try {
+      store.upsertUser(makeUser("user.enc"));
+      store.insertMessage(makeChannelPost("msg_1"));
+      store.wipeAll();
+      expect(store.isEmpty()).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+});
