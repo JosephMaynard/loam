@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 // Importing this module must not boot a server (the auto-start lives in embedded-main.ts) — if it
 // did, this test file would try to listen on load. That it imports cleanly is itself the assertion
 // behind CodeRabbit's "unsafe to load" finding.
-import { firstLanIPv4, parsePort } from "./embedded.js";
+import { firstLanIPv4, parsePort, startEmbeddedServer } from "./embedded.js";
 
 describe("parsePort", () => {
   it("parses a valid port", () => {
@@ -28,5 +28,40 @@ describe("parsePort", () => {
 describe("firstLanIPv4", () => {
   it("returns a string (an address or the localhost fallback)", () => {
     expect(typeof firstLanIPv4()).toBe("string");
+  });
+});
+
+describe("startEmbeddedServer env validation", () => {
+  const envKeys = ["LOAM_DATA_DIR", "LOAM_CLIENT_DIST"] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  afterEach(() => {
+    for (const key of envKeys) {
+      if (saved[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved[key];
+      }
+    }
+  });
+
+  function stashEnv(): void {
+    for (const key of envKeys) {
+      saved[key] = process.env[key];
+    }
+  }
+
+  it("rejects when LOAM_DATA_DIR is missing (before touching Fastify)", async () => {
+    stashEnv();
+    delete process.env.LOAM_DATA_DIR;
+    delete process.env.LOAM_CLIENT_DIST;
+    await expect(startEmbeddedServer()).rejects.toThrow(/LOAM_DATA_DIR/);
+  });
+
+  it("rejects when LOAM_CLIENT_DIST is missing", async () => {
+    stashEnv();
+    process.env.LOAM_DATA_DIR = "/tmp/loam-embedded-test-nonexistent";
+    delete process.env.LOAM_CLIENT_DIST;
+    await expect(startEmbeddedServer()).rejects.toThrow(/LOAM_CLIENT_DIST/);
   });
 });

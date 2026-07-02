@@ -5,7 +5,7 @@ import { StyleSheet, Text, View } from 'react-native';
 type QRCodeProps = {
   /** The string to encode (a `WIFI:` payload or a URL). */
   value: string;
-  /** Overall pixel size of the code, excluding the quiet-zone border. Default 220. */
+  /** Overall pixel size of the square rendered box, including the quiet-zone border. Default 220. */
   size?: number;
 };
 
@@ -52,11 +52,16 @@ export const QRCode = memo(function QRCode({ value, size = 220 }: QRCodeProps) {
     );
   }
 
-  const module = size / rows.moduleCount;
-  const padding = module * QUIET_ZONE_MODULES;
+  // Whole-pixel module so adjacent cells never land on subpixel boundaries (which leaves seams).
+  // `size` is the total square box; the quiet zone is white space inside it (the floor guarantees
+  // at least QUIET_ZONE_MODULES of margin on each side), and the grid is centred within it.
+  const module = Math.max(1, Math.floor(size / (rows.moduleCount + QUIET_ZONE_MODULES * 2)));
 
   return (
-    <View style={[styles.frame, { padding, backgroundColor: LIGHT }]}>
+    <View
+      accessibilityRole="image"
+      accessibilityLabel={`QR code encoding ${value}`}
+      style={[styles.frame, { width: size, height: size, backgroundColor: LIGHT }]}>
       {rows.grid.map((row, y) => (
         // eslint-disable-next-line react/no-array-index-key -- rows are a fixed positional grid
         <View key={y} style={styles.row}>
@@ -77,6 +82,8 @@ const styles = StyleSheet.create({
   frame: {
     borderRadius: 12,
     alignSelf: 'center',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   row: {
     flexDirection: 'row',

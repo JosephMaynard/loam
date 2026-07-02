@@ -71,10 +71,13 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
 
   const shutdown = (): void => {
     app.server.log.info("Shutting down embedded LOAM server…");
-    app
-      .close()
-      .catch((error) => app.server.log.error(error, "Error during embedded server shutdown"))
-      .finally(() => process.exit(0));
+    app.close().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        app.server.log.error(error, "Error during embedded server shutdown");
+        process.exit(1);
+      },
+    );
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
