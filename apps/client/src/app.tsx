@@ -1,11 +1,19 @@
 import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
+  AdminBootstrapStrategySchema,
+  LoamConfigSchema,
   MessageSchema,
+  NetworkConfigSchema,
+  StreamEventSchema,
   UserSchema,
   type Channel,
+  type FeatureFlags,
+  type IdentityConfig,
+  type LoamConfig,
   type Message,
   type MessageCreateRequest,
   type NetworkConfig,
+  type StreamEvent,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -16,7 +24,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
-import { deleteRecord, getAllRecords, putRecords } from "./lib/local-store";
+import { deleteRecord, destroyDatabase, getAllRecords, putRecords } from "./lib/local-store";
 import { renderMarkdown } from "./lib/markdown";
 
 type Conversation =
@@ -37,6 +45,9 @@ type RouteState =
     }
   | {
       screen: "settings";
+    }
+  | {
+      screen: "admin";
     };
 
 type Config = {
@@ -68,6 +79,17 @@ type SocketEvent =
   | {
       type: "userUpserted";
       user: User;
+    }
+  | {
+      type: "configUpdated";
+      networkConfig: NetworkConfig;
+    }
+  | {
+      type: "wipe";
+    }
+  | {
+      type: "stream";
+      event: StreamEvent;
     };
 
 type ReactionSummary = {
@@ -136,6 +158,10 @@ function parseRoute(path: string): RouteState {
 
   if (path === "/settings") {
     return { screen: "settings" };
+  }
+
+  if (path === "/admin") {
+    return { screen: "admin" };
   }
 
   const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);
@@ -210,10 +236,12 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
  * Parses a raw websocket message payload into a validated SocketEvent.
  *
  * Accepts any input (commonly a JSON string), attempts to JSON-parse it, and validates the resulting object.
- * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, and `userUpserted`.
+ * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, `userUpserted`, and
+ * the LLM stream events (`start`/`delta`/`end`/`error`, wrapped as `{ type: "stream", event }`).
  * `messageCreated` and `messageUpdated` require a valid `message` that passes `MessageSchema`.
  * `messageDeleted` requires a string `messageId`.
  * `userUpserted` requires a valid `user` that passes `UserSchema`.
+ * Stream events must pass `StreamEventSchema`.
  *
  * @param data - The raw websocket payload to parse (typically a JSON string)
  * @returns A validated `SocketEvent` when the payload is recognized and passes schema validation, `undefined` otherwise.
@@ -232,7 +260,13 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
     return undefined;
   }
 
-  const candidate = payload as { type: unknown; message?: unknown; messageId?: unknown; user?: unknown };
+  const candidate = payload as {
+    type: unknown;
+    message?: unknown;
+    messageId?: unknown;
+    user?: unknown;
+    networkConfig?: unknown;
+  };
 
   if (candidate.type === "messageCreated") {
     const message = MessageSchema.safeParse(candidate.message);
@@ -253,6 +287,25 @@ function parseSocketEvent(data: unknown): SocketEvent | undefined {
   if (candidate.type === "userUpserted") {
     const user = UserSchema.safeParse(candidate.user);
     return user.success ? { type: "userUpserted", user: user.data } : undefined;
+  }
+
+  if (candidate.type === "configUpdated") {
+    const networkConfig = NetworkConfigSchema.safeParse(candidate.networkConfig);
+    return networkConfig.success ? { type: "configUpdated", networkConfig: networkConfig.data } : undefined;
+  }
+
+  if (candidate.type === "wipe") {
+    return { type: "wipe" };
+  }
+
+  if (
+    candidate.type === "start" ||
+    candidate.type === "delta" ||
+    candidate.type === "end" ||
+    candidate.type === "error"
+  ) {
+    const stream = StreamEventSchema.safeParse(payload);
+    return stream.success ? { type: "stream", event: stream.data } : undefined;
   }
 
   return undefined;
@@ -446,6 +499,7 @@ function LoamApp() {
   const [config, setConfig] = useState<Config>();
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string>();
+  const [wiped, setWiped] = useState(false);
 
   const upsertUsers = useCallback((incomingUsers: User[]) => {
     setUsers((previous) => {
@@ -478,6 +532,54 @@ function LoamApp() {
   const removeMessage = useCallback((messageId: string) => {
     setMessages((previous) => previous.filter((message) => message.id !== messageId));
     void deleteRecord("messages", messageId);
+  }, []);
+
+  const purgeLocalData = useCallback(async () => {
+    // Remote wipe (kill switch): drop everything this browser knows, then show a neutral
+    // disconnected screen. Best-effort on every step — nothing here may block another.
+    setWiped(true);
+    setMessages([]);
+    setChannels([]);
+    setUsers([]);
+    setConfig(undefined);
+    localStorage.removeItem(CURRENT_USER_KEY);
+    localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
+    localStorage.removeItem(LAST_CONVERSATION_KEY);
+    localStorage.removeItem(SERVER_URL_KEY);
+
+    try {
+      await destroyDatabase();
+    } catch {
+      // best effort
+    }
+
+    if ("serviceWorker" in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations().catch(() => []);
+      await Promise.all(registrations.map((registration) => registration.unregister().catch(() => false)));
+    }
+
+    if (typeof caches !== "undefined") {
+      const cacheKeys = await caches.keys().catch(() => []);
+      await Promise.all(cacheKeys.map((key) => caches.delete(key).catch(() => false)));
+    }
+  }, []);
+
+  const applyStreamEvent = useCallback((event: StreamEvent) => {
+    if (event.type !== "delta") {
+      // start/end/error carry no body text; the final authoritative message arrives via the
+      // regular messageUpdated broadcast, which also persists it to IndexedDB.
+      return;
+    }
+
+    // Append in memory only — per-delta IndexedDB writes would be wasteful, and the closing
+    // messageUpdated stores the complete message.
+    setMessages((previous) =>
+      previous.map((message) =>
+        message.id === event.messageId && "body" in message
+          ? { ...message, body: message.body + event.text }
+          : message,
+      ),
+    );
   }, []);
 
   const sendMessage = useCallback(
@@ -551,6 +653,42 @@ function LoamApp() {
         const user = UserSchema.parse(await response.json());
         setCurrentUser(user);
         upsertUsers([user]);
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
+  const claimAdmin = useCallback(
+    async (secret: string) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(apiUrl("/api/admin/claim"), {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({ secret }),
+        });
+        const payload: unknown = await response.json().catch(() => undefined);
+
+        if (!response.ok) {
+          const message =
+            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+              ? payload.error
+              : `Admin claim failed: ${response.status}`;
+          throw new Error(message);
+        }
+
+        const user = UserSchema.parse(payload);
+        setCurrentUser(user);
+        upsertUsers([user]);
+        setConfig((previous) => (previous ? { ...previous, currentUser: user } : previous));
       } finally {
         window.clearTimeout(timeout);
       }
@@ -756,6 +894,23 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "stream") {
+          applyStreamEvent(payload.event);
+          return;
+        }
+
+        if (payload.type === "configUpdated") {
+          setConfig((previous) =>
+            previous ? { ...previous, networkConfig: payload.networkConfig } : previous,
+          );
+          return;
+        }
+
+        if (payload.type === "wipe") {
+          void purgeLocalData();
+          return;
+        }
+
         upsertUsers([payload.user]);
       };
     }
@@ -771,7 +926,7 @@ function LoamApp() {
 
       socket?.close();
     };
-  }, [config?.currentUser.id, removeMessage, upsertMessages, upsertUsers]);
+  }, [applyStreamEvent, config?.currentUser.id, purgeLocalData, removeMessage, upsertMessages, upsertUsers]);
 
   const usersById = useMemo(() => {
     const indexed = new Map(users.map((user) => [user.id, user]));
@@ -786,6 +941,18 @@ function LoamApp() {
     [activeConversation, currentUser.id, messages],
   );
 
+  if (wiped) {
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <h1>Disconnected</h1>
+          <p>This node is no longer available.</p>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className={shellClassName}>
       <Sidebar
@@ -795,10 +962,13 @@ function LoamApp() {
         currentUser={currentUser}
         users={users}
       />
-      {routeState.screen === "settings" ? (
+      {routeState.screen === "admin" ? (
+        <AdminView currentUser={currentUser} onWiped={purgeLocalData} />
+      ) : routeState.screen === "settings" ? (
         <SettingsView
           config={config}
           currentUser={currentUser}
+          onClaimAdmin={claimAdmin}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
         />
@@ -917,6 +1087,12 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
       </section>
 
       <div className="sidebar-footer">
+        {currentUser.isAdmin ? (
+          <NavLink active={false} href="/admin">
+            <span className="nav-glyph">⚙</span>
+            Admin
+          </NavLink>
+        ) : null}
         <NavLink active={false} href="/settings">
           <span className="nav-glyph">⌁</span>
           Join QR and settings
@@ -1803,11 +1979,13 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
 function SettingsView({
   config,
   currentUser,
+  onClaimAdmin,
   onUpdateCurrentUser,
   onUploadAvatarImage,
 }: {
   config?: Config;
   currentUser: User;
+  onClaimAdmin: (secret: string) => Promise<void>;
   onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
   onUploadAvatarImage: (blob: Blob) => Promise<void>;
 }) {
@@ -1982,7 +2160,577 @@ function SettingsView({
           ) : null}
           {profileError ? <p className="form-error">{profileError}</p> : null}
         </form>
+        <AdminAccessPanel
+          allowAdminClaim={config?.networkConfig.allowAdminClaim ?? false}
+          currentUser={currentUser}
+          onClaimAdmin={onClaimAdmin}
+        />
       </div>
+    </section>
+  );
+}
+
+/**
+ * Settings panel granting entry to the admin area: a link for admins, a secret claim form when the
+ * node's bootstrap strategy allows claiming, or an explanatory note otherwise.
+ */
+function AdminAccessPanel({
+  allowAdminClaim,
+  currentUser,
+  onClaimAdmin,
+}: {
+  allowAdminClaim: boolean;
+  currentUser: User;
+  onClaimAdmin: (secret: string) => Promise<void>;
+}) {
+  const [secret, setSecret] = useState("");
+  const [claiming, setClaiming] = useState(false);
+  const [claimError, setClaimError] = useState<string>();
+
+  async function claim(): Promise<void> {
+    setClaiming(true);
+    setClaimError(undefined);
+
+    try {
+      await onClaimAdmin(secret.trim());
+      setSecret("");
+    } catch (error) {
+      setClaimError(error instanceof Error ? error.message : "Unable to claim admin access.");
+    } finally {
+      setClaiming(false);
+    }
+  }
+
+  return (
+    <div className="profile-panel">
+      <div>
+        <p className="eyebrow">Administration</p>
+        <h2>{currentUser.isAdmin ? "Admin tools" : "Admin access"}</h2>
+      </div>
+      {currentUser.isAdmin ? (
+        <NavLink active={false} className="nav-link" href="/admin">
+          Open the admin area →
+        </NavLink>
+      ) : allowAdminClaim ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void claim();
+          }}
+        >
+          <label>
+            Setup code or passphrase
+            <input
+              autoComplete="off"
+              disabled={claiming}
+              onInput={(event) => setSecret(event.currentTarget.value)}
+              type="password"
+              value={secret}
+            />
+          </label>
+          <div className="profile-actions">
+            <button disabled={claiming || !secret.trim()} type="submit">
+              {claiming ? "Checking" : "Unlock admin"}
+            </button>
+          </div>
+          {claimError ? <p className="form-error">{claimError}</p> : null}
+        </form>
+      ) : (
+        <p className="form-note">Admin claiming is not enabled on this LOAM node.</p>
+      )}
+    </div>
+  );
+}
+
+const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
+  ["enablePublicChannels", "Public channels"],
+  ["enablePrivateChannels", "Private channels (not implemented yet)"],
+  ["enableUserChannels", "User-created channels (not implemented yet)"],
+  ["enableReplies", "Thread replies"],
+  ["enableDMs", "Direct messages"],
+  ["enableReactions", "Reactions"],
+  ["enableMarkdown", "Markdown rendering"],
+];
+
+const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
+  ["allowUserDisplayNameEdit", "Users can edit their display name"],
+  ["allowUserAvatarEdit", "Users can edit their avatar"],
+  ["allowUserAvatarUpload", "Users can upload avatar images"],
+  ["allowAdminUserEdit", "Admins can edit other users"],
+];
+
+/**
+ * Admin-only configuration area: edits node feature flags, identity permissions, LLM settings, and
+ * the admin bootstrap strategy via the /api/admin/config endpoints. Client gating is cosmetic —
+ * the server enforces admin on every request.
+ */
+function AdminView({ currentUser, onWiped }: { currentUser: User; onWiped: () => Promise<void> }) {
+  const [adminConfig, setAdminConfig] = useState<LoamConfig>();
+  const [loadError, setLoadError] = useState<string>();
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string>();
+  const [passphrase, setPassphrase] = useState("");
+  const [panicToken, setPanicToken] = useState("");
+  const [wipeConfirmText, setWipeConfirmText] = useState("");
+  const [firing, setFiring] = useState(false);
+  const [fireError, setFireError] = useState<string>();
+
+  useEffect(() => {
+    if (!currentUser.isAdmin) {
+      return;
+    }
+
+    let active = true;
+
+    fetchJson<unknown>("/api/admin/config")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        const parsed = LoamConfigSchema.safeParse(payload);
+
+        if (parsed.success) {
+          setAdminConfig(parsed.data);
+        } else {
+          setLoadError("Received an invalid config payload from the server.");
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setLoadError(error instanceof Error ? error.message : "Unable to load the node config.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [currentUser.isAdmin]);
+
+  async function save(): Promise<void> {
+    if (!adminConfig) {
+      return;
+    }
+
+    setSaving(true);
+    setSaved(false);
+    setSaveError(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const update = {
+        identity: adminConfig.identity,
+        features: adminConfig.features,
+        llm: { ollama: adminConfig.llm.ollama },
+        admin: {
+          bootstrap: adminConfig.admin.bootstrap,
+          ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
+        },
+        killSwitch: {
+          enabled: adminConfig.killSwitch.enabled,
+          requireConfirmation: adminConfig.killSwitch.requireConfirmation,
+          ...(panicToken.trim() ? { panicToken: panicToken.trim() } : {}),
+        },
+        retention: { messageTtlMs: adminConfig.retention.messageTtlMs ?? null },
+        security: adminConfig.security,
+      };
+      const response = await fetch(apiUrl("/api/admin/config"), {
+        method: "PATCH",
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+        },
+        signal: controller.signal,
+        body: JSON.stringify(update),
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Config update failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      const parsed = LoamConfigSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error("The server accepted the update but returned an unrecognised config payload.");
+      }
+
+      setAdminConfig(parsed.data);
+      setPassphrase("");
+      setPanicToken("");
+      setSaved(true);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Unable to save the node config.");
+    } finally {
+      window.clearTimeout(timeout);
+      setSaving(false);
+    }
+  }
+
+  function setFeature(key: keyof FeatureFlags, value: boolean): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, features: { ...previous.features, [key]: value } } : previous,
+    );
+  }
+
+  function setIdentity(key: keyof IdentityConfig, value: boolean): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, identity: { ...previous.identity, [key]: value } } : previous,
+    );
+  }
+
+  function setOllama(update: Partial<LoamConfig["llm"]["ollama"]>): void {
+    setAdminConfig((previous) =>
+      previous
+        ? { ...previous, llm: { ollama: { ...previous.llm.ollama, ...update } } }
+        : previous,
+    );
+  }
+
+  function setKillSwitch(update: Partial<LoamConfig["killSwitch"]>): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, killSwitch: { ...previous.killSwitch, ...update } } : previous,
+    );
+  }
+
+  async function fireKillSwitch(): Promise<void> {
+    setFiring(true);
+    setFireError(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      // The server independently requires { confirm: "wipe" } when requireConfirmation is on, so
+      // pass through what the admin actually typed rather than asserting it.
+      const body = adminConfig?.killSwitch.requireConfirmation
+        ? { confirm: wipeConfirmText.trim() }
+        : {};
+      const response = await fetch(apiUrl("/api/admin/kill-switch"), {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+        },
+        signal: controller.signal,
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const payload: unknown = await response.json().catch(() => undefined);
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Kill switch failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      // The server also broadcasts a wipe event, but purge directly on HTTP success too so the
+      // admin's own browser is cleaned even if its socket is closed (purging twice is harmless).
+      await onWiped();
+    } catch (error) {
+      setFireError(error instanceof Error ? error.message : "Unable to trigger the kill switch.");
+      setFiring(false);
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  if (!currentUser.isAdmin) {
+    return (
+      <section className="settings-view">
+        <header className="conversation-header">
+          <NavLink active={false} className="mobile-back" href="/channels">
+            ←
+          </NavLink>
+          <div>
+            <p className="eyebrow">Admin</p>
+            <h1>Not authorized</h1>
+          </div>
+        </header>
+        <p className="form-note">
+          This area is for node administrators. Claim admin access from the settings page if this
+          node allows it.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="settings-view">
+      <header className="conversation-header">
+        <NavLink active={false} className="mobile-back" href="/channels">
+          ←
+        </NavLink>
+        <div>
+          <p className="eyebrow">Admin</p>
+          <h1>Node configuration</h1>
+        </div>
+      </header>
+      {loadError ? <p className="form-error">{loadError}</p> : null}
+      {!adminConfig && !loadError ? <p className="form-note">Loading node config…</p> : null}
+      {adminConfig ? (
+        <form
+          className="settings-grid"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Features</p>
+              <h2>Messaging</h2>
+            </div>
+            {FEATURE_FLAG_LABELS.map(([key, label]) => (
+              <label className="admin-toggle" key={key}>
+                <input
+                  checked={adminConfig.features[key]}
+                  disabled={saving}
+                  onInput={(event) => setFeature(key, event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Identity</p>
+              <h2>Profiles</h2>
+            </div>
+            {IDENTITY_LABELS.map(([key, label]) => (
+              <label className="admin-toggle" key={key}>
+                <input
+                  checked={adminConfig.identity[key]}
+                  disabled={saving}
+                  onInput={(event) => setIdentity(key, event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">LLM</p>
+              <h2>Assistant (Ollama)</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.llm.ollama.enabled}
+                disabled={saving}
+                onInput={(event) => setOllama({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Enable the LLM assistant
+            </label>
+            <label>
+              Ollama base URL
+              <input
+                disabled={saving}
+                onInput={(event) => setOllama({ baseUrl: event.currentTarget.value })}
+                value={adminConfig.llm.ollama.baseUrl}
+              />
+            </label>
+            <label>
+              Model
+              <input
+                disabled={saving}
+                onInput={(event) => setOllama({ model: event.currentTarget.value })}
+                value={adminConfig.llm.ollama.model}
+              />
+            </label>
+            <label>
+              Bot display name
+              <input
+                disabled={saving}
+                maxLength={80}
+                onInput={(event) => setOllama({ botDisplayName: event.currentTarget.value })}
+                value={adminConfig.llm.ollama.botDisplayName}
+              />
+            </label>
+            <label>
+              System prompt (optional)
+              <textarea
+                disabled={saving}
+                onInput={(event) => setOllama({ systemPrompt: event.currentTarget.value || undefined })}
+                rows={3}
+                value={adminConfig.llm.ollama.systemPrompt ?? ""}
+              />
+            </label>
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Privacy</p>
+              <h2>Message retention</h2>
+            </div>
+            <label>
+              Delete messages after (minutes; blank = keep forever)
+              <input
+                disabled={saving}
+                min={1}
+                onInput={(event) => {
+                  const minutes = Number.parseInt(event.currentTarget.value, 10);
+                  setAdminConfig((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          retention: {
+                            messageTtlMs:
+                              Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined,
+                          },
+                        }
+                      : previous,
+                  );
+                }}
+                type="number"
+                value={
+                  adminConfig.retention.messageTtlMs
+                    ? String(Math.round(adminConfig.retention.messageTtlMs / 60_000))
+                    : ""
+                }
+              />
+            </label>
+            <p className="form-note">
+              Expired messages are deleted from the node and from connected clients (checked every
+              30 seconds). The proactive companion to the kill switch below.
+            </p>
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Safety</p>
+              <h2>Kill switch</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.killSwitch.enabled}
+                disabled={saving}
+                onInput={(event) => setKillSwitch({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Enable the kill switch (instant wipe of all node data)
+            </label>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.killSwitch.requireConfirmation}
+                disabled={saving || !adminConfig.killSwitch.enabled}
+                onInput={(event) => setKillSwitch({ requireConfirmation: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Require typed confirmation before firing
+            </label>
+            <label>
+              Panic token (optional, min 16 chars; enables unauthenticated POST /api/panic; leave
+              blank to keep the current one)
+              <input
+                autoComplete="off"
+                disabled={saving || !adminConfig.killSwitch.enabled}
+                maxLength={256}
+                onInput={(event) => setPanicToken(event.currentTarget.value)}
+                type="password"
+                value={panicToken}
+              />
+            </label>
+            {adminConfig.killSwitch.enabled ? (
+              <div className="danger-zone">
+                <p className="form-note">
+                  Firing the kill switch permanently deletes all messages, users, sessions, and
+                  avatars on this node and remotely purges every connected client. Node settings
+                  survive.
+                </p>
+                {adminConfig.killSwitch.requireConfirmation ? (
+                  <label>
+                    Type <strong>wipe</strong> to arm the button
+                    <input
+                      autoComplete="off"
+                      disabled={firing}
+                      onInput={(event) => setWipeConfirmText(event.currentTarget.value)}
+                      value={wipeConfirmText}
+                    />
+                  </label>
+                ) : null}
+                <div className="profile-actions">
+                  <button
+                    className="danger-button"
+                    disabled={
+                      firing ||
+                      (adminConfig.killSwitch.requireConfirmation && wipeConfirmText.trim() !== "wipe")
+                    }
+                    onClick={() => void fireKillSwitch()}
+                    type="button"
+                  >
+                    {firing ? "Wiping…" : "Wipe this node now"}
+                  </button>
+                </div>
+                {fireError ? <p className="form-error">{fireError}</p> : null}
+              </div>
+            ) : null}
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Admin access</p>
+              <h2>Bootstrap</h2>
+            </div>
+            <label>
+              Strategy
+              <select
+                disabled={saving}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          admin: {
+                            ...previous.admin,
+                            bootstrap: AdminBootstrapStrategySchema.parse(event.currentTarget.value),
+                          },
+                        }
+                      : previous,
+                  )
+                }
+                value={adminConfig.admin.bootstrap}
+              >
+                {AdminBootstrapStrategySchema.options.map((strategy) => (
+                  <option key={strategy} value={strategy}>
+                    {strategy}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {adminConfig.admin.bootstrap === "passphrase" ? (
+              <label>
+                New admin passphrase (min 8 chars; leave blank to keep the current one)
+                <input
+                  autoComplete="off"
+                  disabled={saving}
+                  maxLength={256}
+                  onInput={(event) => setPassphrase(event.currentTarget.value)}
+                  type="password"
+                  value={passphrase}
+                />
+              </label>
+            ) : null}
+            <p className="form-note">
+              The setup-code strategy prints a one-time claim code in the server logs at startup.
+            </p>
+            <div className="profile-actions">
+              <button disabled={saving} type="submit">
+                {saving ? "Saving" : "Save node config"}
+              </button>
+            </div>
+            {saved ? <p className="form-note">Saved. Connected clients pick the change up live.</p> : null}
+            {saveError ? <p className="form-error">{saveError}</p> : null}
+          </div>
+        </form>
+      ) : null}
     </section>
   );
 }

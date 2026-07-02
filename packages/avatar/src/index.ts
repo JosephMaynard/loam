@@ -4,10 +4,10 @@ export {
   getAvatarCounts,
   hashString,
   initAvatarTemplate,
-} from "./avatar";
+} from "./avatar.js";
 export type {
   AvatarColors,
   AvatarFeatureCounts,
   AvatarMode,
   AvatarResult,
-} from "./avatar";
+} from "./avatar.js";

@@ -5,7 +5,7 @@ import {
   generateDisplayName,
   getDisplayNameParts,
   hashString,
-} from "./display-name";
+} from "./display-name.js";
 
 describe("hashString", () => {
   it("is deterministic and unsigned", () => {

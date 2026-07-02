@@ -3,8 +3,8 @@ export {
   generateDisplayName,
   getDisplayNameParts,
   hashString,
-} from "./display-name";
+} from "./display-name.js";
 export type {
   DisplayNameParts,
   WordPack,
-} from "./display-name";
+} from "./display-name.js";

@@ -72,8 +72,133 @@ export const NetworkConfigSchema = z.object({
   allowUserDisplayNameEdit: z.boolean(),
   allowUserAvatarEdit: z.boolean(),
   allowUserAvatarUpload: z.boolean(),
+  allowAdminClaim: z.boolean(),
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
+
+export const FeatureFlagsSchema = z.object({
+  enablePublicChannels: z.boolean(),
+  enablePrivateChannels: z.boolean(),
+  enableUserChannels: z.boolean(),
+  enableReplies: z.boolean(),
+  enableDMs: z.boolean(),
+  enableReactions: z.boolean(),
+  enableMarkdown: z.boolean(),
+});
+export type FeatureFlags = z.infer<typeof FeatureFlagsSchema>;
+
+export const IdentityConfigSchema = z.object({
+  allowUserDisplayNameEdit: z.boolean(),
+  allowUserAvatarEdit: z.boolean(),
+  allowUserAvatarUpload: z.boolean(),
+  allowAdminUserEdit: z.boolean(),
+});
+export type IdentityConfig = z.infer<typeof IdentityConfigSchema>;
+
+export const OllamaConfigSchema = z.object({
+  enabled: z.boolean(),
+  baseUrl: z.url({ protocol: /^https?$/ }),
+  model: z.string().min(1),
+  botId: IdSchema,
+  botDisplayName: z.string().min(1),
+  systemPrompt: z.string().min(1).optional(),
+});
+export type OllamaConfig = z.infer<typeof OllamaConfigSchema>;
+
+export const AdminBootstrapStrategySchema = z.enum([
+  "none",
+  "firstUser",
+  "setupCode",
+  "passphrase",
+  "hostDevice",
+]);
+export type AdminBootstrapStrategy = z.infer<typeof AdminBootstrapStrategySchema>;
+
+export const AdminConfigSchema = z.object({
+  bootstrap: AdminBootstrapStrategySchema,
+  passphrase: z.string().min(8).max(256).optional(),
+});
+export type AdminConfig = z.infer<typeof AdminConfigSchema>;
+
+export const RetentionConfigSchema = z.object({
+  /** Delete messages older than this many milliseconds; unset = keep forever. */
+  messageTtlMs: z.number().int().positive().optional(),
+});
+export type RetentionConfig = z.infer<typeof RetentionConfigSchema>;
+
+export const KillSwitchConfigSchema = z.object({
+  enabled: z.boolean(),
+  requireConfirmation: z.boolean(),
+  panicToken: z.string().min(16).max(256).optional(),
+});
+export type KillSwitchConfig = z.infer<typeof KillSwitchConfigSchema>;
+
+export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
+export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
+
+export const SecurityConfigSchema = z.object({
+  profile: SecurityProfileSchema,
+});
+export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
+
+export const LoamConfigSchema = z.object({
+  identity: IdentityConfigSchema,
+  features: FeatureFlagsSchema,
+  llm: z.object({ ollama: OllamaConfigSchema }),
+  admin: AdminConfigSchema,
+  killSwitch: KillSwitchConfigSchema,
+  retention: RetentionConfigSchema,
+  security: SecurityConfigSchema,
+});
+export type LoamConfig = z.infer<typeof LoamConfigSchema>;
+
+export const LoamConfigUpdateSchema = z.object({
+  identity: IdentityConfigSchema.partial().optional(),
+  features: FeatureFlagsSchema.partial().optional(),
+  llm: z
+    .object({
+      ollama: OllamaConfigSchema.partial().extend({
+        systemPrompt: z.string().max(4000).optional(),
+      }),
+    })
+    .optional(),
+  admin: AdminConfigSchema.partial()
+    .extend({
+      // Empty string clears the stored value; non-empty must meet the same minimum as AdminConfigSchema.
+      passphrase: z.literal("").or(z.string().min(8).max(256)).optional(),
+    })
+    .optional(),
+  killSwitch: KillSwitchConfigSchema.partial()
+    .extend({
+      // Empty string clears the stored value; non-empty must meet the same minimum as KillSwitchConfigSchema.
+      panicToken: z.literal("").or(z.string().min(16).max(256)).optional(),
+    })
+    .optional(),
+  retention: z
+    .object({
+      // null clears the TTL back to keep-forever.
+      messageTtlMs: z.number().int().positive().nullable().optional(),
+    })
+    .optional(),
+  security: SecurityConfigSchema.partial().optional(),
+});
+export type LoamConfigUpdate = z.infer<typeof LoamConfigUpdateSchema>;
+
+export const AdminClaimRequestSchema = z.object({
+  secret: z.string().min(1).max(256),
+});
+export type AdminClaimRequest = z.infer<typeof AdminClaimRequestSchema>;
+
+export const PanicRequestSchema = z.object({
+  token: z.string().min(1).max(256),
+});
+export type PanicRequest = z.infer<typeof PanicRequestSchema>;
+
+export const KillSwitchRequestSchema = z.object({
+  /** Must be the literal "wipe" when the node's killSwitch.requireConfirmation is enabled. */
+  confirm: z.string().max(64).optional(),
+});
+export type KillSwitchRequest = z.infer<typeof KillSwitchRequestSchema>;
 
 export const UserUpdateRequestSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),

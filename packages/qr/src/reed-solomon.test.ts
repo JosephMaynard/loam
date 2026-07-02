@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { interleaveBlocks, rsEncodeBlock, rsGeneratorPoly } from "./reed-solomon";
+import { interleaveBlocks, rsEncodeBlock, rsGeneratorPoly } from "./reed-solomon.js";
 
 describe("Reed-Solomon", () => {
   it("builds the expected generator polynomial for degree 7", () => {

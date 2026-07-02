@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { channelLink, userLink, wifiPayload } from "./payloads";
+import { channelLink, userLink, wifiPayload } from "./payloads.js";
 
 describe("payload helpers", () => {
   it("escapes wifi payload values conservatively", () => {

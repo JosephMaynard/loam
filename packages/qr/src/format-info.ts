@@ -1,4 +1,4 @@
-import type { InternalMatrix } from "./types";
+import type { InternalMatrix } from "./types.js";
 
 export const FORMAT_INFO_H = [
   0b001011010001001,

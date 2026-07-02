@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { placeFormatInfo } from "./format-info";
-import { buildMatrix } from "./matrix";
+import { placeFormatInfo } from "./format-info.js";
+import { buildMatrix } from "./matrix.js";
 
 describe("format info", () => {
   it("writes the expected H/mask 0 format pattern into both strips", () => {

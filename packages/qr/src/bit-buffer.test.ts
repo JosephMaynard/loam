@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BitBuffer } from "./bit-buffer";
+import { BitBuffer } from "./bit-buffer.js";
 
 describe("BitBuffer", () => {
   it("writes bits and bytes in order", () => {
