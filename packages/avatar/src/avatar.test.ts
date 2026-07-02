@@ -129,6 +129,19 @@ describe("generateAvatar", () => {
     expect(ada).not.toBe(ben);
   });
 
+  it("never lets a hostile label inject markup into the initial avatar", () => {
+    const hostile = generateAvatar("user-42", { mode: "initial", label: '<img onerror="x">' });
+    const symbols = generateAvatar("user-43", { mode: "initial", label: '<>&"\'' });
+
+    expect(hostile.html).not.toContain("<img");
+    expect(hostile.html).not.toContain("onerror");
+    expect(hostile.html).toContain(">I<");
+
+    const doc = new DOMParser().parseFromString(symbols.html, "image/svg+xml");
+    expect(doc.querySelector("parsererror")).toBeNull();
+    expect(doc.querySelector("text")?.textContent).toBe("?");
+  });
+
   it("renders a mirrored abstract pattern mode", () => {
     const result = generateAvatar("pattern-user", { mode: "pattern" });
     const doc = new DOMParser().parseFromString(result.html, "image/svg+xml");
