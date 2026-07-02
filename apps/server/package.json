@@ -15,6 +15,7 @@
     "@fastify/websocket": "^11.2.0",
     "@loam/display-name": "workspace:*",
     "@loam/schema": "workspace:*",
+    "better-sqlite3-multiple-ciphers": "^12.11.1",
     "fastify": "^5.6.2"
   },
   "devDependencies": {

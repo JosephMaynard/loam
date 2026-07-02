@@ -50,7 +50,10 @@ const result = await build({
   // an encrypted better-sqlite3 driver in its place (docs/01). Keeping it external means the desktop
   // smoke test (Node ≥22) still resolves it, and the device build fails loudly if the alias is missing
   // rather than silently shipping a broken store.
-  external: ["node:sqlite"],
+  // node:sqlite: Node ≥22 builtin absent on the device's Node 18 (see docs/01).
+  // better-sqlite3-multiple-ciphers: a native .node module — can't be bundled; the on-device build
+  // ships its ABI-108 prebuild and resolves it at runtime (only when encryption is on).
+  external: ["node:sqlite", "better-sqlite3-multiple-ciphers"],
   metafile: true,
   logLevel: "info",
 });

@@ -1,10 +1,16 @@
 # 01 — SQLite migration
 
-> **Status:** Phase A landed — `node:sqlite` behind the driver-agnostic `LoamStore` DAL
-> (`apps/server/src/db.ts`), write-through mutations, one-time JSON importer, and the first
-> `apps/server` test suite. The nodejs-mobile spike (2026-07-01) settled the encrypted driver:
-> **better-sqlite3-multiple-ciphers** (see below); swap it in behind `LoamStore` once Android
-> ABI-108 prebuilds exist. Phase B (hot reads via SQL) deferred as recommended.
+> **Status:** Phase A landed, **and encryption at rest is now implemented** (decision #1). The
+> driver-agnostic `LoamStore` DAL (`apps/server/src/db.ts`) selects its backend at `openStore` time:
+> `node:sqlite` by default (no encryption, no native dep), or **better-sqlite3-multiple-ciphers**
+> (SQLCipher) when an `encryptionKey` is passed — lazy-`require`d so bare deployments never load the
+> native module. Wired through `buildApp({ dbEncryptionKey })` from the `LOAM_DB_KEY` env var.
+> Verified: the same DAL test suite passes against both drivers, the encrypted DB file leaks no
+> plaintext and rejects the wrong key, and a live server booted with `LOAM_DB_KEY` writes an
+> encrypted DB. **`LOAM_DB_KEY=ephemeral`** uses a random RAM-only key (never persisted), and the
+> **kill switch now does a cryptographic wipe** (delete files + rotate key) — see docs/02.
+> **Remaining:** passphrase key-derivation hardening, config/security-profile integration (docs/09),
+> RAM key-zeroing, and the Android on-device ABI-108 prebuild. Phase B (hot reads via SQL) deferred.
 
 ## Goal
 

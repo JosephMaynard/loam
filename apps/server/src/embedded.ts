@@ -57,12 +57,18 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
   const host = process.env.HOST ?? "0.0.0.0";
   const clientPort = parsePort(process.env.CLIENT_PORT, port);
 
+  // LOAM_DB_KEY="ephemeral" → random RAM-only key (lost on reboot, rotated by the kill switch);
+  // any other value → passphrase; unset → no encryption. See docs/02-kill-switch.md.
+  const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
+
   const app = await buildApp({
     dataDir,
     configPath: process.env.LOAM_CONFIG_FILE,
     clientDistDir,
     joinHost: process.env.LOAM_JOIN_HOST ?? firstLanIPv4(),
     clientPort,
+    dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
+    ephemeralDbKey,
   });
 
   if (app.adminSetupCode) {

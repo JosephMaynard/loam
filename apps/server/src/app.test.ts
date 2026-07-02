@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { buildApp, type LoamApp } from "./app.js";
+import { buildApp, type AppOptions, type LoamApp } from "./app.js";
 
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 
@@ -763,5 +763,109 @@ describe("secret storage", () => {
     }
 
     expect(limited).toBeGreaterThan(0);
+  });
+});
+
+describe("encryption at rest + key-discard kill switch", () => {
+  // Build directly (not via makeApp) so `app.store` stays the live getter across an encrypted wipe.
+  async function makeEncryptedApp(
+    opts: Pick<AppOptions, "dbEncryptionKey" | "ephemeralDbKey">,
+    config?: unknown,
+  ): Promise<{ app: LoamApp; dataDir: string }> {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-app-test-"));
+    if (config !== undefined) {
+      writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
+    }
+    const app = await buildApp({ dataDir, logger: false, ...opts });
+    cleanups.push(async () => {
+      await app.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+    return { app, dataDir };
+  }
+
+  async function session(app: LoamApp) {
+    const response = await app.server.inject({ method: "GET", url: "/api/config" });
+    return {
+      cookie: sessionCookie(response),
+      user: (response.json() as { currentUser: { id: string; isAdmin: boolean } }).currentUser,
+    };
+  }
+
+  async function post(app: LoamApp, cookie: string, body: string) {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId: "general", body },
+    });
+  }
+
+  function dataDirHasPlaintext(dataDir: string, needle: string): boolean {
+    const target = Buffer.from(needle);
+    return readdirSync(dataDir)
+      .filter((name) => name.startsWith("loam.db"))
+      .some((name) => readFileSync(join(dataDir, name)).includes(target));
+  }
+
+  it("ephemeral mode writes an encrypted database (no plaintext on disk)", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ ephemeralDbKey: true });
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "EPHEMERAL_PLAINTEXT_NEEDLE")).statusCode).toBe(201);
+
+    expect(dataDirHasPlaintext(dataDir, "EPHEMERAL_PLAINTEXT_NEEDLE")).toBe(false);
+    expect(readFileSync(join(dataDir, "loam.db")).subarray(0, 15).toString("ascii")).not.toBe(
+      "SQLite format 3",
+    );
+  });
+
+  it("kill switch on an ephemeral-key node empties data, rotates the file, and the node recovers", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { ephemeralDbKey: true },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect(admin.user.isAdmin).toBe(true);
+    expect((await post(app, admin.cookie, "DOOMED_SECRET_NEEDLE")).statusCode).toBe(201);
+
+    const before = readFileSync(join(dataDir, "loam.db"));
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // Live getter → the reopened store. Old message gone; node re-seeded and usable.
+    expect(app.store.loadMessages()).toEqual([]);
+    expect(dataDirHasPlaintext(dataDir, "DOOMED_SECRET_NEEDLE")).toBe(false);
+    const after = readFileSync(join(dataDir, "loam.db"));
+    expect(after.equals(before)).toBe(false); // fresh key ⇒ entirely different ciphertext
+    expect(after.subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+
+    const returning = await session(app);
+    expect(returning.user.isAdmin).toBe(true); // firstUser bootstrap re-applies on the fresh node
+    expect((await post(app, returning.cookie, "after wipe")).statusCode).toBe(201);
+  });
+
+  it("kill switch on a passphrase-key node also empties and recovers", async () => {
+    const { app } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed host passphrase" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    await post(app, admin.cookie, "doomed");
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    expect(app.store.loadMessages()).toEqual([]);
+    expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
   });
 });

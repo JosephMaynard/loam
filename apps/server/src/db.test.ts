@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -255,5 +255,99 @@ describe("importLegacyJsonData", () => {
     expect(store.isEmpty()).toBe(true);
     expect(existsSync(join(dataDir, "users.json"))).toBe(true);
     expect(existsSync(join(dataDir, "users.json.bak"))).toBe(false);
+  });
+});
+
+describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () => {
+  let dataDir: string;
+  let dbPath: string;
+  const KEY = "correct horse battery staple";
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "loam-enc-test-"));
+    dbPath = join(dataDir, "loam.db");
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("round-trips every entity through the same DAL surface as node:sqlite", () => {
+    const store = openStore(dbPath, { encryptionKey: KEY });
+    try {
+      store.upsertUser(makeUser("user.enc"));
+      store.upsertChannel(makeChannel("general"));
+      for (const message of allMessageVariants) {
+        store.insertMessage(message);
+      }
+      store.putSession("tok", "user.enc");
+      store.setConfigValue("k", "v");
+
+      expect(store.loadUsers()).toEqual([makeUser("user.enc")]);
+      expect(store.loadChannels()).toEqual([makeChannel("general")]);
+      expect(store.loadMessages()).toEqual(allMessageVariants);
+      expect(store.loadSessions()).toEqual([{ token: "tok", userId: "user.enc" }]);
+      expect(store.getConfigValue("k")).toBe("v");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("writes an encrypted file — message plaintext never touches disk, incl. WAL sidecars", () => {
+    const store = openStore(dbPath, { encryptionKey: KEY });
+    try {
+      // Two distinct sentinels — a message body and a user display name — so we assert that neither
+      // kind of user content reaches disk in the clear.
+      store.insertMessage({ ...makeChannelPost("msg_secret", 1_704_067_200_000), body: "MESSAGE_BODY_NEEDLE" });
+      store.upsertUser(makeUser("user.needle", { displayName: "DISPLAY_NAME_NEEDLE" }));
+
+      // Scan every file in the data dir WHILE the store is open — WAL mode may hold recent writes in
+      // the -wal sidecar before checkpoint, so checking only the main DB (or only after close) could
+      // miss plaintext. SQLCipher encrypts the WAL too, so nothing should leak anywhere.
+      const needles = [Buffer.from("MESSAGE_BODY_NEEDLE"), Buffer.from("DISPLAY_NAME_NEEDLE")];
+      const files = readdirSync(dataDir);
+      expect(files.some((name) => name.startsWith("loam.db"))).toBe(true);
+      for (const name of files) {
+        const raw = readFileSync(join(dataDir, name));
+        for (const needle of needles) {
+          expect(raw.includes(needle)).toBe(false);
+        }
+      }
+      expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists across reopen with the right key and rejects the wrong key", () => {
+    const first = openStore(dbPath, { encryptionKey: KEY });
+    first.upsertUser(makeUser("user.persist"));
+    first.close();
+
+    const reopened = openStore(dbPath, { encryptionKey: KEY });
+    try {
+      expect(reopened.loadUsers()).toEqual([makeUser("user.persist")]);
+    } finally {
+      reopened.close();
+    }
+
+    // openStore closes its own connection when setup fails, so no handle leaks here.
+    expect(() => openStore(dbPath, { encryptionKey: "the wrong key entirely" })).toThrow();
+  });
+
+  it("refuses to key an in-memory database", () => {
+    expect(() => openStore(":memory:", { encryptionKey: KEY })).toThrow(/in-memory/);
+  });
+
+  it("wipeAll clears an encrypted store", () => {
+    const store = openStore(dbPath, { encryptionKey: KEY });
+    try {
+      store.upsertUser(makeUser("user.enc"));
+      store.insertMessage(makeChannelPost("msg_1"));
+      store.wipeAll();
+      expect(store.isEmpty()).toBe(true);
+    } finally {
+      store.close();
+    }
   });
 });

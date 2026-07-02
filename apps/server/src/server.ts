@@ -22,12 +22,18 @@ function localIPv4(): string {
   return "localhost";
 }
 
+// LOAM_DB_KEY: a passphrase encrypts at rest; the literal "ephemeral" uses a random RAM-only key
+// (never persisted; lost on reboot; rotated by the kill switch). Unset = no encryption.
+const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
+
 const app = await buildApp({
   dataDir,
   configPath: process.env.LOAM_CONFIG_FILE,
   clientDistDir: process.env.LOAM_CLIENT_DIST ?? join(rootDir, "apps/client/dist"),
   joinHost: process.env.LOAM_JOIN_HOST ?? localIPv4(),
   clientPort,
+  dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
+  ephemeralDbKey,
 });
 
 if (app.adminSetupCode) {

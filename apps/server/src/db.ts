@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, renameSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -15,6 +16,53 @@ export type SessionRecord = {
   token: string;
   userId: string;
 };
+
+export type OpenStoreOptions = {
+  /**
+   * When set, the database is **encrypted at rest** with SQLCipher via
+   * `better-sqlite3-multiple-ciphers` (see docs/01). Requires a real file path — SQLCipher cannot
+   * key an in-memory database. When unset, the built-in `node:sqlite` driver is used (no encryption),
+   * keeping bare deployments free of the native dependency.
+   */
+  encryptionKey?: string;
+};
+
+type SqliteRow = Record<string, unknown>;
+type SqliteStatement = {
+  run(...params: unknown[]): unknown;
+  get(...params: unknown[]): SqliteRow | undefined;
+  all(...params: unknown[]): SqliteRow[];
+};
+/** The narrow surface both `node:sqlite` and `better-sqlite3-multiple-ciphers` share. */
+type SqliteConnection = {
+  exec(sql: string): void;
+  prepare(sql: string): SqliteStatement;
+  close(): void;
+};
+type EncryptedDatabase = SqliteConnection & { pragma(source: string): unknown };
+
+/**
+ * Open the underlying SQLite connection, selecting the encrypted driver when a key is provided.
+ * The encrypted driver is `require`d lazily so `node:sqlite` deployments never load the native
+ * module (and the Android bundle only pulls it in when encryption is actually on).
+ */
+function openConnection(path: string, options: OpenStoreOptions): SqliteConnection {
+  if (!options.encryptionKey) {
+    return new DatabaseSync(path) as unknown as SqliteConnection;
+  }
+
+  if (path === ":memory:") {
+    throw new Error("Encrypted stores require a file path — SQLCipher cannot key an in-memory database.");
+  }
+
+  const requireNative = createRequire(import.meta.url);
+  const Database = requireNative("better-sqlite3-multiple-ciphers") as new (dbPath: string) => EncryptedDatabase;
+  const db = new Database(path);
+  db.pragma("cipher='sqlcipher'");
+  // Escape single quotes so an arbitrary passphrase can't break out of the pragma literal.
+  db.pragma(`key='${options.encryptionKey.replace(/'/g, "''")}'`);
+  return db;
+}
 
 /**
  * Storage abstraction for all persisted LOAM state.
@@ -67,10 +115,26 @@ function messageColumns(message: Message): [string, string, string | null, strin
  * Open (creating if necessary) the SQLite-backed LOAM store.
  *
  * @param path - Filesystem path for the database, or `":memory:"` for an in-memory store
+ * @param options - Driver options; pass `encryptionKey` to encrypt the database at rest
  * @returns A `LoamStore` bound to the database
  */
-export function openStore(path: string): LoamStore {
-  const db = new DatabaseSync(path);
+export function openStore(path: string, options: OpenStoreOptions = {}): LoamStore {
+  const db = openConnection(path, options);
+
+  try {
+    return buildStore(db);
+  } catch (error) {
+    // A wrong encryption key surfaces here (the first pragma/DDL fails); don't leak the handle.
+    db.close();
+    throw error;
+  }
+}
+
+/**
+ * Initialise the schema and prepared statements on an open connection and return the store.
+ * Split out so `openStore` can close the connection if any setup step throws.
+ */
+function buildStore(db: SqliteConnection): LoamStore {
   let closed = false;
 
   db.exec("PRAGMA journal_mode = WAL");

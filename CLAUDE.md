@@ -102,9 +102,12 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
 
 - **Storage**: reads are served from in-memory arrays (`data.users/channels/messages`) + a
   `sessions` Map; every mutation **writes through synchronously** to SQLite (`.loam/loam.db`, WAL
-  mode) via the DAL in `src/db.ts` (`LoamStore`, opened with `node:sqlite` — emits an
-  ExperimentalWarning, that's expected). The DAL is deliberately **driver-agnostic** so an encrypted
-  driver (SQLCipher/libsql) can replace `node:sqlite` (see `docs/01-sqlite-migration.md`). On first
+  mode) via the DAL in `src/db.ts` (`LoamStore`). `openStore(path, { encryptionKey })` selects the
+  driver: default `node:sqlite` (ExperimentalWarning is expected; no native dep), or
+  **better-sqlite3-multiple-ciphers** (SQLCipher, **encrypted at rest**) when a key is passed —
+  lazy-`require`d, so only encrypted deployments load the native module (it's in
+  `pnpm-workspace.yaml` `onlyBuiltDependencies`). Set via `buildApp({ dbEncryptionKey })` ←
+  `LOAM_DB_KEY`; encrypted stores need a file path, not `:memory:`. On first
   boot with legacy data, `importLegacyJsonData()` migrates the old `*.json` files into the DB and
   renames them `*.json.bak`. `config.json` and the `avatars/` dir remain plain files. There is no
   `markDirty`/flush interval any more — call the matching `store.*` method after mutating in-memory
@@ -131,12 +134,14 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
 - **Ephemeral messages** (off by default; `retention.messageTtlMs`): a 30s reaper (+ boot sweep)
   deletes expired messages and broadcasts `messageDeleted`; streaming LLM messages are spared until
   complete.
-- **Kill switch** (off by default; `killSwitch.enabled`): `executeKillSwitch()` wipes all tables
-  (`store.wipeAll()`), deletes avatars, invalidates sessions, broadcasts `wipe` (clients purge
-  IndexedDB/localStorage/SW caches and show a neutral disconnected screen), closes sockets, and
-  re-seeds defaults. Config survives the wipe. Optional unauthenticated panic token
-  (`killSwitch.panicToken`) fires it via `POST /api/panic`. Note: without encryption at rest this
-  is a delete, **not** secure erasure (docs/02).
+- **Kill switch** (off by default; `killSwitch.enabled`): `executeKillSwitch()` deletes avatars,
+  invalidates sessions, broadcasts `wipe` (clients purge IndexedDB/localStorage/SW caches and show a
+  neutral disconnected screen), closes sockets, and re-seeds defaults. Config survives. The data
+  wipe depends on encryption: **encrypted** (`LOAM_DB_KEY` set) → close store, delete DB files, and
+  (ephemeral mode) rotate to a fresh key — a cryptographic wipe that makes flash remnants
+  unreadable; the store is reopened so `app.store` is a **getter**, not a snapshot. **Unencrypted** →
+  `store.wipeAll()` (logical DELETE, **not** secure erasure on flash — docs/02). Optional
+  unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`.
 - **Broadcast filtering**: `broadcast()` sends to all sockets but `socketCanReceiveEvent` restricts DM
   and DM-reaction events to their participants; channel messages and `userUpserted` go to everyone.
 - **REST endpoints**: `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
