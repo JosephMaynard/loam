@@ -41,3 +41,6 @@ app-example/
 # generated native folders
 /ios
 /android
+
+# embedded server bundle output (produced by pnpm bundle:server)
+/nodejs-assets/nodejs-project

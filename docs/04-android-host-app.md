@@ -1,5 +1,18 @@
 # 04 — Android host app (React Native)
 
+> **Status: build-out started (desktop-verifiable parts).** Landed on `feat/android-host`:
+> `apps/app/scripts/bundle-server.mjs` esbuild-bundles the real server (`apps/server/src/embedded.ts`,
+> a TLA-free, env-driven CJS entry) → `nodejs-assets/nodejs-project/loam-server.js` + a copy of the
+> built web client — **verified booting on desktop Node** (serves `/api/config`, the static client,
+> and accepts a POST). Plus the host UI: a dependency-free `QRCode` (renders `@loam/qr` matrices as
+> RN views — no SVG/WebView) and a `HostPanel` implementing the two-step join flow, wired into the
+> home screen; `apps/app` type-checks. **Still device-bound (need the emulator/prebuild):** wiring
+> `@comapeo/nodejs-mobile-react-native` to boot the bundle, aliasing `node:sqlite` → an encrypted
+> better-sqlite3 driver, the `LocalOnlyHotspot` native module, and the WebView. Caveat: `@loam/qr`
+> tops out at version 6-H (~58 bytes) — fine for real LocalOnlyHotspot creds (~45 bytes) but a long
+> SSID+password can overflow; `QRCode` degrades to the manual text. Raising QR capacity (lower ECC /
+> higher versions) is a `packages/qr` follow-up.
+
 ## Goal
 
 An Android app that turns a phone into a LOAM host: it brings up a local WiFi hotspot, shows QR codes
