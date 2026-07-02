@@ -151,7 +151,11 @@ function parseSvg(svgText: string): SVGSVGElement {
 
 function isDangerousUrl(value: string): boolean {
   const normalized = value.trim().replace(/[\u0000-\u001f\u007f\s]+/g, "").toLowerCase();
-  return normalized.startsWith("javascript:") || normalized.startsWith("data:");
+  return (
+    normalized.startsWith("javascript:") ||
+    normalized.startsWith("data:") ||
+    normalized.startsWith("vbscript:")
+  );
 }
 
 function isLocalFragmentReference(value: string): boolean {
@@ -542,15 +546,6 @@ function getInitialCharacter(label: string): string {
   return source ? source.toUpperCase() : "?";
 }
 
-function escapeXml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
 function getInitialInk(bg: string): string {
   const darkContrast = contrastRatio(BACKGROUND_INK, bg);
   const lightContrast = contrastRatio(BACKGROUND_PAPER, bg);
@@ -840,17 +835,26 @@ function renderPatternAvatar(id: string, colors: AvatarColors): string {
 }
 
 function renderInitialAvatar(label: string, colors: AvatarColors): string {
-  const initial = escapeXml(getInitialCharacter(label));
   const ink = getInitialInk(colors.bg);
+  // The label-derived character is inserted as a DOM text node rather than interpolated into the
+  // markup, so user input never participates in SVG string construction.
+  const svg = parseSvg(
+    [
+      `<svg xmlns="${SVG_NS}" viewBox="0 0 128 128" aria-hidden="true" focusable="false">`,
+      `<rect width="128" height="128" rx="30" fill="${colors.bg}"/>`,
+      `<circle cx="101" cy="29" r="18" fill="${colors.accent}" opacity="0.82"/>`,
+      `<path d="M0 100C18 90 34 85 50 86C78 87 100 102 128 90V128H0Z" fill="${colors.shade}" opacity="0.72"/>`,
+      `<text x="64" y="70" fill="${ink}" font-size="56" font-weight="700" text-anchor="middle" dominant-baseline="middle" font-family="${SVG_TEXT_STACK}"></text>`,
+      `</svg>`,
+    ].join(""),
+  );
+  const text = svg.querySelector("text");
 
-  return [
-    `<svg xmlns="${SVG_NS}" viewBox="0 0 128 128" aria-hidden="true" focusable="false">`,
-    `<rect width="128" height="128" rx="30" fill="${colors.bg}"/>`,
-    `<circle cx="101" cy="29" r="18" fill="${colors.accent}" opacity="0.82"/>`,
-    `<path d="M0 100C18 90 34 85 50 86C78 87 100 102 128 90V128H0Z" fill="${colors.shade}" opacity="0.72"/>`,
-    `<text x="64" y="70" fill="${ink}" font-size="56" font-weight="700" text-anchor="middle" dominant-baseline="middle" font-family="${SVG_TEXT_STACK}">${initial}</text>`,
-    `</svg>`,
-  ].join("");
+  if (text) {
+    text.textContent = getInitialCharacter(label);
+  }
+
+  return serializeAvatar(svg);
 }
 
 function serializeAvatar(svg: SVGSVGElement): string {
