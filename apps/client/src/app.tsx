@@ -2,9 +2,6 @@ import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
   AdminBootstrapStrategySchema,
   LoamConfigSchema,
-  MessageSchema,
-  NetworkConfigSchema,
-  StreamEventSchema,
   UserSchema,
   type Channel,
   type FeatureFlags,
@@ -25,30 +22,8 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecords } from "./lib/local-store";
+import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
-
-type Conversation =
-  | {
-      kind: "channel";
-      id: string;
-      threadId?: string;
-    }
-  | {
-      kind: "dm";
-      id: string;
-    };
-
-type RouteState =
-  | {
-      screen: "channels";
-      conversation?: Conversation;
-    }
-  | {
-      screen: "settings";
-    }
-  | {
-      screen: "admin";
-    };
 
 type Config = {
   nodeName: string;
@@ -57,40 +32,6 @@ type Config = {
   currentUser: User;
   networkConfig: NetworkConfig;
 };
-
-type MessageResponse = {
-  message?: Message;
-  deletedMessageId?: string;
-};
-
-type SocketEvent =
-  | {
-      type: "messageCreated";
-      message: Message;
-    }
-  | {
-      type: "messageUpdated";
-      message: Message;
-    }
-  | {
-      type: "messageDeleted";
-      messageId: string;
-    }
-  | {
-      type: "userUpserted";
-      user: User;
-    }
-  | {
-      type: "configUpdated";
-      networkConfig: NetworkConfig;
-    }
-  | {
-      type: "wipe";
-    }
-  | {
-      type: "stream";
-      event: StreamEvent;
-    };
 
 type ReactionSummary = {
   reaction: string;
@@ -102,7 +43,6 @@ const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
 const LAST_CONVERSATION_KEY = "loam.lastConversation";
 const SERVER_URL_KEY = "loam.serverUrl";
-const DEFAULT_CHANNEL_ID = "general";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 const REQUEST_TIMEOUT_MS = 10_000;
 const AVATAR_MODES = ["face", "initial", "pattern"] as const;
@@ -151,59 +91,6 @@ function rememberCurrentUser(user: User): void {
   localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
 }
 
-function parseRoute(path: string): RouteState {
-  if (path === "/" || path === "/channels") {
-    return { screen: "channels" };
-  }
-
-  if (path === "/settings") {
-    return { screen: "settings" };
-  }
-
-  if (path === "/admin") {
-    return { screen: "admin" };
-  }
-
-  const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);
-
-  if (channelThread) {
-    return {
-      screen: "channels",
-      conversation: {
-        kind: "channel",
-        id: decodeURIComponent(channelThread[1] ?? DEFAULT_CHANNEL_ID),
-        threadId: decodeURIComponent(channelThread[2] ?? ""),
-      },
-    };
-  }
-
-  const channel = path.match(/^\/channel\/([^/]+)$/);
-
-  if (channel) {
-    return {
-      screen: "channels",
-      conversation: {
-        kind: "channel",
-        id: decodeURIComponent(channel[1] ?? DEFAULT_CHANNEL_ID),
-      },
-    };
-  }
-
-  const dm = path.match(/^\/dm\/([^/]+)$/);
-
-  if (dm) {
-    return {
-      screen: "channels",
-      conversation: {
-        kind: "dm",
-        id: decodeURIComponent(dm[1] ?? ""),
-      },
-    };
-  }
-
-  return { screen: "channels" };
-}
-
 function compareCreatedAt(left: Message, right: Message): number {
   return left.createdAt - right.createdAt;
 }
@@ -230,114 +117,6 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
   } finally {
     window.clearTimeout(timeout);
   }
-}
-
-/**
- * Parses a raw websocket message payload into a validated SocketEvent.
- *
- * Accepts any input (commonly a JSON string), attempts to JSON-parse it, and validates the resulting object.
- * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, `userUpserted`, and
- * the LLM stream events (`start`/`delta`/`end`/`error`, wrapped as `{ type: "stream", event }`).
- * `messageCreated` and `messageUpdated` require a valid `message` that passes `MessageSchema`.
- * `messageDeleted` requires a string `messageId`.
- * `userUpserted` requires a valid `user` that passes `UserSchema`.
- * Stream events must pass `StreamEventSchema`.
- *
- * @param data - The raw websocket payload to parse (typically a JSON string)
- * @returns A validated `SocketEvent` when the payload is recognized and passes schema validation, `undefined` otherwise.
- */
-function parseSocketEvent(data: unknown): SocketEvent | undefined {
-  let payload: unknown;
-
-  try {
-    payload = JSON.parse(String(data));
-  } catch (error) {
-    console.warn("Ignoring invalid websocket payload.", error);
-    return undefined;
-  }
-
-  if (!payload || typeof payload !== "object" || !("type" in payload)) {
-    return undefined;
-  }
-
-  const candidate = payload as {
-    type: unknown;
-    message?: unknown;
-    messageId?: unknown;
-    user?: unknown;
-    networkConfig?: unknown;
-  };
-
-  if (candidate.type === "messageCreated") {
-    const message = MessageSchema.safeParse(candidate.message);
-    return message.success ? { type: "messageCreated", message: message.data } : undefined;
-  }
-
-  if (candidate.type === "messageUpdated") {
-    const message = MessageSchema.safeParse(candidate.message);
-    return message.success ? { type: "messageUpdated", message: message.data } : undefined;
-  }
-
-  if (candidate.type === "messageDeleted") {
-    return typeof candidate.messageId === "string"
-      ? { type: "messageDeleted", messageId: candidate.messageId }
-      : undefined;
-  }
-
-  if (candidate.type === "userUpserted") {
-    const user = UserSchema.safeParse(candidate.user);
-    return user.success ? { type: "userUpserted", user: user.data } : undefined;
-  }
-
-  if (candidate.type === "configUpdated") {
-    const networkConfig = NetworkConfigSchema.safeParse(candidate.networkConfig);
-    return networkConfig.success ? { type: "configUpdated", networkConfig: networkConfig.data } : undefined;
-  }
-
-  if (candidate.type === "wipe") {
-    return { type: "wipe" };
-  }
-
-  if (
-    candidate.type === "start" ||
-    candidate.type === "delta" ||
-    candidate.type === "end" ||
-    candidate.type === "error"
-  ) {
-    const stream = StreamEventSchema.safeParse(payload);
-    return stream.success ? { type: "stream", event: stream.data } : undefined;
-  }
-
-  return undefined;
-}
-
-function parseMessageResponse(payload: unknown): MessageResponse | undefined {
-  if (!payload || typeof payload !== "object") {
-    return undefined;
-  }
-
-  const candidate = payload as { message?: unknown; deletedMessageId?: unknown };
-  const result: MessageResponse = {};
-
-  if (candidate.message !== undefined) {
-    const message = MessageSchema.safeParse(candidate.message);
-
-    if (!message.success) {
-      return undefined;
-    }
-
-    result.message = message.data;
-  }
-
-  if (candidate.deletedMessageId !== undefined) {
-    if (typeof candidate.deletedMessageId !== "string") {
-      return undefined;
-    }
-
-    result.deletedMessageId = candidate.deletedMessageId;
-  }
-
-  return result.message || result.deletedMessageId ? result : undefined;
 }
 
 function isConversationMessage(
