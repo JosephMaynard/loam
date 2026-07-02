@@ -19,9 +19,11 @@ const MARKER = "// loam-host: arm-only ABIs";
 function withCleartextTraffic(config) {
   return withAndroidManifest(config, (cfg) => {
     const application = cfg.modResults.manifest.application?.[0];
-    if (application) {
-      application.$["android:usesCleartextTraffic"] = "true";
+    if (!application) {
+      // Silently skipping would ship an APK whose WebView can't reach http://localhost:3000.
+      throw new Error("with-loam-host: no <application> element in AndroidManifest.xml to set usesCleartextTraffic on.");
     }
+    application.$["android:usesCleartextTraffic"] = "true";
     return cfg;
   });
 }
@@ -36,10 +38,16 @@ function withArmOnlyAbiFilters(config) {
       return cfg;
     }
     // Inject an ndk { abiFilters } block as the first line inside `defaultConfig {`.
-    cfg.modResults.contents = cfg.modResults.contents.replace(
+    const injected = cfg.modResults.contents.replace(
       /defaultConfig\s*\{/,
       (match) => `${match}\n            ${MARKER}\n            ndk { abiFilters "${ABIS}" }`,
     );
+    if (!injected.includes(MARKER)) {
+      // The regex found no `defaultConfig {` — a silent skip would let the module target x86 and
+      // break the build. Fail at prebuild instead, where it's obvious.
+      throw new Error("with-loam-host: could not find `defaultConfig {` in app/build.gradle to pin abiFilters.");
+    }
+    cfg.modResults.contents = injected;
     return cfg;
   });
 }

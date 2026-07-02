@@ -1,6 +1,6 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, StyleSheet } from 'react-native';
+import { ActivityIndicator, Linking, Platform, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
@@ -11,6 +11,20 @@ import { MaxContentWidth, Spacing } from '@/constants/theme';
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot IP (initiative 4).
 const LOAM_URL = 'http://localhost:3000';
+// Cold start is ~80s (docs/04); give it comfortably more before declaring the runtime hung.
+const STARTUP_TIMEOUT_MS = 150_000;
+
+/** True when `url` belongs to the embedded server's origin (compares origins, not string prefixes). */
+function isLoamUrl(url: string | undefined): boolean {
+  if (!url) {
+    return false;
+  }
+  try {
+    return new URL(url).origin === LOAM_URL;
+  } catch {
+    return false;
+  }
+}
 
 type HostStatus = 'starting' | 'ready' | 'error';
 type StatusPayload = { status?: HostStatus; message?: string };
@@ -39,12 +53,24 @@ export default function HostScreen() {
       return;
     }
 
+    // Give up waiting after a generous window (cold start is ~80s per docs/04) so a runtime that
+    // never signals doesn't leave the user staring at the spinner forever. Cleared on ready/error.
+    const startupTimeout = setTimeout(() => {
+      if (nodeStatus === 'starting') {
+        nodeStatus = 'error';
+        setStatus('error');
+        setErrorMessage('The embedded server is taking too long to start. Close and reopen the app.');
+      }
+    }, STARTUP_TIMEOUT_MS);
+
     const onStatus = (payload: StatusPayload) => {
       if (payload?.status === 'ready') {
+        clearTimeout(startupTimeout);
         nodeStatus = 'ready';
         setStatus('ready');
         setErrorMessage(undefined);
       } else if (payload?.status === 'error') {
+        clearTimeout(startupTimeout);
         nodeStatus = 'error';
         setStatus('error');
         setErrorMessage(payload.message);
@@ -59,7 +85,10 @@ export default function HostScreen() {
       nodejs.start('main.js', { redirectOutputToLogcat: true });
     }
 
-    return () => nodejs.channel.removeListener('loam-status', onStatus);
+    return () => {
+      clearTimeout(startupTimeout);
+      nodejs.channel.removeListener('loam-status', onStatus);
+    };
   }, []);
 
   // A WebView load failure after the node is ready is usually transient (page fetched mid-cold-start).
@@ -94,9 +123,20 @@ export default function HostScreen() {
           thirdPartyCookiesEnabled
           sharedCookiesEnabled
           cacheEnabled
-          // Keep the WebView pinned to the embedded server's origin — external links (opened by the
-          // client with target=_blank) must not navigate the host frame away from LOAM.
+          // Keep the WebView pinned to the embedded server's origin. originWhitelist is a coarse
+          // prefix guard; onShouldStartLoadWithRequest is the real one — it allows only LOAM-origin
+          // navigations and shunts external links (the client opens them with target=_blank) to the
+          // system browser, so the host frame never leaves LOAM.
           originWhitelist={['http://localhost:3000']}
+          onShouldStartLoadWithRequest={(request) => {
+            if (isLoamUrl(request.url)) {
+              return true;
+            }
+            if (/^https?:\/\//i.test(request.url)) {
+              void Linking.openURL(request.url).catch(() => undefined);
+            }
+            return false;
+          }}
           mixedContentMode="always"
           onError={({ nativeEvent }) => {
             console.warn('LOAM WebView error', nativeEvent.description);
@@ -104,8 +144,9 @@ export default function HostScreen() {
           }}
           onHttpError={({ nativeEvent }) => {
             console.warn('LOAM WebView HTTP error', nativeEvent.statusCode, nativeEvent.url);
-            // Only the main document failing is fatal; a sub-resource 404 shouldn't blank the app.
-            if (nativeEvent.url === LOAM_URL || nativeEvent.url === `${LOAM_URL}/`) {
+            // Any HTTP error from the LOAM origin is fatal (on Android onHttpError is the main frame);
+            // compare origins so a redirect to /channels or a trailing slash still matches.
+            if (isLoamUrl(nativeEvent.url)) {
               failWebView(`The LOAM server returned HTTP ${nativeEvent.statusCode}.`);
             }
           }}
