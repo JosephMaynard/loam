@@ -43,10 +43,14 @@ There is **no lint script and no typecheck-only script**. Type-checking happens 
 (`tsc`). A `.stylelintrc.json` exists but is not wired to any script. CI (`.github/workflows/ci.yml`)
 runs exactly `pnpm build` then `pnpm test` on push/PR to `master`.
 
-**Tests**: `packages/*` (43 tests: schema, display-name, avatar, qr) plus `apps/server` (27 tests:
-`src/db.test.ts` for the DAL/importer, `src/app.test.ts` for routes via `buildApp()` +
-`server.inject()` — admin bootstrap matrix, config API, flag enforcement). `apps/client` has **no
-test script**, so `pnpm test` skips it — a Vitest+jsdom client harness is still a good early win.
+**Tests**: `packages/*` (schema, display-name, avatar, qr), `apps/server` (`src/db.test.ts` for the
+DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
+matrix, config API, flag enforcement, kill switch, retention), and `apps/client` (Vitest + jsdom:
+`src/lib/markdown.test.ts` sanitizer/XSS, `src/lib/local-store.test.ts` IndexedDB round-trips +
+kill-switch purge via `fake-indexeddb`). Client tests use a standalone `vitest.config.ts` (jsdom, no
+Preact plugin — the tested lib modules are plain TS); `*.test.ts` is excluded from the `tsc -b`
+build. Component/route-parser tests would be the next client gap to close. `apps/app` has no test
+script, so `pnpm test` skips it — validate with `cd apps/app && npx tsc --noEmit`.
 
 ## How dev mode wires together (important)
 
