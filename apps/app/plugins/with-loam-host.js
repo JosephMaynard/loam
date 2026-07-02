@@ -1,4 +1,4 @@
-// Expo config plugin for the LOAM Android host (docs/04). Applied at `expo prebuild`. Two jobs:
+// Expo config plugin for the LOAM Android host (docs/04). Applied at `expo prebuild`. Three jobs:
 //
 //   1. Allow cleartext HTTP so the WebView can load http://localhost:3000 (the embedded server has
 //      no TLS — there's no CA on a local hotspot). Sets android:usesCleartextTraffic="true".
@@ -9,11 +9,26 @@
 //      arm64-v8a matches the single android-arm64 better-sqlite3 prebuild we ship (see
 //      scripts/fetch-native-modules.mjs) and covers the emulator + all modern phones. 32-bit
 //      armeabi-v7a support needs its own prebuild and the per-ABI gradle path — a follow-up.
+//
+//   3. Declare the WiFi + location permissions the LocalOnlyHotspot native module needs (see
+//      modules/loam-hotspot). LocalOnlyHotspot is location-gated, so ACCESS_FINE_LOCATION is
+//      mandatory; NEARBY_WIFI_DEVICES covers API 33+, and CHANGE/ACCESS_WIFI_STATE are needed to
+//      start and read the hotspot. The runtime grant is requested from JS before starting.
 
-const { withAndroidManifest, withAppBuildGradle, withGradleProperties } = require("expo/config-plugins");
+const { withAndroidManifest, withAppBuildGradle, withGradleProperties, AndroidConfig } = require("expo/config-plugins");
 
 const ABIS = "arm64-v8a";
 const MARKER = "// loam-host: arm-only ABIs";
+
+// Manifest permissions the hotspot module requires (docs/04). ACCESS_FINE_LOCATION is mandatory for
+// LocalOnlyHotspot; NEARBY_WIFI_DEVICES is the API 33+ companion; the WIFI_STATE pair lets the app
+// start and query the hotspot.
+const HOTSPOT_PERMISSIONS = [
+  "android.permission.ACCESS_FINE_LOCATION",
+  "android.permission.NEARBY_WIFI_DEVICES",
+  "android.permission.CHANGE_WIFI_STATE",
+  "android.permission.ACCESS_WIFI_STATE",
+];
 
 /** Force `android:usesCleartextTraffic="true"` on the <application> element. */
 function withCleartextTraffic(config) {
@@ -71,5 +86,7 @@ module.exports = function withLoamHost(config) {
   config = withCleartextTraffic(config);
   config = withArmOnlyAbiFilters(config);
   config = withArmOnlyReactNativeArchitectures(config);
+  // Merge (de-duped) the hotspot permissions into AndroidManifest.xml.
+  config = AndroidConfig.Permissions.withPermissions(config, HOTSPOT_PERMISSIONS);
   return config;
 };

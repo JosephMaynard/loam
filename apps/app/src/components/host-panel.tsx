@@ -17,6 +17,12 @@ export type HostState = {
   status: 'starting' | 'running' | 'stopped';
   /** Hotspot credentials from `WifiManager.LocalOnlyHotspot` — absent until the module reports them. */
   hotspot?: HotspotInfo;
+  /**
+   * A human-readable reason the hotspot couldn't start (permission denied, no WiFi hardware on an
+   * emulator, a driver failure). When set, Step 1 shows this instead of the "waiting" hint — Step 2
+   * still renders so LOAM stays reachable over any existing LAN (docs/04 graceful degradation).
+   */
+  hotspotError?: string;
   /** The LAN URL where the served client is reachable once the hotspot is up. */
   serverUrl?: string;
 };
@@ -60,6 +66,10 @@ export function HostPanel({ state }: { state: HostState }) {
               {state.hotspot?.ssid} · {state.hotspot?.password}
             </ThemedText>
           </>
+        ) : state.hotspotError ? (
+          <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
+            {state.hotspotError}
+          </ThemedText>
         ) : (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
             Waiting for the hotspot… (starts with the host)
