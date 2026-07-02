@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "dependencies": {
     "@expo/ui": "~57.0.1",
+    "@loam/qr": "workspace:*",
+    "@loam/schema": "workspace:*",
     "expo": "~57.0.1",
     "expo-constants": "~57.0.2",
     "expo-device": "~57.0.0",
@@ -29,6 +31,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "esbuild": "^0.25.0",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -37,7 +40,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "bundle:server": "node ./scripts/bundle-server.mjs"
   },
   "private": true
 }
