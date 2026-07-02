@@ -32,7 +32,7 @@ import {
 } from "@loam/schema";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
-import { importLegacyJsonData, openStore, type LoamStore } from "./db.js";
+import { importLegacyJsonData, openStore, type LoamStore, type StoreDriver } from "./db.js";
 
 type SocketClient = {
   OPEN: number;
@@ -98,6 +98,12 @@ export type AppOptions = {
    * flash-recoverable ciphertext becomes unreadable. See `docs/02-kill-switch.md`.
    */
   ephemeralDbKey?: boolean;
+  /**
+   * Plaintext SQLite backend to use when no encryption key is set. Defaults to `node:sqlite`; the
+   * Android host passes `"better-sqlite3"` because its embedded Node 18 lacks `node:sqlite`
+   * (see `apps/server/src/db.ts` and docs/04). Ignored when a DB key is set (SQLCipher is used).
+   */
+  dbDriver?: StoreDriver;
   logger?: boolean;
 };
 
@@ -491,7 +497,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     : options.dbEncryptionKey;
   const encryptionEnabled = dbKey !== undefined;
 
-  const openLoamStore = (): LoamStore => openStore(dbPath, { encryptionKey: dbKey });
+  const openLoamStore = (): LoamStore =>
+    openStore(dbPath, { encryptionKey: dbKey, driver: options.dbDriver });
   let store = openLoamStore();
 
   /**

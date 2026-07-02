@@ -1,6 +1,7 @@
 import { networkInterfaces } from "node:os";
 
 import { buildApp, type LoamApp } from "./app.js";
+import type { StoreDriver } from "./db.js";
 
 /**
  * Logic for running the LOAM server embedded in a host process (the Android app's nodejs-mobile
@@ -16,6 +17,8 @@ import { buildApp, type LoamApp } from "./app.js";
  * - `LOAM_CLIENT_DIST`— directory of the built web client to serve (shipped inside the bundle).
  * - `PORT` / `HOST`   — listen address (defaults 3000 / 0.0.0.0 for hotspot reachability).
  * - `LOAM_JOIN_HOST`  — host shown in the join URL (defaults to the first non-internal IPv4).
+ * - `LOAM_DB_DRIVER`  — plaintext SQLite backend: `better-sqlite3` (the Android host, whose Node 18
+ *   lacks `node:sqlite`) or `node-sqlite` (default). Ignored when `LOAM_DB_KEY` enables encryption.
  */
 export function firstLanIPv4(): string {
   for (const addresses of Object.values(networkInterfaces())) {
@@ -36,6 +39,14 @@ export function firstLanIPv4(): string {
 export function parsePort(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : fallback;
+}
+
+/**
+ * Resolve the plaintext SQLite driver from `LOAM_DB_DRIVER`. Only the two known values are honoured;
+ * anything else (including unset) leaves the choice to `buildApp` (i.e. the `node:sqlite` default).
+ */
+export function parseDbDriver(value: string | undefined): StoreDriver | undefined {
+  return value === "better-sqlite3" || value === "node-sqlite" ? value : undefined;
 }
 
 export async function startEmbeddedServer(): Promise<LoamApp> {
@@ -69,6 +80,7 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     clientPort,
     dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
     ephemeralDbKey,
+    dbDriver: parseDbDriver(process.env.LOAM_DB_DRIVER),
   });
 
   if (app.adminSetupCode) {

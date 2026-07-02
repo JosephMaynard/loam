@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 import {
   ChannelSchema,
@@ -17,14 +16,34 @@ export type SessionRecord = {
   userId: string;
 };
 
+/**
+ * Which SQLite backend to open.
+ *
+ * - `"node-sqlite"` (default): the built-in `node:sqlite` (`DatabaseSync`) — zero native deps,
+ *   the desktop/CI default. Requires Node ≥ 22 (absent on the Android host's Node 18).
+ * - `"better-sqlite3"`: the plain `better-sqlite3` native module, `require`d lazily. Used by the
+ *   Android host, whose embedded Node 18 has no `node:sqlite`; ships an ABI-108 android-arm64
+ *   prebuild (see docs/04). **Unencrypted** — on-device encryption needs a multiple-ciphers
+ *   android prebuild and is a follow-up (docs/01).
+ *
+ * When `encryptionKey` is set the driver is ignored and `better-sqlite3-multiple-ciphers`
+ * (SQLCipher) is used regardless.
+ */
+export type StoreDriver = "node-sqlite" | "better-sqlite3";
+
 export type OpenStoreOptions = {
   /**
    * When set, the database is **encrypted at rest** with SQLCipher via
    * `better-sqlite3-multiple-ciphers` (see docs/01). Requires a real file path — SQLCipher cannot
-   * key an in-memory database. When unset, the built-in `node:sqlite` driver is used (no encryption),
-   * keeping bare deployments free of the native dependency.
+   * key an in-memory database. Takes precedence over `driver`.
    */
   encryptionKey?: string;
+  /**
+   * Selects the plaintext backend when `encryptionKey` is absent. Defaults to `"node-sqlite"` so
+   * bare desktop/CI deployments stay free of the native dependency; the Android host passes
+   * `"better-sqlite3"` (its Node 18 has no `node:sqlite`). See {@link StoreDriver}.
+   */
+  driver?: StoreDriver;
 };
 
 type SqliteRow = Record<string, unknown>;
@@ -42,26 +61,42 @@ type SqliteConnection = {
 type EncryptedDatabase = SqliteConnection & { pragma(source: string): unknown };
 
 /**
- * Open the underlying SQLite connection, selecting the encrypted driver when a key is provided.
- * The encrypted driver is `require`d lazily so `node:sqlite` deployments never load the native
- * module (and the Android bundle only pulls it in when encryption is actually on).
+ * Open the underlying SQLite connection, selecting the backend from `options`:
+ * an encryption key forces `better-sqlite3-multiple-ciphers` (SQLCipher); otherwise the `driver`
+ * chooses between the built-in `node:sqlite` (default) and the plain `better-sqlite3` native module
+ * used by the Android host. Both native drivers are `require`d lazily (via `createRequire`) so
+ * `node:sqlite` deployments never load — or need to bundle — a native module.
  */
 function openConnection(path: string, options: OpenStoreOptions): SqliteConnection {
-  if (!options.encryptionKey) {
-    return new DatabaseSync(path) as unknown as SqliteConnection;
+  if (options.encryptionKey) {
+    if (path === ":memory:") {
+      throw new Error("Encrypted stores require a file path — SQLCipher cannot key an in-memory database.");
+    }
+
+    const requireNative = createRequire(import.meta.url);
+    const Database = requireNative("better-sqlite3-multiple-ciphers") as new (dbPath: string) => EncryptedDatabase;
+    const db = new Database(path);
+    db.pragma("cipher='sqlcipher'");
+    // Escape single quotes so an arbitrary passphrase can't break out of the pragma literal.
+    db.pragma(`key='${options.encryptionKey.replace(/'/g, "''")}'`);
+    return db;
   }
 
-  if (path === ":memory:") {
-    throw new Error("Encrypted stores require a file path — SQLCipher cannot key an in-memory database.");
+  if (options.driver === "better-sqlite3") {
+    // The Android host's embedded Node 18 has no `node:sqlite`; use the plain (unencrypted)
+    // better-sqlite3 native module. It shares the exec/prepare/run/get/all/close surface with the
+    // multiple-ciphers fork, so the store built on top is identical.
+    const requireNative = createRequire(import.meta.url);
+    const Database = requireNative("better-sqlite3") as new (dbPath: string) => SqliteConnection;
+    return new Database(path);
   }
 
-  const requireNative = createRequire(import.meta.url);
-  const Database = requireNative("better-sqlite3-multiple-ciphers") as new (dbPath: string) => EncryptedDatabase;
-  const db = new Database(path);
-  db.pragma("cipher='sqlcipher'");
-  // Escape single quotes so an arbitrary passphrase can't break out of the pragma literal.
-  db.pragma(`key='${options.encryptionKey.replace(/'/g, "''")}'`);
-  return db;
+  // `node:sqlite` is required lazily (not a static top-level import): it's a Node ≥22 builtin, so
+  // eagerly loading this module would throw ERR_UNKNOWN_BUILTIN_MODULE on the Android host's Node 18
+  // even when it ends up using the better-sqlite3 driver. Reached only for the desktop/CI default.
+  const requireNode = createRequire(import.meta.url);
+  const { DatabaseSync } = requireNode("node:sqlite") as typeof import("node:sqlite");
+  return new DatabaseSync(path) as unknown as SqliteConnection;
 }
 
 /**

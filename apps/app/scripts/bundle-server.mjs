@@ -21,6 +21,9 @@ const appDir = join(here, "..");
 const repoRoot = join(appDir, "..", "..");
 const serverEntry = join(repoRoot, "apps/server/src/embedded-main.ts");
 const clientDist = join(repoRoot, "apps/client/dist");
+// Committed launcher template (main.js + package.json). The nodejs-project dir itself is gitignored
+// build output; these two files are its versioned source of truth.
+const templateDir = join(appDir, "nodejs-project-template");
 
 // Output lands under nodejs-assets/nodejs-project — the layout nodejs-mobile expects.
 const outDir = join(appDir, "nodejs-assets", "nodejs-project");
@@ -36,8 +39,12 @@ function assertBuilt(path, hint) {
 assertBuilt(join(repoRoot, "packages/schema/dist/index.js"), "pnpm -r build");
 assertBuilt(clientDist, "pnpm --filter client build");
 
-rmSync(outDir, { recursive: true, force: true });
+// Rebuild the generated artifacts but preserve node_modules (the native better-sqlite3 prebuild,
+// placed by scripts/fetch-native-modules.mjs) so bundling doesn't wipe it.
 mkdirSync(outDir, { recursive: true });
+for (const stale of [outFile, clientOut, join(outDir, "main.js"), join(outDir, "package.json")]) {
+  rmSync(stale, { recursive: true, force: true });
+}
 
 const result = await build({
   entryPoints: [serverEntry],
@@ -46,19 +53,36 @@ const result = await build({
   platform: "node",
   target: "node18",
   format: "cjs",
-  // node:sqlite is a Node ≥22 builtin absent on the device's Node 18 — the on-device build supplies
-  // an encrypted better-sqlite3 driver in its place (docs/01). Keeping it external means the desktop
-  // smoke test (Node ≥22) still resolves it, and the device build fails loudly if the alias is missing
-  // rather than silently shipping a broken store.
-  // node:sqlite: Node ≥22 builtin absent on the device's Node 18 (see docs/01).
-  // better-sqlite3-multiple-ciphers: a native .node module — can't be bundled; the on-device build
-  // ships its ABI-108 prebuild and resolves it at runtime (only when encryption is on).
-  external: ["node:sqlite", "better-sqlite3-multiple-ciphers"],
+  // Keep the SQLite drivers external — none can be bundled, and the device resolves the right one
+  // at runtime from nodejs-project/node_modules (see docs/04):
+  // - node:sqlite: a Node ≥22 builtin absent on the device's Node 18 (docs/01). External so the
+  //   desktop smoke test (Node ≥22) still resolves it and the device fails loudly if it's reached.
+  // - better-sqlite3: the native .node the device actually uses (LOAM_DB_DRIVER=better-sqlite3,
+  //   unencrypted for now) — ships as an ABI-108 android-arm64 prebuild, resolved at runtime.
+  // - better-sqlite3-multiple-ciphers: the encrypted driver, loaded only when a DB key is set
+  //   (the on-device encrypted path is a follow-up — docs/01).
+  external: ["node:sqlite", "better-sqlite3", "better-sqlite3-multiple-ciphers"],
+  // `import.meta.url` is empty in CJS output, which would make db.ts's `createRequire(import.meta.url)`
+  // throw on-device. Define it to a __filename-derived file URL so the native driver resolves against
+  // nodejs-project/node_modules at runtime (esbuild's CJS output has real __filename + require).
+  banner: {
+    js: "const __loamImportMetaUrl = require('node:url').pathToFileURL(__filename).href;",
+  },
+  define: {
+    "import.meta.url": "__loamImportMetaUrl",
+  },
   metafile: true,
   logLevel: "info",
 });
 
 cpSync(clientDist, clientOut, { recursive: true });
+// The CJS launcher template (main.js) and its package.json — nodejs-mobile runs main.js on boot.
+cpSync(join(templateDir, "main.js"), join(outDir, "main.js"));
+cpSync(join(templateDir, "package.json"), join(outDir, "package.json"));
+
+const hasNative = existsSync(
+  join(outDir, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node"),
+);
 
 const bytes = statSync(outFile).size;
 const inputs = Object.keys(result.metafile.inputs).length;
@@ -66,7 +90,9 @@ console.log(
   `\n✓ Bundled ${inputs} modules → ${outFile.replace(`${repoRoot}/`, "")} (${(bytes / 1024 / 1024).toFixed(2)} MB)`,
 );
 console.log(`✓ Copied web client → ${clientOut.replace(`${repoRoot}/`, "")}`);
+console.log(`✓ Copied launcher template (main.js, package.json)`);
 console.log(
-  "\nNext: the on-device build must alias node:sqlite to an encrypted better-sqlite3 driver and " +
-    "set LOAM_DATA_DIR / LOAM_CLIENT_DIST (=./client) before requiring loam-server.js.",
+  hasNative
+    ? "✓ better-sqlite3 native prebuild present"
+    : "⚠ better-sqlite3 native prebuild MISSING — run `pnpm --filter app fetch:native` before building the APK.",
 );
