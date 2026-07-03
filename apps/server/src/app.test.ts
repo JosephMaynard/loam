@@ -1038,16 +1038,25 @@ describe("admin channels API", () => {
   it("persists created channels across a restart", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-    // reopenApp closes this instance itself and registers the reopened one for teardown, so no
-    // separate close cleanup is needed here (that would double-close initialApp).
+    // reopenApp closes this instance itself and registers the reopened one for teardown. The
+    // try/finally closes the initial instance only if an assertion throws before reopen — so it
+    // never leaks a handle, and is never double-closed on the happy path.
     let app: LoamApp = await buildApp({ dataDir, logger: false });
+    let reopened = false;
 
-    const admin = await newSession(app);
-    // A multi-word name yields a hyphenated slug id; confirm that survives reload + ChannelSchema.parse.
-    const created = (await createChannel(app, admin.cookie, { name: "Durable Channel" })).json() as ChannelBody;
-    expect(created.id).toBe("durable-channel");
+    try {
+      const admin = await newSession(app);
+      // A multi-word name yields a hyphenated slug id; confirm that survives reload + ChannelSchema.parse.
+      const created = (await createChannel(app, admin.cookie, { name: "Durable Channel" })).json() as ChannelBody;
+      expect(created.id).toBe("durable-channel");
 
-    app = await reopenApp(app, dataDir);
-    expect(app.store.loadChannels().some((entry) => entry.id === created.id)).toBe(true);
+      app = await reopenApp(app, dataDir);
+      reopened = true;
+      expect(app.store.loadChannels().some((entry) => entry.id === created.id)).toBe(true);
+    } finally {
+      if (!reopened) {
+        await app.close();
+      }
+    }
   });
 });
