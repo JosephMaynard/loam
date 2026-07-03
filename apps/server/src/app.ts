@@ -1342,21 +1342,58 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    const expiredIds = new Set(expired.map((message) => message.id));
+    deleteMessages(expired);
+    server.log.info(`Retention reaper deleted ${expired.length} expired message(s)`);
+  }
+
+  /**
+   * Collects a message together with everything that deleting it would orphan: reactions targeting
+   * it, and — for a channel post that roots a thread — its replies plus the reactions on those.
+   */
+  function collectDeletionSet(target: Message): Message[] {
+    const set = new Map<string, Message>([[target.id, target]]);
+    const reactionTargets = new Set<string>([target.id]);
+
+    if (target.type === "channelPost") {
+      for (const message of data.messages) {
+        if (message.type === "channelReply" && message.parentMessageId === target.id) {
+          set.set(message.id, message);
+          reactionTargets.add(message.id);
+        }
+      }
+    }
+
+    for (const message of data.messages) {
+      if (message.type === "reaction" && reactionTargets.has(message.targetMessageId)) {
+        set.set(message.id, message);
+      }
+    }
+
+    return Array.from(set.values());
+  }
+
+  /**
+   * Deletes a set of messages: persist the removals in one transaction, broadcast `messageDeleted`
+   * for each while the in-memory mirror is still intact (so reaction DM-audience lookups can resolve
+   * their target), then drop them from memory. Shared by the reaper and the delete endpoint.
+   */
+  function deleteMessages(messages: Message[]): void {
+    if (!messages.length) {
+      return;
+    }
+
+    const ids = new Set(messages.map((message) => message.id));
     store.transaction(() => {
-      for (const id of expiredIds) {
+      for (const id of ids) {
         store.deleteMessage(id);
       }
     });
 
-    // Broadcast while the in-memory mirror is still intact: the DM-audience lookup for expired
-    // reactions needs to resolve their target messages, which may be expiring in the same sweep.
-    for (const message of expired) {
+    for (const message of messages) {
       broadcast({ type: "messageDeleted", messageId: message.id, message });
     }
 
-    data.messages = data.messages.filter((message) => !expiredIds.has(message.id));
-    server.log.info(`Retention reaper deleted ${expired.length} expired message(s)`);
+    data.messages = data.messages.filter((message) => !ids.has(message.id));
   }
 
   /**
@@ -1568,6 +1605,44 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     broadcast({ type: "messageCreated", message: result.message });
     void createOllamaResponse(result.message);
     return reply.code(201).send(result);
+  });
+
+  server.delete<{ Params: { messageId: string } }>("/api/messages/:messageId", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const target = data.messages.find((message) => message.id === request.params.messageId);
+
+    if (!target) {
+      return reply.code(404).send({ error: "Message does not exist" });
+    }
+
+    // Don't delete a message that's still streaming: its in-flight writer would re-persist it.
+    if (target.meta?.streaming) {
+      return reply.code(409).send({ error: "This message is still being written" });
+    }
+
+    const deletionSet = collectDeletionSet(target);
+
+    if (!currentUser.isAdmin) {
+      // A non-admin may delete only their own message, and only when the cascade won't remove
+      // another user's reply (clearing others' reactions on it is fine). Admins can delete anything
+      // — moderation is part of the trusted-host model.
+      if (target.authorId !== currentUser.id) {
+        return reply.code(403).send({ error: "You can only delete your own messages" });
+      }
+
+      const removesOthersContent = deletionSet.some(
+        (message) => message.type !== "reaction" && message.authorId !== currentUser.id,
+      );
+
+      if (removesOthersContent) {
+        return reply
+          .code(403)
+          .send({ error: "This thread has replies from other people — only an admin can delete it" });
+      }
+    }
+
+    deleteMessages(deletionSet);
+    return reply.send({ deletedIds: deletionSet.map((message) => message.id) });
   });
 
   server.post(

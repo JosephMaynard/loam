@@ -1060,3 +1060,106 @@ describe("admin channels API", () => {
     }
   });
 });
+
+describe("message deletion API", () => {
+  function postMessage(app: LoamApp, cookie: string, payload: unknown): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/messages", headers: { cookie }, payload });
+  }
+
+  function deleteMessage(app: LoamApp, cookie: string, id: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "DELETE", url: `/api/messages/${id}`, headers: { cookie } });
+  }
+
+  async function postId(app: LoamApp, cookie: string, payload: unknown): Promise<string> {
+    const response = await postMessage(app, cookie, payload);
+    expect(response.statusCode).toBe(201);
+    return (response.json() as { message: { id: string } }).message.id;
+  }
+
+  const remainingIds = (app: LoamApp): string[] => app.store.loadMessages().map((message) => message.id);
+
+  it("lets an author delete their own message", async () => {
+    const app = await makeApp();
+    await newSession(app); // burn the firstUser=admin slot so the author below is a plain user
+    const author = await newSession(app);
+    expect(author.isAdmin).toBe(false);
+    const id = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "hi" });
+
+    expect((await deleteMessage(app, author.cookie, id)).statusCode).toBe(200);
+    expect(remainingIds(app)).not.toContain(id);
+  });
+
+  it("stops a non-author non-admin from deleting someone else's message", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const author = await newSession(app);
+    const other = await newSession(app);
+    const id = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "hi" });
+
+    const response = await deleteMessage(app, other.cookie, id);
+    expect(response.statusCode).toBe(403);
+    expect(remainingIds(app)).toContain(id);
+  });
+
+  it("lets an admin delete anyone's message (moderation)", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    expect(admin.isAdmin).toBe(true);
+    const author = await newSession(app);
+    const id = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "hi" });
+
+    expect((await deleteMessage(app, admin.cookie, id)).statusCode).toBe(200);
+    expect(remainingIds(app)).not.toContain(id);
+  });
+
+  it("returns 404 for a message that does not exist", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    expect((await deleteMessage(app, admin.cookie, "msg_missing")).statusCode).toBe(404);
+  });
+
+  it("cascades: deleting a thread root removes its replies and reactions", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const author = await newSession(app);
+    const rootId = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "root" });
+    const replyId = await postId(app, author.cookie, {
+      type: "channelReply",
+      channelId: "general",
+      parentMessageId: rootId,
+      body: "reply",
+    });
+    expect((await postMessage(app, author.cookie, { type: "reaction", targetMessageId: rootId, reaction: "👍" })).statusCode).toBe(201);
+
+    const response = await deleteMessage(app, author.cookie, rootId);
+    expect(response.statusCode).toBe(200);
+    const deletedIds = (response.json() as { deletedIds: string[] }).deletedIds;
+    expect(deletedIds).toContain(rootId);
+    expect(deletedIds).toContain(replyId);
+
+    const remaining = app.store.loadMessages();
+    expect(remaining.map((message) => message.id)).not.toContain(rootId);
+    expect(remaining.map((message) => message.id)).not.toContain(replyId);
+    expect(remaining.some((message) => message.type === "reaction")).toBe(false);
+  });
+
+  it("won't let a non-admin delete a thread others have replied to, but an admin can", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const author = await newSession(app);
+    const other = await newSession(app);
+    const rootId = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "root" });
+    await postId(app, other.cookie, {
+      type: "channelReply",
+      channelId: "general",
+      parentMessageId: rootId,
+      body: "someone else's reply",
+    });
+
+    // The author can't delete the root because the cascade would remove another user's reply.
+    expect((await deleteMessage(app, author.cookie, rootId)).statusCode).toBe(403);
+    // An admin can moderate it.
+    expect((await deleteMessage(app, admin.cookie, rootId)).statusCode).toBe(200);
+    expect(app.store.loadMessages()).toEqual([]);
+  });
+});

@@ -344,6 +344,43 @@ function LoamApp() {
     void deleteRecord("messages", messageId);
   }, []);
 
+  const deleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!window.confirm("Delete this message? This can't be undone.")) {
+        return;
+      }
+
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(apiUrl(`/api/messages/${encodeURIComponent(messageId)}`), {
+          method: "DELETE",
+          credentials: "include",
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const payload: unknown = await response.json().catch(() => undefined);
+          const message =
+            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+              ? payload.error
+              : `Delete failed: ${response.status}`;
+          throw new Error(message);
+        }
+
+        // The server broadcasts messageDeleted for the message and any cascaded replies/reactions;
+        // remove the target immediately for snappy feedback (the rest arrive over the socket).
+        removeMessage(messageId);
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "Unable to delete the message.");
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [removeMessage],
+  );
+
   const purgeLocalData = useCallback(async () => {
     // Remote wipe (kill switch): drop everything this browser knows, then show a neutral
     // disconnected screen. Best-effort on every step — nothing here may block another.
@@ -800,6 +837,7 @@ function LoamApp() {
           conversation={activeConversation}
           currentUser={currentUser}
           messages={selectedMessages}
+          onDelete={deleteMessage}
           onReact={(messageId, reaction) =>
             sendMessage({
               type: "reaction",
@@ -962,6 +1000,7 @@ interface ConversationViewProps {
   conversation?: Conversation;
   currentUser: User;
   messages: Message[];
+  onDelete: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onSend: (body: string) => Promise<void>;
   onThreadReply: (parentMessageId: string, body: string) => Promise<void>;
@@ -972,6 +1011,7 @@ function ConversationView({
   conversation,
   currentUser,
   messages,
+  onDelete,
   onReact,
   onSend,
   onThreadReply,
@@ -1012,6 +1052,7 @@ function ConversationView({
           conversation={conversation}
           currentUser={currentUser}
           messages={messages}
+          onDelete={onDelete}
           onOpenThread={(messageId) => {
             if (conversation.kind === "channel") {
               location.route(`/channel/${encodeURIComponent(conversation.id)}/thread/${encodeURIComponent(messageId)}`);
@@ -1033,6 +1074,7 @@ function ConversationView({
           currentUser={currentUser}
           messages={messages}
           onClose={() => location.route(backRouteForThread(conversation))}
+          onDelete={onDelete}
           onReact={onReact}
           onReply={(body) => onThreadReply(threadParent.id, body)}
           parent={threadParent}
@@ -1061,6 +1103,7 @@ interface MessageListProps {
   conversation: Conversation;
   currentUser: User;
   messages: Message[];
+  onDelete: (messageId: string) => void;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   topMessages: Message[];
@@ -1071,6 +1114,7 @@ function MessageList({
   conversation,
   currentUser,
   messages,
+  onDelete,
   onOpenThread,
   onReact,
   topMessages,
@@ -1105,6 +1149,7 @@ function MessageList({
             currentUser={currentUser}
             key={message.id}
             message={message}
+            onDelete={onDelete}
             onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
             onReact={onReact}
             reactions={reactionSummary(messages, message.id, currentUser.id)}
@@ -1122,6 +1167,7 @@ function MessageList({
 interface MessageItemProps {
   currentUser: User;
   message: Message;
+  onDelete: (messageId: string) => void;
   onOpenThread?: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   reactions: ReactionSummary[];
@@ -1144,6 +1190,7 @@ interface MessageItemProps {
 function MessageItem({
   currentUser,
   message,
+  onDelete,
   onOpenThread,
   onReact,
   reactions,
@@ -1202,6 +1249,16 @@ function MessageItem({
           {onOpenThread && !message.meta?.streaming ? (
             <button className="thread-button" onClick={() => onOpenThread(message.id)} type="button">
               {replyCount ? `${replyCount} repl${replyCount === 1 ? "y" : "ies"}` : "Reply"}
+            </button>
+          ) : null}
+          {(isMine || currentUser.isAdmin) && !message.meta?.streaming ? (
+            <button
+              className="message-delete"
+              onClick={() => onDelete(message.id)}
+              title={isMine ? "Delete your message" : "Delete this message (admin)"}
+              type="button"
+            >
+              Delete
             </button>
           ) : null}
         </div>
@@ -1286,6 +1343,7 @@ interface ThreadPanelProps {
   currentUser: User;
   messages: Message[];
   onClose: () => void;
+  onDelete: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onReply: (body: string) => Promise<void>;
   parent: Message;
@@ -1309,6 +1367,7 @@ function ThreadPanel({
   currentUser,
   messages,
   onClose,
+  onDelete,
   onReact,
   onReply,
   parent,
@@ -1334,6 +1393,7 @@ function ThreadPanel({
         <MessageItem
           currentUser={currentUser}
           message={parent}
+          onDelete={onDelete}
           onReact={onReact}
           reactions={reactionSummary(messages, parent.id, currentUser.id)}
           usersById={usersById}
@@ -1344,6 +1404,7 @@ function ThreadPanel({
             currentUser={currentUser}
             key={reply.id}
             message={reply}
+            onDelete={onDelete}
             onReact={onReact}
             reactions={reactionSummary(messages, reply.id, currentUser.id)}
             usersById={usersById}
