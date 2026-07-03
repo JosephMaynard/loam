@@ -1,4 +1,4 @@
-import type { Message, NetworkConfig, User } from "@loam/schema";
+import type { Channel, Message, NetworkConfig, User } from "@loam/schema";
 import { describe, expect, it } from "vitest";
 
 import { parseMessageResponse, parseRoute, parseSocketEvent } from "./protocol";
@@ -9,6 +9,16 @@ const message: Message = {
   channelId: "general",
   authorId: "user.1",
   body: "hello",
+  createdAt: 1_704_067_200_000,
+};
+
+const channel: Channel = {
+  id: "logistics",
+  name: "Logistics",
+  visibility: "public",
+  allowPosting: "everyone",
+  allowReplies: true,
+  discoverable: true,
   createdAt: 1_704_067_200_000,
 };
 
@@ -109,6 +119,14 @@ describe("parseSocketEvent", () => {
   it("parses userUpserted and rejects an invalid user", () => {
     expect(parseSocketEvent(frame({ type: "userUpserted", user }))).toEqual({ type: "userUpserted", user });
     expect(parseSocketEvent(frame({ type: "userUpserted", user: { id: "x" } }))).toBeUndefined();
+  });
+
+  it("parses channelUpserted and rejects an invalid channel", () => {
+    expect(parseSocketEvent(frame({ type: "channelUpserted", channel }))).toEqual({
+      type: "channelUpserted",
+      channel,
+    });
+    expect(parseSocketEvent(frame({ type: "channelUpserted", channel: { id: "x" } }))).toBeUndefined();
   });
 
   it("parses configUpdated and rejects an invalid networkConfig", () => {

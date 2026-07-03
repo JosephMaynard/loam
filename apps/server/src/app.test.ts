@@ -869,3 +869,194 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
   });
 });
+
+describe("admin channels API", () => {
+  type ChannelBody = {
+    id: string;
+    name: string;
+    description?: string;
+    ownerUserId?: string;
+    visibility: string;
+    allowPosting: string;
+    allowReplies: boolean;
+    discoverable: boolean;
+    archived?: boolean;
+  };
+
+  async function listChannels(app: LoamApp, cookie: string): Promise<ChannelBody[]> {
+    const response = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie },
+    });
+    return response.json() as ChannelBody[];
+  }
+
+  function createChannel(app: LoamApp, cookie: string, payload: unknown): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/admin/channels",
+      headers: { cookie },
+      payload,
+    });
+  }
+
+  function updateChannel(
+    app: LoamApp,
+    cookie: string,
+    channelId: string,
+    payload: unknown,
+  ): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "PATCH",
+      url: `/api/admin/channels/${channelId}`,
+      headers: { cookie },
+      payload,
+    });
+  }
+
+  it("rejects non-admins on list, create, and update", async () => {
+    const app = await makeApp({ admin: { bootstrap: "none" } });
+    const session = await newSession(app);
+    expect(session.isAdmin).toBe(false);
+
+    const list = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/channels",
+      headers: { cookie: session.cookie },
+    });
+    expect(list.statusCode).toBe(403);
+
+    const create = await createChannel(app, session.cookie, { name: "Logistics" });
+    expect(create.statusCode).toBe(403);
+
+    const update = await updateChannel(app, session.cookie, "general", { archived: true });
+    expect(update.statusCode).toBe(403);
+  });
+
+  it("lists archived channels for admins even though the public list hides them", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const created = (await createChannel(app, admin.cookie, { name: "Hidden" })).json() as ChannelBody;
+    await updateChannel(app, admin.cookie, created.id, { archived: true });
+
+    // Public list omits it, admin list keeps it (so it can be restored).
+    expect((await listChannels(app, admin.cookie)).some((entry) => entry.id === created.id)).toBe(false);
+
+    const adminList = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(adminList.statusCode).toBe(200);
+    const entries = adminList.json() as ChannelBody[];
+    const hidden = entries.find((entry) => entry.id === created.id);
+    expect(hidden?.archived).toBe(true);
+  });
+
+  it("creates a public channel, owns it, and lists it", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    expect(admin.isAdmin).toBe(true);
+
+    const create = await createChannel(app, admin.cookie, {
+      name: "Logistics Team",
+      description: "Supply coordination",
+      allowPosting: "admins",
+      allowReplies: false,
+    });
+    expect(create.statusCode).toBe(201);
+
+    const channel = create.json() as ChannelBody;
+    expect(channel.id).toBe("logistics-team");
+    expect(channel.name).toBe("Logistics Team");
+    expect(channel.visibility).toBe("public");
+    expect(channel.discoverable).toBe(true);
+    expect(channel.allowPosting).toBe("admins");
+    expect(channel.allowReplies).toBe(false);
+    expect(channel.ownerUserId).toBe(admin.userId);
+
+    const channels = await listChannels(app, admin.cookie);
+    expect(channels.some((entry) => entry.id === "logistics-team")).toBe(true);
+  });
+
+  it("rejects an empty channel name", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const create = await createChannel(app, admin.cookie, { name: "   " });
+    expect(create.statusCode).toBe(400);
+  });
+
+  it("gives duplicate names distinct, non-colliding ids", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const first = (await createChannel(app, admin.cookie, { name: "Alerts" })).json() as ChannelBody;
+    const second = (await createChannel(app, admin.cookie, { name: "Alerts" })).json() as ChannelBody;
+
+    expect(first.id).toBe("alerts");
+    expect(second.id).not.toBe(first.id);
+    expect(second.id.startsWith("alerts-")).toBe(true);
+  });
+
+  it("falls back to a generated id when the name has no slug characters", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const channel = (await createChannel(app, admin.cookie, { name: "🔥🔥" })).json() as ChannelBody;
+    expect(channel.id.startsWith("channel-")).toBe(true);
+    expect(channel.name).toBe("🔥🔥");
+  });
+
+  it("renames a channel and archives it out of the public list, then restores it", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const created = (await createChannel(app, admin.cookie, { name: "Temp" })).json() as ChannelBody;
+
+    const renamed = await updateChannel(app, admin.cookie, created.id, { name: "Renamed" });
+    expect(renamed.statusCode).toBe(200);
+    expect((renamed.json() as ChannelBody).name).toBe("Renamed");
+
+    const archived = await updateChannel(app, admin.cookie, created.id, { archived: true });
+    expect(archived.statusCode).toBe(200);
+    expect((await listChannels(app, admin.cookie)).some((entry) => entry.id === created.id)).toBe(false);
+
+    const restored = await updateChannel(app, admin.cookie, created.id, { archived: false });
+    expect(restored.statusCode).toBe(200);
+    expect((await listChannels(app, admin.cookie)).some((entry) => entry.id === created.id)).toBe(true);
+  });
+
+  it("returns 404 when updating a channel that does not exist", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const update = await updateChannel(app, admin.cookie, "does-not-exist", { name: "Nope" });
+    expect(update.statusCode).toBe(404);
+  });
+
+  it("persists created channels across a restart", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    // reopenApp closes this instance itself and registers the reopened one for teardown. The
+    // try/finally closes the initial instance only if an assertion throws before reopen — so it
+    // never leaks a handle, and is never double-closed on the happy path.
+    let app: LoamApp = await buildApp({ dataDir, logger: false });
+    let reopened = false;
+
+    try {
+      const admin = await newSession(app);
+      // A multi-word name yields a hyphenated slug id; confirm that survives reload + ChannelSchema.parse.
+      const created = (await createChannel(app, admin.cookie, { name: "Durable Channel" })).json() as ChannelBody;
+      expect(created.id).toBe("durable-channel");
+
+      app = await reopenApp(app, dataDir);
+      reopened = true;
+      expect(app.store.loadChannels().some((entry) => entry.id === created.id)).toBe(true);
+    } finally {
+      if (!reopened) {
+        await app.close();
+      }
+    }
+  });
+});

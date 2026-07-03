@@ -1,8 +1,10 @@
 import {
+  ChannelSchema,
   MessageSchema,
   NetworkConfigSchema,
   StreamEventSchema,
   UserSchema,
+  type Channel,
   type Message,
   type NetworkConfig,
   type StreamEvent,
@@ -55,6 +57,10 @@ export type SocketEvent =
   | {
       type: "userUpserted";
       user: User;
+    }
+  | {
+      type: "channelUpserted";
+      channel: Channel;
     }
   | {
       type: "configUpdated";
@@ -131,11 +137,13 @@ export function parseRoute(path: string): RouteState {
  * Parses a raw websocket message payload into a validated SocketEvent.
  *
  * Accepts any input (commonly a JSON string), attempts to JSON-parse it, and validates the resulting object.
- * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, `userUpserted`, `configUpdated`,
- * `wipe`, and the LLM stream events (`start`/`delta`/`end`/`error`, wrapped as `{ type: "stream", event }`).
+ * Supported event types: `messageCreated`, `messageUpdated`, `messageDeleted`, `userUpserted`,
+ * `channelUpserted`, `configUpdated`, `wipe`, and the LLM stream events (`start`/`delta`/`end`/`error`,
+ * wrapped as `{ type: "stream", event }`).
  * `messageCreated` and `messageUpdated` require a valid `message` that passes `MessageSchema`.
  * `messageDeleted` requires a string `messageId`.
  * `userUpserted` requires a valid `user` that passes `UserSchema`.
+ * `channelUpserted` requires a valid `channel` that passes `ChannelSchema`.
  * `configUpdated` requires a valid `networkConfig`; stream events must pass `StreamEventSchema`.
  *
  * @param data - The raw websocket payload to parse (typically a JSON string)
@@ -160,6 +168,7 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
     message?: unknown;
     messageId?: unknown;
     user?: unknown;
+    channel?: unknown;
     networkConfig?: unknown;
   };
 
@@ -182,6 +191,11 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
   if (candidate.type === "userUpserted") {
     const user = UserSchema.safeParse(candidate.user);
     return user.success ? { type: "userUpserted", user: user.data } : undefined;
+  }
+
+  if (candidate.type === "channelUpserted") {
+    const channel = ChannelSchema.safeParse(candidate.channel);
+    return channel.success ? { type: "channelUpserted", channel: channel.data } : undefined;
   }
 
   if (candidate.type === "configUpdated") {

@@ -10,6 +10,9 @@ import { generateDisplayName } from "@loam/display-name";
 import {
   AdminClaimRequestSchema,
   AvatarImageUploadRequestSchema,
+  ChannelCreateRequestSchema,
+  ChannelSchema,
+  ChannelUpdateRequestSchema,
   KillSwitchRequestSchema,
   LoamConfigSchema,
   LoamConfigUpdateSchema,
@@ -20,6 +23,7 @@ import {
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
   type Channel,
+  type ChannelUpdateRequest,
   type LoamConfig,
   type LoamConfigUpdate,
   type Message,
@@ -69,6 +73,10 @@ type ClientEvent =
   | {
       type: "userUpserted";
       user: User;
+    }
+  | {
+      type: "channelUpserted";
+      channel: Channel;
     }
   | {
       type: "configUpdated";
@@ -703,6 +711,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Applies an admin channel update, re-validating the whole channel against the schema. Mirrors
+   * `applyUserUpdate`: persist first, then mutate the live object and broadcast, so a failed write
+   * never leaves in-memory state or a broadcast ahead of what is stored. Only fields present on
+   * `update` change.
+   */
+  function applyChannelUpdate(channel: Channel, update: ChannelUpdateRequest): Channel {
+    const next = ChannelSchema.parse({
+      ...channel,
+      name: update.name ?? channel.name,
+      description: update.description === undefined ? channel.description : update.description,
+      allowPosting: update.allowPosting ?? channel.allowPosting,
+      allowReplies: update.allowReplies ?? channel.allowReplies,
+      archived: update.archived === undefined ? channel.archived : update.archived,
+    });
+    store.upsertChannel(next);
+    Object.assign(channel, next);
+    broadcast({ type: "channelUpserted", channel });
+    return channel;
+  }
+
+  /**
    * Determine which users should be exposed to clients based on the LLM bot visibility setting.
    */
   function visibleUsers(): User[] {
@@ -718,6 +747,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function ensureChannel(id: string): Channel | undefined {
     return data.channels.find((channel) => channel.id === id);
+  }
+
+  /**
+   * Derives a stable, collision-free channel id from a display name: a URL-friendly slug (so routes
+   * read `/channel/general`), with a short random suffix appended only when the slug is already
+   * taken or empty (e.g. a name made entirely of emoji or punctuation).
+   */
+  function uniqueChannelId(name: string): string {
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40);
+
+    if (slug && !ensureChannel(slug)) {
+      return slug;
+    }
+
+    let candidate: string;
+    do {
+      candidate = `${slug || "channel"}-${randomBytes(3).toString("hex")}`;
+    } while (ensureChannel(candidate));
+
+    return candidate;
   }
 
   /**
@@ -789,7 +842,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
-    if (event.type === "userUpserted" || event.type === "configUpdated" || event.type === "wipe") {
+    if (
+      event.type === "userUpserted" ||
+      event.type === "channelUpserted" ||
+      event.type === "configUpdated" ||
+      event.type === "wipe"
+    ) {
+      // Channels are created public + discoverable and `GET /api/channels` already returns every
+      // non-archived channel to everyone, so channel upserts go to all sockets. When private
+      // channels gain real membership enforcement this must filter by visibility/membership.
       return true;
     }
 
@@ -1654,6 +1715,78 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     broadcast({ type: "configUpdated", networkConfig: currentNetworkConfig() });
     return redactedConfig();
   });
+
+  // Unlike GET /api/channels (which hides archived channels from everyone), the admin list returns
+  // every channel so an admin can see and restore archived ones.
+  server.get("/api/admin/channels", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    return data.channels;
+  });
+
+  server.post("/api/admin/channels", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    const body = ChannelCreateRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid channel create request" });
+    }
+
+    // Created channels are public + discoverable for now; private channels need a membership model
+    // that does not exist yet (see socketCanReceiveEvent and docs/07-more-features.md).
+    const channel: Channel = {
+      id: uniqueChannelId(body.data.name),
+      name: body.data.name,
+      description: body.data.description,
+      ownerUserId: currentUser.id,
+      visibility: "public",
+      allowPosting: body.data.allowPosting ?? "everyone",
+      allowReplies: body.data.allowReplies ?? true,
+      discoverable: true,
+      createdAt: Date.now(),
+    };
+
+    // Persist before exposing in memory / broadcasting, so a failed write never surfaces a channel
+    // that was not stored (mirrors applyUserUpdate).
+    store.upsertChannel(channel);
+    data.channels.push(channel);
+    broadcast({ type: "channelUpserted", channel });
+    return reply.code(201).send(channel);
+  });
+
+  server.patch<{ Params: { channelId: string } }>(
+    "/api/admin/channels/:channelId",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+      if (!currentUser.isAdmin) {
+        return reply.code(403).send({ error: "Admin access required" });
+      }
+
+      const body = ChannelUpdateRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send({ error: "Invalid channel update request" });
+      }
+
+      const channel = ensureChannel(request.params.channelId);
+
+      if (!channel) {
+        return reply.code(404).send({ error: "Channel does not exist" });
+      }
+
+      return applyChannelUpdate(channel, body.data);
+    },
+  );
 
   server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
     const userId = getSessionUserIdFromRequest(request);
