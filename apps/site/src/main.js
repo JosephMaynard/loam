@@ -14,9 +14,10 @@ if (toggle && links) {
     const open = links.classList.toggle("open");
     toggle.setAttribute("aria-expanded", String(open));
   });
-  // Close the menu after tapping a link.
+  // Close the menu after tapping a link (or anything inside one, e.g. the button label).
   links.addEventListener("click", (event) => {
-    if (event.target instanceof HTMLAnchorElement) {
+    const link = event.target instanceof Element ? event.target.closest("a") : null;
+    if (link) {
       links.classList.remove("open");
       toggle.setAttribute("aria-expanded", "false");
     }
@@ -31,6 +32,8 @@ const revealables = document.querySelectorAll(".reveal");
 if (prefersReducedMotion || !("IntersectionObserver" in window)) {
   revealables.forEach((el) => el.classList.add("in"));
 } else {
+  // JS is handling reveals now — disarm the CSS fail-safe so items stay hidden until scrolled into view.
+  document.documentElement.classList.add("reveal-js");
   const observer = new IntersectionObserver(
     (entries, obs) => {
       for (const entry of entries) {
