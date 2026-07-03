@@ -762,7 +762,7 @@ a {
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 12px;
-  border: 1px solid #b7cabd;
+  border: 1px solid var(--c-border);
   border-radius: 8px;
   padding: 10px;
 }
@@ -793,8 +793,8 @@ a {
 .admin-channel-actions button {
   min-height: 38px;
   border-radius: 8px;
-  background: #dce8dd;
-  color: #203f34;
+  background: var(--c-surf-2);
+  color: var(--c-ink-green);
   padding: 7px 12px;
   font-weight: 800;
 }
@@ -804,8 +804,8 @@ a {
 }
 
 .admin-channel-actions .danger-button {
-  background: #8b2b17;
-  color: #ffffff;
+  background: var(--c-danger);
+  color: var(--c-white);
 }
 
 .admin-channel .form-error {
