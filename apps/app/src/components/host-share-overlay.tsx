@@ -9,27 +9,29 @@ import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ensureHotspot, useHotspot, type HotspotState } from '@/hooks/use-hotspot';
 
 /** Project the hotspot lifecycle onto the presentational HostPanel state (docs/04 two-step flow). */
-function toHostState(hotspot: HotspotState, serverUrl: string): HostState {
+function toHostState(hotspot: HotspotState, serverUrl: string, addresses: string[]): HostState {
   if (hotspot.phase === 'running' && hotspot.credentials) {
-    return { status: 'running', hotspot: hotspot.credentials, serverUrl };
+    return { status: 'running', hotspot: hotspot.credentials, serverUrl, addresses };
   }
   if (hotspot.phase === 'error') {
     // Hotspot couldn't start — surface the reason in Step 1 but keep Step 2's URL QR so LOAM stays
     // reachable to anyone already on this network (the graceful-degradation path the emulator hits).
-    return { status: 'stopped', hotspotError: hotspot.error, serverUrl };
+    return { status: 'stopped', hotspotError: hotspot.error, serverUrl, addresses };
   }
-  return { status: 'starting', serverUrl };
+  return { status: 'starting', serverUrl, addresses };
 }
 
 type HostShareOverlayProps = {
   visible: boolean;
   onClose: () => void;
   /**
-   * The LAN URL joiners open once connected — the fixed LocalOnlyHotspot gateway
-   * `http://192.168.49.1:3000` (docs/04). Known ahead of the hotspot, so Step 2's QR renders even
-   * when the hotspot itself fails to start.
+   * The LAN URL joiners open once connected — built from the host's real hotspot address when the
+   * launcher has reported it, else the documented LocalOnlyHotspot fallback. Renders even before the
+   * hotspot is up so Step 2's QR always shows.
    */
   serverUrl: string;
+  /** All of the host's detected IPv4 addresses, shown under Step 2 so a joiner can try alternatives. */
+  addresses: string[];
 };
 
 /**
@@ -38,7 +40,7 @@ type HostShareOverlayProps = {
  * can't start — no WiFi hardware on an emulator, or a denied permission — it shows a clear message
  * and still renders the Step-2 LOAM-URL QR, never crashing or hanging (docs/04).
  */
-export function HostShareOverlay({ visible, onClose, serverUrl }: HostShareOverlayProps) {
+export function HostShareOverlay({ visible, onClose, serverUrl, addresses }: HostShareOverlayProps) {
   const hotspot = useHotspot();
 
   // Start the hotspot the first time the overlay opens. `ensureHotspot` is idempotent (no-ops while
@@ -50,7 +52,7 @@ export function HostShareOverlay({ visible, onClose, serverUrl }: HostShareOverl
     }
   }, [visible]);
 
-  const state = toHostState(hotspot, serverUrl);
+  const state = toHostState(hotspot, serverUrl, addresses);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
