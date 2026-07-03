@@ -56,6 +56,11 @@ export function HostPanel({ state }: { state: HostState }) {
         <ThemedText type="small">{STATUS_LABEL[state.status]}</ThemedText>
       </ThemedView>
 
+      <ThemedText type="small" themeColor="textSecondary" style={styles.rationale}>
+        Android requires location permission to create a WiFi hotspot. LOAM never uses, requests, or
+        stores your location — it only turns the hotspot on.
+      </ThemedText>
+
       <ThemedView type="backgroundElement" style={styles.step}>
         <ThemedText type="subtitle">Step 1 · Join the WiFi</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
@@ -115,6 +120,10 @@ const styles = StyleSheet.create({
   },
   title: {
     textAlign: 'center',
+  },
+  rationale: {
+    textAlign: 'center',
+    paddingHorizontal: Spacing.two,
   },
   statusPill: {
     paddingHorizontal: Spacing.three,

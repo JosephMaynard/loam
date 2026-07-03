@@ -28,7 +28,40 @@ const HOTSPOT_PERMISSIONS = [
   "android.permission.NEARBY_WIFI_DEVICES",
   "android.permission.CHANGE_WIFI_STATE",
   "android.permission.ACCESS_WIFI_STATE",
+  // Foreground service keeps the host alive while the screen is off (LoamHostService). WAKE_LOCK
+  // holds the CPU; POST_NOTIFICATIONS (API 33+) lets its required notification show; the
+  // CONNECTED_DEVICE type permission is mandatory to run a `connectedDevice` FGS on API 34+.
+  "android.permission.FOREGROUND_SERVICE",
+  "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+  "android.permission.WAKE_LOCK",
+  "android.permission.POST_NOTIFICATIONS",
 ];
+
+const HOST_SERVICE_NAME = "expo.modules.loamhotspot.LoamHostService";
+
+/** Declare the foreground host service (LoamHostService) in the app manifest. */
+function withHostService(config) {
+  return withAndroidManifest(config, (cfg) => {
+    const application = cfg.modResults.manifest.application?.[0];
+    if (!application) {
+      throw new Error("with-loam-host: no <application> element to declare LoamHostService on.");
+    }
+    application.service = application.service ?? [];
+    const already = application.service.some(
+      (service) => service.$?.["android:name"] === HOST_SERVICE_NAME,
+    );
+    if (!already) {
+      application.service.push({
+        $: {
+          "android:name": HOST_SERVICE_NAME,
+          "android:exported": "false",
+          "android:foregroundServiceType": "connectedDevice",
+        },
+      });
+    }
+    return cfg;
+  });
+}
 
 /** Force `android:usesCleartextTraffic="true"` on the <application> element. */
 function withCleartextTraffic(config) {
@@ -86,7 +119,8 @@ module.exports = function withLoamHost(config) {
   config = withCleartextTraffic(config);
   config = withArmOnlyAbiFilters(config);
   config = withArmOnlyReactNativeArchitectures(config);
-  // Merge (de-duped) the hotspot permissions into AndroidManifest.xml.
+  // Merge (de-duped) the hotspot + foreground-service permissions into AndroidManifest.xml.
   config = AndroidConfig.Permissions.withPermissions(config, HOTSPOT_PERMISSIONS);
+  config = withHostService(config);
   return config;
 };

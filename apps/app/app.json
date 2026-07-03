@@ -28,7 +28,7 @@
         "expo-splash-screen",
         {
           "backgroundColor": "#d14900",
-          "image": "./assets/images/loam-icon.png",
+          "image": "./assets/images/loam-splash.png",
           "imageWidth": 200
         }
       ],

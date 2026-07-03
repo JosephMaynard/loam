@@ -38,3 +38,24 @@ export function stopHotspot(): void {
     // must not surface — callers treat stop as fire-and-forget.
   }
 }
+
+/**
+ * Start a foreground service so the host keeps serving while the screen is off / the app is
+ * backgrounded (docs/04). A no-op when unsupported; never throws.
+ */
+export function startHostService(): void {
+  try {
+    LoamHotspotModule?.startHostService();
+  } catch {
+    // Best effort — the host still works while foregrounded even if the service can't start.
+  }
+}
+
+/** Stop the foreground host service. A no-op when unsupported; never throws. */
+export function stopHostService(): void {
+  try {
+    LoamHotspotModule?.stopHostService();
+  } catch {
+    // Best effort.
+  }
+}

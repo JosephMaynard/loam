@@ -8,6 +8,7 @@ import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { startHostService } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot IP (below).
@@ -21,12 +22,21 @@ const HOTSPOT_GATEWAY_FALLBACK = `http://192.168.49.1:${SERVER_PORT}`;
 const STARTUP_TIMEOUT_MS = 150_000;
 
 /**
- * Build the Step-2 join URL, preferring the host's real LocalOnlyHotspot AP address once the launcher
- * has reported it (192.168.49.x on stock Android), else the documented fallback.
+ * Build the Step-2 join URL from the host's real reported addresses, in order of how likely a joiner
+ * is to reach it: (1) the stock LocalOnlyHotspot AP address; (2) a regular LAN address — the common
+ * case when the host is on an existing WiFi (home/office/venue), which is what actually works when
+ * everyone shares that network; (3) any other private address; (4) whatever was reported. Only when
+ * nothing has been reported yet do we fall back to the documented hotspot default.
  */
 function hotspotJoinUrl(addresses: string[]): string {
-  const apAddress = addresses.find((address) => address.startsWith('192.168.49.'));
-  return apAddress ? `http://${apAddress}:${SERVER_PORT}` : HOTSPOT_GATEWAY_FALLBACK;
+  const isPrivate10or172 = (address: string) =>
+    address.startsWith('10.') || /^172\.(1[6-9]|2\d|3[01])\./.test(address);
+  const preferred =
+    addresses.find((address) => address.startsWith('192.168.49.')) ??
+    addresses.find((address) => address.startsWith('192.168.')) ??
+    addresses.find(isPrivate10or172) ??
+    addresses[0];
+  return preferred ? `http://${preferred}:${SERVER_PORT}` : HOTSPOT_GATEWAY_FALLBACK;
 }
 
 /** True when `url` belongs to the embedded server's origin (compares origins, not string prefixes). */
@@ -90,6 +100,9 @@ export default function HostScreen() {
         nodeStatus = 'ready';
         setStatus('ready');
         setErrorMessage(undefined);
+        // Keep the host alive when the screen locks (docs/04). Best-effort — a device that refuses
+        // the foreground service just falls back to foreground-only hosting.
+        startHostService();
       } else if (payload?.status === 'error') {
         clearTimeout(startupTimeout);
         nodeStatus = 'error';
