@@ -474,6 +474,34 @@ a {
   opacity: 1;
 }
 
+.message-delete {
+  min-height: 28px;
+  margin-left: auto;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--c-text-muted);
+  padding: 3px 8px;
+  font-size: 0.84rem;
+  opacity: 0;
+}
+
+.message:hover .message-delete,
+.message-delete:focus-visible {
+  opacity: 1;
+}
+
+.message-delete:hover {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+}
+
+/* Touch devices can't hover, so keep the delete affordance visible for them. */
+@media (hover: none) {
+  .message-delete {
+    opacity: 1;
+  }
+}
+
 .composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
