@@ -214,6 +214,61 @@ a {
   font-weight: 800;
 }
 
+.new-channel-toggle {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--c-sidebar-muted);
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.new-channel-toggle:hover {
+  background: var(--c-sidebar-active);
+  color: var(--c-sidebar-fg);
+}
+
+.new-channel-form {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.new-channel-form input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--c-sidebar-active);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--c-sidebar-fg);
+  padding: 6px 8px;
+}
+
+.new-channel-form input::placeholder {
+  color: var(--c-sidebar-muted);
+}
+
+.new-channel-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.new-channel-actions button {
+  min-height: 30px;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  background: var(--c-accent);
+  color: var(--c-white);
+}
+
+.new-channel-actions button[type="button"] {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--c-sidebar-fg);
+}
+
 .sidebar-footer {
   display: grid;
   gap: 14px;
@@ -279,6 +334,20 @@ a {
   margin: 0;
   font-size: 1.2rem;
   line-height: 1.2;
+}
+
+.conversation-heading {
+  min-width: 0;
+}
+
+.conversation-description {
+  margin: 2px 0 0;
+  max-width: 62ch;
+  overflow: hidden;
+  color: var(--c-text-muted);
+  font-size: 0.85rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .eyebrow {
@@ -495,11 +564,70 @@ a {
   color: var(--c-danger);
 }
 
-/* Touch devices can't hover, so keep the delete affordance visible for them. */
+.message-edit-button {
+  min-height: 28px;
+  border-radius: 8px;
+  background: var(--c-bg-7);
+  color: var(--c-ink-green);
+  padding: 3px 8px;
+  font-size: 0.84rem;
+  opacity: 0;
+}
+
+.message:hover .message-edit-button,
+.message-edit-button:focus-visible {
+  opacity: 1;
+}
+
+/* Touch devices can't hover, so keep the edit/delete affordances visible for them. */
 @media (hover: none) {
-  .message-delete {
+  .message-delete,
+  .message-edit-button {
     opacity: 1;
   }
+}
+
+.edited-tag {
+  color: var(--c-text-faint);
+  font-size: 0.72rem;
+  font-style: italic;
+}
+
+.message-edit {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.message-edit textarea {
+  width: 100%;
+  min-height: 62px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-white);
+  color: var(--c-ink);
+  padding: 8px 10px;
+  font: inherit;
+  resize: vertical;
+}
+
+.message-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.message-edit-actions button {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-weight: 700;
+  background: var(--c-accent);
+  color: var(--c-white);
+}
+
+.message-edit-actions button[type="button"] {
+  background: var(--c-surf-2);
+  color: var(--c-ink-green);
 }
 
 .composer {

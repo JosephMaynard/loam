@@ -17,12 +17,14 @@ import {
   LoamConfigSchema,
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
+  MessageEditRequestSchema,
   MessageSchema,
   PanicRequestSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
   type Channel,
+  type ChannelCreateRequest,
   type ChannelUpdateRequest,
   type LoamConfig,
   type LoamConfigUpdate,
@@ -771,6 +773,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     } while (ensureChannel(candidate));
 
     return candidate;
+  }
+
+  /**
+   * Builds a public channel from a create request, persists it, and broadcasts it. Shared by admin
+   * creation and (when `enableUserChannels` is on) user creation. Owner = the creator. Channels are
+   * public + discoverable for now; private channels need a membership model that does not exist yet
+   * (see socketCanReceiveEvent and docs/07-more-features.md).
+   */
+  function createChannelFromRequest(input: ChannelCreateRequest, ownerId: string): Channel {
+    const channel: Channel = {
+      id: uniqueChannelId(input.name),
+      name: input.name,
+      description: input.description,
+      ownerUserId: ownerId,
+      visibility: "public",
+      allowPosting: input.allowPosting ?? "everyone",
+      allowReplies: input.allowReplies ?? true,
+      discoverable: true,
+      createdAt: Date.now(),
+    };
+
+    // Persist before exposing in memory / broadcasting, so a failed write never surfaces a channel
+    // that was not stored (mirrors applyUserUpdate).
+    store.upsertChannel(channel);
+    data.channels.push(channel);
+    broadcast({ type: "channelUpserted", channel });
+    return channel;
   }
 
   /**
@@ -1645,6 +1674,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return reply.send({ deletedIds: deletionSet.map((message) => message.id) });
   });
 
+  server.patch<{ Params: { messageId: string } }>("/api/messages/:messageId", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const target = data.messages.find((message) => message.id === request.params.messageId);
+
+    if (!target) {
+      return reply.code(404).send({ error: "Message does not exist" });
+    }
+
+    // Only the author may edit — rewriting someone else's words is impersonation, so not even an
+    // admin can (admins moderate by deleting instead).
+    if (target.authorId !== currentUser.id) {
+      return reply.code(403).send({ error: "You can only edit your own messages" });
+    }
+
+    if (target.type === "reaction") {
+      return reply.code(400).send({ error: "Reactions cannot be edited" });
+    }
+
+    if (target.meta?.streaming) {
+      return reply.code(409).send({ error: "This message is still being written" });
+    }
+
+    const body = MessageEditRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid message edit request" });
+    }
+
+    target.body = body.data.body;
+    target.editedAt = Date.now();
+    store.updateMessage(target);
+    broadcast({ type: "messageUpdated", message: target });
+    return target;
+  });
+
   server.post(
     "/api/admin/claim",
     { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
@@ -1803,11 +1867,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return data.channels;
   });
 
-  server.post("/api/admin/channels", async (request, reply) => {
+  // Create a channel. Admins always may; ordinary users may when `enableUserChannels` is on. The
+  // creator becomes the owner.
+  server.post("/api/channels", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
-    if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+    if (!currentUser.isAdmin && !appConfig.features.enableUserChannels) {
+      return reply.code(403).send({ error: "Creating channels is disabled on this LOAM node" });
     }
 
     const body = ChannelCreateRequestSchema.safeParse(request.body);
@@ -1816,52 +1882,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send({ error: "Invalid channel create request" });
     }
 
-    // Created channels are public + discoverable for now; private channels need a membership model
-    // that does not exist yet (see socketCanReceiveEvent and docs/07-more-features.md).
-    const channel: Channel = {
-      id: uniqueChannelId(body.data.name),
-      name: body.data.name,
-      description: body.data.description,
-      ownerUserId: currentUser.id,
-      visibility: "public",
-      allowPosting: body.data.allowPosting ?? "everyone",
-      allowReplies: body.data.allowReplies ?? true,
-      discoverable: true,
-      createdAt: Date.now(),
-    };
-
-    // Persist before exposing in memory / broadcasting, so a failed write never surfaces a channel
-    // that was not stored (mirrors applyUserUpdate).
-    store.upsertChannel(channel);
-    data.channels.push(channel);
-    broadcast({ type: "channelUpserted", channel });
-    return reply.code(201).send(channel);
+    return reply.code(201).send(createChannelFromRequest(body.data, currentUser.id));
   });
 
-  server.patch<{ Params: { channelId: string } }>(
-    "/api/admin/channels/:channelId",
-    async (request, reply) => {
-      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+  // Rename / re-configure / archive a channel. Allowed for an admin or the channel's owner.
+  server.patch<{ Params: { channelId: string } }>("/api/channels/:channelId", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const channel = ensureChannel(request.params.channelId);
 
-      if (!currentUser.isAdmin) {
-        return reply.code(403).send({ error: "Admin access required" });
-      }
+    if (!channel) {
+      return reply.code(404).send({ error: "Channel does not exist" });
+    }
 
-      const body = ChannelUpdateRequestSchema.safeParse(request.body);
+    if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+      return reply.code(403).send({ error: "Only the channel owner or an admin can change this channel" });
+    }
 
-      if (!body.success) {
-        return reply.code(400).send({ error: "Invalid channel update request" });
-      }
+    const body = ChannelUpdateRequestSchema.safeParse(request.body);
 
-      const channel = ensureChannel(request.params.channelId);
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid channel update request" });
+    }
 
-      if (!channel) {
-        return reply.code(404).send({ error: "Channel does not exist" });
-      }
-
-      return applyChannelUpdate(channel, body.data);
-    },
-  );
+    return applyChannelUpdate(channel, body.data);
+  });
 
   server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
     const userId = getSessionUserIdFromRequest(request);

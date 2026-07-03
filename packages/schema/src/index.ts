@@ -296,6 +296,12 @@ export const MessageCreateRequestSchema = z.discriminatedUnion("type", [
 ]);
 export type MessageCreateRequest = z.infer<typeof MessageCreateRequestSchema>;
 
+/** Author request to edit a body-bearing message (channel post/reply or DM). */
+export const MessageEditRequestSchema = z.object({
+  body: MessageCreateBodySchema,
+});
+export type MessageEditRequest = z.infer<typeof MessageEditRequestSchema>;
+
 export const ChannelPostMessageSchema = BaseMessageSchema.extend({
   type: z.literal("channelPost"),
   channelId: IdSchema,

@@ -3,6 +3,7 @@ import {
   AdminBootstrapStrategySchema,
   ChannelSchema,
   LoamConfigSchema,
+  MessageSchema,
   UserSchema,
   type Channel,
   type ChannelPostingPolicy,
@@ -379,6 +380,97 @@ function LoamApp() {
       }
     },
     [removeMessage],
+  );
+
+  const editMessage = useCallback(
+    async (messageId: string, body: string): Promise<boolean> => {
+      const trimmed = body.trim();
+
+      if (!trimmed) {
+        return false;
+      }
+
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(apiUrl(`/api/messages/${encodeURIComponent(messageId)}`), {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({ body: trimmed }),
+        });
+        const payload: unknown = await response.json().catch(() => undefined);
+
+        if (!response.ok) {
+          const message =
+            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+              ? payload.error
+              : `Edit failed: ${response.status}`;
+          throw new Error(message);
+        }
+
+        // The server also broadcasts messageUpdated; apply the returned message immediately so the
+        // edit shows even if this browser's socket is momentarily closed.
+        const updated = MessageSchema.safeParse(payload);
+        if (updated.success) {
+          upsertMessages([updated.data]);
+        }
+        return true;
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "Unable to edit the message.");
+        return false;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertMessages],
+  );
+
+  const createChannel = useCallback(
+    async (name: string): Promise<boolean> => {
+      const trimmed = name.trim();
+
+      if (!trimmed) {
+        return false;
+      }
+
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(apiUrl("/api/channels"), {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({ name: trimmed }),
+        });
+        const payload: unknown = await response.json().catch(() => undefined);
+
+        if (!response.ok) {
+          const message =
+            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+              ? payload.error
+              : `Couldn't create the channel: ${response.status}`;
+          throw new Error(message);
+        }
+
+        const parsed = ChannelSchema.safeParse(payload);
+        if (parsed.success) {
+          upsertChannels([parsed.data]);
+          location.route(`/channel/${encodeURIComponent(parsed.data.id)}`);
+        }
+        return true;
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "Unable to create the channel.");
+        return false;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [location, upsertChannels],
   );
 
   const purgeLocalData = useCallback(async () => {
@@ -817,9 +909,11 @@ function LoamApp() {
     <main className={shellClassName}>
       <Sidebar
         activeConversation={activeConversation}
+        canCreateChannel={currentUser.isAdmin || !!config?.networkConfig.enableUserChannels}
         channels={channels}
         connection={connection}
         currentUser={currentUser}
+        onCreateChannel={createChannel}
         users={users}
       />
       {routeState.screen === "admin" ? (
@@ -834,10 +928,12 @@ function LoamApp() {
         />
       ) : (
         <ConversationView
+          channels={channels}
           conversation={activeConversation}
           currentUser={currentUser}
           messages={selectedMessages}
           onDelete={deleteMessage}
+          onEdit={editMessage}
           onReact={(messageId, reaction) =>
             sendMessage({
               type: "reaction",
@@ -886,9 +982,11 @@ function LoamApp() {
 
 interface SidebarProps {
   activeConversation?: Conversation;
+  canCreateChannel: boolean;
   channels: Channel[];
   connection: "connecting" | "live" | "offline";
   currentUser: User;
+  onCreateChannel: (name: string) => Promise<boolean>;
   users: User[];
 }
 
@@ -902,7 +1000,15 @@ interface SidebarProps {
  * @param users - All known users; peers (other users) are shown in the Direct Messages section.
  * @returns The sidebar element containing navigation links for channels, direct messages, settings, and a current-user panel.
  */
-function Sidebar({ activeConversation, channels, connection, currentUser, users }: SidebarProps) {
+function Sidebar({
+  activeConversation,
+  canCreateChannel,
+  channels,
+  connection,
+  currentUser,
+  onCreateChannel,
+  users,
+}: SidebarProps) {
   const peers = users.filter((user) => user.id !== currentUser.id);
 
   return (
@@ -929,6 +1035,7 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
             </NavLink>
           ))}
         </nav>
+        {canCreateChannel ? <NewChannelControl onCreateChannel={onCreateChannel} /> : null}
       </section>
 
       <section className="nav-section">
@@ -970,6 +1077,75 @@ function Sidebar({ activeConversation, channels, connection, currentUser, users 
   );
 }
 
+/**
+ * A compact "new channel" affordance in the sidebar. Shown to admins, and to everyone when the
+ * `enableUserChannels` flag is on. Collapses to a single button until the user starts creating.
+ */
+function NewChannelControl({ onCreateChannel }: { onCreateChannel: (name: string) => Promise<boolean> }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  async function create(): Promise<void> {
+    if (!name.trim()) {
+      return;
+    }
+
+    setCreating(true);
+    const ok = await onCreateChannel(name);
+    setCreating(false);
+
+    if (ok) {
+      setName("");
+      setOpen(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button className="new-channel-toggle" onClick={() => setOpen(true)} type="button">
+        + New channel
+      </button>
+    );
+  }
+
+  return (
+    <form
+      className="new-channel-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void create();
+      }}
+    >
+      <input
+        aria-label="New channel name"
+        // eslint-disable-next-line jsx-a11y/no-autofocus
+        autoFocus
+        disabled={creating}
+        maxLength={80}
+        onInput={(event) => setName(event.currentTarget.value)}
+        placeholder="Channel name"
+        value={name}
+      />
+      <div className="new-channel-actions">
+        <button disabled={creating || !name.trim()} type="submit">
+          {creating ? "Creating…" : "Create"}
+        </button>
+        <button
+          disabled={creating}
+          onClick={() => {
+            setOpen(false);
+            setName("");
+          }}
+          type="button"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 interface NavLinkProps {
   active: boolean;
   children: ComponentChildren;
@@ -997,10 +1173,12 @@ function NavLink({ active, children, className, href }: NavLinkProps) {
 }
 
 interface ConversationViewProps {
+  channels: Channel[];
   conversation?: Conversation;
   currentUser: User;
   messages: Message[];
   onDelete: (messageId: string) => void;
+  onEdit: (messageId: string, body: string) => Promise<boolean>;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onSend: (body: string) => Promise<void>;
   onThreadReply: (parentMessageId: string, body: string) => Promise<void>;
@@ -1008,10 +1186,12 @@ interface ConversationViewProps {
 }
 
 function ConversationView({
+  channels,
   conversation,
   currentUser,
   messages,
   onDelete,
+  onEdit,
   onReact,
   onSend,
   onThreadReply,
@@ -1039,20 +1219,29 @@ function ConversationView({
     );
   }
 
+  const activeChannel =
+    conversation.kind === "channel"
+      ? channels.find((channel) => channel.id === conversation.id)
+      : undefined;
   const title =
     conversation.kind === "channel"
-      ? `# ${conversation.id}`
+      ? `# ${activeChannel?.name ?? conversation.id}`
       : usersById.get(conversation.id)?.displayName ?? conversation.id;
 
   return (
     <>
       <section className="conversation">
-        <ConversationHeader conversation={conversation} title={title} />
+        <ConversationHeader
+          conversation={conversation}
+          description={activeChannel?.description}
+          title={title}
+        />
         <MessageList
           conversation={conversation}
           currentUser={currentUser}
           messages={messages}
           onDelete={onDelete}
+          onEdit={onEdit}
           onOpenThread={(messageId) => {
             if (conversation.kind === "channel") {
               location.route(`/channel/${encodeURIComponent(conversation.id)}/thread/${encodeURIComponent(messageId)}`);
@@ -1075,6 +1264,7 @@ function ConversationView({
           messages={messages}
           onClose={() => location.route(backRouteForThread(conversation))}
           onDelete={onDelete}
+          onEdit={onEdit}
           onReact={onReact}
           onReply={(body) => onThreadReply(threadParent.id, body)}
           parent={threadParent}
@@ -1085,15 +1275,24 @@ function ConversationView({
   );
 }
 
-function ConversationHeader({ conversation, title }: { conversation: Conversation; title: string }) {
+function ConversationHeader({
+  conversation,
+  description,
+  title,
+}: {
+  conversation: Conversation;
+  description?: string;
+  title: string;
+}) {
   return (
     <header className="conversation-header">
       <NavLink active={false} className="mobile-back" href="/channels">
         ←
       </NavLink>
-      <div>
+      <div className="conversation-heading">
         <p className="eyebrow">{conversation.kind === "channel" ? "Channel" : "Direct message"}</p>
         <h1>{title}</h1>
+        {description ? <p className="conversation-description">{description}</p> : null}
       </div>
     </header>
   );
@@ -1104,6 +1303,7 @@ interface MessageListProps {
   currentUser: User;
   messages: Message[];
   onDelete: (messageId: string) => void;
+  onEdit: (messageId: string, body: string) => Promise<boolean>;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   topMessages: Message[];
@@ -1115,6 +1315,7 @@ function MessageList({
   currentUser,
   messages,
   onDelete,
+  onEdit,
   onOpenThread,
   onReact,
   topMessages,
@@ -1150,6 +1351,7 @@ function MessageList({
             key={message.id}
             message={message}
             onDelete={onDelete}
+            onEdit={onEdit}
             onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
             onReact={onReact}
             reactions={reactionSummary(messages, message.id, currentUser.id)}
@@ -1168,6 +1370,7 @@ interface MessageItemProps {
   currentUser: User;
   message: Message;
   onDelete: (messageId: string) => void;
+  onEdit: (messageId: string, body: string) => Promise<boolean>;
   onOpenThread?: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   reactions: ReactionSummary[];
@@ -1191,6 +1394,7 @@ function MessageItem({
   currentUser,
   message,
   onDelete,
+  onEdit,
   onOpenThread,
   onReact,
   reactions,
@@ -1206,9 +1410,27 @@ function MessageItem({
     ephemeral: true,
   };
   const isMine = message.authorId === currentUser.id;
+  const canEdit = isMine && !message.meta?.streaming && message.type !== "reaction";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
   const messageClassName = ["message", isMine ? "mine" : undefined, message.meta?.streaming ? "streaming" : undefined]
     .filter(Boolean)
     .join(" ");
+
+  function startEditing(): void {
+    setDraft(bodyFor(message));
+    setEditing(true);
+  }
+
+  async function saveEdit(): Promise<void> {
+    setSavingEdit(true);
+    const ok = await onEdit(message.id, draft);
+    setSavingEdit(false);
+    if (ok) {
+      setEditing(false);
+    }
+  }
 
   return (
     <article className={messageClassName}>
@@ -1217,11 +1439,40 @@ function MessageItem({
         <div className="message-meta">
           <strong>{author.displayName}</strong>
           <span>{displayTime(message.createdAt)}</span>
+          {message.editedAt ? <span className="edited-tag">(edited)</span> : null}
         </div>
-        <div
-          className="markdown-body"
-          dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
-        />
+        {editing ? (
+          <form
+            className="message-edit"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveEdit();
+            }}
+          >
+            <textarea
+              aria-label="Edit message"
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+              disabled={savingEdit}
+              onInput={(event) => setDraft(event.currentTarget.value)}
+              rows={2}
+              value={draft}
+            />
+            <div className="message-edit-actions">
+              <button disabled={savingEdit || !draft.trim()} type="submit">
+                {savingEdit ? "Saving…" : "Save"}
+              </button>
+              <button disabled={savingEdit} onClick={() => setEditing(false)} type="button">
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div
+            className="markdown-body"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
+          />
+        )}
         <div className="message-actions">
           {message.meta?.streaming ? <span className="streaming-pill">Streaming</span> : null}
           {!message.meta?.streaming && reactions.map((reaction) => (
@@ -1249,6 +1500,11 @@ function MessageItem({
           {onOpenThread && !message.meta?.streaming ? (
             <button className="thread-button" onClick={() => onOpenThread(message.id)} type="button">
               {replyCount ? `${replyCount} repl${replyCount === 1 ? "y" : "ies"}` : "Reply"}
+            </button>
+          ) : null}
+          {canEdit && !editing ? (
+            <button className="message-edit-button" onClick={startEditing} type="button">
+              Edit
             </button>
           ) : null}
           {(isMine || currentUser.isAdmin) && !message.meta?.streaming ? (
@@ -1344,6 +1600,7 @@ interface ThreadPanelProps {
   messages: Message[];
   onClose: () => void;
   onDelete: (messageId: string) => void;
+  onEdit: (messageId: string, body: string) => Promise<boolean>;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onReply: (body: string) => Promise<void>;
   parent: Message;
@@ -1368,6 +1625,7 @@ function ThreadPanel({
   messages,
   onClose,
   onDelete,
+  onEdit,
   onReact,
   onReply,
   parent,
@@ -1394,6 +1652,7 @@ function ThreadPanel({
           currentUser={currentUser}
           message={parent}
           onDelete={onDelete}
+          onEdit={onEdit}
           onReact={onReact}
           reactions={reactionSummary(messages, parent.id, currentUser.id)}
           usersById={usersById}
@@ -1405,6 +1664,7 @@ function ThreadPanel({
             key={reply.id}
             message={reply}
             onDelete={onDelete}
+            onEdit={onEdit}
             onReact={onReact}
             reactions={reactionSummary(messages, reply.id, currentUser.id)}
             usersById={usersById}
@@ -2744,7 +3004,7 @@ function AdminChannelsPanel({
     setCreateError(undefined);
 
     try {
-      const channel = await requestChannel("POST", "/api/admin/channels", {
+      const channel = await requestChannel("POST", "/api/channels", {
         name: name.trim(),
         description: description.trim() || undefined,
         allowPosting,
@@ -2869,7 +3129,7 @@ function AdminChannelRow({
     setError(undefined);
 
     try {
-      const updated = await requestChannel("PATCH", `/api/admin/channels/${channel.id}`, update);
+      const updated = await requestChannel("PATCH", `/api/channels/${channel.id}`, update);
       onApply(updated);
       setName(updated.name);
     } catch (requestError) {
