@@ -870,7 +870,7 @@ describe("encryption at rest + key-discard kill switch", () => {
   });
 });
 
-describe("admin channels API", () => {
+describe("channels API", () => {
   type ChannelBody = {
     id: string;
     name: string;
@@ -895,7 +895,7 @@ describe("admin channels API", () => {
   function createChannel(app: LoamApp, cookie: string, payload: unknown): Promise<InjectResponse> {
     return app.server.inject({
       method: "POST",
-      url: "/api/admin/channels",
+      url: "/api/channels",
       headers: { cookie },
       payload,
     });
@@ -909,13 +909,13 @@ describe("admin channels API", () => {
   ): Promise<InjectResponse> {
     return app.server.inject({
       method: "PATCH",
-      url: `/api/admin/channels/${channelId}`,
+      url: `/api/channels/${channelId}`,
       headers: { cookie },
       payload,
     });
   }
 
-  it("rejects non-admins on list, create, and update", async () => {
+  it("restricts the full (archived-inclusive) channel list to admins", async () => {
     const app = await makeApp({ admin: { bootstrap: "none" } });
     const session = await newSession(app);
     expect(session.isAdmin).toBe(false);
@@ -926,12 +926,40 @@ describe("admin channels API", () => {
       headers: { cookie: session.cookie },
     });
     expect(list.statusCode).toBe(403);
+  });
 
-    const create = await createChannel(app, session.cookie, { name: "Logistics" });
-    expect(create.statusCode).toBe(403);
+  it("lets a user create a channel when enableUserChannels is on, and blocks it when off", async () => {
+    // Default config has enableUserChannels: true.
+    const open = await makeApp();
+    await newSession(open); // burn the firstUser=admin slot
+    const user = await newSession(open);
+    expect(user.isAdmin).toBe(false);
 
-    const update = await updateChannel(app, session.cookie, "general", { archived: true });
-    expect(update.statusCode).toBe(403);
+    const created = await createChannel(open, user.cookie, { name: "User Room" });
+    expect(created.statusCode).toBe(201);
+    expect((created.json() as ChannelBody).ownerUserId).toBe(user.userId);
+
+    const locked = await makeApp({ features: { enableUserChannels: false } });
+    const admin = await newSession(locked);
+    const lockedUser = await newSession(locked);
+    expect((await createChannel(locked, lockedUser.cookie, { name: "Nope" })).statusCode).toBe(403);
+    // An admin can still create even when user channels are disabled.
+    expect((await createChannel(locked, admin.cookie, { name: "Admin Room" })).statusCode).toBe(201);
+  });
+
+  it("lets the channel owner update it but blocks a non-owner non-admin", async () => {
+    const app = await makeApp();
+    await newSession(app); // burn the admin slot
+    const owner = await newSession(app);
+    const stranger = await newSession(app);
+    const channel = (await createChannel(app, owner.cookie, { name: "Owned" })).json() as ChannelBody;
+    expect(channel.ownerUserId).toBe(owner.userId);
+
+    const renamed = await updateChannel(app, owner.cookie, channel.id, { name: "Owned Plus" });
+    expect(renamed.statusCode).toBe(200);
+    expect((renamed.json() as ChannelBody).name).toBe("Owned Plus");
+
+    expect((await updateChannel(app, stranger.cookie, channel.id, { name: "Hijack" })).statusCode).toBe(403);
   });
 
   it("lists archived channels for admins even though the public list hides them", async () => {
@@ -1161,5 +1189,59 @@ describe("message deletion API", () => {
     // An admin can moderate it.
     expect((await deleteMessage(app, admin.cookie, rootId)).statusCode).toBe(200);
     expect(app.store.loadMessages()).toEqual([]);
+  });
+});
+
+describe("message editing API", () => {
+  function postMessage(app: LoamApp, cookie: string, payload: unknown): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/messages", headers: { cookie }, payload });
+  }
+
+  function editMessage(app: LoamApp, cookie: string, id: string, payload: unknown): Promise<InjectResponse> {
+    return app.server.inject({ method: "PATCH", url: `/api/messages/${id}`, headers: { cookie }, payload });
+  }
+
+  async function postId(app: LoamApp, cookie: string, payload: unknown): Promise<string> {
+    const response = await postMessage(app, cookie, payload);
+    expect(response.statusCode).toBe(201);
+    return (response.json() as { message: { id: string } }).message.id;
+  }
+
+  it("lets an author edit their own message and stamps editedAt", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const author = await newSession(app);
+    const id = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "typo herre" });
+
+    const response = await editMessage(app, author.cookie, id, { body: "typo here" });
+    expect(response.statusCode).toBe(200);
+    const edited = response.json() as { body: string; editedAt?: number };
+    expect(edited.body).toBe("typo here");
+    expect(typeof edited.editedAt).toBe("number");
+
+    const stored = app.store.loadMessages().find((message) => message.id === id);
+    expect(stored && "body" in stored ? stored.body : undefined).toBe("typo here");
+  });
+
+  it("won't let another user (even an admin) edit someone else's message", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const author = await newSession(app);
+    const id = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "mine" });
+
+    // Editing someone else's words is impersonation — admins moderate by deleting, not editing.
+    expect((await editMessage(app, admin.cookie, id, { body: "tampered" })).statusCode).toBe(403);
+    const stored = app.store.loadMessages().find((message) => message.id === id);
+    expect(stored && "body" in stored ? stored.body : undefined).toBe("mine");
+  });
+
+  it("rejects an empty edited body and a missing message", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const author = await newSession(app);
+    const id = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "keep" });
+
+    expect((await editMessage(app, author.cookie, id, { body: "   " })).statusCode).toBe(400);
+    expect((await editMessage(app, author.cookie, "msg_missing", { body: "hi" })).statusCode).toBe(404);
   });
 });
