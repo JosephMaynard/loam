@@ -74,6 +74,38 @@ class LoamHotspotModule : Module() {
       }
     }
 
+    // Kiosk mode = Android screen pinning (lock-task). Pins the app so a passer-by can't wander off
+    // into other apps; without device-owner provisioning, leaving requires the system Back+Recents
+    // gesture, which prompts for the device's own screen-lock PIN when one is set. Best-effort and
+    // main-thread (startLockTask must run on the UI thread); a failure is logged, never thrown.
+    Function("startKiosk") {
+      val activity = appContext.currentActivity
+      if (activity == null) {
+        android.util.Log.w("LoamHotspot", "startKiosk failed: no current activity")
+      } else {
+        activity.runOnUiThread {
+          try {
+            activity.startLockTask()
+          } catch (error: Throwable) {
+            android.util.Log.w("LoamHotspot", "startLockTask failed", error)
+          }
+        }
+      }
+    }
+
+    Function("stopKiosk") {
+      val activity = appContext.currentActivity
+      if (activity != null) {
+        activity.runOnUiThread {
+          try {
+            activity.stopLockTask()
+          } catch (error: Throwable) {
+            android.util.Log.w("LoamHotspot", "stopLockTask failed", error)
+          }
+        }
+      }
+    }
+
     // The runtime is one hotspot per process; make sure we don't leak the reservation when the
     // module is torn down (app backgrounded/reloaded).
     OnDestroy {

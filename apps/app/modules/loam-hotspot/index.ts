@@ -59,3 +59,24 @@ export function stopHostService(): void {
     // Best effort.
   }
 }
+
+/**
+ * Enter kiosk mode: pin the app via Android screen pinning (lock-task) so it can't be left without
+ * the device's screen-lock PIN. A no-op when unsupported; never throws.
+ */
+export function startKiosk(): void {
+  try {
+    LoamHotspotModule?.startKiosk();
+  } catch {
+    // Best effort — kiosk is optional; hosting continues regardless.
+  }
+}
+
+/** Leave kiosk mode (unpin the app). A no-op when unsupported; never throws. */
+export function stopKiosk(): void {
+  try {
+    LoamHotspotModule?.stopKiosk();
+  } catch {
+    // Best effort.
+  }
+}

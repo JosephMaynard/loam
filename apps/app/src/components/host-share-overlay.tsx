@@ -36,6 +36,9 @@ type HostShareOverlayProps = {
   /** Whether to keep the screen on while hosting (for a host left on display). */
   keepAwake: boolean;
   onKeepAwakeChange: (value: boolean) => void;
+  /** Whether to pin the app (Android screen pinning) so it can't be left without the device PIN. */
+  kiosk: boolean;
+  onKioskChange: (value: boolean) => void;
 };
 
 /**
@@ -51,6 +54,8 @@ export function HostShareOverlay({
   addresses,
   keepAwake,
   onKeepAwakeChange,
+  kiosk,
+  onKioskChange,
 }: HostShareOverlayProps) {
   const hotspot = useHotspot();
   const version = Constants.expoConfig?.version ?? '?';
@@ -89,6 +94,17 @@ export function HostShareOverlay({
                   </ThemedText>
                 </ThemedView>
                 <Switch value={keepAwake} onValueChange={onKeepAwakeChange} />
+              </ThemedView>
+
+              <ThemedView type="backgroundElement" style={styles.settingRow}>
+                <ThemedView style={styles.settingText}>
+                  <ThemedText type="smallBold">Kiosk mode</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    Pins LOAM to the screen so it can&apos;t be left. To exit, hold Back + Recents —
+                    the phone&apos;s own screen-lock PIN is required (set one first).
+                  </ThemedText>
+                </ThemedView>
+                <Switch value={kiosk} onValueChange={onKioskChange} />
               </ThemedView>
 
               <ThemedText type="small" themeColor="textSecondary" style={styles.version}>

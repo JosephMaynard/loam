@@ -9,7 +9,7 @@ import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
-import { startHostService } from '../../modules/loam-hotspot';
+import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot IP (below).
@@ -80,6 +80,9 @@ export default function HostScreen() {
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
   // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
   const [keepAwake, setKeepAwake] = useState(false);
+  // Optional kiosk mode — pin the app (Android screen pinning) so a passer-by can't wander off into
+  // other apps; exiting requires the device's own screen-lock PIN.
+  const [kiosk, setKiosk] = useState(false);
   const webViewRef = useRef<WebView>(null);
 
   useEffect(() => {
@@ -93,6 +96,19 @@ export default function HostScreen() {
       void deactivateKeepAwake(tag).catch(() => undefined);
     };
   }, [keepAwake]);
+
+  // Enter/leave Android screen pinning as the kiosk toggle flips. Both calls are best-effort no-ops
+  // when unsupported; on unmount we unpin so the app is never left stuck in lock-task.
+  useEffect(() => {
+    if (kiosk) {
+      startKiosk();
+    } else {
+      stopKiosk();
+    }
+    return () => {
+      stopKiosk();
+    };
+  }, [kiosk]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -242,6 +258,8 @@ export default function HostScreen() {
           addresses={hostAddresses}
           keepAwake={keepAwake}
           onKeepAwakeChange={setKeepAwake}
+          kiosk={kiosk}
+          onKioskChange={setKiosk}
         />
       </SafeAreaView>
     );

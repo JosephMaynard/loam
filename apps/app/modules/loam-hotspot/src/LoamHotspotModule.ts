@@ -15,6 +15,10 @@ declare class LoamHotspotModule extends NativeModule {
   startHostService(): void;
   /** Stop the foreground host service. */
   stopHostService(): void;
+  /** Pin the app (Android screen pinning / lock-task) so it can't be left without the device PIN. */
+  startKiosk(): void;
+  /** Unpin the app (leave lock-task mode). */
+  stopKiosk(): void;
 }
 
 // Android-only native module: `requireOptionalNativeModule` returns `null` on iOS/web (and any
