@@ -19,7 +19,9 @@ import {
   MessageCreateRequestSchema,
   MessageEditRequestSchema,
   MessageSchema,
+  ModerationUpdateRequestSchema,
   PanicRequestSchema,
+  RolesUpdateRequestSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -200,6 +202,9 @@ export function defaultLoamConfig(): LoamConfig {
     security: {
       profile: "standard",
     },
+    access: {
+      joinPolicy: "open",
+    },
   };
 }
 
@@ -230,6 +235,7 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     killSwitch: { ...base.killSwitch, ...update.killSwitch },
     retention: { ...base.retention, ...update.retention },
     security: { ...base.security, ...update.security },
+    access: { ...base.access, ...update.access },
   };
   const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
   merged.llm.ollama.systemPrompt = systemPrompt || undefined;
@@ -302,9 +308,10 @@ function verifySecret(candidate: string, stored: string): boolean {
  *
  * @param id - The unique user identifier
  * @param isAdmin - Whether the user has administrative privileges
+ * @param pending - Whether the user is awaiting approval (approval join policy); omitted when false
  * @returns A validated `User` object constructed from the provided values
  */
-function makeUser(id: string, isAdmin = false): User {
+function makeUser(id: string, isAdmin = false, pending = false): User {
   return UserSchema.parse({
     id,
     displayName: generateDisplayName(id),
@@ -312,6 +319,7 @@ function makeUser(id: string, isAdmin = false): User {
     isAdmin,
     createdAt: Date.now(),
     ephemeral: false,
+    ...(pending ? { pending: true } : {}),
   });
 }
 
@@ -597,9 +605,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    *
    * @param id - The unique user id to ensure exists
    * @param isAdmin - If a new user is created, whether they should be marked as an administrator
+   * @param pending - If a new user is created, whether they start awaiting approval
    * @returns The existing or newly created User
    */
-  function ensureUser(id: string, isAdmin = false): User {
+  function ensureUser(id: string, isAdmin = false, pending = false): User {
     const existing = data.users.find((user) => user.id === id);
 
     if (existing) {
@@ -607,7 +616,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     // Persist first, then mirror in memory — if the store write throws, nothing diverges.
-    const user = makeUser(id, isAdmin);
+    const user = makeUser(id, isAdmin, pending);
     store.upsertUser(user);
     data.users.push(user);
     broadcast({ type: "userUpserted", user });
@@ -615,11 +624,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Ensure a session-originated user exists, applying the `firstUser` admin bootstrap: when that
-   * strategy is active and no admin exists yet, the first session user created becomes admin.
+   * Ensure a session-originated user exists, applying the `firstUser` admin bootstrap and the join
+   * policy: when `firstUser` is active and no admin exists yet, the first session user created
+   * becomes admin; and under the `approval` join policy a newly created non-admin starts `pending`,
+   * awaiting a greeter/admin's approval before they can participate. Admins are never pending.
    */
   function ensureSessionUser(id: string): User {
-    return ensureUser(id, appConfig.admin.bootstrap === "firstUser" && !anyAdminExists());
+    const isAdmin = appConfig.admin.bootstrap === "firstUser" && !anyAdminExists();
+    const pending = !isAdmin && appConfig.access.joinPolicy === "approval";
+    return ensureUser(id, isAdmin, pending);
   }
 
   /**
@@ -681,6 +694,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowAdminClaim:
         (appConfig.admin.bootstrap === "setupCode" && adminSetupCode !== undefined) ||
         (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
+      joinPolicy: appConfig.access.joinPolicy,
+      securityProfile: appConfig.security.profile,
     };
   }
 
@@ -713,6 +728,63 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Whether a user may moderate others (ban / shadow-ban / unban non-admins): admins always can,
+   * as can anyone granted the `moderator` role.
+   */
+  function canModerate(user: User): boolean {
+    return user.isAdmin || !!user.roles?.includes("moderator");
+  }
+
+  /**
+   * Whether a user may greet newcomers (approve / deny pending users, see the in-client join QR):
+   * admins always can, as can anyone granted the `greeter` role.
+   */
+  function canGreet(user: User): boolean {
+    return user.isAdmin || !!user.roles?.includes("greeter");
+  }
+
+  /**
+   * Apply moderation / role state to a user (roles, banned, shadowBanned, pending), re-validating
+   * the whole record against the schema, persisting, then broadcasting `userUpserted`. Mirrors
+   * `applyUserUpdate`: persist first, then mutate the live object and broadcast, so a failed write
+   * never leaves in-memory state or a broadcast ahead of what is stored. Only the provided fields
+   * change.
+   */
+  function applyUserModeration(
+    user: User,
+    changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending">>,
+  ): User {
+    const next = UserSchema.parse({ ...user, ...changes });
+    store.upsertUser(next);
+    Object.assign(user, next);
+    broadcast({ type: "userUpserted", user });
+    return user;
+  }
+
+  /**
+   * Tear down a user's sessions when they are banned/denied: delete their session tokens from the
+   * store and close any live sockets they hold (mirrors how the kill switch tears sessions down,
+   * scoped to one user). The in-memory session→user mapping is deliberately kept so the ban stays
+   * enforced against that identity — dropping it would re-mint the banned user a fresh, clean id on
+   * their next request, silently undoing the ban. The store deletion still invalidates the session
+   * durably (it is gone after a restart).
+   */
+  function invalidateUserSessions(userId: string): void {
+    for (const [token, sessionUserId] of sessions) {
+      if (sessionUserId === userId) {
+        store.deleteSession(token);
+      }
+    }
+
+    for (const socketSession of [...sockets]) {
+      if (socketSession.userId === userId) {
+        socketSession.socket.close();
+        sockets.delete(socketSession);
+      }
+    }
+  }
+
+  /**
    * Applies an admin channel update, re-validating the whole channel against the schema. Mirrors
    * `applyUserUpdate`: persist first, then mutate the live object and broadcast, so a failed write
    * never leaves in-memory state or a broadcast ahead of what is stored. Only fields present on
@@ -734,10 +806,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Determine which users should be exposed to clients based on the LLM bot visibility setting.
+   * Determine which users should be exposed to clients: active participants only. Bots are hidden
+   * unless the LLM is enabled, and banned/pending users are always hidden (they are not active
+   * participants — moderators and greeters reach them via the dedicated moderation/access
+   * endpoints). Shadow-banned users stay visible; only their messages are withheld.
    */
   function visibleUsers(): User[] {
-    return appConfig.llm.ollama.enabled ? data.users : data.users.filter((user) => user.type !== "bot");
+    const base = appConfig.llm.ollama.enabled
+      ? data.users
+      : data.users.filter((user) => user.type !== "bot");
+    return base.filter((user) => !user.banned && !user.pending);
   }
 
   function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
@@ -884,6 +962,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const message = event.message;
+
+    // Shadow ban: a message whose author is currently shadow-banned is delivered only back to the
+    // author, so their own UI still shows it while nobody else ever sees it. Layered on top of the
+    // DM-audience filtering below (a shadow-banned DM is only ever seen by its author).
+    if (event.type === "messageCreated" || event.type === "messageUpdated") {
+      const author = data.users.find((candidate) => candidate.id === message.authorId);
+
+      if (author?.shadowBanned && userId !== message.authorId) {
+        return false;
+      }
+    }
+
     const audience = messageAudienceUserIds(message);
     return !audience || audience.has(userId);
   }
@@ -926,8 +1016,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function createMessage(
     input: MessageCreateRequest,
     authorId: string,
-  ): { message?: Message; deletedMessage?: Message; deletedMessageId?: string; error?: string } {
-    ensureSessionUser(authorId);
+  ): { message?: Message; deletedMessage?: Message; deletedMessageId?: string; error?: string; forbidden?: boolean } {
+    const author = ensureSessionUser(authorId);
+
+    // Moderation gates run before any feature-flag checks. A banned author is fully blocked; a
+    // pending author is blocked until approved (both are `forbidden`, so the endpoint answers 403).
+    // A shadow-banned author is allowed through here — the message is created and returned to them
+    // normally, and the broadcast filter withholds it from everyone else (see socketCanReceiveEvent).
+    if (author.banned) {
+      return { error: "You have been removed from this node", forbidden: true };
+    }
+
+    if (author.pending) {
+      return { error: "Your join is awaiting approval", forbidden: true };
+    }
 
     if (
       (input.type === "channelPost" || input.type === "channelReply") &&
@@ -1575,6 +1677,145 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     return applyUserUpdate(user, body.data);
   });
+
+  // Set a user's granted roles (replaces the whole set). Admin-only — roles confer moderation and
+  // greeter powers, so only an admin may hand them out. An admin's roles are never changed here.
+  server.patch<{ Params: { userId: string } }>("/api/admin/users/:userId/roles", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    const body = RolesUpdateRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid roles update request" });
+    }
+
+    const user = data.users.find((candidate) => candidate.id === request.params.userId);
+
+    if (!user) {
+      return reply.code(404).send({ error: "User does not exist" });
+    }
+
+    if (user.isAdmin) {
+      return reply.code(400).send({ error: "Cannot change the roles of an admin" });
+    }
+
+    return applyUserModeration(user, { roles: body.data.roles });
+  });
+
+  // Ban / shadow-ban / unban a user. Open to admins and moderators; never usable against an admin
+  // or oneself. Banning a user also tears down their live sessions (see invalidateUserSessions).
+  server.patch<{ Params: { userId: string } }>("/api/moderation/users/:userId", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!canModerate(currentUser)) {
+      return reply.code(403).send({ error: "Moderator access required" });
+    }
+
+    const body = ModerationUpdateRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid moderation request" });
+    }
+
+    const user = data.users.find((candidate) => candidate.id === request.params.userId);
+
+    if (!user) {
+      return reply.code(404).send({ error: "User does not exist" });
+    }
+
+    if (user.isAdmin || user.id === currentUser.id) {
+      return reply.code(403).send({ error: "You cannot moderate an admin or yourself" });
+    }
+
+    const changes: Partial<Pick<User, "banned" | "shadowBanned">> = {};
+
+    if (body.data.banned !== undefined) {
+      changes.banned = body.data.banned;
+    }
+
+    if (body.data.shadowBanned !== undefined) {
+      changes.shadowBanned = body.data.shadowBanned;
+    }
+
+    // Broadcast the userUpserted first (so the target's own client learns it is banned), then tear
+    // down their sessions and sockets.
+    const updated = applyUserModeration(user, changes);
+
+    if (changes.banned === true) {
+      invalidateUserSessions(user.id);
+    }
+
+    return updated;
+  });
+
+  // The full human roster including banned and shadow-banned users, so the moderation UI can review
+  // and unban them (visibleUsers hides banned/pending from everyone else). Admins and moderators.
+  server.get("/api/moderation/users", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!canModerate(currentUser)) {
+      return reply.code(403).send({ error: "Moderator access required" });
+    }
+
+    return data.users.filter((user) => user.type === "human");
+  });
+
+  // Users awaiting approval under the `approval` join policy. Admins and greeters.
+  server.get("/api/access/pending", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!canGreet(currentUser)) {
+      return reply.code(403).send({ error: "Greeter access required" });
+    }
+
+    return data.users.filter((user) => user.type === "human" && user.pending === true);
+  });
+
+  // Approve a pending user so they can participate. Admins and greeters.
+  server.post<{ Params: { userId: string } }>("/api/access/users/:userId/approve", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!canGreet(currentUser)) {
+      return reply.code(403).send({ error: "Greeter access required" });
+    }
+
+    const user = data.users.find((candidate) => candidate.id === request.params.userId);
+
+    if (!user) {
+      return reply.code(404).send({ error: "User does not exist" });
+    }
+
+    return applyUserModeration(user, { pending: false });
+  });
+
+  // Deny a pending user: bans them (clearing pending) and tears down their sessions. Admins and
+  // greeters — but, like moderation, never usable against an admin or oneself.
+  server.post<{ Params: { userId: string } }>("/api/access/users/:userId/deny", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!canGreet(currentUser)) {
+      return reply.code(403).send({ error: "Greeter access required" });
+    }
+
+    const user = data.users.find((candidate) => candidate.id === request.params.userId);
+
+    if (!user) {
+      return reply.code(404).send({ error: "User does not exist" });
+    }
+
+    if (user.isAdmin || user.id === currentUser.id) {
+      return reply.code(403).send({ error: "You cannot deny an admin or yourself" });
+    }
+
+    const updated = applyUserModeration(user, { banned: true, pending: false });
+    invalidateUserSessions(user.id);
+    return updated;
+  });
+
   server.get<{ Params: { fileName: string } }>(
     "/api/avatars/:fileName",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
@@ -1615,7 +1856,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const result = createMessage(body.data, getSessionUserId(request, reply));
 
     if (result.error) {
-      return reply.code(400).send({ error: result.error });
+      // Moderation rejections (banned/pending author) are 403; everything else is a bad request.
+      return reply.code(result.forbidden ? 403 : 400).send({ error: result.error });
     }
 
     if (result.deletedMessageId && result.deletedMessage) {

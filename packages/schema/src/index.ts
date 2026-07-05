@@ -28,16 +28,36 @@ export type UserAvatar = z.infer<typeof UserAvatarSchema>;
 export const UserTypeSchema = z.enum(["human", "bot", "system"]);
 export type UserType = z.infer<typeof UserTypeSchema>;
 
+/** Extra capabilities an admin can grant. Admins (`isAdmin`) implicitly have all role powers. */
+export const RoleSchema = z.enum(["moderator", "greeter"]);
+export type Role = z.infer<typeof RoleSchema>;
+
 export const UserSchema = z.object({
   id: IdSchema,
   displayName: z.string().min(1),
   avatar: UserAvatarSchema.optional(),
   type: UserTypeSchema,
   isAdmin: z.boolean(),
+  /** Extra granted capabilities (moderator, greeter). Absent/empty = a plain member. */
+  roles: z.array(RoleSchema).optional(),
+  /** Barred from the node: cannot post, sessions are invalidated, hidden from non-moderators. */
+  banned: z.boolean().optional(),
+  /** Can still post, but their new messages are only broadcast back to themselves (shadow ban). */
+  shadowBanned: z.boolean().optional(),
+  /** Awaiting a greeter/admin's approval to participate (when the node's joinPolicy is "approval"). */
+  pending: z.boolean().optional(),
   createdAt: TimestampSchema,
   ephemeral: z.boolean(),
 });
 export type User = z.infer<typeof UserSchema>;
+
+/** How new people join: "open" (anyone participates immediately) or "approval" (a greeter/admin lets them in). */
+export const JoinPolicySchema = z.enum(["open", "approval"]);
+export type JoinPolicy = z.infer<typeof JoinPolicySchema>;
+
+/** Named security posture (defined here so NetworkConfig can surface it to the client). */
+export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
+export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
 
 export const ChannelVisibilitySchema = z.enum(["public", "private", "adminInbox"]);
 export type ChannelVisibility = z.infer<typeof ChannelVisibilitySchema>;
@@ -98,6 +118,10 @@ export const NetworkConfigSchema = z.object({
   allowUserAvatarEdit: z.boolean(),
   allowUserAvatarUpload: z.boolean(),
   allowAdminClaim: z.boolean(),
+  /** How new people join, surfaced so the client can show a "waiting for approval" flow. */
+  joinPolicy: JoinPolicySchema,
+  /** The node's active security posture, surfaced so the client can gate secure-only affordances. */
+  securityProfile: SecurityProfileSchema,
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
 
@@ -158,13 +182,16 @@ export const KillSwitchConfigSchema = z.object({
 });
 export type KillSwitchConfig = z.infer<typeof KillSwitchConfigSchema>;
 
-export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
-export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
-
 export const SecurityConfigSchema = z.object({
   profile: SecurityProfileSchema,
 });
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
+
+/** Access control for who may join and participate. */
+export const AccessConfigSchema = z.object({
+  joinPolicy: JoinPolicySchema,
+});
+export type AccessConfig = z.infer<typeof AccessConfigSchema>;
 
 export const LoamConfigSchema = z.object({
   identity: IdentityConfigSchema,
@@ -174,6 +201,7 @@ export const LoamConfigSchema = z.object({
   killSwitch: KillSwitchConfigSchema,
   retention: RetentionConfigSchema,
   security: SecurityConfigSchema,
+  access: AccessConfigSchema,
 });
 export type LoamConfig = z.infer<typeof LoamConfigSchema>;
 
@@ -206,6 +234,7 @@ export const LoamConfigUpdateSchema = z.object({
     })
     .optional(),
   security: SecurityConfigSchema.partial().optional(),
+  access: AccessConfigSchema.partial().optional(),
 });
 export type LoamConfigUpdate = z.infer<typeof LoamConfigUpdateSchema>;
 
@@ -230,6 +259,23 @@ export const UserUpdateRequestSchema = z.object({
   avatar: UserAvatarSchema.optional(),
 });
 export type UserUpdateRequest = z.infer<typeof UserUpdateRequestSchema>;
+
+/** Admin request to set a user's granted roles (replaces the whole set). */
+export const RolesUpdateRequestSchema = z.object({
+  roles: z.array(RoleSchema),
+});
+export type RolesUpdateRequest = z.infer<typeof RolesUpdateRequestSchema>;
+
+/** Admin/moderator request to set a user's moderation state (omitted fields are left unchanged). */
+export const ModerationUpdateRequestSchema = z
+  .object({
+    banned: z.boolean().optional(),
+    shadowBanned: z.boolean().optional(),
+  })
+  .refine((value) => value.banned !== undefined || value.shadowBanned !== undefined, {
+    message: "Provide at least one of banned or shadowBanned",
+  });
+export type ModerationUpdateRequest = z.infer<typeof ModerationUpdateRequestSchema>;
 
 export const AvatarImageUploadRequestSchema = z.object({
   mimeType: AvatarImageMimeTypeSchema,

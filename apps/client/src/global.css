@@ -186,7 +186,7 @@ a {
 
 .nav-link {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   min-height: 36px;
   border-radius: 8px;
@@ -197,6 +197,26 @@ a {
   overflow: hidden;
   gap: 8px;
   user-select: none;
+}
+
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  padding: 0 6px;
+  background: var(--c-accent);
+  color: var(--c-white);
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .nav-link .avatar {
@@ -1038,6 +1058,234 @@ a {
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
+}
+
+.gate-status {
+  margin-top: 14px;
+  color: var(--c-text-muted);
+  font-size: 0.85rem;
+}
+
+/* Sidebar invite (join QR for greeters/admins). */
+.invite-control {
+  display: grid;
+  gap: 8px;
+}
+
+.invite-panel {
+  display: grid;
+  gap: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 10px;
+}
+
+.invite-qr {
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--c-white);
+  padding: 8px;
+}
+
+.invite-qr svg {
+  width: min(100%, 180px);
+  height: auto;
+}
+
+.invite-url {
+  margin: 0;
+  color: var(--c-sidebar-muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* New-message toasts. */
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 50;
+  display: grid;
+  gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+}
+
+.toast {
+  display: grid;
+  gap: 3px;
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  background: var(--c-white);
+  box-shadow: 0 10px 30px rgba(23, 35, 29, 0.18);
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--c-ink);
+  animation: toast-in 160ms ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toast-title {
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast-body {
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* People & moderation. */
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ghost-button {
+  min-height: 34px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surf-2);
+  color: var(--c-ink-green);
+  padding: 4px 12px;
+  font-weight: 700;
+}
+
+.moderation-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.moderation-row {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.moderation-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.moderation-identity .avatar {
+  width: 34px;
+  height: 34px;
+}
+
+.moderation-name {
+  display: grid;
+  min-width: 0;
+}
+
+.moderation-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.moderation-name span {
+  color: var(--c-text-muted);
+  font-size: 0.76rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.moderation-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.role-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.moderation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.moderation-actions button {
+  min-height: 36px;
+  border-radius: 8px;
+  background: var(--c-surf-2);
+  color: var(--c-ink-green);
+  padding: 6px 12px;
+  font-weight: 800;
+}
+
+.moderation-actions .danger-button {
+  background: var(--c-danger);
+  color: var(--c-white);
+}
+
+.moderation-note {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+}
+
+.state-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  background: var(--c-surf-2);
+  color: var(--c-ink-green);
+}
+
+.badge-admin {
+  background: var(--c-highlight);
+  color: var(--c-ink);
+}
+
+.badge-pending {
+  background: var(--c-surf-4);
+  color: var(--c-ink-green);
+}
+
+.badge-banned,
+.badge-shadow {
+  background: var(--c-danger-border);
+  color: var(--c-danger-3);
 }
 
 @media (max-width: 760px) {

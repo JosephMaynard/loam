@@ -45,6 +45,8 @@ const networkConfig: NetworkConfig = {
   allowUserAvatarEdit: false,
   allowUserAvatarUpload: false,
   allowAdminClaim: false,
+  joinPolicy: "open",
+  securityProfile: "standard",
 };
 
 function frame(value: unknown): string {
