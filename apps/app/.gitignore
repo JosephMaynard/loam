@@ -18,6 +18,9 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# Built APK (from `pnpm --filter app apk`)
+*.apk
+
 # Metro
 .metro-health-check*
 

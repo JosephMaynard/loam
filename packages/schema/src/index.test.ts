@@ -6,6 +6,7 @@ import {
   MessageCreateRequestSchema,
   MessageSchema,
   NetworkConfigSchema,
+  securityProfilePreset,
   StreamEventSchema,
   UserSchema,
 } from "./index.js";
@@ -205,6 +206,22 @@ describe("@loam/schema", () => {
         body: "   ",
       }),
     ).toThrow();
+  });
+
+  it("maps security profiles to coherent axis bundles (custom opts out)", () => {
+    expect(securityProfilePreset("custom")).toBeNull();
+
+    const hardened = securityProfilePreset("hardened");
+    expect(hardened).toEqual({ joinPolicy: "approval", messageTtlMs: 3_600_000, killSwitchEnabled: true });
+
+    // open/standard share today's enforced settings; only hardened tightens them.
+    for (const profile of ["open", "standard"] as const) {
+      expect(securityProfilePreset(profile)).toEqual({
+        joinPolicy: "open",
+        messageTtlMs: null,
+        killSwitchEnabled: false,
+      });
+    }
   });
 
   it("validates LLM stream events", () => {

@@ -59,6 +59,40 @@ export type JoinPolicy = z.infer<typeof JoinPolicySchema>;
 export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
 export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
 
+/** The already-enforced security axes a non-`custom` profile applies as one coherent bundle. */
+export type SecurityProfilePreset = {
+  /** Who may join: everyone immediately (`open`) or a greeter/admin approves newcomers (`approval`). */
+  joinPolicy: JoinPolicy;
+  /** Ephemeral-message TTL in ms, or `null` to keep messages forever. */
+  messageTtlMs: number | null;
+  /** Whether the admin/panic kill switch is armed. */
+  killSwitchEnabled: boolean;
+};
+
+/**
+ * The single source of truth mapping each named profile → the concrete config axes it forces, so
+ * "pick a profile" stays testable as 3 whole configurations instead of 2ⁿ toggles (docs/09). Only
+ * axes LOAM actually enforces today appear here; the axes that would otherwise separate `open` from
+ * `standard` (transport encryption, invite tokens — docs/08) are not built yet, so those two apply
+ * the same enforced settings for now and differ only in intent. `hardened` tightens all three.
+ */
+export const SECURITY_PROFILE_PRESETS: Record<
+  Exclude<SecurityProfile, "custom">,
+  SecurityProfilePreset
+> = {
+  open: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false },
+  standard: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false },
+  hardened: { joinPolicy: "approval", messageTtlMs: 3_600_000, killSwitchEnabled: true },
+};
+
+/**
+ * The bundle a profile applies, or `null` for `custom` (the raw configured axes are used as-is).
+ * Callers force the returned axes onto the effective config; `custom` opts out of any forcing.
+ */
+export function securityProfilePreset(profile: SecurityProfile): SecurityProfilePreset | null {
+  return profile === "custom" ? null : SECURITY_PROFILE_PRESETS[profile];
+}
+
 export const ChannelVisibilitySchema = z.enum(["public", "private", "adminInbox"]);
 export type ChannelVisibility = z.infer<typeof ChannelVisibilitySchema>;
 

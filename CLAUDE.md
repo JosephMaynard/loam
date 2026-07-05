@@ -48,11 +48,12 @@ DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` 
 matrix, config API, flag enforcement, kill switch, retention), and `apps/client` (Vitest + jsdom:
 `src/lib/markdown.test.ts` sanitizer/XSS, `src/lib/local-store.test.ts` IndexedDB round-trips +
 kill-switch purge via `fake-indexeddb`, `src/lib/protocol.test.ts` route + WS-event + message-response
-parsers). Client tests use a standalone `vitest.config.ts` (jsdom, no Preact plugin — the tested lib
-modules are plain TS); `*.test.ts` is excluded from the `tsc -b` build. The pure route/protocol
-parsers live in `src/lib/protocol.ts` (extracted from `app.tsx`); rendered-component tests are the
-next client gap. `apps/app` has no test script, so `pnpm test` skips it — validate with `cd apps/app
-&& npx tsc --noEmit`.
+parsers). Client tests use a standalone `vitest.config.ts` (jsdom + `@preact/preset-vite`, so `*.test.tsx`
+mount real components into jsdom); `*.test.ts`/`*.test.tsx` are excluded from the `tsc -b` build. The
+pure route/protocol parsers live in `src/lib/protocol.ts` (extracted from `app.tsx`); rendered
+components extracted to `src/components/` (`Avatar`, `UnreadBadge`, `InviteControl`) have `.test.tsx`
+suites. `apps/app` has no test script, so `pnpm test` skips it — validate with `cd apps/app && npx
+tsc --noEmit`.
 
 ## How dev mode wires together (important)
 
@@ -161,9 +162,15 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
 
 **Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
 `enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`.
-`enablePrivateChannels`/`enableUserChannels` are stored and surfaced but have nothing to gate yet
-(no channel creation or private channels exist). `security.profile` is stored but does not drive
-any behaviour yet (see `docs/09-security-profiles.md`).
+`enableUserChannels` gates user channel creation (`POST /api/channels`); `enablePrivateChannels` is
+stored and surfaced but has nothing to gate yet (private channels need a membership model that does
+not exist). **`security.profile` is authoritative**: a named profile (`open`/`standard`/`hardened`)
+forces a coherent bundle of the already-enforced axes — `access.joinPolicy`, `retention.messageTtlMs`,
+`killSwitch.enabled` — onto the effective config at `mergeConfig()` time via `securityProfilePreset()`
+(shared from `@loam/schema`). `custom` (**the default**) forces nothing, leaving those axes
+individually configurable. A boot-time `reconcileLegacyProfile()` demotes an older persisted preset to
+`custom` if its stored axes diverge, so the profile becoming authoritative never silently disarms a
+kill switch. See `docs/09-security-profiles.md`.
 
 ## Client architecture (`apps/client/src/app.tsx`)
 
@@ -199,11 +206,16 @@ any behaviour yet (see `docs/09-security-profiles.md`).
 
 ## Good first areas / known gaps
 
-- No tests for `apps/client` — a Vitest+jsdom client test harness would be high value and easy to
-  slot into CI.
-- `enablePrivateChannels`/`enableUserChannels` gate nothing yet — channel creation and private
-  channels are the natural features to hang off them.
-- `security.profile` config exists but no preset logic consumes it yet (docs/09).
+- `apps/client` has a Vitest+jsdom harness now (lib parsers + rendered-component tests for `Avatar`,
+  `UnreadBadge`, `InviteControl` under `src/components/`). Most of `app.tsx` is still one big module,
+  so extracting more presentational components into `src/components/` to test them is high value.
+- `enablePrivateChannels` gates nothing yet — **private channels are the biggest open feature**: they
+  need a channel-membership + access-enforcement model (currently `createChannelFromRequest()`
+  hardcodes `visibility: "public"`). `enableUserChannels` is wired (user channel creation).
+- `security.profile` is wired (see the feature-flag note) but only bundles the axes LOAM enforces
+  today; the axes that would distinguish `open` from `standard` (transport encryption, invite tokens
+  — docs/08) are unbuilt, so those two profiles apply the same settings for now.
+- On-device SQLCipher (encrypted Android DB) is still deferred — needs a multiple-ciphers ABI-108
+  android-arm64 prebuild (docs/01, docs/04).
 - LoRa / alternate transports are a stated design goal but unimplemented.
-- Channel creation, private channels, and message editing/deletion by users are not exposed yet
-  though schema/data structures partially anticipate them.
+- Message editing/deletion by users and user channel creation are exposed; private channels are not.
