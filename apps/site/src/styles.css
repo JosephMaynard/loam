@@ -291,11 +291,17 @@ p {
 }
 
 /* ---- Hero ---- */
+/* An off-grid-mesh illustration fills the hero; a left-weighted dark scrim keeps the copy readable
+   while letting the artwork show through on the right. The hero is intentionally dark in both colour
+   schemes, so text/scrim use the fixed on-dark tokens + rgba (they don't flip). */
 .hero {
-  padding: clamp(var(--s-6), 8vw, var(--s-9)) 0 var(--s-8);
+  padding: clamp(var(--s-7), 8vw, var(--s-9)) 0 var(--s-8);
   background:
-    radial-gradient(1200px 500px at 80% -10%, var(--mist), transparent 60%),
-    radial-gradient(900px 500px at -10% 10%, var(--ember-soft), transparent 55%);
+    linear-gradient(105deg, rgba(9, 14, 10, 0.95) 0%, rgba(9, 14, 10, 0.78) 42%, rgba(9, 14, 10, 0.32) 100%),
+    linear-gradient(0deg, rgba(9, 14, 10, 0.62), rgba(9, 14, 10, 0.3)),
+    url('/loam-hero-bkg.jpg') center / cover no-repeat,
+    var(--deep-bg-2);
+  color: var(--on-deep);
 }
 .hero-grid {
   display: grid;
@@ -307,6 +313,13 @@ p {
   font-size: clamp(38px, 6vw, 64px);
   margin-bottom: var(--s-4);
   max-width: 15ch;
+  color: #fff;
+}
+.hero .lede {
+  color: rgba(255, 255, 255, 0.9);
+}
+.hero .eyebrow {
+  color: var(--deep-accent);
 }
 .hero-actions {
   display: flex;
@@ -316,8 +329,18 @@ p {
 }
 .hero-note {
   margin-top: var(--s-4);
-  color: var(--sage);
+  color: rgba(255, 255, 255, 0.72);
   font-size: 14px;
+}
+/* The ghost button needs a light outline over the dark hero (the default dark-ink version vanishes). */
+.hero .btn-ghost {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.06);
+}
+.hero .btn-ghost:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 /* Phone mockup */
