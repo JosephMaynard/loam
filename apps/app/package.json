@@ -45,7 +45,8 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "bundle:server": "node ./scripts/bundle-server.mjs",
-    "fetch:native": "node ./scripts/fetch-native-modules.mjs"
+    "fetch:native": "node ./scripts/fetch-native-modules.mjs",
+    "apk": "node ./scripts/build-apk.mjs"
   },
   "private": true
 }

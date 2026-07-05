@@ -41,6 +41,8 @@ The `apps/app` Expo app builds an installable Android APK that runs the embedded
   set; `adb`/`emulator` on `PATH`.
 
 ### Build the APK (reproducible)
+**Shortcut:** `pnpm --filter app apk` runs every step below in one go (auto-detecting the Studio
+JDK/SDK on macOS) and copies the result to `apps/app/loam-host.apk`. The manual steps:
 ```bash
 pnpm install                                   # nodejs-mobile's postinstall is (correctly) blocked by pnpm
 pnpm -r build                                  # builds packages + server + web client (client dist is bundled)

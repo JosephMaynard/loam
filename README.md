@@ -87,8 +87,41 @@ pnpm --filter @loam/server start   # serves the built client + API, defaults to 
 
 `apps/app` is an Expo/React-Native host that runs the LOAM server **embedded on the phone**, brings
 up a local-only WiFi hotspot, and shows the join QR — turning a single phone into a complete,
-internet-free LOAM node. See **[docs/04-android-host-app.md](docs/04-android-host-app.md)** for
-building and running it.
+internet-free LOAM node.
+
+**Prerequisites:** [Android Studio](https://developer.android.com/studio) (for its bundled JDK, the
+Android SDK + platform-tools, and NDK r27+) with `adb` on your `PATH`. On macOS the build script
+auto-detects the Studio JDK and SDK; otherwise set `JAVA_HOME` and `ANDROID_HOME` yourself.
+
+**Build the APK** — one command from the repo root:
+
+```bash
+pnpm install
+pnpm --filter app apk        # → apps/app/loam-host.apk (takes a few minutes)
+```
+
+That runs the whole pipeline (workspace build → native prebuild → bundle the embedded server → Expo
+prebuild → `gradlew assembleRelease`) and writes the finished APK to `apps/app/loam-host.apk`.
+
+**Copy it to a phone with `adb`:**
+
+1. On the phone, enable **Developer options** (Settings → About phone → tap *Build number* 7×), then
+   turn on **USB debugging**.
+2. Connect the phone with a **data** USB cable (set it to *File transfer*) and accept the *Allow USB
+   debugging?* prompt. Confirm the phone is listed:
+   ```bash
+   adb devices                # your phone's serial should appear
+   ```
+3. Install (and replace any older copy):
+   ```bash
+   adb install -r apps/app/loam-host.apk
+   ```
+   If both a phone and an emulator are connected, target the phone: `adb -s <serial> install -r apps/app/loam-host.apk`.
+4. Launch **LOAM** on the phone. First cold start takes ~1 minute; tap **Share · Host** to bring up
+   the hotspot and join QRs.
+
+See **[docs/04-android-host-app.md](docs/04-android-host-app.md)** for the manual step-by-step, the
+two-step join flow, and troubleshooting.
 
 ## How it works
 
