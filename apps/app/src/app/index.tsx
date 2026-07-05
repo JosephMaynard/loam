@@ -1,4 +1,5 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, Platform, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -77,7 +78,18 @@ export default function HostScreen() {
   // The host's real network addresses, reported by the launcher (loam-hostinfo). Used to build the
   // Step-2 join QR from the actual hotspot IP instead of a hardcoded guess.
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
+  // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
+  const [keepAwake, setKeepAwake] = useState(false);
   const webViewRef = useRef<WebView>(null);
+
+  useEffect(() => {
+    const tag = 'loam-host';
+    if (keepAwake) {
+      void activateKeepAwakeAsync(tag);
+    } else {
+      void deactivateKeepAwake(tag).catch(() => undefined);
+    }
+  }, [keepAwake]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -225,6 +237,8 @@ export default function HostScreen() {
           onClose={() => setShareOpen(false)}
           serverUrl={hotspotJoinUrl(hostAddresses)}
           addresses={hostAddresses}
+          keepAwake={keepAwake}
+          onKeepAwakeChange={setKeepAwake}
         />
       </SafeAreaView>
     );

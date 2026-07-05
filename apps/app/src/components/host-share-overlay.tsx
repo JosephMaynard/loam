@@ -1,5 +1,6 @@
+import Constants from 'expo-constants';
 import { useEffect } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Switch } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { HostPanel, type HostState } from '@/components/host-panel';
@@ -32,6 +33,9 @@ type HostShareOverlayProps = {
   serverUrl: string;
   /** All of the host's detected IPv4 addresses, shown under Step 2 so a joiner can try alternatives. */
   addresses: string[];
+  /** Whether to keep the screen on while hosting (for a host left on display). */
+  keepAwake: boolean;
+  onKeepAwakeChange: (value: boolean) => void;
 };
 
 /**
@@ -40,8 +44,16 @@ type HostShareOverlayProps = {
  * can't start — no WiFi hardware on an emulator, or a denied permission — it shows a clear message
  * and still renders the Step-2 LOAM-URL QR, never crashing or hanging (docs/04).
  */
-export function HostShareOverlay({ visible, onClose, serverUrl, addresses }: HostShareOverlayProps) {
+export function HostShareOverlay({
+  visible,
+  onClose,
+  serverUrl,
+  addresses,
+  keepAwake,
+  onKeepAwakeChange,
+}: HostShareOverlayProps) {
   const hotspot = useHotspot();
+  const version = Constants.expoConfig?.version ?? '?';
 
   // Start the hotspot the first time the overlay opens. `ensureHotspot` is idempotent (no-ops while
   // in flight or already running), and we intentionally leave the hotspot up after close so joiners
@@ -68,6 +80,20 @@ export function HostShareOverlay({ visible, onClose, serverUrl, addresses }: Hos
               contentContainerStyle={styles.scrollContent}
               showsVerticalScrollIndicator={false}>
               <HostPanel state={state} />
+
+              <ThemedView type="backgroundElement" style={styles.settingRow}>
+                <ThemedView style={styles.settingText}>
+                  <ThemedText type="smallBold">Keep screen on</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    For a host left on display (e.g. taped to a wall). Uses more battery.
+                  </ThemedText>
+                </ThemedView>
+                <Switch value={keepAwake} onValueChange={onKeepAwakeChange} />
+              </ThemedView>
+
+              <ThemedText type="small" themeColor="textSecondary" style={styles.version}>
+                LOAM v{version}
+              </ThemedText>
             </ScrollView>
           </SafeAreaView>
         </ThemedView>
@@ -96,5 +122,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingBottom: Spacing.five,
     gap: Spacing.three,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.three,
+    padding: Spacing.four,
+    borderRadius: Spacing.four,
+  },
+  settingText: {
+    flex: 1,
+    gap: Spacing.one,
+    backgroundColor: 'transparent',
+  },
+  version: {
+    textAlign: 'center',
+    paddingTop: Spacing.two,
   },
 });
