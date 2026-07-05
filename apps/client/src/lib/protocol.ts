@@ -34,6 +34,9 @@ export type RouteState =
     }
   | {
       screen: "admin";
+    }
+  | {
+      screen: "people";
     };
 
 export type MessageResponse = {
@@ -91,6 +94,10 @@ export function parseRoute(path: string): RouteState {
 
   if (path === "/admin") {
     return { screen: "admin" };
+  }
+
+  if (path === "/people") {
+    return { screen: "people" };
   }
 
   const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);

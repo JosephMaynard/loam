@@ -55,6 +55,8 @@ describe("@loam/schema", () => {
         allowUserAvatarEdit: false,
         allowUserAvatarUpload: false,
         allowAdminClaim: false,
+        joinPolicy: "open",
+        securityProfile: "standard",
       }),
     ).not.toThrow();
   });
@@ -90,6 +92,7 @@ describe("@loam/schema", () => {
         killSwitch: { enabled: false, requireConfirmation: true },
         retention: {},
         security: { profile: "standard" },
+        access: { joinPolicy: "open" },
       }),
     ).not.toThrow();
 

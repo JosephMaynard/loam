@@ -13,6 +13,7 @@ import {
   type Message,
   type MessageCreateRequest,
   type NetworkConfig,
+  type Role,
   type StreamEvent,
   type User,
   type UserUpdateRequest,
@@ -24,7 +25,8 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
-import { deleteRecord, destroyDatabase, getAllRecords, putRecords } from "./lib/local-store";
+import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
+import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
 
@@ -48,6 +50,22 @@ const LAST_CONVERSATION_KEY = "loam.lastConversation";
 const SERVER_URL_KEY = "loam.serverUrl";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 const REQUEST_TIMEOUT_MS = 10_000;
+const TOAST_DISMISS_MS = 4_000;
+// Single `sync`-store record holding the per-conversation last-read timestamps (ms). One row keeps
+// the write cheap; the map is `conversationKey` → last-read time.
+const CONVERSATION_READS_KEY = "conversationReads";
+
+type ConversationReads = {
+  id: string;
+  reads: Record<string, number>;
+};
+
+type ToastItem = {
+  id: string;
+  title: string;
+  body: string;
+  route: string;
+};
 const AVATAR_MODES = ["face", "initial", "pattern"] as const;
 const AVATAR_OUTPUT_SIZE = 256;
 const AVATAR_MAX_UPLOAD_BYTES = 128 * 1024;
@@ -246,6 +264,101 @@ function backRouteForThread(conversation: Conversation): string {
     : routeForConversation(conversation);
 }
 
+/**
+ * Stable key for a conversation's read/unread bookkeeping (`channel:<id>` or `dm:<peerId>`).
+ *
+ * @param conversation - The conversation to key.
+ * @returns The conversation key string.
+ */
+function conversationKey(conversation: Conversation): string {
+  return `${conversation.kind}:${conversation.id}`;
+}
+
+/**
+ * The conversation key a message belongs to from `currentUserId`'s perspective. Reactions have no
+ * conversation of their own, so they return `undefined` (they never drive unread/toasts).
+ *
+ * @param message - The message to classify.
+ * @param currentUserId - The signed-in user's id (used to resolve the DM peer).
+ * @returns The `channel:<id>` / `dm:<peerId>` key, or `undefined` for reactions.
+ */
+function messageConversationKey(message: Message, currentUserId: string): string | undefined {
+  if (message.type === "channelPost" || message.type === "channelReply") {
+    return `channel:${message.channelId}`;
+  }
+
+  if (message.type === "dm") {
+    const peer = message.authorId === currentUserId ? message.recipientUserId : message.authorId;
+    return `dm:${peer}`;
+  }
+
+  return undefined;
+}
+
+/**
+ * Best-effort OS notification for a new message. No-ops unless the Notification API exists, permission
+ * is already granted, and the document is hidden — it never prompts and never throws (usually
+ * unavailable over an insecure-context LAN origin).
+ *
+ * @param title - The notification title.
+ * @param body - The notification body text.
+ */
+function notifyIfHidden(title: string, body: string): void {
+  try {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted" || !document.hidden) {
+      return;
+    }
+
+    new Notification(title, { body });
+  } catch {
+    // Best effort only — Notification is commonly blocked on insecure LAN origins.
+  }
+}
+
+/**
+ * Issues a user-related admin/moderation/access request and returns the validated user the server
+ * echoes back. Throws with the server's error message (or a status fallback) on failure. Mirrors
+ * `requestChannel` for the user-management endpoints.
+ *
+ * @param method - HTTP method (`POST` for approve/deny, `PATCH` for roles/moderation).
+ * @param path - The API path.
+ * @param body - Optional JSON request body.
+ * @returns The updated `User`.
+ */
+async function requestUser(method: "POST" | "PATCH", path: string, body?: unknown): Promise<User> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(apiUrl(path), {
+      method,
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      signal: controller.signal,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload: unknown = await response.json().catch(() => undefined);
+
+    if (!response.ok) {
+      const message =
+        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+          ? payload.error
+          : `Request failed: ${response.status}`;
+      throw new Error(message);
+    }
+
+    const parsed = UserSchema.safeParse(payload);
+
+    if (!parsed.success) {
+      throw new Error("The server returned an unrecognised user payload.");
+    }
+
+    return parsed.data;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export function App() {
   return (
     <LocationProvider>
@@ -271,7 +384,9 @@ function LoamApp() {
     activeConversation ? "has-conversation" : undefined,
     !activeConversation && routeState.screen === "channels" ? "no-conversation" : undefined,
     activeConversation?.kind === "channel" && activeConversation.threadId ? "thread-open" : undefined,
-    routeState.screen === "settings" ? "settings-open" : undefined,
+    routeState.screen === "settings" || routeState.screen === "people" || routeState.screen === "admin"
+      ? "settings-open"
+      : undefined,
   ]
     .filter(Boolean)
     .join(" ");
@@ -282,6 +397,41 @@ function LoamApp() {
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string>();
   const [wiped, setWiped] = useState(false);
+  const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  // Refs let the long-lived WebSocket handler read the latest active conversation / users / channels
+  // without re-subscribing the socket on every navigation or roster change.
+  const activeConversationRef = useRef(activeConversation);
+  activeConversationRef.current = activeConversation;
+  const currentUserIdRef = useRef(currentUser.id);
+  currentUserIdRef.current = currentUser.id;
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
+  const usersByIdRef = useRef<Map<string, User>>(new Map());
+  const lastReadRef = useRef(lastReadByConversation);
+
+  /**
+   * Persist and apply an updated per-conversation last-read map. `lastReadRef` is the write source of
+   * truth so overlapping updates never race the async setState.
+   */
+  const updateLastRead = useCallback((update: (previous: Record<string, number>) => Record<string, number>) => {
+    const next = update(lastReadRef.current);
+    lastReadRef.current = next;
+    setLastReadByConversation(next);
+    void putRecord("sync", { id: CONVERSATION_READS_KEY, reads: next });
+  }, []);
+
+  const pushToast = useCallback((toast: ToastItem) => {
+    setToasts((previous) => [...previous, toast]);
+    window.setTimeout(() => {
+      setToasts((previous) => previous.filter((item) => item.id !== toast.id));
+    }, TOAST_DISMISS_MS);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((previous) => previous.filter((item) => item.id !== id));
+  }, []);
 
   const upsertUsers = useCallback((incomingUsers: User[]) => {
     setUsers((previous) => {
@@ -297,6 +447,58 @@ function LoamApp() {
     });
     void putRecords("users", incomingUsers);
   }, []);
+
+  // A `userUpserted` for the signed-in user (approval clearing `pending`, a new role, or a self-ban)
+  // rides the same event as every other roster change, so keep `currentUser` in sync too.
+  const applyUserUpsert = useCallback(
+    (user: User) => {
+      upsertUsers([user]);
+      setCurrentUser((previous) => (previous.id === user.id ? user : previous));
+    },
+    [upsertUsers],
+  );
+
+  /**
+   * Surface a live incoming message in a non-active conversation (and, best effort, as an OS
+   * notification) so people notice traffic elsewhere. Skips own messages and reactions. Reads the
+   * latest UI state through refs since the WebSocket handler is a stable long-lived closure.
+   */
+  const maybeToastForMessage = useCallback(
+    (message: Message) => {
+      const meId = currentUserIdRef.current;
+
+      if (message.authorId === meId) {
+        return;
+      }
+
+      const key = messageConversationKey(message, meId);
+
+      if (!key) {
+        return;
+      }
+
+      const active = activeConversationRef.current;
+
+      if (active && conversationKey(active) === key) {
+        return;
+      }
+
+      const authorName = usersByIdRef.current.get(message.authorId)?.displayName ?? generateDisplayName(message.authorId);
+      const body = bodyFor(message);
+      let title = authorName;
+      let route = routeForConversation({ kind: "dm", id: message.authorId });
+
+      if (message.type === "channelPost" || message.type === "channelReply") {
+        const channelName = channelsRef.current.find((channel) => channel.id === message.channelId)?.name ?? message.channelId;
+        title = `${authorName} · #${channelName}`;
+        route = routeForConversation({ kind: "channel", id: message.channelId });
+      }
+
+      pushToast({ id: `${message.id}:${Date.now()}`, title, body, route });
+      notifyIfHidden(title, body);
+    },
+    [pushToast],
+  );
 
   const upsertChannels = useCallback((incomingChannels: Channel[]) => {
     setChannels((previous) => {
@@ -692,8 +894,9 @@ function LoamApp() {
       getAllRecords<Channel>("channels"),
       getAllRecords<User>("users"),
       getAllRecords<Message>("messages"),
+      getAllRecords<ConversationReads>("sync"),
     ])
-      .then(([cachedChannels, cachedUsers, cachedMessages]) => {
+      .then(([cachedChannels, cachedUsers, cachedMessages, cachedSync]) => {
         if (!active) {
           return;
         }
@@ -701,6 +904,13 @@ function LoamApp() {
         setChannels(cachedChannels);
         upsertUsers([currentUser, ...cachedUsers]);
         setMessages(cachedMessages.sort(compareCreatedAt));
+
+        const reads = cachedSync.find((record) => record.id === CONVERSATION_READS_KEY)?.reads;
+
+        if (reads) {
+          lastReadRef.current = reads;
+          setLastReadByConversation(reads);
+        }
       })
       .catch(() => undefined);
 
@@ -825,6 +1035,11 @@ function LoamApp() {
 
         if (payload.type === "messageCreated" || payload.type === "messageUpdated") {
           upsertMessages([payload.message]);
+
+          if (payload.type === "messageCreated") {
+            maybeToastForMessage(payload.message);
+          }
+
           return;
         }
 
@@ -855,7 +1070,7 @@ function LoamApp() {
           return;
         }
 
-        upsertUsers([payload.user]);
+        applyUserUpsert(payload.user);
       };
     }
 
@@ -872,12 +1087,13 @@ function LoamApp() {
     };
   }, [
     applyStreamEvent,
+    applyUserUpsert,
     config?.currentUser.id,
+    maybeToastForMessage,
     purgeLocalData,
     removeMessage,
     upsertChannels,
     upsertMessages,
-    upsertUsers,
   ]);
 
   const usersById = useMemo(() => {
@@ -885,6 +1101,7 @@ function LoamApp() {
     indexed.set(currentUser.id, currentUser);
     return indexed;
   }, [currentUser, users]);
+  usersByIdRef.current = usersById;
   const selectedMessages = useMemo(
     () =>
       activeConversation
@@ -892,6 +1109,41 @@ function LoamApp() {
         : [],
     [activeConversation, currentUser.id, messages],
   );
+
+  // Count unread (non-own) messages per conversation: any post/reply/DM newer than the conversation's
+  // last-read timestamp. Reactions never count (they have no conversation key).
+  const unreadByConversation = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    for (const message of messages) {
+      if (message.authorId === currentUser.id) {
+        continue;
+      }
+
+      const key = messageConversationKey(message, currentUser.id);
+
+      if (!key) {
+        continue;
+      }
+
+      if (message.createdAt > (lastReadByConversation[key] ?? 0)) {
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+
+    return counts;
+  }, [currentUser.id, lastReadByConversation, messages]);
+
+  // The active conversation is always "read": mark it on open and whenever fresh traffic arrives
+  // while it is on screen, so its own new messages never light up an unread badge.
+  useEffect(() => {
+    if (!activeConversation) {
+      return;
+    }
+
+    const key = conversationKey(activeConversation);
+    updateLastRead((previous) => ({ ...previous, [key]: Date.now() }));
+  }, [activeConversation?.id, activeConversation?.kind, messages.length, updateLastRead]);
 
   if (wiped) {
     return (
@@ -905,7 +1157,33 @@ function LoamApp() {
     );
   }
 
+  if (currentUser.banned) {
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <h1>Removed from this node</h1>
+          <p>A moderator has removed you. You can no longer post or read here.</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (currentUser.pending) {
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <h1>You&rsquo;re in the queue</h1>
+          <p>Waiting for someone on this node to let you in. This screen updates the moment you&rsquo;re approved.</p>
+          <p className="gate-status">Connection: {connection}</p>
+        </div>
+      </main>
+    );
+  }
+
   return (
+    <>
     <main className={shellClassName}>
       <Sidebar
         activeConversation={activeConversation}
@@ -913,11 +1191,15 @@ function LoamApp() {
         channels={channels}
         connection={connection}
         currentUser={currentUser}
+        joinUrl={config?.joinUrl}
         onCreateChannel={createChannel}
+        unreadByConversation={unreadByConversation}
         users={users}
       />
       {routeState.screen === "admin" ? (
         <AdminView currentUser={currentUser} onChannelUpsert={upsertChannels} onWiped={purgeLocalData} />
+      ) : routeState.screen === "people" ? (
+        <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           config={config}
@@ -925,6 +1207,7 @@ function LoamApp() {
           onClaimAdmin={claimAdmin}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
+          onWipeDevice={purgeLocalData}
         />
       ) : (
         <ConversationView
@@ -977,6 +1260,39 @@ function LoamApp() {
       )}
       {error ? <p className="connection-error">{error}</p> : null}
     </main>
+    <ToastStack onDismiss={dismissToast} toasts={toasts} />
+    </>
+  );
+}
+
+/**
+ * Fixed-position stack of auto-dismissing toasts announcing new messages in non-active
+ * conversations. Tapping a toast opens the conversation and dismisses it.
+ */
+function ToastStack({ onDismiss, toasts }: { onDismiss: (id: string) => void; toasts: ToastItem[] }) {
+  const location = useLocation();
+
+  if (!toasts.length) {
+    return null;
+  }
+
+  return (
+    <div aria-live="polite" className="toast-stack" role="status">
+      {toasts.map((toast) => (
+        <button
+          className="toast"
+          key={toast.id}
+          onClick={() => {
+            location.route(toast.route);
+            onDismiss(toast.id);
+          }}
+          type="button"
+        >
+          <strong className="toast-title">{toast.title}</strong>
+          <span className="toast-body">{toast.body}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -986,7 +1302,9 @@ interface SidebarProps {
   channels: Channel[];
   connection: "connecting" | "live" | "offline";
   currentUser: User;
+  joinUrl?: string;
   onCreateChannel: (name: string) => Promise<boolean>;
+  unreadByConversation: Map<string, number>;
   users: User[];
 }
 
@@ -1006,10 +1324,13 @@ function Sidebar({
   channels,
   connection,
   currentUser,
+  joinUrl,
   onCreateChannel,
+  unreadByConversation,
   users,
 }: SidebarProps) {
   const peers = users.filter((user) => user.id !== currentUser.id);
+  const showPeople = canModerate(currentUser) || canGreet(currentUser);
 
   return (
     <aside className="sidebar">
@@ -1031,7 +1352,8 @@ function Sidebar({
               key={channel.id}
             >
               <span className="nav-glyph">#</span>
-              {channel.name}
+              <span className="nav-label">{channel.name}</span>
+              <UnreadBadge count={unreadByConversation.get(`channel:${channel.id}`) ?? 0} />
             </NavLink>
           ))}
         </nav>
@@ -1048,13 +1370,21 @@ function Sidebar({
               key={user.id}
             >
               <Avatar avatar={user.avatar} id={user.id} />
-              {user.displayName}
+              <span className="nav-label">{user.displayName}</span>
+              <UnreadBadge count={unreadByConversation.get(`dm:${user.id}`) ?? 0} />
             </NavLink>
           ))}
         </nav>
       </section>
 
       <div className="sidebar-footer">
+        {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} /> : null}
+        {showPeople ? (
+          <NavLink active={false} href="/people">
+            <span className="nav-glyph">☺</span>
+            People and moderation
+          </NavLink>
+        ) : null}
         {currentUser.isAdmin ? (
           <NavLink active={false} href="/admin">
             <span className="nav-glyph">⚙</span>
@@ -1143,6 +1473,58 @@ function NewChannelControl({ onCreateChannel }: { onCreateChannel: (name: string
         </button>
       </div>
     </form>
+  );
+}
+
+/**
+ * Small unread-count pill shown at the trailing edge of a channel/DM nav link. Renders nothing when
+ * there is nothing unread; caps the label at 99+.
+ */
+function UnreadBadge({ count }: { count: number }) {
+  if (count <= 0) {
+    return null;
+  }
+
+  return (
+    <span aria-label={`${count} unread`} className="unread-badge">
+      {count > 99 ? "99+" : count}
+    </span>
+  );
+}
+
+/**
+ * Sidebar invite affordance for greeters/admins: a collapsible panel rendering the node's join URL as
+ * a QR (for someone already on the LAN) plus the URL text. WiFi credentials are native-only, so this
+ * only surfaces the URL. Gated by the caller on `canGreet`.
+ */
+function InviteControl({ joinUrl }: { joinUrl?: string }) {
+  const [open, setOpen] = useState(false);
+  const qrSvg = useMemo(
+    () => (joinUrl ? renderQRToSvg(encodeQR(joinUrl), { dark: "#16271f", light: "#ffffff" }) : ""),
+    [joinUrl],
+  );
+
+  if (!joinUrl) {
+    return null;
+  }
+
+  return (
+    <div className="invite-control">
+      <button
+        aria-expanded={open}
+        className="new-channel-toggle"
+        onClick={() => setOpen((previous) => !previous)}
+        type="button"
+      >
+        {open ? "× Hide invite" : "⧉ Invite someone"}
+      </button>
+      {open ? (
+        <div className="invite-panel">
+          <div className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+          <p className="invite-url">{joinUrl}</p>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -2126,12 +2508,14 @@ function SettingsView({
   onClaimAdmin,
   onUpdateCurrentUser,
   onUploadAvatarImage,
+  onWipeDevice,
 }: {
   config?: Config;
   currentUser: User;
   onClaimAdmin: (secret: string) => Promise<void>;
   onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
   onUploadAvatarImage: (blob: Blob) => Promise<void>;
+  onWipeDevice: () => Promise<void>;
 }) {
   const [displayName, setDisplayName] = useState(currentUser.displayName);
   const [avatarKind, setAvatarKind] = useState(currentUser.avatar?.kind === "image" ? "image" : "generated");
@@ -2309,8 +2693,65 @@ function SettingsView({
           currentUser={currentUser}
           onClaimAdmin={onClaimAdmin}
         />
+        {config?.networkConfig.securityProfile === "hardened" ? (
+          <DeviceWipePanel onWipeDevice={onWipeDevice} />
+        ) : null}
       </div>
     </section>
+  );
+}
+
+/**
+ * Local ("wipe this device") kill switch, shown only under the hardened security profile. Erases
+ * this browser's local copy after a typed confirmation; it does not touch the node or other devices
+ * (that is the admin kill switch). Reuses the app's `purgeLocalData` flow.
+ */
+function DeviceWipePanel({ onWipeDevice }: { onWipeDevice: () => Promise<void> }) {
+  const [confirmText, setConfirmText] = useState("");
+  const [wiping, setWiping] = useState(false);
+
+  async function wipe(): Promise<void> {
+    setWiping(true);
+
+    try {
+      await onWipeDevice();
+    } finally {
+      setWiping(false);
+    }
+  }
+
+  return (
+    <div className="profile-panel">
+      <div>
+        <p className="eyebrow">Security</p>
+        <h2>Wipe this device</h2>
+      </div>
+      <div className="danger-zone">
+        <p className="form-note">
+          Erases this browser&rsquo;s local copy — messages, your identity, and cached data. It does
+          not wipe the node or anyone else&rsquo;s device.
+        </p>
+        <label>
+          Type <strong>wipe</strong> to confirm
+          <input
+            autoComplete="off"
+            disabled={wiping}
+            onInput={(event) => setConfirmText(event.currentTarget.value)}
+            value={confirmText}
+          />
+        </label>
+        <div className="profile-actions">
+          <button
+            className="danger-button"
+            disabled={wiping || confirmText.trim() !== "wipe"}
+            onClick={() => void wipe()}
+            type="button"
+          >
+            {wiping ? "Wiping…" : "Wipe this device"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2382,6 +2823,408 @@ function AdminAccessPanel({
       ) : (
         <p className="form-note">Admin claiming is not enabled on this LOAM node.</p>
       )}
+    </div>
+  );
+}
+
+/**
+ * People & moderation surface for admins, moderators, and greeters. Greeters see the pending-join
+ * queue; moderators (and admins) see the full roster with ban / shadow-ban controls; admins also get
+ * role assignment. All gating here is cosmetic — the server enforces every capability.
+ */
+function PeopleView({
+  currentUser,
+  onUsersChanged,
+}: {
+  currentUser: User;
+  onUsersChanged: (users: User[]) => void;
+}) {
+  const greeter = canGreet(currentUser);
+  const moderator = canModerate(currentUser);
+
+  if (!greeter && !moderator) {
+    return (
+      <section className="settings-view">
+        <header className="conversation-header">
+          <NavLink active={false} className="mobile-back" href="/channels">
+            ←
+          </NavLink>
+          <div>
+            <p className="eyebrow">People</p>
+            <h1>Not authorized</h1>
+          </div>
+        </header>
+        <p className="form-note">This area is for greeters, moderators, and admins.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="settings-view">
+      <header className="conversation-header">
+        <NavLink active={false} className="mobile-back" href="/channels">
+          ←
+        </NavLink>
+        <div>
+          <p className="eyebrow">People</p>
+          <h1>People and moderation</h1>
+        </div>
+      </header>
+      <div className="settings-grid">
+        {greeter ? <PendingApprovalsPanel onUsersChanged={onUsersChanged} /> : null}
+        {moderator ? <ModerationPanel currentUser={currentUser} onUsersChanged={onUsersChanged} /> : null}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Parse an array response into validated users, dropping any entries that fail the schema.
+ */
+function parseUserList(payload: unknown): User[] {
+  return Array.isArray(payload)
+    ? payload.flatMap((item) => {
+        const parsed = UserSchema.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      })
+    : [];
+}
+
+/**
+ * Greeter queue: lists users awaiting approval (`GET /api/access/pending`) with Approve / Deny
+ * actions. Pending users are hidden from the normal roster, so this panel fetches its own list and
+ * offers a manual refresh.
+ */
+function PendingApprovalsPanel({ onUsersChanged }: { onUsersChanged: (users: User[]) => void }) {
+  const [pending, setPending] = useState<User[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string>();
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoaded(false);
+    setLoadError(undefined);
+
+    fetchJson<unknown>("/api/access/pending")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        setPending(parseUserList(payload));
+        setLoaded(true);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setLoadError(error instanceof Error ? error.message : "Unable to load pending joins.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [reloadKey]);
+
+  return (
+    <div className="profile-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Access</p>
+          <h2>Pending joins</h2>
+        </div>
+        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
+          Refresh
+        </button>
+      </div>
+      {loadError ? <p className="form-error">{loadError}</p> : null}
+      {!loaded && !loadError ? <p className="form-note">Loading pending joins…</p> : null}
+      {loaded && pending.length === 0 ? <p className="form-note">Nobody is waiting to join.</p> : null}
+      {pending.length > 0 ? (
+        <ul className="moderation-list">
+          {pending.map((user) => (
+            <PendingRow
+              key={user.id}
+              onResolved={(resolved) => {
+                setPending((previous) => previous.filter((entry) => entry.id !== resolved.id));
+                onUsersChanged([resolved]);
+              }}
+              user={user}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One pending-join row: Approve lets the user in; Deny bans them. Holds its own busy/error state so
+ * resolving one person never disturbs another.
+ */
+function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; user: User }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function decide(action: "approve" | "deny"): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+
+    try {
+      const updated = await requestUser("POST", `/api/access/users/${encodeURIComponent(user.id)}/${action}`);
+      onResolved(updated);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to update this person.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li className="moderation-row">
+      <div className="moderation-identity">
+        <Avatar avatar={user.avatar} id={user.id} />
+        <div className="moderation-name">
+          <strong>{user.displayName}</strong>
+          <span>{user.id}</span>
+        </div>
+      </div>
+      <div className="moderation-actions">
+        <button disabled={busy} onClick={() => void decide("approve")} type="button">
+          Approve
+        </button>
+        <button className="danger-button" disabled={busy} onClick={() => void decide("deny")} type="button">
+          Deny
+        </button>
+      </div>
+      {error ? <p className="form-error">{error}</p> : null}
+    </li>
+  );
+}
+
+/**
+ * Moderator roster: the full human user list including banned / shadow-banned people
+ * (`GET /api/moderation/users`) so they can be unbanned. Each row exposes ban / shadow-ban toggles,
+ * and (for admins) role assignment. Controls are hidden for admin targets and for yourself.
+ */
+function ModerationPanel({
+  currentUser,
+  onUsersChanged,
+}: {
+  currentUser: User;
+  onUsersChanged: (users: User[]) => void;
+}) {
+  const [people, setPeople] = useState<User[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string>();
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoaded(false);
+    setLoadError(undefined);
+
+    fetchJson<unknown>("/api/moderation/users")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        setPeople(parseUserList(payload));
+        setLoaded(true);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setLoadError(error instanceof Error ? error.message : "Unable to load people.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [reloadKey]);
+
+  /** Merge an updated user into the roster (preserving order) and the app-wide roster in one step. */
+  const applyUser = useCallback(
+    (user: User) => {
+      setPeople((previous) => {
+        const next = new Map(previous.map((entry) => [entry.id, entry]));
+        next.set(user.id, user);
+        return Array.from(next.values());
+      });
+      onUsersChanged([user]);
+    },
+    [onUsersChanged],
+  );
+
+  return (
+    <div className="profile-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Moderation</p>
+          <h2>People</h2>
+        </div>
+        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
+          Refresh
+        </button>
+      </div>
+      {loadError ? <p className="form-error">{loadError}</p> : null}
+      {!loaded && !loadError ? <p className="form-note">Loading people…</p> : null}
+      {loaded && people.length === 0 ? <p className="form-note">No people to show yet.</p> : null}
+      {people.length > 0 ? (
+        <ul className="moderation-list">
+          {people.map((user) => (
+            <ModerationUserRow currentUser={currentUser} key={user.id} onApply={applyUser} user={user} />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One roster row. Shows the person's identity and state badges; when the target is neither an admin
+ * nor yourself, exposes role checkboxes (admins only) and ban / shadow-ban toggles.
+ */
+function ModerationUserRow({
+  currentUser,
+  onApply,
+  user,
+}: {
+  currentUser: User;
+  onApply: (user: User) => void;
+  user: User;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const protectedTarget = isProtectedTarget(user, currentUser);
+  const roles = new Set<Role>(user.roles ?? []);
+
+  async function run(action: () => Promise<User>): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+
+    try {
+      onApply(await action());
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to update this person.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function setRole(role: Role, checked: boolean): void {
+    const next = new Set(roles);
+
+    if (checked) {
+      next.add(role);
+    } else {
+      next.delete(role);
+    }
+
+    void run(() =>
+      requestUser("PATCH", `/api/admin/users/${encodeURIComponent(user.id)}/roles`, {
+        roles: Array.from(next),
+      }),
+    );
+  }
+
+  function setModeration(update: { banned?: boolean; shadowBanned?: boolean }): void {
+    void run(() => requestUser("PATCH", `/api/moderation/users/${encodeURIComponent(user.id)}`, update));
+  }
+
+  return (
+    <li className="moderation-row">
+      <div className="moderation-identity">
+        <Avatar avatar={user.avatar} id={user.id} />
+        <div className="moderation-name">
+          <strong>{user.displayName}</strong>
+          <span>{user.id}</span>
+        </div>
+        <UserStateBadges user={user} />
+      </div>
+      {protectedTarget ? (
+        <p className="moderation-note">{user.id === currentUser.id ? "That's you." : "Admins can't be moderated."}</p>
+      ) : (
+        <div className="moderation-controls">
+          {canManageRoles(currentUser) ? (
+            <div className="role-toggles">
+              <label className="admin-toggle">
+                <input
+                  checked={roles.has("moderator")}
+                  disabled={busy}
+                  onInput={(event) => setRole("moderator", event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                Moderator
+              </label>
+              <label className="admin-toggle">
+                <input
+                  checked={roles.has("greeter")}
+                  disabled={busy}
+                  onInput={(event) => setRole("greeter", event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                Greeter
+              </label>
+            </div>
+          ) : null}
+          <div className="moderation-actions">
+            <button
+              className={user.banned ? undefined : "danger-button"}
+              disabled={busy}
+              onClick={() => setModeration({ banned: !user.banned })}
+              type="button"
+            >
+              {user.banned ? "Unban" : "Ban"}
+            </button>
+            <button disabled={busy} onClick={() => setModeration({ shadowBanned: !user.shadowBanned })} type="button">
+              {user.shadowBanned ? "Un-shadow-ban" : "Shadow-ban"}
+            </button>
+          </div>
+        </div>
+      )}
+      {error ? <p className="form-error">{error}</p> : null}
+    </li>
+  );
+}
+
+/**
+ * Compact state badges (admin / roles / pending / banned / shadow-banned) for a roster row.
+ */
+function UserStateBadges({ user }: { user: User }) {
+  const badges: { key: string; label: string; className: string }[] = [];
+
+  if (user.isAdmin) {
+    badges.push({ key: "admin", label: "Admin", className: "badge-admin" });
+  }
+
+  for (const role of user.roles ?? []) {
+    badges.push({ key: `role-${role}`, label: role, className: "badge-role" });
+  }
+
+  if (user.pending) {
+    badges.push({ key: "pending", label: "Pending", className: "badge-pending" });
+  }
+
+  if (user.banned) {
+    badges.push({ key: "banned", label: "Banned", className: "badge-banned" });
+  }
+
+  if (user.shadowBanned) {
+    badges.push({ key: "shadow", label: "Shadow-banned", className: "badge-shadow" });
+  }
+
+  if (!badges.length) {
+    return null;
+  }
+
+  return (
+    <div className="state-badges">
+      {badges.map((badge) => (
+        <span className={`state-badge ${badge.className}`} key={badge.key}>
+          {badge.label}
+        </span>
+      ))}
     </div>
   );
 }

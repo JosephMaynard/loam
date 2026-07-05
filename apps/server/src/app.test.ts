@@ -1245,3 +1245,338 @@ describe("message editing API", () => {
     expect((await editMessage(app, author.cookie, "msg_missing", { body: "hi" })).statusCode).toBe(404);
   });
 });
+
+describe("roles, moderation, and join policy", () => {
+  function postChannel(app: LoamApp, cookie: string, body: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId: "general", body },
+    });
+  }
+
+  function setRoles(app: LoamApp, cookie: string, userId: string, roles: string[]): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${userId}/roles`,
+      headers: { cookie },
+      payload: { roles },
+    });
+  }
+
+  function moderate(
+    app: LoamApp,
+    cookie: string,
+    userId: string,
+    payload: Record<string, unknown>,
+  ): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${userId}`,
+      headers: { cookie },
+      payload,
+    });
+  }
+
+  function approve(app: LoamApp, cookie: string, userId: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${userId}/approve`,
+      headers: { cookie },
+    });
+  }
+
+  function deny(app: LoamApp, cookie: string, userId: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${userId}/deny`,
+      headers: { cookie },
+    });
+  }
+
+  /** Open a fresh session and return the cookie together with the full currentUser (incl. pending). */
+  async function fullSession(
+    app: LoamApp,
+  ): Promise<{ cookie: string; user: { id: string; isAdmin: boolean; pending?: boolean } }> {
+    const response = await app.server.inject({ method: "GET", url: "/api/config" });
+    return {
+      cookie: sessionCookie(response),
+      user: (
+        response.json() as { currentUser: { id: string; isAdmin: boolean; pending?: boolean } }
+      ).currentUser,
+    };
+  }
+
+  describe("roles", () => {
+    it("lets an admin set a member's roles", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const member = await newSession(app);
+
+      const granted = await setRoles(app, admin.cookie, member.userId, ["moderator", "greeter"]);
+      expect(granted.statusCode).toBe(200);
+      expect((granted.json() as { roles: string[] }).roles).toEqual(["moderator", "greeter"]);
+    });
+
+    it("rejects role changes from a non-admin", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const member = await newSession(app);
+      const other = await newSession(app);
+
+      expect((await setRoles(app, other.cookie, member.userId, ["moderator"])).statusCode).toBe(403);
+      // Sanity: the admin can, so it is genuinely a permission gate.
+      expect((await setRoles(app, admin.cookie, member.userId, ["moderator"])).statusCode).toBe(200);
+    });
+
+    it("refuses to change an admin's roles and 404s an unknown user", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+
+      expect((await setRoles(app, admin.cookie, admin.userId, ["moderator"])).statusCode).toBe(400);
+      expect((await setRoles(app, admin.cookie, "user.does-not-exist", ["moderator"])).statusCode).toBe(404);
+    });
+
+    it("rejects an invalid roles body", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const member = await newSession(app);
+
+      const bad = await app.server.inject({
+        method: "PATCH",
+        url: `/api/admin/users/${member.userId}/roles`,
+        headers: { cookie: admin.cookie },
+        payload: { roles: ["overlord"] },
+      });
+      expect(bad.statusCode).toBe(400);
+    });
+  });
+
+  describe("moderation", () => {
+    it("lets a moderator ban a member: enforcement holds and sessions are invalidated", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const mod = await newSession(app);
+      const member = await newSession(app);
+
+      // Grant a genuine (non-admin) moderator role so we exercise canModerate via role, not isAdmin.
+      expect((await setRoles(app, admin.cookie, mod.userId, ["moderator"])).statusCode).toBe(200);
+
+      // The member can post before the ban.
+      expect((await postChannel(app, member.cookie, "before the ban")).statusCode).toBe(201);
+
+      const ban = await moderate(app, mod.cookie, member.userId, { banned: true });
+      expect(ban.statusCode).toBe(200);
+      expect((ban.json() as { banned: boolean }).banned).toBe(true);
+
+      // Their next post is forbidden, and their session is gone from the store.
+      const after = await postChannel(app, member.cookie, "after the ban");
+      expect(after.statusCode).toBe(403);
+      expect(app.store.loadSessions().some((session) => session.userId === member.userId)).toBe(false);
+
+      // A banned user is no longer a visible participant.
+      const roster = (
+        await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: admin.cookie } })
+      ).json() as { id: string }[];
+      expect(roster.some((user) => user.id === member.userId)).toBe(false);
+    });
+
+    it("refuses to ban an admin or oneself", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const mod = await newSession(app);
+      await setRoles(app, admin.cookie, mod.userId, ["moderator"]);
+
+      expect((await moderate(app, mod.cookie, admin.userId, { banned: true })).statusCode).toBe(403);
+      expect((await moderate(app, mod.cookie, mod.userId, { banned: true })).statusCode).toBe(403);
+      expect((await moderate(app, admin.cookie, admin.userId, { banned: true })).statusCode).toBe(403);
+    });
+
+    it("requires moderator (or admin) rights and a non-empty body", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const member = await newSession(app);
+
+      expect((await moderate(app, member.cookie, admin.userId, { banned: true })).statusCode).toBe(403);
+      // Empty moderation body (neither banned nor shadowBanned) is a bad request.
+      expect((await moderate(app, admin.cookie, member.userId, {})).statusCode).toBe(400);
+      expect((await moderate(app, admin.cookie, "user.nope", { banned: true })).statusCode).toBe(404);
+    });
+
+    it("shadow-ban lets the author keep posting while withholding the message from others", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const member = await newSession(app);
+
+      const shadow = await moderate(app, admin.cookie, member.userId, { shadowBanned: true });
+      expect(shadow.statusCode).toBe(200);
+      expect((shadow.json() as { shadowBanned: boolean }).shadowBanned).toBe(true);
+
+      // The author is allowed through: the message is created and persisted (returned to them).
+      const post = await postChannel(app, member.cookie, "am I shouting into the void?");
+      expect(post.statusCode).toBe(201);
+      const messageId = (post.json() as { message: { id: string } }).message.id;
+      expect(app.store.loadMessages().some((message) => message.id === messageId)).toBe(true);
+
+      // A shadow-banned user stays a visible participant — only their messages are withheld (via the
+      // socket broadcast filter). The flag is observable to moderators.
+      const roster = (
+        await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: admin.cookie } })
+      ).json() as { id: string; shadowBanned?: boolean }[];
+      expect(roster.find((user) => user.id === member.userId)?.shadowBanned).toBe(true);
+
+      // Un-shadow-ban clears the flag.
+      const restore = await moderate(app, admin.cookie, member.userId, { shadowBanned: false });
+      expect((restore.json() as { shadowBanned?: boolean }).shadowBanned).toBe(false);
+    });
+
+    it("exposes the full human roster (incl. banned) to moderators only", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const member = await newSession(app);
+      await moderate(app, admin.cookie, member.userId, { banned: true });
+
+      const list = await app.server.inject({
+        method: "GET",
+        url: "/api/moderation/users",
+        headers: { cookie: admin.cookie },
+      });
+      expect(list.statusCode).toBe(200);
+      const users = list.json() as { id: string; banned?: boolean }[];
+      expect(users.find((user) => user.id === member.userId)?.banned).toBe(true);
+
+      // A plain member cannot read the moderation roster.
+      const other = await newSession(app);
+      expect(
+        (
+          await app.server.inject({
+            method: "GET",
+            url: "/api/moderation/users",
+            headers: { cookie: other.cookie },
+          })
+        ).statusCode,
+      ).toBe(403);
+    });
+  });
+
+  describe("join policy (approval)", () => {
+    it("marks fresh non-admin sessions pending and blocks their posts until approved", async () => {
+      const app = await makeApp({ access: { joinPolicy: "approval" } });
+
+      // firstUser bootstrap: the first session becomes admin and is never pending.
+      const admin = await fullSession(app);
+      expect(admin.user.isAdmin).toBe(true);
+      expect(admin.user.pending).toBeUndefined();
+
+      // The next session is a pending newcomer.
+      const newcomer = await fullSession(app);
+      expect(newcomer.user.isAdmin).toBe(false);
+      expect(newcomer.user.pending).toBe(true);
+
+      // A pending user cannot post.
+      expect((await postChannel(app, newcomer.cookie, "hello?")).statusCode).toBe(403);
+
+      // The greeter (admin) sees the newcomer in the pending queue; a pending user cannot.
+      const pending = await app.server.inject({
+        method: "GET",
+        url: "/api/access/pending",
+        headers: { cookie: admin.cookie },
+      });
+      expect(pending.statusCode).toBe(200);
+      expect((pending.json() as { id: string }[]).some((user) => user.id === newcomer.user.id)).toBe(true);
+      expect(
+        (
+          await app.server.inject({
+            method: "GET",
+            url: "/api/access/pending",
+            headers: { cookie: newcomer.cookie },
+          })
+        ).statusCode,
+      ).toBe(403);
+
+      // Approving clears pending; now they can post.
+      const approved = await approve(app, admin.cookie, newcomer.user.id);
+      expect(approved.statusCode).toBe(200);
+      expect((approved.json() as { pending?: boolean }).pending).toBe(false);
+      expect((await postChannel(app, newcomer.cookie, "now I can talk")).statusCode).toBe(201);
+    });
+
+    it("leaves the open join policy ungated", async () => {
+      const app = await makeApp(); // default access.joinPolicy = "open"
+      await newSession(app); // burn the firstUser admin slot
+      const newcomer = await fullSession(app);
+      expect(newcomer.user.pending).toBeUndefined();
+      expect((await postChannel(app, newcomer.cookie, "straight in")).statusCode).toBe(201);
+    });
+
+    it("lets a greeter (not just an admin) approve pending newcomers but not ban", async () => {
+      const app = await makeApp({ access: { joinPolicy: "approval" } });
+      const admin = await newSession(app);
+
+      // Promote a user to greeter: approve them, then grant the role.
+      const greeter = await newSession(app);
+      await approve(app, admin.cookie, greeter.userId);
+      await setRoles(app, admin.cookie, greeter.userId, ["greeter"]);
+
+      const newcomer = await newSession(app);
+      expect((await approve(app, greeter.cookie, newcomer.userId)).statusCode).toBe(200);
+
+      // Greeting is not moderating: the greeter cannot ban.
+      expect((await moderate(app, greeter.cookie, newcomer.userId, { banned: true })).statusCode).toBe(403);
+    });
+
+    it("lets a greeter deny (ban) a pending newcomer and tears their session down", async () => {
+      const app = await makeApp({ access: { joinPolicy: "approval" } });
+      const admin = await newSession(app);
+      const newcomer = await fullSession(app);
+      expect(newcomer.user.pending).toBe(true);
+
+      const denied = await deny(app, admin.cookie, newcomer.user.id);
+      expect(denied.statusCode).toBe(200);
+      const record = denied.json() as { banned: boolean; pending?: boolean };
+      expect(record.banned).toBe(true);
+      expect(record.pending).toBe(false);
+      expect(app.store.loadSessions().some((session) => session.userId === newcomer.user.id)).toBe(false);
+
+      // Denying an admin/self is refused, and a plain member cannot deny at all.
+      expect((await deny(app, admin.cookie, admin.userId)).statusCode).toBe(403);
+      const member = await newSession(app);
+      const another = await fullSession(app);
+      expect((await deny(app, member.cookie, another.user.id)).statusCode).toBe(403);
+
+      // Deny is onboarding-only: once a newcomer is approved they are no longer pending, so denying
+      // them is refused (banning an established member is a moderator action, not a greeter one).
+      await approve(app, admin.cookie, another.user.id);
+      expect((await deny(app, admin.cookie, another.user.id)).statusCode).toBe(400);
+    });
+
+    it("surfaces the join policy and security profile on /api/config", async () => {
+      const app = await makeApp({ access: { joinPolicy: "approval" }, security: { profile: "hardened" } });
+      const config = (
+        await app.server.inject({ method: "GET", url: "/api/config" })
+      ).json() as { networkConfig: { joinPolicy: string; securityProfile: string } };
+      expect(config.networkConfig.joinPolicy).toBe("approval");
+      expect(config.networkConfig.securityProfile).toBe("hardened");
+    });
+
+    it("persists access.joinPolicy through the admin config API and rebroadcasts it", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+
+      const patch = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { access: { joinPolicy: "approval" } },
+      });
+      expect(patch.statusCode).toBe(200);
+      expect((patch.json() as { access: { joinPolicy: string } }).access.joinPolicy).toBe("approval");
+
+      const config = (
+        await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+      ).json() as { networkConfig: { joinPolicy: string } };
+      expect(config.networkConfig.joinPolicy).toBe("approval");
+    });
+  });
+});
