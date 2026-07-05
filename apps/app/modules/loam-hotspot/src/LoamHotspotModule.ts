@@ -11,6 +11,10 @@ declare class LoamHotspotModule extends NativeModule {
   startHotspot(): Promise<HotspotCredentials>;
   /** Closes the hotspot reservation. Safe to call when no hotspot is running. */
   stopHotspot(): void;
+  /** Start a foreground service so the host survives screen-off / backgrounding. Best-effort. */
+  startHostService(): void;
+  /** Stop the foreground host service. */
+  stopHostService(): void;
 }
 
 // Android-only native module: `requireOptionalNativeModule` returns `null` on iOS/web (and any

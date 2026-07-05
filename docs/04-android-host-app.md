@@ -59,6 +59,28 @@ Install on a device/emulator: `adb install -r app/build/outputs/apk/release/app-
 launch it. First cold start takes ~1 minute (asset copy + first `require`); the screen shows
 "Starting host…" until the server answers, then swaps to the WebView.
 
+> **Installing to a phone (not the emulator):** `adb` must list the phone. Enable **Developer
+> options** (Settings → About → tap Build number 7×) → **USB debugging**, accept the *"Allow USB
+> debugging?"* prompt, and use a **data** cable set to *File transfer*. If both a phone and the
+> emulator are connected, target the phone: `adb -s <serial> install -r …` (serials from `adb devices`).
+
+### Hosting from a phone — the two-step join & its gotchas
+The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi QR to connect, then
+**Step 2** scan the URL QR to open LOAM. Real-world gotchas:
+
+- **Don't turn on the phone's own WiFi hotspot / tethering.** Android allows a device to run *either*
+  its personal hotspot *or* a LocalOnlyHotspot, not both — enabling the system hotspot tears LOAM's
+  down. The host may stay **connected to a WiFi network** (station mode) while hosting; that's fine.
+- **Keep the LOAM app in the foreground.** Backgrounding can suspend the hotspot and the embedded
+  server. (Screen-on + app-open is the reliable state.)
+- **The Step-2 address.** LocalOnlyHotspot puts the host at `192.168.49.1` on **stock** Android, but
+  this isn't guaranteed. The launcher (`main.js`) reports the host's real IPv4 addresses over the
+  `loam-hostinfo` channel and the host screen builds the Step-2 QR from the `192.168.49.x` one when
+  present, listing the others underneath. **If Step 2 won't load, try one of the listed addresses**
+  (`http://<addr>:3000`) — and tell us which one worked so we can harden the picker.
+- **Client isolation.** A few hotspot stacks isolate connected clients from the host; if every
+  address fails despite a good WiFi connection, that's the likely cause (device-dependent).
+
 ### Native prebuild (better-sqlite3)
 `fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) pins `better-sqlite3@12.10.0` and downloads
 the matching ABI-108 (Node 18) android-arm64 binary from

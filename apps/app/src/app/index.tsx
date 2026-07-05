@@ -1,4 +1,5 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, Platform, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -8,16 +9,36 @@ import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { startHostService } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot IP (below).
-const LOAM_URL = 'http://localhost:3000';
-// Android's WifiManager.LocalOnlyHotspot always assigns the host device this fixed gateway IP, so a
-// joiner on the hotspot reaches the embedded server here (docs/04). Known before the hotspot even
-// starts, which is why Step 2's URL QR can render regardless of hotspot success.
-const HOTSPOT_GATEWAY_URL = 'http://192.168.49.1:3000';
+const SERVER_PORT = 3000;
+const LOAM_URL = `http://localhost:${SERVER_PORT}`;
+// Fallback join address: stock Android LocalOnlyHotspot puts the host at this fixed gateway IP, but
+// that isn't guaranteed across devices. The launcher reports the host's real addresses over the
+// `loam-hostinfo` channel and we prefer those; this is the last-resort default so a QR always renders.
+const HOTSPOT_GATEWAY_FALLBACK = `http://192.168.49.1:${SERVER_PORT}`;
 // Cold start is ~80s (docs/04); give it comfortably more before declaring the runtime hung.
 const STARTUP_TIMEOUT_MS = 150_000;
+
+/**
+ * Build the Step-2 join URL from the host's real reported addresses, in order of how likely a joiner
+ * is to reach it: (1) the stock LocalOnlyHotspot AP address; (2) a regular LAN address — the common
+ * case when the host is on an existing WiFi (home/office/venue), which is what actually works when
+ * everyone shares that network; (3) any other private address; (4) whatever was reported. Only when
+ * nothing has been reported yet do we fall back to the documented hotspot default.
+ */
+function hotspotJoinUrl(addresses: string[]): string {
+  const isPrivate10or172 = (address: string) =>
+    address.startsWith('10.') || /^172\.(1[6-9]|2\d|3[01])\./.test(address);
+  const preferred =
+    addresses.find((address) => address.startsWith('192.168.49.')) ??
+    addresses.find((address) => address.startsWith('192.168.')) ??
+    addresses.find(isPrivate10or172) ??
+    addresses[0];
+  return preferred ? `http://${preferred}:${SERVER_PORT}` : HOTSPOT_GATEWAY_FALLBACK;
+}
 
 /** True when `url` belongs to the embedded server's origin (compares origins, not string prefixes). */
 function isLoamUrl(url: string | undefined): boolean {
@@ -33,6 +54,7 @@ function isLoamUrl(url: string | undefined): boolean {
 
 type HostStatus = 'starting' | 'ready' | 'error';
 type StatusPayload = { status?: HostStatus; message?: string };
+type HostInfoPayload = { port?: number; addresses?: string[] };
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
 // and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
@@ -53,7 +75,24 @@ export default function HostScreen() {
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
   const [shareOpen, setShareOpen] = useState(false);
+  // The host's real network addresses, reported by the launcher (loam-hostinfo). Used to build the
+  // Step-2 join QR from the actual hotspot IP instead of a hardcoded guess.
+  const [hostAddresses, setHostAddresses] = useState<string[]>([]);
+  // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
+  const [keepAwake, setKeepAwake] = useState(false);
   const webViewRef = useRef<WebView>(null);
+
+  useEffect(() => {
+    const tag = 'loam-host';
+    if (keepAwake) {
+      void activateKeepAwakeAsync(tag).catch(() => undefined);
+    } else {
+      void deactivateKeepAwake(tag).catch(() => undefined);
+    }
+    return () => {
+      void deactivateKeepAwake(tag).catch(() => undefined);
+    };
+  }, [keepAwake]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -76,6 +115,9 @@ export default function HostScreen() {
         nodeStatus = 'ready';
         setStatus('ready');
         setErrorMessage(undefined);
+        // Keep the host alive when the screen locks (docs/04). Best-effort — a device that refuses
+        // the foreground service just falls back to foreground-only hosting.
+        startHostService();
       } else if (payload?.status === 'error') {
         clearTimeout(startupTimeout);
         nodeStatus = 'error';
@@ -84,7 +126,14 @@ export default function HostScreen() {
       }
     };
 
+    const onHostInfo = (payload: HostInfoPayload) => {
+      if (Array.isArray(payload?.addresses)) {
+        setHostAddresses(payload.addresses.filter((address): address is string => typeof address === 'string'));
+      }
+    };
+
     nodejs.channel.addListener('loam-status', onStatus);
+    nodejs.channel.addListener('loam-hostinfo', onHostInfo);
 
     if (!nodeStarted) {
       nodeStarted = true;
@@ -95,8 +144,21 @@ export default function HostScreen() {
     return () => {
       clearTimeout(startupTimeout);
       nodejs.channel.removeListener('loam-status', onStatus);
+      nodejs.channel.removeListener('loam-hostinfo', onHostInfo);
     };
   }, []);
+
+  // Ask the launcher for fresh addresses whenever the Share overlay opens — that's when the hotspot
+  // starts and its AP interface (and address) appears.
+  useEffect(() => {
+    if (shareOpen) {
+      try {
+        nodejs.channel.post('loam-hostinfo-request');
+      } catch {
+        // best-effort; the launcher also re-posts on an interval
+      }
+    }
+  }, [shareOpen]);
 
   // A WebView load failure after the node is ready is usually transient (page fetched mid-cold-start).
   // Surface the error UI; Retry remounts the WebView (a fresh load) as long as the node is still up.
@@ -176,7 +238,10 @@ export default function HostScreen() {
         <HostShareOverlay
           visible={shareOpen}
           onClose={() => setShareOpen(false)}
-          serverUrl={HOTSPOT_GATEWAY_URL}
+          serverUrl={hotspotJoinUrl(hostAddresses)}
+          addresses={hostAddresses}
+          keepAwake={keepAwake}
+          onKeepAwakeChange={setKeepAwake}
         />
       </SafeAreaView>
     );

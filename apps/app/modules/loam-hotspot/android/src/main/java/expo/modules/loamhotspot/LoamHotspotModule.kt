@@ -46,6 +46,34 @@ class LoamHotspotModule : Module() {
       releaseReservation()
     }
 
+    // Start/stop the foreground service that keeps the host alive while the screen is off (docs/04).
+    // Best-effort: a failure is logged and leaves the app in its normal foreground-only state.
+    Function("startHostService") {
+      val context = appContext.reactContext?.applicationContext
+      if (context == null) {
+        android.util.Log.w("LoamHotspot", "startHostService failed: no application context")
+      } else {
+        try {
+          LoamHostService.start(context)
+        } catch (error: Throwable) {
+          android.util.Log.w("LoamHotspot", "startHostService failed", error)
+        }
+      }
+    }
+
+    Function("stopHostService") {
+      val context = appContext.reactContext?.applicationContext
+      if (context == null) {
+        android.util.Log.w("LoamHotspot", "stopHostService failed: no application context")
+      } else {
+        try {
+          LoamHostService.stop(context)
+        } catch (error: Throwable) {
+          android.util.Log.w("LoamHotspot", "stopHostService failed", error)
+        }
+      }
+    }
+
     // The runtime is one hotspot per process; make sure we don't leak the reservation when the
     // module is torn down (app backgrounded/reloaded).
     OnDestroy {

@@ -25,6 +25,8 @@ export type HostState = {
   hotspotError?: string;
   /** The LAN URL where the served client is reachable once the hotspot is up. */
   serverUrl?: string;
+  /** All detected host IPv4 addresses, listed under Step 2 so a joiner can try another if needed. */
+  addresses?: string[];
 };
 
 const STATUS_LABEL: Record<HostState['status'], string> = {
@@ -54,10 +56,16 @@ export function HostPanel({ state }: { state: HostState }) {
         <ThemedText type="small">{STATUS_LABEL[state.status]}</ThemedText>
       </ThemedView>
 
+      <ThemedText type="small" themeColor="textSecondary" style={styles.rationale}>
+        Android requires location permission to create a WiFi hotspot. LOAM never uses, requests, or
+        stores your location — it only turns the hotspot on.
+      </ThemedText>
+
       <ThemedView type="backgroundElement" style={styles.step}>
         <ThemedText type="subtitle">Step 1 · Join the WiFi</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          Scan with the phone camera to connect to this host&apos;s hotspot.
+          Scan with the phone camera to connect to this host&apos;s hotspot. Keep LOAM open, and
+          don&apos;t switch on your phone&apos;s own WiFi hotspot — it replaces this one.
         </ThemedText>
         {wifi ? (
           <>
@@ -88,6 +96,11 @@ export function HostPanel({ state }: { state: HostState }) {
             <ThemedText type="code" style={styles.manual}>
               {state.serverUrl}
             </ThemedText>
+            {state.addresses && state.addresses.length > 0 ? (
+              <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
+                If that doesn&apos;t load, this host is also at: {state.addresses.join(', ')}
+              </ThemedText>
+            ) : null}
           </>
         ) : (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
@@ -107,6 +120,10 @@ const styles = StyleSheet.create({
   },
   title: {
     textAlign: 'center',
+  },
+  rationale: {
+    textAlign: 'center',
+    paddingHorizontal: Spacing.two,
   },
   statusPill: {
     paddingHorizontal: Spacing.three,

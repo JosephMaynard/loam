@@ -9,6 +9,7 @@
 // (node_modules/better-sqlite3/). See apps/app/scripts/bundle-server.mjs.
 
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const rnBridge = require('rn-bridge');
 
@@ -34,6 +35,37 @@ function notify(status, extra) {
 }
 
 /**
+ * The host's non-internal IPv4 addresses. The hotspot's AP interface (192.168.49.1 on stock Android
+ * LocalOnlyHotspot, but not guaranteed) only appears once the hotspot is up, so we re-post these
+ * periodically — the host UI builds the Step-2 join QR from the real address rather than a guess.
+ */
+function lanAddresses() {
+  const addresses = [];
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const info of interfaces[name] || []) {
+      if (info && info.family === 'IPv4' && !info.internal) {
+        addresses.push(info.address);
+      }
+    }
+  }
+  return addresses;
+}
+
+/** Report the current network addresses to the host screen (for the Step-2 join QR + diagnostics). */
+function postHostInfo() {
+  try {
+    rnBridge.channel.post('loam-hostinfo', { port: PORT, addresses: lanAddresses() });
+  } catch (err) {
+    console.error('Failed to post host info', err);
+  }
+}
+
+// Answer on-demand requests (the Share overlay asks when it opens) and refresh on an interval so the
+// hotspot AP address is picked up whenever the hotspot comes up, without the host screen polling.
+rnBridge.channel.on('loam-hostinfo-request', postHostInfo);
+
+/**
  * Poll the embedded server until it answers, then tell the host screen it can load the WebView.
  * The server listens asynchronously after require(), so we can't await it here — polling also
  * confirms the HTTP surface is actually serving before the WebView navigates to it.
@@ -45,6 +77,10 @@ function waitForServer(attempt) {
       response.resume();
       if (response.statusCode && response.statusCode < 500) {
         notify('ready', { port: PORT });
+        postHostInfo();
+        // Refresh addresses so the hotspot AP interface is reported once it appears (the user opens
+        // "Share · Host" after boot, which is when the hotspot starts).
+        setInterval(postHostInfo, 5000);
       } else {
         retry(attempt);
       }
