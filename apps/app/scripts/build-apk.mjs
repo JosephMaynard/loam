@@ -28,12 +28,28 @@ const defaultOut = join(appDir, "loam-host.apk");
 function parseOut() {
   const args = process.argv.slice(2);
   const i = args.indexOf("--out");
-  return i >= 0 && args[i + 1] ? resolve(args[i + 1]) : defaultOut;
+  if (i < 0) {
+    return defaultOut;
+  }
+  const value = args[i + 1];
+  if (!value) {
+    console.error("--out was given without a path. Usage: pnpm --filter app apk -- --out <path>");
+    process.exit(1);
+  }
+  return resolve(value);
 }
 
 /** Find a usable JDK/SDK, preferring an existing env var, then the common macOS locations. */
 function resolveEnv() {
   const env = { ...process.env };
+  // A stale JAVA_HOME/ANDROID_HOME pointing at a deleted SDK would otherwise fail deep inside Gradle
+  // with a confusing error; treat a non-existent pre-set path as absent so the fallbacks and the
+  // required-env checks below get a chance to apply instead.
+  for (const key of ["JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT"]) {
+    if (env[key] && !existsSync(env[key])) {
+      delete env[key];
+    }
+  }
   if (!env.JAVA_HOME && platform() === "darwin") {
     const jbr = "/Applications/Android Studio.app/Contents/jbr/Contents/Home";
     if (existsSync(jbr)) env.JAVA_HOME = jbr;

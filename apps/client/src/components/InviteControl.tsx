@@ -29,7 +29,9 @@ export function InviteControl({ joinUrl }: { joinUrl?: string }) {
       </button>
       {open ? (
         <div className="invite-panel">
-          <div className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+          {/* The QR is a visual shortcut for the URL below it; hide it from assistive tech so screen
+              readers announce the actual join URL rather than raw SVG. */}
+          <div aria-hidden="true" className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
           <p className="invite-url">{joinUrl}</p>
         </div>
       ) : null}

@@ -593,7 +593,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const fileUpdate = parseConfigUpdate(raw, configPath);
 
       if (fileUpdate) {
-        config = mergeConfig(config, fileUpdate);
+        // Same reconciliation as the persisted path: a hand-authored config.json that pins a preset
+        // profile *and* sets an explicit kill switch / approval / TTL keeps those explicit settings
+        // (effective profile → custom) rather than letting the preset silently override them. The
+        // file is the operator's own source, so we don't rewrite it — just resolve it in memory.
+        const { update: reconciled, changed } = reconcileLegacyProfile(fileUpdate);
+        if (changed) {
+          server.log.warn(
+            `${configPath} pins a security profile but also sets explicit access/retention/kill-switch values; keeping the explicit settings (effective profile: custom).`,
+          );
+        }
+        config = mergeConfig(config, reconciled);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {

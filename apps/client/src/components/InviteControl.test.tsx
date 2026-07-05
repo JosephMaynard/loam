@@ -50,8 +50,10 @@ describe("InviteControl", () => {
 
     expect(toggle?.getAttribute("aria-expanded")).toBe("true");
     expect(root.querySelector(".invite-url")?.textContent).toBe("http://192.168.0.5:3000");
-    // The QR is rendered as inline SVG markup, not an external asset.
+    // The QR is rendered as inline SVG markup, not an external asset, and hidden from assistive tech
+    // (the URL text is the accessible content).
     expect(root.querySelector(".invite-qr svg")).not.toBeNull();
+    expect(root.querySelector(".invite-qr")?.getAttribute("aria-hidden")).toBe("true");
 
     toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await tick();

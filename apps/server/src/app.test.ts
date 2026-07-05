@@ -1651,6 +1651,16 @@ describe("security profiles", () => {
     expect(full.killSwitch.enabled).toBe(true);
   });
 
+  it("keeps explicit axes from a config.json that also pins a preset profile (effective: custom)", async () => {
+    // Hand-authored config.json pinning `standard` (kill switch off) alongside an explicitly-armed
+    // kill switch must not have it silently disarmed — the file path reconciles just like the DB one.
+    const app = await makeApp({ security: { profile: "standard" }, killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    const full = await adminConfig(app, admin.cookie);
+    expect(full.security.profile).toBe("custom");
+    expect(full.killSwitch.enabled).toBe(true);
+  });
+
   it("heals a legacy persisted profile that would otherwise silently disarm the kill switch", async () => {
     const { app, dataDir } = await makeApp();
     // Simulate config saved by an older build where the profile was inert: profile `standard` sat
