@@ -85,10 +85,13 @@ export default function HostScreen() {
   useEffect(() => {
     const tag = 'loam-host';
     if (keepAwake) {
-      void activateKeepAwakeAsync(tag);
+      void activateKeepAwakeAsync(tag).catch(() => undefined);
     } else {
       void deactivateKeepAwake(tag).catch(() => undefined);
     }
+    return () => {
+      void deactivateKeepAwake(tag).catch(() => undefined);
+    };
   }, [keepAwake]);
 
   useEffect(() => {
