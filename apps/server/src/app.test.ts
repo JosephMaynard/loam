@@ -1580,3 +1580,91 @@ describe("roles, moderation, and join policy", () => {
     });
   });
 });
+
+describe("security profiles", () => {
+  type FullConfig = {
+    security: { profile: string };
+    access: { joinPolicy: string };
+    retention: { messageTtlMs?: number };
+    killSwitch: { enabled: boolean };
+  };
+
+  async function adminConfig(app: LoamApp, cookie: string): Promise<FullConfig> {
+    return (
+      await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie } })
+    ).json() as FullConfig;
+  }
+
+  it("hardened forces its coherent bundle: approval join, ephemeral TTL, armed kill switch", async () => {
+    const app = await makeApp({ security: { profile: "hardened" } });
+    const admin = await newSession(app);
+    expect(admin.isAdmin).toBe(true);
+
+    const network = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { joinPolicy: string; securityProfile: string } };
+    expect(network.networkConfig.securityProfile).toBe("hardened");
+    expect(network.networkConfig.joinPolicy).toBe("approval");
+
+    const full = await adminConfig(app, admin.cookie);
+    expect(full.access.joinPolicy).toBe("approval");
+    expect(full.retention.messageTtlMs).toBe(3_600_000);
+    expect(full.killSwitch.enabled).toBe(true);
+  });
+
+  it("selecting a profile via PATCH applies the whole bundle even for unspecified axes", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { profile: "hardened" } },
+    });
+    expect(patch.statusCode).toBe(200);
+    const cfg = patch.json() as FullConfig;
+    expect(cfg.security.profile).toBe("hardened");
+    expect(cfg.access.joinPolicy).toBe("approval");
+    expect(cfg.retention.messageTtlMs).toBe(3_600_000);
+    expect(cfg.killSwitch.enabled).toBe(true);
+  });
+
+  it("custom leaves individually-set axes untouched (no forcing)", async () => {
+    const app = await makeApp({
+      security: { profile: "custom" },
+      access: { joinPolicy: "approval" },
+      killSwitch: { enabled: true },
+    });
+    const admin = await newSession(app);
+    const full = await adminConfig(app, admin.cookie);
+    expect(full.security.profile).toBe("custom");
+    expect(full.access.joinPolicy).toBe("approval");
+    expect(full.killSwitch.enabled).toBe(true);
+  });
+
+  it("defaults to custom, so a kill switch set without a profile is preserved", async () => {
+    const app = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    const full = await adminConfig(app, admin.cookie);
+    expect(full.security.profile).toBe("custom");
+    expect(full.killSwitch.enabled).toBe(true);
+  });
+
+  it("heals a legacy persisted profile that would otherwise silently disarm the kill switch", async () => {
+    const { app, dataDir } = await makeApp();
+    // Simulate config saved by an older build where the profile was inert: profile `standard` sat
+    // alongside an explicitly-armed kill switch. The new authoritative `standard` preset would
+    // disarm it, so boot must demote the profile to `custom` and keep the operator's setting.
+    app.store.setConfigValue(
+      "config",
+      JSON.stringify({ security: { profile: "standard" }, killSwitch: { enabled: true } }),
+    );
+
+    const next = await reopenApp(app, dataDir);
+    const admin = await newSession(next);
+    const full = await adminConfig(next, admin.cookie);
+    expect(full.security.profile).toBe("custom");
+    expect(full.killSwitch.enabled).toBe(true);
+  });
+});

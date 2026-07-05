@@ -2,18 +2,23 @@ import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
   AdminBootstrapStrategySchema,
   ChannelSchema,
+  JoinPolicySchema,
   LoamConfigSchema,
   MessageSchema,
+  securityProfilePreset,
+  SecurityProfileSchema,
   UserSchema,
   type Channel,
   type ChannelPostingPolicy,
   type FeatureFlags,
   type IdentityConfig,
+  type JoinPolicy,
   type LoamConfig,
   type Message,
   type MessageCreateRequest,
   type NetworkConfig,
   type Role,
+  type SecurityProfile,
   type StreamEvent,
   type User,
   type UserUpdateRequest,
@@ -25,6 +30,8 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
+import { InviteControl } from "./components/InviteControl";
+import { UnreadBadge } from "./components/UnreadBadge";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
@@ -1473,58 +1480,6 @@ function NewChannelControl({ onCreateChannel }: { onCreateChannel: (name: string
         </button>
       </div>
     </form>
-  );
-}
-
-/**
- * Small unread-count pill shown at the trailing edge of a channel/DM nav link. Renders nothing when
- * there is nothing unread; caps the label at 99+.
- */
-function UnreadBadge({ count }: { count: number }) {
-  if (count <= 0) {
-    return null;
-  }
-
-  return (
-    <span aria-label={`${count} unread`} className="unread-badge">
-      {count > 99 ? "99+" : count}
-    </span>
-  );
-}
-
-/**
- * Sidebar invite affordance for greeters/admins: a collapsible panel rendering the node's join URL as
- * a QR (for someone already on the LAN) plus the URL text. WiFi credentials are native-only, so this
- * only surfaces the URL. Gated by the caller on `canGreet`.
- */
-function InviteControl({ joinUrl }: { joinUrl?: string }) {
-  const [open, setOpen] = useState(false);
-  const qrSvg = useMemo(
-    () => (joinUrl ? renderQRToSvg(encodeQR(joinUrl), { dark: "#16271f", light: "#ffffff" }) : ""),
-    [joinUrl],
-  );
-
-  if (!joinUrl) {
-    return null;
-  }
-
-  return (
-    <div className="invite-control">
-      <button
-        aria-expanded={open}
-        className="new-channel-toggle"
-        onClick={() => setOpen((previous) => !previous)}
-        type="button"
-      >
-        {open ? "× Hide invite" : "⧉ Invite someone"}
-      </button>
-      {open ? (
-        <div className="invite-panel">
-          <div className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-          <p className="invite-url">{joinUrl}</p>
-        </div>
-      ) : null}
-    </div>
   );
 }
 
@@ -3232,7 +3187,7 @@ function UserStateBadges({ user }: { user: User }) {
 const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
   ["enablePublicChannels", "Public channels"],
   ["enablePrivateChannels", "Private channels (not implemented yet)"],
-  ["enableUserChannels", "User-created channels (not implemented yet)"],
+  ["enableUserChannels", "User-created channels"],
   ["enableReplies", "Thread replies"],
   ["enableDMs", "Direct messages"],
   ["enableReactions", "Reactions"],
@@ -3245,6 +3200,31 @@ const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
   ["allowUserAvatarUpload", "Users can upload avatar images"],
   ["allowAdminUserEdit", "Admins can edit other users"],
 ];
+
+/**
+ * Human-facing summary of what each security profile enforces. A named profile bundles the access,
+ * retention, and kill-switch axes (docs/09); `custom` unlocks them for individual editing. Only the
+ * axes LOAM enforces today are described — transport encryption / E2EE are future, which is why
+ * `open` and `standard` currently apply the same settings.
+ */
+const SECURITY_PROFILE_LABELS: Record<SecurityProfile, { title: string; summary: string }> = {
+  open: {
+    title: "Open",
+    summary: "Anyone joins and posts immediately. Messages are kept and the kill switch is off — maximum access, for disaster-relief style use.",
+  },
+  standard: {
+    title: "Standard",
+    summary: "Anyone with the join link participates; messages are kept and the kill switch is off. (Same enforced settings as Open until transport encryption lands.)",
+  },
+  hardened: {
+    title: "Hardened",
+    summary: "New joiners must be approved, messages expire after 1 hour, and the kill switch is armed. For high-risk use.",
+  },
+  custom: {
+    title: "Custom",
+    summary: "Set who can join, message retention, and the kill switch individually in the sections below.",
+  },
+};
 
 /**
  * Admin-only configuration area: edits node feature flags, identity permissions, LLM settings, and
@@ -3331,6 +3311,7 @@ function AdminView({
         },
         retention: { messageTtlMs: adminConfig.retention.messageTtlMs ?? null },
         security: adminConfig.security,
+        access: adminConfig.access,
       };
       const response = await fetch(apiUrl("/api/admin/config"), {
         method: "PATCH",
@@ -3392,6 +3373,36 @@ function AdminView({
   function setKillSwitch(update: Partial<LoamConfig["killSwitch"]>): void {
     setAdminConfig((previous) =>
       previous ? { ...previous, killSwitch: { ...previous.killSwitch, ...update } } : previous,
+    );
+  }
+
+  /**
+   * Switch the security profile. A named profile (open/standard/hardened) is a coherent bundle, so
+   * we mirror the server by applying its access/retention/kill-switch axes locally — the form then
+   * shows exactly what will be enforced. `custom` unlocks those axes for individual editing.
+   */
+  function setSecurityProfile(profile: SecurityProfile): void {
+    setAdminConfig((previous) => {
+      if (!previous) {
+        return previous;
+      }
+      const preset = securityProfilePreset(profile);
+      if (!preset) {
+        return { ...previous, security: { ...previous.security, profile } };
+      }
+      return {
+        ...previous,
+        security: { ...previous.security, profile },
+        access: { ...previous.access, joinPolicy: preset.joinPolicy },
+        retention: { messageTtlMs: preset.messageTtlMs ?? undefined },
+        killSwitch: { ...previous.killSwitch, enabled: preset.killSwitchEnabled },
+      };
+    });
+  }
+
+  function setJoinPolicy(joinPolicy: JoinPolicy): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, access: { ...previous.access, joinPolicy } } : previous,
     );
   }
 
@@ -3479,6 +3490,47 @@ function AdminView({
             void save();
           }}
         >
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Security</p>
+              <h2>Profile</h2>
+            </div>
+            <label>
+              Posture
+              <select
+                disabled={saving}
+                onInput={(event) =>
+                  setSecurityProfile(SecurityProfileSchema.parse(event.currentTarget.value))
+                }
+                value={adminConfig.security.profile}
+              >
+                {SecurityProfileSchema.options.map((profile) => (
+                  <option key={profile} value={profile}>
+                    {SECURITY_PROFILE_LABELS[profile].title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="form-note">{SECURITY_PROFILE_LABELS[adminConfig.security.profile].summary}</p>
+            <label>
+              Who can join
+              <select
+                disabled={saving || adminConfig.security.profile !== "custom"}
+                onInput={(event) => setJoinPolicy(JoinPolicySchema.parse(event.currentTarget.value))}
+                value={adminConfig.access.joinPolicy}
+              >
+                <option value="open">Open — anyone with the link joins</option>
+                <option value="approval">Approval — a greeter or admin lets people in</option>
+              </select>
+            </label>
+            {adminConfig.security.profile !== "custom" ? (
+              <p className="form-note">
+                Access, retention, and the kill switch are managed by the{" "}
+                <strong>{SECURITY_PROFILE_LABELS[adminConfig.security.profile].title}</strong> profile.
+                Switch to <strong>Custom</strong> to edit them individually.
+              </p>
+            ) : null}
+          </div>
           <div className="profile-panel">
             <div>
               <p className="eyebrow">Features</p>
@@ -3570,7 +3622,7 @@ function AdminView({
             <label>
               Delete messages after (minutes; blank = keep forever)
               <input
-                disabled={saving}
+                disabled={saving || adminConfig.security.profile !== "custom"}
                 min={1}
                 onInput={(event) => {
                   const minutes = Number.parseInt(event.currentTarget.value, 10);
@@ -3607,7 +3659,7 @@ function AdminView({
             <label className="admin-toggle">
               <input
                 checked={adminConfig.killSwitch.enabled}
-                disabled={saving}
+                disabled={saving || adminConfig.security.profile !== "custom"}
                 onInput={(event) => setKillSwitch({ enabled: event.currentTarget.checked })}
                 type="checkbox"
               />

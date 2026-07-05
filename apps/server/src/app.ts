@@ -22,6 +22,7 @@ import {
   ModerationUpdateRequestSchema,
   PanicRequestSchema,
   RolesUpdateRequestSchema,
+  securityProfilePreset,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -200,7 +201,10 @@ export function defaultLoamConfig(): LoamConfig {
     },
     retention: {},
     security: {
-      profile: "standard",
+      // Default to `custom` (individual axes, no forcing) so a fresh node behaves exactly as its raw
+      // defaults and an operator can set join/retention/kill-switch directly without a named profile
+      // silently overriding them. Selecting open/standard/hardened opts into the coherent bundle.
+      profile: "custom",
     },
     access: {
       joinPolicy: "open",
@@ -252,7 +256,46 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     : undefined;
 
   merged.retention.messageTtlMs = merged.retention.messageTtlMs ?? undefined;
+
+  // A named security profile (anything but `custom`) is authoritative for the axes it bundles: force
+  // them onto the effective config so the profile actually drives behaviour and can't be silently
+  // contradicted by a stale or hand-edited individual axis. `custom` leaves the raw axes untouched.
+  const preset = securityProfilePreset(merged.security.profile);
+  if (preset) {
+    merged.access.joinPolicy = preset.joinPolicy;
+    merged.retention.messageTtlMs = preset.messageTtlMs ?? undefined;
+    merged.killSwitch.enabled = preset.killSwitchEnabled;
+  }
+
   return LoamConfigSchema.parse(merged);
+}
+
+/**
+ * One-time migration for configs written before the security profile became authoritative. Back then
+ * the profile was inert, so an operator could arm the kill switch, set a message TTL, or require
+ * approval while the profile sat at its `standard` default. Now a named profile *forces* those axes,
+ * which could silently undo such settings — including disarming a kill switch. If a persisted update
+ * pins a non-`custom` profile yet also carries a bundled axis that diverges from what the profile
+ * would force, we preserve the operator's explicit intent by switching the profile to `custom`.
+ *
+ * @returns the (possibly rewritten) update and whether it was changed, so the caller can re-persist.
+ */
+function reconcileLegacyProfile(update: LoamConfigUpdate): { update: LoamConfigUpdate; changed: boolean } {
+  const preset = update.security?.profile ? securityProfilePreset(update.security.profile) : null;
+  if (!preset) {
+    return { update, changed: false };
+  }
+  const killSwitchDiverges =
+    update.killSwitch?.enabled !== undefined && update.killSwitch.enabled !== preset.killSwitchEnabled;
+  const joinDiverges =
+    update.access?.joinPolicy !== undefined && update.access.joinPolicy !== preset.joinPolicy;
+  const ttl = update.retention?.messageTtlMs;
+  const ttlDiverges = ttl !== undefined && (ttl ?? null) !== preset.messageTtlMs;
+
+  if (killSwitchDiverges || joinDiverges || ttlDiverges) {
+    return { update: { ...update, security: { ...update.security, profile: "custom" } }, changed: true };
+  }
+  return { update, changed: false };
 }
 
 const secretHashPrefix = "scrypt:";
@@ -564,7 +607,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const storedUpdate = parseConfigUpdate(stored, "the persisted config table");
 
       if (storedUpdate) {
-        config = mergeConfig(config, storedUpdate);
+        // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
+        // preserve an explicitly-armed kill switch / approval / TTL by demoting the profile to custom.
+        const { update: reconciled, changed } = reconcileLegacyProfile(storedUpdate);
+        config = mergeConfig(config, reconciled);
+        if (changed) {
+          server.log.warn(
+            "Security profile is now authoritative; kept explicit access/retention/kill-switch settings by switching this node's profile to 'custom'.",
+          );
+          store.setConfigValue("config", JSON.stringify(config));
+        }
       }
     }
 

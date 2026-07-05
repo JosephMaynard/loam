@@ -1,5 +1,20 @@
 # 09 — Security profiles (making it all optional without the complexity)
 
+> **Status (2026-07): partially implemented.** The profile is now **authoritative over the axes LOAM
+> enforces today**. `security.profile` (`open`/`standard`/`hardened`/`custom`) is a single source of
+> truth (`SECURITY_PROFILE_PRESETS` + `securityProfilePreset()` in `@loam/schema`); the server forces
+> the bundled axes onto the effective config in `mergeConfig()` (`apps/server/src/app.ts`), and the
+> admin UI has a profile selector that locks the managed axes unless `custom`. **Bundled today:**
+> `access.joinPolicy`, `retention.messageTtlMs`, `killSwitch.enabled`. **Not built yet** (so still
+> *not* bundled): transport encryption / host-key delivery (08), E2EE (07), rotating join QR, at-rest
+> encryption toggle (it's env-driven via `LOAM_DB_KEY`, not profile-driven), identity mode (05).
+> Because transport encryption is the axis that would otherwise separate them, **`open` and `standard`
+> currently apply the same enforced settings**; `hardened` tightens all three (approval join, 1-hour
+> TTL, armed kill switch). The default is `custom` so a fresh node's raw axes are never silently
+> overridden, and `reconcileLegacyProfile()` demotes a legacy persisted preset to `custom` if its
+> stored axes diverge (so this change can't disarm a previously-armed kill switch). The rest of this
+> doc is the original briefing — the full vision the presets grow into as those axes land.
+
 ## The tension
 
 LOAM needs to span a wide range, from **fully open** (a disaster zone: displaced people, no cell
