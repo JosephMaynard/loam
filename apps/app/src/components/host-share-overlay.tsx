@@ -100,8 +100,9 @@ export function HostShareOverlay({
                 <ThemedView style={styles.settingText}>
                   <ThemedText type="smallBold">Kiosk mode</ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    Pins LOAM to the screen so it can&apos;t be left. To exit, hold Back + Recents —
-                    the phone&apos;s own screen-lock PIN is required (set one first).
+                    Pins LOAM to the screen so it can&apos;t be left. To exit, swipe up and hold (or
+                    hold Back + Recents on 3-button nav) — the phone&apos;s own screen-lock PIN is
+                    required (set one first).
                   </ThemedText>
                 </ThemedView>
                 <Switch value={kiosk} onValueChange={onKioskChange} />

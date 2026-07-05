@@ -239,9 +239,9 @@ AOSP-standard address (correct on the overwhelming majority of devices).
 `expo-keep-awake` lock while enabled — for a host taped to a wall showing the join QRs. **Kiosk mode**
 enters Android **screen pinning** (`Activity.startLockTask()`, exposed from `LoamHotspotModule` as
 `startKiosk`/`stopKiosk` and driven by an effect in `index.tsx`) so a passer-by can't wander into
-other apps. Without device-owner provisioning, leaving a pinned app uses the system **Back + Recents**
-gesture, which demands the phone's own screen-lock PIN when one is set — so the host must set a device
-PIN first. Both native calls are best-effort no-ops when unsupported and never throw; the pin is
+other apps. Without device-owner provisioning, leaving a pinned app uses the system exit gesture
+(**swipe up and hold** on gesture nav, or hold **Back + Recents** on 3-button nav), which demands the
+phone's own screen-lock PIN when one is set — so the host must set a device PIN first. Both native calls are best-effort no-ops when unsupported and never throw; the pin is
 released on unmount. The overlay also shows the app **version** (`Constants.expoConfig?.version`).
 
 ## QR codes (mostly already solved)
