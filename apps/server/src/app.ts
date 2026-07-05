@@ -1811,6 +1811,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send({ error: "You cannot deny an admin or yourself" });
     }
 
+    // Deny is an onboarding action, scoped to pending newcomers. Banning an established member is a
+    // moderation action that requires the moderator role (PATCH /api/moderation/users/:id) — without
+    // this guard, a greeter could ban any approved member (privilege escalation).
+    if (!user.pending) {
+      return reply.code(400).send({ error: "Only pending users can be denied" });
+    }
+
     const updated = applyUserModeration(user, { banned: true, pending: false });
     invalidateUserSessions(user.id);
     return updated;

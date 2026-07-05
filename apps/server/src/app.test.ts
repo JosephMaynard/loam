@@ -1541,6 +1541,14 @@ describe("roles, moderation, and join policy", () => {
 
       // Denying an admin/self is refused, and a plain member cannot deny at all.
       expect((await deny(app, admin.cookie, admin.userId)).statusCode).toBe(403);
+      const member = await newSession(app);
+      const another = await fullSession(app);
+      expect((await deny(app, member.cookie, another.user.id)).statusCode).toBe(403);
+
+      // Deny is onboarding-only: once a newcomer is approved they are no longer pending, so denying
+      // them is refused (banning an established member is a moderator action, not a greeter one).
+      await approve(app, admin.cookie, another.user.id);
+      expect((await deny(app, admin.cookie, another.user.id)).statusCode).toBe(400);
     });
 
     it("surfaces the join policy and security profile on /api/config", async () => {
