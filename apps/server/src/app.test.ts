@@ -2155,6 +2155,25 @@ describe("websocket privacy filtering", () => {
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
 
+  /**
+   * Bounded wait for an expected event, so positive assertions don't race CI scheduling the way a
+   * fixed sleep can. Negative assertions ("never delivered") still use `settle` — or first await
+   * the *other* party's copy of the same broadcast, which proves delivery completed.
+   */
+  async function waitFor(check: () => boolean, timeoutMs = 3_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      if (check()) {
+        return true;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    return check();
+  }
+
   it("withholds a shadow-banned author's deleted message body from everyone else", async () => {
     const app = await makeApp();
     const admin = await newSession(app);
@@ -2186,11 +2205,16 @@ describe("websocket privacy filtering", () => {
       headers: { cookie: admin.cookie },
     });
     expect(deleted.statusCode).toBe(200);
-    await settle();
 
     // The delete event carries the full body — it must stay between the author and nobody else.
+    // The author receiving their copy proves the broadcast completed, making the viewer's silence
+    // a real verdict rather than a timing artifact.
+    expect(
+      await waitFor(() =>
+        targetSocket.events.some((event) => event.type === "messageDeleted" && event.messageId === messageId),
+      ),
+    ).toBe(true);
     expect(viewerSocket.events.some((event) => event.type === "messageDeleted")).toBe(false);
-    expect(targetSocket.events.some((event) => event.type === "messageDeleted" && event.messageId === messageId)).toBe(true);
   });
 
   it("rejects a banned user's websocket reconnect", async () => {
@@ -2238,10 +2262,11 @@ describe("websocket privacy filtering", () => {
       url: `/api/access/users/${joiner.userId}/approve`,
       headers: { cookie: admin.cookie },
     });
-    await settle();
     expect(
-      joinerSocket.events.some(
-        (event) => event.type === "userUpserted" && event.user?.id === joiner.userId && event.user?.pending !== true,
+      await waitFor(() =>
+        joinerSocket.events.some(
+          (event) => event.type === "userUpserted" && event.user?.id === joiner.userId && event.user?.pending !== true,
+        ),
       ),
     ).toBe(true);
   });
@@ -2262,11 +2287,11 @@ describe("websocket privacy filtering", () => {
       headers: { cookie: admin.cookie },
       payload: { banned: true },
     });
-    await settle();
 
     const sawBanned = (events: WireEvent[]) =>
       events.some((event) => event.type === "userUpserted" && event.user?.id === target.userId);
-    expect(sawBanned(adminSocket.events)).toBe(true);
+    // The moderator receiving their copy proves the broadcast completed before the negative check.
+    expect(await waitFor(() => sawBanned(adminSocket.events))).toBe(true);
     expect(sawBanned(bystanderSocket.events)).toBe(false);
   });
 });

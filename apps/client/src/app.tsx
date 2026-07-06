@@ -609,6 +609,10 @@ function LoamApp() {
   const reconcileConversationMessages = useCallback(
     (conversation: Conversation, serverMessages: Message[]) => {
       const serverIds = new Set(serverMessages.map((message) => message.id));
+      // Messages created after the server snapshot was taken arrive over the socket while the
+      // fetch is in flight; they are legitimately absent from the list, so never prune anything
+      // newer than the snapshot's newest entry (server timestamps compared to server timestamps).
+      const snapshotEdge = serverMessages.reduce((newest, message) => Math.max(newest, message.createdAt), 0);
       const meId = currentUserIdRef.current;
 
       setMessages((previous) => {
@@ -624,7 +628,7 @@ function LoamApp() {
             isConversationMessage(message, conversation, meId) ||
             (message.type === "reaction" && conversationIds.has(message.targetMessageId));
 
-          if (inConversation && !serverIds.has(message.id)) {
+          if (inConversation && !serverIds.has(message.id) && (snapshotEdge === 0 || message.createdAt <= snapshotEdge)) {
             void deleteRecord("messages", message.id);
             continue;
           }
@@ -1040,6 +1044,19 @@ function LoamApp() {
         );
 
         if (nextConfig.currentUser.banned || nextConfig.currentUser.pending) {
+          // Gated sessions must not keep previously hydrated content around (a banned user's
+          // cached history stays readable otherwise): clear memory and the IndexedDB caches.
+          setChannels([]);
+          setMessages([]);
+
+          for (const storeName of ["channels", "messages"] as const) {
+            const cachedRecords = await getAllRecords<{ id: string }>(storeName).catch(() => []);
+
+            for (const record of cachedRecords) {
+              void deleteRecord(storeName, record.id);
+            }
+          }
+
           return;
         }
 
@@ -1101,10 +1118,21 @@ function LoamApp() {
         : `/api/dms/${encodeURIComponent(activeConversation.id)}`;
 
     const conversation = activeConversation;
+    // Only the latest in-flight request may reconcile: a slow response applying after a newer
+    // sync (conversation switch, reconnect resync) would resurrect or delete the wrong messages.
+    let active = true;
 
     fetchJson<Message[]>(path)
-      .then((nextMessages) => reconcileConversationMessages(conversation, nextMessages))
+      .then((nextMessages) => {
+        if (active) {
+          reconcileConversationMessages(conversation, nextMessages);
+        }
+      })
       .catch((nextError: unknown) => {
+        if (!active) {
+          return;
+        }
+
         // A 404 means the channel does not exist for this user (unknown id, or a private channel
         // they are not a member of) — an empty conversation, not a connectivity problem.
         if (nextError instanceof Error && nextError.message.endsWith("404")) {
@@ -1113,6 +1141,10 @@ function LoamApp() {
 
         setError(nextError instanceof Error ? nextError.message : "Unable to load messages.");
       });
+
+    return () => {
+      active = false;
+    };
   }, [activeConversation?.id, activeConversation?.kind, currentUser.id, reconcileConversationMessages, syncTick]);
 
   useEffect(() => {
