@@ -188,7 +188,12 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.
   Admin: `GET /api/admin/sync`, `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's
   join URL is its sync address.
-- **REST endpoints**: `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
+- **Security headers**: an `onSend` hook sets `X-Content-Type-Options: nosniff` on every response and
+  a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
+  (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session
+  cookie's `Secure` flag tracks the real request protocol (`x-forwarded-proto`/TLS), not `NODE_ENV`.
+- **REST endpoints**: `GET /api/health` (liveness, mints no identity — the Android launcher probes
+  this so it can't consume the `firstUser` admin grant), `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
   `GET/POST /api/channels`, `PATCH /api/channels/:channelId` (owner or admin),
   `GET/POST /api/channels/:channelId/members`,
