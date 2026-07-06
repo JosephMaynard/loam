@@ -4748,9 +4748,19 @@ function SyncStatusPanel() {
 
     fetchJson<unknown>("/api/admin/sync")
       .then((payload) => {
-        if (active) {
-          setReport(parseSyncStatusReport(payload));
+        if (!active) {
+          return;
         }
+
+        const parsed = parseSyncStatusReport(payload);
+
+        if (!parsed) {
+          // Surface contract drift instead of rendering a silently blank panel.
+          setError("The server returned an unrecognised sync status payload.");
+          return;
+        }
+
+        setReport(parsed);
       })
       .catch((loadError: unknown) => {
         if (active) {
@@ -4786,7 +4796,13 @@ function SyncStatusPanel() {
         throw new Error(message);
       }
 
-      setReport(parseSyncStatusReport(payload));
+      const parsed = parseSyncStatusReport(payload);
+
+      if (!parsed) {
+        throw new Error("The server returned an unrecognised sync status payload.");
+      }
+
+      setReport(parsed);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Unable to run sync.");
     } finally {

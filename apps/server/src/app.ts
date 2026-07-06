@@ -1263,12 +1263,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // pending author is blocked until approved (both are `forbidden`, so the endpoint answers 403).
     // A shadow-banned author is allowed through here — the message is created and returned to them
     // normally, and the broadcast filter withholds it from everyone else (see socketCanReceiveEvent).
-    if (author.banned) {
-      return { error: "You have been removed from this node", forbidden: true };
-    }
+    const authorAccessError = participationError(author);
 
-    if (author.pending) {
-      return { error: "Your join is awaiting approval", forbidden: true };
+    if (authorAccessError) {
+      return { error: authorAccessError, forbidden: true };
     }
 
     if (
@@ -1939,7 +1937,44 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     };
   }
 
-  /** GET/POST a peer endpoint with a timeout and schema-validate the response. */
+  /**
+   * Read a peer response body with a hard byte cap, so a misbehaving or malicious peer can't make
+   * this node buffer an arbitrarily large payload.
+   */
+  async function readPeerBody(response: Response, maxBytes: number): Promise<Buffer> {
+    if (!response.body) {
+      return Buffer.alloc(0);
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      total += value.byteLength;
+
+      if (total > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        throw new Error("Peer response too large");
+      }
+
+      chunks.push(value);
+    }
+
+    return Buffer.concat(chunks);
+  }
+
+  // Generous digest/messages ceiling: a full 500-message batch of maximum-size bodies fits well
+  // inside this; anything larger is not a LOAM peer talking in good faith.
+  const maxPeerJsonBytes = 8 * 1024 * 1024;
+
+  /** GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. */
   async function fetchPeerJson<T>(
     peerUrl: string,
     path: string,
@@ -1961,7 +1996,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         throw new Error(`Peer answered ${response.status}`);
       }
 
-      const parsed = schema.safeParse(await response.json());
+      const raw = await readPeerBody(response, maxPeerJsonBytes);
+      const parsed = schema.safeParse(JSON.parse(raw.toString("utf8")));
 
       if (!parsed.success) {
         throw new Error("Peer sent an invalid payload");
@@ -2026,13 +2062,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           continue;
         }
 
-        const bytes = Buffer.from(await response.arrayBuffer());
+        // Bounded read: the cap applies while streaming, not after buffering the whole body.
+        const bytes = await readPeerBody(response, attachmentMaxBytes);
 
-        if (
-          !bytes.length ||
-          bytes.length > attachmentMaxBytes ||
-          !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
-        ) {
+        if (!bytes.length || !avatarImageHasExpectedSignature(bytes, attachment.mimeType)) {
           continue;
         }
 
@@ -2187,9 +2220,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     lastSyncLoopAt = Date.now();
 
     try {
-      for (const peer of appConfig.sync.peers) {
-        await syncWithPeer(peer);
-      }
+      // Peers sync concurrently — syncWithPeer never rejects (it records failures in its own
+      // status entry), and the import path re-checks message existence after its last await, so
+      // interleaved rounds can't double-insert.
+      await Promise.all(appConfig.sync.peers.map((peer) => syncWithPeer(peer)));
     } finally {
       syncRunning = false;
     }

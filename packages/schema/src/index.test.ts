@@ -209,6 +209,34 @@ describe("@loam/schema", () => {
         body: "   ",
       }),
     ).toThrow();
+
+    // An image alone is a valid message: an empty/whitespace body passes when attachments are
+    // present, and still fails without them.
+    const attachment = { id: "att_0123456789abcdef", mimeType: "image/webp" };
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "channelPost",
+        channelId: "chn_general",
+        body: "",
+        attachments: [attachment],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "dm",
+        recipientUserId: "usr_456",
+        body: "   ",
+        attachments: [attachment],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "channelPost",
+        channelId: "chn_general",
+        body: "",
+        attachments: [],
+      }),
+    ).toThrow();
   });
 
   it("maps security profiles to coherent axis bundles (custom opts out)", () => {
