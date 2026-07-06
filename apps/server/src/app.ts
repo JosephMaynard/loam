@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
@@ -139,6 +139,8 @@ export type LoamApp = {
   adminSetupCode?: string;
   /** Delete messages older than the configured retention TTL now (also runs on a timer). */
   reapExpiredMessages(): void;
+  /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
+  reapOrphanedAttachments(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -583,9 +585,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
-  // Uploaded-but-unattached attachment ids → uploader. A message may only reference the uploader's
-  // own pending uploads; each id is consumed on first use (RAM-only: a restart orphans pending ids).
-  const attachmentOwners = new Map<string, string>();
+  // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
+  // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
+  // restart loses (and uploads abandoned past the grace period) are swept by
+  // reapOrphanedAttachments, so unclaimed files never accumulate on disk.
+  const attachmentOwners = new Map<string, { userId: string; uploadedAt: number }>();
+  const attachmentPendingGraceMs = 15 * 60_000;
   // Message ids deliberately deleted on this node — node-to-node sync never re-imports these.
   const tombstones = new Set<string>();
   // Per-peer sync bookkeeping for the admin UI (RAM-only).
@@ -852,18 +857,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * Whether a user may moderate others (ban / shadow-ban / unban non-admins): admins always can,
-   * as can anyone granted the `moderator` role.
+   * as can anyone granted the `moderator` role — unless they are themselves banned or pending
+   * (a banned moderator's lingering session must not keep its powers).
    */
   function canModerate(user: User): boolean {
-    return user.isAdmin || !!user.roles?.includes("moderator");
+    return !user.banned && !user.pending && (user.isAdmin || !!user.roles?.includes("moderator"));
   }
 
   /**
    * Whether a user may greet newcomers (approve / deny pending users, see the in-client join QR):
-   * admins always can, as can anyone granted the `greeter` role.
+   * admins always can, as can anyone granted the `greeter` role. Banned/pending users never can.
    */
   function canGreet(user: User): boolean {
-    return user.isAdmin || !!user.roles?.includes("greeter");
+    return !user.banned && !user.pending && (user.isAdmin || !!user.roles?.includes("greeter"));
   }
 
   /**
@@ -1292,7 +1298,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // guessed/leaked id can't attach someone else's image or double-reference a file whose
       // deletion would break another message.
       for (const attachment of input.attachments) {
-        if (attachmentOwners.get(attachment.id) !== authorId) {
+        if (attachmentOwners.get(attachment.id)?.userId !== authorId) {
           return { error: "Unknown attachment" };
         }
       }
@@ -1781,6 +1787,53 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Delete attachment files no message references and no fresh pending upload claims: uploads
+   * whose send was abandoned (past the grace period) and files orphaned by a restart (the pending
+   * map is RAM-only, so at boot every unreferenced file is an orphan). Runs at boot and on the
+   * reaper timer.
+   */
+  async function reapOrphanedAttachments(): Promise<void> {
+    let files: string[];
+
+    try {
+      files = await readdir(attachmentsDir);
+    } catch {
+      return; // No attachments directory yet — nothing uploaded.
+    }
+
+    const referenced = new Set<string>();
+
+    for (const message of data.messages) {
+      if (message.type !== "reaction") {
+        for (const attachment of message.attachments ?? []) {
+          referenced.add(attachment.id);
+        }
+      }
+    }
+
+    const now = Date.now();
+
+    for (const fileName of files) {
+      const parsed = parseAttachmentFileName(fileName);
+
+      if (!parsed || referenced.has(parsed.id)) {
+        continue;
+      }
+
+      const pending = attachmentOwners.get(parsed.id);
+
+      if (pending && now - pending.uploadedAt < attachmentPendingGraceMs) {
+        continue;
+      }
+
+      attachmentOwners.delete(parsed.id);
+      await rm(join(attachmentsDir, fileName), { force: true }).catch((error: unknown) =>
+        server.log.warn(error),
+      );
+    }
+  }
+
+  /**
    * Collects a message together with everything that deleting it would orphan: reactions targeting
    * it, and — for a channel post that roots a thread — its replies plus the reactions on those.
    */
@@ -1857,19 +1910,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return false;
     }
 
+    // The author check applies to every type — a shadow-banned user's *reactions* are withheld
+    // from local broadcasts too, so they must not leak out through the sync export either.
+    const author = data.users.find((candidate) => candidate.id === message.authorId);
+
+    if (author?.shadowBanned) {
+      return false;
+    }
+
     if (message.type === "reaction") {
       const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
       return !!target && isSyncableMessage(target);
     }
 
     const channel = ensureChannel(message.channelId);
-
-    if (!channel || channel.visibility !== "public" || channel.archived) {
-      return false;
-    }
-
-    const author = data.users.find((candidate) => candidate.id === message.authorId);
-    return !author?.shadowBanned;
+    return !!channel && channel.visibility === "public" && !channel.archived;
   }
 
   /** What this node advertises to pulling peers (see SyncDigestSchema). */
@@ -2016,6 +2071,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         if (!channel || channel.visibility !== "public" || channel.archived) {
           continue;
+        }
+
+        // A reply needs a valid local parent in the same channel (posts sort first, so a parent
+        // in the same batch already landed). A parent we tombstoned or never had stays deleted —
+        // and takes its replies with it, matching the local cascade semantics.
+        if (message.type === "channelReply") {
+          const parent = data.messages.find((candidate) => candidate.id === message.parentMessageId);
+
+          if (!parent || parent.type !== "channelPost" || parent.channelId !== message.channelId) {
+            continue;
+          }
         }
 
         await importPeerAttachments(peerUrl, message);
@@ -2173,12 +2239,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     adminSetupCode = makeAdminSetupCode();
   }
 
+  void reapOrphanedAttachments();
+
   const reaperTimer = setInterval(() => {
     try {
       reapExpiredMessages();
     } catch (error) {
       server.log.error(error);
     }
+
+    void reapOrphanedAttachments().catch((error: unknown) => server.log.error(error));
   }, 30_000);
 
   // Sync ticker: a fixed 5s heartbeat; runSyncLoop itself enforces the configured interval (so an
@@ -2514,7 +2584,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       };
       await mkdir(attachmentsDir, { recursive: true });
       await writeFile(join(attachmentsDir, attachmentFileName(attachment)), image);
-      attachmentOwners.set(attachment.id, currentUser.id);
+      attachmentOwners.set(attachment.id, { userId: currentUser.id, uploadedAt: Date.now() });
       return reply.code(201).send(attachment);
     },
   );
@@ -2527,6 +2597,36 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (!attachment) {
         return reply.code(404).send({ error: "Attachment does not exist" });
+      }
+
+      // Audience-gate the file exactly like its owning message: attachments on public messages
+      // are anonymously fetchable (peer nodes copy them without a session); DM / private-channel
+      // attachments are only served to the people who may read the message. A pending upload
+      // (no owning message yet) is visible only to its uploader.
+      const owningMessage = data.messages.find(
+        (message) =>
+          message.type !== "reaction" && !!message.attachments?.some((entry) => entry.id === attachment.id),
+      );
+      const sessionUserId = getSessionUserIdFromRequest(request);
+
+      if (!owningMessage) {
+        if (!sessionUserId || attachmentOwners.get(attachment.id)?.userId !== sessionUserId) {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
+      } else if (!isSyncableMessage(owningMessage)) {
+        const user = sessionUserId
+          ? data.users.find((candidate) => candidate.id === sessionUserId)
+          : undefined;
+
+        if (!user || participationError(user)) {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
+
+        const audience = messageAudienceUserIds(owningMessage);
+
+        if (audience && !audience.has(user.id)) {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
       }
 
       try {
@@ -2857,6 +2957,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.delete<{ Params: { messageId: string } }>("/api/messages/:messageId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const target = data.messages.find((message) => message.id === request.params.messageId);
 
     if (!target) {
@@ -2895,6 +3001,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.patch<{ Params: { messageId: string } }>("/api/messages/:messageId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const target = data.messages.find((message) => message.id === request.params.messageId);
 
     if (!target) {
@@ -3118,6 +3230,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Rename / re-configure / archive a channel. Allowed for an admin or the channel's owner.
   server.patch<{ Params: { channelId: string } }>("/api/channels/:channelId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel) {
@@ -3184,6 +3302,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     },
     adminSetupCode,
     reapExpiredMessages,
+    reapOrphanedAttachments,
     async close() {
       clearInterval(reaperTimer);
       clearInterval(syncTimer);

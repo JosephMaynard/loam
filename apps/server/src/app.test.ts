@@ -2686,3 +2686,201 @@ describe("node-to-node sync", () => {
     expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("keep me (edited)");
   });
 });
+
+describe("attachment + sync review hardening", () => {
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  async function uploadAttachment(app: LoamApp, cookie: string) {
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie },
+      payload: { mimeType: "image/png", data: tinyPng },
+    });
+    return response.json() as { id: string; mimeType: string };
+  }
+
+  it("audience-gates attachment downloads like their owning message", async () => {
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const eve = await newSession(app);
+
+    // A DM attachment: participants can fetch it, a third party (or no session) cannot.
+    const dmAttachment = await uploadAttachment(app, alice.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "dm", recipientUserId: bob.userId, body: "look", attachments: [dmAttachment] },
+    });
+
+    const path = `/api/attachments/${dmAttachment.id}.png`;
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: alice.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: bob.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: eve.cookie } })).statusCode).toBe(404);
+    expect((await app.server.inject({ method: "GET", url: path })).statusCode).toBe(404);
+
+    // A public-channel attachment stays anonymously fetchable (peer nodes copy without a session).
+    const publicAttachment = await uploadAttachment(app, alice.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [publicAttachment] },
+    });
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/attachments/${publicAttachment.id}.png` })).statusCode,
+    ).toBe(200);
+
+    // A pending (not yet attached) upload is only visible to its uploader.
+    const pendingAttachment = await uploadAttachment(app, alice.cookie);
+    const pendingPath = `/api/attachments/${pendingAttachment.id}.png`;
+    expect((await app.server.inject({ method: "GET", url: pendingPath, headers: { cookie: alice.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: pendingPath, headers: { cookie: eve.cookie } })).statusCode).toBe(404);
+  });
+
+  it("sweeps orphaned attachment files but keeps referenced and fresh-pending ones", async () => {
+    const { app, dataDir } = await makeApp();
+    const session = await newSession(app);
+    const attachmentsDir = join(dataDir, "attachments");
+
+    // Referenced file: attached to a message — must survive the sweep.
+    const attached = await uploadAttachment(app, session.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attached] },
+    });
+
+    // Fresh pending upload: inside the grace period — must survive.
+    const pending = await uploadAttachment(app, session.cookie);
+
+    // Restart-orphan: a file on disk with no pending entry and no referencing message.
+    mkdirSync(attachmentsDir, { recursive: true });
+    const strayPath = join(attachmentsDir, "att_00000000000000ff.png");
+    writeFileSync(strayPath, Buffer.from(tinyPng, "base64"));
+
+    await app.reapOrphanedAttachments();
+
+    expect(existsSync(join(attachmentsDir, `${attached.id}.png`))).toBe(true);
+    expect(existsSync(join(attachmentsDir, `${pending.id}.png`))).toBe(true);
+    expect(existsSync(strayPath)).toBe(false);
+  });
+
+  it("blocks a banned user from editing or deleting their old messages", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: target.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "before the ban" },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const edit = await app.server.inject({
+      method: "PATCH",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: target.cookie },
+      payload: { body: "rewritten after the ban" },
+    });
+    expect(edit.statusCode).toBe(403);
+
+    const remove = await app.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: target.cookie },
+    });
+    expect(remove.statusCode).toBe(403);
+  });
+
+  it("keeps shadow-banned users' reactions out of the sync export", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const admin = await newSession(app);
+    const shadowed = await newSession(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "react to me" },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+
+    const reacted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: shadowed.cookie },
+      payload: { type: "reaction", targetMessageId: messageId, reaction: "👍" },
+    });
+    const reactionId = (reacted.json() as { message: { id: string } }).message.id;
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${shadowed.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    const digest = (await app.server.inject({ method: "GET", url: "/api/sync/digest" })).json() as {
+      messages: { id: string }[];
+    };
+    expect(digest.messages.some((entry) => entry.id === messageId)).toBe(true);
+    expect(digest.messages.some((entry) => entry.id === reactionId)).toBe(false);
+  });
+
+  it("refuses to import a reply whose parent was tombstoned locally", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const parentPost = await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "thread root" },
+    });
+    const parentId = (parentPost.json() as { message: { id: string } }).message.id;
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+
+    // The puller deletes the imported thread root (tombstoning it)...
+    await puller.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${parentId}`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+
+    // ...then the source grows a reply under that root.
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelReply", channelId: "general", parentMessageId: parentId, body: "late reply" },
+    });
+
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+
+    const bodies = (
+      (
+        await puller.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: pullerAdmin.cookie } })
+      ).json() as { body?: string }[]
+    ).map((message) => message.body ?? "");
+    expect(bodies).not.toContain("thread root");
+    expect(bodies).not.toContain("late reply");
+  });
+});
