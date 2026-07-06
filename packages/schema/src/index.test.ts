@@ -50,6 +50,7 @@ describe("@loam/schema", () => {
         enableDMs: false,
         enableReactions: true,
         enableMarkdown: true,
+        enableAttachments: true,
         enableLLMChat: false,
         enableLLMStreaming: false,
         allowUserDisplayNameEdit: false,
@@ -79,6 +80,7 @@ describe("@loam/schema", () => {
           enableDMs: true,
           enableReactions: true,
           enableMarkdown: true,
+          enableAttachments: true,
         },
         llm: {
           ollama: {
@@ -94,6 +96,7 @@ describe("@loam/schema", () => {
         retention: {},
         security: { profile: "standard" },
         access: { joinPolicy: "open" },
+        sync: { enabled: false, peers: [], intervalMs: 30_000 },
       }),
     ).not.toThrow();
 
@@ -204,6 +207,34 @@ describe("@loam/schema", () => {
         type: "dm",
         recipientUserId: "usr_456",
         body: "   ",
+      }),
+    ).toThrow();
+
+    // An image alone is a valid message: an empty/whitespace body passes when attachments are
+    // present, and still fails without them.
+    const attachment = { id: "att_0123456789abcdef", mimeType: "image/webp" };
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "channelPost",
+        channelId: "chn_general",
+        body: "",
+        attachments: [attachment],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "dm",
+        recipientUserId: "usr_456",
+        body: "   ",
+        attachments: [attachment],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      MessageCreateRequestSchema.parse({
+        type: "channelPost",
+        channelId: "chn_general",
+        body: "",
+        attachments: [],
       }),
     ).toThrow();
   });

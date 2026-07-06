@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
 import {
   AdminClaimRequestSchema,
+  AttachmentUploadRequestSchema,
   AvatarImageUploadRequestSchema,
   ChannelCreateRequestSchema,
   ChannelMemberAddRequestSchema,
@@ -24,6 +25,9 @@ import {
   PanicRequestSchema,
   RolesUpdateRequestSchema,
   securityProfilePreset,
+  SyncDigestSchema,
+  SyncMessagesRequestSchema,
+  SyncMessagesResponseSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -33,10 +37,14 @@ import {
   type LoamConfig,
   type LoamConfigUpdate,
   type Message,
+  type MessageAttachment,
   type MessageCreateRequest,
   type NetworkConfig,
   type OllamaConfig,
   type StreamEvent,
+  type SyncDigest,
+  type SyncPeer,
+  type SyncStatusReport,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -132,6 +140,8 @@ export type LoamApp = {
   adminSetupCode?: string;
   /** Delete messages older than the configured retention TTL now (also runs on a timer). */
   reapExpiredMessages(): void;
+  /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
+  reapOrphanedAttachments(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -187,6 +197,7 @@ export function defaultLoamConfig(): LoamConfig {
       enableDMs: true,
       enableReactions: true,
       enableMarkdown: true,
+      enableAttachments: true,
     },
     llm: {
       ollama: {
@@ -213,6 +224,11 @@ export function defaultLoamConfig(): LoamConfig {
     },
     access: {
       joinPolicy: "open",
+    },
+    sync: {
+      enabled: false,
+      peers: [],
+      intervalMs: 30_000,
     },
   };
 }
@@ -245,6 +261,7 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     retention: { ...base.retention, ...update.retention },
     security: { ...base.security, ...update.security },
     access: { ...base.access, ...update.access },
+    sync: { ...base.sync, ...update.sync },
   };
   const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
   merged.llm.ollama.systemPrompt = systemPrompt || undefined;
@@ -440,6 +457,32 @@ function newAvatarImageId(): string {
   return `avt_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
+function newAttachmentId(): string {
+  return `att_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+}
+
+/** Filename an attachment is stored (and served) under: `att_<16hex>.<ext>`. */
+function attachmentFileName(attachment: Pick<MessageAttachment, "id" | "mimeType">): string {
+  return `${attachment.id}.${avatarImageExtension(attachment.mimeType)}`;
+}
+
+/** Parses an attachment filename (`att_<16hex>.<ext>`) into its id and MIME type. */
+function parseAttachmentFileName(value: string): { id: string; mimeType: AvatarImageMimeType } | undefined {
+  const match = value.match(/^(att_[a-f0-9]{16})\.(png|jpg|webp)$/);
+
+  if (!match) {
+    return undefined;
+  }
+
+  const extension = match[2];
+  const mimeType =
+    extension === "png" ? "image/png" : extension === "jpg" ? "image/jpeg" : "image/webp";
+
+  return { id: match[1] ?? "", mimeType };
+}
+
+const attachmentMaxBytes = 256 * 1024;
+
 /**
  * Map an avatar image MIME type to its canonical file extension.
  *
@@ -530,6 +573,7 @@ function newMessageId(prefix = "msg"): string {
 export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const dataDir = options.dataDir;
   const avatarsDir = join(dataDir, "avatars");
+  const attachmentsDir = join(dataDir, "attachments");
   const configPath = options.configPath ?? join(dataDir, "config.json");
   const joinHost = options.joinHost ?? "localhost";
   const clientPort = options.clientPort ?? 3000;
@@ -542,6 +586,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
+  // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
+  // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
+  // restart loses (and uploads abandoned past the grace period) are swept by
+  // reapOrphanedAttachments, so unclaimed files never accumulate on disk.
+  const attachmentOwners = new Map<string, { userId: string; uploadedAt: number }>();
+  const attachmentPendingGraceMs = 15 * 60_000;
+  // Message ids deliberately deleted on this node — node-to-node sync never re-imports these.
+  const tombstones = new Set<string>();
+  // Per-peer sync bookkeeping for the admin UI (RAM-only).
+  type PeerSyncStatus = {
+    lastAttemptAt?: number;
+    lastSuccessAt?: number;
+    lastError?: string;
+    imported: number;
+  };
+  const peerSyncStatus = new Map<string, PeerSyncStatus>();
+  let syncRunning = false;
+  let lastSyncLoopAt = 0;
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -796,18 +858,38 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * Whether a user may moderate others (ban / shadow-ban / unban non-admins): admins always can,
-   * as can anyone granted the `moderator` role.
+   * as can anyone granted the `moderator` role — unless they are themselves banned or pending
+   * (a banned moderator's lingering session must not keep its powers).
    */
   function canModerate(user: User): boolean {
-    return user.isAdmin || !!user.roles?.includes("moderator");
+    return !user.banned && !user.pending && (user.isAdmin || !!user.roles?.includes("moderator"));
   }
 
   /**
    * Whether a user may greet newcomers (approve / deny pending users, see the in-client join QR):
-   * admins always can, as can anyone granted the `greeter` role.
+   * admins always can, as can anyone granted the `greeter` role. Banned/pending users never can.
    */
   function canGreet(user: User): boolean {
-    return user.isAdmin || !!user.roles?.includes("greeter");
+    return !user.banned && !user.pending && (user.isAdmin || !!user.roles?.includes("greeter"));
+  }
+
+  /**
+   * Why a user may not read or create content on this node: banned users are fully locked out, and
+   * under the `approval` join policy a pending user gets nothing until a greeter lets them in
+   * (previously only *posting* was gated, so an unapproved or banned session could still read every
+   * channel and DM feed over REST). `/api/config` stays open — it is how the client learns it is
+   * banned/pending and shows the right screen.
+   */
+  function participationError(user: User): string | undefined {
+    if (user.banned) {
+      return "You have been removed from this node";
+    }
+
+    if (user.pending) {
+      return "Your join is awaiting approval";
+    }
+
+    return undefined;
   }
 
   /**
@@ -1058,8 +1140,37 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
-    if (event.type === "userUpserted" || event.type === "configUpdated" || event.type === "wipe") {
+    const recipient = data.users.find((candidate) => candidate.id === userId);
+
+    // A banned recipient hears nothing (their sockets are closed on ban; this also covers a racing
+    // reconnect). A pending (unapproved) recipient only hears about their own approval and
+    // node-level notices — no content until a greeter lets them in, matching the REST gates.
+    if (recipient?.banned) {
+      return false;
+    }
+
+    if (recipient?.pending) {
+      return (
+        event.type === "wipe" ||
+        event.type === "configUpdated" ||
+        (event.type === "userUpserted" && event.user.id === userId)
+      );
+    }
+
+    if (event.type === "configUpdated" || event.type === "wipe") {
       return true;
+    }
+
+    if (event.type === "userUpserted") {
+      // Banned and pending identities are hidden from the REST roster (visibleUsers), so their
+      // upserts are only announced to themselves and to the people who can act on them.
+      const subject = event.user;
+
+      if (!subject.banned && !subject.pending) {
+        return true;
+      }
+
+      return userId === subject.id || (!!recipient && (canModerate(recipient) || canGreet(recipient)));
     }
 
     if (event.type === "channelUpserted") {
@@ -1077,8 +1188,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     // Shadow ban: a message whose author is currently shadow-banned is delivered only back to the
     // author, so their own UI still shows it while nobody else ever sees it. Layered on top of the
-    // DM-audience filtering below (a shadow-banned DM is only ever seen by its author).
-    if (event.type === "messageCreated" || event.type === "messageUpdated") {
+    // DM-audience filtering below (a shadow-banned DM is only ever seen by its author). This must
+    // cover messageDeleted too — those events carry the full message body, so an unfiltered delete
+    // (author, admin, or the retention reaper) would hand the hidden text to the whole audience.
+    if (event.type === "messageCreated" || event.type === "messageUpdated" || event.type === "messageDeleted") {
       const author = data.users.find((candidate) => candidate.id === message.authorId);
 
       if (author?.shadowBanned && userId !== message.authorId) {
@@ -1150,12 +1263,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // pending author is blocked until approved (both are `forbidden`, so the endpoint answers 403).
     // A shadow-banned author is allowed through here — the message is created and returned to them
     // normally, and the broadcast filter withholds it from everyone else (see socketCanReceiveEvent).
-    if (author.banned) {
-      return { error: "You have been removed from this node", forbidden: true };
-    }
+    const authorAccessError = participationError(author);
 
-    if (author.pending) {
-      return { error: "Your join is awaiting approval", forbidden: true };
+    if (authorAccessError) {
+      return { error: authorAccessError, forbidden: true };
     }
 
     if (
@@ -1175,6 +1286,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (input.type === "reaction" && !appConfig.features.enableReactions) {
       return { error: "Reactions are disabled on this LOAM node" };
+    }
+
+    if (input.type !== "reaction" && input.attachments?.length) {
+      if (!appConfig.features.enableAttachments) {
+        return { error: "Attachments are disabled on this LOAM node" };
+      }
+
+      // Only the uploader's own pending uploads may be attached, and each exactly once — so a
+      // guessed/leaked id can't attach someone else's image or double-reference a file whose
+      // deletion would break another message.
+      for (const attachment of input.attachments) {
+        if (attachmentOwners.get(attachment.id)?.userId !== authorId) {
+          return { error: "Unknown attachment" };
+        }
+      }
     }
 
     if (input.type === "channelPost" || input.type === "channelReply") {
@@ -1235,7 +1361,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         const deleted = data.messages[existingIndex];
 
         if (deleted) {
-          store.deleteMessage(deleted.id);
+          // Tombstone the toggled-off reaction so sync peers don't hand it straight back.
+          store.transaction(() => {
+            store.deleteMessage(deleted.id);
+            store.addTombstone(deleted.id);
+          });
+          tombstones.add(deleted.id);
           data.messages.splice(existingIndex, 1);
         }
 
@@ -1263,6 +1394,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const message = MessageSchema.parse({ ...input, ...base });
     store.insertMessage(message);
     data.messages.push(message);
+
+    if (input.type !== "reaction") {
+      for (const attachment of input.attachments ?? []) {
+        attachmentOwners.delete(attachment.id);
+      }
+    }
+
     return { message };
   }
 
@@ -1491,6 +1629,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       channels: store.loadChannels(),
       messages: store.loadMessages(),
     };
+    tombstones.clear();
+
+    for (const id of store.loadTombstones()) {
+      tombstones.add(id);
+    }
+
     sessions.clear();
 
     for (const session of store.loadSessions()) {
@@ -1524,6 +1668,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean {
     const now = Date.now();
+
+    // Opportunistic pruning so a long-lived node doesn't accumulate one entry per source IP forever.
+    if (attempts.size > 1000) {
+      for (const [staleKey, entry] of attempts) {
+        if (entry.resetAt <= now) {
+          attempts.delete(staleKey);
+        }
+      }
+    }
+
     const entry = attempts.get(key);
 
     if (!entry || entry.resetAt <= now) {
@@ -1558,14 +1712,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       store = openLoamStore();
+      // The wipe destroys data, not settings — but the fresh encrypted DB starts with an empty
+      // config table, unlike wipeAll() below which preserves it. Re-persist the effective config
+      // so admin edits (an armed kill switch, the panic token, feature flags) survive a restart
+      // instead of silently reverting to config.json/defaults.
+      store.setConfigValue("config", JSON.stringify(appConfig));
     } else {
       // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
       store.wipeAll();
     }
 
     await rm(avatarsDir, { recursive: true, force: true });
+    await rm(attachmentsDir, { recursive: true, force: true });
+    attachmentOwners.clear();
     sessions.clear();
     claimAttempts.clear();
+    panicAttempts.clear();
 
     broadcast({ type: "wipe" });
 
@@ -1606,8 +1768,68 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    deleteMessages(expired);
-    server.log.info(`Retention reaper deleted ${expired.length} expired message(s)`);
+    // Expand each expired message through the same cascade the delete endpoint uses, so an expired
+    // thread root takes its replies and reactions with it instead of orphaning them against a
+    // missing parent until their own TTL passes. In-flight streaming messages stay spared.
+    const doomed = new Map<string, Message>();
+
+    for (const message of expired) {
+      for (const casualty of collectDeletionSet(message)) {
+        if (!casualty.meta?.streaming) {
+          doomed.set(casualty.id, casualty);
+        }
+      }
+    }
+
+    deleteMessages([...doomed.values()]);
+    server.log.info(`Retention reaper deleted ${doomed.size} expired message(s)`);
+  }
+
+  /**
+   * Delete attachment files no message references and no fresh pending upload claims: uploads
+   * whose send was abandoned (past the grace period) and files orphaned by a restart (the pending
+   * map is RAM-only, so at boot every unreferenced file is an orphan). Runs at boot and on the
+   * reaper timer.
+   */
+  async function reapOrphanedAttachments(): Promise<void> {
+    let files: string[];
+
+    try {
+      files = await readdir(attachmentsDir);
+    } catch {
+      return; // No attachments directory yet — nothing uploaded.
+    }
+
+    const referenced = new Set<string>();
+
+    for (const message of data.messages) {
+      if (message.type !== "reaction") {
+        for (const attachment of message.attachments ?? []) {
+          referenced.add(attachment.id);
+        }
+      }
+    }
+
+    const now = Date.now();
+
+    for (const fileName of files) {
+      const parsed = parseAttachmentFileName(fileName);
+
+      if (!parsed || referenced.has(parsed.id)) {
+        continue;
+      }
+
+      const pending = attachmentOwners.get(parsed.id);
+
+      if (pending && now - pending.uploadedAt < attachmentPendingGraceMs) {
+        continue;
+      }
+
+      attachmentOwners.delete(parsed.id);
+      await rm(join(attachmentsDir, fileName), { force: true }).catch((error: unknown) =>
+        server.log.warn(error),
+      );
+    }
   }
 
   /**
@@ -1647,17 +1869,376 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const ids = new Set(messages.map((message) => message.id));
+    // Tombstone alongside the delete: a peer that still holds these must not re-import them.
     store.transaction(() => {
       for (const id of ids) {
         store.deleteMessage(id);
+        store.addTombstone(id);
       }
     });
+
+    for (const id of ids) {
+      tombstones.add(id);
+    }
+
+    // Best-effort removal of the deleted messages' attachment files.
+    for (const message of messages) {
+      if (message.type !== "reaction") {
+        for (const attachment of message.attachments ?? []) {
+          rm(join(attachmentsDir, attachmentFileName(attachment)), { force: true }).catch(
+            (error: unknown) => server.log.warn(error),
+          );
+        }
+      }
+    }
 
     for (const message of messages) {
       broadcast({ type: "messageDeleted", messageId: message.id, message });
     }
 
     data.messages = data.messages.filter((message) => !ids.has(message.id));
+  }
+
+  /**
+   * Whether a message may leave this node over node-to-node sync: only content that is public
+   * here — posts/replies in public, non-archived channels and reactions on them. DMs, private
+   * channels, in-flight streaming messages, and shadow-banned authors' messages never sync.
+   */
+  function isSyncableMessage(message: Message): boolean {
+    if (message.type === "dm" || message.meta?.streaming) {
+      return false;
+    }
+
+    // The author check applies to every type — a shadow-banned user's *reactions* are withheld
+    // from local broadcasts too, so they must not leak out through the sync export either.
+    const author = data.users.find((candidate) => candidate.id === message.authorId);
+
+    if (author?.shadowBanned) {
+      return false;
+    }
+
+    if (message.type === "reaction") {
+      const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
+      return !!target && isSyncableMessage(target);
+    }
+
+    const channel = ensureChannel(message.channelId);
+    return !!channel && channel.visibility === "public" && !channel.archived;
+  }
+
+  /** What this node advertises to pulling peers (see SyncDigestSchema). */
+  function buildSyncDigest(): SyncDigest {
+    return {
+      channels: data.channels.filter((channel) => channel.visibility === "public" && !channel.archived),
+      messages: data.messages.filter(isSyncableMessage).map((message) => ({
+        id: message.id,
+        ...(message.editedAt !== undefined ? { editedAt: message.editedAt } : {}),
+      })),
+    };
+  }
+
+  /**
+   * Read a peer response body with a hard byte cap, so a misbehaving or malicious peer can't make
+   * this node buffer an arbitrarily large payload.
+   */
+  async function readPeerBody(response: Response, maxBytes: number): Promise<Buffer> {
+    if (!response.body) {
+      return Buffer.alloc(0);
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      total += value.byteLength;
+
+      if (total > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        throw new Error("Peer response too large");
+      }
+
+      chunks.push(value);
+    }
+
+    return Buffer.concat(chunks);
+  }
+
+  // Generous digest/messages ceiling: a full 500-message batch of maximum-size bodies fits well
+  // inside this; anything larger is not a LOAM peer talking in good faith.
+  const maxPeerJsonBytes = 8 * 1024 * 1024;
+
+  /** GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. */
+  async function fetchPeerJson<T>(
+    peerUrl: string,
+    path: string,
+    schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
+    body?: unknown,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      const response = await fetch(`${peerUrl.replace(/\/+$/, "")}${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Peer answered ${response.status}`);
+      }
+
+      const raw = await readPeerBody(response, maxPeerJsonBytes);
+      const parsed = schema.safeParse(JSON.parse(raw.toString("utf8")));
+
+      if (!parsed.success) {
+        throw new Error("Peer sent an invalid payload");
+      }
+
+      return parsed.data;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Import a peer's user profiles for message authors we don't know yet. Authority and moderation
+   * state are stripped — a peer's admin or moderator is a stranger here, and a peer must never be
+   * able to ban/shadow-ban someone on this node.
+   */
+  function importPeerUsers(users: User[]): void {
+    for (const user of users) {
+      if (data.users.some((candidate) => candidate.id === user.id)) {
+        continue;
+      }
+
+      const sanitized = UserSchema.parse({
+        ...user,
+        isAdmin: false,
+        roles: undefined,
+        banned: undefined,
+        shadowBanned: undefined,
+        pending: undefined,
+      });
+      store.upsertUser(sanitized);
+      data.users.push(sanitized);
+      broadcast({ type: "userUpserted", user: sanitized });
+    }
+  }
+
+  /** Best-effort copy of an imported message's attachment files from the peer that has them. */
+  async function importPeerAttachments(peerUrl: string, message: Message): Promise<void> {
+    if (message.type === "reaction" || !message.attachments?.length) {
+      return;
+    }
+
+    for (const attachment of message.attachments) {
+      const filePath = join(attachmentsDir, attachmentFileName(attachment));
+
+      try {
+        await stat(filePath);
+        continue; // already have it
+      } catch {
+        // fall through to fetch
+      }
+
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        const response = await fetch(
+          `${peerUrl.replace(/\/+$/, "")}/api/attachments/${attachmentFileName(attachment)}`,
+          { signal: controller.signal },
+        ).finally(() => clearTimeout(timeout));
+
+        if (!response.ok) {
+          continue;
+        }
+
+        // Bounded read: the cap applies while streaming, not after buffering the whole body.
+        const bytes = await readPeerBody(response, attachmentMaxBytes);
+
+        if (!bytes.length || !avatarImageHasExpectedSignature(bytes, attachment.mimeType)) {
+          continue;
+        }
+
+        await mkdir(attachmentsDir, { recursive: true });
+        await writeFile(filePath, bytes);
+      } catch {
+        // Message still imports; the image 404s until a later sync round retries... it won't —
+        // acceptable v1 tradeoff, the text is the payload that matters off-grid.
+      }
+    }
+  }
+
+  /**
+   * Import a batch of peer messages: posts before replies before reactions (so parents/targets
+   * land first), never into private/unknown channels (a malicious peer must not inject into a
+   * local private channel id), never over a tombstone, and edits only when strictly newer.
+   */
+  async function importPeerMessages(peerUrl: string, messages: Message[]): Promise<number> {
+    const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3 } as const;
+    const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
+    let imported = 0;
+
+    for (const message of sorted) {
+      if (message.type === "dm" || message.meta?.streaming || tombstones.has(message.id)) {
+        continue;
+      }
+
+      if (message.type === "reaction") {
+        const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
+
+        // The reaction's target must exist locally and be public-audience (no DM/private targets).
+        if (!target || messageAudienceUserIds(message) !== undefined) {
+          continue;
+        }
+      } else {
+        const channel = ensureChannel(message.channelId);
+
+        if (!channel || channel.visibility !== "public" || channel.archived) {
+          continue;
+        }
+
+        // A reply needs a valid local parent in the same channel (posts sort first, so a parent
+        // in the same batch already landed). A parent we tombstoned or never had stays deleted —
+        // and takes its replies with it, matching the local cascade semantics.
+        if (message.type === "channelReply") {
+          const parent = data.messages.find((candidate) => candidate.id === message.parentMessageId);
+
+          if (!parent || parent.type !== "channelPost" || parent.channelId !== message.channelId) {
+            continue;
+          }
+        }
+
+        await importPeerAttachments(peerUrl, message);
+      }
+
+      const existing = data.messages.find((candidate) => candidate.id === message.id);
+
+      if (existing) {
+        if ((message.editedAt ?? 0) > (existing.editedAt ?? 0)) {
+          const updated = MessageSchema.parse(message);
+          store.updateMessage(updated);
+          Object.assign(existing, updated);
+          broadcast({ type: "messageUpdated", message: existing });
+          imported += 1;
+        }
+
+        continue;
+      }
+
+      store.insertMessage(message);
+      data.messages.push(message);
+      broadcast({ type: "messageCreated", message });
+      imported += 1;
+    }
+
+    if (imported) {
+      data.messages.sort((a, b) => a.createdAt - b.createdAt);
+    }
+
+    return imported;
+  }
+
+  /** One pull round against one peer: digest → diff (skipping tombstones) → fetch → import. */
+  async function syncWithPeer(peer: SyncPeer): Promise<void> {
+    const status = peerSyncStatus.get(peer.url) ?? { imported: 0 };
+    peerSyncStatus.set(peer.url, status);
+    status.lastAttemptAt = Date.now();
+
+    try {
+      const digest = await fetchPeerJson(peer.url, "/api/sync/digest", SyncDigestSchema);
+
+      for (const channel of digest.channels) {
+        if (channel.visibility !== "public" || ensureChannel(channel.id)) {
+          continue;
+        }
+
+        const created = ChannelSchema.parse({ ...channel, memberUserIds: undefined });
+        store.upsertChannel(created);
+        data.channels.push(created);
+        broadcast({ type: "channelUpserted", channel: created });
+      }
+
+      const localById = new Map(data.messages.map((message) => [message.id, message]));
+      const wanted = digest.messages
+        .filter((entry) => {
+          if (tombstones.has(entry.id)) {
+            return false;
+          }
+
+          const mine = localById.get(entry.id);
+          return !mine || (entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0));
+        })
+        .map((entry) => entry.id);
+
+      let imported = 0;
+
+      for (let start = 0; start < wanted.length; start += 200) {
+        const payload = await fetchPeerJson(
+          peer.url,
+          "/api/sync/messages",
+          SyncMessagesResponseSchema,
+          { ids: wanted.slice(start, start + 200) },
+        );
+        importPeerUsers(payload.users);
+        imported += await importPeerMessages(peer.url, payload.messages);
+      }
+
+      status.lastSuccessAt = Date.now();
+      status.lastError = undefined;
+      status.imported += imported;
+
+      if (imported) {
+        server.log.info(`Synced ${imported} message(s) from peer ${peer.url}`);
+      }
+    } catch (error) {
+      status.lastError = error instanceof Error ? error.message : "Sync failed";
+      server.log.warn(`Sync with peer ${peer.url} failed: ${status.lastError}`);
+    }
+  }
+
+  /** The pull loop: one round across all peers, at most once per configured interval. */
+  async function runSyncLoop(force = false): Promise<void> {
+    if (!appConfig.sync.enabled || syncRunning || !appConfig.sync.peers.length) {
+      return;
+    }
+
+    if (!force && Date.now() - lastSyncLoopAt < appConfig.sync.intervalMs) {
+      return;
+    }
+
+    syncRunning = true;
+    lastSyncLoopAt = Date.now();
+
+    try {
+      // Peers sync concurrently — syncWithPeer never rejects (it records failures in its own
+      // status entry), and the import path re-checks message existence after its last await, so
+      // interleaved rounds can't double-insert.
+      await Promise.all(appConfig.sync.peers.map((peer) => syncWithPeer(peer)));
+    } finally {
+      syncRunning = false;
+    }
+  }
+
+  /** Peer list with live status, as shown in the admin UI (SyncStatusReportSchema is the contract). */
+  function syncStatusReport(): SyncStatusReport {
+    return {
+      enabled: appConfig.sync.enabled,
+      intervalMs: appConfig.sync.intervalMs,
+      peers: appConfig.sync.peers.map((peer) => ({
+        ...peer,
+        status: peerSyncStatus.get(peer.url),
+      })),
+    };
   }
 
   /**
@@ -1693,13 +2274,23 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     adminSetupCode = makeAdminSetupCode();
   }
 
+  void reapOrphanedAttachments();
+
   const reaperTimer = setInterval(() => {
     try {
       reapExpiredMessages();
     } catch (error) {
       server.log.error(error);
     }
+
+    void reapOrphanedAttachments().catch((error: unknown) => server.log.error(error));
   }, 30_000);
+
+  // Sync ticker: a fixed 5s heartbeat; runSyncLoop itself enforces the configured interval (so an
+  // admin shortening sync.intervalMs takes effect without re-arming a timer).
+  const syncTimer = setInterval(() => {
+    void runSyncLoop().catch((error: unknown) => server.log.error(error));
+  }, 5_000);
 
   // Blanket per-IP throttle for every HTTP route; the abuse-sensitive endpoints (claim, panic,
   // avatar upload) add their own tighter semantic limits on top.
@@ -1723,7 +2314,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     };
   });
 
-  server.get("/api/users", async () => visibleUsers());
+  server.get("/api/users", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    return visibleUsers();
+  });
   server.patch("/api/users/me", async (request, reply) => {
     const body = UserUpdateRequestSchema.safeParse(request.body);
 
@@ -1977,12 +2577,128 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw error;
     }
   });
+  // Upload one message-attachment image. Like avatars: base64 JSON body, magic-byte signature
+  // checked against the declared MIME, strict size cap (clients downscale first). The returned id
+  // is bound to this uploader and consumed by the message that references it (see createMessage).
+  server.post(
+    "/api/attachments",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send({ error: accessError });
+      }
+
+      if (!appConfig.features.enableAttachments) {
+        return reply.code(403).send({ error: "Attachments are disabled on this LOAM node" });
+      }
+
+      const body = AttachmentUploadRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send({ error: "Invalid attachment upload request" });
+      }
+
+      const image = Buffer.from(body.data.data, "base64");
+
+      if (image.length === 0 || image.length > attachmentMaxBytes) {
+        return reply.code(400).send({ error: "Attachment image must be 256KB or smaller" });
+      }
+
+      if (!avatarImageHasExpectedSignature(image, body.data.mimeType)) {
+        return reply.code(400).send({ error: "Attachment image type does not match the uploaded data" });
+      }
+
+      const attachment: MessageAttachment = {
+        id: newAttachmentId(),
+        mimeType: body.data.mimeType,
+        ...(body.data.width !== undefined ? { width: body.data.width } : {}),
+        ...(body.data.height !== undefined ? { height: body.data.height } : {}),
+      };
+      await mkdir(attachmentsDir, { recursive: true });
+      await writeFile(join(attachmentsDir, attachmentFileName(attachment)), image);
+      attachmentOwners.set(attachment.id, { userId: currentUser.id, uploadedAt: Date.now() });
+      return reply.code(201).send(attachment);
+    },
+  );
+
+  server.get<{ Params: { fileName: string } }>(
+    "/api/attachments/:fileName",
+    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const attachment = parseAttachmentFileName(request.params.fileName);
+
+      if (!attachment) {
+        return reply.code(404).send({ error: "Attachment does not exist" });
+      }
+
+      // Audience-gate the file exactly like its owning message: attachments on public messages
+      // are anonymously fetchable (peer nodes copy them without a session); DM / private-channel
+      // attachments are only served to the people who may read the message. A pending upload
+      // (no owning message yet) is visible only to its uploader.
+      const owningMessage = data.messages.find(
+        (message) =>
+          message.type !== "reaction" && !!message.attachments?.some((entry) => entry.id === attachment.id),
+      );
+      const sessionUserId = getSessionUserIdFromRequest(request);
+
+      if (!owningMessage) {
+        if (!sessionUserId || attachmentOwners.get(attachment.id)?.userId !== sessionUserId) {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
+      } else if (!isSyncableMessage(owningMessage)) {
+        const user = sessionUserId
+          ? data.users.find((candidate) => candidate.id === sessionUserId)
+          : undefined;
+
+        if (!user || participationError(user)) {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
+
+        const audience = messageAudienceUserIds(owningMessage);
+
+        if (audience && !audience.has(user.id)) {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
+      }
+
+      try {
+        // Rebuild the filename from the parsed id + MIME type (like the avatar route) rather than
+        // joining the raw request param — the served path is then provably derived from the
+        // whitelisted pattern, never from user input.
+        const image = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
+        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").send(image);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
+
+        throw error;
+      }
+    },
+  );
+
   server.get("/api/channels", async (request, reply) => {
-    const userId = getSessionUserId(request, reply);
-    return data.channels.filter((channel) => !channel.archived && canAccessChannel(channel, userId));
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    return data.channels.filter((channel) => !channel.archived && canAccessChannel(channel, currentUser.id));
   });
   server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request, reply) => {
-    const userId = getSessionUserId(request, reply);
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    const userId = currentUser.id;
     const channel = ensureChannel(request.params.channelId);
 
     // Unknown channels and inaccessible private channels answer identically, so probing this
@@ -1998,6 +2714,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // outsiders get the same 404 as a channel that does not exist.
   server.get<{ Params: { channelId: string } }>("/api/channels/:channelId/members", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -2017,6 +2739,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // channel the moment they are added.
   server.post<{ Params: { channelId: string } }>("/api/channels/:channelId/members", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -2063,6 +2791,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/channels/:channelId/members/:userId",
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send({ error: accessError });
+      }
+
       const channel = ensureChannel(request.params.channelId);
 
       if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -2095,19 +2829,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { ok: true };
     },
   );
-  server.get<{ Params: { userId: string } }>(
-    "/api/dms/:userId",
-    async (request, reply) => dmMessages(request.params.userId, getSessionUserId(request, reply)),
-  );
+  server.get<{ Params: { userId: string } }>("/api/dms/:userId", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    return dmMessages(request.params.userId, currentUser.id);
+  });
 
   // Case-insensitive substring search over message bodies, scoped strictly to what the caller may
   // read: channel messages in channels they can access (never archived ones), and their own DMs.
   // Shadow-banned authors' messages stay visible only to themselves, matching the broadcast filter.
   server.get<{ Querystring: { q?: string; limit?: string } }>("/api/search", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
 
-    if (currentUser.banned || currentUser.pending) {
-      return reply.code(403).send({ error: "You cannot search on this node yet" });
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
     }
 
     const query = (request.query.q ?? "").trim();
@@ -2154,6 +2895,72 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return { query, results };
   });
 
+  // ---- Node-to-node sync (docs/11) ----------------------------------------------------------
+  // Peer-facing endpoints. Both answer 404 unless sync is enabled, so a node that never opted in
+  // is indistinguishable from one without the feature. They expose **public data only** — the
+  // same content any open session on the LAN could read; enabling sync is the operator's explicit
+  // decision to share it with peer nodes.
+
+  server.get(
+    "/api/sync/digest",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (_request, reply) => {
+      if (!appConfig.sync.enabled) {
+        return reply.code(404).send({ error: "Not found" });
+      }
+
+      return buildSyncDigest();
+    },
+  );
+
+  server.post(
+    "/api/sync/messages",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!appConfig.sync.enabled) {
+        return reply.code(404).send({ error: "Not found" });
+      }
+
+      const body = SyncMessagesRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send({ error: "Invalid sync request" });
+      }
+
+      const wanted = new Set(body.data.ids);
+      const messages = data.messages.filter((message) => wanted.has(message.id) && isSyncableMessage(message));
+      const authorIds = new Set(messages.map((message) => message.authorId));
+      const users = data.users.filter((user) => authorIds.has(user.id));
+      return { messages, users };
+    },
+  );
+
+  server.get("/api/admin/sync", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    return syncStatusReport();
+  });
+
+  // Run a sync round right now (ignoring the interval) — the admin UI's "Sync now" button.
+  server.post("/api/admin/sync/run", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    if (!appConfig.sync.enabled || !appConfig.sync.peers.length) {
+      return reply.code(400).send({ error: "Enable sync and add at least one peer first" });
+    }
+
+    await runSyncLoop(true);
+    return syncStatusReport();
+  });
+
   server.post("/api/messages", async (request, reply) => {
     const body = MessageCreateRequestSchema.safeParse(request.body);
 
@@ -2188,6 +2995,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.delete<{ Params: { messageId: string } }>("/api/messages/:messageId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const target = data.messages.find((message) => message.id === request.params.messageId);
 
     if (!target) {
@@ -2226,6 +3039,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.patch<{ Params: { messageId: string } }>("/api/messages/:messageId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const target = data.messages.find((message) => message.id === request.params.messageId);
 
     if (!target) {
@@ -2252,9 +3071,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send({ error: "Invalid message edit request" });
     }
 
-    target.body = body.data.body;
-    target.editedAt = Date.now();
-    store.updateMessage(target);
+    // Persist first, then mirror in memory — matching every other mutator, so a failed store write
+    // never leaves in-memory state (or a broadcast) ahead of what is stored.
+    const updated = MessageSchema.parse({ ...target, body: body.data.body, editedAt: Date.now() });
+    store.updateMessage(updated);
+    Object.assign(target, updated);
     broadcast({ type: "messageUpdated", message: target });
     return target;
   });
@@ -2421,6 +3242,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // creator becomes the owner.
   server.post("/api/channels", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
 
     if (!currentUser.isAdmin && !appConfig.features.enableUserChannels) {
       return reply.code(403).send({ error: "Creating channels is disabled on this LOAM node" });
@@ -2442,6 +3268,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Rename / re-configure / archive a channel. Allowed for an admin or the channel's owner.
   server.patch<{ Params: { channelId: string } }>("/api/channels/:channelId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel) {
@@ -2466,6 +3298,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (!userId) {
       connection.send(JSON.stringify({ type: "error", error: "Unauthenticated websocket" }));
+      connection.close();
+      return;
+    }
+
+    // A banned identity keeps its session mapping (so the ban stays pinned to it — see
+    // invalidateUserSessions) but must not be readmitted to the live feed by a reconnect.
+    // Pending users may connect: the broadcast filter limits them to their own approval notice.
+    const user = data.users.find((candidate) => candidate.id === userId);
+
+    if (user?.banned) {
+      connection.send(JSON.stringify({ type: "error", error: "This session is no longer valid" }));
       connection.close();
       return;
     }
@@ -2497,8 +3340,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     },
     adminSetupCode,
     reapExpiredMessages,
+    reapOrphanedAttachments,
     async close() {
       clearInterval(reaperTimer);
+      clearInterval(syncTimer);
       await server.close();
       store.close();
     },

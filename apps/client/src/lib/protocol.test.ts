@@ -39,6 +39,7 @@ const networkConfig: NetworkConfig = {
   enableDMs: true,
   enableReactions: true,
   enableMarkdown: true,
+  enableAttachments: true,
   enableLLMChat: false,
   enableLLMStreaming: false,
   allowUserDisplayNameEdit: false,

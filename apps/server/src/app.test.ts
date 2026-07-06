@@ -2052,3 +2052,835 @@ describe("message search", () => {
     expect(results(response).length).toBe(3);
   });
 });
+
+describe("participation gating (banned / pending read access)", () => {
+  const readPaths = ["/api/channels", "/api/users", "/api/messages/general", "/api/search?q=x"];
+
+  async function statusFor(app: LoamApp, cookie: string, url: string): Promise<number> {
+    return (await app.server.inject({ method: "GET", url, headers: { cookie } })).statusCode;
+  }
+
+  it("locks a banned user out of every read endpoint", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+
+    // Reads work before the ban.
+    expect(await statusFor(app, target.cookie, "/api/channels")).toBe(200);
+
+    const ban = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+    expect(ban.statusCode).toBe(200);
+
+    for (const path of readPaths) {
+      expect(await statusFor(app, target.cookie, path)).toBe(403);
+    }
+    expect(await statusFor(app, target.cookie, `/api/dms/${admin.userId}`)).toBe(403);
+
+    // Config stays open — it is how the client learns it is banned.
+    expect(await statusFor(app, target.cookie, "/api/config")).toBe(200);
+  });
+
+  it("holds a pending user at the door until approval, then lets them in", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const admin = await newSession(app);
+    const joiner = await newSession(app);
+
+    for (const path of readPaths) {
+      expect(await statusFor(app, joiner.cookie, path)).toBe(403);
+    }
+
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: joiner.cookie },
+      payload: { name: "Sneaky" },
+    });
+    expect(created.statusCode).toBe(403);
+
+    const approve = await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${joiner.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(approve.statusCode).toBe(200);
+
+    for (const path of readPaths) {
+      expect(await statusFor(app, joiner.cookie, path)).toBe(200);
+    }
+  });
+});
+
+describe("websocket privacy filtering", () => {
+  type WireEvent = { type?: string; messageId?: string; user?: { id?: string; pending?: boolean }; message?: { id?: string } };
+
+  const openSockets: WebSocket[] = [];
+
+  afterEach(() => {
+    for (const socket of openSockets) {
+      socket.close();
+    }
+    openSockets.length = 0;
+  });
+
+  async function listen(app: LoamApp): Promise<string> {
+    return app.server.listen({ port: 0, host: "127.0.0.1" });
+  }
+
+  function connect(baseUrl: string, cookie: string): Promise<{ socket: WebSocket; events: WireEvent[]; closed: Promise<void> }> {
+    return new Promise((resolve, reject) => {
+      // Undici's WebSocket accepts an options bag with headers (needed to send the session cookie).
+      const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+        `${baseUrl.replace("http", "ws")}/ws`,
+        { headers: { cookie } },
+      );
+      const events: WireEvent[] = [];
+      const closed = new Promise<void>((resolveClose) => {
+        socket.addEventListener("close", () => resolveClose());
+      });
+      socket.addEventListener("message", (event) => {
+        events.push(JSON.parse(String((event as MessageEvent).data)) as WireEvent);
+      });
+      socket.addEventListener("open", () => {
+        openSockets.push(socket);
+        resolve({ socket, events, closed });
+      });
+      socket.addEventListener("error", () => reject(new Error("websocket failed to connect")));
+    });
+  }
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+  /**
+   * Bounded wait for an expected event, so positive assertions don't race CI scheduling the way a
+   * fixed sleep can. Negative assertions ("never delivered") still use `settle` — or first await
+   * the *other* party's copy of the same broadcast, which proves delivery completed.
+   */
+  async function waitFor(check: () => boolean, timeoutMs = 3_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      if (check()) {
+        return true;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    return check();
+  }
+
+  it("withholds a shadow-banned author's deleted message body from everyone else", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+    const viewer = await newSession(app);
+    const baseUrl = await listen(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: target.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "the hidden text" },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    const viewerSocket = await connect(baseUrl, viewer.cookie);
+    const targetSocket = await connect(baseUrl, target.cookie);
+
+    const deleted = await app.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+
+    // The delete event carries the full body — it must stay between the author and nobody else.
+    // The author receiving their copy proves the broadcast completed, making the viewer's silence
+    // a real verdict rather than a timing artifact.
+    expect(
+      await waitFor(() =>
+        targetSocket.events.some((event) => event.type === "messageDeleted" && event.messageId === messageId),
+      ),
+    ).toBe(true);
+    expect(viewerSocket.events.some((event) => event.type === "messageDeleted")).toBe(false);
+  });
+
+  it("rejects a banned user's websocket reconnect", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+    const baseUrl = await listen(app);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const reconnect = await connect(baseUrl, target.cookie);
+    await reconnect.closed;
+    expect(reconnect.events.some((event) => event.type === "error")).toBe(true);
+
+    // A healthy user still connects and stays connected.
+    const healthy = await connect(baseUrl, admin.cookie);
+    await settle();
+    expect(healthy.socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("limits a pending user's feed to node notices and their own approval", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const admin = await newSession(app);
+    const joiner = await newSession(app);
+    const baseUrl = await listen(app);
+
+    const joinerSocket = await connect(baseUrl, joiner.cookie);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "members only chatter" },
+    });
+    await settle();
+    expect(joinerSocket.events.some((event) => event.type === "messageCreated")).toBe(false);
+
+    await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${joiner.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(
+      await waitFor(() =>
+        joinerSocket.events.some(
+          (event) => event.type === "userUpserted" && event.user?.id === joiner.userId && event.user?.pending !== true,
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("announces hidden identities only to themselves and to moderators", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const bystander = await newSession(app);
+    const target = await newSession(app);
+    const baseUrl = await listen(app);
+
+    const adminSocket = await connect(baseUrl, admin.cookie);
+    const bystanderSocket = await connect(baseUrl, bystander.cookie);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const sawBanned = (events: WireEvent[]) =>
+      events.some((event) => event.type === "userUpserted" && event.user?.id === target.userId);
+    // The moderator receiving their copy proves the broadcast completed before the negative check.
+    expect(await waitFor(() => sawBanned(adminSocket.events))).toBe(true);
+    expect(sawBanned(bystanderSocket.events)).toBe(false);
+  });
+});
+
+describe("review hardening fixes", () => {
+  it("encrypted kill switch re-persists admin config edits into the fresh database", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-config-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const key = "a fixed host passphrase";
+    const first = await buildApp({ dataDir, logger: false, dbEncryptionKey: key });
+    cleanups.push(() => first.close());
+
+    const admin = await newSession(first);
+    // Arm the kill switch purely via the admin API — persisted only in the DB config table.
+    const patch = await first.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { killSwitch: { enabled: true }, features: { enableReactions: false } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const wipe = await first.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // Restart on the same data dir + key: the admin edits must survive the wipe.
+    await first.close();
+    const second = await buildApp({ dataDir, logger: false, dbEncryptionKey: key });
+    cleanups.push(() => second.close());
+
+    const nextAdmin = await newSession(second);
+    const config = await second.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: nextAdmin.cookie },
+    });
+    const body = config.json() as { killSwitch: { enabled: boolean }; features: { enableReactions: boolean } };
+    expect(body.killSwitch.enabled).toBe(true);
+    expect(body.features.enableReactions).toBe(false);
+  });
+
+  it("retention reaper cascades an expired thread root to its replies and reactions", async () => {
+    const app = await makeApp({ retention: { messageTtlMs: 500 } });
+    const session = await newSession(app);
+
+    const root = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "expiring root" },
+    });
+    const rootId = (root.json() as { message: { id: string } }).message.id;
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    // Young reply + reaction attached to the now-expired root.
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelReply", channelId: "general", parentMessageId: rootId, body: "fresh reply" },
+    });
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "reaction", targetMessageId: rootId, reaction: "👍" },
+    });
+
+    app.reapExpiredMessages();
+
+    // No orphans: the root's whole thread goes with it.
+    expect(app.store.loadMessages()).toEqual([]);
+  });
+});
+
+describe("message attachments", () => {
+  // A real 1x1 PNG (valid magic bytes) — small enough to inline.
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  async function upload(app: LoamApp, cookie: string, data = tinyPng, mimeType = "image/png") {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie },
+      payload: { mimeType, data, width: 1, height: 1 },
+    });
+  }
+
+  it("uploads, attaches, serves, and allows an image-only message", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    const uploaded = await upload(app, session.cookie);
+    expect(uploaded.statusCode).toBe(201);
+    const attachment = uploaded.json() as { id: string; mimeType: string };
+    expect(attachment.id).toMatch(/^att_[a-f0-9]{16}$/);
+
+    // Empty body + attachment is a valid message.
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+    expect(posted.statusCode).toBe(201);
+
+    const served = await app.server.inject({
+      method: "GET",
+      url: `/api/attachments/${attachment.id}.png`,
+      headers: { cookie: session.cookie },
+    });
+    expect(served.statusCode).toBe(200);
+    expect(served.headers["content-type"]).toContain("image/png");
+
+    const listed = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: session.cookie } })
+    ).json() as { attachments?: { id: string }[] }[];
+    expect(listed[0]?.attachments?.[0]?.id).toBe(attachment.id);
+  });
+
+  it("rejects a message with no body and no attachments", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "   " },
+    });
+    expect(posted.statusCode).toBe(400);
+  });
+
+  it("rejects uploads when the flag is off, on signature mismatch, and foreign attachment ids", async () => {
+    const flagOff = await makeApp({ features: { enableAttachments: false } });
+    const offSession = await newSession(flagOff);
+    expect((await upload(flagOff, offSession.cookie)).statusCode).toBe(403);
+
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const mallory = await newSession(app);
+
+    // Declared webp but PNG bytes.
+    expect((await upload(app, alice.cookie, tinyPng, "image/webp")).statusCode).toBe(400);
+
+    const uploaded = (await upload(app, alice.cookie)).json() as { id: string; mimeType: string };
+
+    // Mallory cannot attach Alice's pending upload...
+    const stolen = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: mallory.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "mine now", attachments: [uploaded] },
+    });
+    expect(stolen.statusCode).toBe(400);
+    expect((stolen.json() as { error: string }).error).toBe("Unknown attachment");
+
+    // ...and after Alice uses it, the id is consumed and cannot be attached again.
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: alice.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "one", attachments: [uploaded] },
+        })
+      ).statusCode,
+    ).toBe(201);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: alice.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "two", attachments: [uploaded] },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it("deletes the attachment file with its message", async () => {
+    const { app, dataDir } = await makeApp();
+    const session = await newSession(app);
+
+    const attachment = (await upload(app, session.cookie)).json() as { id: string; mimeType: string };
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+    const filePath = join(dataDir, "attachments", `${attachment.id}.png`);
+    expect(existsSync(filePath)).toBe(true);
+
+    await app.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: session.cookie },
+    });
+    // File removal is best-effort/async — poll briefly.
+    for (let i = 0; i < 40 && existsSync(filePath); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(existsSync(filePath)).toBe(false);
+  });
+});
+
+describe("node-to-node sync", () => {
+  async function listenApp(app: LoamApp): Promise<string> {
+    return app.server.listen({ port: 0, host: "127.0.0.1" });
+  }
+
+  async function post(app: LoamApp, cookie: string, channelId: string, body: string): Promise<string> {
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+    return (response.json() as { message: { id: string } }).message.id;
+  }
+
+  async function runSync(app: LoamApp, cookie: string) {
+    return app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
+  }
+
+  async function generalBodies(app: LoamApp, cookie: string): Promise<string[]> {
+    const response = await app.server.inject({
+      method: "GET",
+      url: "/api/messages/general",
+      headers: { cookie },
+    });
+    return (response.json() as { body?: string }[]).map((message) => message.body ?? "");
+  }
+
+  it("answers 404 on the sync endpoints unless enabled", async () => {
+    const app = await makeApp();
+    expect((await app.server.inject({ method: "GET", url: "/api/sync/digest" })).statusCode).toBe(404);
+    expect(
+      (await app.server.inject({ method: "POST", url: "/api/sync/messages", payload: { ids: ["x"] } })).statusCode,
+    ).toBe(404);
+  });
+
+  it("pulls public messages and channels from a peer, sanitizing imported users", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    expect(sourceAdmin.isAdmin).toBe(true);
+    await post(source, sourceAdmin.cookie, "general", "hello from the other node");
+    await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Relief Ops" },
+    });
+    await post(source, sourceAdmin.cookie, "relief-ops", "supplies at the depot");
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl, label: "source" }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+
+    const run = await runSync(puller, pullerAdmin.cookie);
+    expect(run.statusCode).toBe(200);
+    const report = run.json() as { peers: { status?: { lastError?: string; imported: number } }[] };
+    expect(report.peers[0]?.status?.lastError).toBeUndefined();
+
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("hello from the other node");
+
+    // The peer's channel was imported too, with its messages.
+    const channels = (
+      await puller.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: pullerAdmin.cookie } })
+    ).json() as { id: string }[];
+    expect(channels.some((channel) => channel.id === "relief-ops")).toBe(true);
+
+    // The source's admin author arrives as a plain user — authority never syncs.
+    const importedAuthor = puller.store.loadUsers().find((user) => user.id === sourceAdmin.userId);
+    expect(importedAuthor).toBeDefined();
+    expect(importedAuthor?.isAdmin).toBe(false);
+
+    // Running again imports nothing new (idempotent by id).
+    const again = (await runSync(puller, pullerAdmin.cookie)).json() as {
+      peers: { status?: { imported: number } }[];
+    };
+    const importedTotal = again.peers[0]?.status?.imported ?? -1;
+    expect(importedTotal).toBeGreaterThan(0);
+    const third = (await runSync(puller, pullerAdmin.cookie)).json() as {
+      peers: { status?: { imported: number } }[];
+    };
+    expect(third.peers[0]?.status?.imported).toBe(importedTotal);
+  });
+
+  it("never exports private channels, DMs, or shadow-banned authors' messages", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const admin = await newSession(source);
+    const owner = await newSession(source);
+    const shadowed = await newSession(source);
+
+    // Private channel + message.
+    const created = await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Quiet", visibility: "private" },
+    });
+    const privateId = (created.json() as { id: string }).id;
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: owner.cookie },
+      payload: { type: "channelPost", channelId: privateId, body: "private words" },
+    });
+
+    // DM.
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "dm", recipientUserId: owner.userId, body: "dm words" },
+    });
+
+    // Shadow-banned author's public post.
+    await post(source, shadowed.cookie, "general", "shadow words");
+    await source.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${shadowed.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    await post(source, admin.cookie, "general", "public words");
+
+    const digest = (
+      await source.server.inject({ method: "GET", url: "/api/sync/digest" })
+    ).json() as { channels: { id: string }[]; messages: { id: string }[] };
+
+    expect(digest.channels.some((channel) => channel.id === privateId)).toBe(false);
+
+    // Resolve each advertised id and confirm none of the withheld bodies appear.
+    const fetched = (
+      await source.server.inject({
+        method: "POST",
+        url: "/api/sync/messages",
+        payload: { ids: digest.messages.map((entry) => entry.id) },
+      })
+    ).json() as { messages: { body?: string }[] };
+    const bodies = fetched.messages.map((message) => message.body ?? "");
+    expect(bodies).toContain("public words");
+    expect(bodies).not.toContain("private words");
+    expect(bodies).not.toContain("dm words");
+    expect(bodies).not.toContain("shadow words");
+  });
+
+  it("tombstones keep locally deleted messages from re-importing, and edits propagate", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const keepId = await post(source, sourceAdmin.cookie, "general", "keep me");
+    const doomedId = await post(source, sourceAdmin.cookie, "general", "delete me locally");
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("delete me locally");
+
+    // Delete locally on the puller; the source still holds it — it must not come back.
+    await puller.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${doomedId}`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).not.toContain("delete me locally");
+
+    // An edit on the source propagates (newer editedAt wins).
+    await source.server.inject({
+      method: "PATCH",
+      url: `/api/messages/${keepId}`,
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { body: "keep me (edited)" },
+    });
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("keep me (edited)");
+  });
+});
+
+describe("attachment + sync review hardening", () => {
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  async function uploadAttachment(app: LoamApp, cookie: string) {
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie },
+      payload: { mimeType: "image/png", data: tinyPng },
+    });
+    return response.json() as { id: string; mimeType: string };
+  }
+
+  it("audience-gates attachment downloads like their owning message", async () => {
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const eve = await newSession(app);
+
+    // A DM attachment: participants can fetch it, a third party (or no session) cannot.
+    const dmAttachment = await uploadAttachment(app, alice.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "dm", recipientUserId: bob.userId, body: "look", attachments: [dmAttachment] },
+    });
+
+    const path = `/api/attachments/${dmAttachment.id}.png`;
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: alice.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: bob.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: eve.cookie } })).statusCode).toBe(404);
+    expect((await app.server.inject({ method: "GET", url: path })).statusCode).toBe(404);
+
+    // A public-channel attachment stays anonymously fetchable (peer nodes copy without a session).
+    const publicAttachment = await uploadAttachment(app, alice.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [publicAttachment] },
+    });
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/attachments/${publicAttachment.id}.png` })).statusCode,
+    ).toBe(200);
+
+    // A pending (not yet attached) upload is only visible to its uploader.
+    const pendingAttachment = await uploadAttachment(app, alice.cookie);
+    const pendingPath = `/api/attachments/${pendingAttachment.id}.png`;
+    expect((await app.server.inject({ method: "GET", url: pendingPath, headers: { cookie: alice.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: pendingPath, headers: { cookie: eve.cookie } })).statusCode).toBe(404);
+  });
+
+  it("sweeps orphaned attachment files but keeps referenced and fresh-pending ones", async () => {
+    const { app, dataDir } = await makeApp();
+    const session = await newSession(app);
+    const attachmentsDir = join(dataDir, "attachments");
+
+    // Referenced file: attached to a message — must survive the sweep.
+    const attached = await uploadAttachment(app, session.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attached] },
+    });
+
+    // Fresh pending upload: inside the grace period — must survive.
+    const pending = await uploadAttachment(app, session.cookie);
+
+    // Restart-orphan: a file on disk with no pending entry and no referencing message.
+    mkdirSync(attachmentsDir, { recursive: true });
+    const strayPath = join(attachmentsDir, "att_00000000000000ff.png");
+    writeFileSync(strayPath, Buffer.from(tinyPng, "base64"));
+
+    await app.reapOrphanedAttachments();
+
+    expect(existsSync(join(attachmentsDir, `${attached.id}.png`))).toBe(true);
+    expect(existsSync(join(attachmentsDir, `${pending.id}.png`))).toBe(true);
+    expect(existsSync(strayPath)).toBe(false);
+  });
+
+  it("blocks a banned user from editing or deleting their old messages", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: target.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "before the ban" },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const edit = await app.server.inject({
+      method: "PATCH",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: target.cookie },
+      payload: { body: "rewritten after the ban" },
+    });
+    expect(edit.statusCode).toBe(403);
+
+    const remove = await app.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: target.cookie },
+    });
+    expect(remove.statusCode).toBe(403);
+  });
+
+  it("keeps shadow-banned users' reactions out of the sync export", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const admin = await newSession(app);
+    const shadowed = await newSession(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "react to me" },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+
+    const reacted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: shadowed.cookie },
+      payload: { type: "reaction", targetMessageId: messageId, reaction: "👍" },
+    });
+    const reactionId = (reacted.json() as { message: { id: string } }).message.id;
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${shadowed.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    const digest = (await app.server.inject({ method: "GET", url: "/api/sync/digest" })).json() as {
+      messages: { id: string }[];
+    };
+    expect(digest.messages.some((entry) => entry.id === messageId)).toBe(true);
+    expect(digest.messages.some((entry) => entry.id === reactionId)).toBe(false);
+  });
+
+  it("refuses to import a reply whose parent was tombstoned locally", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const parentPost = await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "thread root" },
+    });
+    const parentId = (parentPost.json() as { message: { id: string } }).message.id;
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+
+    // The puller deletes the imported thread root (tombstoning it)...
+    await puller.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${parentId}`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+
+    // ...then the source grows a reply under that root.
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelReply", channelId: "general", parentMessageId: parentId, body: "late reply" },
+    });
+
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+
+    const bodies = (
+      (
+        await puller.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: pullerAdmin.cookie } })
+      ).json() as { body?: string }[]
+    ).map((message) => message.body ?? "");
+    expect(bodies).not.toContain("thread root");
+    expect(bodies).not.toContain("late reply");
+  });
+});

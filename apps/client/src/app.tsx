@@ -4,9 +4,11 @@ import {
   ChannelSchema,
   JoinPolicySchema,
   LoamConfigSchema,
+  MessageAttachmentSchema,
   MessageSchema,
   securityProfilePreset,
   SecurityProfileSchema,
+  SyncStatusReportSchema,
   UserSchema,
   type Channel,
   type ChannelPostingPolicy,
@@ -15,11 +17,13 @@ import {
   type JoinPolicy,
   type LoamConfig,
   type Message,
+  type MessageAttachment,
   type MessageCreateRequest,
   type NetworkConfig,
   type Role,
   type SecurityProfile,
   type StreamEvent,
+  type SyncStatusReport,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -33,6 +37,7 @@ import { Avatar } from "./components/Avatar";
 import { InviteControl } from "./components/InviteControl";
 import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
+import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
@@ -408,6 +413,12 @@ function LoamApp() {
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string>();
   const [wiped, setWiped] = useState(false);
+  // Whether the wipe screen reflects a node kill switch ("node") or just this browser ("device").
+  const [wipeScope, setWipeScope] = useState<"node" | "device">("node");
+  // Bumped to force a full server re-sync: on WebSocket reconnect (missed events don't replay) and
+  // on a failed boot fetch (retry with backoff instead of stranding the app offline).
+  const [syncTick, setSyncTick] = useState(0);
+  const syncFailuresRef = useRef(0);
   const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
@@ -421,6 +432,8 @@ function LoamApp() {
   currentUserIdRef.current = currentUser.id;
   const channelsRef = useRef(channels);
   channelsRef.current = channels;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const usersByIdRef = useRef<Map<string, User>>(new Map());
   const lastReadRef = useRef(lastReadByConversation);
 
@@ -497,7 +510,9 @@ function LoamApp() {
       }
 
       const authorName = usersByIdRef.current.get(message.authorId)?.displayName ?? generateDisplayName(message.authorId);
-      const body = bodyFor(message);
+      const body =
+        bodyFor(message) ||
+        (message.type !== "reaction" && message.attachments?.length ? "📷 Image" : "");
       let title = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
 
@@ -513,38 +528,10 @@ function LoamApp() {
     [pushToast],
   );
 
-  const upsertChannels = useCallback((incomingChannels: Channel[]) => {
-    setChannels((previous) => {
-      // Map upsert preserves insertion order: existing channels stay put, new ones append. No
-      // re-sort, so the seeded Announcements/General keep their position. Archived channels are
-      // dropped from the nav, so archiving hides a channel live and restoring re-adds it.
-      const next = new Map(previous.map((channel) => [channel.id, channel]));
-
-      for (const channel of incomingChannels) {
-        if (channel.archived) {
-          next.delete(channel.id);
-        } else {
-          next.set(channel.id, channel);
-        }
-      }
-
-      return Array.from(next.values());
-    });
-
-    for (const channel of incomingChannels) {
-      if (channel.archived) {
-        void deleteRecord("channels", channel.id);
-      }
-    }
-    void putRecords(
-      "channels",
-      incomingChannels.filter((channel) => !channel.archived),
-    );
-  }, []);
-
   /**
-   * Drop a channel this user can no longer see (they were removed from a private channel): purge
-   * the channel and its cached messages locally, and leave the conversation if it is on screen.
+   * Drop a channel this user can no longer see (removed from a private channel, or the channel was
+   * archived): purge the channel and its cached messages locally, and leave the conversation if it
+   * is on screen.
    */
   const removeChannel = useCallback((channelId: string) => {
     setChannels((previous) => previous.filter((channel) => channel.id !== channelId));
@@ -574,6 +561,40 @@ function LoamApp() {
     }
   }, []);
 
+  const upsertChannels = useCallback(
+    (incomingChannels: Channel[]) => {
+      setChannels((previous) => {
+        // Map upsert preserves insertion order: existing channels stay put, new ones append. No
+        // re-sort, so the seeded Announcements/General keep their position. Archived channels are
+        // dropped from the nav, so archiving hides a channel live and restoring re-adds it.
+        const next = new Map(previous.map((channel) => [channel.id, channel]));
+
+        for (const channel of incomingChannels) {
+          if (channel.archived) {
+            next.delete(channel.id);
+          } else {
+            next.set(channel.id, channel);
+          }
+        }
+
+        return Array.from(next.values());
+      });
+
+      for (const channel of incomingChannels) {
+        if (channel.archived) {
+          // Archiving revokes visibility: purge like a removal (cached message bodies included —
+          // an archived private channel's history must not linger in IndexedDB).
+          removeChannel(channel.id);
+        }
+      }
+      void putRecords(
+        "channels",
+        incomingChannels.filter((channel) => !channel.archived),
+      );
+    },
+    [removeChannel],
+  );
+
   const upsertMessages = useCallback((incomingMessages: Message[]) => {
     setMessages((previous) => {
       const next = new Map(previous.map((message) => [message.id, message]));
@@ -586,6 +607,63 @@ function LoamApp() {
     });
     void putRecords("messages", incomingMessages);
   }, []);
+
+  /**
+   * Apply a conversation's authoritative server message list: upsert everything returned and drop
+   * local messages in that conversation (and reactions on them) that the server no longer has.
+   * Deletions and retention expiries that happen while this client is offline never arrive as live
+   * events, so a plain additive merge would keep the stale copies — including supposedly expired
+   * bodies — in memory and IndexedDB forever.
+   */
+  const reconcileConversationMessages = useCallback(
+    (conversation: Conversation, serverMessages: Message[], preFetchIds: Set<string>) => {
+      const serverIds = new Set(serverMessages.map((message) => message.id));
+      // Two guards against pruning legitimate messages that raced the fetch (sent locally or
+      // arriving over the socket while it was in flight): only messages we already held when the
+      // request started are prunable at all, and never anything newer than the snapshot's newest
+      // entry (server timestamps compared to server timestamps — an empty snapshot has no edge,
+      // so there the pre-fetch id set is the only, and sufficient, guard).
+      const snapshotEdge = serverMessages.reduce((newest, message) => Math.max(newest, message.createdAt), 0);
+      const meId = currentUserIdRef.current;
+
+      setMessages((previous) => {
+        const conversationIds = new Set(
+          previous
+            .filter((message) => isConversationMessage(message, conversation, meId))
+            .map((message) => message.id),
+        );
+        const kept: Message[] = [];
+
+        for (const message of previous) {
+          const inConversation =
+            isConversationMessage(message, conversation, meId) ||
+            (message.type === "reaction" && conversationIds.has(message.targetMessageId));
+
+          if (
+            inConversation &&
+            !serverIds.has(message.id) &&
+            preFetchIds.has(message.id) &&
+            (snapshotEdge === 0 || message.createdAt <= snapshotEdge)
+          ) {
+            void deleteRecord("messages", message.id);
+            continue;
+          }
+
+          kept.push(message);
+        }
+
+        const next = new Map(kept.map((message) => [message.id, message]));
+
+        for (const message of serverMessages) {
+          next.set(message.id, message);
+        }
+
+        return Array.from(next.values()).sort(compareCreatedAt);
+      });
+      void putRecords("messages", serverMessages);
+    },
+    [],
+  );
 
   const removeMessage = useCallback((messageId: string) => {
     setMessages((previous) => previous.filter((message) => message.id !== messageId));
@@ -720,9 +798,11 @@ function LoamApp() {
     [location, upsertChannels],
   );
 
-  const purgeLocalData = useCallback(async () => {
-    // Remote wipe (kill switch): drop everything this browser knows, then show a neutral
-    // disconnected screen. Best-effort on every step — nothing here may block another.
+  const purgeLocalData = useCallback(async (scope: "node" | "device" = "node") => {
+    // Wipe: drop everything this browser knows, then show a neutral end screen. `scope` only
+    // changes the copy — a node kill switch reads "node unavailable", a local device wipe says so
+    // honestly (the node is still up). Best-effort on every step — nothing here may block another.
+    setWipeScope(scope);
     setWiped(true);
     setMessages([]);
     setChannels([]);
@@ -882,6 +962,58 @@ function LoamApp() {
     [upsertUsers],
   );
 
+  /**
+   * Resize an image on-device (the original never leaves the browser) and upload it as a message
+   * attachment. Returns the descriptor to include in the message create request.
+   */
+  const uploadAttachment = useCallback(async (file: File): Promise<MessageAttachment> => {
+    const prepared = await prepareImageAttachment(file);
+    const buffer = await prepared.blob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(apiUrl("/api/attachments"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          mimeType: prepared.blob.type || "image/png",
+          data: btoa(binary),
+          width: prepared.width,
+          height: prepared.height,
+        }),
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Attachment upload failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      const parsed = MessageAttachmentSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error("The server returned an unrecognised attachment payload.");
+      }
+
+      return parsed.data;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
+
   const uploadAvatarImage = useCallback(
     async (blob: Blob) => {
       const controller = new AbortController();
@@ -959,33 +1091,89 @@ function LoamApp() {
       })
       .catch(() => undefined);
 
-    Promise.all([fetchJson<Config>("/api/config"), fetchJson<Channel[]>("/api/channels"), fetchJson<User[]>("/api/users")])
-      .then(([nextConfig, nextChannels, nextUsers]) => {
+    let retryTimer: number | undefined;
+
+    // Config first: it identifies the session and says whether this user may read content at all.
+    // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
+    // participating user; approval flips `currentUser.pending`, which re-runs this effect.
+    fetchJson<Config>("/api/config")
+      .then(async (nextConfig) => {
         if (!active) {
           return;
         }
 
+        syncFailuresRef.current = 0;
+        setError(undefined);
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
         setCurrentUser(nextConfig.currentUser);
         setUsers((previous) =>
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
+
+        if (nextConfig.currentUser.banned || nextConfig.currentUser.pending) {
+          // Gated sessions must not keep previously hydrated content around (a banned user's
+          // cached history stays readable otherwise): clear memory and the IndexedDB caches.
+          setChannels([]);
+          setMessages([]);
+
+          for (const storeName of ["channels", "messages"] as const) {
+            const cachedRecords = await getAllRecords<{ id: string }>(storeName).catch(() => []);
+
+            for (const record of cachedRecords) {
+              void deleteRecord(storeName, record.id);
+            }
+          }
+
+          return;
+        }
+
+        const [nextChannels, nextUsers] = await Promise.all([
+          fetchJson<Channel[]>("/api/channels"),
+          fetchJson<User[]>("/api/users"),
+        ]);
+
+        if (!active) {
+          return;
+        }
+
         setChannels(nextChannels);
         upsertUsers([nextConfig.currentUser, ...nextUsers]);
         void putRecords("channels", nextChannels);
+
+        // Drop cached channels the server no longer returns (deleted, archived, or access revoked
+        // while this client was offline) — and their message bodies with them.
+        const keep = new Set(nextChannels.map((channel) => channel.id));
+        const cached = await getAllRecords<Channel>("channels").catch(() => [] as Channel[]);
+
+        for (const channel of cached) {
+          if (!keep.has(channel.id)) {
+            removeChannel(channel.id);
+          }
+        }
       })
       .catch((nextError: unknown) => {
-        if (active) {
-          setError(nextError instanceof Error ? nextError.message : "Unable to reach the LOAM server.");
-          setConnection("offline");
+        if (!active) {
+          return;
         }
+
+        setError(nextError instanceof Error ? nextError.message : "Unable to reach the LOAM server.");
+        setConnection("offline");
+        // Retry with backoff — a one-shot boot fetch would strand the app offline forever when the
+        // server is momentarily unreachable (previously a manual reload was the only way out).
+        const delay = Math.min(30_000, 2_000 * 2 ** syncFailuresRef.current);
+        syncFailuresRef.current += 1;
+        retryTimer = window.setTimeout(() => setSyncTick((tick) => tick + 1), delay);
       });
 
     return () => {
       active = false;
+
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+      }
     };
-  }, [currentUser.id, upsertUsers]);
+  }, [currentUser.id, currentUser.banned, currentUser.pending, removeChannel, syncTick, upsertUsers]);
 
   useEffect(() => {
     if (!activeConversation) {
@@ -997,9 +1185,25 @@ function LoamApp() {
         ? `/api/messages/${encodeURIComponent(activeConversation.id)}`
         : `/api/dms/${encodeURIComponent(activeConversation.id)}`;
 
+    const conversation = activeConversation;
+    // Only the latest in-flight request may reconcile: a slow response applying after a newer
+    // sync (conversation switch, reconnect resync) would resurrect or delete the wrong messages.
+    let active = true;
+    // What we held when the request started — reconciliation may only prune these (a message
+    // sent or received while the fetch was in flight is not a deletion).
+    const preFetchIds = new Set(messagesRef.current.map((message) => message.id));
+
     fetchJson<Message[]>(path)
-      .then((nextMessages) => upsertMessages(nextMessages))
+      .then((nextMessages) => {
+        if (active) {
+          reconcileConversationMessages(conversation, nextMessages, preFetchIds);
+        }
+      })
       .catch((nextError: unknown) => {
+        if (!active) {
+          return;
+        }
+
         // A 404 means the channel does not exist for this user (unknown id, or a private channel
         // they are not a member of) — an empty conversation, not a connectivity problem.
         if (nextError instanceof Error && nextError.message.endsWith("404")) {
@@ -1008,7 +1212,11 @@ function LoamApp() {
 
         setError(nextError instanceof Error ? nextError.message : "Unable to load messages.");
       });
-  }, [activeConversation?.id, activeConversation?.kind, currentUser.id, upsertMessages]);
+
+    return () => {
+      active = false;
+    };
+  }, [activeConversation?.id, activeConversation?.kind, currentUser.id, reconcileConversationMessages, syncTick]);
 
   useEffect(() => {
     if (!config?.currentUser.id) {
@@ -1052,6 +1260,13 @@ function LoamApp() {
       nextSocket.onopen = () => {
         if (disposed || attempt !== socketAttempt) {
           return;
+        }
+
+        // A reconnect means events were missed (deletes, edits, new channels don't replay): pull
+        // fresh state — config/channels/users plus the open conversation — instead of trusting the
+        // cache. The first connection skips this; boot hydration just ran.
+        if (attempt > 1) {
+          setSyncTick((tick) => tick + 1);
         }
 
         reconnectAttempts = 0;
@@ -1207,8 +1422,17 @@ function LoamApp() {
       <main className="wiped-screen">
         <div>
           <p className="brand-title">LOAM</p>
-          <h1>Disconnected</h1>
-          <p>This node is no longer available.</p>
+          {wipeScope === "device" ? (
+            <>
+              <h1>Device wiped</h1>
+              <p>This browser&rsquo;s local copy has been erased. Scan the join QR to reconnect.</p>
+            </>
+          ) : (
+            <>
+              <h1>Disconnected</h1>
+              <p>This node is no longer available.</p>
+            </>
+          )}
         </div>
       </main>
     );
@@ -1267,10 +1491,11 @@ function LoamApp() {
           onClaimAdmin={claimAdmin}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
-          onWipeDevice={purgeLocalData}
+          onWipeDevice={() => purgeLocalData("device")}
         />
       ) : (
         <ConversationView
+          allowAttachments={!!config?.networkConfig.enableAttachments}
           channels={channels}
           conversation={activeConversation}
           currentUser={currentUser}
@@ -1286,7 +1511,7 @@ function LoamApp() {
               reaction,
             })
           }
-          onSend={(body) => {
+          onSend={(body, attachments) => {
             if (!activeConversation) {
               return Promise.resolve();
             }
@@ -1296,6 +1521,7 @@ function LoamApp() {
                 type: "channelPost",
                 channelId: activeConversation.id,
                 body,
+                ...(attachments?.length ? { attachments } : {}),
               });
             }
 
@@ -1303,9 +1529,10 @@ function LoamApp() {
               type: "dm",
               recipientUserId: activeConversation.id,
               body,
+              ...(attachments?.length ? { attachments } : {}),
             });
           }}
-          onThreadReply={(parentMessageId, body) => {
+          onThreadReply={(parentMessageId, body, attachments) => {
             if (!activeConversation || activeConversation.kind !== "channel") {
               return Promise.resolve();
             }
@@ -1315,8 +1542,10 @@ function LoamApp() {
               channelId: activeConversation.id,
               parentMessageId,
               body,
+              ...(attachments?.length ? { attachments } : {}),
             });
           }}
+          onUploadAttachment={uploadAttachment}
           users={users}
           usersById={usersById}
         />
@@ -1597,6 +1826,7 @@ function NavLink({ active, children, className, href }: NavLinkProps) {
 }
 
 interface ConversationViewProps {
+  allowAttachments: boolean;
   channels: Channel[];
   conversation?: Conversation;
   currentUser: User;
@@ -1606,13 +1836,15 @@ interface ConversationViewProps {
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onLeftChannel: (channelId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
-  onSend: (body: string) => Promise<void>;
-  onThreadReply: (parentMessageId: string, body: string) => Promise<void>;
+  onSend: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onThreadReply: (parentMessageId: string, body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onUploadAttachment: (file: File) => Promise<MessageAttachment>;
   users: User[];
   usersById: Map<string, User>;
 }
 
 function ConversationView({
+  allowAttachments,
   channels,
   conversation,
   currentUser,
@@ -1624,6 +1856,7 @@ function ConversationView({
   onReact,
   onSend,
   onThreadReply,
+  onUploadAttachment,
   users,
   usersById,
 }: ConversationViewProps) {
@@ -1715,6 +1948,7 @@ function ConversationView({
         <MessageComposer
           label={conversation.kind === "channel" ? `Message ${conversation.id}` : `Message ${title}`}
           onSend={onSend}
+          onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
           placeholder={conversation.kind === "channel" ? "Post an update" : "Send a direct message"}
         />
       </section>
@@ -1727,7 +1961,8 @@ function ConversationView({
           onDelete={onDelete}
           onEdit={onEdit}
           onReact={onReact}
-          onReply={(body) => onThreadReply(threadParent.id, body)}
+          onReply={(body, attachments) => onThreadReply(threadParent.id, body, attachments)}
+          onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
           parent={threadParent}
           usersById={usersById}
         />
@@ -2129,6 +2364,22 @@ function MessageItem({
             dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
           />
         )}
+        {message.type !== "reaction" && message.attachments?.length ? (
+          <div className="message-attachments">
+            {message.attachments.map((attachment) => (
+              <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
+                <img
+                  alt="Attached image"
+                  className="message-attachment"
+                  height={attachment.height}
+                  loading="lazy"
+                  src={apiUrl(attachmentPath(attachment))}
+                  width={attachment.width}
+                />
+              </a>
+            ))}
+          </div>
+        ) : null}
         <div className="message-actions">
           {message.meta?.streaming ? <span className="streaming-pill">Streaming</span> : null}
           {!message.meta?.streaming && reactions.map((reaction) => (
@@ -2181,15 +2432,30 @@ function MessageItem({
 
 interface MessageComposerProps {
   label: string;
-  onSend: (body: string) => Promise<void>;
+  onSend: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  /** When present, the composer offers image attachments (resized on-device before upload). */
+  onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   placeholder: string;
 }
 
-function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
+type PendingAttachment = {
+  key: string;
+  name: string;
+  status: "uploading" | "ready" | "error";
+  attachment?: MessageAttachment;
+  error?: string;
+};
+
+function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: MessageComposerProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
+  const [pending, setPending] = useState<PendingAttachment[]>([]);
+  const pendingKeyRef = useRef(0);
   const composerId = useId();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const readyAttachments = pending.flatMap((entry) => (entry.attachment ? [entry.attachment] : []));
+  const uploading = pending.some((entry) => entry.status === "uploading");
 
   useEffect(() => {
     const textArea = textAreaRef.current;
@@ -2202,18 +2468,52 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
     textArea.style.height = `${Math.min(textArea.scrollHeight, 168)}px`;
   }, [value]);
 
+  function attachFiles(files: FileList | null): void {
+    if (!onUploadAttachment || !files) {
+      return;
+    }
+
+    const room = ATTACHMENT_MAX_COUNT - pending.filter((entry) => entry.status !== "error").length;
+
+    for (const file of Array.from(files).slice(0, Math.max(0, room))) {
+      pendingKeyRef.current += 1;
+      const key = `att-${pendingKeyRef.current}`;
+      setPending((previous) => [...previous, { key, name: file.name, status: "uploading" }]);
+      onUploadAttachment(file)
+        .then((attachment) => {
+          setPending((previous) =>
+            previous.map((entry) => (entry.key === key ? { ...entry, status: "ready", attachment } : entry)),
+          );
+        })
+        .catch((uploadError: unknown) => {
+          setPending((previous) =>
+            previous.map((entry) =>
+              entry.key === key
+                ? {
+                    ...entry,
+                    status: "error",
+                    error: uploadError instanceof Error ? uploadError.message : "Upload failed.",
+                  }
+                : entry,
+            ),
+          );
+        });
+    }
+  }
+
   async function submit(): Promise<void> {
     const body = value.trim();
 
-    if (!body || sending) {
+    if ((!body && !readyAttachments.length) || sending || uploading) {
       return;
     }
 
     setSending(true);
 
     try {
-      await onSend(body);
+      await onSend(body, readyAttachments.length ? readyAttachments : undefined);
       setValue("");
+      setPending([]);
     } finally {
       setSending(false);
     }
@@ -2221,15 +2521,60 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
 
   return (
     <form
-      className="composer"
+      className={onUploadAttachment ? "composer has-attach" : "composer"}
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
       }}
     >
+      {pending.length ? (
+        <div className="composer-attachments">
+          {pending.map((entry) => (
+            <span className={`attachment-chip ${entry.status}`} key={entry.key}>
+              {entry.status === "uploading" ? "⏳ " : entry.status === "error" ? "⚠ " : "🖼 "}
+              <span className="attachment-chip-name" title={entry.error}>
+                {entry.name}
+              </span>
+              <button
+                aria-label={`Remove ${entry.name}`}
+                disabled={sending}
+                onClick={() => setPending((previous) => previous.filter((item) => item.key !== entry.key))}
+                type="button"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <label className="sr-only" for={composerId}>
         {label}
       </label>
+      {onUploadAttachment ? (
+        <>
+          <input
+            accept="image/png,image/jpeg,image/webp,image/*"
+            className="sr-only"
+            multiple
+            onInput={(event) => {
+              attachFiles(event.currentTarget.files);
+              event.currentTarget.value = "";
+            }}
+            ref={fileInputRef}
+            type="file"
+          />
+          <button
+            aria-label="Attach an image"
+            className="composer-attach"
+            disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach an image (resized on this device before upload)"
+            type="button"
+          >
+            🖼
+          </button>
+        </>
+      ) : null}
       <textarea
         dir="auto"
         id={composerId}
@@ -2245,7 +2590,7 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
         rows={1}
         value={value}
       />
-      <button disabled={!value.trim() || sending} type="submit">
+      <button disabled={(!value.trim() && !readyAttachments.length) || sending || uploading} type="submit">
         Send
       </button>
     </form>
@@ -2259,7 +2604,8 @@ interface ThreadPanelProps {
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onReact: (messageId: string, reaction: string) => Promise<void>;
-  onReply: (body: string) => Promise<void>;
+  onReply: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   parent: Message;
   usersById: Map<string, User>;
 }
@@ -2285,6 +2631,7 @@ function ThreadPanel({
   onEdit,
   onReact,
   onReply,
+  onUploadAttachment,
   parent,
   usersById,
 }: ThreadPanelProps) {
@@ -2328,7 +2675,12 @@ function ThreadPanel({
           />
         ))}
       </div>
-      <MessageComposer label="Reply in thread" onSend={onReply} placeholder="Reply in thread" />
+      <MessageComposer
+        label="Reply in thread"
+        onSend={onReply}
+        onUploadAttachment={onUploadAttachment}
+        placeholder="Reply in thread"
+      />
     </aside>
   );
 }
@@ -3659,6 +4011,7 @@ const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
   ["enableDMs", "Direct messages"],
   ["enableReactions", "Reactions"],
   ["enableMarkdown", "Markdown rendering"],
+  ["enableAttachments", "Image attachments"],
 ];
 
 const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
@@ -3779,6 +4132,7 @@ function AdminView({
         retention: { messageTtlMs: adminConfig.retention.messageTtlMs ?? null },
         security: adminConfig.security,
         access: adminConfig.access,
+        sync: adminConfig.sync,
       };
       const response = await fetch(apiUrl("/api/admin/config"), {
         method: "PATCH",
@@ -4190,6 +4544,81 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
+              <p className="eyebrow">Network</p>
+              <h2>Node-to-node sync</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.sync.enabled}
+                disabled={saving}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous
+                      ? { ...previous, sync: { ...previous.sync, enabled: event.currentTarget.checked } }
+                      : previous,
+                  )
+                }
+                type="checkbox"
+              />
+              Sync public channels with peer nodes
+            </label>
+            <p className="form-note">
+              Pull-based: this node fetches public channels, their messages, and profiles from each
+              peer. DMs and private channels never leave a node. A peer&rsquo;s join URL (from its
+              join QR) is its sync address. Enabling this also lets peers pull this node&rsquo;s
+              public content.
+            </p>
+            {adminConfig.sync.peers.length ? (
+              <ul className="moderation-list">
+                {adminConfig.sync.peers.map((peer) => (
+                  <li className="moderation-row sync-peer" key={peer.url}>
+                    <div className="moderation-name">
+                      <strong>{peer.label ?? peer.url}</strong>
+                      {peer.label ? <span>{peer.url}</span> : null}
+                    </div>
+                    <div className="moderation-actions">
+                      <button
+                        className="danger-button"
+                        disabled={saving}
+                        onClick={() =>
+                          setAdminConfig((previous) =>
+                            previous
+                              ? {
+                                  ...previous,
+                                  sync: {
+                                    ...previous.sync,
+                                    peers: previous.sync.peers.filter((entry) => entry.url !== peer.url),
+                                  },
+                                }
+                              : previous,
+                          )
+                        }
+                        type="button"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="form-note">No peers yet.</p>
+            )}
+            <AddSyncPeerControl
+              disabled={saving || adminConfig.sync.peers.length >= 16}
+              onAdd={(peer) =>
+                setAdminConfig((previous) =>
+                  previous && !previous.sync.peers.some((entry) => entry.url === peer.url)
+                    ? { ...previous, sync: { ...previous.sync, peers: [...previous.sync.peers, peer] } }
+                    : previous,
+                )
+              }
+            />
+            <p className="form-note">Peer changes apply when you save the node config below.</p>
+            <SyncStatusPanel />
+          </div>
+          <div className="profile-panel">
+            <div>
               <p className="eyebrow">Admin access</p>
               <h2>Bootstrap</h2>
             </div>
@@ -4247,6 +4676,176 @@ function AdminView({
       ) : null}
       <AdminChannelsPanel currentUser={currentUser} onChannelUpsert={onChannelUpsert} />
     </section>
+  );
+}
+
+/** Compact add-a-peer form: URL (required, http/https) + optional label. */
+function AddSyncPeerControl({
+  disabled,
+  onAdd,
+}: {
+  disabled: boolean;
+  onAdd: (peer: { url: string; label?: string }) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [label, setLabel] = useState("");
+  const trimmedUrl = url.trim().replace(/\/+$/, "");
+  const validUrl = /^https?:\/\/.+/.test(trimmedUrl);
+
+  return (
+    <div className="sync-peer-add">
+      <label>
+        Peer URL (its join URL)
+        <input
+          disabled={disabled}
+          onInput={(event) => setUrl(event.currentTarget.value)}
+          placeholder="http://192.168.0.10:3000"
+          value={url}
+        />
+      </label>
+      <label>
+        Label (optional)
+        <input
+          disabled={disabled}
+          maxLength={80}
+          onInput={(event) => setLabel(event.currentTarget.value)}
+          placeholder="e.g. Depot Pi"
+          value={label}
+        />
+      </label>
+      <button
+        disabled={disabled || !validUrl}
+        onClick={() => {
+          onAdd({ url: trimmedUrl, ...(label.trim() ? { label: label.trim() } : {}) });
+          setUrl("");
+          setLabel("");
+        }}
+        type="button"
+      >
+        Add peer
+      </button>
+    </div>
+  );
+}
+
+function parseSyncStatusReport(payload: unknown): SyncStatusReport | undefined {
+  const parsed = SyncStatusReportSchema.safeParse(payload);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Live per-peer sync status (`GET /api/admin/sync`) with a "Sync now" trigger. Reflects the
+ * *saved* config — peers added above appear here after saving.
+ */
+function SyncStatusPanel() {
+  const [report, setReport] = useState<SyncStatusReport>();
+  const [error, setError] = useState<string>();
+  const [running, setRunning] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+
+    fetchJson<unknown>("/api/admin/sync")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        const parsed = parseSyncStatusReport(payload);
+
+        if (!parsed) {
+          // Surface contract drift instead of rendering a silently blank panel.
+          setError("The server returned an unrecognised sync status payload.");
+          return;
+        }
+
+        setReport(parsed);
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : "Unable to load sync status.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [reloadKey]);
+
+  async function runNow(): Promise<void> {
+    setRunning(true);
+    setError(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 60_000);
+
+    try {
+      const response = await fetch(apiUrl("/api/admin/sync/run"), {
+        method: "POST",
+        credentials: "include",
+        signal: controller.signal,
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Sync failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      const parsed = parseSyncStatusReport(payload);
+
+      if (!parsed) {
+        throw new Error("The server returned an unrecognised sync status payload.");
+      }
+
+      setReport(parsed);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Unable to run sync.");
+    } finally {
+      window.clearTimeout(timeout);
+      setRunning(false);
+    }
+  }
+
+  if (!report?.peers.length) {
+    return error ? <p className="form-error">{error}</p> : null;
+  }
+
+  return (
+    <div className="sync-status">
+      <div className="panel-heading">
+        <p className="eyebrow">Status (saved peers)</p>
+        <div className="moderation-actions">
+          <button className="ghost-button" disabled={running} onClick={() => setReloadKey((key) => key + 1)} type="button">
+            Refresh
+          </button>
+          <button disabled={running || !report.enabled} onClick={() => void runNow()} type="button">
+            {running ? "Syncing…" : "Sync now"}
+          </button>
+        </div>
+      </div>
+      <ul className="moderation-list">
+        {report.peers.map((peer) => (
+          <li className="moderation-row sync-peer" key={peer.url}>
+            <div className="moderation-name">
+              <strong>{peer.label ?? peer.url}</strong>
+              <span>
+                {peer.status?.lastError
+                  ? `Error: ${peer.status.lastError}`
+                  : peer.status?.lastSuccessAt
+                    ? `Last synced ${displayTime(peer.status.lastSuccessAt)} · ${peer.status.imported} message(s) imported`
+                    : "Not synced yet"}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {error ? <p className="form-error">{error}</p> : null}
+    </div>
   );
 }
 

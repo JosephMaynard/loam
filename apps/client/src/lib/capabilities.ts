@@ -8,7 +8,7 @@ import type { User } from "@loam/schema";
  * @returns True when the user is an admin or holds the moderator role.
  */
 export function canModerate(user: User): boolean {
-  return user.isAdmin || (user.roles?.includes("moderator") ?? false);
+  return !user.banned && !user.pending && (user.isAdmin || (user.roles?.includes("moderator") ?? false));
 }
 
 /**
@@ -19,7 +19,7 @@ export function canModerate(user: User): boolean {
  * @returns True when the user is an admin or holds the greeter role.
  */
 export function canGreet(user: User): boolean {
-  return user.isAdmin || (user.roles?.includes("greeter") ?? false);
+  return !user.banned && !user.pending && (user.isAdmin || (user.roles?.includes("greeter") ?? false));
 }
 
 /**

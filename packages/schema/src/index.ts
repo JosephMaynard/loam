@@ -159,6 +159,7 @@ export const NetworkConfigSchema = z.object({
   enableDMs: z.boolean(),
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
+  enableAttachments: z.boolean(),
   enableLLMChat: z.boolean(),
   enableLLMStreaming: z.boolean(),
   allowUserDisplayNameEdit: z.boolean(),
@@ -180,6 +181,7 @@ export const FeatureFlagsSchema = z.object({
   enableDMs: z.boolean(),
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
+  enableAttachments: z.boolean(),
 });
 export type FeatureFlags = z.infer<typeof FeatureFlagsSchema>;
 
@@ -240,6 +242,25 @@ export const AccessConfigSchema = z.object({
 });
 export type AccessConfig = z.infer<typeof AccessConfigSchema>;
 
+/** One node this node pulls from. The peer's join URL (from its join QR) is exactly its sync URL. */
+export const SyncPeerSchema = z.object({
+  url: z.url({ protocol: /^https?$/ }),
+  label: z.string().trim().min(1).max(80).optional(),
+});
+export type SyncPeer = z.infer<typeof SyncPeerSchema>;
+
+/**
+ * Node-to-node sync (docs/11): pull-based gossip of **public** data only — public channels, their
+ * messages/reactions, and referenced user profiles. DMs and private channels never leave a node.
+ */
+export const SyncConfigSchema = z.object({
+  enabled: z.boolean(),
+  peers: z.array(SyncPeerSchema).max(16),
+  /** How often the pull loop runs against each peer. */
+  intervalMs: z.number().int().min(5_000).max(3_600_000),
+});
+export type SyncConfig = z.infer<typeof SyncConfigSchema>;
+
 export const LoamConfigSchema = z.object({
   identity: IdentityConfigSchema,
   features: FeatureFlagsSchema,
@@ -249,6 +270,7 @@ export const LoamConfigSchema = z.object({
   retention: RetentionConfigSchema,
   security: SecurityConfigSchema,
   access: AccessConfigSchema,
+  sync: SyncConfigSchema,
 });
 export type LoamConfig = z.infer<typeof LoamConfigSchema>;
 
@@ -282,6 +304,8 @@ export const LoamConfigUpdateSchema = z.object({
     .optional(),
   security: SecurityConfigSchema.partial().optional(),
   access: AccessConfigSchema.partial().optional(),
+  // `peers` replaces the whole list when present.
+  sync: SyncConfigSchema.partial().optional(),
 });
 export type LoamConfigUpdate = z.infer<typeof LoamConfigUpdateSchema>;
 
@@ -330,6 +354,28 @@ export const AvatarImageUploadRequestSchema = z.object({
 });
 export type AvatarImageUploadRequest = z.infer<typeof AvatarImageUploadRequestSchema>;
 
+/** An image attached to a message. The file itself is uploaded first via `POST /api/attachments`. */
+export const MessageAttachmentSchema = z.object({
+  id: z.string().regex(/^att_[a-f0-9]{16}$/),
+  mimeType: AvatarImageMimeTypeSchema,
+  /** Pixel dimensions of the stored image (client-reported, cosmetic — used to reserve layout). */
+  width: z.number().int().positive().max(10_000).optional(),
+  height: z.number().int().positive().max(10_000).optional(),
+});
+export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
+
+/**
+ * Upload one message-attachment image (base64 body, like avatars). Clients downscale before
+ * uploading — the server enforces a 256KB binary cap and magic-byte/MIME agreement.
+ */
+export const AttachmentUploadRequestSchema = z.object({
+  mimeType: AvatarImageMimeTypeSchema,
+  data: z.string().min(1).max(400_000),
+  width: z.number().int().positive().max(10_000).optional(),
+  height: z.number().int().positive().max(10_000).optional(),
+});
+export type AttachmentUploadRequest = z.infer<typeof AttachmentUploadRequestSchema>;
+
 export const MessageTypeSchema = z.enum([
   "channelPost",
   "channelReply",
@@ -360,38 +406,48 @@ export const BaseMessageSchema = z.object({
 export type BaseMessage = z.infer<typeof BaseMessageSchema>;
 
 const MessageBodySchema = z.string();
-const MessageCreateBodySchema = MessageBodySchema.refine((body) => body.trim().length > 0, {
-  message: "Message body cannot be empty",
-});
+const MessageAttachmentsSchema = z.array(MessageAttachmentSchema).max(4);
 
-export const MessageCreateRequestSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("channelPost"),
-    channelId: IdSchema,
-    body: MessageCreateBodySchema,
-  }),
-  z.object({
-    type: z.literal("channelReply"),
-    channelId: IdSchema,
-    parentMessageId: IdSchema,
-    body: MessageCreateBodySchema,
-  }),
-  z.object({
-    type: z.literal("dm"),
-    recipientUserId: IdSchema,
-    body: MessageCreateBodySchema,
-  }),
-  z.object({
-    type: z.literal("reaction"),
-    targetMessageId: IdSchema,
-    reaction: z.string().min(1),
-  }),
-]);
+export const MessageCreateRequestSchema = z
+  .discriminatedUnion("type", [
+    z.object({
+      type: z.literal("channelPost"),
+      channelId: IdSchema,
+      body: MessageBodySchema,
+      attachments: MessageAttachmentsSchema.optional(),
+    }),
+    z.object({
+      type: z.literal("channelReply"),
+      channelId: IdSchema,
+      parentMessageId: IdSchema,
+      body: MessageBodySchema,
+      attachments: MessageAttachmentsSchema.optional(),
+    }),
+    z.object({
+      type: z.literal("dm"),
+      recipientUserId: IdSchema,
+      body: MessageBodySchema,
+      attachments: MessageAttachmentsSchema.optional(),
+    }),
+    z.object({
+      type: z.literal("reaction"),
+      targetMessageId: IdSchema,
+      reaction: z.string().min(1),
+    }),
+  ])
+  // A message needs text or at least one attachment (an image alone is a valid message).
+  .superRefine((value, ctx) => {
+    if (value.type !== "reaction" && !value.body.trim() && !value.attachments?.length) {
+      ctx.addIssue({ code: "custom", message: "Message body cannot be empty", path: ["body"] });
+    }
+  });
 export type MessageCreateRequest = z.infer<typeof MessageCreateRequestSchema>;
 
 /** Author request to edit a body-bearing message (channel post/reply or DM). */
 export const MessageEditRequestSchema = z.object({
-  body: MessageCreateBodySchema,
+  body: MessageBodySchema.refine((body) => body.trim().length > 0, {
+    message: "Message body cannot be empty",
+  }),
 });
 export type MessageEditRequest = z.infer<typeof MessageEditRequestSchema>;
 
@@ -399,6 +455,7 @@ export const ChannelPostMessageSchema = BaseMessageSchema.extend({
   type: z.literal("channelPost"),
   channelId: IdSchema,
   body: MessageBodySchema,
+  attachments: MessageAttachmentsSchema.optional(),
 });
 export type ChannelPostMessage = z.infer<typeof ChannelPostMessageSchema>;
 
@@ -407,6 +464,7 @@ export const ChannelReplyMessageSchema = BaseMessageSchema.extend({
   channelId: IdSchema,
   parentMessageId: IdSchema,
   body: MessageBodySchema,
+  attachments: MessageAttachmentsSchema.optional(),
 });
 export type ChannelReplyMessage = z.infer<typeof ChannelReplyMessageSchema>;
 
@@ -414,6 +472,7 @@ export const DirectMessageSchema = BaseMessageSchema.extend({
   type: z.literal("dm"),
   recipientUserId: IdSchema,
   body: MessageBodySchema,
+  attachments: MessageAttachmentsSchema.optional(),
 });
 export type DirectMessage = z.infer<typeof DirectMessageSchema>;
 
@@ -431,6 +490,51 @@ export const MessageSchema = z.discriminatedUnion("type", [
   ReactionMessageSchema,
 ]);
 export type Message = z.infer<typeof MessageSchema>;
+
+/**
+ * `GET /api/sync/digest` — what a peer advertises: its public non-archived channels and the
+ * id/editedAt of every syncable message (public-channel posts/replies/reactions, shadow-banned
+ * authors excluded). Pullers diff this against what they hold and fetch the missing ids.
+ */
+export const SyncDigestSchema = z.object({
+  channels: z.array(ChannelSchema),
+  messages: z.array(
+    z.object({
+      id: IdSchema,
+      editedAt: TimestampSchema.optional(),
+    }),
+  ),
+});
+export type SyncDigest = z.infer<typeof SyncDigestSchema>;
+
+/** `POST /api/sync/messages` — fetch full records for up to 500 advertised ids. */
+export const SyncMessagesRequestSchema = z.object({
+  ids: z.array(IdSchema).min(1).max(500),
+});
+export type SyncMessagesRequest = z.infer<typeof SyncMessagesRequestSchema>;
+
+export const SyncMessagesResponseSchema = z.object({
+  messages: z.array(MessageSchema),
+  /** Profiles for the message authors, so names/avatars resolve on the pulling node. */
+  users: z.array(UserSchema),
+});
+export type SyncMessagesResponse = z.infer<typeof SyncMessagesResponseSchema>;
+
+/** Live per-peer sync bookkeeping, as reported by `GET /api/admin/sync`. */
+export const SyncPeerStatusSchema = z.object({
+  lastAttemptAt: TimestampSchema.optional(),
+  lastSuccessAt: TimestampSchema.optional(),
+  lastError: z.string().optional(),
+  imported: z.number().int().nonnegative(),
+});
+export type SyncPeerStatus = z.infer<typeof SyncPeerStatusSchema>;
+
+export const SyncStatusReportSchema = z.object({
+  enabled: z.boolean(),
+  intervalMs: z.number().int().positive(),
+  peers: z.array(SyncPeerSchema.extend({ status: SyncPeerStatusSchema.optional() })),
+});
+export type SyncStatusReport = z.infer<typeof SyncStatusReportSchema>;
 
 export const StreamEventSchema = z.discriminatedUnion("type", [
   z.object({

@@ -21,7 +21,9 @@ Researched but not committed — briefings for Fable/owner to prioritize.
 |-----------|----------------|-----|
 | **Optional authentication** | Add an opt-in `authenticated` deployment mode (Better Auth now; atproto later) without touching the anonymous off-grid default. | [05-authentication.md](05-authentication.md) |
 | **LLM improvements** | Provider abstraction, fix the O(n²) streaming, bound context, channel/@mention, and local RAG. | [06-llm.md](06-llm.md) |
-| **Other features** | Menu of candidates: ephemeral messages, E2EE, attachments, LoRa sync, moderation, i18n/RTL, etc. | [07-more-features.md](07-more-features.md) |
+| **Other features** | Menu of candidates: attachments, E2EE, LoRa sync, presence, etc. (ephemeral messages, moderation, search, and RTL have since landed — see the doc's status notes). | [07-more-features.md](07-more-features.md) |
+| **Maps & location sharing** | Offline map tiles + opt-in location sharing on the local node. | [10-maps-location-sharing.md](10-maps-location-sharing.md) |
+| **Node-to-node sync** | Pull-based gossip of public data between nodes (the transport-agnostic layer LoRa will ride). **MVP landed.** | [11-node-sync.md](11-node-sync.md) |
 | **Transport security (no HTTPS)** | QR-bootstrapped app-layer encryption so plain-HTTP LAN traffic is confidential + MITM-resistant without certs. | [08-transport-security.md](08-transport-security.md) |
 | **Security profiles** | Make all security optional via a few named presets (open/standard/hardened), not a toggle matrix — spans disaster-relief to protest. | [09-security-profiles.md](09-security-profiles.md) |
 

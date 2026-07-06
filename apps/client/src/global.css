@@ -659,6 +659,11 @@ a {
   padding: 14px;
 }
 
+/* With the attach button the composer is [attach][textarea][send]. */
+.composer.has-attach {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .composer textarea {
   width: 100%;
   max-height: 168px;
@@ -1333,6 +1338,14 @@ a {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .composer.has-attach {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .composer.has-attach button[type="submit"] {
+    grid-column: 1 / -1;
+  }
+
   .composer button {
     min-height: 42px;
   }
@@ -1378,6 +1391,85 @@ a {
   gap: 4px;
   font-size: 0.85rem;
   color: var(--c-text-2);
+}
+
+/* Message attachments. */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.message-attachment {
+  display: block;
+  max-width: min(320px, 100%);
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surf-1);
+}
+
+.composer-attachments {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: var(--c-surf-1);
+  padding: 2px 8px;
+  font-size: 0.8rem;
+}
+
+.attachment-chip.error {
+  border-color: var(--c-danger-border);
+  color: var(--c-danger);
+}
+
+.attachment-chip-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip button {
+  background: none;
+  padding: 0 2px;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.composer-attach {
+  min-height: 42px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surf-2);
+  padding: 0 10px;
+}
+
+/* Node-to-node sync admin panel. */
+.sync-peer-add {
+  display: grid;
+  gap: 8px;
+}
+
+.sync-peer .moderation-name span {
+  overflow-wrap: anywhere;
+}
+
+.sync-status {
+  display: grid;
+  gap: 10px;
 }
 
 /* Message search. */

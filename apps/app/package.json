@@ -46,7 +46,8 @@
     "lint": "expo lint",
     "bundle:server": "node ./scripts/bundle-server.mjs",
     "fetch:native": "node ./scripts/fetch-native-modules.mjs",
-    "apk": "node ./scripts/build-apk.mjs"
+    "apk": "node ./scripts/build-apk.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "private": true
 }
