@@ -2631,7 +2631,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       try {
-        const image = await readFile(join(attachmentsDir, request.params.fileName));
+        // Rebuild the filename from the parsed id + MIME type (like the avatar route) rather than
+        // joining the raw request param — the served path is then provably derived from the
+        // whitelisted pattern, never from user input.
+        const image = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
         return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").send(image);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
