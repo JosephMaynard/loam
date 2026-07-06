@@ -23,7 +23,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 |------|------|
 | `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. App factory: `src/app.ts` (`buildApp()`, all routes/logic — testable via `inject`); `src/server.ts` is the thin entry point (env, listen, SIGINT). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2k lines, all components). Libs in `src/lib/`. |
-| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored) and the host UI (`HostPanel`, `QRCode`). No test script, so `pnpm test` skips it; validate with `cd apps/app && npx tsc --noEmit`. |
+| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored) and the host UI (`HostPanel`, `QRCode`). No test script, so `pnpm test` skips it; validate with `pnpm --filter app typecheck` (also a CI step). |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
 | `packages/avatar` | Deterministic SVG avatar from an id. Three modes: `face` (SVG template), `initial`, `pattern`. OKLCH colour derivation with WCAG contrast fixups. Has a standalone `demo/`. |
@@ -36,24 +36,26 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 pnpm install          # install workspace deps
 pnpm dev              # root: runs server + client together, prints join QR (see ports below)
 pnpm build            # pnpm -r build: builds all packages, then server (tsc) and client (tsc -b && vite build)
-pnpm test             # pnpm -r --if-present test: runs vitest in the 4 packages + apps/server
+pnpm test             # pnpm -r --if-present test: runs vitest in the 4 packages + apps/server + apps/client
 ```
 
-There is **no lint script and no typecheck-only script**. Type-checking happens as part of `build`
-(`tsc`). A `.stylelintrc.json` exists but is not wired to any script. CI (`.github/workflows/ci.yml`)
-runs exactly `pnpm build` then `pnpm test` on push/PR to `master`.
+There is **no lint script**. Type-checking happens as part of `build` (`tsc`), except `apps/app`,
+which has a dedicated `typecheck` script (`pnpm --filter app typecheck`). A `.stylelintrc.json`
+exists but is not wired to any script. CI (`.github/workflows/ci.yml`) runs `pnpm build`, `pnpm
+test`, then the apps/app typecheck on push/PR to `master`.
 
 **Tests**: `packages/*` (schema, display-name, avatar, qr), `apps/server` (`src/db.test.ts` for the
 DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
-matrix, config API, flag enforcement, kill switch, retention), and `apps/client` (Vitest + jsdom:
+matrix, config API, flag enforcement, kill switch, retention, private channels, search, WebSocket
+privacy filtering via a real listener — plus `src/embedded.test.ts`), and `apps/client` (Vitest + jsdom:
 `src/lib/markdown.test.ts` sanitizer/XSS, `src/lib/local-store.test.ts` IndexedDB round-trips +
 kill-switch purge via `fake-indexeddb`, `src/lib/protocol.test.ts` route + WS-event + message-response
 parsers). Client tests use a standalone `vitest.config.ts` (jsdom + `@preact/preset-vite`, so `*.test.tsx`
 mount real components into jsdom); `*.test.ts`/`*.test.tsx` are excluded from the `tsc -b` build. The
 pure route/protocol parsers live in `src/lib/protocol.ts` (extracted from `app.tsx`); rendered
 components extracted to `src/components/` (`Avatar`, `UnreadBadge`, `InviteControl`, `SearchResult`) have `.test.tsx`
-suites. `apps/app` has no test script, so `pnpm test` skips it — validate with `cd apps/app && npx
-tsc --noEmit`.
+suites. `apps/app` has no test script, so `pnpm test` skips it — validate with
+`pnpm --filter app typecheck` (CI runs this as its own step).
 
 ## How dev mode wires together (important)
 
@@ -171,7 +173,11 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   `GET/POST /api/channels/:channelId/members`,
   `DELETE /api/channels/:channelId/members/:userId`, `GET /api/messages/:channelId`,
   `GET /api/dms/:userId`, `POST /api/messages`, `PATCH/DELETE /api/messages/:messageId`,
-  `GET /api/search`, `POST /api/admin/claim`, `GET/PATCH /api/admin/config` (admin),
+  `GET /api/search`, `GET /api/moderation/users` + `PATCH /api/moderation/users/:userId`
+  (admin/moderator ban + shadow-ban), `GET /api/access/pending` +
+  `POST /api/access/users/:userId/approve|deny` (admin/greeter join approval),
+  `PATCH /api/admin/users/:userId/roles` (admin), `POST /api/admin/claim`,
+  `GET/PATCH /api/admin/config` (admin),
   `GET /api/admin/channels` (admin), `POST /api/admin/kill-switch`
   (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless
   configured). WebSocket at `GET /ws` (requires the session cookie to already be set — the client

@@ -35,3 +35,8 @@ jobs:
 
       - name: Unit tests
         run: pnpm test
+
+      # apps/app has no build/test script (Expo), so the recursive build and test steps skip it —
+      # typecheck it explicitly or its TypeScript is never validated in CI.
+      - name: Android host typecheck
+        run: pnpm --filter app typecheck

@@ -4,3 +4,6 @@
 .loam/
 .DS_Store
 .vscode/
+# The root pnpm-lock.yaml is the single authoritative lockfile; nested ones are stray.
+apps/*/pnpm-lock.yaml
+packages/*/pnpm-lock.yaml

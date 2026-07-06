@@ -220,7 +220,8 @@ Design notes, threat models, and initiative briefings live in [`docs/`](docs/):
 - [Roadmap & how the initiatives interlock](docs/roadmap.md)
 - [SQLite migration](docs/01-sqlite-migration.md) · [Kill switch](docs/02-kill-switch.md) · [Admin UI](docs/03-admin-ui.md)
 - [Android host app](docs/04-android-host-app.md) · [Authentication](docs/05-authentication.md) · [LLM](docs/06-llm.md)
-- [Transport security](docs/08-transport-security.md) · [Security profiles](docs/09-security-profiles.md)
+- [More features menu](docs/07-more-features.md) · [Transport security](docs/08-transport-security.md) · [Security profiles](docs/09-security-profiles.md)
+- [Maps & location sharing](docs/10-maps-location-sharing.md)
 - [`CLAUDE.md`](CLAUDE.md) — architecture baseline for contributors (and AI agents).
 
 ## Contributing
