@@ -726,11 +726,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     store.putSession(token, userId);
     // Mark the cookie Secure only when the request actually arrived over TLS. Keying this on
     // NODE_ENV=production instead (as before) breaks sessions on LOAM's documented plain-http LAN
-    // deployment: a Secure cookie is dropped by the browser, so every request mints a fresh
-    // session and identity never persists. `x-forwarded-proto` covers a TLS-terminating proxy.
-    const forwardedProto = request.headers["x-forwarded-proto"];
-    const proto = (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) ?? request.protocol;
-    const secure = proto === "https";
+    // deployment: a Secure cookie is dropped by the browser, so every request mints a fresh session
+    // and identity never persists. We read `request.protocol` (the real socket protocol) rather
+    // than a client-supplied `x-forwarded-proto` header: LOAM runs without `trustProxy` on purpose
+    // (so the per-IP rate limiter can't be evaded by a spoofed `x-forwarded-for`), which means a
+    // self-hoster terminating TLS at a proxy must enable trustProxy themselves for this to flip.
+    const secure = request.protocol === "https";
     const cookie = `${sessionCookieName}=${encodeCookieValue(
       token,
     )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${secure ? "; Secure" : ""}`;

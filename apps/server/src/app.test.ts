@@ -2914,7 +2914,11 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
   });
 
   it("lets an admin promote a member, but not non-admins, bots, or pending users", async () => {
-    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const app = await makeApp({
+      access: { joinPolicy: "approval" },
+      // Enable the LLM so the bot user exists, to exercise the type !== "human" guard below.
+      llm: { ollama: { enabled: true, baseUrl: "http://localhost:11434", model: "m", botId: "bot.test", botDisplayName: "Bot" } },
+    });
     const admin = await newSession(app);
     const member = await newSession(app);
     const pendingUser = await newSession(app);
@@ -2924,6 +2928,14 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
       url: `/api/access/users/${member.userId}/approve`,
       headers: { cookie: admin.cookie },
     });
+
+    // A bot can never be promoted to admin (only people can be admins).
+    const bot = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/users/bot.test/promote",
+      headers: { cookie: admin.cookie },
+    });
+    expect(bot.statusCode).toBe(400);
 
     // A plain member cannot promote anyone.
     const forbidden = await app.server.inject({
@@ -3098,17 +3110,15 @@ describe("security hardening", () => {
     expect(ok.statusCode).toBe(201);
   });
 
-  it("marks the session cookie Secure only over TLS (not on plain-http LAN)", async () => {
+  it("does not mark the session cookie Secure on the plain-http LAN", async () => {
+    // The injected request is plain http (no TLS socket, trustProxy off), so the cookie must NOT be
+    // Secure — a Secure cookie would be dropped by the browser and break the session. The flag
+    // flips only when request.protocol is genuinely https (a self-hoster behind a TLS proxy enables
+    // trustProxy for that); we deliberately don't trust a spoofable x-forwarded-proto header.
     const app = await makeApp();
 
     const plain = await app.server.inject({ method: "GET", url: "/api/config" });
+    expect(String(plain.headers["set-cookie"])).toContain("loam_session=");
     expect(String(plain.headers["set-cookie"])).not.toContain("Secure");
-
-    const tls = await app.server.inject({
-      method: "GET",
-      url: "/api/config",
-      headers: { "x-forwarded-proto": "https" },
-    });
-    expect(String(tls.headers["set-cookie"])).toContain("Secure");
   });
 });
