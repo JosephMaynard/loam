@@ -3030,3 +3030,85 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
     carolSocket.socket.close();
   });
 });
+
+describe("security hardening", () => {
+  it("GET /api/health returns ok without minting a session or consuming firstUser admin", async () => {
+    const app = await makeApp();
+
+    const health = await app.server.inject({ method: "GET", url: "/api/health" });
+    expect(health.statusCode).toBe(200);
+    expect(health.json()).toEqual({ ok: true });
+    expect(health.headers["set-cookie"]).toBeUndefined();
+
+    const first = await newSession(app);
+    expect(first.isAdmin).toBe(true);
+  });
+
+  it("sets security headers (nosniff always, CSP on the app shell only)", async () => {
+    const app = await makeApp();
+
+    const api = await app.server.inject({ method: "GET", url: "/api/health" });
+    expect(api.headers["x-content-type-options"]).toBe("nosniff");
+    expect(api.headers["content-security-policy"]).toBeUndefined();
+
+    const shell = await app.server.inject({ method: "GET", url: "/" });
+    expect(shell.headers["x-content-type-options"]).toBe("nosniff");
+    expect(String(shell.headers["content-security-policy"])).toContain("frame-ancestors 'none'");
+  });
+
+  it("blocks a banned user from editing their profile", async () => {
+    const app = await makeApp({ identity: { allowUserDisplayNameEdit: true } });
+    const admin = await newSession(app);
+    const target = await newSession(app);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const edit = await app.server.inject({
+      method: "PATCH",
+      url: "/api/users/me",
+      headers: { cookie: target.cookie },
+      payload: { displayName: "Ban Evader" },
+    });
+    expect(edit.statusCode).toBe(403);
+  });
+
+  it("rejects an over-long message body but keeps normal ones", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    const huge = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "x".repeat(8001) },
+    });
+    expect(huge.statusCode).toBe(400);
+
+    const ok = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "x".repeat(8000) },
+    });
+    expect(ok.statusCode).toBe(201);
+  });
+
+  it("marks the session cookie Secure only over TLS (not on plain-http LAN)", async () => {
+    const app = await makeApp();
+
+    const plain = await app.server.inject({ method: "GET", url: "/api/config" });
+    expect(String(plain.headers["set-cookie"])).not.toContain("Secure");
+
+    const tls = await app.server.inject({
+      method: "GET",
+      url: "/api/config",
+      headers: { "x-forwarded-proto": "https" },
+    });
+    expect(String(tls.headers["set-cookie"])).toContain("Secure");
+  });
+});

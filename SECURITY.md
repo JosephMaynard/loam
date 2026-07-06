@@ -60,3 +60,46 @@ It does not cover:
 Please allow reasonable time for investigation and remediation before making any public disclosure.
 
 If a report is accepted as a genuine security issue, I may credit the reporter in release notes or documentation, unless you would prefer to remain anonymous.
+
+## Threat model & accepted limitations
+
+LOAM's threat models span disaster-relief openness to protest-mode hostile environments, and the
+**server host is trusted** (it can read all plaintext). The following are deliberate, documented
+trade-offs — not open bugs:
+
+- **Plain HTTP on the LAN** (`http://<lan-ip>`, no TLS/CA on a local hotspot). Not a browser secure
+  context, so WebCrypto and service workers are unavailable. App-layer transport encryption is
+  planned in [docs/08](docs/08-transport-security.md).
+- **No end-to-end encryption** — the server processes plaintext (search, LLM, audience filtering).
+  Optional E2EE is a future initiative ([docs/07](docs/07-more-features.md)).
+- **No peer authentication in node-to-node sync v1** — only public content is exposed and imports
+  are defensive ([docs/11](docs/11-node-sync.md)); a shared-token handshake is the follow-up.
+- **On-device Android database is unencrypted** ([docs/04](docs/04-android-host-app.md)); OS backup
+  is disabled so it can't be extracted via `adb backup`, but at-rest encryption is the deeper fix.
+- **Logical delete is not secure flash erasure** without encryption ([docs/02](docs/02-kill-switch.md)).
+
+## Review history
+
+### 2026-07-06 — full pre-launch review
+
+An adversarial review covered every server route, the WebSocket audience filter, the DAL, the client
+markdown/XSS path and all HTML sinks, the QR/avatar generators, and the Android host.
+
+**Fixed:** Android host admin lockout (the readiness probe consumed the `firstUser` admin grant —
+added a no-identity `GET /api/health`); banned/pending users can no longer edit their profile or
+upload avatars; human-submitted message/reaction bodies are length-capped; the session cookie is
+`Secure` based on real TLS (not `NODE_ENV`, which broke sessions on the http LAN); a strict CSP +
+`nosniff` are served; Android OS backup disabled; QR rendering degrades gracefully instead of
+throwing.
+
+**Deferred (tracked):** unbounded anonymous user creation by a LAN participant who withholds their
+cookie (a behavioural fix — defer persisting a user until first participation — held back to avoid
+destabilising identity semantics right before handoff; the `/api/health` fix removed the accidental
+Android self-DoS contributor); release APK is debug-signed (needs a real release keystore, a manual
+release-engineering step); sync author-id namespacing (belongs with sync peer-auth).
+
+**Found clean:** the SQL layer (prepared statements; escaped SQLCipher pragma), the markdown
+sanitizer and every `dangerouslySetInnerHTML` sink, the QR/avatar SVG generators, server
+authorization/audience filtering, sync export scoping + defensive imports + resource caps, secret
+handling (scrypt + constant-time + redaction), attachment path/traversal handling, and the Android
+native surface. Dependencies are reputable and pinned.

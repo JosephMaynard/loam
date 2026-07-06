@@ -71,8 +71,12 @@ rnBridge.channel.on('loam-hostinfo-request', postHostInfo);
  * confirms the HTTP surface is actually serving before the WebView navigates to it.
  */
 function waitForServer(attempt) {
+  // Probe /api/health, NOT /api/config: config mints a session and, on a fresh node, grants the
+  // first caller `firstUser` admin — a loopback probe would silently steal admin from the operator
+  // (and its cookie is discarded here), disabling the kill switch and moderation. /api/health
+  // creates no identity.
   const request = http.get(
-    { host: '127.0.0.1', port: PORT, path: '/api/config', timeout: 2000 },
+    { host: '127.0.0.1', port: PORT, path: '/api/health', timeout: 2000 },
     (response) => {
       response.resume();
       if (response.statusCode && response.statusCode < 500) {

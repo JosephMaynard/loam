@@ -1,5 +1,6 @@
-import { encodeQR, renderQRToSvg } from "@loam/qr";
 import { useMemo, useState } from "preact/hooks";
+
+import { safeQrSvg } from "../lib/qr";
 
 /**
  * "Link another node" affordance for the admin sync panel: shows this node's own address (its join
@@ -10,10 +11,7 @@ import { useMemo, useState } from "preact/hooks";
 export function NodeLinkControl({ joinUrl }: { joinUrl?: string }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const qrSvg = useMemo(
-    () => (joinUrl ? renderQRToSvg(encodeQR(joinUrl), { dark: "#16271f", light: "#ffffff" }) : ""),
-    [joinUrl],
-  );
+  const qrSvg = useMemo(() => safeQrSvg(joinUrl, "#16271f"), [joinUrl]);
 
   if (!joinUrl) {
     return null;

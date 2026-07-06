@@ -422,7 +422,13 @@ export const BaseMessageSchema = z.object({
 });
 export type BaseMessage = z.infer<typeof BaseMessageSchema>;
 
+// Stored bodies are unbounded: LLM replies can be long, and synced messages must round-trip
+// whatever a peer legitimately stored.
 const MessageBodySchema = z.string();
+// Human-submitted bodies ARE capped — unbounded, one hostile joiner could flood ~1MB messages up
+// to the per-IP rate limit. 8000 chars is generous for a LAN chat message. (The bot writes its
+// replies server-side via the unbounded stored schema, so this never truncates an LLM answer.)
+const MessageCreateBodySchema = z.string().max(8000);
 const MessageAttachmentsSchema = z.array(MessageAttachmentSchema).max(4);
 
 export const MessageCreateRequestSchema = z
@@ -430,26 +436,26 @@ export const MessageCreateRequestSchema = z
     z.object({
       type: z.literal("channelPost"),
       channelId: IdSchema,
-      body: MessageBodySchema,
+      body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
     }),
     z.object({
       type: z.literal("channelReply"),
       channelId: IdSchema,
       parentMessageId: IdSchema,
-      body: MessageBodySchema,
+      body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
     }),
     z.object({
       type: z.literal("dm"),
       recipientUserId: IdSchema,
-      body: MessageBodySchema,
+      body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
     }),
     z.object({
       type: z.literal("reaction"),
       targetMessageId: IdSchema,
-      reaction: z.string().min(1),
+      reaction: z.string().min(1).max(64),
     }),
   ])
   // A message needs text or at least one attachment (an image alone is a valid message).
@@ -462,7 +468,7 @@ export type MessageCreateRequest = z.infer<typeof MessageCreateRequestSchema>;
 
 /** Author request to edit a body-bearing message (channel post/reply or DM). */
 export const MessageEditRequestSchema = z.object({
-  body: MessageBodySchema.refine((body) => body.trim().length > 0, {
+  body: MessageCreateBodySchema.refine((body) => body.trim().length > 0, {
     message: "Message body cannot be empty",
   }),
 });
@@ -496,7 +502,7 @@ export type DirectMessage = z.infer<typeof DirectMessageSchema>;
 export const ReactionMessageSchema = BaseMessageSchema.extend({
   type: z.literal("reaction"),
   targetMessageId: IdSchema,
-  reaction: z.string().min(1),
+  reaction: z.string().min(1).max(64),
 });
 export type ReactionMessage = z.infer<typeof ReactionMessageSchema>;
 

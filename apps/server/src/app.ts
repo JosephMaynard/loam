@@ -152,7 +152,6 @@ export type LoamApp = {
 const sessionCookieName = "loam_session";
 const sessionCookieMaxAge = 60 * 60 * 24 * 365;
 const defaultChannelCreatedAt = 1_704_067_200_000;
-const isProduction = process.env.NODE_ENV === "production";
 const claimAttemptLimit = 5;
 const claimAttemptWindowMs = 5 * 60_000;
 
@@ -725,9 +724,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const token = makeSessionToken();
     sessions.set(token, userId);
     store.putSession(token, userId);
+    // Mark the cookie Secure only when the request actually arrived over TLS. Keying this on
+    // NODE_ENV=production instead (as before) breaks sessions on LOAM's documented plain-http LAN
+    // deployment: a Secure cookie is dropped by the browser, so every request mints a fresh
+    // session and identity never persists. `x-forwarded-proto` covers a TLS-terminating proxy.
+    const forwardedProto = request.headers["x-forwarded-proto"];
+    const proto = (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) ?? request.protocol;
+    const secure = proto === "https";
     const cookie = `${sessionCookieName}=${encodeCookieValue(
       token,
-    )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${isProduction ? "; Secure" : ""}`;
+    )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${secure ? "; Secure" : ""}`;
     reply.header("set-cookie", cookie);
     return userId;
   }
@@ -2336,6 +2342,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     void runSyncLoop().catch((error: unknown) => server.log.error(error));
   }, 5_000);
 
+  // Security headers on every response. A strict CSP is defense-in-depth behind the already-hardened
+  // markdown sanitizer: the client is fully self-contained (its own JS/CSS, images from this origin,
+  // ws:// to this host), so it needs no external origins. `nosniff` stops content-type confusion on
+  // the user-uploaded images. `frame-ancestors 'none'` blocks clickjacking. No HSTS — LOAM runs on
+  // plain-http LANs by design (docs/08), so forcing https would break it.
+  server.addHook("onSend", async (request, reply) => {
+    reply.header("x-content-type-options", "nosniff");
+
+    // Only decorate the app shell / navigations, not API JSON or image bytes (those set their own).
+    if (!request.url.startsWith("/api/") && request.url !== "/ws") {
+      reply.header(
+        "content-security-policy",
+        [
+          "default-src 'self'",
+          // Inline styles: the client injects generated SVG (avatars, QR) with style attributes.
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob:",
+          "connect-src 'self' ws: wss:",
+          "object-src 'none'",
+          "base-uri 'self'",
+          "form-action 'self'",
+          "frame-ancestors 'none'",
+        ].join("; "),
+      );
+      reply.header("referrer-policy", "no-referrer");
+    }
+  });
+
   // Blanket per-IP throttle for every HTTP route; the abuse-sensitive endpoints (claim, panic,
   // avatar upload) add their own tighter semantic limits on top.
   await server.register(fastifyRateLimit, {
@@ -2345,6 +2379,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   });
   await server.register(fastifyWebsocket);
   await registerStaticFiles();
+
+  // Liveness probe that mints NO identity — the Android host launcher polls this before loading the
+  // WebView. Polling /api/config here would consume the one-time `firstUser` admin grant with a
+  // throwaway loopback session, leaving the real operator (and the kill switch) locked out.
+  server.get("/api/health", async () => ({ ok: true }));
 
   server.get("/api/config", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
@@ -2383,6 +2422,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const user = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(user);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     return applyUserUpdate(user, body.data);
   });
   server.put(
@@ -2391,6 +2436,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     async (request, reply) => {
     if (!appConfig.identity.allowUserAvatarEdit || !appConfig.identity.allowUserAvatarUpload) {
       return reply.code(403).send({ error: "User avatar uploads are disabled on this LOAM node" });
+    }
+
+    const uploader = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(uploader);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
     }
 
     const body = AvatarImageUploadRequestSchema.safeParse(request.body);
@@ -2409,7 +2461,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send({ error: "Avatar image type does not match the uploaded data" });
     }
 
-    const user = ensureSessionUser(getSessionUserId(request, reply));
+    const user = uploader;
     const previousAvatar = user.avatar;
     const imageId = newAvatarImageId();
     await mkdir(avatarsDir, { recursive: true });
@@ -2647,7 +2699,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     try {
       const image = await readFile(avatarImagePath(avatar.imageId, avatar.mimeType));
-      return reply.type(avatar.mimeType).header("cache-control", "private, max-age=3600").send(image);
+      return reply.type(avatar.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return reply.code(404).send({ error: "Avatar image does not exist" });
@@ -2748,7 +2800,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // joining the raw request param — the served path is then provably derived from the
         // whitelisted pattern, never from user input.
         const image = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
-        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").send(image);
+        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
           return reply.code(404).send({ error: "Attachment does not exist" });

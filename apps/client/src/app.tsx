@@ -1,4 +1,3 @@
-import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
   AdminBootstrapStrategySchema,
   ChannelSchema,
@@ -44,6 +43,7 @@ import { dayKey, dayLabel } from "./lib/dates";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
+import { safeQrSvg } from "./lib/qr";
 
 type Config = {
   nodeName: string;
@@ -3362,16 +3362,7 @@ function SettingsView({
   const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
   const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
   const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
-  const qrSvg = useMemo(() => {
-    if (!config?.joinUrl) {
-      return "";
-    }
-
-    return renderQRToSvg(encodeQR(config.joinUrl), {
-      dark: "#203f34",
-      light: "#ffffff",
-    });
-  }, [config?.joinUrl]);
+  const qrSvg = useMemo(() => safeQrSvg(config?.joinUrl, "#203f34"), [config?.joinUrl]);
   const previewUser: User = {
     ...currentUser,
     displayName,

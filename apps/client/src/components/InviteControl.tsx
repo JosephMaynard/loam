@@ -1,5 +1,6 @@
-import { encodeQR, renderQRToSvg } from "@loam/qr";
 import { useMemo, useState } from "preact/hooks";
+
+import { safeQrSvg } from "../lib/qr";
 
 /**
  * Sidebar invite affordance for greeters/admins: a collapsible panel rendering the node's join URL as
@@ -8,10 +9,7 @@ import { useMemo, useState } from "preact/hooks";
  */
 export function InviteControl({ joinUrl }: { joinUrl?: string }) {
   const [open, setOpen] = useState(false);
-  const qrSvg = useMemo(
-    () => (joinUrl ? renderQRToSvg(encodeQR(joinUrl), { dark: "#16271f", light: "#ffffff" }) : ""),
-    [joinUrl],
-  );
+  const qrSvg = useMemo(() => safeQrSvg(joinUrl, "#16271f"), [joinUrl]);
 
   if (!joinUrl) {
     return null;
