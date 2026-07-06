@@ -97,6 +97,10 @@ type ClientEvent =
       channelId: string;
     }
   | {
+      type: "presence";
+      onlineUserIds: string[];
+    }
+  | {
       type: "configUpdated";
       networkConfig: NetworkConfig;
     }
@@ -183,6 +187,9 @@ const seedUsers = ["user.1234", "user.5678"];
  */
 export function defaultLoamConfig(): LoamConfig {
   return {
+    node: {
+      name: "LOAM local",
+    },
     identity: {
       allowUserDisplayNameEdit: false,
       allowUserAvatarEdit: false,
@@ -198,6 +205,7 @@ export function defaultLoamConfig(): LoamConfig {
       enableReactions: true,
       enableMarkdown: true,
       enableAttachments: true,
+      enablePresence: true,
     },
     llm: {
       ollama: {
@@ -253,6 +261,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
   const merged = {
+    node: { ...base.node, ...update.node },
     identity: { ...base.identity, ...update.identity },
     features: { ...base.features, ...update.features },
     llm: { ollama: { ...base.llm.ollama, ...update.llm?.ollama } },
@@ -812,6 +821,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function currentNetworkConfig(): NetworkConfig {
     return {
+      nodeName: appConfig.node.name,
       ...appConfig.features,
       enableLLMChat: appConfig.llm.ollama.enabled,
       enableLLMStreaming: appConfig.llm.ollama.enabled,
@@ -1184,6 +1194,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return false;
     }
 
+    if (event.type === "presence") {
+      // Contains only visible users' ids; the banned/pending recipient gates above already ran.
+      return true;
+    }
+
     const message = event.message;
 
     // Shadow ban: a message whose author is currently shadow-banned is delivered only back to the
@@ -1211,6 +1226,35 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         socket.send(payload);
       }
     }
+  }
+
+  /** User ids with at least one open socket, restricted to visible (non-banned/-pending) users. */
+  function onlineUserIds(): string[] {
+    const online = new Set<string>();
+
+    for (const { socket, userId } of sockets) {
+      if (socket.readyState === socket.OPEN) {
+        online.add(userId);
+      }
+    }
+
+    return [...online].filter((id) => {
+      const user = data.users.find((candidate) => candidate.id === id);
+      return !!user && !user.banned && !user.pending;
+    });
+  }
+
+  /**
+   * Tell everyone who is connected right now (online dots). No-op when `enablePresence` is off —
+   * high-risk deployments disable it, since presence reveals exactly who is reachable at this
+   * moment. Sent on every connect/disconnect; at LAN scale that needs no debouncing.
+   */
+  function broadcastPresence(): void {
+    if (!appConfig.features.enablePresence) {
+      return;
+    }
+
+    broadcast({ type: "presence", onlineUserIds: onlineUserIds() });
   }
 
   /**
@@ -2306,7 +2350,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     return {
-      nodeName: "LOAM local",
+      nodeName: appConfig.node.name,
       joinUrl: `http://${joinHost}:${clientPort}`,
       websocketPath: "/ws",
       currentUser,
@@ -2437,6 +2481,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     return applyUserModeration(user, { roles: body.data.roles });
+  });
+
+  // Promote a member to admin — host handover and co-admins. Deliberately no demote counterpart:
+  // admin removal happens by re-bootstrapping the node (or the kill switch), never by another
+  // admin, so a contested node can't descend into a mutual-demotion fight over governance.
+  server.post<{ Params: { userId: string } }>("/api/admin/users/:userId/promote", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    const user = data.users.find((candidate) => candidate.id === request.params.userId);
+
+    if (!user) {
+      return reply.code(404).send({ error: "User does not exist" });
+    }
+
+    if (user.type !== "human") {
+      return reply.code(400).send({ error: "Only people can be admins" });
+    }
+
+    if (user.banned || user.pending) {
+      return reply.code(400).send({ error: "Approve or unban this user before promoting them" });
+    }
+
+    if (user.isAdmin) {
+      return user;
+    }
+
+    const next = UserSchema.parse({ ...user, isAdmin: true });
+    store.upsertUser(next);
+    Object.assign(user, next);
+    broadcast({ type: "userUpserted", user });
+    return user;
   });
 
   // Ban / shadow-ban / unban a user. Open to admins and moderators; never usable against an admin
@@ -3223,6 +3302,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     store.setConfigValue("config", JSON.stringify(appConfig));
     ensureOllamaBotUser();
     broadcast({ type: "configUpdated", networkConfig: currentNetworkConfig() });
+    // If presence was just enabled, connected clients need the current roster to light up.
+    broadcastPresence();
     return redactedConfig();
   });
 
@@ -3315,7 +3396,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const socketSession = { socket: connection, userId };
     sockets.add(socketSession);
-    connection.on("close", () => sockets.delete(socketSession));
+    broadcastPresence();
+    connection.on("close", () => {
+      sockets.delete(socketSession);
+      broadcastPresence();
+    });
   });
 
   server.setNotFoundHandler((request, reply) => {

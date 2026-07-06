@@ -73,6 +73,10 @@ export type SocketEvent =
       channelId: string;
     }
   | {
+      type: "presence";
+      onlineUserIds: string[];
+    }
+  | {
       type: "configUpdated";
       networkConfig: NetworkConfig;
     }
@@ -188,6 +192,7 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
     user?: unknown;
     channel?: unknown;
     channelId?: unknown;
+    onlineUserIds?: unknown;
     networkConfig?: unknown;
   };
 
@@ -220,6 +225,13 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
   if (candidate.type === "channelRemoved") {
     return typeof candidate.channelId === "string"
       ? { type: "channelRemoved", channelId: candidate.channelId }
+      : undefined;
+  }
+
+  if (candidate.type === "presence") {
+    return Array.isArray(candidate.onlineUserIds) &&
+      candidate.onlineUserIds.every((id) => typeof id === "string")
+      ? { type: "presence", onlineUserIds: candidate.onlineUserIds as string[] }
       : undefined;
   }
 

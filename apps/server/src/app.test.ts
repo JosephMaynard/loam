@@ -2884,3 +2884,149 @@ describe("attachment + sync review hardening", () => {
     expect(bodies).not.toContain("late reply");
   });
 });
+
+describe("ready-for-use features (node name, promotion, presence)", () => {
+  it("serves and hot-updates the configurable network name", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const before = (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).json() as {
+      nodeName: string;
+      networkConfig: { nodeName: string };
+    };
+    expect(before.nodeName).toBe("LOAM local");
+    expect(before.networkConfig.nodeName).toBe("LOAM local");
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { node: { name: "Sector 7 Relief Net" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).json() as {
+      nodeName: string;
+      networkConfig: { nodeName: string };
+    };
+    expect(after.nodeName).toBe("Sector 7 Relief Net");
+    expect(after.networkConfig.nodeName).toBe("Sector 7 Relief Net");
+  });
+
+  it("lets an admin promote a member, but not non-admins, bots, or pending users", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const admin = await newSession(app);
+    const member = await newSession(app);
+    const pendingUser = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${member.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+
+    // A plain member cannot promote anyone.
+    const forbidden = await app.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${admin.userId}/promote`,
+      headers: { cookie: member.cookie },
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    // Pending users must be approved first.
+    const early = await app.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${pendingUser.userId}/promote`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(early.statusCode).toBe(400);
+
+    const promoted = await app.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${member.userId}/promote`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(promoted.statusCode).toBe(200);
+    expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+
+    // The promotion persisted and the new admin has admin powers.
+    const config = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: member.cookie },
+    });
+    expect(config.statusCode).toBe(200);
+  });
+
+  it("broadcasts presence on connect/disconnect and stays silent when disabled", async () => {
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const connect = (cookie: string) =>
+      new Promise<{ socket: WebSocket; events: { type?: string; onlineUserIds?: string[] }[] }>((resolve, reject) => {
+        const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+          `${baseUrl.replace("http", "ws")}/ws`,
+          { headers: { cookie } },
+        );
+        const events: { type?: string; onlineUserIds?: string[] }[] = [];
+        socket.addEventListener("message", (event) =>
+          events.push(JSON.parse(String((event as MessageEvent).data)) as { type?: string }),
+        );
+        socket.addEventListener("open", () => resolve({ socket, events }));
+        socket.addEventListener("error", () => reject(new Error("connect failed")));
+      });
+
+    const waitUntil = async (check: () => boolean) => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline && !check()) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return check();
+    };
+
+    const aliceSocket = await connect(alice.cookie);
+    const bobSocket = await connect(bob.cookie);
+
+    // Alice hears that Bob came online (a presence event listing both ids).
+    expect(
+      await waitUntil(() =>
+        aliceSocket.events.some(
+          (event) =>
+            event.type === "presence" &&
+            !!event.onlineUserIds?.includes(alice.userId) &&
+            !!event.onlineUserIds?.includes(bob.userId),
+        ),
+      ),
+    ).toBe(true);
+
+    // Bob disconnects; Alice's next presence event no longer lists him.
+    bobSocket.socket.close();
+    expect(
+      await waitUntil(() => {
+        const last = [...aliceSocket.events].reverse().find((event) => event.type === "presence");
+        return !!last && !last.onlineUserIds?.includes(bob.userId);
+      }),
+    ).toBe(true);
+    aliceSocket.socket.close();
+
+    // With the flag off, no presence events are emitted at all.
+    const silent = await makeApp({ features: { enablePresence: false } });
+    const carol = await newSession(silent);
+    const silentUrl = await silent.server.listen({ port: 0, host: "127.0.0.1" });
+    const carolSocket = await new Promise<{ socket: WebSocket; events: { type?: string }[] }>((resolve, reject) => {
+      const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+        `${silentUrl.replace("http", "ws")}/ws`,
+        { headers: { cookie: carol.cookie } },
+      );
+      const events: { type?: string }[] = [];
+      socket.addEventListener("message", (event) => events.push(JSON.parse(String((event as MessageEvent).data)) as { type?: string }));
+      socket.addEventListener("open", () => resolve({ socket, events }));
+      socket.addEventListener("error", () => reject(new Error("connect failed")));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(carolSocket.events.some((event) => event.type === "presence")).toBe(false);
+    carolSocket.socket.close();
+  });
+});

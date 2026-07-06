@@ -6,7 +6,7 @@
     <title>LOAM — off-grid, local-first messaging</title>
     <meta
       name="description"
-      content="LOAM is a local-first, off-grid messaging network. A host runs it on a laptop, Raspberry Pi, or phone; nearby people scan a QR code and join over the local network. No internet, no accounts, no cloud."
+      content="LOAM is a local-first, off-grid messaging network. A host runs it on a laptop, Raspberry Pi, or phone; nearby people scan a QR code and join over the local network. Link nodes and separate hotspots converge into one conversation. No internet, no accounts, no cloud."
     />
     <link rel="icon" href="/loam.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/loam-512.png" />
@@ -49,6 +49,7 @@
         </button>
         <ul class="nav-links" id="nav-links">
           <li><a href="#how">How it works</a></li>
+          <li><a href="#mesh">Mesh</a></li>
           <li><a href="#features">Features</a></li>
           <li><a href="#who">Who it's for</a></li>
           <li><a href="#open">Open source</a></li>
@@ -120,7 +121,8 @@
               <h3>Someone hosts</h3>
               <p>
                 Run LOAM on a laptop, a Raspberry&nbsp;Pi, or an Android phone. It starts a local WiFi
-                hotspot and prints a join QR — no servers, no setup.
+                hotspot and prints a join QR — no servers, no setup. You name the network and set the
+                rules.
               </p>
             </li>
             <li class="step reveal">
@@ -128,18 +130,42 @@
               <h3>People scan &amp; join</h3>
               <p>
                 Nearby devices scan the QR to connect and open LOAM in the browser. Everyone gets an
-                anonymous, ephemeral identity — no email, no phone number.
+                anonymous, ephemeral identity — no email, no phone number. Approve newcomers if you
+                want to vet who's in.
               </p>
             </li>
             <li class="step reveal">
               <span class="step-num">3</span>
               <h3>You talk, locally</h3>
               <p>
-                Post to channels, reply in threads, DM, react — and optionally chat with a local AI
-                assistant. Everything stays on the local network.
+                Post to public or invite-only channels, reply in threads, DM, react, search, and share
+                images — and optionally chat with a local AI assistant. Everything stays on the local
+                network.
               </p>
             </li>
           </ol>
+        </div>
+      </section>
+
+      <!-- Mesh / node-to-node sync -->
+      <section id="mesh" class="band band-deep" aria-labelledby="mesh-title">
+        <div class="wrap who-grid">
+          <div class="reveal">
+            <p class="eyebrow">Node-to-node sync</p>
+            <h2 id="mesh-title" class="section-title">When the crowd outgrows one hotspot.</h2>
+            <p class="who-lede">
+              One host covers everyone in WiFi range. But a field, a building, or a whole
+              neighbourhood is bigger than a single hotspot — so LOAM nodes can join up. Two nodes
+              that can reach each other sync their public channels, and separate hotspots converge
+              into one conversation.
+            </p>
+          </div>
+          <ul class="who-list reveal">
+            <li><strong>One host is a network</strong> — a laptop, Pi, or phone serves everyone nearby with no internet at all.</li>
+            <li><strong>Many hosts are one network</strong> — link nodes and their public channels merge, so the conversation spans them all.</li>
+            <li><strong>Link by QR</strong> — point one node at another with a scan; a node's join code is its sync address.</li>
+            <li><strong>Resilient by design</strong> — DMs and private channels stay put; if a node drops the others carry on, then catch up when it returns.</li>
+          </ul>
         </div>
       </section>
 
@@ -162,17 +188,47 @@
             <article class="feature reveal">
               <div class="feature-icon">▤</div>
               <h3>Channels, threads &amp; DMs</h3>
-              <p>Public channels for coordination, threaded replies for focus, and private direct messages between two people.</p>
+              <p>Public and private, invite-only channels; threaded replies, direct messages, reactions, and markdown.</p>
             </article>
             <article class="feature reveal">
-              <div class="feature-icon">⤓</div>
-              <h3>Installable PWA</h3>
-              <p>Add it to your home screen and keep reading against the local cache even when the signal drops.</p>
+              <div class="feature-icon">⌕</div>
+              <h3>Search &amp; images</h3>
+              <p>Find any message in seconds, and share pictures that are resized on your device before they're ever sent.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">⚑</div>
+              <h3>Moderation &amp; join approval</h3>
+              <p>Greeter and moderator roles let the host approve who joins and ban or shadow-ban when someone won't play nice.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">◧</div>
+              <h3>Security profiles</h3>
+              <p>Choose open, standard, or hardened, and coherent defaults for joins, retention, and the kill switch follow.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">⊘</div>
+              <h3>Encryption &amp; kill switch</h3>
+              <p>Encrypt the database at rest, then wipe everything in one action — or trigger it remotely with a panic token.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">◐</div>
+              <h3>Any language, light or dark</h3>
+              <p>Renders every script, including right-to-left, and follows your system's light or dark theme automatically.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">◉</div>
+              <h3>Presence &amp; a name of its own</h3>
+              <p>See who's online, give the network a name you choose, and configure nearly everything else as the host.</p>
             </article>
             <article class="feature reveal">
               <div class="feature-icon">✦</div>
               <h3>Optional local AI</h3>
               <p>Point it at a local Ollama model and an assistant appears as a contact — answers stay on the host, offline.</p>
+            </article>
+            <article class="feature reveal">
+              <div class="feature-icon">⤓</div>
+              <h3>Installable PWA</h3>
+              <p>Add it to your home screen and keep reading against the local cache even when the signal drops.</p>
             </article>
             <article class="feature reveal">
               <div class="feature-icon">◲</div>
@@ -214,7 +270,8 @@
             <h2 id="open-title" class="section-title">Yours to run, read, and improve.</h2>
             <p class="lede">
               LOAM is free and open source under the AGPL. Read every line, run your own node, and help
-              build the roadmap — from encrypted storage to LoRa relays that reach beyond one hotspot.
+              build the roadmap — encrypted storage and node-to-node sync ship today; low-bandwidth
+              LoRa relay that reaches beyond WiFi is next.
             </p>
             <div class="hero-actions">
               <a class="btn btn-primary" href="https://github.com/JosephMaynard/loam" rel="noreferrer">
@@ -228,7 +285,8 @@
           <ul class="stack reveal" aria-label="Built with">
             <li>Fastify server &middot; WebSocket + REST</li>
             <li>Preact PWA client</li>
-            <li>SQLite storage, encrypted at rest</li>
+            <li>SQLite storage, optionally encrypted at rest</li>
+            <li>Node-to-node public-channel sync</li>
             <li>Deterministic anonymous identities</li>
             <li>Dependency-free QR encoder</li>
             <li>Expo / React&nbsp;Native Android host</li>

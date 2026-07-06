@@ -43,6 +43,7 @@ describe("@loam/schema", () => {
   it("validates network configuration", () => {
     expect(() =>
       NetworkConfigSchema.parse({
+        nodeName: "Test Net",
         enablePublicChannels: true,
         enablePrivateChannels: false,
         enableUserChannels: true,
@@ -51,6 +52,7 @@ describe("@loam/schema", () => {
         enableReactions: true,
         enableMarkdown: true,
         enableAttachments: true,
+        enablePresence: true,
         enableLLMChat: false,
         enableLLMStreaming: false,
         allowUserDisplayNameEdit: false,
@@ -66,6 +68,7 @@ describe("@loam/schema", () => {
   it("validates the node configuration and partial updates", () => {
     expect(() =>
       LoamConfigSchema.parse({
+        node: { name: "Test Net" },
         identity: {
           allowUserDisplayNameEdit: true,
           allowUserAvatarEdit: true,
@@ -81,6 +84,7 @@ describe("@loam/schema", () => {
           enableReactions: true,
           enableMarkdown: true,
           enableAttachments: true,
+          enablePresence: true,
         },
         llm: {
           ollama: {

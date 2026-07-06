@@ -152,6 +152,8 @@ export const ChannelUpdateRequestSchema = z
 export type ChannelUpdateRequest = z.infer<typeof ChannelUpdateRequestSchema>;
 
 export const NetworkConfigSchema = z.object({
+  /** The operator-chosen name of this network, shown in the client (sidebar, join screen). */
+  nodeName: z.string().min(1).max(80),
   enablePublicChannels: z.boolean(),
   enablePrivateChannels: z.boolean(),
   enableUserChannels: z.boolean(),
@@ -160,6 +162,7 @@ export const NetworkConfigSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  enablePresence: z.boolean(),
   enableLLMChat: z.boolean(),
   enableLLMStreaming: z.boolean(),
   allowUserDisplayNameEdit: z.boolean(),
@@ -182,8 +185,20 @@ export const FeatureFlagsSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  /**
+   * Broadcast who is currently connected (online dots). Default on; worth disabling on
+   * high-risk deployments — presence reveals exactly who is reachable right now.
+   */
+  enablePresence: z.boolean(),
 });
 export type FeatureFlags = z.infer<typeof FeatureFlagsSchema>;
+
+/** Operator-facing identity of the node itself (not of any user). */
+export const NodeIdentityConfigSchema = z.object({
+  /** Network name shown to everyone in the client. */
+  name: z.string().trim().min(1).max(80),
+});
+export type NodeIdentityConfig = z.infer<typeof NodeIdentityConfigSchema>;
 
 export const IdentityConfigSchema = z.object({
   allowUserDisplayNameEdit: z.boolean(),
@@ -262,6 +277,7 @@ export const SyncConfigSchema = z.object({
 export type SyncConfig = z.infer<typeof SyncConfigSchema>;
 
 export const LoamConfigSchema = z.object({
+  node: NodeIdentityConfigSchema,
   identity: IdentityConfigSchema,
   features: FeatureFlagsSchema,
   llm: z.object({ ollama: OllamaConfigSchema }),
@@ -275,6 +291,7 @@ export const LoamConfigSchema = z.object({
 export type LoamConfig = z.infer<typeof LoamConfigSchema>;
 
 export const LoamConfigUpdateSchema = z.object({
+  node: NodeIdentityConfigSchema.partial().optional(),
   identity: IdentityConfigSchema.partial().optional(),
   features: FeatureFlagsSchema.partial().optional(),
   llm: z
