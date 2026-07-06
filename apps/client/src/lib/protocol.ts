@@ -37,6 +37,9 @@ export type RouteState =
     }
   | {
       screen: "people";
+    }
+  | {
+      screen: "search";
     };
 
 export type MessageResponse = {
@@ -64,6 +67,10 @@ export type SocketEvent =
   | {
       type: "channelUpserted";
       channel: Channel;
+    }
+  | {
+      type: "channelRemoved";
+      channelId: string;
     }
   | {
       type: "configUpdated";
@@ -98,6 +105,10 @@ export function parseRoute(path: string): RouteState {
 
   if (path === "/people") {
     return { screen: "people" };
+  }
+
+  if (path === "/search") {
+    return { screen: "search" };
   }
 
   const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);
@@ -176,6 +187,7 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
     messageId?: unknown;
     user?: unknown;
     channel?: unknown;
+    channelId?: unknown;
     networkConfig?: unknown;
   };
 
@@ -203,6 +215,12 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
   if (candidate.type === "channelUpserted") {
     const channel = ChannelSchema.safeParse(candidate.channel);
     return channel.success ? { type: "channelUpserted", channel: channel.data } : undefined;
+  }
+
+  if (candidate.type === "channelRemoved") {
+    return typeof candidate.channelId === "string"
+      ? { type: "channelRemoved", channelId: candidate.channelId }
+      : undefined;
   }
 
   if (candidate.type === "configUpdated") {

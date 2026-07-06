@@ -59,6 +59,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/channels")).toEqual({ screen: "channels" });
     expect(parseRoute("/settings")).toEqual({ screen: "settings" });
     expect(parseRoute("/admin")).toEqual({ screen: "admin" });
+    expect(parseRoute("/people")).toEqual({ screen: "people" });
+    expect(parseRoute("/search")).toEqual({ screen: "search" });
   });
 
   it("parses a channel route", () => {
@@ -129,6 +131,29 @@ describe("parseSocketEvent", () => {
       channel,
     });
     expect(parseSocketEvent(frame({ type: "channelUpserted", channel: { id: "x" } }))).toBeUndefined();
+  });
+
+  it("parses channelRemoved only with a string channel id", () => {
+    expect(parseSocketEvent(frame({ type: "channelRemoved", channelId: "quiet-room" }))).toEqual({
+      type: "channelRemoved",
+      channelId: "quiet-room",
+    });
+    expect(parseSocketEvent(frame({ type: "channelRemoved", channelId: 7 }))).toBeUndefined();
+    expect(parseSocketEvent(frame({ type: "channelRemoved" }))).toBeUndefined();
+  });
+
+  it("accepts a private channel with a member roster in channelUpserted", () => {
+    const privateChannel = {
+      ...channel,
+      id: "quiet-room",
+      visibility: "private",
+      discoverable: false,
+      memberUserIds: ["user.1", "user.2"],
+    };
+    expect(parseSocketEvent(frame({ type: "channelUpserted", channel: privateChannel }))).toEqual({
+      type: "channelUpserted",
+      channel: privateChannel,
+    });
   });
 
   it("parses configUpdated and rejects an invalid networkConfig", () => {

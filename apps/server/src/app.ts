@@ -11,6 +11,7 @@ import {
   AdminClaimRequestSchema,
   AvatarImageUploadRequestSchema,
   ChannelCreateRequestSchema,
+  ChannelMemberAddRequestSchema,
   ChannelSchema,
   ChannelUpdateRequestSchema,
   KillSwitchRequestSchema,
@@ -82,6 +83,10 @@ type ClientEvent =
   | {
       type: "channelUpserted";
       channel: Channel;
+    }
+  | {
+      type: "channelRemoved";
+      channelId: string;
     }
   | {
       type: "configUpdated";
@@ -176,7 +181,7 @@ export function defaultLoamConfig(): LoamConfig {
     },
     features: {
       enablePublicChannels: true,
-      enablePrivateChannels: false,
+      enablePrivateChannels: true,
       enableUserChannels: true,
       enableReplies: true,
       enableDMs: true,
@@ -916,28 +921,67 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Builds a public channel from a create request, persists it, and broadcasts it. Shared by admin
-   * creation and (when `enableUserChannels` is on) user creation. Owner = the creator. Channels are
-   * public + discoverable for now; private channels need a membership model that does not exist yet
-   * (see socketCanReceiveEvent and docs/07-more-features.md).
+   * The full member roster of a channel as a set of user ids. The owner is always a member, even if
+   * the stored `memberUserIds` predates an ownership change or omits them.
+   */
+  function channelMemberIds(channel: Channel): Set<string> {
+    const members = new Set(channel.memberUserIds ?? []);
+
+    if (channel.ownerUserId) {
+      members.add(channel.ownerUserId);
+    }
+
+    return members;
+  }
+
+  /**
+   * Whether a user may see, read, and post in a channel: public channels are open to everyone;
+   * private channels are members-only. Deliberately, node admins get no implicit read access —
+   * they manage private channels (archive, rename) through the admin endpoints without joining
+   * their audience.
+   */
+  function canAccessChannel(channel: Channel, userId: string): boolean {
+    return channel.visibility !== "private" || channelMemberIds(channel).has(userId);
+  }
+
+  /**
+   * Builds a channel from a create request, persists it, and broadcasts it. Shared by admin
+   * creation and (when `enableUserChannels` is on) user creation. Owner = the creator. Public
+   * channels are discoverable by everyone; private channels start with the creator as the only
+   * member and are only ever sent to their members (see socketCanReceiveEvent).
    */
   function createChannelFromRequest(input: ChannelCreateRequest, ownerId: string): Channel {
+    const visibility = input.visibility ?? "public";
     const channel: Channel = {
       id: uniqueChannelId(input.name),
       name: input.name,
       description: input.description,
       ownerUserId: ownerId,
-      visibility: "public",
+      visibility,
       allowPosting: input.allowPosting ?? "everyone",
       allowReplies: input.allowReplies ?? true,
-      discoverable: true,
+      discoverable: visibility === "public",
       createdAt: Date.now(),
+      ...(visibility === "private" ? { memberUserIds: [ownerId] } : {}),
     };
 
     // Persist before exposing in memory / broadcasting, so a failed write never surfaces a channel
     // that was not stored (mirrors applyUserUpdate).
     store.upsertChannel(channel);
     data.channels.push(channel);
+    broadcast({ type: "channelUpserted", channel });
+    return channel;
+  }
+
+  /**
+   * Replace a private channel's member roster. Mirrors `applyChannelUpdate`: persist first, then
+   * mutate the live object and broadcast — the `channelUpserted` reaches members only, so a newly
+   * added member learns of the channel through it while outsiders never see it.
+   */
+  function applyChannelMembers(channel: Channel, memberUserIds: string[]): Channel {
+    const next = ChannelSchema.parse({ ...channel, memberUserIds });
+    store.upsertChannel(next);
+    Object.assign(channel, next);
     broadcast({ type: "channelUpserted", channel });
     return channel;
   }
@@ -1007,20 +1051,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return target ? messageAudienceUserIds(target) : new Set([message.authorId]);
     }
 
-    return undefined;
+    // Channel messages: a private channel's messages (and, via the reaction recursion above, the
+    // reactions on them) are only ever for its members. Public channels have no audience limit.
+    const channel = ensureChannel(message.channelId);
+    return channel?.visibility === "private" ? channelMemberIds(channel) : undefined;
   }
 
   function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
-    if (
-      event.type === "userUpserted" ||
-      event.type === "channelUpserted" ||
-      event.type === "configUpdated" ||
-      event.type === "wipe"
-    ) {
-      // Channels are created public + discoverable and `GET /api/channels` already returns every
-      // non-archived channel to everyone, so channel upserts go to all sockets. When private
-      // channels gain real membership enforcement this must filter by visibility/membership.
+    if (event.type === "userUpserted" || event.type === "configUpdated" || event.type === "wipe") {
       return true;
+    }
+
+    if (event.type === "channelUpserted") {
+      // Public channel upserts go to all sockets (`GET /api/channels` returns them to everyone);
+      // a private channel — including its member list — is only ever sent to its members.
+      return canAccessChannel(event.channel, userId);
+    }
+
+    if (event.type === "channelRemoved") {
+      // Targeted notice (a member losing access) — delivered via sendEventToUsers, never broadcast.
+      return false;
     }
 
     const message = event.message;
@@ -1045,6 +1095,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     for (const { socket, userId } of sockets) {
       if (socket.readyState === socket.OPEN && socketCanReceiveEvent(userId, event)) {
+        socket.send(payload);
+      }
+    }
+  }
+
+  /**
+   * Send an event to the sockets of the given users only, bypassing the broadcast audience filter.
+   * Used for targeted notices such as `channelRemoved`, whose recipient is by definition no longer
+   * in the event's natural audience.
+   */
+  function sendEventToUsers(audience: Set<string>, event: ClientEvent): void {
+    const payload = JSON.stringify(event);
+
+    for (const { socket, userId } of sockets) {
+      if (socket.readyState === socket.OPEN && audience.has(userId)) {
         socket.send(payload);
       }
     }
@@ -1116,6 +1181,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const channel = ensureChannel(input.channelId);
 
       if (!channel) {
+        return { error: "Channel does not exist" };
+      }
+
+      // Non-members get the same answer as a missing channel, so a private channel's existence is
+      // never leaked by probing the message endpoint.
+      if (!canAccessChannel(channel, authorId)) {
         return { error: "Channel does not exist" };
       }
 
@@ -1906,14 +1977,182 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw error;
     }
   });
-  server.get("/api/channels", async () => data.channels.filter((channel) => !channel.archived));
-  server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request) =>
-    channelMessages(request.params.channelId),
+  server.get("/api/channels", async (request, reply) => {
+    const userId = getSessionUserId(request, reply);
+    return data.channels.filter((channel) => !channel.archived && canAccessChannel(channel, userId));
+  });
+  server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request, reply) => {
+    const userId = getSessionUserId(request, reply);
+    const channel = ensureChannel(request.params.channelId);
+
+    // Unknown channels and inaccessible private channels answer identically, so probing this
+    // endpoint can never confirm that a private channel exists.
+    if (!channel || !canAccessChannel(channel, userId)) {
+      return reply.code(404).send({ error: "Channel does not exist" });
+    }
+
+    return channelMessages(channel.id);
+  });
+
+  // The member roster of a private channel. Members only — like every private-channel endpoint,
+  // outsiders get the same 404 as a channel that does not exist.
+  server.get<{ Params: { channelId: string } }>("/api/channels/:channelId/members", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const channel = ensureChannel(request.params.channelId);
+
+    if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+      return reply.code(404).send({ error: "Channel does not exist" });
+    }
+
+    if (channel.visibility !== "private") {
+      return reply.code(400).send({ error: "Only private channels have a member list" });
+    }
+
+    const members = channelMemberIds(channel);
+    return data.users.filter((user) => members.has(user.id));
+  });
+
+  // Invite a user into a private channel. The channel owner or an admin only; adding an existing
+  // member is a no-op. The member-only `channelUpserted` broadcast tells the invitee about the
+  // channel the moment they are added.
+  server.post<{ Params: { channelId: string } }>("/api/channels/:channelId/members", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const channel = ensureChannel(request.params.channelId);
+
+    if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+      return reply.code(404).send({ error: "Channel does not exist" });
+    }
+
+    if (channel.visibility !== "private") {
+      return reply.code(400).send({ error: "Only private channels have a member list" });
+    }
+
+    if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+      return reply.code(403).send({ error: "Only the channel owner or an admin can invite members" });
+    }
+
+    const body = ChannelMemberAddRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send({ error: "Invalid member request" });
+    }
+
+    const target = data.users.find((user) => user.id === body.data.userId);
+
+    if (!target || target.type !== "human") {
+      return reply.code(400).send({ error: "User does not exist" });
+    }
+
+    if (target.banned) {
+      return reply.code(400).send({ error: "That user has been removed from this node" });
+    }
+
+    const members = channelMemberIds(channel);
+
+    if (members.has(target.id)) {
+      return channel;
+    }
+
+    return applyChannelMembers(channel, [...members, target.id]);
+  });
+
+  // Remove a member from a private channel. The owner or an admin may remove anyone but the owner;
+  // any member may remove themselves (leave). The removed user gets a targeted `channelRemoved`
+  // notice so their client drops the channel immediately.
+  server.delete<{ Params: { channelId: string; userId: string } }>(
+    "/api/channels/:channelId/members/:userId",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const channel = ensureChannel(request.params.channelId);
+
+      if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+        return reply.code(404).send({ error: "Channel does not exist" });
+      }
+
+      if (channel.visibility !== "private") {
+        return reply.code(400).send({ error: "Only private channels have a member list" });
+      }
+
+      const targetId = request.params.userId;
+
+      if (targetId !== currentUser.id && !currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+        return reply.code(403).send({ error: "Only the channel owner or an admin can remove members" });
+      }
+
+      if (targetId === channel.ownerUserId) {
+        return reply.code(400).send({ error: "The channel owner cannot be removed from their own channel" });
+      }
+
+      const members = channelMemberIds(channel);
+
+      if (!members.has(targetId)) {
+        return reply.code(400).send({ error: "That user is not a member of this channel" });
+      }
+
+      members.delete(targetId);
+      applyChannelMembers(channel, [...members]);
+      sendEventToUsers(new Set([targetId]), { type: "channelRemoved", channelId: channel.id });
+      return { ok: true };
+    },
   );
   server.get<{ Params: { userId: string } }>(
     "/api/dms/:userId",
     async (request, reply) => dmMessages(request.params.userId, getSessionUserId(request, reply)),
   );
+
+  // Case-insensitive substring search over message bodies, scoped strictly to what the caller may
+  // read: channel messages in channels they can access (never archived ones), and their own DMs.
+  // Shadow-banned authors' messages stay visible only to themselves, matching the broadcast filter.
+  server.get<{ Querystring: { q?: string; limit?: string } }>("/api/search", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (currentUser.banned || currentUser.pending) {
+      return reply.code(403).send({ error: "You cannot search on this node yet" });
+    }
+
+    const query = (request.query.q ?? "").trim();
+
+    if (!query) {
+      return reply.code(400).send({ error: "Provide a search query (?q=)" });
+    }
+
+    const needle = query.toLowerCase();
+    const parsedLimit = Number.parseInt(request.query.limit ?? "", 10);
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 25;
+    const channelsById = new Map(data.channels.map((channel) => [channel.id, channel]));
+    const results: Message[] = [];
+
+    // Walk newest-first (data.messages is kept in createdAt order) and stop at the limit.
+    for (let index = data.messages.length - 1; index >= 0 && results.length < limit; index -= 1) {
+      const message = data.messages[index];
+
+      if (!message || !("body" in message) || !message.body.toLowerCase().includes(needle)) {
+        continue;
+      }
+
+      const author = data.users.find((user) => user.id === message.authorId);
+
+      if (author?.shadowBanned && message.authorId !== currentUser.id) {
+        continue;
+      }
+
+      if (message.type === "dm") {
+        if (message.authorId !== currentUser.id && message.recipientUserId !== currentUser.id) {
+          continue;
+        }
+      } else {
+        const channel = channelsById.get(message.channelId);
+
+        if (!channel || channel.archived || !canAccessChannel(channel, currentUser.id)) {
+          continue;
+        }
+      }
+
+      results.push(message);
+    }
+
+    return { query, results };
+  });
 
   server.post("/api/messages", async (request, reply) => {
     const body = MessageCreateRequestSchema.safeParse(request.body);
@@ -2191,6 +2430,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (!body.success) {
       return reply.code(400).send({ error: "Invalid channel create request" });
+    }
+
+    if (body.data.visibility === "private" && !appConfig.features.enablePrivateChannels) {
+      return reply.code(403).send({ error: "Private channels are disabled on this LOAM node" });
     }
 
     return reply.code(201).send(createChannelFromRequest(body.data, currentUser.id));

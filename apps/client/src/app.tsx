@@ -31,6 +31,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
 import { InviteControl } from "./components/InviteControl";
+import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
@@ -391,7 +392,10 @@ function LoamApp() {
     activeConversation ? "has-conversation" : undefined,
     !activeConversation && routeState.screen === "channels" ? "no-conversation" : undefined,
     activeConversation?.kind === "channel" && activeConversation.threadId ? "thread-open" : undefined,
-    routeState.screen === "settings" || routeState.screen === "people" || routeState.screen === "admin"
+    routeState.screen === "settings" ||
+    routeState.screen === "people" ||
+    routeState.screen === "admin" ||
+    routeState.screen === "search"
       ? "settings-open"
       : undefined,
   ]
@@ -411,6 +415,8 @@ function LoamApp() {
   // without re-subscribing the socket on every navigation or roster change.
   const activeConversationRef = useRef(activeConversation);
   activeConversationRef.current = activeConversation;
+  const routeRef = useRef(location.route);
+  routeRef.current = location.route;
   const currentUserIdRef = useRef(currentUser.id);
   currentUserIdRef.current = currentUser.id;
   const channelsRef = useRef(channels);
@@ -536,6 +542,38 @@ function LoamApp() {
     );
   }, []);
 
+  /**
+   * Drop a channel this user can no longer see (they were removed from a private channel): purge
+   * the channel and its cached messages locally, and leave the conversation if it is on screen.
+   */
+  const removeChannel = useCallback((channelId: string) => {
+    setChannels((previous) => previous.filter((channel) => channel.id !== channelId));
+    void deleteRecord("channels", channelId);
+
+    setMessages((previous) => {
+      const keep: Message[] = [];
+
+      for (const message of previous) {
+        if (
+          (message.type === "channelPost" || message.type === "channelReply") &&
+          message.channelId === channelId
+        ) {
+          void deleteRecord("messages", message.id);
+        } else {
+          keep.push(message);
+        }
+      }
+
+      return keep;
+    });
+
+    const active = activeConversationRef.current;
+
+    if (active?.kind === "channel" && active.id === channelId) {
+      routeRef.current("/channels");
+    }
+  }, []);
+
   const upsertMessages = useCallback((incomingMessages: Message[]) => {
     setMessages((previous) => {
       const next = new Map(previous.map((message) => [message.id, message]));
@@ -638,7 +676,7 @@ function LoamApp() {
   );
 
   const createChannel = useCallback(
-    async (name: string): Promise<boolean> => {
+    async (name: string, visibility: "public" | "private" = "public"): Promise<boolean> => {
       const trimmed = name.trim();
 
       if (!trimmed) {
@@ -654,7 +692,7 @@ function LoamApp() {
           credentials: "include",
           headers: { "content-type": "application/json" },
           signal: controller.signal,
-          body: JSON.stringify({ name: trimmed }),
+          body: JSON.stringify({ name: trimmed, ...(visibility === "private" ? { visibility } : {}) }),
         });
         const payload: unknown = await response.json().catch(() => undefined);
 
@@ -962,6 +1000,12 @@ function LoamApp() {
     fetchJson<Message[]>(path)
       .then((nextMessages) => upsertMessages(nextMessages))
       .catch((nextError: unknown) => {
+        // A 404 means the channel does not exist for this user (unknown id, or a private channel
+        // they are not a member of) — an empty conversation, not a connectivity problem.
+        if (nextError instanceof Error && nextError.message.endsWith("404")) {
+          return;
+        }
+
         setError(nextError instanceof Error ? nextError.message : "Unable to load messages.");
       });
   }, [activeConversation?.id, activeConversation?.kind, currentUser.id, upsertMessages]);
@@ -1077,6 +1121,11 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "channelRemoved") {
+          removeChannel(payload.channelId);
+          return;
+        }
+
         applyUserUpsert(payload.user);
       };
     }
@@ -1098,6 +1147,7 @@ function LoamApp() {
     config?.currentUser.id,
     maybeToastForMessage,
     purgeLocalData,
+    removeChannel,
     removeMessage,
     upsertChannels,
     upsertMessages,
@@ -1195,6 +1245,7 @@ function LoamApp() {
       <Sidebar
         activeConversation={activeConversation}
         canCreateChannel={currentUser.isAdmin || !!config?.networkConfig.enableUserChannels}
+        canCreatePrivateChannel={!!config?.networkConfig.enablePrivateChannels}
         channels={channels}
         connection={connection}
         currentUser={currentUser}
@@ -1207,6 +1258,8 @@ function LoamApp() {
         <AdminView currentUser={currentUser} onChannelUpsert={upsertChannels} onWiped={purgeLocalData} />
       ) : routeState.screen === "people" ? (
         <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} />
+      ) : routeState.screen === "search" ? (
+        <SearchView channels={channels} currentUser={currentUser} usersById={usersById} />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           config={config}
@@ -1222,8 +1275,10 @@ function LoamApp() {
           conversation={activeConversation}
           currentUser={currentUser}
           messages={selectedMessages}
+          onChannelUpsert={upsertChannels}
           onDelete={deleteMessage}
           onEdit={editMessage}
+          onLeftChannel={removeChannel}
           onReact={(messageId, reaction) =>
             sendMessage({
               type: "reaction",
@@ -1262,6 +1317,7 @@ function LoamApp() {
               body,
             });
           }}
+          users={users}
           usersById={usersById}
         />
       )}
@@ -1306,11 +1362,12 @@ function ToastStack({ onDismiss, toasts }: { onDismiss: (id: string) => void; to
 interface SidebarProps {
   activeConversation?: Conversation;
   canCreateChannel: boolean;
+  canCreatePrivateChannel: boolean;
   channels: Channel[];
   connection: "connecting" | "live" | "offline";
   currentUser: User;
   joinUrl?: string;
-  onCreateChannel: (name: string) => Promise<boolean>;
+  onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
   unreadByConversation: Map<string, number>;
   users: User[];
 }
@@ -1328,6 +1385,7 @@ interface SidebarProps {
 function Sidebar({
   activeConversation,
   canCreateChannel,
+  canCreatePrivateChannel,
   channels,
   connection,
   currentUser,
@@ -1358,13 +1416,17 @@ function Sidebar({
               href={`/channel/${encodeURIComponent(channel.id)}`}
               key={channel.id}
             >
-              <span className="nav-glyph">#</span>
+              <span aria-label={channel.visibility === "private" ? "Private channel" : undefined} className="nav-glyph">
+                {channel.visibility === "private" ? "🔒" : "#"}
+              </span>
               <span className="nav-label">{channel.name}</span>
               <UnreadBadge count={unreadByConversation.get(`channel:${channel.id}`) ?? 0} />
             </NavLink>
           ))}
         </nav>
-        {canCreateChannel ? <NewChannelControl onCreateChannel={onCreateChannel} /> : null}
+        {canCreateChannel ? (
+          <NewChannelControl allowPrivate={canCreatePrivateChannel} onCreateChannel={onCreateChannel} />
+        ) : null}
       </section>
 
       <section className="nav-section">
@@ -1385,6 +1447,10 @@ function Sidebar({
       </section>
 
       <div className="sidebar-footer">
+        <NavLink active={false} href="/search">
+          <span className="nav-glyph">⌕</span>
+          Search messages
+        </NavLink>
         {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} /> : null}
         {showPeople ? (
           <NavLink active={false} href="/people">
@@ -1417,10 +1483,19 @@ function Sidebar({
 /**
  * A compact "new channel" affordance in the sidebar. Shown to admins, and to everyone when the
  * `enableUserChannels` flag is on. Collapses to a single button until the user starts creating.
+ * When the node allows private channels, offers an invite-only toggle (the creator starts as the
+ * only member and invites people from the channel's Members panel).
  */
-function NewChannelControl({ onCreateChannel }: { onCreateChannel: (name: string) => Promise<boolean> }) {
+function NewChannelControl({
+  allowPrivate,
+  onCreateChannel,
+}: {
+  allowPrivate: boolean;
+  onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
+}) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [isPrivate, setIsPrivate] = useState(false);
   const [creating, setCreating] = useState(false);
 
   async function create(): Promise<void> {
@@ -1429,11 +1504,12 @@ function NewChannelControl({ onCreateChannel }: { onCreateChannel: (name: string
     }
 
     setCreating(true);
-    const ok = await onCreateChannel(name);
+    const ok = await onCreateChannel(name, isPrivate ? "private" : "public");
     setCreating(false);
 
     if (ok) {
       setName("");
+      setIsPrivate(false);
       setOpen(false);
     }
   }
@@ -1464,6 +1540,17 @@ function NewChannelControl({ onCreateChannel }: { onCreateChannel: (name: string
         placeholder="Channel name"
         value={name}
       />
+      {allowPrivate ? (
+        <label className="admin-toggle">
+          <input
+            checked={isPrivate}
+            disabled={creating}
+            onInput={(event) => setIsPrivate(event.currentTarget.checked)}
+            type="checkbox"
+          />
+          Private (invite-only)
+        </label>
+      ) : null}
       <div className="new-channel-actions">
         <button disabled={creating || !name.trim()} type="submit">
           {creating ? "Creating…" : "Create"}
@@ -1514,11 +1601,14 @@ interface ConversationViewProps {
   conversation?: Conversation;
   currentUser: User;
   messages: Message[];
+  onChannelUpsert: (channels: Channel[]) => void;
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
+  onLeftChannel: (channelId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onSend: (body: string) => Promise<void>;
   onThreadReply: (parentMessageId: string, body: string) => Promise<void>;
+  users: User[];
   usersById: Map<string, User>;
 }
 
@@ -1527,15 +1617,24 @@ function ConversationView({
   conversation,
   currentUser,
   messages,
+  onChannelUpsert,
   onDelete,
   onEdit,
+  onLeftChannel,
   onReact,
   onSend,
   onThreadReply,
+  users,
   usersById,
 }: ConversationViewProps) {
   const location = useLocation();
+  const [membersOpen, setMembersOpen] = useState(false);
   const topMessages = conversation ? topLevelMessages(messages, conversation) : [];
+
+  // Never carry the members panel from one conversation into another.
+  useEffect(() => {
+    setMembersOpen(false);
+  }, [conversation?.kind, conversation?.id]);
   const threadParent =
     conversation?.kind === "channel" && conversation.threadId
       ? topMessages.find((message) => message.id === conversation.threadId)
@@ -1560,19 +1659,44 @@ function ConversationView({
     conversation.kind === "channel"
       ? channels.find((channel) => channel.id === conversation.id)
       : undefined;
+  const isPrivateChannel = activeChannel?.visibility === "private";
   const title =
     conversation.kind === "channel"
-      ? `# ${activeChannel?.name ?? conversation.id}`
+      ? `${isPrivateChannel ? "🔒" : "#"} ${activeChannel?.name ?? conversation.id}`
       : usersById.get(conversation.id)?.displayName ?? conversation.id;
 
   return (
     <>
       <section className="conversation">
-        <ConversationHeader
-          conversation={conversation}
-          description={activeChannel?.description}
-          title={title}
-        />
+        {/* One wrapper = one grid row: .conversation is a strict header/list/composer 3-row grid. */}
+        <div className="conversation-top">
+          <ConversationHeader
+            conversation={conversation}
+            description={activeChannel?.description}
+            title={title}
+            trailing={
+              isPrivateChannel ? (
+                <button
+                  aria-expanded={membersOpen}
+                  className="ghost-button"
+                  onClick={() => setMembersOpen((previous) => !previous)}
+                  type="button"
+                >
+                  Members
+                </button>
+              ) : undefined
+            }
+          />
+          {isPrivateChannel && membersOpen && activeChannel ? (
+            <ChannelMembersPanel
+              channel={activeChannel}
+              currentUser={currentUser}
+              onChannelUpsert={onChannelUpsert}
+              onLeftChannel={onLeftChannel}
+              users={users}
+            />
+          ) : null}
+        </div>
         <MessageList
           conversation={conversation}
           currentUser={currentUser}
@@ -1616,10 +1740,12 @@ function ConversationHeader({
   conversation,
   description,
   title,
+  trailing,
 }: {
   conversation: Conversation;
   description?: string;
   title: string;
+  trailing?: ComponentChildren;
 }) {
   return (
     <header className="conversation-header">
@@ -1631,7 +1757,198 @@ function ConversationHeader({
         <h1>{title}</h1>
         {description ? <p className="conversation-description">{description}</p> : null}
       </div>
+      {trailing ? <div className="conversation-header-actions">{trailing}</div> : null}
     </header>
+  );
+}
+
+/**
+ * Member management for a private channel: shows the roster, lets the owner (or an admin) invite
+ * and remove people, and lets any non-owner member leave. All gating here is cosmetic — the server
+ * enforces every rule (owner-or-admin invites, members-only visibility, the owner can never be
+ * removed).
+ */
+function ChannelMembersPanel({
+  channel,
+  currentUser,
+  onChannelUpsert,
+  onLeftChannel,
+  users,
+}: {
+  channel: Channel;
+  currentUser: User;
+  onChannelUpsert: (channels: Channel[]) => void;
+  onLeftChannel: (channelId: string) => void;
+  users: User[];
+}) {
+  const [members, setMembers] = useState<User[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [inviteId, setInviteId] = useState("");
+  const canManage = currentUser.isAdmin || channel.ownerUserId === currentUser.id;
+  const memberIds = new Set(channel.memberUserIds ?? []);
+
+  if (channel.ownerUserId) {
+    memberIds.add(channel.ownerUserId);
+  }
+
+  const invitable = users.filter((user) => user.type === "human" && !memberIds.has(user.id));
+  // Refetch whenever the roster itself changes (live channelUpserted events update the channel).
+  const rosterKey = [...memberIds].sort().join(",");
+
+  useEffect(() => {
+    let active = true;
+    setLoaded(false);
+    setError(undefined);
+
+    fetchJson<unknown>(`/api/channels/${encodeURIComponent(channel.id)}/members`)
+      .then((payload) => {
+        if (active) {
+          setMembers(parseUserList(payload));
+          setLoaded(true);
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : "Unable to load members.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [channel.id, rosterKey]);
+
+  async function invite(): Promise<void> {
+    if (!inviteId) {
+      return;
+    }
+
+    setBusy(true);
+    setError(undefined);
+
+    try {
+      const updated = await requestChannel(
+        "POST",
+        `/api/channels/${encodeURIComponent(channel.id)}/members`,
+        { userId: inviteId },
+      );
+      onChannelUpsert([updated]);
+      setInviteId("");
+    } catch (inviteError) {
+      setError(inviteError instanceof Error ? inviteError.message : "Unable to invite that person.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(userId: string): Promise<void> {
+    const leaving = userId === currentUser.id;
+
+    if (leaving && !window.confirm("Leave this channel? You'll need a new invite to come back.")) {
+      return;
+    }
+
+    setBusy(true);
+    setError(undefined);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        apiUrl(`/api/channels/${encodeURIComponent(channel.id)}/members/${encodeURIComponent(userId)}`),
+        { method: "DELETE", credentials: "include", signal: controller.signal },
+      );
+
+      if (!response.ok) {
+        const payload: unknown = await response.json().catch(() => undefined);
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Request failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      if (leaving) {
+        onLeftChannel(channel.id);
+        return;
+      }
+
+      onChannelUpsert([
+        { ...channel, memberUserIds: (channel.memberUserIds ?? []).filter((id) => id !== userId) },
+      ]);
+      setMembers((previous) => previous.filter((member) => member.id !== userId));
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : "Unable to remove that person.");
+    } finally {
+      window.clearTimeout(timeout);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="channel-members-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Private channel</p>
+          <h2>Members</h2>
+        </div>
+        {memberIds.has(currentUser.id) && channel.ownerUserId !== currentUser.id ? (
+          <button className="danger-button" disabled={busy} onClick={() => void remove(currentUser.id)} type="button">
+            Leave channel
+          </button>
+        ) : null}
+      </div>
+      {!loaded && !error ? <p className="form-note">Loading members…</p> : null}
+      {loaded ? (
+        <ul className="moderation-list">
+          {members.map((member) => (
+            <li className="moderation-row" key={member.id}>
+              <div className="moderation-identity">
+                <Avatar avatar={member.avatar} id={member.id} />
+                <div className="moderation-name">
+                  <strong>{member.displayName}</strong>
+                  <span>{member.id === channel.ownerUserId ? "Owner" : member.id}</span>
+                </div>
+              </div>
+              {canManage && member.id !== channel.ownerUserId ? (
+                <div className="moderation-actions">
+                  <button className="danger-button" disabled={busy} onClick={() => void remove(member.id)} type="button">
+                    Remove
+                  </button>
+                </div>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {canManage ? (
+        <form
+          className="member-invite-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void invite();
+          }}
+        >
+          <label>
+            Invite someone
+            <select disabled={busy || !invitable.length} onInput={(event) => setInviteId(event.currentTarget.value)} value={inviteId}>
+              <option value="">{invitable.length ? "Choose a person…" : "Everyone is already a member"}</option>
+              {invitable.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button disabled={busy || !inviteId} type="submit">
+            Invite
+          </button>
+        </form>
+      ) : null}
+      {error ? <p className="form-error">{error}</p> : null}
+    </div>
   );
 }
 
@@ -1790,6 +2107,7 @@ function MessageItem({
               aria-label="Edit message"
               // eslint-disable-next-line jsx-a11y/no-autofocus
               autoFocus
+              dir="auto"
               disabled={savingEdit}
               onInput={(event) => setDraft(event.currentTarget.value)}
               rows={2}
@@ -1807,6 +2125,7 @@ function MessageItem({
         ) : (
           <div
             className="markdown-body"
+            dir="auto"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
           />
         )}
@@ -1912,6 +2231,7 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
         {label}
       </label>
       <textarea
+        dir="auto"
         id={composerId}
         onInput={(event) => setValue(event.currentTarget.value)}
         onKeyDown={(event) => {
@@ -2441,6 +2761,153 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       </label>
       {error ? <p className="form-error">{error}</p> : null}
     </div>
+  );
+}
+
+/**
+ * Full-text message search over `GET /api/search`. The server scopes results strictly to what this
+ * user may read (public channels, their private channels, their own DMs), so the client just
+ * renders whatever comes back. Tapping a result jumps to its conversation (or thread).
+ */
+function SearchView({
+  channels,
+  currentUser,
+  usersById,
+}: {
+  channels: Channel[];
+  currentUser: User;
+  usersById: Map<string, User>;
+}) {
+  const location = useLocation();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Message[]>();
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState<string>();
+  const searchInputId = useId();
+
+  async function run(): Promise<void> {
+    const trimmed = query.trim();
+
+    if (!trimmed || searching) {
+      return;
+    }
+
+    setSearching(true);
+    setError(undefined);
+
+    try {
+      const payload = await fetchJson<unknown>(`/api/search?q=${encodeURIComponent(trimmed)}`);
+      const rawResults =
+        payload && typeof payload === "object" && "results" in payload && Array.isArray(payload.results)
+          ? (payload.results as unknown[])
+          : [];
+      setResults(
+        rawResults.flatMap((item) => {
+          const parsed = MessageSchema.safeParse(item);
+          return parsed.success ? [parsed.data] : [];
+        }),
+      );
+    } catch (searchError) {
+      setError(searchError instanceof Error ? searchError.message : "Unable to search messages.");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function contextLabel(message: Message): string {
+    if (message.type === "channelPost" || message.type === "channelReply") {
+      const channel = channels.find((entry) => entry.id === message.channelId);
+      return `${channel?.visibility === "private" ? "🔒" : "#"}${channel?.name ?? message.channelId}`;
+    }
+
+    if (message.type === "dm") {
+      const peerId = message.authorId === currentUser.id ? message.recipientUserId : message.authorId;
+      return `DM with ${usersById.get(peerId)?.displayName ?? generateDisplayName(peerId)}`;
+    }
+
+    return "";
+  }
+
+  function routeFor(message: Message): string | undefined {
+    if (message.type === "channelPost") {
+      return `/channel/${encodeURIComponent(message.channelId)}`;
+    }
+
+    if (message.type === "channelReply") {
+      return `/channel/${encodeURIComponent(message.channelId)}/thread/${encodeURIComponent(message.parentMessageId)}`;
+    }
+
+    if (message.type === "dm") {
+      const peerId = message.authorId === currentUser.id ? message.recipientUserId : message.authorId;
+      return `/dm/${encodeURIComponent(peerId)}`;
+    }
+
+    return undefined;
+  }
+
+  return (
+    <section className="settings-view">
+      <header className="conversation-header">
+        <NavLink active={false} className="mobile-back" href="/channels">
+          ←
+        </NavLink>
+        <div>
+          <p className="eyebrow">Search</p>
+          <h1>Find messages</h1>
+        </div>
+      </header>
+      {/* One wrapper = one grid row: .settings-view is a strict header/content 2-row grid. */}
+      <div className="search-content">
+        <form
+          className="search-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void run();
+          }}
+        >
+          <label className="sr-only" for={searchInputId}>
+            Search messages
+          </label>
+          <input
+            dir="auto"
+            disabled={searching}
+            id={searchInputId}
+            maxLength={200}
+            onInput={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search channel messages and your DMs"
+            type="search"
+            value={query}
+          />
+          <button disabled={searching || !query.trim()} type="submit">
+            {searching ? "Searching…" : "Search"}
+          </button>
+        </form>
+        {error ? <p className="form-error">{error}</p> : null}
+        {results && !results.length ? <p className="form-note">No messages matched.</p> : null}
+        {results?.length ? (
+          <ul className="search-results">
+            {results.map((message) => {
+              const route = routeFor(message);
+              const author = usersById.get(message.authorId);
+              return (
+                <SearchResult
+                  authorName={author?.displayName ?? generateDisplayName(message.authorId)}
+                  body={bodyFor(message)}
+                  contextLabel={contextLabel(message)}
+                  key={message.id}
+                  onOpen={() => {
+                    if (route) {
+                      location.route(route);
+                    }
+                  }}
+                  time={displayTime(message.createdAt)}
+                />
+              );
+            })}
+          </ul>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -3186,7 +3653,7 @@ function UserStateBadges({ user }: { user: User }) {
 
 const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
   ["enablePublicChannels", "Public channels"],
-  ["enablePrivateChannels", "Private channels (not implemented yet)"],
+  ["enablePrivateChannels", "Private channels (invite-only)"],
   ["enableUserChannels", "User-created channels"],
   ["enableReplies", "Thread replies"],
   ["enableDMs", "Direct messages"],
@@ -3841,6 +4308,7 @@ function AdminChannelsPanel({
   const [description, setDescription] = useState("");
   const [allowPosting, setAllowPosting] = useState<ChannelPostingPolicy>("everyone");
   const [allowReplies, setAllowReplies] = useState(true);
+  const [isPrivate, setIsPrivate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string>();
 
@@ -3902,6 +4370,7 @@ function AdminChannelsPanel({
       const channel = await requestChannel("POST", "/api/channels", {
         name: name.trim(),
         description: description.trim() || undefined,
+        ...(isPrivate ? { visibility: "private" } : {}),
         allowPosting,
         allowReplies,
       });
@@ -3910,6 +4379,7 @@ function AdminChannelsPanel({
       setDescription("");
       setAllowPosting("everyone");
       setAllowReplies(true);
+      setIsPrivate(false);
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : "Unable to create the channel.");
     } finally {
@@ -3970,6 +4440,15 @@ function AdminChannelsPanel({
               type="checkbox"
             />
             Allow threaded replies
+          </label>
+          <label className="admin-toggle">
+            <input
+              checked={isPrivate}
+              disabled={creating}
+              onInput={(event) => setIsPrivate(event.currentTarget.checked)}
+              type="checkbox"
+            />
+            Private (invite-only; you start as the only member)
           </label>
           <div className="profile-actions">
             <button disabled={creating || !name.trim()} type="submit">
@@ -4046,6 +4525,7 @@ function AdminChannelRow({
         />
         <span className="admin-channel-meta">
           {channel.allowPosting === "admins" ? "Admins post" : "Open posting"}
+          {channel.visibility === "private" ? " · Private" : ""}
           {channel.archived ? " · Archived" : ""}
         </span>
       </div>
