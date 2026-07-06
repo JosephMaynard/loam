@@ -1678,3 +1678,377 @@ describe("security profiles", () => {
     expect(full.killSwitch.enabled).toBe(true);
   });
 });
+
+describe("private channels", () => {
+  type PrivateChannelBody = {
+    id: string;
+    visibility: string;
+    discoverable: boolean;
+    ownerUserId?: string;
+    memberUserIds?: string[];
+  };
+
+  async function createPrivateChannel(
+    app: LoamApp,
+    cookie: string,
+    name = "Secret Ops",
+  ): Promise<PrivateChannelBody> {
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie },
+      payload: { name, visibility: "private" },
+    });
+
+    if (response.statusCode !== 201) {
+      throw new Error(`Private channel creation failed: ${response.statusCode}`);
+    }
+
+    return response.json() as PrivateChannelBody;
+  }
+
+  function addMember(app: LoamApp, cookie: string, channelId: string, userId: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: `/api/channels/${channelId}/members`,
+      headers: { cookie },
+      payload: { userId },
+    });
+  }
+
+  function removeMember(app: LoamApp, cookie: string, channelId: string, userId: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "DELETE",
+      url: `/api/channels/${channelId}/members/${userId}`,
+      headers: { cookie },
+    });
+  }
+
+  async function channelIdsFor(app: LoamApp, cookie: string): Promise<string[]> {
+    const response = await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie } });
+    return (response.json() as { id: string }[]).map((entry) => entry.id);
+  }
+
+  function readMessages(app: LoamApp, cookie: string, channelId: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie } });
+  }
+
+  function post(app: LoamApp, cookie: string, channelId: string, body: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+  }
+
+  it("creates a private channel with the creator as the only member", async () => {
+    const app = await makeApp();
+    await newSession(app); // burn the firstUser=admin slot
+    const owner = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    expect(channel.visibility).toBe("private");
+    expect(channel.discoverable).toBe(false);
+    expect(channel.ownerUserId).toBe(owner.userId);
+    expect(channel.memberUserIds).toEqual([owner.userId]);
+  });
+
+  it("rejects private channel creation when enablePrivateChannels is off", async () => {
+    const app = await makeApp({ features: { enablePrivateChannels: false } });
+    const admin = await newSession(app);
+
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+      payload: { name: "Nope", visibility: "private" },
+    });
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("hides a private channel from everyone but its members", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+
+    expect(await channelIdsFor(app, owner.cookie)).toContain(channel.id);
+    expect(await channelIdsFor(app, outsider.cookie)).not.toContain(channel.id);
+    // Even node admins get no implicit membership in the public list...
+    expect(await channelIdsFor(app, admin.cookie)).not.toContain(channel.id);
+
+    // ...but the admin management list still shows it (archive/rename without reading).
+    const adminList = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect((adminList.json() as { id: string }[]).some((entry) => entry.id === channel.id)).toBe(true);
+  });
+
+  it("answers 404 for message reads by outsiders and for unknown channels alike", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    expect((await post(app, owner.cookie, channel.id, "member post")).statusCode).toBe(201);
+
+    const asOwner = await readMessages(app, owner.cookie, channel.id);
+    expect(asOwner.statusCode).toBe(200);
+    expect((asOwner.json() as unknown[]).length).toBe(1);
+
+    // Outsider, admin (no implicit read), and a genuinely-missing channel are indistinguishable.
+    expect((await readMessages(app, outsider.cookie, channel.id)).statusCode).toBe(404);
+    expect((await readMessages(app, admin.cookie, channel.id)).statusCode).toBe(404);
+    expect((await readMessages(app, outsider.cookie, "does-not-exist")).statusCode).toBe(404);
+  });
+
+  it("blocks outsiders from posting and reacting without leaking channel existence", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    const posted = await post(app, owner.cookie, channel.id, "hello members");
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+
+    const blockedPost = await post(app, outsider.cookie, channel.id, "let me in");
+    expect(blockedPost.statusCode).toBe(400);
+    expect((blockedPost.json() as { error: string }).error).toBe("Channel does not exist");
+
+    const blockedReaction = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: outsider.cookie },
+      payload: { type: "reaction", targetMessageId: messageId, reaction: "👍" },
+    });
+    expect(blockedReaction.statusCode).toBe(400);
+  });
+
+  it("lets the owner invite and remove members, who gain and lose access", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const owner = await newSession(app);
+    const invitee = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    expect((await post(app, owner.cookie, channel.id, "founding note")).statusCode).toBe(201);
+
+    const added = await addMember(app, owner.cookie, channel.id, invitee.userId);
+    expect(added.statusCode).toBe(200);
+    expect((added.json() as PrivateChannelBody).memberUserIds).toContain(invitee.userId);
+
+    expect(await channelIdsFor(app, invitee.cookie)).toContain(channel.id);
+    expect((await readMessages(app, invitee.cookie, channel.id)).statusCode).toBe(200);
+    expect((await post(app, invitee.cookie, channel.id, "thanks for the invite")).statusCode).toBe(201);
+
+    const removed = await removeMember(app, owner.cookie, channel.id, invitee.userId);
+    expect(removed.statusCode).toBe(200);
+    expect(await channelIdsFor(app, invitee.cookie)).not.toContain(channel.id);
+    expect((await readMessages(app, invitee.cookie, channel.id)).statusCode).toBe(404);
+  });
+
+  it("lets a member leave, keeps the owner in place, and gates invites to owner/admin", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const member = await newSession(app);
+    const other = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    await addMember(app, owner.cookie, channel.id, member.userId);
+
+    // A plain member cannot invite others...
+    expect((await addMember(app, member.cookie, channel.id, other.userId)).statusCode).toBe(403);
+    // ...or remove anyone else (the permission gate answers before owner-protection).
+    expect((await removeMember(app, member.cookie, channel.id, owner.userId)).statusCode).toBe(403);
+
+    // An admin may manage membership without being a member.
+    expect((await addMember(app, admin.cookie, channel.id, other.userId)).statusCode).toBe(200);
+
+    // A member may leave (remove themselves).
+    expect((await removeMember(app, member.cookie, channel.id, member.userId)).statusCode).toBe(200);
+    expect(await channelIdsFor(app, member.cookie)).not.toContain(channel.id);
+
+    // The owner can never be removed — not even by themselves or an admin.
+    expect((await removeMember(app, owner.cookie, channel.id, owner.userId)).statusCode).toBe(400);
+    expect((await removeMember(app, admin.cookie, channel.id, owner.userId)).statusCode).toBe(400);
+  });
+
+  it("hides the member roster from outsiders and rejects it for public channels", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+
+    const asOwner = await app.server.inject({
+      method: "GET",
+      url: `/api/channels/${channel.id}/members`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(asOwner.statusCode).toBe(200);
+    expect((asOwner.json() as { id: string }[]).map((user) => user.id)).toEqual([owner.userId]);
+
+    const asOutsider = await app.server.inject({
+      method: "GET",
+      url: `/api/channels/${channel.id}/members`,
+      headers: { cookie: outsider.cookie },
+    });
+    expect(asOutsider.statusCode).toBe(404);
+
+    const publicRoster = await app.server.inject({
+      method: "GET",
+      url: "/api/channels/general/members",
+      headers: { cookie: owner.cookie },
+    });
+    expect(publicRoster.statusCode).toBe(400);
+  });
+
+  it("persists private channels and their members across a restart", async () => {
+    const { app, dataDir } = await makeApp();
+    await newSession(app);
+    const owner = await newSession(app);
+    const member = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    await addMember(app, owner.cookie, channel.id, member.userId);
+
+    const next = await reopenApp(app, dataDir);
+    const stored = next.store.loadChannels().find((entry) => entry.id === channel.id);
+    expect(stored?.visibility).toBe("private");
+    expect(stored?.memberUserIds).toEqual([owner.userId, member.userId]);
+
+    expect((await readMessages(next, member.cookie, channel.id)).statusCode).toBe(200);
+  });
+});
+
+describe("message search", () => {
+  function search(app: LoamApp, cookie: string, query: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "GET",
+      url: `/api/search?q=${encodeURIComponent(query)}`,
+      headers: { cookie },
+    });
+  }
+
+  function results(response: InjectResponse): { id: string; body?: string }[] {
+    return (response.json() as { results: { id: string; body?: string }[] }).results;
+  }
+
+  async function post(app: LoamApp, cookie: string, channelId: string, body: string): Promise<string> {
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+    return (response.json() as { message: { id: string } }).message.id;
+  }
+
+  it("matches case-insensitively, newest first, and requires a query", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    await post(app, session.cookie, "general", "The water point is OPEN again");
+    await post(app, session.cookie, "general", "Bring water bottles tomorrow");
+    await post(app, session.cookie, "general", "Unrelated note");
+
+    const response = await search(app, session.cookie, "water");
+    expect(response.statusCode).toBe(200);
+    const found = results(response);
+    expect(found.length).toBe(2);
+    expect(found[0]?.body).toBe("Bring water bottles tomorrow");
+    expect(found[1]?.body).toBe("The water point is OPEN again");
+
+    expect((await search(app, session.cookie, "   ")).statusCode).toBe(400);
+  });
+
+  it("keeps DMs scoped to their participants", async () => {
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const eve = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "dm", recipientUserId: bob.userId, body: "secret rendezvous point" },
+    });
+
+    expect(results(await search(app, alice.cookie, "rendezvous")).length).toBe(1);
+    expect(results(await search(app, bob.cookie, "rendezvous")).length).toBe(1);
+    expect(results(await search(app, eve.cookie, "rendezvous")).length).toBe(0);
+  });
+
+  it("keeps private-channel messages scoped to members and skips archived channels", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Quiet Room", visibility: "private" },
+    });
+    const channelId = (created.json() as { id: string }).id;
+    await post(app, owner.cookie, channelId, "meet at the quiet spot");
+
+    expect(results(await search(app, owner.cookie, "quiet spot")).length).toBe(1);
+    expect(results(await search(app, outsider.cookie, "quiet spot")).length).toBe(0);
+    expect(results(await search(app, admin.cookie, "quiet spot")).length).toBe(0);
+
+    // Archiving a channel removes its messages from search results too.
+    await post(app, admin.cookie, "general", "archive me please");
+    await app.server.inject({
+      method: "PATCH",
+      url: "/api/channels/general",
+      headers: { cookie: admin.cookie },
+      payload: { archived: true },
+    });
+    expect(results(await search(app, admin.cookie, "archive me")).length).toBe(0);
+  });
+
+  it("shows a shadow-banned author's messages only to themselves", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+
+    await post(app, target.cookie, "general", "shadow banned words");
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    expect(results(await search(app, target.cookie, "shadow banned words")).length).toBe(1);
+    expect(results(await search(app, admin.cookie, "shadow banned words")).length).toBe(0);
+  });
+
+  it("caps results at the requested limit", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    for (let index = 0; index < 5; index += 1) {
+      await post(app, session.cookie, "general", `flood message ${index}`);
+    }
+
+    const response = await app.server.inject({
+      method: "GET",
+      url: "/api/search?q=flood&limit=3",
+      headers: { cookie: session.cookie },
+    });
+    expect(results(response).length).toBe(3);
+  });
+});

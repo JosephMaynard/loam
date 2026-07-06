@@ -110,21 +110,34 @@ export const ChannelSchema = z.object({
   discoverable: z.boolean(),
   createdAt: TimestampSchema,
   archived: z.boolean().optional(),
+  /**
+   * Private-channel roster: the user ids who may see, read, and post in the channel (the owner is
+   * always treated as a member even if absent here). Present only on private channels — the server
+   * never sends a private channel (or its member list) to anyone outside this roster.
+   */
+  memberUserIds: z.array(IdSchema).optional(),
 });
 export type Channel = z.infer<typeof ChannelSchema>;
 
 /**
- * Admin request to create a channel. The server assigns `id`, `createdAt`, and `ownerUserId`, and
- * currently forces `visibility: "public"` / `discoverable: true` (private channels need a
- * membership + enforcement model that does not exist yet, so they are deliberately not creatable).
+ * Request to create a channel. The server assigns `id`, `createdAt`, and `ownerUserId`.
+ * `visibility` may be `public` (default; discoverable by everyone) or `private` (invite-only —
+ * requires the `enablePrivateChannels` feature flag; the creator becomes the first member).
  */
 export const ChannelCreateRequestSchema = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(280).optional(),
+  visibility: z.enum(["public", "private"]).optional(),
   allowPosting: ChannelPostingPolicySchema.optional(),
   allowReplies: z.boolean().optional(),
 });
 export type ChannelCreateRequest = z.infer<typeof ChannelCreateRequestSchema>;
+
+/** Request to add a member to a private channel (channel owner or an admin only). */
+export const ChannelMemberAddRequestSchema = z.object({
+  userId: IdSchema,
+});
+export type ChannelMemberAddRequest = z.infer<typeof ChannelMemberAddRequestSchema>;
 
 /** Admin request to update an existing channel. Every field is optional; omitted fields are left as-is. */
 export const ChannelUpdateRequestSchema = z
