@@ -173,6 +173,14 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch.
   Clients downscale to ≤1280px webp on-device first (`apps/client/src/lib/attachments.ts`).
   `enableAttachments` flag, default on.
+- **Network identity & presence**: `node.name` (default "LOAM local") is the operator-set network
+  name in `NetworkConfig.nodeName` (client sidebar/join/tab title), editable via the admin Network
+  panel. `enablePresence` (default on) makes the WS broadcast a `presence` event (online user ids,
+  visible users only) on every connect/disconnect — the client shows online dots; disable for
+  high-risk deployments (it reveals who is connected).
+- **Admin promotion**: `POST /api/admin/users/:userId/promote` (admin-only) makes a member admin.
+  Deliberately **one-way** — no demote route; admin removal is via re-bootstrap / kill switch, so a
+  contested node can't fall into a mutual-demotion fight (see docs/12).
 - **Node-to-node sync** (docs/11): `sync.{enabled,peers,intervalMs}` config; pull-based gossip of
   **public data only** via `GET /api/sync/digest` + `POST /api/sync/messages` (404 unless enabled).
   DMs/private channels/shadow-banned authors never export. Imports are defensive (public-local
@@ -189,7 +197,8 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   `GET /api/search`, `GET /api/moderation/users` + `PATCH /api/moderation/users/:userId`
   (admin/moderator ban + shadow-ban), `GET /api/access/pending` +
   `POST /api/access/users/:userId/approve|deny` (admin/greeter join approval),
-  `PATCH /api/admin/users/:userId/roles` (admin), `POST /api/admin/claim`,
+  `PATCH /api/admin/users/:userId/roles` + `POST /api/admin/users/:userId/promote` (admin),
+  `POST /api/attachments` + `GET /api/attachments/:fileName`, `POST /api/admin/claim`,
   `GET/PATCH /api/admin/config` (admin),
   `GET /api/admin/channels` (admin), `POST /api/admin/kill-switch`
   (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless
