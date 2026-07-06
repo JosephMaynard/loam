@@ -2372,3 +2372,317 @@ describe("review hardening fixes", () => {
     expect(app.store.loadMessages()).toEqual([]);
   });
 });
+
+describe("message attachments", () => {
+  // A real 1x1 PNG (valid magic bytes) — small enough to inline.
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  async function upload(app: LoamApp, cookie: string, data = tinyPng, mimeType = "image/png") {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie },
+      payload: { mimeType, data, width: 1, height: 1 },
+    });
+  }
+
+  it("uploads, attaches, serves, and allows an image-only message", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    const uploaded = await upload(app, session.cookie);
+    expect(uploaded.statusCode).toBe(201);
+    const attachment = uploaded.json() as { id: string; mimeType: string };
+    expect(attachment.id).toMatch(/^att_[a-f0-9]{16}$/);
+
+    // Empty body + attachment is a valid message.
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+    expect(posted.statusCode).toBe(201);
+
+    const served = await app.server.inject({
+      method: "GET",
+      url: `/api/attachments/${attachment.id}.png`,
+      headers: { cookie: session.cookie },
+    });
+    expect(served.statusCode).toBe(200);
+    expect(served.headers["content-type"]).toContain("image/png");
+
+    const listed = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: session.cookie } })
+    ).json() as { attachments?: { id: string }[] }[];
+    expect(listed[0]?.attachments?.[0]?.id).toBe(attachment.id);
+  });
+
+  it("rejects a message with no body and no attachments", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "   " },
+    });
+    expect(posted.statusCode).toBe(400);
+  });
+
+  it("rejects uploads when the flag is off, on signature mismatch, and foreign attachment ids", async () => {
+    const flagOff = await makeApp({ features: { enableAttachments: false } });
+    const offSession = await newSession(flagOff);
+    expect((await upload(flagOff, offSession.cookie)).statusCode).toBe(403);
+
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const mallory = await newSession(app);
+
+    // Declared webp but PNG bytes.
+    expect((await upload(app, alice.cookie, tinyPng, "image/webp")).statusCode).toBe(400);
+
+    const uploaded = (await upload(app, alice.cookie)).json() as { id: string; mimeType: string };
+
+    // Mallory cannot attach Alice's pending upload...
+    const stolen = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: mallory.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "mine now", attachments: [uploaded] },
+    });
+    expect(stolen.statusCode).toBe(400);
+    expect((stolen.json() as { error: string }).error).toBe("Unknown attachment");
+
+    // ...and after Alice uses it, the id is consumed and cannot be attached again.
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: alice.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "one", attachments: [uploaded] },
+        })
+      ).statusCode,
+    ).toBe(201);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: alice.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "two", attachments: [uploaded] },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it("deletes the attachment file with its message", async () => {
+    const { app, dataDir } = await makeApp();
+    const session = await newSession(app);
+
+    const attachment = (await upload(app, session.cookie)).json() as { id: string; mimeType: string };
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+    const filePath = join(dataDir, "attachments", `${attachment.id}.png`);
+    expect(existsSync(filePath)).toBe(true);
+
+    await app.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: session.cookie },
+    });
+    // File removal is best-effort/async — poll briefly.
+    for (let i = 0; i < 40 && existsSync(filePath); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(existsSync(filePath)).toBe(false);
+  });
+});
+
+describe("node-to-node sync", () => {
+  async function listenApp(app: LoamApp): Promise<string> {
+    return app.server.listen({ port: 0, host: "127.0.0.1" });
+  }
+
+  async function post(app: LoamApp, cookie: string, channelId: string, body: string): Promise<string> {
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+    return (response.json() as { message: { id: string } }).message.id;
+  }
+
+  async function runSync(app: LoamApp, cookie: string) {
+    return app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
+  }
+
+  async function generalBodies(app: LoamApp, cookie: string): Promise<string[]> {
+    const response = await app.server.inject({
+      method: "GET",
+      url: "/api/messages/general",
+      headers: { cookie },
+    });
+    return (response.json() as { body?: string }[]).map((message) => message.body ?? "");
+  }
+
+  it("answers 404 on the sync endpoints unless enabled", async () => {
+    const app = await makeApp();
+    expect((await app.server.inject({ method: "GET", url: "/api/sync/digest" })).statusCode).toBe(404);
+    expect(
+      (await app.server.inject({ method: "POST", url: "/api/sync/messages", payload: { ids: ["x"] } })).statusCode,
+    ).toBe(404);
+  });
+
+  it("pulls public messages and channels from a peer, sanitizing imported users", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    expect(sourceAdmin.isAdmin).toBe(true);
+    await post(source, sourceAdmin.cookie, "general", "hello from the other node");
+    await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Relief Ops" },
+    });
+    await post(source, sourceAdmin.cookie, "relief-ops", "supplies at the depot");
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl, label: "source" }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+
+    const run = await runSync(puller, pullerAdmin.cookie);
+    expect(run.statusCode).toBe(200);
+    const report = run.json() as { peers: { status?: { lastError?: string; imported: number } }[] };
+    expect(report.peers[0]?.status?.lastError).toBeUndefined();
+
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("hello from the other node");
+
+    // The peer's channel was imported too, with its messages.
+    const channels = (
+      await puller.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: pullerAdmin.cookie } })
+    ).json() as { id: string }[];
+    expect(channels.some((channel) => channel.id === "relief-ops")).toBe(true);
+
+    // The source's admin author arrives as a plain user — authority never syncs.
+    const importedAuthor = puller.store.loadUsers().find((user) => user.id === sourceAdmin.userId);
+    expect(importedAuthor).toBeDefined();
+    expect(importedAuthor?.isAdmin).toBe(false);
+
+    // Running again imports nothing new (idempotent by id).
+    const again = (await runSync(puller, pullerAdmin.cookie)).json() as {
+      peers: { status?: { imported: number } }[];
+    };
+    const importedTotal = again.peers[0]?.status?.imported ?? -1;
+    expect(importedTotal).toBeGreaterThan(0);
+    const third = (await runSync(puller, pullerAdmin.cookie)).json() as {
+      peers: { status?: { imported: number } }[];
+    };
+    expect(third.peers[0]?.status?.imported).toBe(importedTotal);
+  });
+
+  it("never exports private channels, DMs, or shadow-banned authors' messages", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const admin = await newSession(source);
+    const owner = await newSession(source);
+    const shadowed = await newSession(source);
+
+    // Private channel + message.
+    const created = await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Quiet", visibility: "private" },
+    });
+    const privateId = (created.json() as { id: string }).id;
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: owner.cookie },
+      payload: { type: "channelPost", channelId: privateId, body: "private words" },
+    });
+
+    // DM.
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "dm", recipientUserId: owner.userId, body: "dm words" },
+    });
+
+    // Shadow-banned author's public post.
+    await post(source, shadowed.cookie, "general", "shadow words");
+    await source.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${shadowed.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    await post(source, admin.cookie, "general", "public words");
+
+    const digest = (
+      await source.server.inject({ method: "GET", url: "/api/sync/digest" })
+    ).json() as { channels: { id: string }[]; messages: { id: string }[] };
+
+    expect(digest.channels.some((channel) => channel.id === privateId)).toBe(false);
+
+    // Resolve each advertised id and confirm none of the withheld bodies appear.
+    const fetched = (
+      await source.server.inject({
+        method: "POST",
+        url: "/api/sync/messages",
+        payload: { ids: digest.messages.map((entry) => entry.id) },
+      })
+    ).json() as { messages: { body?: string }[] };
+    const bodies = fetched.messages.map((message) => message.body ?? "");
+    expect(bodies).toContain("public words");
+    expect(bodies).not.toContain("private words");
+    expect(bodies).not.toContain("dm words");
+    expect(bodies).not.toContain("shadow words");
+  });
+
+  it("tombstones keep locally deleted messages from re-importing, and edits propagate", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const keepId = await post(source, sourceAdmin.cookie, "general", "keep me");
+    const doomedId = await post(source, sourceAdmin.cookie, "general", "delete me locally");
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("delete me locally");
+
+    // Delete locally on the puller; the source still holds it — it must not come back.
+    await puller.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${doomedId}`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).not.toContain("delete me locally");
+
+    // An edit on the source propagates (newer editedAt wins).
+    await source.server.inject({
+      method: "PATCH",
+      url: `/api/messages/${keepId}`,
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { body: "keep me (edited)" },
+    });
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("keep me (edited)");
+  });
+});

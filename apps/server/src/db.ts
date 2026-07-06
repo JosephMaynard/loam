@@ -120,6 +120,12 @@ export interface LoamStore {
   deleteSession(token: string): void;
   getConfigValue(key: string): string | undefined;
   setConfigValue(key: string, value: string): void;
+  /**
+   * Record that a message id was deliberately deleted here, so node-to-node sync never re-imports
+   * it from a peer that still holds it (docs/11). Tombstones are data: wiped with everything else.
+   */
+  addTombstone(messageId: string): void;
+  loadTombstones(): string[];
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -204,6 +210,9 @@ function buildStore(db: SqliteConnection): LoamStore {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS tombstones (
+      message_id TEXT PRIMARY KEY
+    );
   `);
 
   const upsertUserStmt = db.prepare(
@@ -230,6 +239,9 @@ function buildStore(db: SqliteConnection): LoamStore {
     "INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   );
   const getConfigStmt = db.prepare("SELECT value FROM config WHERE key = ?");
+  const addTombstoneStmt = db.prepare(
+    "INSERT INTO tombstones (message_id) VALUES (?) ON CONFLICT(message_id) DO NOTHING",
+  );
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -290,6 +302,15 @@ function buildStore(db: SqliteConnection): LoamStore {
     setConfigValue(key, value) {
       setConfigStmt.run(key, value);
     },
+    addTombstone(messageId) {
+      addTombstoneStmt.run(messageId);
+    },
+    loadTombstones() {
+      return db
+        .prepare("SELECT message_id FROM tombstones ORDER BY rowid")
+        .all()
+        .map((row) => row.message_id as string);
+    },
     transaction(fn) {
       db.exec("BEGIN IMMEDIATE");
 
@@ -312,6 +333,7 @@ function buildStore(db: SqliteConnection): LoamStore {
         db.exec("DELETE FROM sessions");
         db.exec("DELETE FROM users");
         db.exec("DELETE FROM channels");
+        db.exec("DELETE FROM tombstones");
       });
     },
     close() {

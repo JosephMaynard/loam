@@ -9,6 +9,7 @@ import fastifyWebsocket from "@fastify/websocket";
 import { generateDisplayName } from "@loam/display-name";
 import {
   AdminClaimRequestSchema,
+  AttachmentUploadRequestSchema,
   AvatarImageUploadRequestSchema,
   ChannelCreateRequestSchema,
   ChannelMemberAddRequestSchema,
@@ -24,6 +25,9 @@ import {
   PanicRequestSchema,
   RolesUpdateRequestSchema,
   securityProfilePreset,
+  SyncDigestSchema,
+  SyncMessagesRequestSchema,
+  SyncMessagesResponseSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -33,10 +37,13 @@ import {
   type LoamConfig,
   type LoamConfigUpdate,
   type Message,
+  type MessageAttachment,
   type MessageCreateRequest,
   type NetworkConfig,
   type OllamaConfig,
   type StreamEvent,
+  type SyncDigest,
+  type SyncPeer,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -187,6 +194,7 @@ export function defaultLoamConfig(): LoamConfig {
       enableDMs: true,
       enableReactions: true,
       enableMarkdown: true,
+      enableAttachments: true,
     },
     llm: {
       ollama: {
@@ -213,6 +221,11 @@ export function defaultLoamConfig(): LoamConfig {
     },
     access: {
       joinPolicy: "open",
+    },
+    sync: {
+      enabled: false,
+      peers: [],
+      intervalMs: 30_000,
     },
   };
 }
@@ -245,6 +258,7 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     retention: { ...base.retention, ...update.retention },
     security: { ...base.security, ...update.security },
     access: { ...base.access, ...update.access },
+    sync: { ...base.sync, ...update.sync },
   };
   const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
   merged.llm.ollama.systemPrompt = systemPrompt || undefined;
@@ -440,6 +454,32 @@ function newAvatarImageId(): string {
   return `avt_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
+function newAttachmentId(): string {
+  return `att_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+}
+
+/** Filename an attachment is stored (and served) under: `att_<16hex>.<ext>`. */
+function attachmentFileName(attachment: Pick<MessageAttachment, "id" | "mimeType">): string {
+  return `${attachment.id}.${avatarImageExtension(attachment.mimeType)}`;
+}
+
+/** Parses an attachment filename (`att_<16hex>.<ext>`) into its id and MIME type. */
+function parseAttachmentFileName(value: string): { id: string; mimeType: AvatarImageMimeType } | undefined {
+  const match = value.match(/^(att_[a-f0-9]{16})\.(png|jpg|webp)$/);
+
+  if (!match) {
+    return undefined;
+  }
+
+  const extension = match[2];
+  const mimeType =
+    extension === "png" ? "image/png" : extension === "jpg" ? "image/jpeg" : "image/webp";
+
+  return { id: match[1] ?? "", mimeType };
+}
+
+const attachmentMaxBytes = 256 * 1024;
+
 /**
  * Map an avatar image MIME type to its canonical file extension.
  *
@@ -530,6 +570,7 @@ function newMessageId(prefix = "msg"): string {
 export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const dataDir = options.dataDir;
   const avatarsDir = join(dataDir, "avatars");
+  const attachmentsDir = join(dataDir, "attachments");
   const configPath = options.configPath ?? join(dataDir, "config.json");
   const joinHost = options.joinHost ?? "localhost";
   const clientPort = options.clientPort ?? 3000;
@@ -542,6 +583,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
+  // Uploaded-but-unattached attachment ids → uploader. A message may only reference the uploader's
+  // own pending uploads; each id is consumed on first use (RAM-only: a restart orphans pending ids).
+  const attachmentOwners = new Map<string, string>();
+  // Message ids deliberately deleted on this node — node-to-node sync never re-imports these.
+  const tombstones = new Set<string>();
+  // Per-peer sync bookkeeping for the admin UI (RAM-only).
+  type PeerSyncStatus = {
+    lastAttemptAt?: number;
+    lastSuccessAt?: number;
+    lastError?: string;
+    imported: number;
+  };
+  const peerSyncStatus = new Map<string, PeerSyncStatus>();
+  let syncRunning = false;
+  let lastSyncLoopAt = 0;
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -1227,6 +1283,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { error: "Reactions are disabled on this LOAM node" };
     }
 
+    if (input.type !== "reaction" && input.attachments?.length) {
+      if (!appConfig.features.enableAttachments) {
+        return { error: "Attachments are disabled on this LOAM node" };
+      }
+
+      // Only the uploader's own pending uploads may be attached, and each exactly once — so a
+      // guessed/leaked id can't attach someone else's image or double-reference a file whose
+      // deletion would break another message.
+      for (const attachment of input.attachments) {
+        if (attachmentOwners.get(attachment.id) !== authorId) {
+          return { error: "Unknown attachment" };
+        }
+      }
+    }
+
     if (input.type === "channelPost" || input.type === "channelReply") {
       const channel = ensureChannel(input.channelId);
 
@@ -1285,7 +1356,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         const deleted = data.messages[existingIndex];
 
         if (deleted) {
-          store.deleteMessage(deleted.id);
+          // Tombstone the toggled-off reaction so sync peers don't hand it straight back.
+          store.transaction(() => {
+            store.deleteMessage(deleted.id);
+            store.addTombstone(deleted.id);
+          });
+          tombstones.add(deleted.id);
           data.messages.splice(existingIndex, 1);
         }
 
@@ -1313,6 +1389,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const message = MessageSchema.parse({ ...input, ...base });
     store.insertMessage(message);
     data.messages.push(message);
+
+    if (input.type !== "reaction") {
+      for (const attachment of input.attachments ?? []) {
+        attachmentOwners.delete(attachment.id);
+      }
+    }
+
     return { message };
   }
 
@@ -1541,6 +1624,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       channels: store.loadChannels(),
       messages: store.loadMessages(),
     };
+    tombstones.clear();
+
+    for (const id of store.loadTombstones()) {
+      tombstones.add(id);
+    }
+
     sessions.clear();
 
     for (const session of store.loadSessions()) {
@@ -1629,6 +1718,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     await rm(avatarsDir, { recursive: true, force: true });
+    await rm(attachmentsDir, { recursive: true, force: true });
+    attachmentOwners.clear();
     sessions.clear();
     claimAttempts.clear();
     panicAttempts.clear();
@@ -1726,17 +1817,327 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const ids = new Set(messages.map((message) => message.id));
+    // Tombstone alongside the delete: a peer that still holds these must not re-import them.
     store.transaction(() => {
       for (const id of ids) {
         store.deleteMessage(id);
+        store.addTombstone(id);
       }
     });
+
+    for (const id of ids) {
+      tombstones.add(id);
+    }
+
+    // Best-effort removal of the deleted messages' attachment files.
+    for (const message of messages) {
+      if (message.type !== "reaction") {
+        for (const attachment of message.attachments ?? []) {
+          rm(join(attachmentsDir, attachmentFileName(attachment)), { force: true }).catch(
+            (error: unknown) => server.log.warn(error),
+          );
+        }
+      }
+    }
 
     for (const message of messages) {
       broadcast({ type: "messageDeleted", messageId: message.id, message });
     }
 
     data.messages = data.messages.filter((message) => !ids.has(message.id));
+  }
+
+  /**
+   * Whether a message may leave this node over node-to-node sync: only content that is public
+   * here — posts/replies in public, non-archived channels and reactions on them. DMs, private
+   * channels, in-flight streaming messages, and shadow-banned authors' messages never sync.
+   */
+  function isSyncableMessage(message: Message): boolean {
+    if (message.type === "dm" || message.meta?.streaming) {
+      return false;
+    }
+
+    if (message.type === "reaction") {
+      const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
+      return !!target && isSyncableMessage(target);
+    }
+
+    const channel = ensureChannel(message.channelId);
+
+    if (!channel || channel.visibility !== "public" || channel.archived) {
+      return false;
+    }
+
+    const author = data.users.find((candidate) => candidate.id === message.authorId);
+    return !author?.shadowBanned;
+  }
+
+  /** What this node advertises to pulling peers (see SyncDigestSchema). */
+  function buildSyncDigest(): SyncDigest {
+    return {
+      channels: data.channels.filter((channel) => channel.visibility === "public" && !channel.archived),
+      messages: data.messages.filter(isSyncableMessage).map((message) => ({
+        id: message.id,
+        ...(message.editedAt !== undefined ? { editedAt: message.editedAt } : {}),
+      })),
+    };
+  }
+
+  /** GET/POST a peer endpoint with a timeout and schema-validate the response. */
+  async function fetchPeerJson<T>(
+    peerUrl: string,
+    path: string,
+    schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
+    body?: unknown,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      const response = await fetch(`${peerUrl.replace(/\/+$/, "")}${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Peer answered ${response.status}`);
+      }
+
+      const parsed = schema.safeParse(await response.json());
+
+      if (!parsed.success) {
+        throw new Error("Peer sent an invalid payload");
+      }
+
+      return parsed.data;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Import a peer's user profiles for message authors we don't know yet. Authority and moderation
+   * state are stripped — a peer's admin or moderator is a stranger here, and a peer must never be
+   * able to ban/shadow-ban someone on this node.
+   */
+  function importPeerUsers(users: User[]): void {
+    for (const user of users) {
+      if (data.users.some((candidate) => candidate.id === user.id)) {
+        continue;
+      }
+
+      const sanitized = UserSchema.parse({
+        ...user,
+        isAdmin: false,
+        roles: undefined,
+        banned: undefined,
+        shadowBanned: undefined,
+        pending: undefined,
+      });
+      store.upsertUser(sanitized);
+      data.users.push(sanitized);
+      broadcast({ type: "userUpserted", user: sanitized });
+    }
+  }
+
+  /** Best-effort copy of an imported message's attachment files from the peer that has them. */
+  async function importPeerAttachments(peerUrl: string, message: Message): Promise<void> {
+    if (message.type === "reaction" || !message.attachments?.length) {
+      return;
+    }
+
+    for (const attachment of message.attachments) {
+      const filePath = join(attachmentsDir, attachmentFileName(attachment));
+
+      try {
+        await stat(filePath);
+        continue; // already have it
+      } catch {
+        // fall through to fetch
+      }
+
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        const response = await fetch(
+          `${peerUrl.replace(/\/+$/, "")}/api/attachments/${attachmentFileName(attachment)}`,
+          { signal: controller.signal },
+        ).finally(() => clearTimeout(timeout));
+
+        if (!response.ok) {
+          continue;
+        }
+
+        const bytes = Buffer.from(await response.arrayBuffer());
+
+        if (
+          !bytes.length ||
+          bytes.length > attachmentMaxBytes ||
+          !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
+        ) {
+          continue;
+        }
+
+        await mkdir(attachmentsDir, { recursive: true });
+        await writeFile(filePath, bytes);
+      } catch {
+        // Message still imports; the image 404s until a later sync round retries... it won't —
+        // acceptable v1 tradeoff, the text is the payload that matters off-grid.
+      }
+    }
+  }
+
+  /**
+   * Import a batch of peer messages: posts before replies before reactions (so parents/targets
+   * land first), never into private/unknown channels (a malicious peer must not inject into a
+   * local private channel id), never over a tombstone, and edits only when strictly newer.
+   */
+  async function importPeerMessages(peerUrl: string, messages: Message[]): Promise<number> {
+    const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3 } as const;
+    const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
+    let imported = 0;
+
+    for (const message of sorted) {
+      if (message.type === "dm" || message.meta?.streaming || tombstones.has(message.id)) {
+        continue;
+      }
+
+      if (message.type === "reaction") {
+        const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
+
+        // The reaction's target must exist locally and be public-audience (no DM/private targets).
+        if (!target || messageAudienceUserIds(message) !== undefined) {
+          continue;
+        }
+      } else {
+        const channel = ensureChannel(message.channelId);
+
+        if (!channel || channel.visibility !== "public" || channel.archived) {
+          continue;
+        }
+
+        await importPeerAttachments(peerUrl, message);
+      }
+
+      const existing = data.messages.find((candidate) => candidate.id === message.id);
+
+      if (existing) {
+        if ((message.editedAt ?? 0) > (existing.editedAt ?? 0)) {
+          const updated = MessageSchema.parse(message);
+          store.updateMessage(updated);
+          Object.assign(existing, updated);
+          broadcast({ type: "messageUpdated", message: existing });
+          imported += 1;
+        }
+
+        continue;
+      }
+
+      store.insertMessage(message);
+      data.messages.push(message);
+      broadcast({ type: "messageCreated", message });
+      imported += 1;
+    }
+
+    if (imported) {
+      data.messages.sort((a, b) => a.createdAt - b.createdAt);
+    }
+
+    return imported;
+  }
+
+  /** One pull round against one peer: digest → diff (skipping tombstones) → fetch → import. */
+  async function syncWithPeer(peer: SyncPeer): Promise<void> {
+    const status = peerSyncStatus.get(peer.url) ?? { imported: 0 };
+    peerSyncStatus.set(peer.url, status);
+    status.lastAttemptAt = Date.now();
+
+    try {
+      const digest = await fetchPeerJson(peer.url, "/api/sync/digest", SyncDigestSchema);
+
+      for (const channel of digest.channels) {
+        if (channel.visibility !== "public" || ensureChannel(channel.id)) {
+          continue;
+        }
+
+        const created = ChannelSchema.parse({ ...channel, memberUserIds: undefined });
+        store.upsertChannel(created);
+        data.channels.push(created);
+        broadcast({ type: "channelUpserted", channel: created });
+      }
+
+      const localById = new Map(data.messages.map((message) => [message.id, message]));
+      const wanted = digest.messages
+        .filter((entry) => {
+          if (tombstones.has(entry.id)) {
+            return false;
+          }
+
+          const mine = localById.get(entry.id);
+          return !mine || (entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0));
+        })
+        .map((entry) => entry.id);
+
+      let imported = 0;
+
+      for (let start = 0; start < wanted.length; start += 200) {
+        const payload = await fetchPeerJson(
+          peer.url,
+          "/api/sync/messages",
+          SyncMessagesResponseSchema,
+          { ids: wanted.slice(start, start + 200) },
+        );
+        importPeerUsers(payload.users);
+        imported += await importPeerMessages(peer.url, payload.messages);
+      }
+
+      status.lastSuccessAt = Date.now();
+      status.lastError = undefined;
+      status.imported += imported;
+
+      if (imported) {
+        server.log.info(`Synced ${imported} message(s) from peer ${peer.url}`);
+      }
+    } catch (error) {
+      status.lastError = error instanceof Error ? error.message : "Sync failed";
+      server.log.warn(`Sync with peer ${peer.url} failed: ${status.lastError}`);
+    }
+  }
+
+  /** The pull loop: one round across all peers, at most once per configured interval. */
+  async function runSyncLoop(force = false): Promise<void> {
+    if (!appConfig.sync.enabled || syncRunning || !appConfig.sync.peers.length) {
+      return;
+    }
+
+    if (!force && Date.now() - lastSyncLoopAt < appConfig.sync.intervalMs) {
+      return;
+    }
+
+    syncRunning = true;
+    lastSyncLoopAt = Date.now();
+
+    try {
+      for (const peer of appConfig.sync.peers) {
+        await syncWithPeer(peer);
+      }
+    } finally {
+      syncRunning = false;
+    }
+  }
+
+  /** Peer list with live status, as shown in the admin UI. */
+  function syncStatusReport() {
+    return {
+      enabled: appConfig.sync.enabled,
+      intervalMs: appConfig.sync.intervalMs,
+      peers: appConfig.sync.peers.map((peer) => ({
+        ...peer,
+        status: peerSyncStatus.get(peer.url),
+      })),
+    };
   }
 
   /**
@@ -1779,6 +2180,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       server.log.error(error);
     }
   }, 30_000);
+
+  // Sync ticker: a fixed 5s heartbeat; runSyncLoop itself enforces the configured interval (so an
+  // admin shortening sync.intervalMs takes effect without re-arming a timer).
+  const syncTimer = setInterval(() => {
+    void runSyncLoop().catch((error: unknown) => server.log.error(error));
+  }, 5_000);
 
   // Blanket per-IP throttle for every HTTP route; the abuse-sensitive endpoints (claim, panic,
   // avatar upload) add their own tighter semantic limits on top.
@@ -2065,6 +2472,76 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw error;
     }
   });
+  // Upload one message-attachment image. Like avatars: base64 JSON body, magic-byte signature
+  // checked against the declared MIME, strict size cap (clients downscale first). The returned id
+  // is bound to this uploader and consumed by the message that references it (see createMessage).
+  server.post(
+    "/api/attachments",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send({ error: accessError });
+      }
+
+      if (!appConfig.features.enableAttachments) {
+        return reply.code(403).send({ error: "Attachments are disabled on this LOAM node" });
+      }
+
+      const body = AttachmentUploadRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send({ error: "Invalid attachment upload request" });
+      }
+
+      const image = Buffer.from(body.data.data, "base64");
+
+      if (image.length === 0 || image.length > attachmentMaxBytes) {
+        return reply.code(400).send({ error: "Attachment image must be 256KB or smaller" });
+      }
+
+      if (!avatarImageHasExpectedSignature(image, body.data.mimeType)) {
+        return reply.code(400).send({ error: "Attachment image type does not match the uploaded data" });
+      }
+
+      const attachment: MessageAttachment = {
+        id: newAttachmentId(),
+        mimeType: body.data.mimeType,
+        ...(body.data.width !== undefined ? { width: body.data.width } : {}),
+        ...(body.data.height !== undefined ? { height: body.data.height } : {}),
+      };
+      await mkdir(attachmentsDir, { recursive: true });
+      await writeFile(join(attachmentsDir, attachmentFileName(attachment)), image);
+      attachmentOwners.set(attachment.id, currentUser.id);
+      return reply.code(201).send(attachment);
+    },
+  );
+
+  server.get<{ Params: { fileName: string } }>(
+    "/api/attachments/:fileName",
+    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const attachment = parseAttachmentFileName(request.params.fileName);
+
+      if (!attachment) {
+        return reply.code(404).send({ error: "Attachment does not exist" });
+      }
+
+      try {
+        const image = await readFile(join(attachmentsDir, request.params.fileName));
+        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").send(image);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return reply.code(404).send({ error: "Attachment does not exist" });
+        }
+
+        throw error;
+      }
+    },
+  );
+
   server.get("/api/channels", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
     const accessError = participationError(currentUser);
@@ -2278,6 +2755,72 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     return { query, results };
+  });
+
+  // ---- Node-to-node sync (docs/11) ----------------------------------------------------------
+  // Peer-facing endpoints. Both answer 404 unless sync is enabled, so a node that never opted in
+  // is indistinguishable from one without the feature. They expose **public data only** — the
+  // same content any open session on the LAN could read; enabling sync is the operator's explicit
+  // decision to share it with peer nodes.
+
+  server.get(
+    "/api/sync/digest",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (_request, reply) => {
+      if (!appConfig.sync.enabled) {
+        return reply.code(404).send({ error: "Not found" });
+      }
+
+      return buildSyncDigest();
+    },
+  );
+
+  server.post(
+    "/api/sync/messages",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!appConfig.sync.enabled) {
+        return reply.code(404).send({ error: "Not found" });
+      }
+
+      const body = SyncMessagesRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send({ error: "Invalid sync request" });
+      }
+
+      const wanted = new Set(body.data.ids);
+      const messages = data.messages.filter((message) => wanted.has(message.id) && isSyncableMessage(message));
+      const authorIds = new Set(messages.map((message) => message.authorId));
+      const users = data.users.filter((user) => authorIds.has(user.id));
+      return { messages, users };
+    },
+  );
+
+  server.get("/api/admin/sync", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    return syncStatusReport();
+  });
+
+  // Run a sync round right now (ignoring the interval) — the admin UI's "Sync now" button.
+  server.post("/api/admin/sync/run", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    if (!appConfig.sync.enabled || !appConfig.sync.peers.length) {
+      return reply.code(400).send({ error: "Enable sync and add at least one peer first" });
+    }
+
+    await runSyncLoop(true);
+    return syncStatusReport();
   });
 
   server.post("/api/messages", async (request, reply) => {
@@ -2643,6 +3186,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     reapExpiredMessages,
     async close() {
       clearInterval(reaperTimer);
+      clearInterval(syncTimer);
       await server.close();
       store.close();
     },
