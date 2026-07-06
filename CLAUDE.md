@@ -167,10 +167,12 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   first, scoped to the caller (accessible non-archived channels + own DMs, shadow-ban respected).
 - **REST endpoints**: `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
-  `GET /api/channels`, `GET/POST /api/channels/:channelId/members`,
+  `GET/POST /api/channels`, `PATCH /api/channels/:channelId` (owner or admin),
+  `GET/POST /api/channels/:channelId/members`,
   `DELETE /api/channels/:channelId/members/:userId`, `GET /api/messages/:channelId`,
-  `GET /api/dms/:userId`, `POST /api/messages`, `GET /api/search`,
-  `POST /api/admin/claim`, `GET/PATCH /api/admin/config` (admin), `POST /api/admin/kill-switch`
+  `GET /api/dms/:userId`, `POST /api/messages`, `PATCH/DELETE /api/messages/:messageId`,
+  `GET /api/search`, `POST /api/admin/claim`, `GET/PATCH /api/admin/config` (admin),
+  `GET /api/admin/channels` (admin), `POST /api/admin/kill-switch`
   (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless
   configured). WebSocket at `GET /ws` (requires the session cookie to already be set — the client
   opens it only after `/api/config` resolves).

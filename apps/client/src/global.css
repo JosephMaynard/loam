@@ -1428,6 +1428,11 @@ a {
   background: var(--c-surf-2);
 }
 
+.search-result-button:focus-visible {
+  outline: 3px solid rgba(47, 95, 76, 0.18);
+  border-color: var(--c-border-3);
+}
+
 .search-result-meta {
   font-size: 0.8rem;
   color: var(--c-text-muted);
