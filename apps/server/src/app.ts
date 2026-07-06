@@ -44,6 +44,7 @@ import {
   type StreamEvent,
   type SyncDigest,
   type SyncPeer,
+  type SyncStatusReport,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -2194,8 +2195,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
-  /** Peer list with live status, as shown in the admin UI. */
-  function syncStatusReport() {
+  /** Peer list with live status, as shown in the admin UI (SyncStatusReportSchema is the contract). */
+  function syncStatusReport(): SyncStatusReport {
     return {
       enabled: appConfig.sync.enabled,
       intervalMs: appConfig.sync.intervalMs,

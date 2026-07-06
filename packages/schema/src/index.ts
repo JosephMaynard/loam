@@ -520,6 +520,22 @@ export const SyncMessagesResponseSchema = z.object({
 });
 export type SyncMessagesResponse = z.infer<typeof SyncMessagesResponseSchema>;
 
+/** Live per-peer sync bookkeeping, as reported by `GET /api/admin/sync`. */
+export const SyncPeerStatusSchema = z.object({
+  lastAttemptAt: TimestampSchema.optional(),
+  lastSuccessAt: TimestampSchema.optional(),
+  lastError: z.string().optional(),
+  imported: z.number().int().nonnegative(),
+});
+export type SyncPeerStatus = z.infer<typeof SyncPeerStatusSchema>;
+
+export const SyncStatusReportSchema = z.object({
+  enabled: z.boolean(),
+  intervalMs: z.number().int().positive(),
+  peers: z.array(SyncPeerSchema.extend({ status: SyncPeerStatusSchema.optional() })),
+});
+export type SyncStatusReport = z.infer<typeof SyncStatusReportSchema>;
+
 export const StreamEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("start"),

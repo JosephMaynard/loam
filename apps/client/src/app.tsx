@@ -8,6 +8,7 @@ import {
   MessageSchema,
   securityProfilePreset,
   SecurityProfileSchema,
+  SyncStatusReportSchema,
   UserSchema,
   type Channel,
   type ChannelPostingPolicy,
@@ -22,6 +23,7 @@ import {
   type Role,
   type SecurityProfile,
   type StreamEvent,
+  type SyncStatusReport,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -430,6 +432,8 @@ function LoamApp() {
   currentUserIdRef.current = currentUser.id;
   const channelsRef = useRef(channels);
   channelsRef.current = channels;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const usersByIdRef = useRef<Map<string, User>>(new Map());
   const lastReadRef = useRef(lastReadByConversation);
 
@@ -612,11 +616,13 @@ function LoamApp() {
    * bodies — in memory and IndexedDB forever.
    */
   const reconcileConversationMessages = useCallback(
-    (conversation: Conversation, serverMessages: Message[]) => {
+    (conversation: Conversation, serverMessages: Message[], preFetchIds: Set<string>) => {
       const serverIds = new Set(serverMessages.map((message) => message.id));
-      // Messages created after the server snapshot was taken arrive over the socket while the
-      // fetch is in flight; they are legitimately absent from the list, so never prune anything
-      // newer than the snapshot's newest entry (server timestamps compared to server timestamps).
+      // Two guards against pruning legitimate messages that raced the fetch (sent locally or
+      // arriving over the socket while it was in flight): only messages we already held when the
+      // request started are prunable at all, and never anything newer than the snapshot's newest
+      // entry (server timestamps compared to server timestamps — an empty snapshot has no edge,
+      // so there the pre-fetch id set is the only, and sufficient, guard).
       const snapshotEdge = serverMessages.reduce((newest, message) => Math.max(newest, message.createdAt), 0);
       const meId = currentUserIdRef.current;
 
@@ -633,7 +639,12 @@ function LoamApp() {
             isConversationMessage(message, conversation, meId) ||
             (message.type === "reaction" && conversationIds.has(message.targetMessageId));
 
-          if (inConversation && !serverIds.has(message.id) && (snapshotEdge === 0 || message.createdAt <= snapshotEdge)) {
+          if (
+            inConversation &&
+            !serverIds.has(message.id) &&
+            preFetchIds.has(message.id) &&
+            (snapshotEdge === 0 || message.createdAt <= snapshotEdge)
+          ) {
             void deleteRecord("messages", message.id);
             continue;
           }
@@ -1178,11 +1189,14 @@ function LoamApp() {
     // Only the latest in-flight request may reconcile: a slow response applying after a newer
     // sync (conversation switch, reconnect resync) would resurrect or delete the wrong messages.
     let active = true;
+    // What we held when the request started — reconciliation may only prune these (a message
+    // sent or received while the fetch was in flight is not a deletion).
+    const preFetchIds = new Set(messagesRef.current.map((message) => message.id));
 
     fetchJson<Message[]>(path)
       .then((nextMessages) => {
         if (active) {
-          reconcileConversationMessages(conversation, nextMessages);
+          reconcileConversationMessages(conversation, nextMessages, preFetchIds);
         }
       })
       .catch((nextError: unknown) => {
@@ -4714,21 +4728,9 @@ function AddSyncPeerControl({
   );
 }
 
-type SyncStatusReport = {
-  enabled: boolean;
-  peers: {
-    url: string;
-    label?: string;
-    status?: { lastAttemptAt?: number; lastSuccessAt?: number; lastError?: string; imported: number };
-  }[];
-};
-
 function parseSyncStatusReport(payload: unknown): SyncStatusReport | undefined {
-  if (!payload || typeof payload !== "object" || !("peers" in payload) || !Array.isArray(payload.peers)) {
-    return undefined;
-  }
-
-  return payload as SyncStatusReport;
+  const parsed = SyncStatusReportSchema.safeParse(payload);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**
