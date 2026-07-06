@@ -52,10 +52,10 @@ goal, so a message can eventually hop device-to-device across a wider area with 
 - 📡 **Off-grid by design** — a local hotspot is the whole network; no internet required at any point.
 - 📱 **Nothing to install** — joiners open a link (or scan a QR); the host can run it from a laptop, Pi, or [an Android phone](docs/04-android-host-app.md).
 - 🕶️ **Anonymous & ephemeral** — every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
-- 💬 **Real messaging** — public channels, threaded replies, direct messages, and reactions.
+- 💬 **Real messaging** — public and private (invite-only) channels, threaded replies, direct messages, reactions, and message search.
 - 🤖 **Optional local AI** — point it at a local [Ollama](https://ollama.com) model and a bot appears as a DM contact; replies stream in. Entirely local, entirely optional.
 - 🔌 **Works offline** — the client is an installable PWA that keeps working against its local cache when the connection drops.
-- 🌍 **Minimal by design** — an intentionally sparse interface that stays out of the way and renders text in any language.
+- 🌍 **Minimal by design** — an intentionally sparse interface that stays out of the way and renders text in any language, including right-to-left scripts.
 - 🌗 **Light & dark** — the client follows your system theme automatically.
 - 🔒 **Optional encryption at rest + a kill switch** — the host can encrypt the on-disk database and wipe everything in one action (see [Security](#security)).
 

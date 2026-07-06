@@ -51,7 +51,7 @@ kill-switch purge via `fake-indexeddb`, `src/lib/protocol.test.ts` route + WS-ev
 parsers). Client tests use a standalone `vitest.config.ts` (jsdom + `@preact/preset-vite`, so `*.test.tsx`
 mount real components into jsdom); `*.test.ts`/`*.test.tsx` are excluded from the `tsc -b` build. The
 pure route/protocol parsers live in `src/lib/protocol.ts` (extracted from `app.tsx`); rendered
-components extracted to `src/components/` (`Avatar`, `UnreadBadge`, `InviteControl`) have `.test.tsx`
+components extracted to `src/components/` (`Avatar`, `UnreadBadge`, `InviteControl`, `SearchResult`) have `.test.tsx`
 suites. `apps/app` has no test script, so `pnpm test` skips it — validate with `cd apps/app && npx
 tsc --noEmit`.
 
@@ -83,6 +83,9 @@ Env vars the server/dev script read: `PORT`, `CLIENT_PORT`, `HOST`, `LOAM_JOIN_H
 - **Message** is a discriminated union on `type`: `channelPost`, `channelReply`, `dm`, `reaction`.
   A separate `MessageCreateRequest` union is what clients POST (server assigns `id`, `authorId`,
   `createdAt`, `meta`).
+- **Channel** carries `visibility` (`public` | `private`) and, for private channels, `memberUserIds`
+  (the invite-only roster; the owner is always an implicit member). `ChannelCreateRequest` accepts
+  `visibility`; `ChannelMemberAddRequest` is the invite payload.
 - **User**: `{ id, displayName, avatar?, type: human|bot|system, isAdmin, createdAt, ephemeral }`.
   `avatar` is either generated (`seed`+`mode`) or an uploaded `image` (`imageId`+`mimeType`).
 - **StreamEvent**: `start | delta | end | error` — the LLM streaming protocol over the WebSocket.
@@ -146,10 +149,27 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   `store.wipeAll()` (logical DELETE, **not** secure erasure on flash — docs/02). Optional
   unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`.
 - **Broadcast filtering**: `broadcast()` sends to all sockets but `socketCanReceiveEvent` restricts DM
-  and DM-reaction events to their participants; channel messages and `userUpserted` go to everyone.
+  and DM-reaction events to their participants and **everything about a private channel (the channel
+  upsert, its messages, and reactions on them) to its members** (`messageAudienceUserIds` resolves the
+  member set); public channel messages and `userUpserted` go to everyone. A member removed from a
+  private channel gets a targeted `channelRemoved` event via `sendEventToUsers` (clients purge the
+  channel + cached messages and navigate away).
+- **Private channels**: `createChannelFromRequest` honours `visibility` (`private` requires the
+  `enablePrivateChannels` flag; creator becomes owner + sole member). Enforcement is everywhere the
+  data flows: `GET /api/channels` filters per-user; `GET /api/messages/:channelId` 404s identically
+  for unknown and inaccessible channels (existence is never leaked, and posting as a non-member gets
+  the same "Channel does not exist"); member management is
+  `GET/POST /api/channels/:id/members` + `DELETE /api/channels/:id/members/:userId` (owner/admin
+  invite+remove, self-remove = leave, the owner can never be removed). **Node admins get no implicit
+  read access** — they manage private channels (rename/archive via `/api/admin/channels`) without
+  joining their audience.
+- **Search**: `GET /api/search?q=&limit=` — case-insensitive substring over message bodies, newest
+  first, scoped to the caller (accessible non-archived channels + own DMs, shadow-ban respected).
 - **REST endpoints**: `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
-  `GET /api/channels`, `GET /api/messages/:channelId`, `GET /api/dms/:userId`, `POST /api/messages`,
+  `GET /api/channels`, `GET/POST /api/channels/:channelId/members`,
+  `DELETE /api/channels/:channelId/members/:userId`, `GET /api/messages/:channelId`,
+  `GET /api/dms/:userId`, `POST /api/messages`, `GET /api/search`,
   `POST /api/admin/claim`, `GET/PATCH /api/admin/config` (admin), `POST /api/admin/kill-switch`
   (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless
   configured). WebSocket at `GET /ws` (requires the session cookie to already be set — the client
@@ -162,9 +182,9 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
 
 **Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
 `enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`.
-`enableUserChannels` gates user channel creation (`POST /api/channels`); `enablePrivateChannels` is
-stored and surfaced but has nothing to gate yet (private channels need a membership model that does
-not exist). **`security.profile` is authoritative**: a named profile (`open`/`standard`/`hardened`)
+`enableUserChannels` gates user channel creation (`POST /api/channels`); `enablePrivateChannels`
+(default **on**) gates the *creation* of private channels — existing private channels keep working
+if it is later switched off. **`security.profile` is authoritative**: a named profile (`open`/`standard`/`hardened`)
 forces a coherent bundle of the already-enforced axes — `access.joinPolicy`, `retention.messageTtlMs`,
 `killSwitch.enabled` — onto the effective config at `mergeConfig()` time via `securityProfilePreset()`
 (shared from `@loam/schema`). `custom` (**the default**) forces nothing, leaving those axes
@@ -175,8 +195,8 @@ kill switch. See `docs/09-security-profiles.md`.
 ## Client architecture (`apps/client/src/app.tsx`)
 
 - Preact + `preact-iso` for routing (hash-free paths: `/channels`, `/channel/:id`,
-  `/channel/:id/thread/:tid`, `/dm/:id`, `/settings`, `/admin`). `parseRoute` maps path →
-  `RouteState`. The admin area (`AdminView`) and the claim form in settings appear per
+  `/channel/:id/thread/:tid`, `/dm/:id`, `/settings`, `/admin`, `/people`, `/search`). `parseRoute`
+  maps path → `RouteState`. The admin area (`AdminView`) and the claim form in settings appear per
   `currentUser.isAdmin` / `networkConfig.allowAdminClaim` — cosmetic only; the server enforces.
 - State is plain `useState` in `LoamApp` (no store lib). Flow: hydrate from **IndexedDB**
   (`src/lib/local-store.ts`, db `loam-poc`) → fetch `/api/config`, `/api/channels`, `/api/users` →
@@ -207,15 +227,17 @@ kill switch. See `docs/09-security-profiles.md`.
 ## Good first areas / known gaps
 
 - `apps/client` has a Vitest+jsdom harness now (lib parsers + rendered-component tests for `Avatar`,
-  `UnreadBadge`, `InviteControl` under `src/components/`). Most of `app.tsx` is still one big module,
-  so extracting more presentational components into `src/components/` to test them is high value.
-- `enablePrivateChannels` gates nothing yet — **private channels are the biggest open feature**: they
-  need a channel-membership + access-enforcement model (currently `createChannelFromRequest()`
-  hardcodes `visibility: "public"`). `enableUserChannels` is wired (user channel creation).
+  `UnreadBadge`, `InviteControl`, `SearchResult` under `src/components/`). Most of `app.tsx` is still
+  one big module, so extracting more presentational components into `src/components/` to test them is
+  high value.
+- **Private channels are implemented** (membership, full server-side enforcement, member management
+  UI, targeted `channelRemoved`) — see the server-architecture notes above. Remaining refinement
+  ideas: transferring channel ownership, and a join-request flow (today it is invite-only).
+- Message search is server-side substring (`LIKE`-equivalent over the in-memory mirror); semantic
+  search would fall out of the RAG embeddings (docs/06) if that lands.
 - `security.profile` is wired (see the feature-flag note) but only bundles the axes LOAM enforces
   today; the axes that would distinguish `open` from `standard` (transport encryption, invite tokens
   — docs/08) are unbuilt, so those two profiles apply the same settings for now.
 - On-device SQLCipher (encrypted Android DB) is still deferred — needs a multiple-ciphers ABI-108
   android-arm64 prebuild (docs/01, docs/04).
 - LoRa / alternate transports are a stated design goal but unimplemented.
-- Message editing/deletion by users and user channel creation are exposed; private channels are not.
