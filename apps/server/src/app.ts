@@ -811,6 +811,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Why a user may not read or create content on this node: banned users are fully locked out, and
+   * under the `approval` join policy a pending user gets nothing until a greeter lets them in
+   * (previously only *posting* was gated, so an unapproved or banned session could still read every
+   * channel and DM feed over REST). `/api/config` stays open — it is how the client learns it is
+   * banned/pending and shows the right screen.
+   */
+  function participationError(user: User): string | undefined {
+    if (user.banned) {
+      return "You have been removed from this node";
+    }
+
+    if (user.pending) {
+      return "Your join is awaiting approval";
+    }
+
+    return undefined;
+  }
+
+  /**
    * Apply moderation / role state to a user (roles, banned, shadowBanned, pending), re-validating
    * the whole record against the schema, persisting, then broadcasting `userUpserted`. Mirrors
    * `applyUserUpdate`: persist first, then mutate the live object and broadcast, so a failed write
@@ -1058,8 +1077,37 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
-    if (event.type === "userUpserted" || event.type === "configUpdated" || event.type === "wipe") {
+    const recipient = data.users.find((candidate) => candidate.id === userId);
+
+    // A banned recipient hears nothing (their sockets are closed on ban; this also covers a racing
+    // reconnect). A pending (unapproved) recipient only hears about their own approval and
+    // node-level notices — no content until a greeter lets them in, matching the REST gates.
+    if (recipient?.banned) {
+      return false;
+    }
+
+    if (recipient?.pending) {
+      return (
+        event.type === "wipe" ||
+        event.type === "configUpdated" ||
+        (event.type === "userUpserted" && event.user.id === userId)
+      );
+    }
+
+    if (event.type === "configUpdated" || event.type === "wipe") {
       return true;
+    }
+
+    if (event.type === "userUpserted") {
+      // Banned and pending identities are hidden from the REST roster (visibleUsers), so their
+      // upserts are only announced to themselves and to the people who can act on them.
+      const subject = event.user;
+
+      if (!subject.banned && !subject.pending) {
+        return true;
+      }
+
+      return userId === subject.id || (!!recipient && (canModerate(recipient) || canGreet(recipient)));
     }
 
     if (event.type === "channelUpserted") {
@@ -1077,8 +1125,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     // Shadow ban: a message whose author is currently shadow-banned is delivered only back to the
     // author, so their own UI still shows it while nobody else ever sees it. Layered on top of the
-    // DM-audience filtering below (a shadow-banned DM is only ever seen by its author).
-    if (event.type === "messageCreated" || event.type === "messageUpdated") {
+    // DM-audience filtering below (a shadow-banned DM is only ever seen by its author). This must
+    // cover messageDeleted too — those events carry the full message body, so an unfiltered delete
+    // (author, admin, or the retention reaper) would hand the hidden text to the whole audience.
+    if (event.type === "messageCreated" || event.type === "messageUpdated" || event.type === "messageDeleted") {
       const author = data.users.find((candidate) => candidate.id === message.authorId);
 
       if (author?.shadowBanned && userId !== message.authorId) {
@@ -1524,6 +1574,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean {
     const now = Date.now();
+
+    // Opportunistic pruning so a long-lived node doesn't accumulate one entry per source IP forever.
+    if (attempts.size > 1000) {
+      for (const [staleKey, entry] of attempts) {
+        if (entry.resetAt <= now) {
+          attempts.delete(staleKey);
+        }
+      }
+    }
+
     const entry = attempts.get(key);
 
     if (!entry || entry.resetAt <= now) {
@@ -1558,6 +1618,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       store = openLoamStore();
+      // The wipe destroys data, not settings — but the fresh encrypted DB starts with an empty
+      // config table, unlike wipeAll() below which preserves it. Re-persist the effective config
+      // so admin edits (an armed kill switch, the panic token, feature flags) survive a restart
+      // instead of silently reverting to config.json/defaults.
+      store.setConfigValue("config", JSON.stringify(appConfig));
     } else {
       // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
       store.wipeAll();
@@ -1566,6 +1631,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     await rm(avatarsDir, { recursive: true, force: true });
     sessions.clear();
     claimAttempts.clear();
+    panicAttempts.clear();
 
     broadcast({ type: "wipe" });
 
@@ -1606,8 +1672,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    deleteMessages(expired);
-    server.log.info(`Retention reaper deleted ${expired.length} expired message(s)`);
+    // Expand each expired message through the same cascade the delete endpoint uses, so an expired
+    // thread root takes its replies and reactions with it instead of orphaning them against a
+    // missing parent until their own TTL passes. In-flight streaming messages stay spared.
+    const doomed = new Map<string, Message>();
+
+    for (const message of expired) {
+      for (const casualty of collectDeletionSet(message)) {
+        if (!casualty.meta?.streaming) {
+          doomed.set(casualty.id, casualty);
+        }
+      }
+    }
+
+    deleteMessages([...doomed.values()]);
+    server.log.info(`Retention reaper deleted ${doomed.size} expired message(s)`);
   }
 
   /**
@@ -1723,7 +1802,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     };
   });
 
-  server.get("/api/users", async () => visibleUsers());
+  server.get("/api/users", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    return visibleUsers();
+  });
   server.patch("/api/users/me", async (request, reply) => {
     const body = UserUpdateRequestSchema.safeParse(request.body);
 
@@ -1978,11 +2066,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   });
   server.get("/api/channels", async (request, reply) => {
-    const userId = getSessionUserId(request, reply);
-    return data.channels.filter((channel) => !channel.archived && canAccessChannel(channel, userId));
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    return data.channels.filter((channel) => !channel.archived && canAccessChannel(channel, currentUser.id));
   });
   server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request, reply) => {
-    const userId = getSessionUserId(request, reply);
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    const userId = currentUser.id;
     const channel = ensureChannel(request.params.channelId);
 
     // Unknown channels and inaccessible private channels answer identically, so probing this
@@ -1998,6 +2099,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // outsiders get the same 404 as a channel that does not exist.
   server.get<{ Params: { channelId: string } }>("/api/channels/:channelId/members", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -2017,6 +2124,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // channel the moment they are added.
   server.post<{ Params: { channelId: string } }>("/api/channels/:channelId/members", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -2063,6 +2176,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/channels/:channelId/members/:userId",
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send({ error: accessError });
+      }
+
       const channel = ensureChannel(request.params.channelId);
 
       if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -2095,19 +2214,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { ok: true };
     },
   );
-  server.get<{ Params: { userId: string } }>(
-    "/api/dms/:userId",
-    async (request, reply) => dmMessages(request.params.userId, getSessionUserId(request, reply)),
-  );
+  server.get<{ Params: { userId: string } }>("/api/dms/:userId", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
+    return dmMessages(request.params.userId, currentUser.id);
+  });
 
   // Case-insensitive substring search over message bodies, scoped strictly to what the caller may
   // read: channel messages in channels they can access (never archived ones), and their own DMs.
   // Shadow-banned authors' messages stay visible only to themselves, matching the broadcast filter.
   server.get<{ Querystring: { q?: string; limit?: string } }>("/api/search", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
 
-    if (currentUser.banned || currentUser.pending) {
-      return reply.code(403).send({ error: "You cannot search on this node yet" });
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
     }
 
     const query = (request.query.q ?? "").trim();
@@ -2252,9 +2378,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send({ error: "Invalid message edit request" });
     }
 
-    target.body = body.data.body;
-    target.editedAt = Date.now();
-    store.updateMessage(target);
+    // Persist first, then mirror in memory — matching every other mutator, so a failed store write
+    // never leaves in-memory state (or a broadcast) ahead of what is stored.
+    const updated = MessageSchema.parse({ ...target, body: body.data.body, editedAt: Date.now() });
+    store.updateMessage(updated);
+    Object.assign(target, updated);
     broadcast({ type: "messageUpdated", message: target });
     return target;
   });
@@ -2421,6 +2549,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // creator becomes the owner.
   server.post("/api/channels", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
 
     if (!currentUser.isAdmin && !appConfig.features.enableUserChannels) {
       return reply.code(403).send({ error: "Creating channels is disabled on this LOAM node" });
@@ -2466,6 +2599,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (!userId) {
       connection.send(JSON.stringify({ type: "error", error: "Unauthenticated websocket" }));
+      connection.close();
+      return;
+    }
+
+    // A banned identity keeps its session mapping (so the ban stays pinned to it — see
+    // invalidateUserSessions) but must not be readmitted to the live feed by a reconnect.
+    // Pending users may connect: the broadcast filter limits them to their own approval notice.
+    const user = data.users.find((candidate) => candidate.id === userId);
+
+    if (user?.banned) {
+      connection.send(JSON.stringify({ type: "error", error: "This session is no longer valid" }));
       connection.close();
       return;
     }

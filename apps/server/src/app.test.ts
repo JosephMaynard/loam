@@ -2052,3 +2052,298 @@ describe("message search", () => {
     expect(results(response).length).toBe(3);
   });
 });
+
+describe("participation gating (banned / pending read access)", () => {
+  const readPaths = ["/api/channels", "/api/users", "/api/messages/general", "/api/search?q=x"];
+
+  async function statusFor(app: LoamApp, cookie: string, url: string): Promise<number> {
+    return (await app.server.inject({ method: "GET", url, headers: { cookie } })).statusCode;
+  }
+
+  it("locks a banned user out of every read endpoint", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+
+    // Reads work before the ban.
+    expect(await statusFor(app, target.cookie, "/api/channels")).toBe(200);
+
+    const ban = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+    expect(ban.statusCode).toBe(200);
+
+    for (const path of readPaths) {
+      expect(await statusFor(app, target.cookie, path)).toBe(403);
+    }
+    expect(await statusFor(app, target.cookie, `/api/dms/${admin.userId}`)).toBe(403);
+
+    // Config stays open — it is how the client learns it is banned.
+    expect(await statusFor(app, target.cookie, "/api/config")).toBe(200);
+  });
+
+  it("holds a pending user at the door until approval, then lets them in", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const admin = await newSession(app);
+    const joiner = await newSession(app);
+
+    for (const path of readPaths) {
+      expect(await statusFor(app, joiner.cookie, path)).toBe(403);
+    }
+
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: joiner.cookie },
+      payload: { name: "Sneaky" },
+    });
+    expect(created.statusCode).toBe(403);
+
+    const approve = await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${joiner.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(approve.statusCode).toBe(200);
+
+    for (const path of readPaths) {
+      expect(await statusFor(app, joiner.cookie, path)).toBe(200);
+    }
+  });
+});
+
+describe("websocket privacy filtering", () => {
+  type WireEvent = { type?: string; messageId?: string; user?: { id?: string; pending?: boolean }; message?: { id?: string } };
+
+  const openSockets: WebSocket[] = [];
+
+  afterEach(() => {
+    for (const socket of openSockets) {
+      socket.close();
+    }
+    openSockets.length = 0;
+  });
+
+  async function listen(app: LoamApp): Promise<string> {
+    return app.server.listen({ port: 0, host: "127.0.0.1" });
+  }
+
+  function connect(baseUrl: string, cookie: string): Promise<{ socket: WebSocket; events: WireEvent[]; closed: Promise<void> }> {
+    return new Promise((resolve, reject) => {
+      // Undici's WebSocket accepts an options bag with headers (needed to send the session cookie).
+      const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+        `${baseUrl.replace("http", "ws")}/ws`,
+        { headers: { cookie } },
+      );
+      const events: WireEvent[] = [];
+      const closed = new Promise<void>((resolveClose) => {
+        socket.addEventListener("close", () => resolveClose());
+      });
+      socket.addEventListener("message", (event) => {
+        events.push(JSON.parse(String((event as MessageEvent).data)) as WireEvent);
+      });
+      socket.addEventListener("open", () => {
+        openSockets.push(socket);
+        resolve({ socket, events, closed });
+      });
+      socket.addEventListener("error", () => reject(new Error("websocket failed to connect")));
+    });
+  }
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+  it("withholds a shadow-banned author's deleted message body from everyone else", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+    const viewer = await newSession(app);
+    const baseUrl = await listen(app);
+
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: target.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "the hidden text" },
+    });
+    const messageId = (posted.json() as { message: { id: string } }).message.id;
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    const viewerSocket = await connect(baseUrl, viewer.cookie);
+    const targetSocket = await connect(baseUrl, target.cookie);
+
+    const deleted = await app.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+    await settle();
+
+    // The delete event carries the full body — it must stay between the author and nobody else.
+    expect(viewerSocket.events.some((event) => event.type === "messageDeleted")).toBe(false);
+    expect(targetSocket.events.some((event) => event.type === "messageDeleted" && event.messageId === messageId)).toBe(true);
+  });
+
+  it("rejects a banned user's websocket reconnect", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const target = await newSession(app);
+    const baseUrl = await listen(app);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const reconnect = await connect(baseUrl, target.cookie);
+    await reconnect.closed;
+    expect(reconnect.events.some((event) => event.type === "error")).toBe(true);
+
+    // A healthy user still connects and stays connected.
+    const healthy = await connect(baseUrl, admin.cookie);
+    await settle();
+    expect(healthy.socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("limits a pending user's feed to node notices and their own approval", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const admin = await newSession(app);
+    const joiner = await newSession(app);
+    const baseUrl = await listen(app);
+
+    const joinerSocket = await connect(baseUrl, joiner.cookie);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "members only chatter" },
+    });
+    await settle();
+    expect(joinerSocket.events.some((event) => event.type === "messageCreated")).toBe(false);
+
+    await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${joiner.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+    await settle();
+    expect(
+      joinerSocket.events.some(
+        (event) => event.type === "userUpserted" && event.user?.id === joiner.userId && event.user?.pending !== true,
+      ),
+    ).toBe(true);
+  });
+
+  it("announces hidden identities only to themselves and to moderators", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const bystander = await newSession(app);
+    const target = await newSession(app);
+    const baseUrl = await listen(app);
+
+    const adminSocket = await connect(baseUrl, admin.cookie);
+    const bystanderSocket = await connect(baseUrl, bystander.cookie);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+    await settle();
+
+    const sawBanned = (events: WireEvent[]) =>
+      events.some((event) => event.type === "userUpserted" && event.user?.id === target.userId);
+    expect(sawBanned(adminSocket.events)).toBe(true);
+    expect(sawBanned(bystanderSocket.events)).toBe(false);
+  });
+});
+
+describe("review hardening fixes", () => {
+  it("encrypted kill switch re-persists admin config edits into the fresh database", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-config-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const key = "a fixed host passphrase";
+    const first = await buildApp({ dataDir, logger: false, dbEncryptionKey: key });
+    cleanups.push(() => first.close());
+
+    const admin = await newSession(first);
+    // Arm the kill switch purely via the admin API — persisted only in the DB config table.
+    const patch = await first.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { killSwitch: { enabled: true }, features: { enableReactions: false } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const wipe = await first.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // Restart on the same data dir + key: the admin edits must survive the wipe.
+    await first.close();
+    const second = await buildApp({ dataDir, logger: false, dbEncryptionKey: key });
+    cleanups.push(() => second.close());
+
+    const nextAdmin = await newSession(second);
+    const config = await second.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: nextAdmin.cookie },
+    });
+    const body = config.json() as { killSwitch: { enabled: boolean }; features: { enableReactions: boolean } };
+    expect(body.killSwitch.enabled).toBe(true);
+    expect(body.features.enableReactions).toBe(false);
+  });
+
+  it("retention reaper cascades an expired thread root to its replies and reactions", async () => {
+    const app = await makeApp({ retention: { messageTtlMs: 500 } });
+    const session = await newSession(app);
+
+    const root = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "expiring root" },
+    });
+    const rootId = (root.json() as { message: { id: string } }).message.id;
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    // Young reply + reaction attached to the now-expired root.
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelReply", channelId: "general", parentMessageId: rootId, body: "fresh reply" },
+    });
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "reaction", targetMessageId: rootId, reaction: "👍" },
+    });
+
+    app.reapExpiredMessages();
+
+    // No orphans: the root's whole thread goes with it.
+    expect(app.store.loadMessages()).toEqual([]);
+  });
+});
