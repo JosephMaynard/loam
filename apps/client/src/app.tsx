@@ -4,6 +4,7 @@ import {
   ChannelSchema,
   JoinPolicySchema,
   LoamConfigSchema,
+  MessageAttachmentSchema,
   MessageSchema,
   securityProfilePreset,
   SecurityProfileSchema,
@@ -15,6 +16,7 @@ import {
   type JoinPolicy,
   type LoamConfig,
   type Message,
+  type MessageAttachment,
   type MessageCreateRequest,
   type NetworkConfig,
   type Role,
@@ -33,6 +35,7 @@ import { Avatar } from "./components/Avatar";
 import { InviteControl } from "./components/InviteControl";
 import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
+import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
@@ -503,7 +506,9 @@ function LoamApp() {
       }
 
       const authorName = usersByIdRef.current.get(message.authorId)?.displayName ?? generateDisplayName(message.authorId);
-      const body = bodyFor(message);
+      const body =
+        bodyFor(message) ||
+        (message.type !== "reaction" && message.attachments?.length ? "📷 Image" : "");
       let title = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
 
@@ -945,6 +950,58 @@ function LoamApp() {
     },
     [upsertUsers],
   );
+
+  /**
+   * Resize an image on-device (the original never leaves the browser) and upload it as a message
+   * attachment. Returns the descriptor to include in the message create request.
+   */
+  const uploadAttachment = useCallback(async (file: File): Promise<MessageAttachment> => {
+    const prepared = await prepareImageAttachment(file);
+    const buffer = await prepared.blob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(apiUrl("/api/attachments"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          mimeType: prepared.blob.type || "image/png",
+          data: btoa(binary),
+          width: prepared.width,
+          height: prepared.height,
+        }),
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Attachment upload failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      const parsed = MessageAttachmentSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error("The server returned an unrecognised attachment payload.");
+      }
+
+      return parsed.data;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
 
   const uploadAvatarImage = useCallback(
     async (blob: Blob) => {
@@ -1424,6 +1481,7 @@ function LoamApp() {
         />
       ) : (
         <ConversationView
+          allowAttachments={!!config?.networkConfig.enableAttachments}
           channels={channels}
           conversation={activeConversation}
           currentUser={currentUser}
@@ -1439,7 +1497,7 @@ function LoamApp() {
               reaction,
             })
           }
-          onSend={(body) => {
+          onSend={(body, attachments) => {
             if (!activeConversation) {
               return Promise.resolve();
             }
@@ -1449,6 +1507,7 @@ function LoamApp() {
                 type: "channelPost",
                 channelId: activeConversation.id,
                 body,
+                ...(attachments?.length ? { attachments } : {}),
               });
             }
 
@@ -1456,9 +1515,10 @@ function LoamApp() {
               type: "dm",
               recipientUserId: activeConversation.id,
               body,
+              ...(attachments?.length ? { attachments } : {}),
             });
           }}
-          onThreadReply={(parentMessageId, body) => {
+          onThreadReply={(parentMessageId, body, attachments) => {
             if (!activeConversation || activeConversation.kind !== "channel") {
               return Promise.resolve();
             }
@@ -1468,8 +1528,10 @@ function LoamApp() {
               channelId: activeConversation.id,
               parentMessageId,
               body,
+              ...(attachments?.length ? { attachments } : {}),
             });
           }}
+          onUploadAttachment={uploadAttachment}
           users={users}
           usersById={usersById}
         />
@@ -1750,6 +1812,7 @@ function NavLink({ active, children, className, href }: NavLinkProps) {
 }
 
 interface ConversationViewProps {
+  allowAttachments: boolean;
   channels: Channel[];
   conversation?: Conversation;
   currentUser: User;
@@ -1759,13 +1822,15 @@ interface ConversationViewProps {
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onLeftChannel: (channelId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
-  onSend: (body: string) => Promise<void>;
-  onThreadReply: (parentMessageId: string, body: string) => Promise<void>;
+  onSend: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onThreadReply: (parentMessageId: string, body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onUploadAttachment: (file: File) => Promise<MessageAttachment>;
   users: User[];
   usersById: Map<string, User>;
 }
 
 function ConversationView({
+  allowAttachments,
   channels,
   conversation,
   currentUser,
@@ -1777,6 +1842,7 @@ function ConversationView({
   onReact,
   onSend,
   onThreadReply,
+  onUploadAttachment,
   users,
   usersById,
 }: ConversationViewProps) {
@@ -1868,6 +1934,7 @@ function ConversationView({
         <MessageComposer
           label={conversation.kind === "channel" ? `Message ${conversation.id}` : `Message ${title}`}
           onSend={onSend}
+          onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
           placeholder={conversation.kind === "channel" ? "Post an update" : "Send a direct message"}
         />
       </section>
@@ -1880,7 +1947,8 @@ function ConversationView({
           onDelete={onDelete}
           onEdit={onEdit}
           onReact={onReact}
-          onReply={(body) => onThreadReply(threadParent.id, body)}
+          onReply={(body, attachments) => onThreadReply(threadParent.id, body, attachments)}
+          onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
           parent={threadParent}
           usersById={usersById}
         />
@@ -2282,6 +2350,22 @@ function MessageItem({
             dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
           />
         )}
+        {message.type !== "reaction" && message.attachments?.length ? (
+          <div className="message-attachments">
+            {message.attachments.map((attachment) => (
+              <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
+                <img
+                  alt="Attached image"
+                  className="message-attachment"
+                  height={attachment.height}
+                  loading="lazy"
+                  src={apiUrl(attachmentPath(attachment))}
+                  width={attachment.width}
+                />
+              </a>
+            ))}
+          </div>
+        ) : null}
         <div className="message-actions">
           {message.meta?.streaming ? <span className="streaming-pill">Streaming</span> : null}
           {!message.meta?.streaming && reactions.map((reaction) => (
@@ -2334,15 +2418,30 @@ function MessageItem({
 
 interface MessageComposerProps {
   label: string;
-  onSend: (body: string) => Promise<void>;
+  onSend: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  /** When present, the composer offers image attachments (resized on-device before upload). */
+  onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   placeholder: string;
 }
 
-function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
+type PendingAttachment = {
+  key: string;
+  name: string;
+  status: "uploading" | "ready" | "error";
+  attachment?: MessageAttachment;
+  error?: string;
+};
+
+function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: MessageComposerProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
+  const [pending, setPending] = useState<PendingAttachment[]>([]);
+  const pendingKeyRef = useRef(0);
   const composerId = useId();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const readyAttachments = pending.flatMap((entry) => (entry.attachment ? [entry.attachment] : []));
+  const uploading = pending.some((entry) => entry.status === "uploading");
 
   useEffect(() => {
     const textArea = textAreaRef.current;
@@ -2355,18 +2454,52 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
     textArea.style.height = `${Math.min(textArea.scrollHeight, 168)}px`;
   }, [value]);
 
+  function attachFiles(files: FileList | null): void {
+    if (!onUploadAttachment || !files) {
+      return;
+    }
+
+    const room = ATTACHMENT_MAX_COUNT - pending.filter((entry) => entry.status !== "error").length;
+
+    for (const file of Array.from(files).slice(0, Math.max(0, room))) {
+      pendingKeyRef.current += 1;
+      const key = `att-${pendingKeyRef.current}`;
+      setPending((previous) => [...previous, { key, name: file.name, status: "uploading" }]);
+      onUploadAttachment(file)
+        .then((attachment) => {
+          setPending((previous) =>
+            previous.map((entry) => (entry.key === key ? { ...entry, status: "ready", attachment } : entry)),
+          );
+        })
+        .catch((uploadError: unknown) => {
+          setPending((previous) =>
+            previous.map((entry) =>
+              entry.key === key
+                ? {
+                    ...entry,
+                    status: "error",
+                    error: uploadError instanceof Error ? uploadError.message : "Upload failed.",
+                  }
+                : entry,
+            ),
+          );
+        });
+    }
+  }
+
   async function submit(): Promise<void> {
     const body = value.trim();
 
-    if (!body || sending) {
+    if ((!body && !readyAttachments.length) || sending || uploading) {
       return;
     }
 
     setSending(true);
 
     try {
-      await onSend(body);
+      await onSend(body, readyAttachments.length ? readyAttachments : undefined);
       setValue("");
+      setPending([]);
     } finally {
       setSending(false);
     }
@@ -2374,15 +2507,60 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
 
   return (
     <form
-      className="composer"
+      className={onUploadAttachment ? "composer has-attach" : "composer"}
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
       }}
     >
+      {pending.length ? (
+        <div className="composer-attachments">
+          {pending.map((entry) => (
+            <span className={`attachment-chip ${entry.status}`} key={entry.key}>
+              {entry.status === "uploading" ? "⏳ " : entry.status === "error" ? "⚠ " : "🖼 "}
+              <span className="attachment-chip-name" title={entry.error}>
+                {entry.name}
+              </span>
+              <button
+                aria-label={`Remove ${entry.name}`}
+                disabled={sending}
+                onClick={() => setPending((previous) => previous.filter((item) => item.key !== entry.key))}
+                type="button"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <label className="sr-only" for={composerId}>
         {label}
       </label>
+      {onUploadAttachment ? (
+        <>
+          <input
+            accept="image/png,image/jpeg,image/webp,image/*"
+            className="sr-only"
+            multiple
+            onInput={(event) => {
+              attachFiles(event.currentTarget.files);
+              event.currentTarget.value = "";
+            }}
+            ref={fileInputRef}
+            type="file"
+          />
+          <button
+            aria-label="Attach an image"
+            className="composer-attach"
+            disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach an image (resized on this device before upload)"
+            type="button"
+          >
+            🖼
+          </button>
+        </>
+      ) : null}
       <textarea
         dir="auto"
         id={composerId}
@@ -2398,7 +2576,7 @@ function MessageComposer({ label, onSend, placeholder }: MessageComposerProps) {
         rows={1}
         value={value}
       />
-      <button disabled={!value.trim() || sending} type="submit">
+      <button disabled={(!value.trim() && !readyAttachments.length) || sending || uploading} type="submit">
         Send
       </button>
     </form>
@@ -2412,7 +2590,8 @@ interface ThreadPanelProps {
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onReact: (messageId: string, reaction: string) => Promise<void>;
-  onReply: (body: string) => Promise<void>;
+  onReply: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   parent: Message;
   usersById: Map<string, User>;
 }
@@ -2438,6 +2617,7 @@ function ThreadPanel({
   onEdit,
   onReact,
   onReply,
+  onUploadAttachment,
   parent,
   usersById,
 }: ThreadPanelProps) {
@@ -2481,7 +2661,12 @@ function ThreadPanel({
           />
         ))}
       </div>
-      <MessageComposer label="Reply in thread" onSend={onReply} placeholder="Reply in thread" />
+      <MessageComposer
+        label="Reply in thread"
+        onSend={onReply}
+        onUploadAttachment={onUploadAttachment}
+        placeholder="Reply in thread"
+      />
     </aside>
   );
 }
@@ -3812,6 +3997,7 @@ const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
   ["enableDMs", "Direct messages"],
   ["enableReactions", "Reactions"],
   ["enableMarkdown", "Markdown rendering"],
+  ["enableAttachments", "Image attachments"],
 ];
 
 const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
@@ -3932,6 +4118,7 @@ function AdminView({
         retention: { messageTtlMs: adminConfig.retention.messageTtlMs ?? null },
         security: adminConfig.security,
         access: adminConfig.access,
+        sync: adminConfig.sync,
       };
       const response = await fetch(apiUrl("/api/admin/config"), {
         method: "PATCH",
@@ -4343,6 +4530,81 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
+              <p className="eyebrow">Network</p>
+              <h2>Node-to-node sync</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.sync.enabled}
+                disabled={saving}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous
+                      ? { ...previous, sync: { ...previous.sync, enabled: event.currentTarget.checked } }
+                      : previous,
+                  )
+                }
+                type="checkbox"
+              />
+              Sync public channels with peer nodes
+            </label>
+            <p className="form-note">
+              Pull-based: this node fetches public channels, their messages, and profiles from each
+              peer. DMs and private channels never leave a node. A peer&rsquo;s join URL (from its
+              join QR) is its sync address. Enabling this also lets peers pull this node&rsquo;s
+              public content.
+            </p>
+            {adminConfig.sync.peers.length ? (
+              <ul className="moderation-list">
+                {adminConfig.sync.peers.map((peer) => (
+                  <li className="moderation-row sync-peer" key={peer.url}>
+                    <div className="moderation-name">
+                      <strong>{peer.label ?? peer.url}</strong>
+                      {peer.label ? <span>{peer.url}</span> : null}
+                    </div>
+                    <div className="moderation-actions">
+                      <button
+                        className="danger-button"
+                        disabled={saving}
+                        onClick={() =>
+                          setAdminConfig((previous) =>
+                            previous
+                              ? {
+                                  ...previous,
+                                  sync: {
+                                    ...previous.sync,
+                                    peers: previous.sync.peers.filter((entry) => entry.url !== peer.url),
+                                  },
+                                }
+                              : previous,
+                          )
+                        }
+                        type="button"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="form-note">No peers yet.</p>
+            )}
+            <AddSyncPeerControl
+              disabled={saving || adminConfig.sync.peers.length >= 16}
+              onAdd={(peer) =>
+                setAdminConfig((previous) =>
+                  previous && !previous.sync.peers.some((entry) => entry.url === peer.url)
+                    ? { ...previous, sync: { ...previous.sync, peers: [...previous.sync.peers, peer] } }
+                    : previous,
+                )
+              }
+            />
+            <p className="form-note">Peer changes apply when you save the node config below.</p>
+            <SyncStatusPanel />
+          </div>
+          <div className="profile-panel">
+            <div>
               <p className="eyebrow">Admin access</p>
               <h2>Bootstrap</h2>
             </div>
@@ -4400,6 +4662,172 @@ function AdminView({
       ) : null}
       <AdminChannelsPanel currentUser={currentUser} onChannelUpsert={onChannelUpsert} />
     </section>
+  );
+}
+
+/** Compact add-a-peer form: URL (required, http/https) + optional label. */
+function AddSyncPeerControl({
+  disabled,
+  onAdd,
+}: {
+  disabled: boolean;
+  onAdd: (peer: { url: string; label?: string }) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [label, setLabel] = useState("");
+  const trimmedUrl = url.trim().replace(/\/+$/, "");
+  const validUrl = /^https?:\/\/.+/.test(trimmedUrl);
+
+  return (
+    <div className="sync-peer-add">
+      <label>
+        Peer URL (its join URL)
+        <input
+          disabled={disabled}
+          onInput={(event) => setUrl(event.currentTarget.value)}
+          placeholder="http://192.168.0.10:3000"
+          value={url}
+        />
+      </label>
+      <label>
+        Label (optional)
+        <input
+          disabled={disabled}
+          maxLength={80}
+          onInput={(event) => setLabel(event.currentTarget.value)}
+          placeholder="e.g. Depot Pi"
+          value={label}
+        />
+      </label>
+      <button
+        disabled={disabled || !validUrl}
+        onClick={() => {
+          onAdd({ url: trimmedUrl, ...(label.trim() ? { label: label.trim() } : {}) });
+          setUrl("");
+          setLabel("");
+        }}
+        type="button"
+      >
+        Add peer
+      </button>
+    </div>
+  );
+}
+
+type SyncStatusReport = {
+  enabled: boolean;
+  peers: {
+    url: string;
+    label?: string;
+    status?: { lastAttemptAt?: number; lastSuccessAt?: number; lastError?: string; imported: number };
+  }[];
+};
+
+function parseSyncStatusReport(payload: unknown): SyncStatusReport | undefined {
+  if (!payload || typeof payload !== "object" || !("peers" in payload) || !Array.isArray(payload.peers)) {
+    return undefined;
+  }
+
+  return payload as SyncStatusReport;
+}
+
+/**
+ * Live per-peer sync status (`GET /api/admin/sync`) with a "Sync now" trigger. Reflects the
+ * *saved* config — peers added above appear here after saving.
+ */
+function SyncStatusPanel() {
+  const [report, setReport] = useState<SyncStatusReport>();
+  const [error, setError] = useState<string>();
+  const [running, setRunning] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+
+    fetchJson<unknown>("/api/admin/sync")
+      .then((payload) => {
+        if (active) {
+          setReport(parseSyncStatusReport(payload));
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : "Unable to load sync status.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [reloadKey]);
+
+  async function runNow(): Promise<void> {
+    setRunning(true);
+    setError(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 60_000);
+
+    try {
+      const response = await fetch(apiUrl("/api/admin/sync/run"), {
+        method: "POST",
+        credentials: "include",
+        signal: controller.signal,
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Sync failed: ${response.status}`;
+        throw new Error(message);
+      }
+
+      setReport(parseSyncStatusReport(payload));
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Unable to run sync.");
+    } finally {
+      window.clearTimeout(timeout);
+      setRunning(false);
+    }
+  }
+
+  if (!report?.peers.length) {
+    return error ? <p className="form-error">{error}</p> : null;
+  }
+
+  return (
+    <div className="sync-status">
+      <div className="panel-heading">
+        <p className="eyebrow">Status (saved peers)</p>
+        <div className="moderation-actions">
+          <button className="ghost-button" disabled={running} onClick={() => setReloadKey((key) => key + 1)} type="button">
+            Refresh
+          </button>
+          <button disabled={running || !report.enabled} onClick={() => void runNow()} type="button">
+            {running ? "Syncing…" : "Sync now"}
+          </button>
+        </div>
+      </div>
+      <ul className="moderation-list">
+        {report.peers.map((peer) => (
+          <li className="moderation-row sync-peer" key={peer.url}>
+            <div className="moderation-name">
+              <strong>{peer.label ?? peer.url}</strong>
+              <span>
+                {peer.status?.lastError
+                  ? `Error: ${peer.status.lastError}`
+                  : peer.status?.lastSuccessAt
+                    ? `Last synced ${displayTime(peer.status.lastSuccessAt)} · ${peer.status.imported} message(s) imported`
+                    : "Not synced yet"}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {error ? <p className="form-error">{error}</p> : null}
+    </div>
   );
 }
 

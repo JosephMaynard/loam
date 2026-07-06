@@ -50,6 +50,7 @@ describe("@loam/schema", () => {
         enableDMs: false,
         enableReactions: true,
         enableMarkdown: true,
+        enableAttachments: true,
         enableLLMChat: false,
         enableLLMStreaming: false,
         allowUserDisplayNameEdit: false,
@@ -79,6 +80,7 @@ describe("@loam/schema", () => {
           enableDMs: true,
           enableReactions: true,
           enableMarkdown: true,
+          enableAttachments: true,
         },
         llm: {
           ollama: {
@@ -94,6 +96,7 @@ describe("@loam/schema", () => {
         retention: {},
         security: { profile: "standard" },
         access: { joinPolicy: "open" },
+        sync: { enabled: false, peers: [], intervalMs: 30_000 },
       }),
     ).not.toThrow();
 

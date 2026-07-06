@@ -167,6 +167,19 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   joining their audience.
 - **Search**: `GET /api/search?q=&limit=` — case-insensitive substring over message bodies, newest
   first, scoped to the caller (accessible non-archived channels + own DMs, shadow-ban respected).
+- **Attachments**: messages may carry ≤4 images (`attachments` on posts/replies/DMs; image-only
+  messages are valid). `POST /api/attachments` mirrors the avatar pipeline (base64, magic-byte vs
+  MIME, 256KB cap, rate-limited); ids are uploader-bound and consumed on first use; files served
+  from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch.
+  Clients downscale to ≤1280px webp on-device first (`apps/client/src/lib/attachments.ts`).
+  `enableAttachments` flag, default on.
+- **Node-to-node sync** (docs/11): `sync.{enabled,peers,intervalMs}` config; pull-based gossip of
+  **public data only** via `GET /api/sync/digest` + `POST /api/sync/messages` (404 unless enabled).
+  DMs/private channels/shadow-banned authors never export. Imports are defensive (public-local
+  channels only, users stripped of authority, edits only when newer, attachments copied
+  best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.
+  Admin: `GET /api/admin/sync`, `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's
+  join URL is its sync address.
 - **REST endpoints**: `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
   `GET/POST /api/channels`, `PATCH /api/channels/:channelId` (owner or admin),
@@ -248,4 +261,6 @@ kill switch. See `docs/09-security-profiles.md`.
   — docs/08) are unbuilt, so those two profiles apply the same settings for now.
 - On-device SQLCipher (encrypted Android DB) is still deferred — needs a multiple-ciphers ABI-108
   android-arm64 prebuild (docs/01, docs/04).
-- LoRa / alternate transports are a stated design goal but unimplemented.
+- LoRa / alternate transports: the node-to-node sync protocol (docs/11) is the transport-agnostic
+  layer a LoRa link would carry; the LoRa framing/bandwidth work itself is unbuilt. Sync v1 also
+  lacks peer authentication (docs/11 security posture) — a shared-token handshake is the follow-up.
