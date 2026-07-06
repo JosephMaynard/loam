@@ -408,6 +408,12 @@ function LoamApp() {
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string>();
   const [wiped, setWiped] = useState(false);
+  // Whether the wipe screen reflects a node kill switch ("node") or just this browser ("device").
+  const [wipeScope, setWipeScope] = useState<"node" | "device">("node");
+  // Bumped to force a full server re-sync: on WebSocket reconnect (missed events don't replay) and
+  // on a failed boot fetch (retry with backoff instead of stranding the app offline).
+  const [syncTick, setSyncTick] = useState(0);
+  const syncFailuresRef = useRef(0);
   const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
@@ -513,38 +519,10 @@ function LoamApp() {
     [pushToast],
   );
 
-  const upsertChannels = useCallback((incomingChannels: Channel[]) => {
-    setChannels((previous) => {
-      // Map upsert preserves insertion order: existing channels stay put, new ones append. No
-      // re-sort, so the seeded Announcements/General keep their position. Archived channels are
-      // dropped from the nav, so archiving hides a channel live and restoring re-adds it.
-      const next = new Map(previous.map((channel) => [channel.id, channel]));
-
-      for (const channel of incomingChannels) {
-        if (channel.archived) {
-          next.delete(channel.id);
-        } else {
-          next.set(channel.id, channel);
-        }
-      }
-
-      return Array.from(next.values());
-    });
-
-    for (const channel of incomingChannels) {
-      if (channel.archived) {
-        void deleteRecord("channels", channel.id);
-      }
-    }
-    void putRecords(
-      "channels",
-      incomingChannels.filter((channel) => !channel.archived),
-    );
-  }, []);
-
   /**
-   * Drop a channel this user can no longer see (they were removed from a private channel): purge
-   * the channel and its cached messages locally, and leave the conversation if it is on screen.
+   * Drop a channel this user can no longer see (removed from a private channel, or the channel was
+   * archived): purge the channel and its cached messages locally, and leave the conversation if it
+   * is on screen.
    */
   const removeChannel = useCallback((channelId: string) => {
     setChannels((previous) => previous.filter((channel) => channel.id !== channelId));
@@ -574,6 +552,40 @@ function LoamApp() {
     }
   }, []);
 
+  const upsertChannels = useCallback(
+    (incomingChannels: Channel[]) => {
+      setChannels((previous) => {
+        // Map upsert preserves insertion order: existing channels stay put, new ones append. No
+        // re-sort, so the seeded Announcements/General keep their position. Archived channels are
+        // dropped from the nav, so archiving hides a channel live and restoring re-adds it.
+        const next = new Map(previous.map((channel) => [channel.id, channel]));
+
+        for (const channel of incomingChannels) {
+          if (channel.archived) {
+            next.delete(channel.id);
+          } else {
+            next.set(channel.id, channel);
+          }
+        }
+
+        return Array.from(next.values());
+      });
+
+      for (const channel of incomingChannels) {
+        if (channel.archived) {
+          // Archiving revokes visibility: purge like a removal (cached message bodies included —
+          // an archived private channel's history must not linger in IndexedDB).
+          removeChannel(channel.id);
+        }
+      }
+      void putRecords(
+        "channels",
+        incomingChannels.filter((channel) => !channel.archived),
+      );
+    },
+    [removeChannel],
+  );
+
   const upsertMessages = useCallback((incomingMessages: Message[]) => {
     setMessages((previous) => {
       const next = new Map(previous.map((message) => [message.id, message]));
@@ -586,6 +598,52 @@ function LoamApp() {
     });
     void putRecords("messages", incomingMessages);
   }, []);
+
+  /**
+   * Apply a conversation's authoritative server message list: upsert everything returned and drop
+   * local messages in that conversation (and reactions on them) that the server no longer has.
+   * Deletions and retention expiries that happen while this client is offline never arrive as live
+   * events, so a plain additive merge would keep the stale copies — including supposedly expired
+   * bodies — in memory and IndexedDB forever.
+   */
+  const reconcileConversationMessages = useCallback(
+    (conversation: Conversation, serverMessages: Message[]) => {
+      const serverIds = new Set(serverMessages.map((message) => message.id));
+      const meId = currentUserIdRef.current;
+
+      setMessages((previous) => {
+        const conversationIds = new Set(
+          previous
+            .filter((message) => isConversationMessage(message, conversation, meId))
+            .map((message) => message.id),
+        );
+        const kept: Message[] = [];
+
+        for (const message of previous) {
+          const inConversation =
+            isConversationMessage(message, conversation, meId) ||
+            (message.type === "reaction" && conversationIds.has(message.targetMessageId));
+
+          if (inConversation && !serverIds.has(message.id)) {
+            void deleteRecord("messages", message.id);
+            continue;
+          }
+
+          kept.push(message);
+        }
+
+        const next = new Map(kept.map((message) => [message.id, message]));
+
+        for (const message of serverMessages) {
+          next.set(message.id, message);
+        }
+
+        return Array.from(next.values()).sort(compareCreatedAt);
+      });
+      void putRecords("messages", serverMessages);
+    },
+    [],
+  );
 
   const removeMessage = useCallback((messageId: string) => {
     setMessages((previous) => previous.filter((message) => message.id !== messageId));
@@ -720,9 +778,11 @@ function LoamApp() {
     [location, upsertChannels],
   );
 
-  const purgeLocalData = useCallback(async () => {
-    // Remote wipe (kill switch): drop everything this browser knows, then show a neutral
-    // disconnected screen. Best-effort on every step — nothing here may block another.
+  const purgeLocalData = useCallback(async (scope: "node" | "device" = "node") => {
+    // Wipe: drop everything this browser knows, then show a neutral end screen. `scope` only
+    // changes the copy — a node kill switch reads "node unavailable", a local device wipe says so
+    // honestly (the node is still up). Best-effort on every step — nothing here may block another.
+    setWipeScope(scope);
     setWiped(true);
     setMessages([]);
     setChannels([]);
@@ -959,33 +1019,76 @@ function LoamApp() {
       })
       .catch(() => undefined);
 
-    Promise.all([fetchJson<Config>("/api/config"), fetchJson<Channel[]>("/api/channels"), fetchJson<User[]>("/api/users")])
-      .then(([nextConfig, nextChannels, nextUsers]) => {
+    let retryTimer: number | undefined;
+
+    // Config first: it identifies the session and says whether this user may read content at all.
+    // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
+    // participating user; approval flips `currentUser.pending`, which re-runs this effect.
+    fetchJson<Config>("/api/config")
+      .then(async (nextConfig) => {
         if (!active) {
           return;
         }
 
+        syncFailuresRef.current = 0;
+        setError(undefined);
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
         setCurrentUser(nextConfig.currentUser);
         setUsers((previous) =>
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
+
+        if (nextConfig.currentUser.banned || nextConfig.currentUser.pending) {
+          return;
+        }
+
+        const [nextChannels, nextUsers] = await Promise.all([
+          fetchJson<Channel[]>("/api/channels"),
+          fetchJson<User[]>("/api/users"),
+        ]);
+
+        if (!active) {
+          return;
+        }
+
         setChannels(nextChannels);
         upsertUsers([nextConfig.currentUser, ...nextUsers]);
         void putRecords("channels", nextChannels);
+
+        // Drop cached channels the server no longer returns (deleted, archived, or access revoked
+        // while this client was offline) — and their message bodies with them.
+        const keep = new Set(nextChannels.map((channel) => channel.id));
+        const cached = await getAllRecords<Channel>("channels").catch(() => [] as Channel[]);
+
+        for (const channel of cached) {
+          if (!keep.has(channel.id)) {
+            removeChannel(channel.id);
+          }
+        }
       })
       .catch((nextError: unknown) => {
-        if (active) {
-          setError(nextError instanceof Error ? nextError.message : "Unable to reach the LOAM server.");
-          setConnection("offline");
+        if (!active) {
+          return;
         }
+
+        setError(nextError instanceof Error ? nextError.message : "Unable to reach the LOAM server.");
+        setConnection("offline");
+        // Retry with backoff — a one-shot boot fetch would strand the app offline forever when the
+        // server is momentarily unreachable (previously a manual reload was the only way out).
+        const delay = Math.min(30_000, 2_000 * 2 ** syncFailuresRef.current);
+        syncFailuresRef.current += 1;
+        retryTimer = window.setTimeout(() => setSyncTick((tick) => tick + 1), delay);
       });
 
     return () => {
       active = false;
+
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+      }
     };
-  }, [currentUser.id, upsertUsers]);
+  }, [currentUser.id, currentUser.banned, currentUser.pending, removeChannel, syncTick, upsertUsers]);
 
   useEffect(() => {
     if (!activeConversation) {
@@ -997,8 +1100,10 @@ function LoamApp() {
         ? `/api/messages/${encodeURIComponent(activeConversation.id)}`
         : `/api/dms/${encodeURIComponent(activeConversation.id)}`;
 
+    const conversation = activeConversation;
+
     fetchJson<Message[]>(path)
-      .then((nextMessages) => upsertMessages(nextMessages))
+      .then((nextMessages) => reconcileConversationMessages(conversation, nextMessages))
       .catch((nextError: unknown) => {
         // A 404 means the channel does not exist for this user (unknown id, or a private channel
         // they are not a member of) — an empty conversation, not a connectivity problem.
@@ -1008,7 +1113,7 @@ function LoamApp() {
 
         setError(nextError instanceof Error ? nextError.message : "Unable to load messages.");
       });
-  }, [activeConversation?.id, activeConversation?.kind, currentUser.id, upsertMessages]);
+  }, [activeConversation?.id, activeConversation?.kind, currentUser.id, reconcileConversationMessages, syncTick]);
 
   useEffect(() => {
     if (!config?.currentUser.id) {
@@ -1052,6 +1157,13 @@ function LoamApp() {
       nextSocket.onopen = () => {
         if (disposed || attempt !== socketAttempt) {
           return;
+        }
+
+        // A reconnect means events were missed (deletes, edits, new channels don't replay): pull
+        // fresh state — config/channels/users plus the open conversation — instead of trusting the
+        // cache. The first connection skips this; boot hydration just ran.
+        if (attempt > 1) {
+          setSyncTick((tick) => tick + 1);
         }
 
         reconnectAttempts = 0;
@@ -1207,8 +1319,17 @@ function LoamApp() {
       <main className="wiped-screen">
         <div>
           <p className="brand-title">LOAM</p>
-          <h1>Disconnected</h1>
-          <p>This node is no longer available.</p>
+          {wipeScope === "device" ? (
+            <>
+              <h1>Device wiped</h1>
+              <p>This browser&rsquo;s local copy has been erased. Scan the join QR to reconnect.</p>
+            </>
+          ) : (
+            <>
+              <h1>Disconnected</h1>
+              <p>This node is no longer available.</p>
+            </>
+          )}
         </div>
       </main>
     );
@@ -1267,7 +1388,7 @@ function LoamApp() {
           onClaimAdmin={claimAdmin}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
-          onWipeDevice={purgeLocalData}
+          onWipeDevice={() => purgeLocalData("device")}
         />
       ) : (
         <ConversationView
