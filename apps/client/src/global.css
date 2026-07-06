@@ -1351,12 +1351,19 @@ a {
   gap: 8px;
 }
 
+/* Header + optional members panel share the .conversation grid's first (auto) row. */
+.conversation-top {
+  min-height: 0;
+}
+
 .channel-members-panel {
   display: grid;
   gap: 12px;
   padding: 12px 20px;
   border-bottom: 1px solid var(--c-border);
   background: var(--c-bg-2);
+  max-height: 45svh;
+  overflow-y: auto;
 }
 
 .member-invite-form {
@@ -1374,6 +1381,19 @@ a {
 }
 
 /* Message search. */
+.search-content {
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  display: grid;
+  gap: 12px;
+}
+
+.search-content .form-error,
+.search-content .form-note {
+  padding: 0 20px;
+}
+
 .search-form {
   display: flex;
   gap: 10px;

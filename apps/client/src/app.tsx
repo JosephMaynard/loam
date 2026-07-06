@@ -1668,32 +1668,35 @@ function ConversationView({
   return (
     <>
       <section className="conversation">
-        <ConversationHeader
-          conversation={conversation}
-          description={activeChannel?.description}
-          title={title}
-          trailing={
-            isPrivateChannel ? (
-              <button
-                aria-expanded={membersOpen}
-                className="ghost-button"
-                onClick={() => setMembersOpen((previous) => !previous)}
-                type="button"
-              >
-                Members
-              </button>
-            ) : undefined
-          }
-        />
-        {isPrivateChannel && membersOpen && activeChannel ? (
-          <ChannelMembersPanel
-            channel={activeChannel}
-            currentUser={currentUser}
-            onChannelUpsert={onChannelUpsert}
-            onLeftChannel={onLeftChannel}
-            users={users}
+        {/* One wrapper = one grid row: .conversation is a strict header/list/composer 3-row grid. */}
+        <div className="conversation-top">
+          <ConversationHeader
+            conversation={conversation}
+            description={activeChannel?.description}
+            title={title}
+            trailing={
+              isPrivateChannel ? (
+                <button
+                  aria-expanded={membersOpen}
+                  className="ghost-button"
+                  onClick={() => setMembersOpen((previous) => !previous)}
+                  type="button"
+                >
+                  Members
+                </button>
+              ) : undefined
+            }
           />
-        ) : null}
+          {isPrivateChannel && membersOpen && activeChannel ? (
+            <ChannelMembersPanel
+              channel={activeChannel}
+              currentUser={currentUser}
+              onChannelUpsert={onChannelUpsert}
+              onLeftChannel={onLeftChannel}
+              users={users}
+            />
+          ) : null}
+        </div>
         <MessageList
           conversation={conversation}
           currentUser={currentUser}
@@ -2853,54 +2856,57 @@ function SearchView({
           <h1>Find messages</h1>
         </div>
       </header>
-      <form
-        className="search-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void run();
-        }}
-      >
-        <label className="sr-only" for={searchInputId}>
-          Search messages
-        </label>
-        <input
-          dir="auto"
-          disabled={searching}
-          id={searchInputId}
-          maxLength={200}
-          onInput={(event) => setQuery(event.currentTarget.value)}
-          placeholder="Search channel messages and your DMs"
-          type="search"
-          value={query}
-        />
-        <button disabled={searching || !query.trim()} type="submit">
-          {searching ? "Searching…" : "Search"}
-        </button>
-      </form>
-      {error ? <p className="form-error">{error}</p> : null}
-      {results && !results.length ? <p className="form-note">No messages matched.</p> : null}
-      {results?.length ? (
-        <ul className="search-results">
-          {results.map((message) => {
-            const route = routeFor(message);
-            const author = usersById.get(message.authorId);
-            return (
-              <SearchResult
-                authorName={author?.displayName ?? generateDisplayName(message.authorId)}
-                body={bodyFor(message)}
-                contextLabel={contextLabel(message)}
-                key={message.id}
-                onOpen={() => {
-                  if (route) {
-                    location.route(route);
-                  }
-                }}
-                time={displayTime(message.createdAt)}
-              />
-            );
-          })}
-        </ul>
-      ) : null}
+      {/* One wrapper = one grid row: .settings-view is a strict header/content 2-row grid. */}
+      <div className="search-content">
+        <form
+          className="search-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void run();
+          }}
+        >
+          <label className="sr-only" for={searchInputId}>
+            Search messages
+          </label>
+          <input
+            dir="auto"
+            disabled={searching}
+            id={searchInputId}
+            maxLength={200}
+            onInput={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search channel messages and your DMs"
+            type="search"
+            value={query}
+          />
+          <button disabled={searching || !query.trim()} type="submit">
+            {searching ? "Searching…" : "Search"}
+          </button>
+        </form>
+        {error ? <p className="form-error">{error}</p> : null}
+        {results && !results.length ? <p className="form-note">No messages matched.</p> : null}
+        {results?.length ? (
+          <ul className="search-results">
+            {results.map((message) => {
+              const route = routeFor(message);
+              const author = usersById.get(message.authorId);
+              return (
+                <SearchResult
+                  authorName={author?.displayName ?? generateDisplayName(message.authorId)}
+                  body={bodyFor(message)}
+                  contextLabel={contextLabel(message)}
+                  key={message.id}
+                  onOpen={() => {
+                    if (route) {
+                      location.route(route);
+                    }
+                  }}
+                  time={displayTime(message.createdAt)}
+                />
+              );
+            })}
+          </ul>
+        ) : null}
+      </div>
     </section>
   );
 }
