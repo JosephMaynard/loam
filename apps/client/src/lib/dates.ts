@@ -2,6 +2,13 @@
  * Day bucketing for message-history separators. Timestamps are grouped by *local* calendar day,
  * so the divider matches what the person reading would call "today".
  */
+import { getActiveLocale, icuLocale } from "../i18n";
+
+/** The BCP-47 locale to hand `Intl`, matching the admin-selected node UI language (not the browser),
+ * so dates read in the same language as the rest of the chrome. */
+function intlLocale(): string {
+  return icuLocale(getActiveLocale());
+}
 
 /** A stable key identifying the local calendar day of a timestamp (e.g. "2026-7-6"). */
 export function dayKey(timestamp: number): string {
@@ -19,9 +26,10 @@ export function dayKey(timestamp: number): string {
 export function dayLabel(timestamp: number, now = Date.now()): string {
   const key = dayKey(timestamp);
 
-  // "Today"/"Yesterday" via Intl.RelativeTimeFormat so they localize with the browser rather than
-  // hardcoding English — the rest of the app leans on Intl for the same reason.
-  const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  // "Today"/"Yesterday" via Intl.RelativeTimeFormat, in the node's UI language so the divider matches
+  // the rest of the localized chrome (not the viewer's browser language).
+  const locale = intlLocale();
+  const relative = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
 
   if (key === dayKey(now)) {
     return capitalize(relative.format(0, "day"));
@@ -33,7 +41,7 @@ export function dayLabel(timestamp: number, now = Date.now()): string {
 
   const date = new Date(timestamp);
   const sameYear = date.getFullYear() === new Date(now).getFullYear();
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(locale, {
     weekday: "short",
     day: "numeric",
     month: "short",

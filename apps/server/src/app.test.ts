@@ -2968,6 +2968,43 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
     expect((missing.json() as { code?: string }).code).toBe("channel_not_found");
   });
 
+  it("codes the participation-gate and channel-posting-policy errors (were English-only)", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const admin = await newSession(app);
+    const pending = await newSession(app); // under approval policy, starts pending
+
+    // A pending user hitting a mutating endpoint: the gate message now carries a code to localize.
+    const gated = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: pending.cookie },
+    });
+    expect(gated.statusCode).toBe(403);
+    expect((gated.json() as { code?: string }).code).toBe("awaiting_approval");
+
+    // Channel-posting policy: an admins-only channel rejects a member's post with a code.
+    await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${pending.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+      payload: { name: "Announce", allowPosting: "admins" },
+    });
+    const channelId = (created.json() as { id: string }).id;
+    const post = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: pending.cookie },
+      payload: { type: "channelPost", channelId, body: "hi" },
+    });
+    expect(post.statusCode).toBe(400);
+    expect((post.json() as { code?: string }).code).toBe("channel_admins_post_only");
+  });
+
   it("surfaces the node version in /api/config", async () => {
     // makeApp builds with no version option, so it reports the "dev" fallback.
     const app = await makeApp();

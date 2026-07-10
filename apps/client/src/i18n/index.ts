@@ -129,10 +129,14 @@ export function t(key: CatalogKey, params?: Record<string, string | number>): st
   // completion). Cast to the value union so the plural branch stays live even when the catalog
   // currently holds only string-valued keys (otherwise TS narrows to `string` and the else to `never`).
   const catalog = loaded[activeLocale] ?? en;
-  const entry = (catalog[key] ?? en[key]) as string | PluralMessage;
+  const entry = (catalog[key] ?? en[key]) as string | PluralMessage | undefined;
   let template: string;
 
-  if (typeof entry === "string") {
+  if (entry === undefined) {
+    // Key absent from en too (shouldn't happen — keys are typed — but a dynamically-built key or a
+    // future refactor could hit this). Return the key itself rather than throwing on the plural path.
+    return key;
+  } else if (typeof entry === "string") {
     template = entry;
   } else {
     const n = typeof params?.n === "number" ? params.n : 0;

@@ -266,6 +266,14 @@ const ERROR_CODES: Record<string, string> = {
   "You can only edit your own messages": "edit_own_only",
   "You cannot deny an admin or yourself": "deny_forbidden",
   "You cannot moderate an admin or yourself": "moderate_forbidden",
+  // Participation gate (banned/pending) and channel-posting policy — these are returned via
+  // participationError()/channelPostingError() and must localize like every other error.
+  "You have been removed from this node": "removed_from_node",
+  "Your join is awaiting approval": "awaiting_approval",
+  "Channel is archived": "channel_archived",
+  "Replies are disabled in this channel": "channel_replies_disabled",
+  "Only the channel owner can post in this channel": "channel_owner_post_only",
+  "Only admins can post in this channel": "channel_admins_post_only",
 };
 
 /** All stable error codes, exported so tests can assert client-catalog coverage. */
@@ -3536,7 +3544,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const userId = getSessionUserIdFromRequest(request);
 
     if (!userId) {
-      connection.send(JSON.stringify({ type: "error", error: "Unauthenticated websocket" }));
+      connection.send(JSON.stringify({ type: "error", ...errorBody("Unauthenticated websocket") }));
       connection.close();
       return;
     }
@@ -3547,7 +3555,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const user = data.users.find((candidate) => candidate.id === userId);
 
     if (user?.banned) {
-      connection.send(JSON.stringify({ type: "error", error: "This session is no longer valid" }));
+      connection.send(JSON.stringify({ type: "error", ...errorBody("This session is no longer valid") }));
       connection.close();
       return;
     }

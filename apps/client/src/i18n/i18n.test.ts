@@ -61,6 +61,21 @@ describe("i18n catalogs", () => {
     }
   });
 
+  it("plain-string keys preserve exactly en's token set (no dropped or stray tokens)", () => {
+    // For non-plural keys the translation must carry the same {tokens} as en — a subset check alone
+    // would miss a translator dropping a required token (rendering a value silently blank). Plural
+    // forms are exempt: some CLDR categories legitimately omit {n} (e.g. Arabic zero/one/two).
+    const plainKeys = EN_KEYS.filter((key) => !isPlural((en as Record<string, unknown>)[key]));
+
+    for (const locale of LOCALES) {
+      for (const key of plainKeys) {
+        const enSet = [...tokensOf(en[key as keyof typeof en] as string)].sort();
+        const value = (ALL_CATALOGS[locale] as Record<string, string>)[key];
+        expect([...tokensOf(value)].sort(), `${locale} ${key} token set`).toEqual(enSet);
+      }
+    }
+  });
+
   it("placeholder tokens per key are a subset of en's tokens", () => {
     const enTokens = (key: string): Set<string> => {
       const value = (en as Record<string, unknown>)[key];
@@ -112,7 +127,8 @@ describe("i18n catalogs", () => {
       "message_streaming", "session_invalid", "thread_has_replies", "too_many_attempts", "too_many_claim_attempts",
       "message_create_failed", "websocket_unauthenticated", "unknown_attachment", "user_avatar_upload_disabled",
       "user_not_found", "user_profile_edit_disabled", "delete_own_only", "edit_own_only", "deny_forbidden",
-      "moderate_forbidden",
+      "moderate_forbidden", "removed_from_node", "awaiting_approval", "channel_archived",
+      "channel_replies_disabled", "channel_owner_post_only", "channel_admins_post_only",
     ];
 
     for (const code of SERVER_ERROR_CODES) {

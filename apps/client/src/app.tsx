@@ -48,6 +48,8 @@ import {
   LOCALE_LABELS,
   RTL_LOCALES,
   errorText,
+  getActiveLocale,
+  icuLocale,
   isLocaleLoaded,
   loadLocale,
   resolveLocale,
@@ -57,7 +59,6 @@ import {
 import { safeQrSvg } from "./lib/qr";
 
 type Config = {
-  nodeName: string;
   /** The node's build version, shown in the join/settings footer. Absent on very old nodes. */
   version?: string;
   joinUrl: string;
@@ -251,7 +252,8 @@ function reactionSummary(
  * @returns The time formatted as hours and minutes according to the current locale (e.g., "09:05")
  */
 function displayTime(timestamp: number): string {
-  return new Intl.DateTimeFormat(undefined, {
+  // Node UI locale (via icuLocale), so times read in the same language as the rest of the chrome.
+  return new Intl.DateTimeFormat(icuLocale(getActiveLocale()), {
     hour: "2-digit",
     minute: "2-digit",
   }).format(timestamp);
