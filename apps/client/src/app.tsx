@@ -4756,8 +4756,12 @@ function AdminView({
                     maxLength={256}
                     onInput={(event) =>
                       setAdminConfig((previous) =>
+                        // Keep the raw value, including "" — an empty string is the explicit "clear the
+                        // token" signal the server understands. Mapping "" → undefined would be dropped
+                        // by JSON.stringify, so a cleared field would never reach the server and the old
+                        // token would silently persist.
                         previous
-                          ? { ...previous, sync: { ...previous.sync, token: event.currentTarget.value || undefined } }
+                          ? { ...previous, sync: { ...previous.sync, token: event.currentTarget.value } }
                           : previous,
                       )
                     }
