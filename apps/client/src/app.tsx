@@ -1934,12 +1934,9 @@ function ConversationView({
     return (
       <section className="conversation empty-state">
         <div>
-          <p className="eyebrow">Local node ready</p>
-          <h1>Choose a channel or direct message.</h1>
-          <p>
-            Messages, replies and reactions persist locally and sync through the laptop or Raspberry Pi
-            server while it is running.
-          </p>
+          <p className="eyebrow">{t("conversation.emptyEyebrow")}</p>
+          <h1>{t("conversation.emptyTitle")}</h1>
+          <p>{t("conversation.emptyBody")}</p>
         </div>
       </section>
     );
@@ -1972,7 +1969,7 @@ function ConversationView({
                   onClick={() => setMembersOpen((previous) => !previous)}
                   type="button"
                 >
-                  Members
+                  {t("conversation.members")}
                 </button>
               ) : undefined
             }
@@ -2003,10 +2000,14 @@ function ConversationView({
           usersById={usersById}
         />
         <MessageComposer
-          label={conversation.kind === "channel" ? `Message ${conversation.id}` : `Message ${title}`}
+          label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
           onSend={onSend}
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
-          placeholder={conversation.kind === "channel" ? "Post an update" : "Send a direct message"}
+          placeholder={
+            conversation.kind === "channel"
+              ? t("conversation.composerPlaceholderChannel")
+              : t("conversation.composerPlaceholderDm")
+          }
         />
       </section>
 
@@ -2045,7 +2046,7 @@ function ConversationHeader({
         ←
       </NavLink>
       <div className="conversation-heading">
-        <p className="eyebrow">{conversation.kind === "channel" ? "Channel" : "Direct message"}</p>
+        <p className="eyebrow">{conversation.kind === "channel" ? t("conversation.kindChannel") : t("conversation.kindDm")}</p>
         <h1>{title}</h1>
         {description ? <p className="conversation-description">{description}</p> : null}
       </div>
@@ -2103,7 +2104,7 @@ function ChannelMembersPanel({
       })
       .catch((loadError: unknown) => {
         if (active) {
-          setError(loadError instanceof Error ? loadError.message : "Unable to load members.");
+          setError(loadError instanceof Error ? loadError.message : t("members.loadError"));
         }
       });
 
@@ -2129,7 +2130,7 @@ function ChannelMembersPanel({
       onChannelUpsert([updated]);
       setInviteId("");
     } catch (inviteError) {
-      setError(inviteError instanceof Error ? inviteError.message : "Unable to invite that person.");
+      setError(inviteError instanceof Error ? inviteError.message : t("members.inviteError"));
     } finally {
       setBusy(false);
     }
@@ -2138,7 +2139,7 @@ function ChannelMembersPanel({
   async function remove(userId: string): Promise<void> {
     const leaving = userId === currentUser.id;
 
-    if (leaving && !window.confirm("Leave this channel? You'll need a new invite to come back.")) {
+    if (leaving && !window.confirm(t("members.leaveConfirm"))) {
       return;
     }
 
@@ -2158,7 +2159,7 @@ function ChannelMembersPanel({
         const message =
           payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
             ? payload.error
-            : `Request failed: ${response.status}`;
+            : t("common.requestFailed", { status: response.status });
         throw new Error(message);
       }
 
@@ -2172,7 +2173,7 @@ function ChannelMembersPanel({
       ]);
       setMembers((previous) => previous.filter((member) => member.id !== userId));
     } catch (removeError) {
-      setError(removeError instanceof Error ? removeError.message : "Unable to remove that person.");
+      setError(removeError instanceof Error ? removeError.message : t("members.removeError"));
     } finally {
       window.clearTimeout(timeout);
       setBusy(false);
@@ -2183,16 +2184,16 @@ function ChannelMembersPanel({
     <div className="channel-members-panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Private channel</p>
-          <h2>Members</h2>
+          <p className="eyebrow">{t("members.eyebrow")}</p>
+          <h2>{t("members.heading")}</h2>
         </div>
         {memberIds.has(currentUser.id) && channel.ownerUserId !== currentUser.id ? (
           <button className="danger-button" disabled={busy} onClick={() => void remove(currentUser.id)} type="button">
-            Leave channel
+            {t("members.leave")}
           </button>
         ) : null}
       </div>
-      {!loaded && !error ? <p className="form-note">Loading members…</p> : null}
+      {!loaded && !error ? <p className="form-note">{t("members.loading")}</p> : null}
       {loaded ? (
         <ul className="moderation-list">
           {members.map((member) => (
@@ -2201,13 +2202,13 @@ function ChannelMembersPanel({
                 <Avatar avatar={member.avatar} id={member.id} />
                 <div className="moderation-name">
                   <strong>{member.displayName}</strong>
-                  <span>{member.id === channel.ownerUserId ? "Owner" : member.id}</span>
+                  <span>{member.id === channel.ownerUserId ? t("members.owner") : member.id}</span>
                 </div>
               </div>
               {canManage && member.id !== channel.ownerUserId ? (
                 <div className="moderation-actions">
                   <button className="danger-button" disabled={busy} onClick={() => void remove(member.id)} type="button">
-                    Remove
+                    {t("common.remove")}
                   </button>
                 </div>
               ) : null}
@@ -2224,9 +2225,9 @@ function ChannelMembersPanel({
           }}
         >
           <label>
-            Invite someone
+            {t("members.inviteLabel")}
             <select disabled={busy || !invitable.length} onInput={(event) => setInviteId(event.currentTarget.value)} value={inviteId}>
-              <option value="">{invitable.length ? "Choose a person…" : "Everyone is already a member"}</option>
+              <option value="">{invitable.length ? t("members.choosePerson") : t("members.allMembers")}</option>
               {invitable.map((user) => (
                 <option key={user.id} value={user.id}>
                   {user.displayName}
@@ -2235,7 +2236,7 @@ function ChannelMembersPanel({
             </select>
           </label>
           <button disabled={busy || !inviteId} type="submit">
-            Invite
+            {t("members.invite")}
           </button>
         </form>
       ) : null}
@@ -2317,7 +2318,7 @@ function MessageList({
           );
         })
       ) : (
-        <p className="empty-copy">No messages yet. Start with the practical detail everyone needs.</p>
+        <p className="empty-copy">{t("messageList.empty")}</p>
       )}
     </div>
   );
@@ -2396,7 +2397,7 @@ function MessageItem({
         <div className="message-meta">
           <strong>{author.displayName}</strong>
           <span>{displayTime(message.createdAt)}</span>
-          {message.editedAt ? <span className="edited-tag">(edited)</span> : null}
+          {message.editedAt ? <span className="edited-tag">{t("message.editedTag")}</span> : null}
         </div>
         {editing ? (
           <form
@@ -2407,7 +2408,7 @@ function MessageItem({
             }}
           >
             <textarea
-              aria-label="Edit message"
+              aria-label={t("message.editAriaLabel")}
               // eslint-disable-next-line jsx-a11y/no-autofocus
               autoFocus
               dir="auto"
@@ -2418,10 +2419,10 @@ function MessageItem({
             />
             <div className="message-edit-actions">
               <button disabled={savingEdit || !draft.trim()} type="submit">
-                {savingEdit ? "Saving…" : "Save"}
+                {savingEdit ? t("common.saving") : t("common.save")}
               </button>
               <button disabled={savingEdit} onClick={() => setEditing(false)} type="button">
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           </form>
@@ -2437,7 +2438,7 @@ function MessageItem({
             {message.attachments.map((attachment) => (
               <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
                 <img
-                  alt="Attached image"
+                  alt={t("message.attachedImageAlt")}
                   className="message-attachment"
                   height={attachment.height}
                   loading="lazy"
@@ -2449,7 +2450,7 @@ function MessageItem({
           </div>
         ) : null}
         <div className="message-actions">
-          {message.meta?.streaming ? <span className="streaming-pill">Streaming</span> : null}
+          {message.meta?.streaming ? <span className="streaming-pill">{t("message.streaming")}</span> : null}
           {!message.meta?.streaming && reactions.map((reaction) => (
             <button
               className={reaction.active ? "reaction active" : "reaction"}
@@ -2474,22 +2475,22 @@ function MessageItem({
           ))}
           {onOpenThread && !message.meta?.streaming ? (
             <button className="thread-button" onClick={() => onOpenThread(message.id)} type="button">
-              {replyCount ? `${replyCount} repl${replyCount === 1 ? "y" : "ies"}` : "Reply"}
+              {replyCount ? t("message.replyCount", { n: replyCount }) : t("message.reply")}
             </button>
           ) : null}
           {canEdit && !editing ? (
             <button className="message-edit-button" onClick={startEditing} type="button">
-              Edit
+              {t("message.edit")}
             </button>
           ) : null}
           {(isMine || currentUser.isAdmin) && !message.meta?.streaming ? (
             <button
               className="message-delete"
               onClick={() => onDelete(message.id)}
-              title={isMine ? "Delete your message" : "Delete this message (admin)"}
+              title={isMine ? t("message.deleteOwnTitle") : t("message.deleteAdminTitle")}
               type="button"
             >
-              Delete
+              {t("common.delete")}
             </button>
           ) : null}
         </div>
@@ -2560,7 +2561,7 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
                 ? {
                     ...entry,
                     status: "error",
-                    error: uploadError instanceof Error ? uploadError.message : "Upload failed.",
+                    error: uploadError instanceof Error ? uploadError.message : t("composer.uploadFailed"),
                   }
                 : entry,
             ),
@@ -2604,7 +2605,7 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
                 {entry.name}
               </span>
               <button
-                aria-label={`Remove ${entry.name}`}
+                aria-label={t("composer.removeAttachment", { name: entry.name })}
                 disabled={sending}
                 onClick={() => setPending((previous) => previous.filter((item) => item.key !== entry.key))}
                 type="button"
@@ -2632,11 +2633,11 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
             type="file"
           />
           <button
-            aria-label="Attach an image"
+            aria-label={t("composer.attachImage")}
             className="composer-attach"
             disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
             onClick={() => fileInputRef.current?.click()}
-            title="Attach an image (resized on this device before upload)"
+            title={t("composer.attachImageHint")}
             type="button"
           >
             🖼
@@ -2659,7 +2660,7 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
         value={value}
       />
       <button disabled={(!value.trim() && !readyAttachments.length) || sending || uploading} type="submit">
-        Send
+        {t("composer.send")}
       </button>
     </form>
   );
@@ -2712,10 +2713,10 @@ function ThreadPanel({
           ←
         </button>
         <div>
-          <p className="eyebrow">Thread</p>
-          <h2>Replies</h2>
+          <p className="eyebrow">{t("thread.eyebrow")}</p>
+          <h2>{t("thread.heading")}</h2>
         </div>
-        <button aria-label="Close thread" className="close-button" onClick={onClose} type="button">
+        <button aria-label={t("thread.close")} className="close-button" onClick={onClose} type="button">
           ×
         </button>
       </header>
@@ -2729,7 +2730,9 @@ function ThreadPanel({
           reactions={reactionSummary(messages, parent.id, currentUser.id)}
           usersById={usersById}
         />
-        <div className="reply-divider">{replies.length ? `${replies.length} replies` : "No replies yet"}</div>
+        <div className="reply-divider">
+          {replies.length ? t("message.replyCount", { n: replies.length }) : t("thread.noReplies")}
+        </div>
         {replies.map((reply) => (
           <MessageItem
             currentUser={currentUser}
@@ -2744,10 +2747,10 @@ function ThreadPanel({
         ))}
       </div>
       <MessageComposer
-        label="Reply in thread"
+        label={t("thread.replyLabel")}
         onSend={onReply}
         onUploadAttachment={onUploadAttachment}
-        placeholder="Reply in thread"
+        placeholder={t("thread.replyLabel")}
       />
     </aside>
   );
