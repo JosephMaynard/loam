@@ -43,6 +43,7 @@ import { dayKey, dayLabel } from "./lib/dates";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
+import { RTL_LOCALES, resolveLocale, setActiveLocale, t } from "./i18n";
 import { safeQrSvg } from "./lib/qr";
 
 type Config = {
@@ -247,14 +248,14 @@ function displayTime(timestamp: number): string {
  * Get the display text for a message, substituting a streaming placeholder when appropriate.
  *
  * @param message - The message to extract text from; may be any Message variant.
- * @returns The message `body` if present and non-empty, `"Thinking..."` when `body` is empty and `message.meta?.streaming` is true, or an empty string when no body is available.
+ * @returns The message `body` if present and non-empty, the localized "thinking" placeholder when `body` is empty and `message.meta?.streaming` is true, or an empty string when no body is available.
  */
 function bodyFor(message: Message): string {
   if (!("body" in message)) {
     return "";
   }
 
-  return message.body || (message.meta?.streaming ? "Thinking..." : "");
+  return message.body || (message.meta?.streaming ? t("composer.thinking") : "");
 }
 
 /**
@@ -516,7 +517,7 @@ function LoamApp() {
       const authorName = usersByIdRef.current.get(message.authorId)?.displayName ?? generateDisplayName(message.authorId);
       const body =
         bodyFor(message) ||
-        (message.type !== "reaction" && message.attachments?.length ? "📷 Image" : "");
+        (message.type !== "reaction" && message.attachments?.length ? t("toast.imageFallback") : "");
       let title = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
 
@@ -1074,16 +1075,21 @@ function LoamApp() {
     document.title = nodeName && nodeName !== "LOAM local" ? `${nodeName} · LOAM` : "LOAM";
   }, [config?.networkConfig.nodeName]);
 
-  // Flip the whole layout for right-to-left locales. Message bodies already use dir="auto" per
-  // message; this sets the document direction so the chrome (sidebar, panels) mirrors too. When a
-  // UI translation layer lands (docs/13) this will key off the selected locale instead of the
-  // browser's — for now the browser's primary language is the best available signal.
+  // The admin selects one UI language for the whole node (config.networkConfig.locale); resolve it
+  // (fallback `en`) and apply it via `setActiveLocale` — module state that `t()` reads — in a useMemo
+  // so it runs *before* children render this pass (no stale-language flash). No context/provider is
+  // needed: `config` is top-level state, so the live `configUpdated` handler's `setConfig` already
+  // re-renders the whole tree in the new language.
+  const locale = resolveLocale(config?.networkConfig.locale);
+  useMemo(() => setActiveLocale(locale), [locale]);
+
+  // Flip the whole layout for right-to-left locales and expose the language on <html lang>. Message
+  // bodies already use dir="auto" per message; this mirrors the chrome (sidebar, panels) too. Keys
+  // off the admin-selected node locale, not navigator.language.
   useEffect(() => {
-    const rtl = new Set(["ar", "he", "fa", "ur", "ps", "sd", "yi", "dv"]);
-    const primary = (navigator.language || "en").split("-")[0]?.toLowerCase() ?? "en";
-    document.documentElement.dir = rtl.has(primary) ? "rtl" : "ltr";
-    document.documentElement.lang = navigator.language || "en";
-  }, []);
+    document.documentElement.dir = RTL_LOCALES.has(locale) ? "rtl" : "ltr";
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   useEffect(() => {
     let active = true;

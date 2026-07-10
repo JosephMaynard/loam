@@ -2913,6 +2913,37 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
     expect(after.networkConfig.nodeName).toBe("Sector 7 Relief Net");
   });
 
+  it("serves and hot-updates the node UI locale", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const before = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { locale: string } };
+    expect(before.networkConfig.locale).toBe("en");
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { node: { locale: "ar" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { locale: string } };
+    expect(after.networkConfig.locale).toBe("ar");
+
+    const rejected = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { node: { locale: "xx" } },
+    });
+    expect(rejected.statusCode).toBe(400);
+  });
+
   it("lets an admin promote a member, but not non-admins, bots, or pending users", async () => {
     const app = await makeApp({
       access: { joinPolicy: "approval" },

@@ -188,6 +188,7 @@ export function defaultLoamConfig(): LoamConfig {
   return {
     node: {
       name: "LOAM local",
+      locale: "en",
     },
     identity: {
       allowUserDisplayNameEdit: false,
@@ -842,6 +843,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
       joinPolicy: appConfig.access.joinPolicy,
       securityProfile: appConfig.security.profile,
+      locale: appConfig.node.locale,
     };
   }
 
