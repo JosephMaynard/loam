@@ -151,6 +151,173 @@ export const en = {
   "moderation.badgePending": "Pending",
   "moderation.badgeBanned": "Banned",
   "moderation.badgeShadow": "Shadow-banned",
+
+  // Admin view — feature-flag labels.
+  "admin.flagPublicChannels": "Public channels",
+  "admin.flagPrivateChannels": "Private channels (invite-only)",
+  "admin.flagUserChannels": "User-created channels",
+  "admin.flagReplies": "Thread replies",
+  "admin.flagDMs": "Direct messages",
+  "admin.flagReactions": "Reactions",
+  "admin.flagMarkdown": "Markdown rendering",
+  "admin.flagAttachments": "Image attachments",
+  "admin.flagPresence": "Online presence (reveals who is connected — off for high-risk use)",
+  // Admin view — identity-permission labels.
+  "admin.identityDisplayName": "Users can edit their display name",
+  "admin.identityAvatarEdit": "Users can edit their avatar",
+  "admin.identityAvatarUpload": "Users can upload avatar images",
+  "admin.identityAdminEdit": "Admins can edit other users",
+  // Admin view — security profile titles + summaries.
+  "admin.profileOpenTitle": "Open",
+  "admin.profileOpenSummary":
+    "Anyone joins and posts immediately. Messages are kept and the kill switch is off — maximum access, for disaster-relief style use.",
+  "admin.profileStandardTitle": "Standard",
+  "admin.profileStandardSummary":
+    "Anyone with the join link participates; messages are kept and the kill switch is off. (Same enforced settings as Open until transport encryption lands.)",
+  "admin.profileHardenedTitle": "Hardened",
+  "admin.profileHardenedSummary":
+    "New joiners must be approved, messages expire after 1 hour, and the kill switch is armed. For high-risk use.",
+  "admin.profileCustomTitle": "Custom",
+  "admin.profileCustomSummary":
+    "Set who can join, message retention, and the kill switch individually in the sections below.",
+  // Admin view — errors + shell.
+  "admin.configInvalid": "Received an invalid config payload from the server.",
+  "admin.configLoadError": "Unable to load the node config.",
+  "admin.configUpdateFailed": "Config update failed: {status}",
+  "admin.configUnrecognised": "The server accepted the update but returned an unrecognised config payload.",
+  "admin.configSaveError": "Unable to save the node config.",
+  "admin.killSwitchFailed": "Kill switch failed: {status}",
+  "admin.killSwitchError": "Unable to trigger the kill switch.",
+  "admin.eyebrow": "Admin",
+  "admin.notAuthorizedNote":
+    "This area is for node administrators. Claim admin access from the settings page if this node allows it.",
+  "admin.title": "Node configuration",
+  "admin.loading": "Loading node config…",
+  // Admin view — getting-started panel.
+  "admin.gettingStartedEyebrow": "Getting started",
+  "admin.gettingStartedTitle": "Run your network in five steps",
+  "admin.step1Title": "Name it",
+  "admin.step1Body": "set a Network name below so joiners recognise where they are.",
+  "admin.step2Title": "Choose a posture",
+  "admin.step2Body":
+    "pick a Security profile (Open for relief, Hardened for high-risk), or Custom to tune each control.",
+  "admin.step3Title": "Invite people",
+  "admin.step3Body":
+    "share the join QR from the sidebar; under an Approval policy, greeters let newcomers in from People & moderation.",
+  "admin.step4Title": "Set your team",
+  "admin.step4Body": "grant moderator/greeter roles or promote a co-admin in People & moderation.",
+  "admin.step5Title": "Grow the mesh",
+  "admin.step5Body": "to cover more than one hotspot, enable Node-to-node sync and link another host by QR.",
+  "admin.gettingStartedNoteBefore": "Everything here is optional and reversible. See the",
+  "admin.gettingStartedGuideLink": "operator's guide",
+  "admin.gettingStartedNoteAfter": "for the full walkthrough.",
+  // Admin view — identity/network panel + language.
+  "admin.networkEyebrow": "Network",
+  "admin.identityHeading": "Identity",
+  "admin.networkName": "Network name",
+  "admin.networkNameNote":
+    "Shown to everyone who joins — in the sidebar and on the join screen. Give your network a name people will recognise (e.g. \"Riverside Relief\").",
+  "admin.language": "Interface language",
+  "admin.languageNote": "Applies to everyone's interface on this node.",
+  // Admin view — security profile panel.
+  "admin.profileHeading": "Profile",
+  "admin.posture": "Posture",
+  "admin.whoCanJoin": "Who can join",
+  "admin.joinOpen": "Open — anyone with the link joins",
+  "admin.joinApproval": "Approval — a greeter or admin lets people in",
+  "admin.axesManaged":
+    "Access, retention, and the kill switch are managed by the {profile} profile. Switch to {custom} to edit them individually.",
+  // Admin view — features + identity panels.
+  "admin.featuresEyebrow": "Features",
+  "admin.messagingHeading": "Messaging",
+  "admin.identityEyebrow": "Identity",
+  "admin.profilesHeading": "Profiles",
+  // Admin view — LLM panel.
+  "admin.llmEyebrow": "LLM",
+  "admin.llmHeading": "Assistant (Ollama)",
+  "admin.llmEnable": "Enable the LLM assistant",
+  "admin.llmBaseUrl": "Ollama base URL",
+  "admin.llmModel": "Model",
+  "admin.llmBotName": "Bot display name",
+  "admin.llmSystemPrompt": "System prompt (optional)",
+  // Admin view — retention panel.
+  "admin.privacyEyebrow": "Privacy",
+  "admin.retentionHeading": "Message retention",
+  "admin.retentionLabel": "Delete messages after (minutes; blank = keep forever)",
+  "admin.retentionNote":
+    "Expired messages are deleted from the node and from connected clients (checked every 30 seconds). The proactive companion to the kill switch below.",
+  // Admin view — kill switch panel.
+  "admin.safetyEyebrow": "Safety",
+  "admin.killSwitchHeading": "Kill switch",
+  "admin.killSwitchEnable": "Enable the kill switch (instant wipe of all node data)",
+  "admin.killSwitchRequireConfirm": "Require typed confirmation before firing",
+  "admin.panicToken":
+    "Panic token (optional, min 16 chars; enables unauthenticated POST /api/panic; leave blank to keep the current one)",
+  "admin.killSwitchWarning":
+    "Firing the kill switch permanently deletes all messages, users, sessions, and avatars on this node and remotely purges every connected client. Node settings survive.",
+  "admin.killSwitchConfirmBefore": "Type",
+  "admin.killSwitchConfirmAfter": "to arm the button",
+  "admin.wipeNow": "Wipe this node now",
+  // Admin view — sync panel.
+  "admin.syncHeading": "Node-to-node sync",
+  "admin.syncEnable": "Sync public channels with peer nodes",
+  "admin.syncNote":
+    "Pull-based: this node fetches public channels, their messages, and profiles from each peer. DMs and private channels never leave a node. A peer's join URL (from its join QR) is its sync address. Enabling this also lets peers pull this node's public content.",
+  "admin.noPeers": "No peers yet.",
+  "admin.peerChangesNote": "Peer changes apply when you save the node config below.",
+  // Admin view — bootstrap panel.
+  "admin.bootstrapEyebrow": "Admin access",
+  "admin.bootstrapHeading": "Bootstrap",
+  "admin.strategy": "Strategy",
+  "admin.newPassphrase": "New admin passphrase (min 8 chars; leave blank to keep the current one)",
+  "admin.bootstrapNote": "The setup-code strategy prints a one-time claim code in the server logs at startup.",
+  "admin.saveConfig": "Save node config",
+  "admin.saved": "Saved. Connected clients pick the change up live.",
+  // Add-a-peer control.
+  "admin.peerUrl": "Peer URL (its join URL)",
+  "admin.peerLabel": "Label (optional)",
+  "admin.peerLabelPlaceholder": "e.g. Depot Pi",
+  "admin.addPeer": "Add peer",
+  // Sync status panel.
+  "admin.syncStatusUnrecognised": "The server returned an unrecognised sync status payload.",
+  "admin.syncStatusLoadError": "Unable to load sync status.",
+  "admin.syncFailed": "Sync failed: {status}",
+  "admin.syncRunError": "Unable to run sync.",
+  "admin.syncStatusEyebrow": "Status (saved peers)",
+  "admin.syncing": "Syncing…",
+  "admin.syncNow": "Sync now",
+  "admin.peerError": "Error: {error}",
+  "admin.peerLastSyncedAt": "Last synced {time}",
+  "admin.peerImported": { one: "{n} message imported", other: "{n} messages imported" },
+  "admin.peerNotSynced": "Not synced yet",
+  // Channel management.
+  "admin.channelUnrecognised": "The server returned an unrecognised channel payload.",
+  "admin.channelsLoadError": "Unable to load channels.",
+  "admin.channelCreateError": "Unable to create the channel.",
+  "admin.channelsEyebrow": "Channels",
+  "admin.createChannelHeading": "Create a channel",
+  "admin.channelName": "Name",
+  "admin.channelNamePlaceholder": "e.g. Logistics",
+  "admin.channelDescription": "Description (optional)",
+  "admin.whoCanPost": "Who can post",
+  "admin.postEveryone": "Everyone",
+  "admin.postAdmins": "Admins only",
+  "admin.allowReplies": "Allow threaded replies",
+  "admin.channelPrivate": "Private (invite-only; you start as the only member)",
+  "admin.creating": "Creating…",
+  "admin.createChannel": "Create channel",
+  "admin.existingChannels": "Existing channels",
+  "admin.channelsLoading": "Loading channels…",
+  "admin.channelsEmpty": "No channels yet. Create one above.",
+  "admin.channelUpdateError": "Unable to update the channel.",
+  "admin.channelNameAria": "Channel name for {name}",
+  "admin.metaAdminsPost": "Admins post",
+  "admin.metaOpenPosting": "Open posting",
+  "admin.metaPrivate": "Private",
+  "admin.metaArchived": "Archived",
+  "admin.rename": "Rename",
+  "admin.restore": "Restore",
+  "admin.archive": "Archive",
 };
 
 /**

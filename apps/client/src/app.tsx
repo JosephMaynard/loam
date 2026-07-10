@@ -3,6 +3,7 @@ import {
   ChannelSchema,
   JoinPolicySchema,
   LoamConfigSchema,
+  LocaleSchema,
   MessageAttachmentSchema,
   MessageSchema,
   securityProfilePreset,
@@ -43,7 +44,7 @@ import { dayKey, dayLabel } from "./lib/dates";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
-import { RTL_LOCALES, resolveLocale, setActiveLocale, t } from "./i18n";
+import { LOCALE_LABELS, RTL_LOCALES, resolveLocale, setActiveLocale, t } from "./i18n";
 import { safeQrSvg } from "./lib/qr";
 
 type Config = {
@@ -4081,49 +4082,46 @@ function UserStateBadges({ user }: { user: User }) {
   );
 }
 
-const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
-  ["enablePublicChannels", "Public channels"],
-  ["enablePrivateChannels", "Private channels (invite-only)"],
-  ["enableUserChannels", "User-created channels"],
-  ["enableReplies", "Thread replies"],
-  ["enableDMs", "Direct messages"],
-  ["enableReactions", "Reactions"],
-  ["enableMarkdown", "Markdown rendering"],
-  ["enableAttachments", "Image attachments"],
-  ["enablePresence", "Online presence (reveals who is connected — off for high-risk use)"],
-];
+/** Feature-flag toggle labels, resolved against the active locale at render time. */
+function featureFlagLabels(): [keyof FeatureFlags, string][] {
+  return [
+    ["enablePublicChannels", t("admin.flagPublicChannels")],
+    ["enablePrivateChannels", t("admin.flagPrivateChannels")],
+    ["enableUserChannels", t("admin.flagUserChannels")],
+    ["enableReplies", t("admin.flagReplies")],
+    ["enableDMs", t("admin.flagDMs")],
+    ["enableReactions", t("admin.flagReactions")],
+    ["enableMarkdown", t("admin.flagMarkdown")],
+    ["enableAttachments", t("admin.flagAttachments")],
+    ["enablePresence", t("admin.flagPresence")],
+  ];
+}
 
-const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
-  ["allowUserDisplayNameEdit", "Users can edit their display name"],
-  ["allowUserAvatarEdit", "Users can edit their avatar"],
-  ["allowUserAvatarUpload", "Users can upload avatar images"],
-  ["allowAdminUserEdit", "Admins can edit other users"],
-];
+/** Identity-permission toggle labels, resolved against the active locale at render time. */
+function identityLabels(): [keyof IdentityConfig, string][] {
+  return [
+    ["allowUserDisplayNameEdit", t("admin.identityDisplayName")],
+    ["allowUserAvatarEdit", t("admin.identityAvatarEdit")],
+    ["allowUserAvatarUpload", t("admin.identityAvatarUpload")],
+    ["allowAdminUserEdit", t("admin.identityAdminEdit")],
+  ];
+}
 
 /**
- * Human-facing summary of what each security profile enforces. A named profile bundles the access,
- * retention, and kill-switch axes (docs/09); `custom` unlocks them for individual editing. Only the
- * axes LOAM enforces today are described — transport encryption / E2EE are future, which is why
- * `open` and `standard` currently apply the same settings.
+ * Human-facing summary of what each security profile enforces, resolved against the active locale at
+ * render time. A named profile bundles the access, retention, and kill-switch axes (docs/09);
+ * `custom` unlocks them for individual editing. Only the axes LOAM enforces today are described —
+ * transport encryption / E2EE are future, which is why `open` and `standard` currently apply the
+ * same settings.
  */
-const SECURITY_PROFILE_LABELS: Record<SecurityProfile, { title: string; summary: string }> = {
-  open: {
-    title: "Open",
-    summary: "Anyone joins and posts immediately. Messages are kept and the kill switch is off — maximum access, for disaster-relief style use.",
-  },
-  standard: {
-    title: "Standard",
-    summary: "Anyone with the join link participates; messages are kept and the kill switch is off. (Same enforced settings as Open until transport encryption lands.)",
-  },
-  hardened: {
-    title: "Hardened",
-    summary: "New joiners must be approved, messages expire after 1 hour, and the kill switch is armed. For high-risk use.",
-  },
-  custom: {
-    title: "Custom",
-    summary: "Set who can join, message retention, and the kill switch individually in the sections below.",
-  },
-};
+function securityProfileLabels(): Record<SecurityProfile, { title: string; summary: string }> {
+  return {
+    open: { title: t("admin.profileOpenTitle"), summary: t("admin.profileOpenSummary") },
+    standard: { title: t("admin.profileStandardTitle"), summary: t("admin.profileStandardSummary") },
+    hardened: { title: t("admin.profileHardenedTitle"), summary: t("admin.profileHardenedSummary") },
+    custom: { title: t("admin.profileCustomTitle"), summary: t("admin.profileCustomSummary") },
+  };
+}
 
 /**
  * Admin-only configuration area: edits node feature flags, identity permissions, LLM settings, and
@@ -4170,12 +4168,12 @@ function AdminView({
         if (parsed.success) {
           setAdminConfig(parsed.data);
         } else {
-          setLoadError("Received an invalid config payload from the server.");
+          setLoadError(t("admin.configInvalid"));
         }
       })
       .catch((error: unknown) => {
         if (active) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load the node config.");
+          setLoadError(error instanceof Error ? error.message : t("admin.configLoadError"));
         }
       });
 
@@ -4231,14 +4229,14 @@ function AdminView({
         const message =
           payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
             ? payload.error
-            : `Config update failed: ${response.status}`;
+            : t("admin.configUpdateFailed", { status: response.status });
         throw new Error(message);
       }
 
       const parsed = LoamConfigSchema.safeParse(payload);
 
       if (!parsed.success) {
-        throw new Error("The server accepted the update but returned an unrecognised config payload.");
+        throw new Error(t("admin.configUnrecognised"));
       }
 
       setAdminConfig(parsed.data);
@@ -4246,7 +4244,7 @@ function AdminView({
       setPanicToken("");
       setSaved(true);
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "Unable to save the node config.");
+      setSaveError(error instanceof Error ? error.message : t("admin.configSaveError"));
     } finally {
       window.clearTimeout(timeout);
       setSaving(false);
@@ -4337,7 +4335,7 @@ function AdminView({
         const message =
           payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
             ? payload.error
-            : `Kill switch failed: ${response.status}`;
+            : t("admin.killSwitchFailed", { status: response.status });
         throw new Error(message);
       }
 
@@ -4345,7 +4343,7 @@ function AdminView({
       // admin's own browser is cleaned even if its socket is closed (purging twice is harmless).
       await onWiped();
     } catch (error) {
-      setFireError(error instanceof Error ? error.message : "Unable to trigger the kill switch.");
+      setFireError(error instanceof Error ? error.message : t("admin.killSwitchError"));
       setFiring(false);
     } finally {
       window.clearTimeout(timeout);
@@ -4360,14 +4358,11 @@ function AdminView({
             ←
           </NavLink>
           <div>
-            <p className="eyebrow">Admin</p>
-            <h1>Not authorized</h1>
+            <p className="eyebrow">{t("admin.eyebrow")}</p>
+            <h1>{t("people.notAuthorizedTitle")}</h1>
           </div>
         </header>
-        <p className="form-note">
-          This area is for node administrators. Claim admin access from the settings page if this
-          node allows it.
-        </p>
+        <p className="form-note">{t("admin.notAuthorizedNote")}</p>
       </section>
     );
   }
@@ -4379,12 +4374,12 @@ function AdminView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">Admin</p>
-          <h1>Node configuration</h1>
+          <p className="eyebrow">{t("admin.eyebrow")}</p>
+          <h1>{t("admin.title")}</h1>
         </div>
       </header>
       {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!adminConfig && !loadError ? <p className="form-note">Loading node config…</p> : null}
+      {!adminConfig && !loadError ? <p className="form-note">{t("admin.loading")}</p> : null}
       {adminConfig ? (
         <form
           className="settings-grid"
@@ -4395,31 +4390,31 @@ function AdminView({
         >
           <div className="profile-panel getting-started">
             <div>
-              <p className="eyebrow">Getting started</p>
-              <h2>Run your network in five steps</h2>
+              <p className="eyebrow">{t("admin.gettingStartedEyebrow")}</p>
+              <h2>{t("admin.gettingStartedTitle")}</h2>
             </div>
             <ol className="getting-started-steps">
-              <li><strong>Name it</strong> — set a Network name below so joiners recognise where they are.</li>
-              <li><strong>Choose a posture</strong> — pick a Security profile (Open for relief, Hardened for high-risk), or Custom to tune each control.</li>
-              <li><strong>Invite people</strong> — share the join QR from the sidebar; under an Approval policy, greeters let newcomers in from People &amp; moderation.</li>
-              <li><strong>Set your team</strong> — grant moderator/greeter roles or promote a co-admin in People &amp; moderation.</li>
-              <li><strong>Grow the mesh</strong> — to cover more than one hotspot, enable Node-to-node sync and link another host by QR.</li>
+              <li><strong>{t("admin.step1Title")}</strong> — {t("admin.step1Body")}</li>
+              <li><strong>{t("admin.step2Title")}</strong> — {t("admin.step2Body")}</li>
+              <li><strong>{t("admin.step3Title")}</strong> — {t("admin.step3Body")}</li>
+              <li><strong>{t("admin.step4Title")}</strong> — {t("admin.step4Body")}</li>
+              <li><strong>{t("admin.step5Title")}</strong> — {t("admin.step5Body")}</li>
             </ol>
             <p className="form-note">
-              Everything here is optional and reversible. See the{" "}
+              {t("admin.gettingStartedNoteBefore")}{" "}
               <a href="https://github.com/JosephMaynard/loam/blob/master/docs/12-operators-guide.md" rel="noreferrer" target="_blank">
-                operator&rsquo;s guide
+                {t("admin.gettingStartedGuideLink")}
               </a>{" "}
-              for the full walkthrough.
+              {t("admin.gettingStartedNoteAfter")}
             </p>
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Network</p>
-              <h2>Identity</h2>
+              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
+              <h2>{t("admin.identityHeading")}</h2>
             </div>
             <label>
-              Network name
+              {t("admin.networkName")}
               <input
                 disabled={saving}
                 maxLength={80}
@@ -4431,18 +4426,36 @@ function AdminView({
                 value={adminConfig.node.name}
               />
             </label>
-            <p className="form-note">
-              Shown to everyone who joins — in the sidebar and on the join screen. Give your network a
-              name people will recognise (e.g. &ldquo;Riverside Relief&rdquo;).
-            </p>
+            <p className="form-note">{t("admin.networkNameNote")}</p>
+            <label>
+              {t("admin.language")}
+              <select
+                disabled={saving}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous
+                      ? { ...previous, node: { ...previous.node, locale: LocaleSchema.parse(event.currentTarget.value) } }
+                      : previous,
+                  )
+                }
+                value={adminConfig.node.locale}
+              >
+                {LocaleSchema.options.map((option) => (
+                  <option key={option} value={option}>
+                    {LOCALE_LABELS[option]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="form-note">{t("admin.languageNote")}</p>
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Security</p>
-              <h2>Profile</h2>
+              <p className="eyebrow">{t("settings.securityEyebrow")}</p>
+              <h2>{t("admin.profileHeading")}</h2>
             </div>
             <label>
-              Posture
+              {t("admin.posture")}
               <select
                 disabled={saving}
                 onInput={(event) =>
@@ -4452,37 +4465,38 @@ function AdminView({
               >
                 {SecurityProfileSchema.options.map((profile) => (
                   <option key={profile} value={profile}>
-                    {SECURITY_PROFILE_LABELS[profile].title}
+                    {securityProfileLabels()[profile].title}
                   </option>
                 ))}
               </select>
             </label>
-            <p className="form-note">{SECURITY_PROFILE_LABELS[adminConfig.security.profile].summary}</p>
+            <p className="form-note">{securityProfileLabels()[adminConfig.security.profile].summary}</p>
             <label>
-              Who can join
+              {t("admin.whoCanJoin")}
               <select
                 disabled={saving || adminConfig.security.profile !== "custom"}
                 onInput={(event) => setJoinPolicy(JoinPolicySchema.parse(event.currentTarget.value))}
                 value={adminConfig.access.joinPolicy}
               >
-                <option value="open">Open — anyone with the link joins</option>
-                <option value="approval">Approval — a greeter or admin lets people in</option>
+                <option value="open">{t("admin.joinOpen")}</option>
+                <option value="approval">{t("admin.joinApproval")}</option>
               </select>
             </label>
             {adminConfig.security.profile !== "custom" ? (
               <p className="form-note">
-                Access, retention, and the kill switch are managed by the{" "}
-                <strong>{SECURITY_PROFILE_LABELS[adminConfig.security.profile].title}</strong> profile.
-                Switch to <strong>Custom</strong> to edit them individually.
+                {t("admin.axesManaged", {
+                  profile: securityProfileLabels()[adminConfig.security.profile].title,
+                  custom: securityProfileLabels().custom.title,
+                })}
               </p>
             ) : null}
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Features</p>
-              <h2>Messaging</h2>
+              <p className="eyebrow">{t("admin.featuresEyebrow")}</p>
+              <h2>{t("admin.messagingHeading")}</h2>
             </div>
-            {FEATURE_FLAG_LABELS.map(([key, label]) => (
+            {featureFlagLabels().map(([key, label]) => (
               <label className="admin-toggle" key={key}>
                 <input
                   checked={adminConfig.features[key]}
@@ -4496,10 +4510,10 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Identity</p>
-              <h2>Profiles</h2>
+              <p className="eyebrow">{t("admin.identityEyebrow")}</p>
+              <h2>{t("admin.profilesHeading")}</h2>
             </div>
-            {IDENTITY_LABELS.map(([key, label]) => (
+            {identityLabels().map(([key, label]) => (
               <label className="admin-toggle" key={key}>
                 <input
                   checked={adminConfig.identity[key]}
@@ -4513,8 +4527,8 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">LLM</p>
-              <h2>Assistant (Ollama)</h2>
+              <p className="eyebrow">{t("admin.llmEyebrow")}</p>
+              <h2>{t("admin.llmHeading")}</h2>
             </div>
             <label className="admin-toggle">
               <input
@@ -4523,10 +4537,10 @@ function AdminView({
                 onInput={(event) => setOllama({ enabled: event.currentTarget.checked })}
                 type="checkbox"
               />
-              Enable the LLM assistant
+              {t("admin.llmEnable")}
             </label>
             <label>
-              Ollama base URL
+              {t("admin.llmBaseUrl")}
               <input
                 disabled={saving}
                 onInput={(event) => setOllama({ baseUrl: event.currentTarget.value })}
@@ -4534,7 +4548,7 @@ function AdminView({
               />
             </label>
             <label>
-              Model
+              {t("admin.llmModel")}
               <input
                 disabled={saving}
                 onInput={(event) => setOllama({ model: event.currentTarget.value })}
@@ -4542,7 +4556,7 @@ function AdminView({
               />
             </label>
             <label>
-              Bot display name
+              {t("admin.llmBotName")}
               <input
                 disabled={saving}
                 maxLength={80}
@@ -4551,7 +4565,7 @@ function AdminView({
               />
             </label>
             <label>
-              System prompt (optional)
+              {t("admin.llmSystemPrompt")}
               <textarea
                 disabled={saving}
                 onInput={(event) => setOllama({ systemPrompt: event.currentTarget.value || undefined })}
@@ -4562,11 +4576,11 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Privacy</p>
-              <h2>Message retention</h2>
+              <p className="eyebrow">{t("admin.privacyEyebrow")}</p>
+              <h2>{t("admin.retentionHeading")}</h2>
             </div>
             <label>
-              Delete messages after (minutes; blank = keep forever)
+              {t("admin.retentionLabel")}
               <input
                 disabled={saving || adminConfig.security.profile !== "custom"}
                 min={1}
@@ -4592,15 +4606,12 @@ function AdminView({
                 }
               />
             </label>
-            <p className="form-note">
-              Expired messages are deleted from the node and from connected clients (checked every
-              30 seconds). The proactive companion to the kill switch below.
-            </p>
+            <p className="form-note">{t("admin.retentionNote")}</p>
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Safety</p>
-              <h2>Kill switch</h2>
+              <p className="eyebrow">{t("admin.safetyEyebrow")}</p>
+              <h2>{t("admin.killSwitchHeading")}</h2>
             </div>
             <label className="admin-toggle">
               <input
@@ -4609,7 +4620,7 @@ function AdminView({
                 onInput={(event) => setKillSwitch({ enabled: event.currentTarget.checked })}
                 type="checkbox"
               />
-              Enable the kill switch (instant wipe of all node data)
+              {t("admin.killSwitchEnable")}
             </label>
             <label className="admin-toggle">
               <input
@@ -4618,11 +4629,10 @@ function AdminView({
                 onInput={(event) => setKillSwitch({ requireConfirmation: event.currentTarget.checked })}
                 type="checkbox"
               />
-              Require typed confirmation before firing
+              {t("admin.killSwitchRequireConfirm")}
             </label>
             <label>
-              Panic token (optional, min 16 chars; enables unauthenticated POST /api/panic; leave
-              blank to keep the current one)
+              {t("admin.panicToken")}
               <input
                 autoComplete="off"
                 disabled={saving || !adminConfig.killSwitch.enabled}
@@ -4634,14 +4644,10 @@ function AdminView({
             </label>
             {adminConfig.killSwitch.enabled ? (
               <div className="danger-zone">
-                <p className="form-note">
-                  Firing the kill switch permanently deletes all messages, users, sessions, and
-                  avatars on this node and remotely purges every connected client. Node settings
-                  survive.
-                </p>
+                <p className="form-note">{t("admin.killSwitchWarning")}</p>
                 {adminConfig.killSwitch.requireConfirmation ? (
                   <label>
-                    Type <strong>wipe</strong> to arm the button
+                    {t("admin.killSwitchConfirmBefore")} <strong>wipe</strong> {t("admin.killSwitchConfirmAfter")}
                     <input
                       autoComplete="off"
                       disabled={firing}
@@ -4660,7 +4666,7 @@ function AdminView({
                     onClick={() => void fireKillSwitch()}
                     type="button"
                   >
-                    {firing ? "Wiping…" : "Wipe this node now"}
+                    {firing ? t("settings.wiping") : t("admin.wipeNow")}
                   </button>
                 </div>
                 {fireError ? <p className="form-error">{fireError}</p> : null}
@@ -4669,8 +4675,8 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Network</p>
-              <h2>Node-to-node sync</h2>
+              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
+              <h2>{t("admin.syncHeading")}</h2>
             </div>
             <label className="admin-toggle">
               <input
@@ -4685,14 +4691,9 @@ function AdminView({
                 }
                 type="checkbox"
               />
-              Sync public channels with peer nodes
+              {t("admin.syncEnable")}
             </label>
-            <p className="form-note">
-              Pull-based: this node fetches public channels, their messages, and profiles from each
-              peer. DMs and private channels never leave a node. A peer&rsquo;s join URL (from its
-              join QR) is its sync address. Enabling this also lets peers pull this node&rsquo;s
-              public content.
-            </p>
+            <p className="form-note">{t("admin.syncNote")}</p>
             {adminConfig.sync.enabled ? <NodeLinkControl joinUrl={joinUrl} /> : null}
             {adminConfig.sync.peers.length ? (
               <ul className="moderation-list">
@@ -4721,14 +4722,14 @@ function AdminView({
                         }
                         type="button"
                       >
-                        Remove
+                        {t("common.remove")}
                       </button>
                     </div>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="form-note">No peers yet.</p>
+              <p className="form-note">{t("admin.noPeers")}</p>
             )}
             <AddSyncPeerControl
               disabled={saving || adminConfig.sync.peers.length >= 16}
@@ -4740,16 +4741,16 @@ function AdminView({
                 )
               }
             />
-            <p className="form-note">Peer changes apply when you save the node config below.</p>
+            <p className="form-note">{t("admin.peerChangesNote")}</p>
             <SyncStatusPanel />
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Admin access</p>
-              <h2>Bootstrap</h2>
+              <p className="eyebrow">{t("admin.bootstrapEyebrow")}</p>
+              <h2>{t("admin.bootstrapHeading")}</h2>
             </div>
             <label>
-              Strategy
+              {t("admin.strategy")}
               <select
                 disabled={saving}
                 onInput={(event) =>
@@ -4776,7 +4777,7 @@ function AdminView({
             </label>
             {adminConfig.admin.bootstrap === "passphrase" ? (
               <label>
-                New admin passphrase (min 8 chars; leave blank to keep the current one)
+                {t("admin.newPassphrase")}
                 <input
                   autoComplete="off"
                   disabled={saving}
@@ -4787,15 +4788,13 @@ function AdminView({
                 />
               </label>
             ) : null}
-            <p className="form-note">
-              The setup-code strategy prints a one-time claim code in the server logs at startup.
-            </p>
+            <p className="form-note">{t("admin.bootstrapNote")}</p>
             <div className="profile-actions">
               <button disabled={saving} type="submit">
-                {saving ? "Saving" : "Save node config"}
+                {saving ? t("common.saving") : t("admin.saveConfig")}
               </button>
             </div>
-            {saved ? <p className="form-note">Saved. Connected clients pick the change up live.</p> : null}
+            {saved ? <p className="form-note">{t("admin.saved")}</p> : null}
             {saveError ? <p className="form-error">{saveError}</p> : null}
           </div>
         </form>
@@ -4821,7 +4820,7 @@ function AddSyncPeerControl({
   return (
     <div className="sync-peer-add">
       <label>
-        Peer URL (its join URL)
+        {t("admin.peerUrl")}
         <input
           disabled={disabled}
           onInput={(event) => setUrl(event.currentTarget.value)}
@@ -4830,12 +4829,12 @@ function AddSyncPeerControl({
         />
       </label>
       <label>
-        Label (optional)
+        {t("admin.peerLabel")}
         <input
           disabled={disabled}
           maxLength={80}
           onInput={(event) => setLabel(event.currentTarget.value)}
-          placeholder="e.g. Depot Pi"
+          placeholder={t("admin.peerLabelPlaceholder")}
           value={label}
         />
       </label>
@@ -4848,7 +4847,7 @@ function AddSyncPeerControl({
         }}
         type="button"
       >
-        Add peer
+        {t("admin.addPeer")}
       </button>
     </div>
   );
@@ -4882,7 +4881,7 @@ function SyncStatusPanel() {
 
         if (!parsed) {
           // Surface contract drift instead of rendering a silently blank panel.
-          setError("The server returned an unrecognised sync status payload.");
+          setError(t("admin.syncStatusUnrecognised"));
           return;
         }
 
@@ -4890,7 +4889,7 @@ function SyncStatusPanel() {
       })
       .catch((loadError: unknown) => {
         if (active) {
-          setError(loadError instanceof Error ? loadError.message : "Unable to load sync status.");
+          setError(loadError instanceof Error ? loadError.message : t("admin.syncStatusLoadError"));
         }
       });
 
@@ -4918,19 +4917,19 @@ function SyncStatusPanel() {
         const message =
           payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
             ? payload.error
-            : `Sync failed: ${response.status}`;
+            : t("admin.syncFailed", { status: response.status });
         throw new Error(message);
       }
 
       const parsed = parseSyncStatusReport(payload);
 
       if (!parsed) {
-        throw new Error("The server returned an unrecognised sync status payload.");
+        throw new Error(t("admin.syncStatusUnrecognised"));
       }
 
       setReport(parsed);
     } catch (runError) {
-      setError(runError instanceof Error ? runError.message : "Unable to run sync.");
+      setError(runError instanceof Error ? runError.message : t("admin.syncRunError"));
     } finally {
       window.clearTimeout(timeout);
       setRunning(false);
@@ -4944,13 +4943,13 @@ function SyncStatusPanel() {
   return (
     <div className="sync-status">
       <div className="panel-heading">
-        <p className="eyebrow">Status (saved peers)</p>
+        <p className="eyebrow">{t("admin.syncStatusEyebrow")}</p>
         <div className="moderation-actions">
           <button className="ghost-button" disabled={running} onClick={() => setReloadKey((key) => key + 1)} type="button">
-            Refresh
+            {t("common.refresh")}
           </button>
           <button disabled={running || !report.enabled} onClick={() => void runNow()} type="button">
-            {running ? "Syncing…" : "Sync now"}
+            {running ? t("admin.syncing") : t("admin.syncNow")}
           </button>
         </div>
       </div>
@@ -4961,10 +4960,10 @@ function SyncStatusPanel() {
               <strong>{peer.label ?? peer.url}</strong>
               <span>
                 {peer.status?.lastError
-                  ? `Error: ${peer.status.lastError}`
+                  ? t("admin.peerError", { error: peer.status.lastError })
                   : peer.status?.lastSuccessAt
-                    ? `Last synced ${displayTime(peer.status.lastSuccessAt)} · ${peer.status.imported} message(s) imported`
-                    : "Not synced yet"}
+                    ? `${t("admin.peerLastSyncedAt", { time: displayTime(peer.status.lastSuccessAt) })} · ${t("admin.peerImported", { n: peer.status.imported })}`
+                    : t("admin.peerNotSynced")}
               </span>
             </div>
           </li>
@@ -4997,14 +4996,14 @@ async function requestChannel(method: "POST" | "PATCH", path: string, body: unkn
       const message =
         payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
           ? payload.error
-          : `Request failed: ${response.status}`;
+          : t("common.requestFailed", { status: response.status });
       throw new Error(message);
     }
 
     const parsed = ChannelSchema.safeParse(payload);
 
     if (!parsed.success) {
-      throw new Error("The server returned an unrecognised channel payload.");
+      throw new Error(t("admin.channelUnrecognised"));
     }
 
     return parsed.data;
@@ -5074,7 +5073,7 @@ function AdminChannelsPanel({
       })
       .catch((error: unknown) => {
         if (active) {
-          setListError(error instanceof Error ? error.message : "Unable to load channels.");
+          setListError(error instanceof Error ? error.message : t("admin.channelsLoadError"));
         }
       });
 
@@ -5106,7 +5105,7 @@ function AdminChannelsPanel({
       setAllowReplies(true);
       setIsPrivate(false);
     } catch (error) {
-      setCreateError(error instanceof Error ? error.message : "Unable to create the channel.");
+      setCreateError(error instanceof Error ? error.message : t("admin.channelCreateError"));
     } finally {
       setCreating(false);
     }
@@ -5116,8 +5115,8 @@ function AdminChannelsPanel({
     <div className="settings-grid">
       <div className="profile-panel">
         <div>
-          <p className="eyebrow">Channels</p>
-          <h2>Create a channel</h2>
+          <p className="eyebrow">{t("admin.channelsEyebrow")}</p>
+          <h2>{t("admin.createChannelHeading")}</h2>
         </div>
         <form
           onSubmit={(event) => {
@@ -5126,17 +5125,17 @@ function AdminChannelsPanel({
           }}
         >
           <label>
-            Name
+            {t("admin.channelName")}
             <input
               disabled={creating}
               maxLength={80}
               onInput={(event) => setName(event.currentTarget.value)}
-              placeholder="e.g. Logistics"
+              placeholder={t("admin.channelNamePlaceholder")}
               value={name}
             />
           </label>
           <label>
-            Description (optional)
+            {t("admin.channelDescription")}
             <input
               disabled={creating}
               maxLength={280}
@@ -5145,7 +5144,7 @@ function AdminChannelsPanel({
             />
           </label>
           <label>
-            Who can post
+            {t("admin.whoCanPost")}
             <select
               disabled={creating}
               onInput={(event) =>
@@ -5153,8 +5152,8 @@ function AdminChannelsPanel({
               }
               value={allowPosting}
             >
-              <option value="everyone">Everyone</option>
-              <option value="admins">Admins only</option>
+              <option value="everyone">{t("admin.postEveryone")}</option>
+              <option value="admins">{t("admin.postAdmins")}</option>
             </select>
           </label>
           <label className="admin-toggle">
@@ -5164,7 +5163,7 @@ function AdminChannelsPanel({
               onInput={(event) => setAllowReplies(event.currentTarget.checked)}
               type="checkbox"
             />
-            Allow threaded replies
+            {t("admin.allowReplies")}
           </label>
           <label className="admin-toggle">
             <input
@@ -5173,11 +5172,11 @@ function AdminChannelsPanel({
               onInput={(event) => setIsPrivate(event.currentTarget.checked)}
               type="checkbox"
             />
-            Private (invite-only; you start as the only member)
+            {t("admin.channelPrivate")}
           </label>
           <div className="profile-actions">
             <button disabled={creating || !name.trim()} type="submit">
-              {creating ? "Creating…" : "Create channel"}
+              {creating ? t("admin.creating") : t("admin.createChannel")}
             </button>
           </div>
           {createError ? <p className="form-error">{createError}</p> : null}
@@ -5185,13 +5184,13 @@ function AdminChannelsPanel({
       </div>
       <div className="profile-panel">
         <div>
-          <p className="eyebrow">Channels</p>
-          <h2>Existing channels</h2>
+          <p className="eyebrow">{t("admin.channelsEyebrow")}</p>
+          <h2>{t("admin.existingChannels")}</h2>
         </div>
         {listError ? <p className="form-error">{listError}</p> : null}
-        {!loaded && !listError ? <p className="form-note">Loading channels…</p> : null}
+        {!loaded && !listError ? <p className="form-note">{t("admin.channelsLoading")}</p> : null}
         {loaded && adminChannels.length === 0 ? (
-          <p className="form-note">No channels yet. Create one above.</p>
+          <p className="form-note">{t("admin.channelsEmpty")}</p>
         ) : null}
         {adminChannels.length > 0 ? (
           <ul className="admin-channel-list">
@@ -5232,7 +5231,7 @@ function AdminChannelRow({
       onApply(updated);
       setName(updated.name);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to update the channel.");
+      setError(requestError instanceof Error ? requestError.message : t("admin.channelUpdateError"));
     } finally {
       setBusy(false);
     }
@@ -5242,21 +5241,21 @@ function AdminChannelRow({
     <li className={channel.archived ? "admin-channel archived" : "admin-channel"}>
       <div className="admin-channel-main">
         <input
-          aria-label={`Channel name for ${channel.name}`}
+          aria-label={t("admin.channelNameAria", { name: channel.name })}
           disabled={busy}
           maxLength={80}
           onInput={(event) => setName(event.currentTarget.value)}
           value={name}
         />
         <span className="admin-channel-meta">
-          {channel.allowPosting === "admins" ? "Admins post" : "Open posting"}
-          {channel.visibility === "private" ? " · Private" : ""}
-          {channel.archived ? " · Archived" : ""}
+          {channel.allowPosting === "admins" ? t("admin.metaAdminsPost") : t("admin.metaOpenPosting")}
+          {channel.visibility === "private" ? ` · ${t("admin.metaPrivate")}` : ""}
+          {channel.archived ? ` · ${t("admin.metaArchived")}` : ""}
         </span>
       </div>
       <div className="admin-channel-actions">
         <button disabled={renameDisabled} onClick={() => void patch({ name: trimmedName })} type="button">
-          Rename
+          {t("admin.rename")}
         </button>
         <button
           className={channel.archived ? undefined : "danger-button"}
@@ -5264,7 +5263,7 @@ function AdminChannelRow({
           onClick={() => void patch({ archived: !channel.archived })}
           type="button"
         >
-          {channel.archived ? "Restore" : "Archive"}
+          {channel.archived ? t("admin.restore") : t("admin.archive")}
         </button>
       </div>
       {error ? <p className="form-error">{error}</p> : null}
