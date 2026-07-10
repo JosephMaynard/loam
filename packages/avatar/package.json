@@ -24,13 +24,13 @@
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.4",
-    "@tailwindcss/vite": "^4.2.2",
-    "@types/node": "^24.12.0",
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/node": "^24.13.3",
     "jsdom": "^29.1.1",
-    "preact": "^10.29.3",
+    "preact": "^10.29.7",
     "tailwindcss": "^4.3.2",
-    "typescript": "~5.9.3",
-    "vite": "^8.1.3",
+    "typescript": "~7.0.2",
+    "vite": "^8.1.4",
     "vitest": "^4.1.10"
   }
 }

@@ -11,17 +11,17 @@
   },
   "dependencies": {
     "@fastify/rate-limit": "^11.1.0",
-    "@fastify/static": "^9.1.1",
-    "@fastify/websocket": "^11.2.0",
+    "@fastify/static": "^9.3.0",
+    "@fastify/websocket": "^11.3.0",
     "@loam/display-name": "workspace:*",
     "@loam/schema": "workspace:*",
     "better-sqlite3-multiple-ciphers": "^12.11.1",
-    "fastify": "^5.9.0"
+    "fastify": "^5.10.0"
   },
   "devDependencies": {
-    "@types/node": "^24.12.0",
-    "tsx": "^4.22.4",
-    "typescript": "~5.9.3",
+    "@types/node": "^24.13.3",
+    "tsx": "^4.23.0",
+    "typescript": "~7.0.2",
     "vitest": "^4.1.10"
   }
 }
