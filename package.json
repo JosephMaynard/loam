@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "tsx scripts/dev.ts",
     "build": "pnpm -r --if-present build",
+    "build:cli": "node scripts/build-cli.mjs",
     "test": "pnpm -r --if-present test"
   },
   "devDependencies": {
     "@loam/qr": "workspace:*",
+    "esbuild": "^0.25.0",
     "tsx": "^4.22.4"
   },
   "keywords": [],
