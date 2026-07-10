@@ -17,5 +17,12 @@
   "keywords": [],
   "author": "Magic Zebra Ltd",
   "license": "AGPL-3.0-only",
-  "packageManager": "pnpm@10.30.2"
+  "packageManager": "pnpm@10.30.2",
+  "pnpm": {
+    "overrides": {
+      "tar@<7.5.16": "^7.5.16",
+      "uuid@<11.1.1": "^11.1.1",
+      "@babel/core@<7.29.6": "^7.29.6"
+    }
+  }
 }
