@@ -134,6 +134,8 @@ export type AppOptions = {
    * (see `apps/server/src/db.ts` and docs/04). Ignored when a DB key is set (SQLCipher is used).
    */
   dbDriver?: StoreDriver;
+  /** Node version string shown to clients (via `/api/config`). Defaults to `"dev"`. */
+  version?: string;
   logger?: boolean;
 };
 
@@ -2391,6 +2393,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     return {
       nodeName: appConfig.node.name,
+      version: options.version ?? "dev",
       joinUrl: `http://${joinHost}:${clientPort}`,
       websocketPath: "/ws",
       currentUser,

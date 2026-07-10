@@ -47,6 +47,8 @@ import { safeQrSvg } from "./lib/qr";
 
 type Config = {
   nodeName: string;
+  /** The node's build version, shown in the join/settings footer. Absent on very old nodes. */
+  version?: string;
   joinUrl: string;
   websocketPath: string;
   currentUser: User;
@@ -3443,6 +3445,9 @@ function SettingsView({
         <div className="join-panel">
           <div className="qr-box" dangerouslySetInnerHTML={{ __html: qrSvg }} />
           <p>{config?.joinUrl ?? window.location.origin}</p>
+          {/* Product name + version — the node's build, not this browser's cache. Deliberately no
+              translatable label word so it stays i18n-neutral. */}
+          <p className="node-version">LOAM v{config?.version ?? "…"}</p>
         </div>
         <div className="identity-panel">
           <Avatar avatar={previewUser.avatar} id={currentUser.id} />

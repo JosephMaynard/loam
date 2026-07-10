@@ -784,6 +784,13 @@ a {
   overflow-wrap: anywhere;
 }
 
+.node-version {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--c-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 .qr-box {
   display: grid;
   place-items: center;
