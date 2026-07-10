@@ -1,0 +1,34 @@
+{
+  "name": "loamnet",
+  "version": "0.1.0",
+  "description": "Run a local, off-grid LOAM messaging node from the terminal — server + installable PWA, no internet or accounts. Scan the printed QR to join over your LAN.",
+  "keywords": [
+    "loam",
+    "off-grid",
+    "local-first",
+    "mesh",
+    "messaging",
+    "pwa",
+    "offline",
+    "lan"
+  ],
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "loam": "./bin/loam.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "client"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3-multiple-ciphers": "^12.11.1"
+  },
+  "scripts": {
+    "prepublishOnly": "cd .. && pnpm -r build && node scripts/build-cli.mjs"
+  }
+}

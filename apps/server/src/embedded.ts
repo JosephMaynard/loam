@@ -81,6 +81,9 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
     ephemeralDbKey,
     dbDriver: parseDbDriver(process.env.LOAM_DB_DRIVER),
+    // The Android host / npm CLI inject the app version via LOAM_VERSION (no package.json on the
+    // bundle path); "dev" if unset.
+    version: process.env.LOAM_VERSION?.trim() || "dev",
   });
 
   if (app.adminSetupCode) {

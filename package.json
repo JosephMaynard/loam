@@ -1,19 +1,28 @@
 {
   "name": "loam",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Local-first, off-grid messaging: a host runs it on a laptop, Pi, or phone; nearby people scan a QR and chat over the local network.",
   "scripts": {
     "dev": "tsx scripts/dev.ts",
     "build": "pnpm -r --if-present build",
+    "build:cli": "node scripts/build-cli.mjs",
     "test": "pnpm -r --if-present test"
   },
   "devDependencies": {
     "@loam/qr": "workspace:*",
+    "esbuild": "^0.25.0",
     "tsx": "^4.23.0"
   },
   "keywords": [],
   "author": "Magic Zebra Ltd",
   "license": "AGPL-3.0-only",
-  "packageManager": "pnpm@10.30.2"
+  "packageManager": "pnpm@10.30.2",
+  "pnpm": {
+    "overrides": {
+      "tar@<7.5.16": "^7.5.16",
+      "uuid@<11.1.1": "^11.1.1",
+      "@babel/core@<7.29.6": "^7.29.6"
+    }
+  }
 }

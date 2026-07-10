@@ -59,6 +59,31 @@ export type JoinPolicy = z.infer<typeof JoinPolicySchema>;
 export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
 export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
 
+/**
+ * The UI languages LOAM ships. The admin selects one for the whole node (`node.locale`), applied to
+ * every user — there is no per-user picker. `en` is the source of truth and the guaranteed fallback.
+ * Five are right-to-left scripts: `ar`, `fa`, `ur`, `prs` (Dari), `ps` (Pashto). Dari uses the ISO
+ * 639-3 tag `prs`; the client maps it to `fa-AF` where `Intl` needs a CLDR locale.
+ */
+export const LocaleSchema = z.enum([
+  "en",
+  "es",
+  "fr",
+  "ar",
+  "fa",
+  "pt",
+  "uk",
+  "ru",
+  "tr",
+  "my",
+  "ur",
+  "prs",
+  "ps",
+  "sw",
+  "bn",
+]);
+export type Locale = z.infer<typeof LocaleSchema>;
+
 /** The already-enforced security axes a non-`custom` profile applies as one coherent bundle. */
 export type SecurityProfilePreset = {
   /** Who may join: everyone immediately (`open`) or a greeter/admin approves newcomers (`approval`). */
@@ -152,6 +177,8 @@ export const ChannelUpdateRequestSchema = z
 export type ChannelUpdateRequest = z.infer<typeof ChannelUpdateRequestSchema>;
 
 export const NetworkConfigSchema = z.object({
+  /** The operator-chosen name of this network, shown in the client (sidebar, join screen). */
+  nodeName: z.string().min(1).max(80),
   enablePublicChannels: z.boolean(),
   enablePrivateChannels: z.boolean(),
   enableUserChannels: z.boolean(),
@@ -160,6 +187,7 @@ export const NetworkConfigSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  enablePresence: z.boolean(),
   enableLLMChat: z.boolean(),
   enableLLMStreaming: z.boolean(),
   allowUserDisplayNameEdit: z.boolean(),
@@ -170,6 +198,8 @@ export const NetworkConfigSchema = z.object({
   joinPolicy: JoinPolicySchema,
   /** The node's active security posture, surfaced so the client can gate secure-only affordances. */
   securityProfile: SecurityProfileSchema,
+  /** Admin-selected UI language for the whole node; the client renders every label in it. */
+  locale: LocaleSchema,
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
 
@@ -182,8 +212,22 @@ export const FeatureFlagsSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  /**
+   * Broadcast who is currently connected (online dots). Default on; worth disabling on
+   * high-risk deployments — presence reveals exactly who is reachable right now.
+   */
+  enablePresence: z.boolean(),
 });
 export type FeatureFlags = z.infer<typeof FeatureFlagsSchema>;
+
+/** Operator-facing identity of the node itself (not of any user). */
+export const NodeIdentityConfigSchema = z.object({
+  /** Network name shown to everyone in the client. */
+  name: z.string().trim().min(1).max(80),
+  /** UI language for the whole node, chosen by the admin and applied to every user. */
+  locale: LocaleSchema,
+});
+export type NodeIdentityConfig = z.infer<typeof NodeIdentityConfigSchema>;
 
 export const IdentityConfigSchema = z.object({
   allowUserDisplayNameEdit: z.boolean(),
@@ -262,6 +306,7 @@ export const SyncConfigSchema = z.object({
 export type SyncConfig = z.infer<typeof SyncConfigSchema>;
 
 export const LoamConfigSchema = z.object({
+  node: NodeIdentityConfigSchema,
   identity: IdentityConfigSchema,
   features: FeatureFlagsSchema,
   llm: z.object({ ollama: OllamaConfigSchema }),
@@ -275,6 +320,7 @@ export const LoamConfigSchema = z.object({
 export type LoamConfig = z.infer<typeof LoamConfigSchema>;
 
 export const LoamConfigUpdateSchema = z.object({
+  node: NodeIdentityConfigSchema.partial().optional(),
   identity: IdentityConfigSchema.partial().optional(),
   features: FeatureFlagsSchema.partial().optional(),
   llm: z
@@ -405,7 +451,13 @@ export const BaseMessageSchema = z.object({
 });
 export type BaseMessage = z.infer<typeof BaseMessageSchema>;
 
+// Stored bodies are unbounded: LLM replies can be long, and synced messages must round-trip
+// whatever a peer legitimately stored.
 const MessageBodySchema = z.string();
+// Human-submitted bodies ARE capped — unbounded, one hostile joiner could flood ~1MB messages up
+// to the per-IP rate limit. 8000 chars is generous for a LAN chat message. (The bot writes its
+// replies server-side via the unbounded stored schema, so this never truncates an LLM answer.)
+const MessageCreateBodySchema = z.string().max(8000);
 const MessageAttachmentsSchema = z.array(MessageAttachmentSchema).max(4);
 
 export const MessageCreateRequestSchema = z
@@ -413,26 +465,26 @@ export const MessageCreateRequestSchema = z
     z.object({
       type: z.literal("channelPost"),
       channelId: IdSchema,
-      body: MessageBodySchema,
+      body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
     }),
     z.object({
       type: z.literal("channelReply"),
       channelId: IdSchema,
       parentMessageId: IdSchema,
-      body: MessageBodySchema,
+      body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
     }),
     z.object({
       type: z.literal("dm"),
       recipientUserId: IdSchema,
-      body: MessageBodySchema,
+      body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
     }),
     z.object({
       type: z.literal("reaction"),
       targetMessageId: IdSchema,
-      reaction: z.string().min(1),
+      reaction: z.string().min(1).max(64),
     }),
   ])
   // A message needs text or at least one attachment (an image alone is a valid message).
@@ -445,7 +497,7 @@ export type MessageCreateRequest = z.infer<typeof MessageCreateRequestSchema>;
 
 /** Author request to edit a body-bearing message (channel post/reply or DM). */
 export const MessageEditRequestSchema = z.object({
-  body: MessageBodySchema.refine((body) => body.trim().length > 0, {
+  body: MessageCreateBodySchema.refine((body) => body.trim().length > 0, {
     message: "Message body cannot be empty",
   }),
 });
@@ -479,7 +531,7 @@ export type DirectMessage = z.infer<typeof DirectMessageSchema>;
 export const ReactionMessageSchema = BaseMessageSchema.extend({
   type: z.literal("reaction"),
   targetMessageId: IdSchema,
-  reaction: z.string().min(1),
+  reaction: z.string().min(1).max(64),
 });
 export type ReactionMessage = z.infer<typeof ReactionMessageSchema>;
 

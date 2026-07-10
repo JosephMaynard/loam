@@ -1,5 +1,7 @@
-import { encodeQR, renderQRToSvg } from "@loam/qr";
 import { useMemo, useState } from "preact/hooks";
+
+import { t } from "../i18n";
+import { safeQrSvg } from "../lib/qr";
 
 /**
  * Sidebar invite affordance for greeters/admins: a collapsible panel rendering the node's join URL as
@@ -8,10 +10,7 @@ import { useMemo, useState } from "preact/hooks";
  */
 export function InviteControl({ joinUrl }: { joinUrl?: string }) {
   const [open, setOpen] = useState(false);
-  const qrSvg = useMemo(
-    () => (joinUrl ? renderQRToSvg(encodeQR(joinUrl), { dark: "#16271f", light: "#ffffff" }) : ""),
-    [joinUrl],
-  );
+  const qrSvg = useMemo(() => safeQrSvg(joinUrl, "#16271f"), [joinUrl]);
 
   if (!joinUrl) {
     return null;
@@ -25,7 +24,7 @@ export function InviteControl({ joinUrl }: { joinUrl?: string }) {
         onClick={() => setOpen((previous) => !previous)}
         type="button"
       >
-        {open ? "× Hide invite" : "⧉ Invite someone"}
+        {open ? t("invite.hide") : t("invite.show")}
       </button>
       {open ? (
         <div className="invite-panel">

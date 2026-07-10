@@ -1,9 +1,14 @@
 **/node_modules/
 **/dist/
 **/dist-demo/
+# loamnet build output (bundled server lives in cli/dist via **/dist/; the copied web client here):
+cli/client/
 .loam/
 .DS_Store
 .vscode/
 # The root pnpm-lock.yaml is the single authoritative lockfile; nested ones are stray.
 apps/*/pnpm-lock.yaml
 packages/*/pnpm-lock.yaml
+
+# npm pack output
+*.tgz

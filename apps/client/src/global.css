@@ -117,7 +117,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 26px;
-  border-right: 1px solid var(--c-surf-3);
+  border-inline-end: 1px solid var(--c-surf-3);
   background: var(--c-sidebar-bg);
   color: var(--c-sidebar-fg);
   padding: 18px 14px;
@@ -241,7 +241,7 @@ a {
   background: transparent;
   color: var(--c-sidebar-muted);
   font-size: 0.9rem;
-  text-align: left;
+  text-align: start;
 }
 
 .new-channel-toggle:hover {
@@ -486,13 +486,13 @@ a {
 }
 
 .markdown-body ul {
-  padding-left: 20px;
+  padding-inline-start: 20px;
 }
 
 .markdown-body blockquote {
-  border-left: 3px solid var(--c-border-3);
+  border-inline-start: 3px solid var(--c-border-3);
   color: var(--c-text-2);
-  padding-left: 10px;
+  padding-inline-start: 10px;
 }
 
 .markdown-body code {
@@ -565,7 +565,7 @@ a {
 
 .message-delete {
   min-height: 28px;
-  margin-left: auto;
+  margin-inline-start: auto;
   border-radius: 8px;
   background: transparent;
   color: var(--c-text-muted);
@@ -694,7 +694,7 @@ a {
 .thread-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  border-left: 1px solid var(--c-surf-3);
+  border-inline-start: 1px solid var(--c-surf-3);
   background: var(--c-bg-3);
 }
 
@@ -704,7 +704,7 @@ a {
 
 .thread-header > div {
   min-width: 0;
-  margin-right: auto;
+  margin-inline-end: auto;
 }
 
 .close-button {
@@ -749,7 +749,7 @@ a {
 
 .connection-error {
   position: fixed;
-  right: 16px;
+  inset-inline-end: 16px;
   bottom: 16px;
   max-width: min(420px, calc(100vw - 32px));
   margin: 0;
@@ -782,6 +782,13 @@ a {
   color: var(--c-text-muted);
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.node-version {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--c-text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .qr-box {
@@ -1108,7 +1115,7 @@ a {
 /* New-message toasts. */
 .toast-stack {
   position: fixed;
-  right: 16px;
+  inset-inline-end: 16px;
   bottom: 16px;
   z-index: 50;
   display: grid;
@@ -1124,7 +1131,7 @@ a {
   background: var(--c-white);
   box-shadow: 0 10px 30px rgba(23, 35, 29, 0.18);
   padding: 10px 12px;
-  text-align: left;
+  text-align: start;
   color: var(--c-ink);
   animation: toast-in 160ms ease-out;
 }
@@ -1358,7 +1365,7 @@ a {
 
 /* Private-channel members panel. */
 .conversation-header-actions {
-  margin-left: auto;
+  margin-inline-start: auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1391,6 +1398,63 @@ a {
   gap: 4px;
   font-size: 0.85rem;
   color: var(--c-text-2);
+}
+
+/* Presence (online dots). */
+.presence-anchor {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.presence-dot {
+  position: absolute;
+  inset-inline-end: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #33c27a;
+  border: 2px solid var(--c-sidebar-bg);
+}
+
+/* Day separators in message history. */
+.day-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 14px 0 6px;
+}
+
+.day-divider span {
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: var(--c-bg-2);
+  color: var(--c-text-muted);
+  padding: 2px 12px;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+/* Getting-started admin panel. */
+.getting-started {
+  grid-column: 1 / -1;
+}
+
+.getting-started-steps {
+  margin: 0;
+  padding-inline-start: 20px;
+  display: grid;
+  gap: 8px;
+  color: var(--c-text-2);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+/* Node-link ("link another node") control reuses the invite panel styling. */
+.node-link-control {
+  display: grid;
+  gap: 8px;
 }
 
 /* Message attachments. */

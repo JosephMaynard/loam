@@ -72,6 +72,13 @@ function withCleartextTraffic(config) {
       throw new Error("with-loam-host: no <application> element in AndroidManifest.xml to set usesCleartextTraffic on.");
     }
     application.$["android:usesCleartextTraffic"] = "true";
+    // Disable OS backup: the on-device `.loam` dir holds the (currently unencrypted) message
+    // history, avatars, and sessions. Expo defaults allowBackup to true, which would let Google
+    // Auto Backup and `adb backup` copy that data off the device — wrong for a privacy app whose
+    // whole point is that nothing leaves the local node. (docs/04 — on-device encryption is the
+    // deeper follow-up; this closes the extraction path meanwhile.)
+    application.$["android:allowBackup"] = "false";
+    application.$["android:fullBackupContent"] = "false";
     return cfg;
   });
 }

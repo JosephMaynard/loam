@@ -2,7 +2,9 @@
 
 These docs are a **briefing pack**, not prescriptive specs. They capture the current state (grounded
 in real files/functions), the goal, design options with a recommendation, a task breakdown, and open
-questions. Fable decides how to execute. Read `CLAUDE.md` first for the architecture baseline.
+questions. Fable decides how to execute. Read `CLAUDE.md` first for the architecture baseline. For the
+end-to-end guide to *running* a node (host setup, admin, moderation, mesh, emergency posture), see
+the [Operator's guide](12-operators-guide.md).
 
 ## The four initiatives
 

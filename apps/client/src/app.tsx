@@ -1,9 +1,9 @@
-import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
   AdminBootstrapStrategySchema,
   ChannelSchema,
   JoinPolicySchema,
   LoamConfigSchema,
+  LocaleSchema,
   MessageAttachmentSchema,
   MessageSchema,
   securityProfilePreset,
@@ -35,16 +35,32 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
 import { InviteControl } from "./components/InviteControl";
+import { NodeLinkControl } from "./components/NodeLinkControl";
 import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
 import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
+import { dayKey, dayLabel } from "./lib/dates";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
+import {
+  LOCALE_LABELS,
+  RTL_LOCALES,
+  errorText,
+  getActiveLocale,
+  icuLocale,
+  isLocaleLoaded,
+  loadLocale,
+  resolveLocale,
+  setActiveLocale,
+  t,
+} from "./i18n";
+import { safeQrSvg } from "./lib/qr";
 
 type Config = {
-  nodeName: string;
+  /** The node's build version, shown in the join/settings footer. Absent on very old nodes. */
+  version?: string;
   joinUrl: string;
   websocketPath: string;
   currentUser: User;
@@ -144,7 +160,8 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
     });
 
     if (!response.ok) {
-      throw new Error(`Request failed: ${response.status}`);
+      const payload: unknown = await response.json().catch(() => undefined);
+      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
     }
 
     return response.json() as Promise<T>;
@@ -235,7 +252,8 @@ function reactionSummary(
  * @returns The time formatted as hours and minutes according to the current locale (e.g., "09:05")
  */
 function displayTime(timestamp: number): string {
-  return new Intl.DateTimeFormat(undefined, {
+  // Node UI locale (via icuLocale), so times read in the same language as the rest of the chrome.
+  return new Intl.DateTimeFormat(icuLocale(getActiveLocale()), {
     hour: "2-digit",
     minute: "2-digit",
   }).format(timestamp);
@@ -245,14 +263,14 @@ function displayTime(timestamp: number): string {
  * Get the display text for a message, substituting a streaming placeholder when appropriate.
  *
  * @param message - The message to extract text from; may be any Message variant.
- * @returns The message `body` if present and non-empty, `"Thinking..."` when `body` is empty and `message.meta?.streaming` is true, or an empty string when no body is available.
+ * @returns The message `body` if present and non-empty, the localized "thinking" placeholder when `body` is empty and `message.meta?.streaming` is true, or an empty string when no body is available.
  */
 function bodyFor(message: Message): string {
   if (!("body" in message)) {
     return "";
   }
 
-  return message.body || (message.meta?.streaming ? "Thinking..." : "");
+  return message.body || (message.meta?.streaming ? t("composer.thinking") : "");
 }
 
 /**
@@ -353,17 +371,14 @@ async function requestUser(method: "POST" | "PATCH", path: string, body?: unknow
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const message =
-        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-          ? payload.error
-          : `Request failed: ${response.status}`;
+      const message = errorText(payload, `Request failed: ${response.status}`);
       throw new Error(message);
     }
 
     const parsed = UserSchema.safeParse(payload);
 
     if (!parsed.success) {
-      throw new Error("The server returned an unrecognised user payload.");
+      throw new Error(t("app.userUnrecognised"));
     }
 
     return parsed.data;
@@ -421,6 +436,8 @@ function LoamApp() {
   const syncFailuresRef = useRef(0);
   const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  // Who is connected right now (server presence events; empty when the node disables presence).
+  const [onlineUserIds, setOnlineUserIds] = useState<ReadonlySet<string>>(new Set());
 
   // Refs let the long-lived WebSocket handler read the latest active conversation / users / channels
   // without re-subscribing the socket on every navigation or roster change.
@@ -512,7 +529,7 @@ function LoamApp() {
       const authorName = usersByIdRef.current.get(message.authorId)?.displayName ?? generateDisplayName(message.authorId);
       const body =
         bodyFor(message) ||
-        (message.type !== "reaction" && message.attachments?.length ? "📷 Image" : "");
+        (message.type !== "reaction" && message.attachments?.length ? t("toast.imageFallback") : "");
       let title = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
 
@@ -672,7 +689,7 @@ function LoamApp() {
 
   const deleteMessage = useCallback(
     async (messageId: string) => {
-      if (!window.confirm("Delete this message? This can't be undone.")) {
+      if (!window.confirm(t("confirm.deleteMessage"))) {
         return;
       }
 
@@ -688,10 +705,7 @@ function LoamApp() {
 
         if (!response.ok) {
           const payload: unknown = await response.json().catch(() => undefined);
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Delete failed: ${response.status}`;
+          const message = errorText(payload, `Delete failed: ${response.status}`);
           throw new Error(message);
         }
 
@@ -699,7 +713,7 @@ function LoamApp() {
         // remove the target immediately for snappy feedback (the rest arrive over the socket).
         removeMessage(messageId);
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Unable to delete the message.");
+        setError(error instanceof Error ? error.message : t("app.deleteError"));
       } finally {
         window.clearTimeout(timeout);
       }
@@ -729,10 +743,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Edit failed: ${response.status}`;
+          const message = errorText(payload, `Edit failed: ${response.status}`);
           throw new Error(message);
         }
 
@@ -744,7 +755,7 @@ function LoamApp() {
         }
         return true;
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Unable to edit the message.");
+        setError(error instanceof Error ? error.message : t("app.editError"));
         return false;
       } finally {
         window.clearTimeout(timeout);
@@ -775,10 +786,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Couldn't create the channel: ${response.status}`;
+          const message = errorText(payload, `Couldn't create the channel: ${response.status}`);
           throw new Error(message);
         }
 
@@ -789,7 +797,7 @@ function LoamApp() {
         }
         return true;
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Unable to create the channel.");
+        setError(error instanceof Error ? error.message : t("admin.channelCreateError"));
         return false;
       } finally {
         window.clearTimeout(timeout);
@@ -873,13 +881,13 @@ function LoamApp() {
         try {
           payload = await response.json();
         } catch (error) {
-          throw new Error("Message send failed: invalid JSON response.", { cause: error });
+          throw new Error(t("app.sendInvalidJson"), { cause: error });
         }
 
         const result = parseMessageResponse(payload);
 
         if (!result) {
-          throw new Error("Message send failed: invalid response payload.");
+          throw new Error(t("app.sendInvalidPayload"));
         }
 
         if (result.message) {
@@ -944,10 +952,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Admin claim failed: ${response.status}`;
+          const message = errorText(payload, `Admin claim failed: ${response.status}`);
           throw new Error(message);
         }
 
@@ -995,17 +1000,14 @@ function LoamApp() {
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : `Attachment upload failed: ${response.status}`;
+        const message = errorText(payload, `Attachment upload failed: ${response.status}`);
         throw new Error(message);
       }
 
       const parsed = MessageAttachmentSchema.safeParse(payload);
 
       if (!parsed.success) {
-        throw new Error("The server returned an unrecognised attachment payload.");
+        throw new Error(t("app.attachmentUnrecognised"));
       }
 
       return parsed.data;
@@ -1063,6 +1065,50 @@ function LoamApp() {
   useEffect(() => {
     localStorage.setItem(LAST_CONVERSATION_KEY, location.path);
   }, [location.path]);
+
+  // The browser tab carries the operator-chosen network name once known.
+  useEffect(() => {
+    const nodeName = config?.networkConfig.nodeName;
+    document.title = nodeName && nodeName !== "LOAM local" ? `${nodeName} · LOAM` : "LOAM";
+  }, [config?.networkConfig.nodeName]);
+
+  // The admin selects one UI language for the whole node (config.networkConfig.locale); resolve it
+  // (fallback `en`) and apply it via `setActiveLocale` — module state that `t()` reads — in a useMemo
+  // so it runs *before* children render this pass (no stale-language flash). No context/provider is
+  // needed: `config` is top-level state, so the live `configUpdated` handler's `setConfig` already
+  // re-renders the whole tree in the new language.
+  const locale = resolveLocale(config?.networkConfig.locale);
+  useMemo(() => setActiveLocale(locale), [locale]);
+
+  // Only English is bundled; other languages are code-split and fetched on demand. Load the node's
+  // locale when it changes and bump `localeTick` on completion so the tree re-renders in the newly
+  // loaded language (until then `t()` returns English — no blank UI, at most a brief English flash on
+  // a non-English node's first paint). English needs no fetch.
+  const [, setLocaleTick] = useState(0);
+  useEffect(() => {
+    if (isLocaleLoaded(locale)) {
+      return;
+    }
+
+    let active = true;
+    void loadLocale(locale).then(() => {
+      if (active) {
+        setLocaleTick((tick) => tick + 1);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [locale]);
+
+  // Flip the whole layout for right-to-left locales and expose the language on <html lang>. Message
+  // bodies already use dir="auto" per message; this mirrors the chrome (sidebar, panels) too. Keys
+  // off the admin-selected node locale, not navigator.language.
+  useEffect(() => {
+    document.documentElement.dir = RTL_LOCALES.has(locale) ? "rtl" : "ltr";
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   useEffect(() => {
     let active = true;
@@ -1157,7 +1203,7 @@ function LoamApp() {
           return;
         }
 
-        setError(nextError instanceof Error ? nextError.message : "Unable to reach the LOAM server.");
+        setError(nextError instanceof Error ? nextError.message : t("app.serverUnreachable"));
         setConnection("offline");
         // Retry with backoff — a one-shot boot fetch would strand the app offline forever when the
         // server is momentarily unreachable (previously a manual reload was the only way out).
@@ -1210,7 +1256,7 @@ function LoamApp() {
           return;
         }
 
-        setError(nextError instanceof Error ? nextError.message : "Unable to load messages.");
+        setError(nextError instanceof Error ? nextError.message : t("app.messagesLoadError"));
       });
 
     return () => {
@@ -1323,6 +1369,17 @@ function LoamApp() {
           setConfig((previous) =>
             previous ? { ...previous, networkConfig: payload.networkConfig } : previous,
           );
+
+          // Presence switched off: clear the dots immediately (no further events will arrive).
+          if (!payload.networkConfig.enablePresence) {
+            setOnlineUserIds(new Set());
+          }
+
+          return;
+        }
+
+        if (payload.type === "presence") {
+          setOnlineUserIds(new Set(payload.onlineUserIds));
           return;
         }
 
@@ -1424,13 +1481,13 @@ function LoamApp() {
           <p className="brand-title">LOAM</p>
           {wipeScope === "device" ? (
             <>
-              <h1>Device wiped</h1>
-              <p>This browser&rsquo;s local copy has been erased. Scan the join QR to reconnect.</p>
+              <h1>{t("gate.deviceWipedTitle")}</h1>
+              <p>{t("gate.deviceWipedBody")}</p>
             </>
           ) : (
             <>
-              <h1>Disconnected</h1>
-              <p>This node is no longer available.</p>
+              <h1>{t("gate.disconnectedTitle")}</h1>
+              <p>{t("gate.disconnectedBody")}</p>
             </>
           )}
         </div>
@@ -1443,8 +1500,8 @@ function LoamApp() {
       <main className="wiped-screen">
         <div>
           <p className="brand-title">LOAM</p>
-          <h1>Removed from this node</h1>
-          <p>A moderator has removed you. You can no longer post or read here.</p>
+          <h1>{t("gate.bannedTitle")}</h1>
+          <p>{t("gate.bannedBody")}</p>
         </div>
       </main>
     );
@@ -1455,9 +1512,18 @@ function LoamApp() {
       <main className="wiped-screen">
         <div>
           <p className="brand-title">LOAM</p>
-          <h1>You&rsquo;re in the queue</h1>
-          <p>Waiting for someone on this node to let you in. This screen updates the moment you&rsquo;re approved.</p>
-          <p className="gate-status">Connection: {connection}</p>
+          <h1>{t("gate.pendingTitle")}</h1>
+          <p>{t("gate.pendingBody")}</p>
+          <p className="gate-status">
+            {t("gate.connection", {
+              status:
+                connection === "live"
+                  ? t("sidebar.statusLive")
+                  : connection === "offline"
+                    ? t("sidebar.statusOffline")
+                    : t("sidebar.statusConnecting"),
+            })}
+          </p>
         </div>
       </main>
     );
@@ -1474,12 +1540,19 @@ function LoamApp() {
         connection={connection}
         currentUser={currentUser}
         joinUrl={config?.joinUrl}
+        nodeName={config?.networkConfig.nodeName}
         onCreateChannel={createChannel}
+        onlineUserIds={onlineUserIds}
         unreadByConversation={unreadByConversation}
         users={users}
       />
       {routeState.screen === "admin" ? (
-        <AdminView currentUser={currentUser} onChannelUpsert={upsertChannels} onWiped={purgeLocalData} />
+        <AdminView
+          currentUser={currentUser}
+          joinUrl={config?.joinUrl}
+          onChannelUpsert={upsertChannels}
+          onWiped={purgeLocalData}
+        />
       ) : routeState.screen === "people" ? (
         <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} />
       ) : routeState.screen === "search" ? (
@@ -1596,7 +1669,9 @@ interface SidebarProps {
   connection: "connecting" | "live" | "offline";
   currentUser: User;
   joinUrl?: string;
+  nodeName?: string;
   onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
+  onlineUserIds: ReadonlySet<string>;
   unreadByConversation: Map<string, number>;
   users: User[];
 }
@@ -1619,7 +1694,9 @@ function Sidebar({
   connection,
   currentUser,
   joinUrl,
+  nodeName,
   onCreateChannel,
+  onlineUserIds,
   unreadByConversation,
   users,
 }: SidebarProps) {
@@ -1631,21 +1708,30 @@ function Sidebar({
       <div className="brand-row">
         <img src={loamMark} alt="" className="brand-mark" />
         <div>
-          <p className="brand-title">LOAM</p>
-          <p className={`status-pill status-${connection}`}>{connection}</p>
+          {/* The operator-chosen network name is the headline; LOAM stays as the mark. */}
+          <p className="brand-title" title={nodeName}>
+            {nodeName ?? "LOAM"}
+          </p>
+          <p className={`status-pill status-${connection}`}>
+            {connection === "live"
+              ? t("sidebar.statusLive")
+              : connection === "offline"
+                ? t("sidebar.statusOffline")
+                : t("sidebar.statusConnecting")}
+          </p>
         </div>
       </div>
 
       <section className="nav-section">
-        <h2>Channels</h2>
-        <nav aria-label="Channels">
+        <h2>{t("sidebar.channels")}</h2>
+        <nav aria-label={t("sidebar.channels")}>
           {channels.map((channel) => (
             <NavLink
               active={activeConversation?.kind === "channel" && activeConversation.id === channel.id}
               href={`/channel/${encodeURIComponent(channel.id)}`}
               key={channel.id}
             >
-              <span aria-label={channel.visibility === "private" ? "Private channel" : undefined} className="nav-glyph">
+              <span aria-label={channel.visibility === "private" ? t("members.eyebrow") : undefined} className="nav-glyph">
                 {channel.visibility === "private" ? "🔒" : "#"}
               </span>
               <span className="nav-label">{channel.name}</span>
@@ -1659,15 +1745,20 @@ function Sidebar({
       </section>
 
       <section className="nav-section">
-        <h2>Direct Messages</h2>
-        <nav aria-label="Direct messages">
+        <h2>{t("sidebar.dms")}</h2>
+        <nav aria-label={t("sidebar.dms")}>
           {peers.map((user) => (
             <NavLink
               active={activeConversation?.kind === "dm" && activeConversation.id === user.id}
               href={`/dm/${encodeURIComponent(user.id)}`}
               key={user.id}
             >
-              <Avatar avatar={user.avatar} id={user.id} />
+              <span className="presence-anchor">
+                <Avatar avatar={user.avatar} id={user.id} />
+                {onlineUserIds.has(user.id) ? (
+                  <span aria-label={t("sidebar.online")} className="presence-dot" title={t("sidebar.online")} />
+                ) : null}
+              </span>
               <span className="nav-label">{user.displayName}</span>
               <UnreadBadge count={unreadByConversation.get(`dm:${user.id}`) ?? 0} />
             </NavLink>
@@ -1678,24 +1769,24 @@ function Sidebar({
       <div className="sidebar-footer">
         <NavLink active={false} href="/search">
           <span className="nav-glyph">⌕</span>
-          Search messages
+          {t("sidebar.searchMessages")}
         </NavLink>
         {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} /> : null}
         {showPeople ? (
           <NavLink active={false} href="/people">
             <span className="nav-glyph">☺</span>
-            People and moderation
+            {t("people.title")}
           </NavLink>
         ) : null}
         {currentUser.isAdmin ? (
           <NavLink active={false} href="/admin">
             <span className="nav-glyph">⚙</span>
-            Admin
+            {t("admin.eyebrow")}
           </NavLink>
         ) : null}
         <NavLink active={false} href="/settings">
           <span className="nav-glyph">⌁</span>
-          Join QR and settings
+          {t("sidebar.settings")}
         </NavLink>
         <div className="current-user">
           <Avatar avatar={currentUser.avatar} id={currentUser.id} />
@@ -1746,7 +1837,7 @@ function NewChannelControl({
   if (!open) {
     return (
       <button className="new-channel-toggle" onClick={() => setOpen(true)} type="button">
-        + New channel
+        {t("newChannel.new")}
       </button>
     );
   }
@@ -1760,13 +1851,13 @@ function NewChannelControl({
       }}
     >
       <input
-        aria-label="New channel name"
+        aria-label={t("newChannel.nameAria")}
         // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus
         disabled={creating}
         maxLength={80}
         onInput={(event) => setName(event.currentTarget.value)}
-        placeholder="Channel name"
+        placeholder={t("newChannel.namePlaceholder")}
         value={name}
       />
       {allowPrivate ? (
@@ -1777,12 +1868,12 @@ function NewChannelControl({
             onInput={(event) => setIsPrivate(event.currentTarget.checked)}
             type="checkbox"
           />
-          Private (invite-only)
+          {t("newChannel.private")}
         </label>
       ) : null}
       <div className="new-channel-actions">
         <button disabled={creating || !name.trim()} type="submit">
-          {creating ? "Creating…" : "Create"}
+          {creating ? t("admin.creating") : t("newChannel.create")}
         </button>
         <button
           disabled={creating}
@@ -1792,7 +1883,7 @@ function NewChannelControl({
           }}
           type="button"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
       </div>
     </form>
@@ -1877,12 +1968,9 @@ function ConversationView({
     return (
       <section className="conversation empty-state">
         <div>
-          <p className="eyebrow">Local node ready</p>
-          <h1>Choose a channel or direct message.</h1>
-          <p>
-            Messages, replies and reactions persist locally and sync through the laptop or Raspberry Pi
-            server while it is running.
-          </p>
+          <p className="eyebrow">{t("conversation.emptyEyebrow")}</p>
+          <h1>{t("conversation.emptyTitle")}</h1>
+          <p>{t("conversation.emptyBody")}</p>
         </div>
       </section>
     );
@@ -1915,7 +2003,7 @@ function ConversationView({
                   onClick={() => setMembersOpen((previous) => !previous)}
                   type="button"
                 >
-                  Members
+                  {t("conversation.members")}
                 </button>
               ) : undefined
             }
@@ -1946,10 +2034,14 @@ function ConversationView({
           usersById={usersById}
         />
         <MessageComposer
-          label={conversation.kind === "channel" ? `Message ${conversation.id}` : `Message ${title}`}
+          label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
           onSend={onSend}
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
-          placeholder={conversation.kind === "channel" ? "Post an update" : "Send a direct message"}
+          placeholder={
+            conversation.kind === "channel"
+              ? t("conversation.composerPlaceholderChannel")
+              : t("conversation.composerPlaceholderDm")
+          }
         />
       </section>
 
@@ -1988,7 +2080,7 @@ function ConversationHeader({
         ←
       </NavLink>
       <div className="conversation-heading">
-        <p className="eyebrow">{conversation.kind === "channel" ? "Channel" : "Direct message"}</p>
+        <p className="eyebrow">{conversation.kind === "channel" ? t("conversation.kindChannel") : t("conversation.kindDm")}</p>
         <h1>{title}</h1>
         {description ? <p className="conversation-description">{description}</p> : null}
       </div>
@@ -2046,7 +2138,7 @@ function ChannelMembersPanel({
       })
       .catch((loadError: unknown) => {
         if (active) {
-          setError(loadError instanceof Error ? loadError.message : "Unable to load members.");
+          setError(loadError instanceof Error ? loadError.message : t("members.loadError"));
         }
       });
 
@@ -2072,7 +2164,7 @@ function ChannelMembersPanel({
       onChannelUpsert([updated]);
       setInviteId("");
     } catch (inviteError) {
-      setError(inviteError instanceof Error ? inviteError.message : "Unable to invite that person.");
+      setError(inviteError instanceof Error ? inviteError.message : t("members.inviteError"));
     } finally {
       setBusy(false);
     }
@@ -2081,7 +2173,7 @@ function ChannelMembersPanel({
   async function remove(userId: string): Promise<void> {
     const leaving = userId === currentUser.id;
 
-    if (leaving && !window.confirm("Leave this channel? You'll need a new invite to come back.")) {
+    if (leaving && !window.confirm(t("members.leaveConfirm"))) {
       return;
     }
 
@@ -2098,10 +2190,7 @@ function ChannelMembersPanel({
 
       if (!response.ok) {
         const payload: unknown = await response.json().catch(() => undefined);
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : `Request failed: ${response.status}`;
+        const message = errorText(payload, t("common.requestFailed", { status: response.status }));
         throw new Error(message);
       }
 
@@ -2115,7 +2204,7 @@ function ChannelMembersPanel({
       ]);
       setMembers((previous) => previous.filter((member) => member.id !== userId));
     } catch (removeError) {
-      setError(removeError instanceof Error ? removeError.message : "Unable to remove that person.");
+      setError(removeError instanceof Error ? removeError.message : t("members.removeError"));
     } finally {
       window.clearTimeout(timeout);
       setBusy(false);
@@ -2126,16 +2215,16 @@ function ChannelMembersPanel({
     <div className="channel-members-panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Private channel</p>
-          <h2>Members</h2>
+          <p className="eyebrow">{t("members.eyebrow")}</p>
+          <h2>{t("members.heading")}</h2>
         </div>
         {memberIds.has(currentUser.id) && channel.ownerUserId !== currentUser.id ? (
           <button className="danger-button" disabled={busy} onClick={() => void remove(currentUser.id)} type="button">
-            Leave channel
+            {t("members.leave")}
           </button>
         ) : null}
       </div>
-      {!loaded && !error ? <p className="form-note">Loading members…</p> : null}
+      {!loaded && !error ? <p className="form-note">{t("members.loading")}</p> : null}
       {loaded ? (
         <ul className="moderation-list">
           {members.map((member) => (
@@ -2144,13 +2233,13 @@ function ChannelMembersPanel({
                 <Avatar avatar={member.avatar} id={member.id} />
                 <div className="moderation-name">
                   <strong>{member.displayName}</strong>
-                  <span>{member.id === channel.ownerUserId ? "Owner" : member.id}</span>
+                  <span>{member.id === channel.ownerUserId ? t("members.owner") : member.id}</span>
                 </div>
               </div>
               {canManage && member.id !== channel.ownerUserId ? (
                 <div className="moderation-actions">
                   <button className="danger-button" disabled={busy} onClick={() => void remove(member.id)} type="button">
-                    Remove
+                    {t("common.remove")}
                   </button>
                 </div>
               ) : null}
@@ -2167,9 +2256,9 @@ function ChannelMembersPanel({
           }}
         >
           <label>
-            Invite someone
+            {t("members.inviteLabel")}
             <select disabled={busy || !invitable.length} onInput={(event) => setInviteId(event.currentTarget.value)} value={inviteId}>
-              <option value="">{invitable.length ? "Choose a person…" : "Everyone is already a member"}</option>
+              <option value="">{invitable.length ? t("members.choosePerson") : t("members.allMembers")}</option>
               {invitable.map((user) => (
                 <option key={user.id} value={user.id}>
                   {user.displayName}
@@ -2178,7 +2267,7 @@ function ChannelMembersPanel({
             </select>
           </label>
           <button disabled={busy || !inviteId} type="submit">
-            Invite
+            {t("members.invite")}
           </button>
         </form>
       ) : null}
@@ -2234,22 +2323,33 @@ function MessageList({
   return (
     <div className="message-list" ref={listRef}>
       {topMessages.length ? (
-        topMessages.map((message) => (
-          <MessageItem
-            currentUser={currentUser}
-            key={message.id}
-            message={message}
-            onDelete={onDelete}
-            onEdit={onEdit}
-            onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
-            onReact={onReact}
-            reactions={reactionSummary(messages, message.id, currentUser.id)}
-            replyCount={repliesFor(messages, message.id).length}
-            usersById={usersById}
-          />
-        ))
+        topMessages.map((message, index) => {
+          const previous = topMessages[index - 1];
+          const newDay = !previous || dayKey(previous.createdAt) !== dayKey(message.createdAt);
+
+          return (
+            <div key={message.id}>
+              {newDay ? (
+                <div className="day-divider" role="separator">
+                  <span>{dayLabel(message.createdAt)}</span>
+                </div>
+              ) : null}
+              <MessageItem
+                currentUser={currentUser}
+                message={message}
+                onDelete={onDelete}
+                onEdit={onEdit}
+                onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
+                onReact={onReact}
+                reactions={reactionSummary(messages, message.id, currentUser.id)}
+                replyCount={repliesFor(messages, message.id).length}
+                usersById={usersById}
+              />
+            </div>
+          );
+        })
       ) : (
-        <p className="empty-copy">No messages yet. Start with the practical detail everyone needs.</p>
+        <p className="empty-copy">{t("messageList.empty")}</p>
       )}
     </div>
   );
@@ -2328,7 +2428,7 @@ function MessageItem({
         <div className="message-meta">
           <strong>{author.displayName}</strong>
           <span>{displayTime(message.createdAt)}</span>
-          {message.editedAt ? <span className="edited-tag">(edited)</span> : null}
+          {message.editedAt ? <span className="edited-tag">{t("message.editedTag")}</span> : null}
         </div>
         {editing ? (
           <form
@@ -2339,7 +2439,7 @@ function MessageItem({
             }}
           >
             <textarea
-              aria-label="Edit message"
+              aria-label={t("message.editAriaLabel")}
               // eslint-disable-next-line jsx-a11y/no-autofocus
               autoFocus
               dir="auto"
@@ -2350,10 +2450,10 @@ function MessageItem({
             />
             <div className="message-edit-actions">
               <button disabled={savingEdit || !draft.trim()} type="submit">
-                {savingEdit ? "Saving…" : "Save"}
+                {savingEdit ? t("common.saving") : t("common.save")}
               </button>
               <button disabled={savingEdit} onClick={() => setEditing(false)} type="button">
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           </form>
@@ -2369,7 +2469,7 @@ function MessageItem({
             {message.attachments.map((attachment) => (
               <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
                 <img
-                  alt="Attached image"
+                  alt={t("message.attachedImageAlt")}
                   className="message-attachment"
                   height={attachment.height}
                   loading="lazy"
@@ -2381,7 +2481,7 @@ function MessageItem({
           </div>
         ) : null}
         <div className="message-actions">
-          {message.meta?.streaming ? <span className="streaming-pill">Streaming</span> : null}
+          {message.meta?.streaming ? <span className="streaming-pill">{t("message.streaming")}</span> : null}
           {!message.meta?.streaming && reactions.map((reaction) => (
             <button
               className={reaction.active ? "reaction active" : "reaction"}
@@ -2406,22 +2506,22 @@ function MessageItem({
           ))}
           {onOpenThread && !message.meta?.streaming ? (
             <button className="thread-button" onClick={() => onOpenThread(message.id)} type="button">
-              {replyCount ? `${replyCount} repl${replyCount === 1 ? "y" : "ies"}` : "Reply"}
+              {replyCount ? t("message.replyCount", { n: replyCount }) : t("message.reply")}
             </button>
           ) : null}
           {canEdit && !editing ? (
             <button className="message-edit-button" onClick={startEditing} type="button">
-              Edit
+              {t("message.edit")}
             </button>
           ) : null}
           {(isMine || currentUser.isAdmin) && !message.meta?.streaming ? (
             <button
               className="message-delete"
               onClick={() => onDelete(message.id)}
-              title={isMine ? "Delete your message" : "Delete this message (admin)"}
+              title={isMine ? t("message.deleteOwnTitle") : t("message.deleteAdminTitle")}
               type="button"
             >
-              Delete
+              {t("common.delete")}
             </button>
           ) : null}
         </div>
@@ -2492,7 +2592,7 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
                 ? {
                     ...entry,
                     status: "error",
-                    error: uploadError instanceof Error ? uploadError.message : "Upload failed.",
+                    error: uploadError instanceof Error ? uploadError.message : t("composer.uploadFailed"),
                   }
                 : entry,
             ),
@@ -2536,7 +2636,7 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
                 {entry.name}
               </span>
               <button
-                aria-label={`Remove ${entry.name}`}
+                aria-label={t("composer.removeAttachment", { name: entry.name })}
                 disabled={sending}
                 onClick={() => setPending((previous) => previous.filter((item) => item.key !== entry.key))}
                 type="button"
@@ -2564,11 +2664,11 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
             type="file"
           />
           <button
-            aria-label="Attach an image"
+            aria-label={t("composer.attachImage")}
             className="composer-attach"
             disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
             onClick={() => fileInputRef.current?.click()}
-            title="Attach an image (resized on this device before upload)"
+            title={t("composer.attachImageHint")}
             type="button"
           >
             🖼
@@ -2591,7 +2691,7 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
         value={value}
       />
       <button disabled={(!value.trim() && !readyAttachments.length) || sending || uploading} type="submit">
-        Send
+        {t("composer.send")}
       </button>
     </form>
   );
@@ -2644,10 +2744,10 @@ function ThreadPanel({
           ←
         </button>
         <div>
-          <p className="eyebrow">Thread</p>
-          <h2>Replies</h2>
+          <p className="eyebrow">{t("thread.eyebrow")}</p>
+          <h2>{t("thread.heading")}</h2>
         </div>
-        <button aria-label="Close thread" className="close-button" onClick={onClose} type="button">
+        <button aria-label={t("thread.close")} className="close-button" onClick={onClose} type="button">
           ×
         </button>
       </header>
@@ -2661,7 +2761,9 @@ function ThreadPanel({
           reactions={reactionSummary(messages, parent.id, currentUser.id)}
           usersById={usersById}
         />
-        <div className="reply-divider">{replies.length ? `${replies.length} replies` : "No replies yet"}</div>
+        <div className="reply-divider">
+          {replies.length ? t("message.replyCount", { n: replies.length }) : t("thread.noReplies")}
+        </div>
         {replies.map((reply) => (
           <MessageItem
             currentUser={currentUser}
@@ -2676,10 +2778,10 @@ function ThreadPanel({
         ))}
       </div>
       <MessageComposer
-        label="Reply in thread"
+        label={t("thread.replyLabel")}
         onSend={onReply}
         onUploadAttachment={onUploadAttachment}
-        placeholder="Reply in thread"
+        placeholder={t("thread.replyLabel")}
       />
     </aside>
   );
@@ -2805,7 +2907,7 @@ function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
       const format = formats[index];
 
       if (!format) {
-        reject(new Error("Avatar image is too large after resizing."));
+        reject(new Error(t("avatarEditor.tooLarge")));
         return;
       }
 
@@ -2971,7 +3073,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
 
   async function selectImage(file: File): Promise<void> {
     if (!file.type.startsWith("image/") || file.type === "image/svg+xml") {
-      setError("Choose a PNG, JPEG, or WebP image.");
+      setError(t("avatarEditor.invalidType"));
       return;
     }
 
@@ -3002,7 +3104,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
         image.onerror = () => {
           image.onload = null;
           image.onerror = null;
-          reject(new Error("Unable to load image."));
+          reject(new Error(t("avatarEditor.loadError")));
         };
         image.src = url;
       });
@@ -3017,7 +3119,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       setError(undefined);
     } catch (nextError) {
       if (mountedRef.current && objectUrlRef.current === url) {
-        setError(nextError instanceof Error ? nextError.message : "Unable to load image.");
+        setError(nextError instanceof Error ? nextError.message : t("avatarEditor.loadError"));
       }
     } finally {
       if (objectUrlRef.current === url) {
@@ -3045,7 +3147,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       const blob = await blobFromCanvas(canvas);
       await onUpload(blob);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Unable to upload avatar.");
+      setError(nextError instanceof Error ? nextError.message : t("avatarEditor.uploadError"));
     } finally {
       setUploading(false);
     }
@@ -3054,7 +3156,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
   return (
     <div className="avatar-editor">
       <canvas
-        aria-label="Avatar crop preview"
+        aria-label={t("avatarEditor.cropPreview")}
         className="avatar-crop-canvas"
         height={AVATAR_OUTPUT_SIZE}
         onPointerDown={startDrag}
@@ -3081,14 +3183,14 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       />
       <div className="avatar-editor-controls">
         <button disabled={disabled || uploading} onClick={() => fileInputRef.current?.click()} type="button">
-          Choose image
+          {t("avatarEditor.chooseImage")}
         </button>
         <button disabled={disabled || uploading || !hasImage} onClick={() => void upload()} type="button">
-          {uploading ? "Uploading" : "Use cropped image"}
+          {uploading ? t("avatarEditor.uploading") : t("avatarEditor.useCropped")}
         </button>
       </div>
       <label>
-        Zoom
+        {t("avatarEditor.zoom")}
         <input
           disabled={disabled || uploading || !hasImage}
           max="3"
@@ -3100,7 +3202,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
         />
       </label>
       <label>
-        Rotate
+        {t("avatarEditor.rotate")}
         <input
           disabled={disabled || uploading || !hasImage}
           max="180"
@@ -3160,7 +3262,7 @@ function SearchView({
         }),
       );
     } catch (searchError) {
-      setError(searchError instanceof Error ? searchError.message : "Unable to search messages.");
+      setError(searchError instanceof Error ? searchError.message : t("search.error"));
     } finally {
       setSearching(false);
     }
@@ -3174,7 +3276,7 @@ function SearchView({
 
     if (message.type === "dm") {
       const peerId = message.authorId === currentUser.id ? message.recipientUserId : message.authorId;
-      return `DM with ${usersById.get(peerId)?.displayName ?? generateDisplayName(peerId)}`;
+      return t("search.dmWith", { name: usersById.get(peerId)?.displayName ?? generateDisplayName(peerId) });
     }
 
     return "";
@@ -3204,8 +3306,8 @@ function SearchView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">Search</p>
-          <h1>Find messages</h1>
+          <p className="eyebrow">{t("search.eyebrow")}</p>
+          <h1>{t("search.title")}</h1>
         </div>
       </header>
       {/* One wrapper = one grid row: .settings-view is a strict header/content 2-row grid. */}
@@ -3218,7 +3320,7 @@ function SearchView({
           }}
         >
           <label className="sr-only" for={searchInputId}>
-            Search messages
+            {t("sidebar.searchMessages")}
           </label>
           <input
             dir="auto"
@@ -3226,16 +3328,16 @@ function SearchView({
             id={searchInputId}
             maxLength={200}
             onInput={(event) => setQuery(event.currentTarget.value)}
-            placeholder="Search channel messages and your DMs"
+            placeholder={t("search.placeholder")}
             type="search"
             value={query}
           />
           <button disabled={searching || !query.trim()} type="submit">
-            {searching ? "Searching…" : "Search"}
+            {searching ? t("search.searching") : t("search.button")}
           </button>
         </form>
         {error ? <p className="form-error">{error}</p> : null}
-        {results && !results.length ? <p className="form-note">No messages matched.</p> : null}
+        {results && !results.length ? <p className="form-note">{t("search.noResults")}</p> : null}
         {results?.length ? (
           <ul className="search-results">
             {results.map((message) => {
@@ -3300,16 +3402,7 @@ function SettingsView({
   const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
   const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
   const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
-  const qrSvg = useMemo(() => {
-    if (!config?.joinUrl) {
-      return "";
-    }
-
-    return renderQRToSvg(encodeQR(config.joinUrl), {
-      dark: "#203f34",
-      light: "#ffffff",
-    });
-  }, [config?.joinUrl]);
+  const qrSvg = useMemo(() => safeQrSvg(config?.joinUrl, "#203f34"), [config?.joinUrl]);
   const previewUser: User = {
     ...currentUser,
     displayName,
@@ -3362,7 +3455,7 @@ function SettingsView({
     try {
       await onUpdateCurrentUser(update);
     } catch (error) {
-      setProfileError(error instanceof Error ? error.message : "Unable to update profile.");
+      setProfileError(error instanceof Error ? error.message : t("settings.profileError"));
     } finally {
       setSaving(false);
     }
@@ -3382,19 +3475,22 @@ function SettingsView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">Local access</p>
-          <h1>Join this LOAM node</h1>
+          <p className="eyebrow">{t("settings.joinEyebrow")}</p>
+          <h1>{t("settings.joinTitle")}</h1>
         </div>
       </header>
       <div className="settings-grid">
         <div className="join-panel">
           <div className="qr-box" dangerouslySetInnerHTML={{ __html: qrSvg }} />
           <p>{config?.joinUrl ?? window.location.origin}</p>
+          {/* Product name + version — the node's build, not this browser's cache. Deliberately no
+              translatable label word so it stays i18n-neutral. */}
+          <p className="node-version">LOAM v{config?.version ?? "…"}</p>
         </div>
         <div className="identity-panel">
           <Avatar avatar={previewUser.avatar} id={currentUser.id} />
           <div>
-            <p className="eyebrow">This browser</p>
+            <p className="eyebrow">{t("settings.thisBrowser")}</p>
             <h2>{displayName}</h2>
             <p>{currentUser.id}</p>
           </div>
@@ -3407,11 +3503,11 @@ function SettingsView({
           }}
         >
           <div>
-            <p className="eyebrow">Profile</p>
-            <h2>Local identity</h2>
+            <p className="eyebrow">{t("settings.profileEyebrow")}</p>
+            <h2>{t("settings.profileTitle")}</h2>
           </div>
           <label>
-            Display name
+            {t("settings.displayName")}
             <input
               disabled={!allowDisplayNameEdit || saving}
               maxLength={80}
@@ -3420,7 +3516,7 @@ function SettingsView({
             />
           </label>
           <label>
-            Avatar style
+            {t("settings.avatarStyle")}
             <select
               disabled={!allowAvatarEdit || saving || avatarKind === "image"}
               onInput={(event) => {
@@ -3438,27 +3534,27 @@ function SettingsView({
           </label>
           <div className="profile-actions">
             <button disabled={!allowAvatarEdit || saving} onClick={randomizeAvatar} type="button">
-              New avatar
+              {t("settings.newAvatar")}
             </button>
             <button disabled={saving || (!allowDisplayNameEdit && !allowAvatarEdit)} type="submit">
-              {saving ? "Saving" : "Save profile"}
+              {saving ? t("common.saving") : t("settings.saveProfile")}
             </button>
           </div>
           <div className="avatar-upload-panel">
             <div>
-              <p className="eyebrow">Image avatar</p>
-              <h2>Crop upload</h2>
+              <p className="eyebrow">{t("settings.imageAvatarEyebrow")}</p>
+              <h2>{t("settings.cropUpload")}</h2>
             </div>
             <AvatarImageEditor
               disabled={!allowAvatarEdit || !allowAvatarUpload || saving}
               onUpload={onUploadAvatarImage}
             />
             {!allowAvatarUpload ? (
-              <p className="form-note">Image avatar uploads are disabled on this LOAM node.</p>
+              <p className="form-note">{t("settings.avatarUploadDisabled")}</p>
             ) : null}
           </div>
           {!allowDisplayNameEdit && !allowAvatarEdit ? (
-            <p className="form-note">Profile editing is disabled on this LOAM node.</p>
+            <p className="form-note">{t("settings.profileEditingDisabled")}</p>
           ) : null}
           {profileError ? <p className="form-error">{profileError}</p> : null}
         </form>
@@ -3497,16 +3593,13 @@ function DeviceWipePanel({ onWipeDevice }: { onWipeDevice: () => Promise<void> }
   return (
     <div className="profile-panel">
       <div>
-        <p className="eyebrow">Security</p>
-        <h2>Wipe this device</h2>
+        <p className="eyebrow">{t("settings.securityEyebrow")}</p>
+        <h2>{t("settings.wipeTitle")}</h2>
       </div>
       <div className="danger-zone">
-        <p className="form-note">
-          Erases this browser&rsquo;s local copy — messages, your identity, and cached data. It does
-          not wipe the node or anyone else&rsquo;s device.
-        </p>
+        <p className="form-note">{t("settings.wipeBody")}</p>
         <label>
-          Type <strong>wipe</strong> to confirm
+          {t("settings.wipeConfirmBefore")} <strong>wipe</strong> {t("settings.wipeConfirmAfter")}
           <input
             autoComplete="off"
             disabled={wiping}
@@ -3521,7 +3614,7 @@ function DeviceWipePanel({ onWipeDevice }: { onWipeDevice: () => Promise<void> }
             onClick={() => void wipe()}
             type="button"
           >
-            {wiping ? "Wiping…" : "Wipe this device"}
+            {wiping ? t("settings.wiping") : t("settings.wipeTitle")}
           </button>
         </div>
       </div>
@@ -3554,7 +3647,7 @@ function AdminAccessPanel({
       await onClaimAdmin(secret.trim());
       setSecret("");
     } catch (error) {
-      setClaimError(error instanceof Error ? error.message : "Unable to claim admin access.");
+      setClaimError(error instanceof Error ? error.message : t("settings.claimError"));
     } finally {
       setClaiming(false);
     }
@@ -3563,12 +3656,12 @@ function AdminAccessPanel({
   return (
     <div className="profile-panel">
       <div>
-        <p className="eyebrow">Administration</p>
-        <h2>{currentUser.isAdmin ? "Admin tools" : "Admin access"}</h2>
+        <p className="eyebrow">{t("settings.adminEyebrow")}</p>
+        <h2>{currentUser.isAdmin ? t("settings.adminTools") : t("settings.adminAccess")}</h2>
       </div>
       {currentUser.isAdmin ? (
         <NavLink active={false} className="nav-link" href="/admin">
-          Open the admin area →
+          {t("settings.openAdmin")}
         </NavLink>
       ) : allowAdminClaim ? (
         <form
@@ -3578,7 +3671,7 @@ function AdminAccessPanel({
           }}
         >
           <label>
-            Setup code or passphrase
+            {t("settings.claimLabel")}
             <input
               autoComplete="off"
               disabled={claiming}
@@ -3589,13 +3682,13 @@ function AdminAccessPanel({
           </label>
           <div className="profile-actions">
             <button disabled={claiming || !secret.trim()} type="submit">
-              {claiming ? "Checking" : "Unlock admin"}
+              {claiming ? t("settings.checking") : t("settings.unlockAdmin")}
             </button>
           </div>
           {claimError ? <p className="form-error">{claimError}</p> : null}
         </form>
       ) : (
-        <p className="form-note">Admin claiming is not enabled on this LOAM node.</p>
+        <p className="form-note">{t("settings.claimDisabled")}</p>
       )}
     </div>
   );
@@ -3624,11 +3717,11 @@ function PeopleView({
             ←
           </NavLink>
           <div>
-            <p className="eyebrow">People</p>
-            <h1>Not authorized</h1>
+            <p className="eyebrow">{t("people.eyebrow")}</p>
+            <h1>{t("people.notAuthorizedTitle")}</h1>
           </div>
         </header>
-        <p className="form-note">This area is for greeters, moderators, and admins.</p>
+        <p className="form-note">{t("people.notAuthorizedNote")}</p>
       </section>
     );
   }
@@ -3640,8 +3733,8 @@ function PeopleView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">People</p>
-          <h1>People and moderation</h1>
+          <p className="eyebrow">{t("people.eyebrow")}</p>
+          <h1>{t("people.title")}</h1>
         </div>
       </header>
       <div className="settings-grid">
@@ -3691,7 +3784,7 @@ function PendingApprovalsPanel({ onUsersChanged }: { onUsersChanged: (users: Use
       })
       .catch((error: unknown) => {
         if (active) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load pending joins.");
+          setLoadError(error instanceof Error ? error.message : t("people.pendingLoadError"));
         }
       });
 
@@ -3704,16 +3797,16 @@ function PendingApprovalsPanel({ onUsersChanged }: { onUsersChanged: (users: Use
     <div className="profile-panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Access</p>
-          <h2>Pending joins</h2>
+          <p className="eyebrow">{t("people.accessEyebrow")}</p>
+          <h2>{t("people.pendingTitle")}</h2>
         </div>
         <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          Refresh
+          {t("common.refresh")}
         </button>
       </div>
       {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!loaded && !loadError ? <p className="form-note">Loading pending joins…</p> : null}
-      {loaded && pending.length === 0 ? <p className="form-note">Nobody is waiting to join.</p> : null}
+      {!loaded && !loadError ? <p className="form-note">{t("people.pendingLoading")}</p> : null}
+      {loaded && pending.length === 0 ? <p className="form-note">{t("people.pendingEmpty")}</p> : null}
       {pending.length > 0 ? (
         <ul className="moderation-list">
           {pending.map((user) => (
@@ -3748,7 +3841,7 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
       const updated = await requestUser("POST", `/api/access/users/${encodeURIComponent(user.id)}/${action}`);
       onResolved(updated);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to update this person.");
+      setError(requestError instanceof Error ? requestError.message : t("moderation.updateError"));
       setBusy(false);
     }
   }
@@ -3764,10 +3857,10 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
       </div>
       <div className="moderation-actions">
         <button disabled={busy} onClick={() => void decide("approve")} type="button">
-          Approve
+          {t("people.approve")}
         </button>
         <button className="danger-button" disabled={busy} onClick={() => void decide("deny")} type="button">
-          Deny
+          {t("people.deny")}
         </button>
       </div>
       {error ? <p className="form-error">{error}</p> : null}
@@ -3808,7 +3901,7 @@ function ModerationPanel({
       })
       .catch((error: unknown) => {
         if (active) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load people.");
+          setLoadError(error instanceof Error ? error.message : t("moderation.loadError"));
         }
       });
 
@@ -3834,16 +3927,16 @@ function ModerationPanel({
     <div className="profile-panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Moderation</p>
-          <h2>People</h2>
+          <p className="eyebrow">{t("moderation.eyebrow")}</p>
+          <h2>{t("moderation.heading")}</h2>
         </div>
         <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          Refresh
+          {t("common.refresh")}
         </button>
       </div>
       {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!loaded && !loadError ? <p className="form-note">Loading people…</p> : null}
-      {loaded && people.length === 0 ? <p className="form-note">No people to show yet.</p> : null}
+      {!loaded && !loadError ? <p className="form-note">{t("moderation.loading")}</p> : null}
+      {loaded && people.length === 0 ? <p className="form-note">{t("moderation.empty")}</p> : null}
       {people.length > 0 ? (
         <ul className="moderation-list">
           {people.map((user) => (
@@ -3880,7 +3973,7 @@ function ModerationUserRow({
     try {
       onApply(await action());
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to update this person.");
+      setError(requestError instanceof Error ? requestError.message : t("moderation.updateError"));
     } finally {
       setBusy(false);
     }
@@ -3906,6 +3999,14 @@ function ModerationUserRow({
     void run(() => requestUser("PATCH", `/api/moderation/users/${encodeURIComponent(user.id)}`, update));
   }
 
+  function promote(): void {
+    if (!window.confirm(t("moderation.promoteConfirm", { name: user.displayName }))) {
+      return;
+    }
+
+    void run(() => requestUser("POST", `/api/admin/users/${encodeURIComponent(user.id)}/promote`));
+  }
+
   return (
     <li className="moderation-row">
       <div className="moderation-identity">
@@ -3917,7 +4018,7 @@ function ModerationUserRow({
         <UserStateBadges user={user} />
       </div>
       {protectedTarget ? (
-        <p className="moderation-note">{user.id === currentUser.id ? "That's you." : "Admins can't be moderated."}</p>
+        <p className="moderation-note">{user.id === currentUser.id ? t("moderation.thatsYou") : t("moderation.adminsProtected")}</p>
       ) : (
         <div className="moderation-controls">
           {canManageRoles(currentUser) ? (
@@ -3929,7 +4030,7 @@ function ModerationUserRow({
                   onInput={(event) => setRole("moderator", event.currentTarget.checked)}
                   type="checkbox"
                 />
-                Moderator
+                {t("moderation.roleModerator")}
               </label>
               <label className="admin-toggle">
                 <input
@@ -3938,7 +4039,7 @@ function ModerationUserRow({
                   onInput={(event) => setRole("greeter", event.currentTarget.checked)}
                   type="checkbox"
                 />
-                Greeter
+                {t("moderation.roleGreeter")}
               </label>
             </div>
           ) : null}
@@ -3949,11 +4050,18 @@ function ModerationUserRow({
               onClick={() => setModeration({ banned: !user.banned })}
               type="button"
             >
-              {user.banned ? "Unban" : "Ban"}
+              {user.banned ? t("moderation.unban") : t("moderation.ban")}
             </button>
             <button disabled={busy} onClick={() => setModeration({ shadowBanned: !user.shadowBanned })} type="button">
-              {user.shadowBanned ? "Un-shadow-ban" : "Shadow-ban"}
+              {user.shadowBanned ? t("moderation.unshadowban") : t("moderation.shadowban")}
             </button>
+            {/* Promotion is admin-only and one-way (no demote — see the server route). Offered
+                only for a non-banned, non-pending member so the new admin is immediately usable. */}
+            {canManageRoles(currentUser) && !user.banned && !user.pending ? (
+              <button disabled={busy} onClick={promote} type="button">
+                {t("moderation.makeAdmin")}
+              </button>
+            ) : null}
           </div>
         </div>
       )}
@@ -3969,23 +4077,27 @@ function UserStateBadges({ user }: { user: User }) {
   const badges: { key: string; label: string; className: string }[] = [];
 
   if (user.isAdmin) {
-    badges.push({ key: "admin", label: "Admin", className: "badge-admin" });
+    badges.push({ key: "admin", label: t("moderation.badgeAdmin"), className: "badge-admin" });
   }
 
   for (const role of user.roles ?? []) {
-    badges.push({ key: `role-${role}`, label: role, className: "badge-role" });
+    badges.push({
+      key: `role-${role}`,
+      label: role === "moderator" ? t("moderation.roleModerator") : t("moderation.roleGreeter"),
+      className: "badge-role",
+    });
   }
 
   if (user.pending) {
-    badges.push({ key: "pending", label: "Pending", className: "badge-pending" });
+    badges.push({ key: "pending", label: t("moderation.badgePending"), className: "badge-pending" });
   }
 
   if (user.banned) {
-    badges.push({ key: "banned", label: "Banned", className: "badge-banned" });
+    badges.push({ key: "banned", label: t("moderation.badgeBanned"), className: "badge-banned" });
   }
 
   if (user.shadowBanned) {
-    badges.push({ key: "shadow", label: "Shadow-banned", className: "badge-shadow" });
+    badges.push({ key: "shadow", label: t("moderation.badgeShadow"), className: "badge-shadow" });
   }
 
   if (!badges.length) {
@@ -4003,48 +4115,46 @@ function UserStateBadges({ user }: { user: User }) {
   );
 }
 
-const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
-  ["enablePublicChannels", "Public channels"],
-  ["enablePrivateChannels", "Private channels (invite-only)"],
-  ["enableUserChannels", "User-created channels"],
-  ["enableReplies", "Thread replies"],
-  ["enableDMs", "Direct messages"],
-  ["enableReactions", "Reactions"],
-  ["enableMarkdown", "Markdown rendering"],
-  ["enableAttachments", "Image attachments"],
-];
+/** Feature-flag toggle labels, resolved against the active locale at render time. */
+function featureFlagLabels(): [keyof FeatureFlags, string][] {
+  return [
+    ["enablePublicChannels", t("admin.flagPublicChannels")],
+    ["enablePrivateChannels", t("admin.flagPrivateChannels")],
+    ["enableUserChannels", t("admin.flagUserChannels")],
+    ["enableReplies", t("admin.flagReplies")],
+    ["enableDMs", t("admin.flagDMs")],
+    ["enableReactions", t("admin.flagReactions")],
+    ["enableMarkdown", t("admin.flagMarkdown")],
+    ["enableAttachments", t("admin.flagAttachments")],
+    ["enablePresence", t("admin.flagPresence")],
+  ];
+}
 
-const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
-  ["allowUserDisplayNameEdit", "Users can edit their display name"],
-  ["allowUserAvatarEdit", "Users can edit their avatar"],
-  ["allowUserAvatarUpload", "Users can upload avatar images"],
-  ["allowAdminUserEdit", "Admins can edit other users"],
-];
+/** Identity-permission toggle labels, resolved against the active locale at render time. */
+function identityLabels(): [keyof IdentityConfig, string][] {
+  return [
+    ["allowUserDisplayNameEdit", t("admin.identityDisplayName")],
+    ["allowUserAvatarEdit", t("admin.identityAvatarEdit")],
+    ["allowUserAvatarUpload", t("admin.identityAvatarUpload")],
+    ["allowAdminUserEdit", t("admin.identityAdminEdit")],
+  ];
+}
 
 /**
- * Human-facing summary of what each security profile enforces. A named profile bundles the access,
- * retention, and kill-switch axes (docs/09); `custom` unlocks them for individual editing. Only the
- * axes LOAM enforces today are described — transport encryption / E2EE are future, which is why
- * `open` and `standard` currently apply the same settings.
+ * Human-facing summary of what each security profile enforces, resolved against the active locale at
+ * render time. A named profile bundles the access, retention, and kill-switch axes (docs/09);
+ * `custom` unlocks them for individual editing. Only the axes LOAM enforces today are described —
+ * transport encryption / E2EE are future, which is why `open` and `standard` currently apply the
+ * same settings.
  */
-const SECURITY_PROFILE_LABELS: Record<SecurityProfile, { title: string; summary: string }> = {
-  open: {
-    title: "Open",
-    summary: "Anyone joins and posts immediately. Messages are kept and the kill switch is off — maximum access, for disaster-relief style use.",
-  },
-  standard: {
-    title: "Standard",
-    summary: "Anyone with the join link participates; messages are kept and the kill switch is off. (Same enforced settings as Open until transport encryption lands.)",
-  },
-  hardened: {
-    title: "Hardened",
-    summary: "New joiners must be approved, messages expire after 1 hour, and the kill switch is armed. For high-risk use.",
-  },
-  custom: {
-    title: "Custom",
-    summary: "Set who can join, message retention, and the kill switch individually in the sections below.",
-  },
-};
+function securityProfileLabels(): Record<SecurityProfile, { title: string; summary: string }> {
+  return {
+    open: { title: t("admin.profileOpenTitle"), summary: t("admin.profileOpenSummary") },
+    standard: { title: t("admin.profileStandardTitle"), summary: t("admin.profileStandardSummary") },
+    hardened: { title: t("admin.profileHardenedTitle"), summary: t("admin.profileHardenedSummary") },
+    custom: { title: t("admin.profileCustomTitle"), summary: t("admin.profileCustomSummary") },
+  };
+}
 
 /**
  * Admin-only configuration area: edits node feature flags, identity permissions, LLM settings, and
@@ -4053,10 +4163,12 @@ const SECURITY_PROFILE_LABELS: Record<SecurityProfile, { title: string; summary:
  */
 function AdminView({
   currentUser,
+  joinUrl,
   onChannelUpsert,
   onWiped,
 }: {
   currentUser: User;
+  joinUrl?: string;
   onChannelUpsert: (channels: Channel[]) => void;
   onWiped: () => Promise<void>;
 }) {
@@ -4089,12 +4201,12 @@ function AdminView({
         if (parsed.success) {
           setAdminConfig(parsed.data);
         } else {
-          setLoadError("Received an invalid config payload from the server.");
+          setLoadError(t("admin.configInvalid"));
         }
       })
       .catch((error: unknown) => {
         if (active) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load the node config.");
+          setLoadError(error instanceof Error ? error.message : t("admin.configLoadError"));
         }
       });
 
@@ -4117,6 +4229,7 @@ function AdminView({
 
     try {
       const update = {
+        node: adminConfig.node,
         identity: adminConfig.identity,
         features: adminConfig.features,
         llm: { ollama: adminConfig.llm.ollama },
@@ -4146,17 +4259,14 @@ function AdminView({
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : `Config update failed: ${response.status}`;
+        const message = errorText(payload, t("admin.configUpdateFailed", { status: response.status }));
         throw new Error(message);
       }
 
       const parsed = LoamConfigSchema.safeParse(payload);
 
       if (!parsed.success) {
-        throw new Error("The server accepted the update but returned an unrecognised config payload.");
+        throw new Error(t("admin.configUnrecognised"));
       }
 
       setAdminConfig(parsed.data);
@@ -4164,7 +4274,7 @@ function AdminView({
       setPanicToken("");
       setSaved(true);
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "Unable to save the node config.");
+      setSaveError(error instanceof Error ? error.message : t("admin.configSaveError"));
     } finally {
       window.clearTimeout(timeout);
       setSaving(false);
@@ -4252,10 +4362,7 @@ function AdminView({
 
       if (!response.ok) {
         const payload: unknown = await response.json().catch(() => undefined);
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : `Kill switch failed: ${response.status}`;
+        const message = errorText(payload, t("admin.killSwitchFailed", { status: response.status }));
         throw new Error(message);
       }
 
@@ -4263,7 +4370,7 @@ function AdminView({
       // admin's own browser is cleaned even if its socket is closed (purging twice is harmless).
       await onWiped();
     } catch (error) {
-      setFireError(error instanceof Error ? error.message : "Unable to trigger the kill switch.");
+      setFireError(error instanceof Error ? error.message : t("admin.killSwitchError"));
       setFiring(false);
     } finally {
       window.clearTimeout(timeout);
@@ -4278,14 +4385,11 @@ function AdminView({
             ←
           </NavLink>
           <div>
-            <p className="eyebrow">Admin</p>
-            <h1>Not authorized</h1>
+            <p className="eyebrow">{t("admin.eyebrow")}</p>
+            <h1>{t("people.notAuthorizedTitle")}</h1>
           </div>
         </header>
-        <p className="form-note">
-          This area is for node administrators. Claim admin access from the settings page if this
-          node allows it.
-        </p>
+        <p className="form-note">{t("admin.notAuthorizedNote")}</p>
       </section>
     );
   }
@@ -4297,12 +4401,12 @@ function AdminView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">Admin</p>
-          <h1>Node configuration</h1>
+          <p className="eyebrow">{t("admin.eyebrow")}</p>
+          <h1>{t("admin.title")}</h1>
         </div>
       </header>
       {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!adminConfig && !loadError ? <p className="form-note">Loading node config…</p> : null}
+      {!adminConfig && !loadError ? <p className="form-note">{t("admin.loading")}</p> : null}
       {adminConfig ? (
         <form
           className="settings-grid"
@@ -4311,13 +4415,74 @@ function AdminView({
             void save();
           }}
         >
+          <div className="profile-panel getting-started">
+            <div>
+              <p className="eyebrow">{t("admin.gettingStartedEyebrow")}</p>
+              <h2>{t("admin.gettingStartedTitle")}</h2>
+            </div>
+            <ol className="getting-started-steps">
+              <li><strong>{t("admin.step1Title")}</strong> — {t("admin.step1Body")}</li>
+              <li><strong>{t("admin.step2Title")}</strong> — {t("admin.step2Body")}</li>
+              <li><strong>{t("admin.step3Title")}</strong> — {t("admin.step3Body")}</li>
+              <li><strong>{t("admin.step4Title")}</strong> — {t("admin.step4Body")}</li>
+              <li><strong>{t("admin.step5Title")}</strong> — {t("admin.step5Body")}</li>
+            </ol>
+            <p className="form-note">
+              {t("admin.gettingStartedNoteBefore")}{" "}
+              <a href="https://github.com/JosephMaynard/loam/blob/master/docs/12-operators-guide.md" rel="noreferrer" target="_blank">
+                {t("admin.gettingStartedGuideLink")}
+              </a>{" "}
+              {t("admin.gettingStartedNoteAfter")}
+            </p>
+          </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Security</p>
-              <h2>Profile</h2>
+              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
+              <h2>{t("admin.identityHeading")}</h2>
             </div>
             <label>
-              Posture
+              {t("admin.networkName")}
+              <input
+                disabled={saving}
+                maxLength={80}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous ? { ...previous, node: { ...previous.node, name: event.currentTarget.value } } : previous,
+                  )
+                }
+                value={adminConfig.node.name}
+              />
+            </label>
+            <p className="form-note">{t("admin.networkNameNote")}</p>
+            <label>
+              {t("admin.language")}
+              <select
+                disabled={saving}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous
+                      ? { ...previous, node: { ...previous.node, locale: LocaleSchema.parse(event.currentTarget.value) } }
+                      : previous,
+                  )
+                }
+                value={adminConfig.node.locale}
+              >
+                {LocaleSchema.options.map((option) => (
+                  <option key={option} value={option}>
+                    {LOCALE_LABELS[option]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="form-note">{t("admin.languageNote")}</p>
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">{t("settings.securityEyebrow")}</p>
+              <h2>{t("admin.profileHeading")}</h2>
+            </div>
+            <label>
+              {t("admin.posture")}
               <select
                 disabled={saving}
                 onInput={(event) =>
@@ -4327,37 +4492,38 @@ function AdminView({
               >
                 {SecurityProfileSchema.options.map((profile) => (
                   <option key={profile} value={profile}>
-                    {SECURITY_PROFILE_LABELS[profile].title}
+                    {securityProfileLabels()[profile].title}
                   </option>
                 ))}
               </select>
             </label>
-            <p className="form-note">{SECURITY_PROFILE_LABELS[adminConfig.security.profile].summary}</p>
+            <p className="form-note">{securityProfileLabels()[adminConfig.security.profile].summary}</p>
             <label>
-              Who can join
+              {t("admin.whoCanJoin")}
               <select
                 disabled={saving || adminConfig.security.profile !== "custom"}
                 onInput={(event) => setJoinPolicy(JoinPolicySchema.parse(event.currentTarget.value))}
                 value={adminConfig.access.joinPolicy}
               >
-                <option value="open">Open — anyone with the link joins</option>
-                <option value="approval">Approval — a greeter or admin lets people in</option>
+                <option value="open">{t("admin.joinOpen")}</option>
+                <option value="approval">{t("admin.joinApproval")}</option>
               </select>
             </label>
             {adminConfig.security.profile !== "custom" ? (
               <p className="form-note">
-                Access, retention, and the kill switch are managed by the{" "}
-                <strong>{SECURITY_PROFILE_LABELS[adminConfig.security.profile].title}</strong> profile.
-                Switch to <strong>Custom</strong> to edit them individually.
+                {t("admin.axesManaged", {
+                  profile: securityProfileLabels()[adminConfig.security.profile].title,
+                  custom: securityProfileLabels().custom.title,
+                })}
               </p>
             ) : null}
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Features</p>
-              <h2>Messaging</h2>
+              <p className="eyebrow">{t("admin.featuresEyebrow")}</p>
+              <h2>{t("admin.messagingHeading")}</h2>
             </div>
-            {FEATURE_FLAG_LABELS.map(([key, label]) => (
+            {featureFlagLabels().map(([key, label]) => (
               <label className="admin-toggle" key={key}>
                 <input
                   checked={adminConfig.features[key]}
@@ -4371,10 +4537,10 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Identity</p>
-              <h2>Profiles</h2>
+              <p className="eyebrow">{t("admin.identityEyebrow")}</p>
+              <h2>{t("admin.profilesHeading")}</h2>
             </div>
-            {IDENTITY_LABELS.map(([key, label]) => (
+            {identityLabels().map(([key, label]) => (
               <label className="admin-toggle" key={key}>
                 <input
                   checked={adminConfig.identity[key]}
@@ -4388,8 +4554,8 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">LLM</p>
-              <h2>Assistant (Ollama)</h2>
+              <p className="eyebrow">{t("admin.llmEyebrow")}</p>
+              <h2>{t("admin.llmHeading")}</h2>
             </div>
             <label className="admin-toggle">
               <input
@@ -4398,10 +4564,10 @@ function AdminView({
                 onInput={(event) => setOllama({ enabled: event.currentTarget.checked })}
                 type="checkbox"
               />
-              Enable the LLM assistant
+              {t("admin.llmEnable")}
             </label>
             <label>
-              Ollama base URL
+              {t("admin.llmBaseUrl")}
               <input
                 disabled={saving}
                 onInput={(event) => setOllama({ baseUrl: event.currentTarget.value })}
@@ -4409,7 +4575,7 @@ function AdminView({
               />
             </label>
             <label>
-              Model
+              {t("admin.llmModel")}
               <input
                 disabled={saving}
                 onInput={(event) => setOllama({ model: event.currentTarget.value })}
@@ -4417,7 +4583,7 @@ function AdminView({
               />
             </label>
             <label>
-              Bot display name
+              {t("admin.llmBotName")}
               <input
                 disabled={saving}
                 maxLength={80}
@@ -4426,7 +4592,7 @@ function AdminView({
               />
             </label>
             <label>
-              System prompt (optional)
+              {t("admin.llmSystemPrompt")}
               <textarea
                 disabled={saving}
                 onInput={(event) => setOllama({ systemPrompt: event.currentTarget.value || undefined })}
@@ -4437,11 +4603,11 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Privacy</p>
-              <h2>Message retention</h2>
+              <p className="eyebrow">{t("admin.privacyEyebrow")}</p>
+              <h2>{t("admin.retentionHeading")}</h2>
             </div>
             <label>
-              Delete messages after (minutes; blank = keep forever)
+              {t("admin.retentionLabel")}
               <input
                 disabled={saving || adminConfig.security.profile !== "custom"}
                 min={1}
@@ -4467,15 +4633,12 @@ function AdminView({
                 }
               />
             </label>
-            <p className="form-note">
-              Expired messages are deleted from the node and from connected clients (checked every
-              30 seconds). The proactive companion to the kill switch below.
-            </p>
+            <p className="form-note">{t("admin.retentionNote")}</p>
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Safety</p>
-              <h2>Kill switch</h2>
+              <p className="eyebrow">{t("admin.safetyEyebrow")}</p>
+              <h2>{t("admin.killSwitchHeading")}</h2>
             </div>
             <label className="admin-toggle">
               <input
@@ -4484,7 +4647,7 @@ function AdminView({
                 onInput={(event) => setKillSwitch({ enabled: event.currentTarget.checked })}
                 type="checkbox"
               />
-              Enable the kill switch (instant wipe of all node data)
+              {t("admin.killSwitchEnable")}
             </label>
             <label className="admin-toggle">
               <input
@@ -4493,11 +4656,10 @@ function AdminView({
                 onInput={(event) => setKillSwitch({ requireConfirmation: event.currentTarget.checked })}
                 type="checkbox"
               />
-              Require typed confirmation before firing
+              {t("admin.killSwitchRequireConfirm")}
             </label>
             <label>
-              Panic token (optional, min 16 chars; enables unauthenticated POST /api/panic; leave
-              blank to keep the current one)
+              {t("admin.panicToken")}
               <input
                 autoComplete="off"
                 disabled={saving || !adminConfig.killSwitch.enabled}
@@ -4509,14 +4671,10 @@ function AdminView({
             </label>
             {adminConfig.killSwitch.enabled ? (
               <div className="danger-zone">
-                <p className="form-note">
-                  Firing the kill switch permanently deletes all messages, users, sessions, and
-                  avatars on this node and remotely purges every connected client. Node settings
-                  survive.
-                </p>
+                <p className="form-note">{t("admin.killSwitchWarning")}</p>
                 {adminConfig.killSwitch.requireConfirmation ? (
                   <label>
-                    Type <strong>wipe</strong> to arm the button
+                    {t("admin.killSwitchConfirmBefore")} <strong>wipe</strong> {t("admin.killSwitchConfirmAfter")}
                     <input
                       autoComplete="off"
                       disabled={firing}
@@ -4535,7 +4693,7 @@ function AdminView({
                     onClick={() => void fireKillSwitch()}
                     type="button"
                   >
-                    {firing ? "Wiping…" : "Wipe this node now"}
+                    {firing ? t("settings.wiping") : t("admin.wipeNow")}
                   </button>
                 </div>
                 {fireError ? <p className="form-error">{fireError}</p> : null}
@@ -4544,8 +4702,8 @@ function AdminView({
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Network</p>
-              <h2>Node-to-node sync</h2>
+              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
+              <h2>{t("admin.syncHeading")}</h2>
             </div>
             <label className="admin-toggle">
               <input
@@ -4560,14 +4718,10 @@ function AdminView({
                 }
                 type="checkbox"
               />
-              Sync public channels with peer nodes
+              {t("admin.syncEnable")}
             </label>
-            <p className="form-note">
-              Pull-based: this node fetches public channels, their messages, and profiles from each
-              peer. DMs and private channels never leave a node. A peer&rsquo;s join URL (from its
-              join QR) is its sync address. Enabling this also lets peers pull this node&rsquo;s
-              public content.
-            </p>
+            <p className="form-note">{t("admin.syncNote")}</p>
+            {adminConfig.sync.enabled ? <NodeLinkControl joinUrl={joinUrl} /> : null}
             {adminConfig.sync.peers.length ? (
               <ul className="moderation-list">
                 {adminConfig.sync.peers.map((peer) => (
@@ -4595,14 +4749,14 @@ function AdminView({
                         }
                         type="button"
                       >
-                        Remove
+                        {t("common.remove")}
                       </button>
                     </div>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="form-note">No peers yet.</p>
+              <p className="form-note">{t("admin.noPeers")}</p>
             )}
             <AddSyncPeerControl
               disabled={saving || adminConfig.sync.peers.length >= 16}
@@ -4614,16 +4768,16 @@ function AdminView({
                 )
               }
             />
-            <p className="form-note">Peer changes apply when you save the node config below.</p>
+            <p className="form-note">{t("admin.peerChangesNote")}</p>
             <SyncStatusPanel />
           </div>
           <div className="profile-panel">
             <div>
-              <p className="eyebrow">Admin access</p>
-              <h2>Bootstrap</h2>
+              <p className="eyebrow">{t("admin.bootstrapEyebrow")}</p>
+              <h2>{t("admin.bootstrapHeading")}</h2>
             </div>
             <label>
-              Strategy
+              {t("admin.strategy")}
               <select
                 disabled={saving}
                 onInput={(event) =>
@@ -4650,7 +4804,7 @@ function AdminView({
             </label>
             {adminConfig.admin.bootstrap === "passphrase" ? (
               <label>
-                New admin passphrase (min 8 chars; leave blank to keep the current one)
+                {t("admin.newPassphrase")}
                 <input
                   autoComplete="off"
                   disabled={saving}
@@ -4661,15 +4815,13 @@ function AdminView({
                 />
               </label>
             ) : null}
-            <p className="form-note">
-              The setup-code strategy prints a one-time claim code in the server logs at startup.
-            </p>
+            <p className="form-note">{t("admin.bootstrapNote")}</p>
             <div className="profile-actions">
               <button disabled={saving} type="submit">
-                {saving ? "Saving" : "Save node config"}
+                {saving ? t("common.saving") : t("admin.saveConfig")}
               </button>
             </div>
-            {saved ? <p className="form-note">Saved. Connected clients pick the change up live.</p> : null}
+            {saved ? <p className="form-note">{t("admin.saved")}</p> : null}
             {saveError ? <p className="form-error">{saveError}</p> : null}
           </div>
         </form>
@@ -4695,7 +4847,7 @@ function AddSyncPeerControl({
   return (
     <div className="sync-peer-add">
       <label>
-        Peer URL (its join URL)
+        {t("admin.peerUrl")}
         <input
           disabled={disabled}
           onInput={(event) => setUrl(event.currentTarget.value)}
@@ -4704,12 +4856,12 @@ function AddSyncPeerControl({
         />
       </label>
       <label>
-        Label (optional)
+        {t("admin.peerLabel")}
         <input
           disabled={disabled}
           maxLength={80}
           onInput={(event) => setLabel(event.currentTarget.value)}
-          placeholder="e.g. Depot Pi"
+          placeholder={t("admin.peerLabelPlaceholder")}
           value={label}
         />
       </label>
@@ -4722,7 +4874,7 @@ function AddSyncPeerControl({
         }}
         type="button"
       >
-        Add peer
+        {t("admin.addPeer")}
       </button>
     </div>
   );
@@ -4756,7 +4908,7 @@ function SyncStatusPanel() {
 
         if (!parsed) {
           // Surface contract drift instead of rendering a silently blank panel.
-          setError("The server returned an unrecognised sync status payload.");
+          setError(t("admin.syncStatusUnrecognised"));
           return;
         }
 
@@ -4764,7 +4916,7 @@ function SyncStatusPanel() {
       })
       .catch((loadError: unknown) => {
         if (active) {
-          setError(loadError instanceof Error ? loadError.message : "Unable to load sync status.");
+          setError(loadError instanceof Error ? loadError.message : t("admin.syncStatusLoadError"));
         }
       });
 
@@ -4789,22 +4941,19 @@ function SyncStatusPanel() {
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : `Sync failed: ${response.status}`;
+        const message = errorText(payload, t("admin.syncFailed", { status: response.status }));
         throw new Error(message);
       }
 
       const parsed = parseSyncStatusReport(payload);
 
       if (!parsed) {
-        throw new Error("The server returned an unrecognised sync status payload.");
+        throw new Error(t("admin.syncStatusUnrecognised"));
       }
 
       setReport(parsed);
     } catch (runError) {
-      setError(runError instanceof Error ? runError.message : "Unable to run sync.");
+      setError(runError instanceof Error ? runError.message : t("admin.syncRunError"));
     } finally {
       window.clearTimeout(timeout);
       setRunning(false);
@@ -4818,13 +4967,13 @@ function SyncStatusPanel() {
   return (
     <div className="sync-status">
       <div className="panel-heading">
-        <p className="eyebrow">Status (saved peers)</p>
+        <p className="eyebrow">{t("admin.syncStatusEyebrow")}</p>
         <div className="moderation-actions">
           <button className="ghost-button" disabled={running} onClick={() => setReloadKey((key) => key + 1)} type="button">
-            Refresh
+            {t("common.refresh")}
           </button>
           <button disabled={running || !report.enabled} onClick={() => void runNow()} type="button">
-            {running ? "Syncing…" : "Sync now"}
+            {running ? t("admin.syncing") : t("admin.syncNow")}
           </button>
         </div>
       </div>
@@ -4835,10 +4984,10 @@ function SyncStatusPanel() {
               <strong>{peer.label ?? peer.url}</strong>
               <span>
                 {peer.status?.lastError
-                  ? `Error: ${peer.status.lastError}`
+                  ? t("admin.peerError", { error: peer.status.lastError })
                   : peer.status?.lastSuccessAt
-                    ? `Last synced ${displayTime(peer.status.lastSuccessAt)} · ${peer.status.imported} message(s) imported`
-                    : "Not synced yet"}
+                    ? `${t("admin.peerLastSyncedAt", { time: displayTime(peer.status.lastSuccessAt) })} · ${t("admin.peerImported", { n: peer.status.imported })}`
+                    : t("admin.peerNotSynced")}
               </span>
             </div>
           </li>
@@ -4868,17 +5017,14 @@ async function requestChannel(method: "POST" | "PATCH", path: string, body: unkn
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const message =
-        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-          ? payload.error
-          : `Request failed: ${response.status}`;
+      const message = errorText(payload, t("common.requestFailed", { status: response.status }));
       throw new Error(message);
     }
 
     const parsed = ChannelSchema.safeParse(payload);
 
     if (!parsed.success) {
-      throw new Error("The server returned an unrecognised channel payload.");
+      throw new Error(t("admin.channelUnrecognised"));
     }
 
     return parsed.data;
@@ -4948,7 +5094,7 @@ function AdminChannelsPanel({
       })
       .catch((error: unknown) => {
         if (active) {
-          setListError(error instanceof Error ? error.message : "Unable to load channels.");
+          setListError(error instanceof Error ? error.message : t("admin.channelsLoadError"));
         }
       });
 
@@ -4980,7 +5126,7 @@ function AdminChannelsPanel({
       setAllowReplies(true);
       setIsPrivate(false);
     } catch (error) {
-      setCreateError(error instanceof Error ? error.message : "Unable to create the channel.");
+      setCreateError(error instanceof Error ? error.message : t("admin.channelCreateError"));
     } finally {
       setCreating(false);
     }
@@ -4990,8 +5136,8 @@ function AdminChannelsPanel({
     <div className="settings-grid">
       <div className="profile-panel">
         <div>
-          <p className="eyebrow">Channels</p>
-          <h2>Create a channel</h2>
+          <p className="eyebrow">{t("admin.channelsEyebrow")}</p>
+          <h2>{t("admin.createChannelHeading")}</h2>
         </div>
         <form
           onSubmit={(event) => {
@@ -5000,17 +5146,17 @@ function AdminChannelsPanel({
           }}
         >
           <label>
-            Name
+            {t("admin.channelName")}
             <input
               disabled={creating}
               maxLength={80}
               onInput={(event) => setName(event.currentTarget.value)}
-              placeholder="e.g. Logistics"
+              placeholder={t("admin.channelNamePlaceholder")}
               value={name}
             />
           </label>
           <label>
-            Description (optional)
+            {t("admin.channelDescription")}
             <input
               disabled={creating}
               maxLength={280}
@@ -5019,7 +5165,7 @@ function AdminChannelsPanel({
             />
           </label>
           <label>
-            Who can post
+            {t("admin.whoCanPost")}
             <select
               disabled={creating}
               onInput={(event) =>
@@ -5027,8 +5173,8 @@ function AdminChannelsPanel({
               }
               value={allowPosting}
             >
-              <option value="everyone">Everyone</option>
-              <option value="admins">Admins only</option>
+              <option value="everyone">{t("admin.postEveryone")}</option>
+              <option value="admins">{t("admin.postAdmins")}</option>
             </select>
           </label>
           <label className="admin-toggle">
@@ -5038,7 +5184,7 @@ function AdminChannelsPanel({
               onInput={(event) => setAllowReplies(event.currentTarget.checked)}
               type="checkbox"
             />
-            Allow threaded replies
+            {t("admin.allowReplies")}
           </label>
           <label className="admin-toggle">
             <input
@@ -5047,11 +5193,11 @@ function AdminChannelsPanel({
               onInput={(event) => setIsPrivate(event.currentTarget.checked)}
               type="checkbox"
             />
-            Private (invite-only; you start as the only member)
+            {t("admin.channelPrivate")}
           </label>
           <div className="profile-actions">
             <button disabled={creating || !name.trim()} type="submit">
-              {creating ? "Creating…" : "Create channel"}
+              {creating ? t("admin.creating") : t("admin.createChannel")}
             </button>
           </div>
           {createError ? <p className="form-error">{createError}</p> : null}
@@ -5059,13 +5205,13 @@ function AdminChannelsPanel({
       </div>
       <div className="profile-panel">
         <div>
-          <p className="eyebrow">Channels</p>
-          <h2>Existing channels</h2>
+          <p className="eyebrow">{t("admin.channelsEyebrow")}</p>
+          <h2>{t("admin.existingChannels")}</h2>
         </div>
         {listError ? <p className="form-error">{listError}</p> : null}
-        {!loaded && !listError ? <p className="form-note">Loading channels…</p> : null}
+        {!loaded && !listError ? <p className="form-note">{t("admin.channelsLoading")}</p> : null}
         {loaded && adminChannels.length === 0 ? (
-          <p className="form-note">No channels yet. Create one above.</p>
+          <p className="form-note">{t("admin.channelsEmpty")}</p>
         ) : null}
         {adminChannels.length > 0 ? (
           <ul className="admin-channel-list">
@@ -5106,7 +5252,7 @@ function AdminChannelRow({
       onApply(updated);
       setName(updated.name);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to update the channel.");
+      setError(requestError instanceof Error ? requestError.message : t("admin.channelUpdateError"));
     } finally {
       setBusy(false);
     }
@@ -5116,21 +5262,21 @@ function AdminChannelRow({
     <li className={channel.archived ? "admin-channel archived" : "admin-channel"}>
       <div className="admin-channel-main">
         <input
-          aria-label={`Channel name for ${channel.name}`}
+          aria-label={t("admin.channelNameAria", { name: channel.name })}
           disabled={busy}
           maxLength={80}
           onInput={(event) => setName(event.currentTarget.value)}
           value={name}
         />
         <span className="admin-channel-meta">
-          {channel.allowPosting === "admins" ? "Admins post" : "Open posting"}
-          {channel.visibility === "private" ? " · Private" : ""}
-          {channel.archived ? " · Archived" : ""}
+          {channel.allowPosting === "admins" ? t("admin.metaAdminsPost") : t("admin.metaOpenPosting")}
+          {channel.visibility === "private" ? ` · ${t("admin.metaPrivate")}` : ""}
+          {channel.archived ? ` · ${t("admin.metaArchived")}` : ""}
         </span>
       </div>
       <div className="admin-channel-actions">
         <button disabled={renameDisabled} onClick={() => void patch({ name: trimmedName })} type="button">
-          Rename
+          {t("admin.rename")}
         </button>
         <button
           className={channel.archived ? undefined : "danger-button"}
@@ -5138,7 +5284,7 @@ function AdminChannelRow({
           onClick={() => void patch({ archived: !channel.archived })}
           type="button"
         >
-          {channel.archived ? "Restore" : "Archive"}
+          {channel.archived ? t("admin.restore") : t("admin.archive")}
         </button>
       </div>
       {error ? <p className="form-error">{error}</p> : null}

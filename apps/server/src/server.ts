@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,7 +6,36 @@ import { fileURLToPath } from "node:url";
 import { buildApp } from "./app.js";
 
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
+const serverDir = fileURLToPath(new URL("..", import.meta.url));
 const dataDir = process.env.LOAM_DATA_DIR ?? join(rootDir, ".loam");
+
+/**
+ * Resolve the node's version for display in the client. Prefers the `LOAM_VERSION` env override (set
+ * by the npm CLI to inject the published package version), then the server package's own
+ * `package.json`, then the workspace root's — falling back to `"dev"` if none can be read. Never
+ * throws: a missing/malformed file just yields the fallback.
+ */
+function resolveVersion(): string {
+  const fromEnv = process.env.LOAM_VERSION?.trim();
+
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  for (const candidate of [join(serverDir, "package.json"), join(rootDir, "package.json")]) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(candidate, "utf8"));
+
+      if (parsed && typeof parsed === "object" && "version" in parsed && typeof parsed.version === "string" && parsed.version) {
+        return parsed.version;
+      }
+    } catch {
+      // Try the next candidate; unreadable/malformed files fall through to "dev".
+    }
+  }
+
+  return "dev";
+}
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
 const host = process.env.HOST ?? "0.0.0.0";
@@ -34,6 +64,7 @@ const app = await buildApp({
   clientPort,
   dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
   ephemeralDbKey,
+  version: resolveVersion(),
 });
 
 if (app.adminSetupCode) {

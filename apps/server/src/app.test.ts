@@ -2884,3 +2884,350 @@ describe("attachment + sync review hardening", () => {
     expect(bodies).not.toContain("late reply");
   });
 });
+
+describe("ready-for-use features (node name, promotion, presence)", () => {
+  it("serves and hot-updates the configurable network name", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const before = (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).json() as {
+      nodeName: string;
+      networkConfig: { nodeName: string };
+    };
+    expect(before.nodeName).toBe("LOAM local");
+    expect(before.networkConfig.nodeName).toBe("LOAM local");
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { node: { name: "Sector 7 Relief Net" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).json() as {
+      nodeName: string;
+      networkConfig: { nodeName: string };
+    };
+    expect(after.nodeName).toBe("Sector 7 Relief Net");
+    expect(after.networkConfig.nodeName).toBe("Sector 7 Relief Net");
+  });
+
+  it("serves and hot-updates the node UI locale", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const before = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { locale: string } };
+    expect(before.networkConfig.locale).toBe("en");
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { node: { locale: "ar" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { locale: string } };
+    expect(after.networkConfig.locale).toBe("ar");
+
+    const rejected = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { node: { locale: "xx" } },
+    });
+    expect(rejected.statusCode).toBe(400);
+  });
+
+  it("attaches a stable snake_case error code alongside the English error message", async () => {
+    const app = await makeApp();
+    await newSession(app); // first session claims the firstUser admin grant
+    const user = await newSession(app); // this one is a plain member
+
+    // A non-admin hitting an admin-only route gets the localizable code plus the English fallback.
+    const denied = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: user.cookie },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toEqual({ error: "Admin access required", code: "admin_required" });
+
+    // A 404 for an unknown channel carries the not-found code.
+    const missing = await app.server.inject({
+      method: "GET",
+      url: "/api/messages/does-not-exist",
+      headers: { cookie: user.cookie },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect((missing.json() as { code?: string }).code).toBe("channel_not_found");
+  });
+
+  it("codes the participation-gate and channel-posting-policy errors (were English-only)", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const admin = await newSession(app);
+    const pending = await newSession(app); // under approval policy, starts pending
+
+    // A pending user hitting a mutating endpoint: the gate message now carries a code to localize.
+    const gated = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: pending.cookie },
+    });
+    expect(gated.statusCode).toBe(403);
+    expect((gated.json() as { code?: string }).code).toBe("awaiting_approval");
+
+    // Channel-posting policy: an admins-only channel rejects a member's post with a code.
+    await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${pending.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+      payload: { name: "Announce", allowPosting: "admins" },
+    });
+    const channelId = (created.json() as { id: string }).id;
+    const post = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: pending.cookie },
+      payload: { type: "channelPost", channelId, body: "hi" },
+    });
+    expect(post.statusCode).toBe(400);
+    expect((post.json() as { code?: string }).code).toBe("channel_admins_post_only");
+  });
+
+  it("surfaces the node version in /api/config", async () => {
+    // makeApp builds with no version option, so it reports the "dev" fallback.
+    const app = await makeApp();
+    const dev = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as { version: string };
+    expect(dev.version).toBe("dev");
+
+    // An explicit version (as server.ts / the npm CLI inject) is echoed back verbatim.
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    const versioned = await buildApp({ dataDir, logger: false, version: "9.9.9" });
+    cleanups.push(async () => {
+      await versioned.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+    const reported = (await versioned.server.inject({ method: "GET", url: "/api/config" })).json() as { version: string };
+    expect(reported.version).toBe("9.9.9");
+  });
+
+  it("lets an admin promote a member, but not non-admins, bots, or pending users", async () => {
+    const app = await makeApp({
+      access: { joinPolicy: "approval" },
+      // Enable the LLM so the bot user exists, to exercise the type !== "human" guard below.
+      llm: { ollama: { enabled: true, baseUrl: "http://localhost:11434", model: "m", botId: "bot.test", botDisplayName: "Bot" } },
+    });
+    const admin = await newSession(app);
+    const member = await newSession(app);
+    const pendingUser = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: `/api/access/users/${member.userId}/approve`,
+      headers: { cookie: admin.cookie },
+    });
+
+    // A bot can never be promoted to admin (only people can be admins).
+    const bot = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/users/bot.test/promote",
+      headers: { cookie: admin.cookie },
+    });
+    expect(bot.statusCode).toBe(400);
+
+    // A plain member cannot promote anyone.
+    const forbidden = await app.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${admin.userId}/promote`,
+      headers: { cookie: member.cookie },
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    // Pending users must be approved first.
+    const early = await app.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${pendingUser.userId}/promote`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(early.statusCode).toBe(400);
+
+    const promoted = await app.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${member.userId}/promote`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(promoted.statusCode).toBe(200);
+    expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+
+    // The promotion persisted and the new admin has admin powers.
+    const config = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: member.cookie },
+    });
+    expect(config.statusCode).toBe(200);
+  });
+
+  it("broadcasts presence on connect/disconnect and stays silent when disabled", async () => {
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const connect = (cookie: string) =>
+      new Promise<{ socket: WebSocket; events: { type?: string; onlineUserIds?: string[] }[] }>((resolve, reject) => {
+        const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+          `${baseUrl.replace("http", "ws")}/ws`,
+          { headers: { cookie } },
+        );
+        const events: { type?: string; onlineUserIds?: string[] }[] = [];
+        socket.addEventListener("message", (event) =>
+          events.push(JSON.parse(String((event as MessageEvent).data)) as { type?: string }),
+        );
+        socket.addEventListener("open", () => resolve({ socket, events }));
+        socket.addEventListener("error", () => reject(new Error("connect failed")));
+      });
+
+    const waitUntil = async (check: () => boolean) => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline && !check()) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return check();
+    };
+
+    const aliceSocket = await connect(alice.cookie);
+    const bobSocket = await connect(bob.cookie);
+
+    // Alice hears that Bob came online (a presence event listing both ids).
+    expect(
+      await waitUntil(() =>
+        aliceSocket.events.some(
+          (event) =>
+            event.type === "presence" &&
+            !!event.onlineUserIds?.includes(alice.userId) &&
+            !!event.onlineUserIds?.includes(bob.userId),
+        ),
+      ),
+    ).toBe(true);
+
+    // Bob disconnects; Alice's next presence event no longer lists him.
+    bobSocket.socket.close();
+    expect(
+      await waitUntil(() => {
+        const last = [...aliceSocket.events].reverse().find((event) => event.type === "presence");
+        return !!last && !last.onlineUserIds?.includes(bob.userId);
+      }),
+    ).toBe(true);
+    aliceSocket.socket.close();
+
+    // With the flag off, no presence events are emitted at all.
+    const silent = await makeApp({ features: { enablePresence: false } });
+    const carol = await newSession(silent);
+    const silentUrl = await silent.server.listen({ port: 0, host: "127.0.0.1" });
+    const carolSocket = await new Promise<{ socket: WebSocket; events: { type?: string }[] }>((resolve, reject) => {
+      const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+        `${silentUrl.replace("http", "ws")}/ws`,
+        { headers: { cookie: carol.cookie } },
+      );
+      const events: { type?: string }[] = [];
+      socket.addEventListener("message", (event) => events.push(JSON.parse(String((event as MessageEvent).data)) as { type?: string }));
+      socket.addEventListener("open", () => resolve({ socket, events }));
+      socket.addEventListener("error", () => reject(new Error("connect failed")));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(carolSocket.events.some((event) => event.type === "presence")).toBe(false);
+    carolSocket.socket.close();
+  });
+});
+
+describe("security hardening", () => {
+  it("GET /api/health returns ok without minting a session or consuming firstUser admin", async () => {
+    const app = await makeApp();
+
+    const health = await app.server.inject({ method: "GET", url: "/api/health" });
+    expect(health.statusCode).toBe(200);
+    expect(health.json()).toEqual({ ok: true });
+    expect(health.headers["set-cookie"]).toBeUndefined();
+
+    const first = await newSession(app);
+    expect(first.isAdmin).toBe(true);
+  });
+
+  it("sets security headers (nosniff always, CSP on the app shell only)", async () => {
+    const app = await makeApp();
+
+    const api = await app.server.inject({ method: "GET", url: "/api/health" });
+    expect(api.headers["x-content-type-options"]).toBe("nosniff");
+    expect(api.headers["content-security-policy"]).toBeUndefined();
+
+    const shell = await app.server.inject({ method: "GET", url: "/" });
+    expect(shell.headers["x-content-type-options"]).toBe("nosniff");
+    expect(String(shell.headers["content-security-policy"])).toContain("frame-ancestors 'none'");
+  });
+
+  it("blocks a banned user from editing their profile", async () => {
+    const app = await makeApp({ identity: { allowUserDisplayNameEdit: true } });
+    const admin = await newSession(app);
+    const target = await newSession(app);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${target.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const edit = await app.server.inject({
+      method: "PATCH",
+      url: "/api/users/me",
+      headers: { cookie: target.cookie },
+      payload: { displayName: "Ban Evader" },
+    });
+    expect(edit.statusCode).toBe(403);
+  });
+
+  it("rejects an over-long message body but keeps normal ones", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    const huge = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "x".repeat(8001) },
+    });
+    expect(huge.statusCode).toBe(400);
+
+    const ok = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "x".repeat(8000) },
+    });
+    expect(ok.statusCode).toBe(201);
+  });
+
+  it("does not mark the session cookie Secure on the plain-http LAN", async () => {
+    // The injected request is plain http (no TLS socket, trustProxy off), so the cookie must NOT be
+    // Secure — a Secure cookie would be dropped by the browser and break the session. The flag
+    // flips only when request.protocol is genuinely https (a self-hoster behind a TLS proxy enables
+    // trustProxy for that); we deliberately don't trust a spoofable x-forwarded-proto header.
+    const app = await makeApp();
+
+    const plain = await app.server.inject({ method: "GET", url: "/api/config" });
+    expect(String(plain.headers["set-cookie"])).toContain("loam_session=");
+    expect(String(plain.headers["set-cookie"])).not.toContain("Secure");
+  });
+});
