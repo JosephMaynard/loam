@@ -62,8 +62,25 @@ goal, so a message can eventually hop device-to-device across a wider area with 
 
 ## Quick start
 
-You'll need [Node 24.13.1](.node-version) and [pnpm 10](https://pnpm.io) (`corepack enable` will
-set pnpm up for you).
+### Install with npm (easiest)
+
+If you just want to **run** a node, install the published package (Node ≥22 required — the default
+database uses the built-in `node:sqlite`, so there's **no native build / no node-gyp**):
+
+```bash
+npm install -g loamnet     # the npm name is loamnet; the command is `loam`
+loam                       # boots a node and prints a join QR + LAN URL
+```
+
+Scan the printed QR (or open the URL) from another device on the same network — that's the whole join
+flow. Useful flags: `loam --port 8080`, `loam --data-dir ~/loam-data` (defaults to `$XDG_DATA_HOME/loam`
+or `~/.loam`), and `loam --encrypt <passphrase>` to encrypt the database at rest (pulls an optional
+native SQLCipher driver; skip it and storage stays plain). See [`loam --help`](docs/14-distribution.md).
+
+### Develop from source (git clone)
+
+For hacking on LOAM you'll want the repo. You'll need [Node 24.13.1](.node-version) and
+[pnpm 10](https://pnpm.io) (`corepack enable` will set pnpm up for you).
 
 ```bash
 pnpm install
@@ -83,6 +100,9 @@ with an SPA fallback.
 pnpm build
 pnpm --filter @loam/server start   # serves the built client + API, defaults to PORT 3000
 ```
+
+The `loamnet` npm package above is exactly this single-origin build, bundled into one self-contained
+file with the web client — see [docs/14-distribution.md](docs/14-distribution.md).
 
 ### Host it from an Android phone
 
@@ -223,7 +243,8 @@ Design notes, threat models, and initiative briefings live in [`docs/`](docs/):
 - [Android host app](docs/04-android-host-app.md) · [Authentication](docs/05-authentication.md) · [LLM](docs/06-llm.md)
 - [More features menu](docs/07-more-features.md) · [Transport security](docs/08-transport-security.md) · [Security profiles](docs/09-security-profiles.md)
 - [Maps & location sharing](docs/10-maps-location-sharing.md) · [Node-to-node sync](docs/11-node-sync.md)
-- [Operator's guide — running a node](docs/12-operators-guide.md) · [Internationalization plan](docs/13-i18n.md)
+- [Operator's guide — running a node](docs/12-operators-guide.md) · [Internationalization](docs/13-i18n.md)
+- [Distribution — the `loamnet` npm package](docs/14-distribution.md)
 - [`CLAUDE.md`](CLAUDE.md) — architecture baseline for contributors (and AI agents).
 
 ## Contributing
