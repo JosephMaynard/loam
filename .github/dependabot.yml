@@ -1,11 +1,21 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
+# Dependabot version updates. See:
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
 version: 2
 updates:
   - package-ecosystem: "npm"
-    directory: "/" # Location of package manifests
+    directory: "/" # pnpm workspace root — covers every apps/* and packages/* manifest
     schedule:
       interval: "weekly"
+    # Batch routine minor/patch bumps into a single weekly PR instead of one-per-dependency, so the
+    # PR queue stays small. Major bumps still arrive as their own PRs for individual review.
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Keep @types/node aligned with the pinned runtime (Node 24, see .node-version). A major bump
+      # ahead of the runtime lets code typecheck against APIs that don't exist at run time; allow
+      # only minor/patch within the current major and revisit this when the Node pin moves.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
