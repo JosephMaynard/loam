@@ -1,7 +1,7 @@
 {
   "name": "loam",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Local-first, off-grid messaging: a host runs it on a laptop, Pi, or phone; nearby people scan a QR and chat over the local network.",
   "scripts": {
     "dev": "tsx scripts/dev.ts",
