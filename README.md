@@ -223,6 +223,7 @@ Design notes, threat models, and initiative briefings live in [`docs/`](docs/):
 - [Android host app](docs/04-android-host-app.md) · [Authentication](docs/05-authentication.md) · [LLM](docs/06-llm.md)
 - [More features menu](docs/07-more-features.md) · [Transport security](docs/08-transport-security.md) · [Security profiles](docs/09-security-profiles.md)
 - [Maps & location sharing](docs/10-maps-location-sharing.md) · [Node-to-node sync](docs/11-node-sync.md)
+- [Operator's guide — running a node](docs/12-operators-guide.md) · [Internationalization plan](docs/13-i18n.md)
 - [`CLAUDE.md`](CLAUDE.md) — architecture baseline for contributors (and AI agents).
 
 ## Contributing

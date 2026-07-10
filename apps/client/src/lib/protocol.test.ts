@@ -32,6 +32,7 @@ const user: User = {
 };
 
 const networkConfig: NetworkConfig = {
+  nodeName: "Test Net",
   enablePublicChannels: true,
   enablePrivateChannels: false,
   enableUserChannels: true,
@@ -40,6 +41,7 @@ const networkConfig: NetworkConfig = {
   enableReactions: true,
   enableMarkdown: true,
   enableAttachments: true,
+  enablePresence: true,
   enableLLMChat: false,
   enableLLMStreaming: false,
   allowUserDisplayNameEdit: false,
@@ -167,6 +169,15 @@ describe("parseSocketEvent", () => {
 
   it("parses the wipe event", () => {
     expect(parseSocketEvent(frame({ type: "wipe" }))).toEqual({ type: "wipe" });
+  });
+
+  it("parses presence with a string-id array and rejects malformed ones", () => {
+    expect(parseSocketEvent(frame({ type: "presence", onlineUserIds: ["user.1", "user.2"] }))).toEqual({
+      type: "presence",
+      onlineUserIds: ["user.1", "user.2"],
+    });
+    expect(parseSocketEvent(frame({ type: "presence", onlineUserIds: [1, 2] }))).toBeUndefined();
+    expect(parseSocketEvent(frame({ type: "presence" }))).toBeUndefined();
   });
 
   it("wraps LLM stream events", () => {

@@ -97,6 +97,10 @@ type ClientEvent =
       channelId: string;
     }
   | {
+      type: "presence";
+      onlineUserIds: string[];
+    }
+  | {
       type: "configUpdated";
       networkConfig: NetworkConfig;
     }
@@ -148,7 +152,6 @@ export type LoamApp = {
 const sessionCookieName = "loam_session";
 const sessionCookieMaxAge = 60 * 60 * 24 * 365;
 const defaultChannelCreatedAt = 1_704_067_200_000;
-const isProduction = process.env.NODE_ENV === "production";
 const claimAttemptLimit = 5;
 const claimAttemptWindowMs = 5 * 60_000;
 
@@ -183,6 +186,9 @@ const seedUsers = ["user.1234", "user.5678"];
  */
 export function defaultLoamConfig(): LoamConfig {
   return {
+    node: {
+      name: "LOAM local",
+    },
     identity: {
       allowUserDisplayNameEdit: false,
       allowUserAvatarEdit: false,
@@ -198,6 +204,7 @@ export function defaultLoamConfig(): LoamConfig {
       enableReactions: true,
       enableMarkdown: true,
       enableAttachments: true,
+      enablePresence: true,
     },
     llm: {
       ollama: {
@@ -253,6 +260,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
   const merged = {
+    node: { ...base.node, ...update.node },
     identity: { ...base.identity, ...update.identity },
     features: { ...base.features, ...update.features },
     llm: { ollama: { ...base.llm.ollama, ...update.llm?.ollama } },
@@ -716,9 +724,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const token = makeSessionToken();
     sessions.set(token, userId);
     store.putSession(token, userId);
+    // Mark the cookie Secure only when the request actually arrived over TLS. Keying this on
+    // NODE_ENV=production instead (as before) breaks sessions on LOAM's documented plain-http LAN
+    // deployment: a Secure cookie is dropped by the browser, so every request mints a fresh session
+    // and identity never persists. We read `request.protocol` (the real socket protocol) rather
+    // than a client-supplied `x-forwarded-proto` header: LOAM runs without `trustProxy` on purpose
+    // (so the per-IP rate limiter can't be evaded by a spoofed `x-forwarded-for`), which means a
+    // self-hoster terminating TLS at a proxy must enable trustProxy themselves for this to flip.
+    const secure = request.protocol === "https";
     const cookie = `${sessionCookieName}=${encodeCookieValue(
       token,
-    )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${isProduction ? "; Secure" : ""}`;
+    )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${secure ? "; Secure" : ""}`;
     reply.header("set-cookie", cookie);
     return userId;
   }
@@ -812,6 +828,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function currentNetworkConfig(): NetworkConfig {
     return {
+      nodeName: appConfig.node.name,
       ...appConfig.features,
       enableLLMChat: appConfig.llm.ollama.enabled,
       enableLLMStreaming: appConfig.llm.ollama.enabled,
@@ -1184,6 +1201,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return false;
     }
 
+    if (event.type === "presence") {
+      // Contains only visible users' ids; the banned/pending recipient gates above already ran.
+      return true;
+    }
+
     const message = event.message;
 
     // Shadow ban: a message whose author is currently shadow-banned is delivered only back to the
@@ -1211,6 +1233,35 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         socket.send(payload);
       }
     }
+  }
+
+  /** User ids with at least one open socket, restricted to visible (non-banned/-pending) users. */
+  function onlineUserIds(): string[] {
+    const online = new Set<string>();
+
+    for (const { socket, userId } of sockets) {
+      if (socket.readyState === socket.OPEN) {
+        online.add(userId);
+      }
+    }
+
+    return [...online].filter((id) => {
+      const user = data.users.find((candidate) => candidate.id === id);
+      return !!user && !user.banned && !user.pending;
+    });
+  }
+
+  /**
+   * Tell everyone who is connected right now (online dots). No-op when `enablePresence` is off —
+   * high-risk deployments disable it, since presence reveals exactly who is reachable at this
+   * moment. Sent on every connect/disconnect; at LAN scale that needs no debouncing.
+   */
+  function broadcastPresence(): void {
+    if (!appConfig.features.enablePresence) {
+      return;
+    }
+
+    broadcast({ type: "presence", onlineUserIds: onlineUserIds() });
   }
 
   /**
@@ -2292,6 +2343,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     void runSyncLoop().catch((error: unknown) => server.log.error(error));
   }, 5_000);
 
+  // Security headers on every response. A strict CSP is defense-in-depth behind the already-hardened
+  // markdown sanitizer: the client is fully self-contained (its own JS/CSS, images from this origin,
+  // ws:// to this host), so it needs no external origins. `nosniff` stops content-type confusion on
+  // the user-uploaded images. `frame-ancestors 'none'` blocks clickjacking. No HSTS — LOAM runs on
+  // plain-http LANs by design (docs/08), so forcing https would break it.
+  server.addHook("onSend", async (request, reply) => {
+    reply.header("x-content-type-options", "nosniff");
+
+    // Only decorate the app shell / navigations, not API JSON or image bytes (those set their own).
+    if (!request.url.startsWith("/api/") && request.url !== "/ws") {
+      reply.header(
+        "content-security-policy",
+        [
+          "default-src 'self'",
+          // Inline styles: the client injects generated SVG (avatars, QR) with style attributes.
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob:",
+          "connect-src 'self' ws: wss:",
+          "object-src 'none'",
+          "base-uri 'self'",
+          "form-action 'self'",
+          "frame-ancestors 'none'",
+        ].join("; "),
+      );
+      reply.header("referrer-policy", "no-referrer");
+    }
+  });
+
   // Blanket per-IP throttle for every HTTP route; the abuse-sensitive endpoints (claim, panic,
   // avatar upload) add their own tighter semantic limits on top.
   await server.register(fastifyRateLimit, {
@@ -2302,11 +2381,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   await server.register(fastifyWebsocket);
   await registerStaticFiles();
 
+  // Liveness probe that mints NO identity — the Android host launcher polls this before loading the
+  // WebView. Polling /api/config here would consume the one-time `firstUser` admin grant with a
+  // throwaway loopback session, leaving the real operator (and the kill switch) locked out.
+  server.get("/api/health", async () => ({ ok: true }));
+
   server.get("/api/config", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     return {
-      nodeName: "LOAM local",
+      nodeName: appConfig.node.name,
       joinUrl: `http://${joinHost}:${clientPort}`,
       websocketPath: "/ws",
       currentUser,
@@ -2339,6 +2423,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const user = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(user);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
+    }
+
     return applyUserUpdate(user, body.data);
   });
   server.put(
@@ -2347,6 +2437,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     async (request, reply) => {
     if (!appConfig.identity.allowUserAvatarEdit || !appConfig.identity.allowUserAvatarUpload) {
       return reply.code(403).send({ error: "User avatar uploads are disabled on this LOAM node" });
+    }
+
+    const uploader = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(uploader);
+
+    if (accessError) {
+      return reply.code(403).send({ error: accessError });
     }
 
     const body = AvatarImageUploadRequestSchema.safeParse(request.body);
@@ -2365,7 +2462,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send({ error: "Avatar image type does not match the uploaded data" });
     }
 
-    const user = ensureSessionUser(getSessionUserId(request, reply));
+    const user = uploader;
     const previousAvatar = user.avatar;
     const imageId = newAvatarImageId();
     await mkdir(avatarsDir, { recursive: true });
@@ -2437,6 +2534,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     return applyUserModeration(user, { roles: body.data.roles });
+  });
+
+  // Promote a member to admin — host handover and co-admins. Deliberately no demote counterpart:
+  // admin removal happens by re-bootstrapping the node (or the kill switch), never by another
+  // admin, so a contested node can't descend into a mutual-demotion fight over governance.
+  server.post<{ Params: { userId: string } }>("/api/admin/users/:userId/promote", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send({ error: "Admin access required" });
+    }
+
+    const user = data.users.find((candidate) => candidate.id === request.params.userId);
+
+    if (!user) {
+      return reply.code(404).send({ error: "User does not exist" });
+    }
+
+    if (user.type !== "human") {
+      return reply.code(400).send({ error: "Only people can be admins" });
+    }
+
+    if (user.banned || user.pending) {
+      return reply.code(400).send({ error: "Approve or unban this user before promoting them" });
+    }
+
+    if (user.isAdmin) {
+      return user;
+    }
+
+    const next = UserSchema.parse({ ...user, isAdmin: true });
+    store.upsertUser(next);
+    Object.assign(user, next);
+    broadcast({ type: "userUpserted", user });
+    return user;
   });
 
   // Ban / shadow-ban / unban a user. Open to admins and moderators; never usable against an admin
@@ -2568,7 +2700,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     try {
       const image = await readFile(avatarImagePath(avatar.imageId, avatar.mimeType));
-      return reply.type(avatar.mimeType).header("cache-control", "private, max-age=3600").send(image);
+      return reply.type(avatar.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return reply.code(404).send({ error: "Avatar image does not exist" });
@@ -2669,7 +2801,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // joining the raw request param — the served path is then provably derived from the
         // whitelisted pattern, never from user input.
         const image = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
-        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").send(image);
+        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
           return reply.code(404).send({ error: "Attachment does not exist" });
@@ -3223,6 +3355,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     store.setConfigValue("config", JSON.stringify(appConfig));
     ensureOllamaBotUser();
     broadcast({ type: "configUpdated", networkConfig: currentNetworkConfig() });
+    // If presence was just enabled, connected clients need the current roster to light up.
+    broadcastPresence();
     return redactedConfig();
   });
 
@@ -3315,7 +3449,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const socketSession = { socket: connection, userId };
     sockets.add(socketSession);
-    connection.on("close", () => sockets.delete(socketSession));
+    broadcastPresence();
+    connection.on("close", () => {
+      sockets.delete(socketSession);
+      broadcastPresence();
+    });
   });
 
   server.setNotFoundHandler((request, reply) => {

@@ -1,4 +1,3 @@
-import { encodeQR, renderQRToSvg } from "@loam/qr";
 import {
   AdminBootstrapStrategySchema,
   ChannelSchema,
@@ -35,13 +34,16 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
 import { InviteControl } from "./components/InviteControl";
+import { NodeLinkControl } from "./components/NodeLinkControl";
 import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
 import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
+import { dayKey, dayLabel } from "./lib/dates";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
+import { safeQrSvg } from "./lib/qr";
 
 type Config = {
   nodeName: string;
@@ -421,6 +423,8 @@ function LoamApp() {
   const syncFailuresRef = useRef(0);
   const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  // Who is connected right now (server presence events; empty when the node disables presence).
+  const [onlineUserIds, setOnlineUserIds] = useState<ReadonlySet<string>>(new Set());
 
   // Refs let the long-lived WebSocket handler read the latest active conversation / users / channels
   // without re-subscribing the socket on every navigation or roster change.
@@ -1064,6 +1068,23 @@ function LoamApp() {
     localStorage.setItem(LAST_CONVERSATION_KEY, location.path);
   }, [location.path]);
 
+  // The browser tab carries the operator-chosen network name once known.
+  useEffect(() => {
+    const nodeName = config?.networkConfig.nodeName;
+    document.title = nodeName && nodeName !== "LOAM local" ? `${nodeName} · LOAM` : "LOAM";
+  }, [config?.networkConfig.nodeName]);
+
+  // Flip the whole layout for right-to-left locales. Message bodies already use dir="auto" per
+  // message; this sets the document direction so the chrome (sidebar, panels) mirrors too. When a
+  // UI translation layer lands (docs/13) this will key off the selected locale instead of the
+  // browser's — for now the browser's primary language is the best available signal.
+  useEffect(() => {
+    const rtl = new Set(["ar", "he", "fa", "ur", "ps", "sd", "yi", "dv"]);
+    const primary = (navigator.language || "en").split("-")[0]?.toLowerCase() ?? "en";
+    document.documentElement.dir = rtl.has(primary) ? "rtl" : "ltr";
+    document.documentElement.lang = navigator.language || "en";
+  }, []);
+
   useEffect(() => {
     let active = true;
 
@@ -1323,6 +1344,17 @@ function LoamApp() {
           setConfig((previous) =>
             previous ? { ...previous, networkConfig: payload.networkConfig } : previous,
           );
+
+          // Presence switched off: clear the dots immediately (no further events will arrive).
+          if (!payload.networkConfig.enablePresence) {
+            setOnlineUserIds(new Set());
+          }
+
+          return;
+        }
+
+        if (payload.type === "presence") {
+          setOnlineUserIds(new Set(payload.onlineUserIds));
           return;
         }
 
@@ -1474,12 +1506,19 @@ function LoamApp() {
         connection={connection}
         currentUser={currentUser}
         joinUrl={config?.joinUrl}
+        nodeName={config?.networkConfig.nodeName}
         onCreateChannel={createChannel}
+        onlineUserIds={onlineUserIds}
         unreadByConversation={unreadByConversation}
         users={users}
       />
       {routeState.screen === "admin" ? (
-        <AdminView currentUser={currentUser} onChannelUpsert={upsertChannels} onWiped={purgeLocalData} />
+        <AdminView
+          currentUser={currentUser}
+          joinUrl={config?.joinUrl}
+          onChannelUpsert={upsertChannels}
+          onWiped={purgeLocalData}
+        />
       ) : routeState.screen === "people" ? (
         <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} />
       ) : routeState.screen === "search" ? (
@@ -1596,7 +1635,9 @@ interface SidebarProps {
   connection: "connecting" | "live" | "offline";
   currentUser: User;
   joinUrl?: string;
+  nodeName?: string;
   onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
+  onlineUserIds: ReadonlySet<string>;
   unreadByConversation: Map<string, number>;
   users: User[];
 }
@@ -1619,7 +1660,9 @@ function Sidebar({
   connection,
   currentUser,
   joinUrl,
+  nodeName,
   onCreateChannel,
+  onlineUserIds,
   unreadByConversation,
   users,
 }: SidebarProps) {
@@ -1631,7 +1674,10 @@ function Sidebar({
       <div className="brand-row">
         <img src={loamMark} alt="" className="brand-mark" />
         <div>
-          <p className="brand-title">LOAM</p>
+          {/* The operator-chosen network name is the headline; LOAM stays as the mark. */}
+          <p className="brand-title" title={nodeName}>
+            {nodeName ?? "LOAM"}
+          </p>
           <p className={`status-pill status-${connection}`}>{connection}</p>
         </div>
       </div>
@@ -1667,7 +1713,12 @@ function Sidebar({
               href={`/dm/${encodeURIComponent(user.id)}`}
               key={user.id}
             >
-              <Avatar avatar={user.avatar} id={user.id} />
+              <span className="presence-anchor">
+                <Avatar avatar={user.avatar} id={user.id} />
+                {onlineUserIds.has(user.id) ? (
+                  <span aria-label="Online" className="presence-dot" title="Online" />
+                ) : null}
+              </span>
               <span className="nav-label">{user.displayName}</span>
               <UnreadBadge count={unreadByConversation.get(`dm:${user.id}`) ?? 0} />
             </NavLink>
@@ -2234,20 +2285,31 @@ function MessageList({
   return (
     <div className="message-list" ref={listRef}>
       {topMessages.length ? (
-        topMessages.map((message) => (
-          <MessageItem
-            currentUser={currentUser}
-            key={message.id}
-            message={message}
-            onDelete={onDelete}
-            onEdit={onEdit}
-            onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
-            onReact={onReact}
-            reactions={reactionSummary(messages, message.id, currentUser.id)}
-            replyCount={repliesFor(messages, message.id).length}
-            usersById={usersById}
-          />
-        ))
+        topMessages.map((message, index) => {
+          const previous = topMessages[index - 1];
+          const newDay = !previous || dayKey(previous.createdAt) !== dayKey(message.createdAt);
+
+          return (
+            <div key={message.id}>
+              {newDay ? (
+                <div className="day-divider" role="separator">
+                  <span>{dayLabel(message.createdAt)}</span>
+                </div>
+              ) : null}
+              <MessageItem
+                currentUser={currentUser}
+                message={message}
+                onDelete={onDelete}
+                onEdit={onEdit}
+                onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
+                onReact={onReact}
+                reactions={reactionSummary(messages, message.id, currentUser.id)}
+                replyCount={repliesFor(messages, message.id).length}
+                usersById={usersById}
+              />
+            </div>
+          );
+        })
       ) : (
         <p className="empty-copy">No messages yet. Start with the practical detail everyone needs.</p>
       )}
@@ -3300,16 +3362,7 @@ function SettingsView({
   const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
   const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
   const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
-  const qrSvg = useMemo(() => {
-    if (!config?.joinUrl) {
-      return "";
-    }
-
-    return renderQRToSvg(encodeQR(config.joinUrl), {
-      dark: "#203f34",
-      light: "#ffffff",
-    });
-  }, [config?.joinUrl]);
+  const qrSvg = useMemo(() => safeQrSvg(config?.joinUrl, "#203f34"), [config?.joinUrl]);
   const previewUser: User = {
     ...currentUser,
     displayName,
@@ -3906,6 +3959,14 @@ function ModerationUserRow({
     void run(() => requestUser("PATCH", `/api/moderation/users/${encodeURIComponent(user.id)}`, update));
   }
 
+  function promote(): void {
+    if (!window.confirm(`Make ${user.displayName} an admin? Admin access can't be revoked from here — only by re-setting up the node.`)) {
+      return;
+    }
+
+    void run(() => requestUser("POST", `/api/admin/users/${encodeURIComponent(user.id)}/promote`));
+  }
+
   return (
     <li className="moderation-row">
       <div className="moderation-identity">
@@ -3954,6 +4015,13 @@ function ModerationUserRow({
             <button disabled={busy} onClick={() => setModeration({ shadowBanned: !user.shadowBanned })} type="button">
               {user.shadowBanned ? "Un-shadow-ban" : "Shadow-ban"}
             </button>
+            {/* Promotion is admin-only and one-way (no demote — see the server route). Offered
+                only for a non-banned, non-pending member so the new admin is immediately usable. */}
+            {canManageRoles(currentUser) && !user.banned && !user.pending ? (
+              <button disabled={busy} onClick={promote} type="button">
+                Make admin
+              </button>
+            ) : null}
           </div>
         </div>
       )}
@@ -4012,6 +4080,7 @@ const FEATURE_FLAG_LABELS: [keyof FeatureFlags, string][] = [
   ["enableReactions", "Reactions"],
   ["enableMarkdown", "Markdown rendering"],
   ["enableAttachments", "Image attachments"],
+  ["enablePresence", "Online presence (reveals who is connected — off for high-risk use)"],
 ];
 
 const IDENTITY_LABELS: [keyof IdentityConfig, string][] = [
@@ -4053,10 +4122,12 @@ const SECURITY_PROFILE_LABELS: Record<SecurityProfile, { title: string; summary:
  */
 function AdminView({
   currentUser,
+  joinUrl,
   onChannelUpsert,
   onWiped,
 }: {
   currentUser: User;
+  joinUrl?: string;
   onChannelUpsert: (channels: Channel[]) => void;
   onWiped: () => Promise<void>;
 }) {
@@ -4117,6 +4188,7 @@ function AdminView({
 
     try {
       const update = {
+        node: adminConfig.node,
         identity: adminConfig.identity,
         features: adminConfig.features,
         llm: { ollama: adminConfig.llm.ollama },
@@ -4311,6 +4383,49 @@ function AdminView({
             void save();
           }}
         >
+          <div className="profile-panel getting-started">
+            <div>
+              <p className="eyebrow">Getting started</p>
+              <h2>Run your network in five steps</h2>
+            </div>
+            <ol className="getting-started-steps">
+              <li><strong>Name it</strong> — set a Network name below so joiners recognise where they are.</li>
+              <li><strong>Choose a posture</strong> — pick a Security profile (Open for relief, Hardened for high-risk), or Custom to tune each control.</li>
+              <li><strong>Invite people</strong> — share the join QR from the sidebar; under an Approval policy, greeters let newcomers in from People &amp; moderation.</li>
+              <li><strong>Set your team</strong> — grant moderator/greeter roles or promote a co-admin in People &amp; moderation.</li>
+              <li><strong>Grow the mesh</strong> — to cover more than one hotspot, enable Node-to-node sync and link another host by QR.</li>
+            </ol>
+            <p className="form-note">
+              Everything here is optional and reversible. See the{" "}
+              <a href="https://github.com/JosephMaynard/loam/blob/master/docs/12-operators-guide.md" rel="noreferrer" target="_blank">
+                operator&rsquo;s guide
+              </a>{" "}
+              for the full walkthrough.
+            </p>
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">Network</p>
+              <h2>Identity</h2>
+            </div>
+            <label>
+              Network name
+              <input
+                disabled={saving}
+                maxLength={80}
+                onInput={(event) =>
+                  setAdminConfig((previous) =>
+                    previous ? { ...previous, node: { ...previous.node, name: event.currentTarget.value } } : previous,
+                  )
+                }
+                value={adminConfig.node.name}
+              />
+            </label>
+            <p className="form-note">
+              Shown to everyone who joins — in the sidebar and on the join screen. Give your network a
+              name people will recognise (e.g. &ldquo;Riverside Relief&rdquo;).
+            </p>
+          </div>
           <div className="profile-panel">
             <div>
               <p className="eyebrow">Security</p>
@@ -4568,6 +4683,7 @@ function AdminView({
               join QR) is its sync address. Enabling this also lets peers pull this node&rsquo;s
               public content.
             </p>
+            {adminConfig.sync.enabled ? <NodeLinkControl joinUrl={joinUrl} /> : null}
             {adminConfig.sync.peers.length ? (
               <ul className="moderation-list">
                 {adminConfig.sync.peers.map((peer) => (
