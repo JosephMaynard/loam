@@ -123,3 +123,24 @@ export function t(key: CatalogKey, params?: Record<string, string | number>): st
     token in params ? String(params[token]) : `{${token}}`,
   );
 }
+
+/**
+ * Localize a server error response `{ error?, code? }`. When the payload carries a known `code`, the
+ * matching `error.<code>` catalog entry is returned in the active locale; otherwise the server's
+ * English `error` string is used (forward-compatible with a mixed-version mesh where a peer may send
+ * a code this client doesn't ship yet), falling back to `fallback` when there is no `error` field.
+ */
+export function errorText(payload: unknown, fallback = ""): string {
+  const record = payload && typeof payload === "object" ? (payload as { error?: unknown; code?: unknown }) : {};
+  const error = typeof record.error === "string" ? record.error : fallback;
+  const code = typeof record.code === "string" ? record.code : undefined;
+
+  if (code) {
+    const key = `error.${code}` as CatalogKey;
+    if (key in en) {
+      return t(key);
+    }
+  }
+
+  return error;
+}

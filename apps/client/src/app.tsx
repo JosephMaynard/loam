@@ -44,7 +44,7 @@ import { dayKey, dayLabel } from "./lib/dates";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
-import { LOCALE_LABELS, RTL_LOCALES, resolveLocale, setActiveLocale, t } from "./i18n";
+import { LOCALE_LABELS, RTL_LOCALES, errorText, resolveLocale, setActiveLocale, t } from "./i18n";
 import { safeQrSvg } from "./lib/qr";
 
 type Config = {
@@ -148,7 +148,8 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
     });
 
     if (!response.ok) {
-      throw new Error(`Request failed: ${response.status}`);
+      const payload: unknown = await response.json().catch(() => undefined);
+      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
     }
 
     return response.json() as Promise<T>;
@@ -357,10 +358,7 @@ async function requestUser(method: "POST" | "PATCH", path: string, body?: unknow
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const message =
-        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-          ? payload.error
-          : `Request failed: ${response.status}`;
+      const message = errorText(payload, `Request failed: ${response.status}`);
       throw new Error(message);
     }
 
@@ -694,10 +692,7 @@ function LoamApp() {
 
         if (!response.ok) {
           const payload: unknown = await response.json().catch(() => undefined);
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Delete failed: ${response.status}`;
+          const message = errorText(payload, `Delete failed: ${response.status}`);
           throw new Error(message);
         }
 
@@ -735,10 +730,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Edit failed: ${response.status}`;
+          const message = errorText(payload, `Edit failed: ${response.status}`);
           throw new Error(message);
         }
 
@@ -781,10 +773,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Couldn't create the channel: ${response.status}`;
+          const message = errorText(payload, `Couldn't create the channel: ${response.status}`);
           throw new Error(message);
         }
 
@@ -950,10 +939,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-              ? payload.error
-              : `Admin claim failed: ${response.status}`;
+          const message = errorText(payload, `Admin claim failed: ${response.status}`);
           throw new Error(message);
         }
 
@@ -1001,10 +987,7 @@ function LoamApp() {
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : `Attachment upload failed: ${response.status}`;
+        const message = errorText(payload, `Attachment upload failed: ${response.status}`);
         throw new Error(message);
       }
 
@@ -2172,10 +2155,7 @@ function ChannelMembersPanel({
 
       if (!response.ok) {
         const payload: unknown = await response.json().catch(() => undefined);
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : t("common.requestFailed", { status: response.status });
+        const message = errorText(payload, t("common.requestFailed", { status: response.status }));
         throw new Error(message);
       }
 
@@ -4241,10 +4221,7 @@ function AdminView({
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : t("admin.configUpdateFailed", { status: response.status });
+        const message = errorText(payload, t("admin.configUpdateFailed", { status: response.status }));
         throw new Error(message);
       }
 
@@ -4347,10 +4324,7 @@ function AdminView({
 
       if (!response.ok) {
         const payload: unknown = await response.json().catch(() => undefined);
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : t("admin.killSwitchFailed", { status: response.status });
+        const message = errorText(payload, t("admin.killSwitchFailed", { status: response.status }));
         throw new Error(message);
       }
 
@@ -4929,10 +4903,7 @@ function SyncStatusPanel() {
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : t("admin.syncFailed", { status: response.status });
+        const message = errorText(payload, t("admin.syncFailed", { status: response.status }));
         throw new Error(message);
       }
 
@@ -5008,10 +4979,7 @@ async function requestChannel(method: "POST" | "PATCH", path: string, body: unkn
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const message =
-        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-          ? payload.error
-          : t("common.requestFailed", { status: response.status });
+      const message = errorText(payload, t("common.requestFailed", { status: response.status }));
       throw new Error(message);
     }
 
