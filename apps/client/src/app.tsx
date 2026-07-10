@@ -44,7 +44,16 @@ import { dayKey, dayLabel } from "./lib/dates";
 import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
-import { LOCALE_LABELS, RTL_LOCALES, errorText, resolveLocale, setActiveLocale, t } from "./i18n";
+import {
+  LOCALE_LABELS,
+  RTL_LOCALES,
+  errorText,
+  isLocaleLoaded,
+  loadLocale,
+  resolveLocale,
+  setActiveLocale,
+  t,
+} from "./i18n";
 import { safeQrSvg } from "./lib/qr";
 
 type Config = {
@@ -1066,6 +1075,28 @@ function LoamApp() {
   // re-renders the whole tree in the new language.
   const locale = resolveLocale(config?.networkConfig.locale);
   useMemo(() => setActiveLocale(locale), [locale]);
+
+  // Only English is bundled; other languages are code-split and fetched on demand. Load the node's
+  // locale when it changes and bump `localeTick` on completion so the tree re-renders in the newly
+  // loaded language (until then `t()` returns English — no blank UI, at most a brief English flash on
+  // a non-English node's first paint). English needs no fetch.
+  const [, setLocaleTick] = useState(0);
+  useEffect(() => {
+    if (isLocaleLoaded(locale)) {
+      return;
+    }
+
+    let active = true;
+    void loadLocale(locale).then(() => {
+      if (active) {
+        setLocaleTick((tick) => tick + 1);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [locale]);
 
   // Flip the whole layout for right-to-left locales and expose the language on <html lang>. Message
   // bodies already use dir="auto" per message; this mirrors the chrome (sidebar, panels) too. Keys

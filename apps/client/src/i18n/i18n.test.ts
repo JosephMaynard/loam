@@ -1,8 +1,28 @@
 import { LocaleSchema, type Locale } from "@loam/schema";
 import { describe, expect, it } from "vitest";
 
-import { en, type PluralMessage } from "./en";
-import { CATALOGS, errorText, icuLocale, resolveLocale, setActiveLocale, t } from "./index";
+import { ar } from "./ar";
+import { bn } from "./bn";
+import { en, type Catalog, type PluralMessage } from "./en";
+import { es } from "./es";
+import { fa } from "./fa";
+import { fr } from "./fr";
+import { my } from "./my";
+import { prs } from "./prs";
+import { ps } from "./ps";
+import { pt } from "./pt";
+import { ru } from "./ru";
+import { sw } from "./sw";
+import { tr } from "./tr";
+import { uk } from "./uk";
+import { ur } from "./ur";
+import { errorText, icuLocale, loadLocale, resolveLocale, setActiveLocale, t } from "./index";
+
+// The shipped bundle lazy-loads catalogs (only `en` is static); the completeness tests need them all
+// synchronously, so the *test* imports every catalog directly (the test bundle isn't shipped).
+const ALL_CATALOGS: Record<Locale, Catalog> = {
+  en, es, fr, ar, fa, pt, uk, ru, tr, my, ur, prs, ps, sw, bn,
+};
 
 const LOCALES = LocaleSchema.options as readonly Locale[];
 const EN_KEYS = Object.keys(en).sort();
@@ -20,7 +40,7 @@ function isPlural(value: unknown): value is PluralMessage {
 describe("i18n catalogs", () => {
   it("every locale has exactly en's key set (completeness)", () => {
     for (const locale of LOCALES) {
-      expect(Object.keys(CATALOGS[locale]).sort(), `locale ${locale}`).toEqual(EN_KEYS);
+      expect(Object.keys(ALL_CATALOGS[locale]).sort(), `locale ${locale}`).toEqual(EN_KEYS);
     }
   });
 
@@ -32,7 +52,7 @@ describe("i18n catalogs", () => {
       const categories = new Intl.PluralRules(icuLocale(locale)).resolvedOptions().pluralCategories.slice().sort();
 
       for (const key of pluralKeys) {
-        const value = (CATALOGS[locale] as Record<string, unknown>)[key];
+        const value = (ALL_CATALOGS[locale] as Record<string, unknown>)[key];
         expect(isPlural(value), `${locale} ${key} is a plural object`).toBe(true);
         const plural = value as PluralMessage;
         expect(Object.keys(plural).sort(), `${locale} ${key} categories`).toEqual(categories);
@@ -59,7 +79,7 @@ describe("i18n catalogs", () => {
     for (const locale of LOCALES) {
       for (const key of EN_KEYS) {
         const allowed = enTokens(key);
-        const value = (CATALOGS[locale] as Record<string, unknown>)[key];
+        const value = (ALL_CATALOGS[locale] as Record<string, unknown>)[key];
         const forms = typeof value === "string" ? [value] : Object.values(value as PluralMessage);
         for (const form of forms) {
           for (const token of tokensOf(form)) {
@@ -107,11 +127,14 @@ describe("t()", () => {
     expect(t("conversation.composerLabel", { name: "general" })).toBe("Message general");
   });
 
-  it("selects the right plural form per locale", () => {
+  it("selects the right plural form per locale", async () => {
+    await loadLocale("ar");
     setActiveLocale("ar"); // Arabic: 3 → 'few'
     expect(t("message.replyCount", { n: 3 })).toContain("3");
+    await loadLocale("ru");
     setActiveLocale("ru"); // Russian: 2 → 'few'
     expect(t("message.replyCount", { n: 2 })).toContain("2");
+    await loadLocale("my");
     setActiveLocale("my"); // Burmese: only 'other'
     expect(t("message.replyCount", { n: 5 })).toContain("5");
     setActiveLocale("en");
@@ -125,10 +148,11 @@ describe("t()", () => {
 });
 
 describe("errorText()", () => {
-  it("localizes a known code and falls back to the server message for unknown codes", () => {
+  it("localizes a known code and falls back to the server message for unknown codes", async () => {
+    await loadLocale("es");
     setActiveLocale("es");
     expect(errorText({ error: "Channel does not exist", code: "channel_not_found" })).toBe(
-      CATALOGS.es["error.channel_not_found"],
+      ALL_CATALOGS.es["error.channel_not_found"],
     );
     // Unknown code (e.g. a newer peer) → the server's English string.
     expect(errorText({ error: "Something new", code: "brand_new_code" })).toBe("Something new");
