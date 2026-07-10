@@ -3683,11 +3683,11 @@ function PeopleView({
             ←
           </NavLink>
           <div>
-            <p className="eyebrow">People</p>
-            <h1>Not authorized</h1>
+            <p className="eyebrow">{t("people.eyebrow")}</p>
+            <h1>{t("people.notAuthorizedTitle")}</h1>
           </div>
         </header>
-        <p className="form-note">This area is for greeters, moderators, and admins.</p>
+        <p className="form-note">{t("people.notAuthorizedNote")}</p>
       </section>
     );
   }
@@ -3699,8 +3699,8 @@ function PeopleView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">People</p>
-          <h1>People and moderation</h1>
+          <p className="eyebrow">{t("people.eyebrow")}</p>
+          <h1>{t("people.title")}</h1>
         </div>
       </header>
       <div className="settings-grid">
@@ -3750,7 +3750,7 @@ function PendingApprovalsPanel({ onUsersChanged }: { onUsersChanged: (users: Use
       })
       .catch((error: unknown) => {
         if (active) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load pending joins.");
+          setLoadError(error instanceof Error ? error.message : t("people.pendingLoadError"));
         }
       });
 
@@ -3763,16 +3763,16 @@ function PendingApprovalsPanel({ onUsersChanged }: { onUsersChanged: (users: Use
     <div className="profile-panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Access</p>
-          <h2>Pending joins</h2>
+          <p className="eyebrow">{t("people.accessEyebrow")}</p>
+          <h2>{t("people.pendingTitle")}</h2>
         </div>
         <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          Refresh
+          {t("common.refresh")}
         </button>
       </div>
       {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!loaded && !loadError ? <p className="form-note">Loading pending joins…</p> : null}
-      {loaded && pending.length === 0 ? <p className="form-note">Nobody is waiting to join.</p> : null}
+      {!loaded && !loadError ? <p className="form-note">{t("people.pendingLoading")}</p> : null}
+      {loaded && pending.length === 0 ? <p className="form-note">{t("people.pendingEmpty")}</p> : null}
       {pending.length > 0 ? (
         <ul className="moderation-list">
           {pending.map((user) => (
@@ -3807,7 +3807,7 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
       const updated = await requestUser("POST", `/api/access/users/${encodeURIComponent(user.id)}/${action}`);
       onResolved(updated);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to update this person.");
+      setError(requestError instanceof Error ? requestError.message : t("moderation.updateError"));
       setBusy(false);
     }
   }
@@ -3823,10 +3823,10 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
       </div>
       <div className="moderation-actions">
         <button disabled={busy} onClick={() => void decide("approve")} type="button">
-          Approve
+          {t("people.approve")}
         </button>
         <button className="danger-button" disabled={busy} onClick={() => void decide("deny")} type="button">
-          Deny
+          {t("people.deny")}
         </button>
       </div>
       {error ? <p className="form-error">{error}</p> : null}
@@ -3867,7 +3867,7 @@ function ModerationPanel({
       })
       .catch((error: unknown) => {
         if (active) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load people.");
+          setLoadError(error instanceof Error ? error.message : t("moderation.loadError"));
         }
       });
 
@@ -3893,16 +3893,16 @@ function ModerationPanel({
     <div className="profile-panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Moderation</p>
-          <h2>People</h2>
+          <p className="eyebrow">{t("moderation.eyebrow")}</p>
+          <h2>{t("moderation.heading")}</h2>
         </div>
         <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          Refresh
+          {t("common.refresh")}
         </button>
       </div>
       {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!loaded && !loadError ? <p className="form-note">Loading people…</p> : null}
-      {loaded && people.length === 0 ? <p className="form-note">No people to show yet.</p> : null}
+      {!loaded && !loadError ? <p className="form-note">{t("moderation.loading")}</p> : null}
+      {loaded && people.length === 0 ? <p className="form-note">{t("moderation.empty")}</p> : null}
       {people.length > 0 ? (
         <ul className="moderation-list">
           {people.map((user) => (
@@ -3939,7 +3939,7 @@ function ModerationUserRow({
     try {
       onApply(await action());
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to update this person.");
+      setError(requestError instanceof Error ? requestError.message : t("moderation.updateError"));
     } finally {
       setBusy(false);
     }
@@ -3966,7 +3966,7 @@ function ModerationUserRow({
   }
 
   function promote(): void {
-    if (!window.confirm(`Make ${user.displayName} an admin? Admin access can't be revoked from here — only by re-setting up the node.`)) {
+    if (!window.confirm(t("moderation.promoteConfirm", { name: user.displayName }))) {
       return;
     }
 
@@ -3984,7 +3984,7 @@ function ModerationUserRow({
         <UserStateBadges user={user} />
       </div>
       {protectedTarget ? (
-        <p className="moderation-note">{user.id === currentUser.id ? "That's you." : "Admins can't be moderated."}</p>
+        <p className="moderation-note">{user.id === currentUser.id ? t("moderation.thatsYou") : t("moderation.adminsProtected")}</p>
       ) : (
         <div className="moderation-controls">
           {canManageRoles(currentUser) ? (
@@ -3996,7 +3996,7 @@ function ModerationUserRow({
                   onInput={(event) => setRole("moderator", event.currentTarget.checked)}
                   type="checkbox"
                 />
-                Moderator
+                {t("moderation.roleModerator")}
               </label>
               <label className="admin-toggle">
                 <input
@@ -4005,7 +4005,7 @@ function ModerationUserRow({
                   onInput={(event) => setRole("greeter", event.currentTarget.checked)}
                   type="checkbox"
                 />
-                Greeter
+                {t("moderation.roleGreeter")}
               </label>
             </div>
           ) : null}
@@ -4016,16 +4016,16 @@ function ModerationUserRow({
               onClick={() => setModeration({ banned: !user.banned })}
               type="button"
             >
-              {user.banned ? "Unban" : "Ban"}
+              {user.banned ? t("moderation.unban") : t("moderation.ban")}
             </button>
             <button disabled={busy} onClick={() => setModeration({ shadowBanned: !user.shadowBanned })} type="button">
-              {user.shadowBanned ? "Un-shadow-ban" : "Shadow-ban"}
+              {user.shadowBanned ? t("moderation.unshadowban") : t("moderation.shadowban")}
             </button>
             {/* Promotion is admin-only and one-way (no demote — see the server route). Offered
                 only for a non-banned, non-pending member so the new admin is immediately usable. */}
             {canManageRoles(currentUser) && !user.banned && !user.pending ? (
               <button disabled={busy} onClick={promote} type="button">
-                Make admin
+                {t("moderation.makeAdmin")}
               </button>
             ) : null}
           </div>
@@ -4043,23 +4043,27 @@ function UserStateBadges({ user }: { user: User }) {
   const badges: { key: string; label: string; className: string }[] = [];
 
   if (user.isAdmin) {
-    badges.push({ key: "admin", label: "Admin", className: "badge-admin" });
+    badges.push({ key: "admin", label: t("moderation.badgeAdmin"), className: "badge-admin" });
   }
 
   for (const role of user.roles ?? []) {
-    badges.push({ key: `role-${role}`, label: role, className: "badge-role" });
+    badges.push({
+      key: `role-${role}`,
+      label: role === "moderator" ? t("moderation.roleModerator") : t("moderation.roleGreeter"),
+      className: "badge-role",
+    });
   }
 
   if (user.pending) {
-    badges.push({ key: "pending", label: "Pending", className: "badge-pending" });
+    badges.push({ key: "pending", label: t("moderation.badgePending"), className: "badge-pending" });
   }
 
   if (user.banned) {
-    badges.push({ key: "banned", label: "Banned", className: "badge-banned" });
+    badges.push({ key: "banned", label: t("moderation.badgeBanned"), className: "badge-banned" });
   }
 
   if (user.shadowBanned) {
-    badges.push({ key: "shadow", label: "Shadow-banned", className: "badge-shadow" });
+    badges.push({ key: "shadow", label: t("moderation.badgeShadow"), className: "badge-shadow" });
   }
 
   if (!badges.length) {

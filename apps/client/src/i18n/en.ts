@@ -113,6 +113,44 @@ export const en = {
   "settings.unlockAdmin": "Unlock admin",
   "settings.claimError": "Unable to claim admin access.",
   "settings.claimDisabled": "Admin claiming is not enabled on this LOAM node.",
+
+  "common.refresh": "Refresh",
+
+  // People view + greeter pending-approvals panel.
+  "people.eyebrow": "People",
+  "people.notAuthorizedTitle": "Not authorized",
+  "people.notAuthorizedNote": "This area is for greeters, moderators, and admins.",
+  "people.title": "People and moderation",
+  "people.accessEyebrow": "Access",
+  "people.pendingTitle": "Pending joins",
+  "people.pendingLoadError": "Unable to load pending joins.",
+  "people.pendingLoading": "Loading pending joins…",
+  "people.pendingEmpty": "Nobody is waiting to join.",
+  "people.approve": "Approve",
+  "people.deny": "Deny",
+
+  // Moderation panel + roster rows + state badges.
+  "moderation.updateError": "Unable to update this person.",
+  "moderation.loadError": "Unable to load people.",
+  "moderation.eyebrow": "Moderation",
+  "moderation.heading": "People",
+  "moderation.loading": "Loading people…",
+  "moderation.empty": "No people to show yet.",
+  "moderation.promoteConfirm":
+    "Make {name} an admin? Admin access can't be revoked from here — only by re-setting up the node.",
+  "moderation.thatsYou": "That's you.",
+  "moderation.adminsProtected": "Admins can't be moderated.",
+  "moderation.roleModerator": "Moderator",
+  "moderation.roleGreeter": "Greeter",
+  "moderation.ban": "Ban",
+  "moderation.unban": "Unban",
+  "moderation.shadowban": "Shadow-ban",
+  "moderation.unshadowban": "Un-shadow-ban",
+  "moderation.makeAdmin": "Make admin",
+  "moderation.badgeAdmin": "Admin",
+  "moderation.badgePending": "Pending",
+  "moderation.badgeBanned": "Banned",
+  "moderation.badgeShadow": "Shadow-banned",
 };
 
 /**
