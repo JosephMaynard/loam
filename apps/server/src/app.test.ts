@@ -2944,6 +2944,30 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
     expect(rejected.statusCode).toBe(400);
   });
 
+  it("attaches a stable snake_case error code alongside the English error message", async () => {
+    const app = await makeApp();
+    await newSession(app); // first session claims the firstUser admin grant
+    const user = await newSession(app); // this one is a plain member
+
+    // A non-admin hitting an admin-only route gets the localizable code plus the English fallback.
+    const denied = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: user.cookie },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toEqual({ error: "Admin access required", code: "admin_required" });
+
+    // A 404 for an unknown channel carries the not-found code.
+    const missing = await app.server.inject({
+      method: "GET",
+      url: "/api/messages/does-not-exist",
+      headers: { cookie: user.cookie },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect((missing.json() as { code?: string }).code).toBe("channel_not_found");
+  });
+
   it("lets an admin promote a member, but not non-admins, bots, or pending users", async () => {
     const app = await makeApp({
       access: { joinPolicy: "approval" },
