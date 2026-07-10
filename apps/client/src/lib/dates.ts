@@ -32,11 +32,15 @@ export function dayLabel(timestamp: number, now = Date.now()): string {
   const relative = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
 
   if (key === dayKey(now)) {
-    return capitalize(relative.format(0, "day"));
+    return capitalize(relative.format(0, "day"), locale);
   }
 
-  if (key === dayKey(now - 24 * 60 * 60 * 1000)) {
-    return capitalize(relative.format(-1, "day"));
+  // "Yesterday" via a calendar-day step (setDate handles month/DST boundaries) rather than
+  // subtracting a fixed 24h, which would misfire near local midnight on 23h/25h DST days.
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (key === dayKey(yesterday.getTime())) {
+    return capitalize(relative.format(-1, "day"), locale);
   }
 
   const date = new Date(timestamp);
@@ -49,7 +53,8 @@ export function dayLabel(timestamp: number, now = Date.now()): string {
   }).format(date);
 }
 
-/** Uppercase the first character, so a divider reads "Today" not "today" at the start of a row. */
-function capitalize(value: string): string {
-  return value.charAt(0).toLocaleUpperCase() + value.slice(1);
+/** Uppercase the first character, so a divider reads "Today" not "today" at the start of a row.
+ * The locale drives casing rules (e.g. Turkish dotted/dotless I) so it matches the active UI language. */
+function capitalize(value: string, locale: string): string {
+  return value.charAt(0).toLocaleUpperCase(locale) + value.slice(1);
 }

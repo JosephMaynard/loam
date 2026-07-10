@@ -23,7 +23,7 @@
     "client"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "optionalDependencies": {
     "better-sqlite3-multiple-ciphers": "^12.11.1"

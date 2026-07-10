@@ -120,7 +120,7 @@ export const ar: Catalog = {
   "moderation.loading": "جارٍ تحميل الأشخاص…",
   "moderation.empty": "لا أشخاص لعرضهم بعد.",
   "moderation.promoteConfirm":
-    "جعل {name} مشرفًا؟ لا يمكن سحب صلاحية المشرف من هنا — فقط بإعادة إعداد العقدة.",
+    "جعل {name} إداريًا؟ لا يمكن سحب صلاحية الإداري من هنا — فقط بإعادة إعداد العقدة.",
   "moderation.thatsYou": "هذا أنت.",
   "moderation.adminsProtected": "لا يمكن الإشراف على الإداريين.",
   "moderation.roleModerator": "مشرف",
@@ -362,7 +362,7 @@ export const ar: Catalog = {
 
   "confirm.deleteMessage": "حذف هذه الرسالة؟ لا يمكن التراجع عن ذلك.",
 
-  "error.admin_required": "يلزم وصول المشرف",
+  "error.admin_required": "يلزم وصول الإداري",
   "error.admin_claim_disabled": "الحصول على وصول المشرف غير مُفعّل على عقدة LOAM هذه",
   "error.admin_user_edit_disabled": "تعديل المشرفين للمستخدمين معطّل على عقدة LOAM هذه",
   "error.promote_requires_active": "وافق على هذا المستخدم أو ارفع الحظر عنه قبل ترقيته",

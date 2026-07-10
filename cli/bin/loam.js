@@ -99,7 +99,9 @@ console.log("");
 try {
   await startEmbeddedServer();
 } catch (error) {
-  if (process.env.LOAM_DB_KEY && String(error?.message ?? "").match(/better-sqlite3-multiple-ciphers|Cannot find module/)) {
+  // Only treat this as a missing-driver case when the error actually names the SQLCipher module —
+  // a bare `Cannot find module` match would misreport any unrelated missing dependency.
+  if (process.env.LOAM_DB_KEY && String(error?.message ?? "").includes("better-sqlite3-multiple-ciphers")) {
     console.error(
       "\nEncryption requested but the native SQLCipher driver is unavailable.\n" +
         "Install it with:  npm install -g better-sqlite3-multiple-ciphers\n" +
