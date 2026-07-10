@@ -55,6 +55,8 @@ const storePassword = randomBytes(24).toString("base64url");
 const keyPassword = randomBytes(24).toString("base64url");
 const keytool = resolveKeytool();
 
+// Pass the passwords via `:env` (read from the child's environment) rather than as CLI args, so they
+// never appear in a `ps`/process listing. The `:env` modifier is a long-standing keytool feature.
 const result = spawnSync(
   keytool,
   [
@@ -65,11 +67,14 @@ const result = spawnSync(
     "-keyalg", "RSA",
     "-keysize", "2048",
     "-validity", "10000",
-    "-storepass", storePassword,
-    "-keypass", keyPassword,
+    "-storepass:env", "LOAM_STOREPASS",
+    "-keypass:env", "LOAM_KEYPASS",
     "-dname", "CN=LOAM Host, OU=LOAM, O=LOAM, C=US",
   ],
-  { stdio: ["ignore", "inherit", "inherit"] },
+  {
+    stdio: ["ignore", "inherit", "inherit"],
+    env: { ...process.env, LOAM_STOREPASS: storePassword, LOAM_KEYPASS: keyPassword },
+  },
 );
 
 if (result.error) {

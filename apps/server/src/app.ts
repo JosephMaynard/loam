@@ -3194,10 +3194,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return channel;
     }
 
-    // For a private channel the new owner must be reachable — add them to the roster if needed.
+    // For a private channel, materialise the full roster (channelMemberIds folds in the *current*
+    // owner, who may only be an implicit member) and add the new owner. Doing this unconditionally —
+    // not just when the target is absent — keeps the previous owner an explicit member after they
+    // stop being the implicit one, so they don't silently lose access on a legacy channel whose
+    // stored memberUserIds omitted the owner.
     const members = channelMemberIds(channel);
-    const memberUserIds =
-      channel.visibility === "private" && !members.has(target.id) ? [...members, target.id] : channel.memberUserIds;
+    members.add(target.id);
+    const memberUserIds = channel.visibility === "private" ? [...members] : channel.memberUserIds;
 
     const next = ChannelSchema.parse({ ...channel, ownerUserId: target.id, memberUserIds });
     store.upsertChannel(next);

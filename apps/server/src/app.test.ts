@@ -2001,6 +2001,22 @@ describe("private channels", () => {
     });
     expect((await transfer(app, owner.cookie, channel.id, outsider.userId)).statusCode).toBe(400);
   });
+
+  it("keeps the previous owner in the roster when transferring to an existing member", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const owner = await newSession(app);
+    const member = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    await addMember(app, owner.cookie, channel.id, member.userId);
+
+    // Transfer to someone who was already a member — the old owner must remain an explicit member,
+    // not silently drop out once they stop being the (implicit) owner.
+    const body = (await transfer(app, owner.cookie, channel.id, member.userId)).json() as PrivateChannelBody;
+    expect(body.ownerUserId).toBe(member.userId);
+    expect(new Set(body.memberUserIds)).toEqual(new Set([owner.userId, member.userId]));
+  });
 });
 
 describe("message search", () => {
@@ -3368,6 +3384,66 @@ describe("sync peer authentication (shared token)", () => {
 
     // Token cleared → open again.
     expect((await digest(app)).statusCode).toBe(200);
+  });
+
+  it("attaches the configured token to outbound pulls (two-node end-to-end)", async () => {
+    const meshToken = "mesh-shared-secret-token-02";
+
+    // Peer node: token-guarded, offering one public channel + message.
+    const peer = await makeApp({ sync: { enabled: true, token: meshToken } });
+    const peerAdmin = await newSession(peer);
+    const channel = (
+      await peer.server.inject({
+        method: "POST",
+        url: "/api/channels",
+        headers: { cookie: peerAdmin.cookie },
+        payload: { name: "Mesh News" },
+      })
+    ).json() as { id: string };
+    await peer.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: peerAdmin.cookie },
+      payload: { type: "channelPost", channelId: channel.id, body: "hello from the peer" },
+    });
+    const peerUrl = await peer.server.listen({ host: "127.0.0.1", port: 0 });
+
+    // A puller with the MATCHING token imports the peer's message — only possible if the pull loop
+    // attached x-loam-sync-token (the peer 404s the digest otherwise).
+    const puller = await makeApp({ sync: { enabled: true, token: meshToken, peers: [{ url: peerUrl }] } });
+    const pullerAdmin = await newSession(puller);
+    const run = await puller.server.inject({
+      method: "POST",
+      url: "/api/admin/sync/run",
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    expect(run.statusCode).toBe(200);
+    const pulled = (
+      await puller.server.inject({
+        method: "GET",
+        url: `/api/messages/${channel.id}`,
+        headers: { cookie: pullerAdmin.cookie },
+      })
+    ).json() as { body: string }[];
+    expect(pulled.some((message) => message.body === "hello from the peer")).toBe(true);
+
+    // A puller with the WRONG token gets nothing — the peer really gates on the exact token, so the
+    // channel is never imported and its messages 404 (existence is not leaked).
+    const badPuller = await makeApp({
+      sync: { enabled: true, token: "wrong-token-abcdefghij", peers: [{ url: peerUrl }] },
+    });
+    const badAdmin = await newSession(badPuller);
+    await badPuller.server.inject({
+      method: "POST",
+      url: "/api/admin/sync/run",
+      headers: { cookie: badAdmin.cookie },
+    });
+    const none = await badPuller.server.inject({
+      method: "GET",
+      url: `/api/messages/${channel.id}`,
+      headers: { cookie: badAdmin.cookie },
+    });
+    expect(none.statusCode).toBe(404);
   });
 });
 
