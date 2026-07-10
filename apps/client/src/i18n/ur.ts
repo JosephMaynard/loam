@@ -278,4 +278,73 @@ export const ur: Catalog = {
   "admin.rename": "نام بدلیں",
   "admin.restore": "بحال کریں",
   "admin.archive": "محفوظ کریں",
+
+  "sidebar.channels": "چینلز",
+  "sidebar.dms": "براہِ راست پیغامات",
+  "sidebar.online": "آن لائن",
+  "sidebar.searchMessages": "پیغامات تلاش کریں",
+  "sidebar.settings": "جوائن QR اور ترتیبات",
+  "sidebar.statusConnecting": "منسلک ہو رہا ہے",
+  "sidebar.statusLive": "براہِ راست",
+  "sidebar.statusOffline": "آف لائن",
+
+  "newChannel.new": "+ نیا چینل",
+  "newChannel.nameAria": "نئے چینل کا نام",
+  "newChannel.namePlaceholder": "چینل کا نام",
+  "newChannel.private": "نجی (صرف دعوت پر)",
+  "newChannel.create": "بنائیں",
+
+  "search.error": "پیغامات تلاش نہیں ہو سکے۔",
+  "search.dmWith": "{name} کے ساتھ DM",
+  "search.eyebrow": "تلاش",
+  "search.title": "پیغامات ڈھونڈیں",
+  "search.placeholder": "چینل پیغامات اور اپنے DM میں تلاش کریں",
+  "search.searching": "تلاش ہو رہی ہے…",
+  "search.button": "تلاش",
+  "search.noResults": "کوئی پیغام مطابقت نہیں کرتا۔",
+
+  "invite.hide": "× دعوت چھپائیں",
+  "invite.show": "⧉ کسی کو مدعو کریں",
+
+  "nodeLink.hide": "× لنک چھپائیں",
+  "nodeLink.show": "⧉ دوسرا نوڈ جوڑیں",
+  "nodeLink.note":
+    "دوسرے نوڈ کی ایڈمن اسکرین پر سِنک فعال کریں اور اِس پتے کو ہم مرتبہ کے طور پر شامل کریں (کوڈ اسکین کریں یا URL پیسٹ کریں)۔",
+  "nodeLink.copied": "کاپی ہو گیا",
+  "nodeLink.copy": "پتہ کاپی کریں",
+
+  "unreadBadge.label": "{n} غیر پڑھے",
+
+  "avatarEditor.loadError": "تصویر لوڈ نہیں ہو سکی۔",
+  "avatarEditor.uploadError": "اوتار اپ لوڈ نہیں ہو سکا۔",
+  "avatarEditor.tooLarge": "سائز تبدیل کرنے کے بعد اوتار تصویر بہت بڑی ہے۔",
+  "avatarEditor.cropPreview": "اوتار کٹائی کا پیش منظر",
+  "avatarEditor.chooseImage": "تصویر منتخب کریں",
+  "avatarEditor.uploading": "اپ لوڈ ہو رہا ہے",
+  "avatarEditor.useCropped": "کٹی ہوئی تصویر استعمال کریں",
+  "avatarEditor.zoom": "زوم",
+  "avatarEditor.rotate": "گھمائیں",
+  "avatarEditor.invalidType": "PNG، JPEG یا WebP تصویر منتخب کریں۔",
+
+  "app.userUnrecognised": "سرور نے ناقابلِ شناخت صارف واپس کیا۔",
+  "app.deleteError": "پیغام حذف نہیں ہو سکا۔",
+  "app.editError": "پیغام میں ترمیم نہیں ہو سکی۔",
+  "app.sendInvalidJson": "پیغام بھیجنا ناکام: غلط JSON جواب۔",
+  "app.sendInvalidPayload": "پیغام بھیجنا ناکام: غلط جواب۔",
+  "app.attachmentUnrecognised": "سرور نے ناقابلِ شناخت منسلکہ واپس کیا۔",
+  "app.serverUnreachable": "LOAM سرور تک نہیں پہنچا جا سکا۔",
+  "app.messagesLoadError": "پیغامات لوڈ نہیں ہو سکے۔",
+
+  "gate.deviceWipedTitle": "آلہ صاف کر دیا گیا",
+  "gate.deviceWipedBody": "اِس براؤزر کی مقامی نقل مٹا دی گئی ہے۔ دوبارہ جڑنے کے لیے جوائن QR اسکین کریں۔",
+  "gate.disconnectedTitle": "منقطع",
+  "gate.disconnectedBody": "یہ نوڈ اب دستیاب نہیں۔",
+  "gate.bannedTitle": "اِس نوڈ سے ہٹا دیا گیا",
+  "gate.bannedBody": "ایک ناظم نے آپ کو ہٹا دیا ہے۔ اب آپ یہاں پوسٹ یا پڑھ نہیں سکتے۔",
+  "gate.pendingTitle": "آپ قطار میں ہیں",
+  "gate.pendingBody":
+    "اِس نوڈ پر کسی کے آپ کو داخل کرنے کا انتظار ہے۔ منظوری ملتے ہی یہ اسکرین اپ ڈیٹ ہو جائے گی۔",
+  "gate.connection": "کنکشن: {status}",
+
+  "confirm.deleteMessage": "یہ پیغام حذف کریں؟ یہ واپس نہیں ہو سکتا۔",
 };

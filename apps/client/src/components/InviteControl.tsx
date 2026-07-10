@@ -1,5 +1,6 @@
 import { useMemo, useState } from "preact/hooks";
 
+import { t } from "../i18n";
 import { safeQrSvg } from "../lib/qr";
 
 /**
@@ -23,7 +24,7 @@ export function InviteControl({ joinUrl }: { joinUrl?: string }) {
         onClick={() => setOpen((previous) => !previous)}
         type="button"
       >
-        {open ? "× Hide invite" : "⧉ Invite someone"}
+        {open ? t("invite.hide") : t("invite.show")}
       </button>
       {open ? (
         <div className="invite-panel">

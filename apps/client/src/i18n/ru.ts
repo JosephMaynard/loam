@@ -288,4 +288,73 @@ export const ru: Catalog = {
   "admin.rename": "Переименовать",
   "admin.restore": "Восстановить",
   "admin.archive": "Архивировать",
+
+  "sidebar.channels": "Каналы",
+  "sidebar.dms": "Личные сообщения",
+  "sidebar.online": "В сети",
+  "sidebar.searchMessages": "Поиск сообщений",
+  "sidebar.settings": "QR присоединения и настройки",
+  "sidebar.statusConnecting": "подключение",
+  "sidebar.statusLive": "в эфире",
+  "sidebar.statusOffline": "не в сети",
+
+  "newChannel.new": "+ Новый канал",
+  "newChannel.nameAria": "Название нового канала",
+  "newChannel.namePlaceholder": "Название канала",
+  "newChannel.private": "Приватный (только по приглашению)",
+  "newChannel.create": "Создать",
+
+  "search.error": "Не удалось выполнить поиск сообщений.",
+  "search.dmWith": "Личные с {name}",
+  "search.eyebrow": "Поиск",
+  "search.title": "Найти сообщения",
+  "search.placeholder": "Ищите в сообщениях каналов и своих личных",
+  "search.searching": "Поиск…",
+  "search.button": "Искать",
+  "search.noResults": "Ни одно сообщение не совпало.",
+
+  "invite.hide": "× Скрыть приглашение",
+  "invite.show": "⧉ Пригласить кого-нибудь",
+
+  "nodeLink.hide": "× Скрыть ссылку",
+  "nodeLink.show": "⧉ Связать другой узел",
+  "nodeLink.note":
+    "На экране администрирования другого узла включите синхронизацию и добавьте этот адрес как партнёра (отсканируйте код или вставьте URL).",
+  "nodeLink.copied": "Скопировано",
+  "nodeLink.copy": "Копировать адрес",
+
+  "unreadBadge.label": "{n} непрочитанных",
+
+  "avatarEditor.loadError": "Не удалось загрузить изображение.",
+  "avatarEditor.uploadError": "Не удалось загрузить аватар.",
+  "avatarEditor.tooLarge": "Изображение аватара слишком велико после изменения размера.",
+  "avatarEditor.cropPreview": "Предпросмотр обрезки аватара",
+  "avatarEditor.chooseImage": "Выбрать изображение",
+  "avatarEditor.uploading": "Загрузка",
+  "avatarEditor.useCropped": "Использовать обрезанное изображение",
+  "avatarEditor.zoom": "Масштаб",
+  "avatarEditor.rotate": "Повернуть",
+  "avatarEditor.invalidType": "Выберите изображение PNG, JPEG или WebP.",
+
+  "app.userUnrecognised": "Сервер вернул нераспознанного пользователя.",
+  "app.deleteError": "Не удалось удалить сообщение.",
+  "app.editError": "Не удалось отредактировать сообщение.",
+  "app.sendInvalidJson": "Не удалось отправить сообщение: недопустимый ответ JSON.",
+  "app.sendInvalidPayload": "Не удалось отправить сообщение: недопустимый ответ.",
+  "app.attachmentUnrecognised": "Сервер вернул нераспознанное вложение.",
+  "app.serverUnreachable": "Не удалось связаться с сервером LOAM.",
+  "app.messagesLoadError": "Не удалось загрузить сообщения.",
+
+  "gate.deviceWipedTitle": "Устройство стёрто",
+  "gate.deviceWipedBody": "Локальная копия этого браузера стёрта. Отсканируйте QR присоединения, чтобы переподключиться.",
+  "gate.disconnectedTitle": "Отключено",
+  "gate.disconnectedBody": "Этот узел больше недоступен.",
+  "gate.bannedTitle": "Удалён с этого узла",
+  "gate.bannedBody": "Модератор удалил вас. Вы больше не можете писать или читать здесь.",
+  "gate.pendingTitle": "Вы в очереди",
+  "gate.pendingBody":
+    "Ожидаем, пока кто-нибудь на этом узле впустит вас. Этот экран обновится, как только вас одобрят.",
+  "gate.connection": "Соединение: {status}",
+
+  "confirm.deleteMessage": "Удалить это сообщение? Это нельзя отменить.",
 };

@@ -318,6 +318,85 @@ export const en = {
   "admin.rename": "Rename",
   "admin.restore": "Restore",
   "admin.archive": "Archive",
+
+  // Sidebar.
+  "sidebar.channels": "Channels",
+  "sidebar.dms": "Direct Messages",
+  "sidebar.online": "Online",
+  "sidebar.searchMessages": "Search messages",
+  "sidebar.settings": "Join QR and settings",
+  "sidebar.statusConnecting": "connecting",
+  "sidebar.statusLive": "live",
+  "sidebar.statusOffline": "offline",
+
+  // New-channel control (sidebar).
+  "newChannel.new": "+ New channel",
+  "newChannel.nameAria": "New channel name",
+  "newChannel.namePlaceholder": "Channel name",
+  "newChannel.private": "Private (invite-only)",
+  "newChannel.create": "Create",
+
+  // Search view.
+  "search.error": "Unable to search messages.",
+  "search.dmWith": "DM with {name}",
+  "search.eyebrow": "Search",
+  "search.title": "Find messages",
+  "search.placeholder": "Search channel messages and your DMs",
+  "search.searching": "Searching…",
+  "search.button": "Search",
+  "search.noResults": "No messages matched.",
+
+  // Invite control (sidebar).
+  "invite.hide": "× Hide invite",
+  "invite.show": "⧉ Invite someone",
+
+  // Node-link control (admin sync panel).
+  "nodeLink.hide": "× Hide link",
+  "nodeLink.show": "⧉ Link another node",
+  "nodeLink.note":
+    "On the other node's admin screen, enable sync and add this address as a peer (scan the code or paste the URL).",
+  "nodeLink.copied": "Copied",
+  "nodeLink.copy": "Copy address",
+
+  // Unread badge.
+  "unreadBadge.label": "{n} unread",
+
+  // Avatar image crop/upload editor (settings).
+  "avatarEditor.loadError": "Unable to load image.",
+  "avatarEditor.uploadError": "Unable to upload avatar.",
+  "avatarEditor.tooLarge": "Avatar image is too large after resizing.",
+  "avatarEditor.cropPreview": "Avatar crop preview",
+  "avatarEditor.chooseImage": "Choose image",
+  "avatarEditor.uploading": "Uploading",
+  "avatarEditor.useCropped": "Use cropped image",
+  "avatarEditor.zoom": "Zoom",
+  "avatarEditor.rotate": "Rotate",
+  "avatarEditor.invalidType": "Choose a PNG, JPEG, or WebP image.",
+
+  // App-level error fallbacks.
+  "app.userUnrecognised": "The server returned an unrecognised user payload.",
+  "app.deleteError": "Unable to delete the message.",
+  "app.editError": "Unable to edit the message.",
+  "app.sendInvalidJson": "Message send failed: invalid JSON response.",
+  "app.sendInvalidPayload": "Message send failed: invalid response payload.",
+  "app.attachmentUnrecognised": "The server returned an unrecognised attachment payload.",
+  "app.serverUnreachable": "Unable to reach the LOAM server.",
+  "app.messagesLoadError": "Unable to load messages.",
+
+  // Full-screen gate states (wiped / disconnected / banned / pending).
+  "gate.deviceWipedTitle": "Device wiped",
+  "gate.deviceWipedBody": "This browser's local copy has been erased. Scan the join QR to reconnect.",
+  "gate.disconnectedTitle": "Disconnected",
+  "gate.disconnectedBody": "This node is no longer available.",
+  "gate.bannedTitle": "Removed from this node",
+  "gate.bannedBody": "A moderator has removed you. You can no longer post or read here.",
+  "gate.pendingTitle": "You're in the queue",
+  "gate.pendingBody":
+    "Waiting for someone on this node to let you in. This screen updates the moment you're approved.",
+  "gate.connection": "Connection: {status}",
+
+  // Confirmation dialogs.
+  "confirm.deleteMessage": "Delete this message? This can't be undone.",
 };
 
 /**

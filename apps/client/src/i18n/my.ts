@@ -278,4 +278,73 @@ export const my: Catalog = {
   "admin.rename": "အမည်ပြောင်းရန်",
   "admin.restore": "ပြန်လည်ရယူရန်",
   "admin.archive": "မှတ်တမ်းသိမ်းရန်",
+
+  "sidebar.channels": "Channel များ",
+  "sidebar.dms": "တိုက်ရိုက်စာများ",
+  "sidebar.online": "အွန်လိုင်း",
+  "sidebar.searchMessages": "စာများ ရှာရန်",
+  "sidebar.settings": "ဝင်ရောက်ရန် QR နှင့် ဆက်တင်များ",
+  "sidebar.statusConnecting": "ချိတ်ဆက်နေသည်",
+  "sidebar.statusLive": "တိုက်ရိုက်",
+  "sidebar.statusOffline": "အော့ဖ်လိုင်း",
+
+  "newChannel.new": "+ Channel အသစ်",
+  "newChannel.nameAria": "Channel အသစ် အမည်",
+  "newChannel.namePlaceholder": "Channel အမည်",
+  "newChannel.private": "သီးသန့် (ဖိတ်ကြားချက်ဖြင့်သာ)",
+  "newChannel.create": "ဖန်တီးရန်",
+
+  "search.error": "စာများ ရှာ၍မရပါ။",
+  "search.dmWith": "{name} နှင့် တိုက်ရိုက်စာ",
+  "search.eyebrow": "ရှာဖွေ",
+  "search.title": "စာများ ရှာရန်",
+  "search.placeholder": "Channel စာများနှင့် သင့်တိုက်ရိုက်စာများတွင် ရှာပါ",
+  "search.searching": "ရှာနေသည်…",
+  "search.button": "ရှာရန်",
+  "search.noResults": "ကိုက်ညီသော စာ မရှိပါ။",
+
+  "invite.hide": "× ဖိတ်ကြားချက် ဖျောက်ရန်",
+  "invite.show": "⧉ တစ်ဦးကို ဖိတ်ရန်",
+
+  "nodeLink.hide": "× လင့်ခ် ဖျောက်ရန်",
+  "nodeLink.show": "⧉ အခြား node ချိတ်ရန်",
+  "nodeLink.note":
+    "အခြား node ၏ အက်ဒမင် စာမျက်နှာတွင် sync ဖွင့်ပြီး ဤလိပ်စာကို peer အဖြစ် ထည့်ပါ (ကုဒ်ကို scan ဖတ်ပါ သို့မဟုတ် URL ကို paste လုပ်ပါ)။",
+  "nodeLink.copied": "ကူးပြီး",
+  "nodeLink.copy": "လိပ်စာ ကူးရန်",
+
+  "unreadBadge.label": "မဖတ်ရသေး {n} ခု",
+
+  "avatarEditor.loadError": "ပုံ ဖွင့်၍မရပါ။",
+  "avatarEditor.uploadError": "Avatar တင်၍မရပါ။",
+  "avatarEditor.tooLarge": "အရွယ်ပြန်ချိန်ပြီးနောက် avatar ပုံ အလွန်ကြီးနေသည်။",
+  "avatarEditor.cropPreview": "Avatar ဖြတ်ညှပ် အစမ်းကြည့်",
+  "avatarEditor.chooseImage": "ပုံ ရွေးရန်",
+  "avatarEditor.uploading": "တင်နေသည်",
+  "avatarEditor.useCropped": "ဖြတ်ညှပ်ထားသော ပုံ သုံးရန်",
+  "avatarEditor.zoom": "ချဲ့",
+  "avatarEditor.rotate": "လှည့်",
+  "avatarEditor.invalidType": "PNG၊ JPEG သို့မဟုတ် WebP ပုံ ရွေးပါ။",
+
+  "app.userUnrecognised": "ဆာဗာက အသိအမှတ်မပြုနိုင်သော အသုံးပြုသူ ပြန်ပို့သည်။",
+  "app.deleteError": "စာ ဖျက်၍မရပါ။",
+  "app.editError": "စာ တည်းဖြတ်၍မရပါ။",
+  "app.sendInvalidJson": "စာ ပို့ခြင်း မအောင်မြင်ပါ- မမှန်ကန်သော JSON တုံ့ပြန်ချက်။",
+  "app.sendInvalidPayload": "စာ ပို့ခြင်း မအောင်မြင်ပါ- မမှန်ကန်သော တုံ့ပြန်ချက်။",
+  "app.attachmentUnrecognised": "ဆာဗာက အသိအမှတ်မပြုနိုင်သော ပူးတွဲဖိုင် ပြန်ပို့သည်။",
+  "app.serverUnreachable": "LOAM ဆာဗာသို့ မရောက်နိုင်ပါ။",
+  "app.messagesLoadError": "စာများ ဖွင့်၍မရပါ။",
+
+  "gate.deviceWipedTitle": "စက် ဖျက်ပြီး",
+  "gate.deviceWipedBody": "ဤ browser ၏ ဒေသတွင်းမိတ္တူကို ဖျက်ပြီးပြီ။ ပြန်ချိတ်ဆက်ရန် ဝင်ရောက်ရန် QR ကို scan ဖတ်ပါ။",
+  "gate.disconnectedTitle": "ချိတ်ဆက်မှု ပြတ်တောက်",
+  "gate.disconnectedBody": "ဤ node ကို မရနိုင်တော့ပါ။",
+  "gate.bannedTitle": "ဤ node မှ ဖယ်ရှားခံရသည်",
+  "gate.bannedBody": "Moderator တစ်ဦးက သင့်ကို ဖယ်ရှားလိုက်သည်။ ဤနေရာတွင် တင်ခြင်း သို့မဟုတ် ဖတ်ခြင်း မပြုနိုင်တော့ပါ။",
+  "gate.pendingTitle": "သင် စောင့်ဆိုင်းစာရင်းတွင် ရှိသည်",
+  "gate.pendingBody":
+    "ဤ node ရှိ တစ်စုံတစ်ဦးက သင့်ကို ဝင်ခွင့်ပေးရန် စောင့်နေသည်။ သင် အတည်ပြုခံရသည်နှင့် ဤစာမျက်နှာ ချက်ချင်း အပ်ဒိတ်ဖြစ်သည်။",
+  "gate.connection": "ချိတ်ဆက်မှု- {status}",
+
+  "confirm.deleteMessage": "ဤစာကို ဖျက်မလား။ ၎င်းကို ပြန်ပြင်၍မရပါ။",
 };

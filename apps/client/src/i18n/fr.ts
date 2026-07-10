@@ -278,4 +278,73 @@ export const fr: Catalog = {
   "admin.rename": "Renommer",
   "admin.restore": "Restaurer",
   "admin.archive": "Archiver",
+
+  "sidebar.channels": "Canaux",
+  "sidebar.dms": "Messages directs",
+  "sidebar.online": "En ligne",
+  "sidebar.searchMessages": "Rechercher des messages",
+  "sidebar.settings": "QR d’accès et paramètres",
+  "sidebar.statusConnecting": "connexion",
+  "sidebar.statusLive": "en direct",
+  "sidebar.statusOffline": "hors ligne",
+
+  "newChannel.new": "+ Nouveau canal",
+  "newChannel.nameAria": "Nom du nouveau canal",
+  "newChannel.namePlaceholder": "Nom du canal",
+  "newChannel.private": "Privé (sur invitation)",
+  "newChannel.create": "Créer",
+
+  "search.error": "Impossible de rechercher les messages.",
+  "search.dmWith": "MP avec {name}",
+  "search.eyebrow": "Recherche",
+  "search.title": "Trouver des messages",
+  "search.placeholder": "Recherchez dans les messages de canal et vos MP",
+  "search.searching": "Recherche…",
+  "search.button": "Rechercher",
+  "search.noResults": "Aucun message ne correspond.",
+
+  "invite.hide": "× Masquer l’invitation",
+  "invite.show": "⧉ Inviter quelqu’un",
+
+  "nodeLink.hide": "× Masquer le lien",
+  "nodeLink.show": "⧉ Relier un autre nœud",
+  "nodeLink.note":
+    "Sur l’écran d’administration de l’autre nœud, activez la synchronisation et ajoutez cette adresse comme pair (scannez le code ou collez l’URL).",
+  "nodeLink.copied": "Copié",
+  "nodeLink.copy": "Copier l’adresse",
+
+  "unreadBadge.label": "{n} non lus",
+
+  "avatarEditor.loadError": "Impossible de charger l’image.",
+  "avatarEditor.uploadError": "Impossible d’envoyer l’avatar.",
+  "avatarEditor.tooLarge": "L’image de l’avatar est trop grande après redimensionnement.",
+  "avatarEditor.cropPreview": "Aperçu du recadrage de l’avatar",
+  "avatarEditor.chooseImage": "Choisir une image",
+  "avatarEditor.uploading": "Envoi",
+  "avatarEditor.useCropped": "Utiliser l’image recadrée",
+  "avatarEditor.zoom": "Zoom",
+  "avatarEditor.rotate": "Pivoter",
+  "avatarEditor.invalidType": "Choisissez une image PNG, JPEG ou WebP.",
+
+  "app.userUnrecognised": "Le serveur a renvoyé un utilisateur non reconnu.",
+  "app.deleteError": "Impossible de supprimer le message.",
+  "app.editError": "Impossible de modifier le message.",
+  "app.sendInvalidJson": "Échec de l’envoi du message : réponse JSON non valide.",
+  "app.sendInvalidPayload": "Échec de l’envoi du message : réponse non valide.",
+  "app.attachmentUnrecognised": "Le serveur a renvoyé une pièce jointe non reconnue.",
+  "app.serverUnreachable": "Impossible de joindre le serveur LOAM.",
+  "app.messagesLoadError": "Impossible de charger les messages.",
+
+  "gate.deviceWipedTitle": "Appareil effacé",
+  "gate.deviceWipedBody": "La copie locale de ce navigateur a été effacée. Scannez le QR d’accès pour vous reconnecter.",
+  "gate.disconnectedTitle": "Déconnecté",
+  "gate.disconnectedBody": "Ce nœud n’est plus disponible.",
+  "gate.bannedTitle": "Retiré de ce nœud",
+  "gate.bannedBody": "Un modérateur vous a retiré. Vous ne pouvez plus publier ni lire ici.",
+  "gate.pendingTitle": "Vous êtes dans la file",
+  "gate.pendingBody":
+    "En attente que quelqu’un de ce nœud vous laisse entrer. Cet écran se met à jour dès que vous êtes approuvé.",
+  "gate.connection": "Connexion : {status}",
+
+  "confirm.deleteMessage": "Supprimer ce message ? Cette action est irréversible.",
 };

@@ -278,4 +278,73 @@ export const fa: Catalog = {
   "admin.rename": "تغییر نام",
   "admin.restore": "بازگردانی",
   "admin.archive": "بایگانی",
+
+  "sidebar.channels": "کانال‌ها",
+  "sidebar.dms": "پیام‌های مستقیم",
+  "sidebar.online": "آنلاین",
+  "sidebar.searchMessages": "جست‌وجوی پیام‌ها",
+  "sidebar.settings": "کد پیوستن و تنظیمات",
+  "sidebar.statusConnecting": "در حال اتصال",
+  "sidebar.statusLive": "زنده",
+  "sidebar.statusOffline": "آفلاین",
+
+  "newChannel.new": "+ کانال جدید",
+  "newChannel.nameAria": "نام کانال جدید",
+  "newChannel.namePlaceholder": "نام کانال",
+  "newChannel.private": "خصوصی (فقط با دعوت)",
+  "newChannel.create": "ساختن",
+
+  "search.error": "جست‌وجوی پیام‌ها ممکن نشد.",
+  "search.dmWith": "پیام مستقیم با {name}",
+  "search.eyebrow": "جست‌وجو",
+  "search.title": "یافتن پیام‌ها",
+  "search.placeholder": "در پیام‌های کانال و پیام‌های مستقیم خود جست‌وجو کنید",
+  "search.searching": "در حال جست‌وجو…",
+  "search.button": "جست‌وجو",
+  "search.noResults": "پیامی مطابقت نداشت.",
+
+  "invite.hide": "× پنهان‌کردن دعوت",
+  "invite.show": "⧉ دعوت از کسی",
+
+  "nodeLink.hide": "× پنهان‌کردن پیوند",
+  "nodeLink.show": "⧉ پیوند گرهٔ دیگر",
+  "nodeLink.note":
+    "در صفحهٔ مدیریت گرهٔ دیگر، همگام‌سازی را فعال کنید و این نشانی را به‌عنوان همتا بیفزایید (کد را اسکن یا نشانی را جای‌گذاری کنید).",
+  "nodeLink.copied": "کپی شد",
+  "nodeLink.copy": "کپی نشانی",
+
+  "unreadBadge.label": "{n} نخوانده",
+
+  "avatarEditor.loadError": "بار کردن تصویر ممکن نشد.",
+  "avatarEditor.uploadError": "بارگذاری آواتار ممکن نشد.",
+  "avatarEditor.tooLarge": "تصویر آواتار پس از تغییر اندازه بیش از حد بزرگ است.",
+  "avatarEditor.cropPreview": "پیش‌نمایش برش آواتار",
+  "avatarEditor.chooseImage": "انتخاب تصویر",
+  "avatarEditor.uploading": "در حال بارگذاری",
+  "avatarEditor.useCropped": "استفاده از تصویر برش‌خورده",
+  "avatarEditor.zoom": "بزرگ‌نمایی",
+  "avatarEditor.rotate": "چرخش",
+  "avatarEditor.invalidType": "یک تصویر PNG، JPEG یا WebP انتخاب کنید.",
+
+  "app.userUnrecognised": "سرور کاربر ناشناخته‌ای بازگرداند.",
+  "app.deleteError": "حذف پیام ممکن نشد.",
+  "app.editError": "ویرایش پیام ممکن نشد.",
+  "app.sendInvalidJson": "ارسال پیام ناموفق بود: پاسخ JSON نامعتبر.",
+  "app.sendInvalidPayload": "ارسال پیام ناموفق بود: پاسخ نامعتبر.",
+  "app.attachmentUnrecognised": "سرور پیوست ناشناخته‌ای بازگرداند.",
+  "app.serverUnreachable": "دسترسی به سرور LOAM ممکن نشد.",
+  "app.messagesLoadError": "بارگیری پیام‌ها ممکن نشد.",
+
+  "gate.deviceWipedTitle": "دستگاه پاک شد",
+  "gate.deviceWipedBody": "نسخهٔ محلی این مرورگر پاک شد. برای اتصال دوباره کد پیوستن را اسکن کنید.",
+  "gate.disconnectedTitle": "قطع‌شده",
+  "gate.disconnectedBody": "این گره دیگر در دسترس نیست.",
+  "gate.bannedTitle": "از این گره حذف شدید",
+  "gate.bannedBody": "یک ناظر شما را حذف کرد. دیگر نمی‌توانید اینجا بنویسید یا بخوانید.",
+  "gate.pendingTitle": "در صف هستید",
+  "gate.pendingBody":
+    "منتظرید کسی در این گره شما را راه دهد. این صفحه به‌محض تأیید شما به‌روز می‌شود.",
+  "gate.connection": "اتصال: {status}",
+
+  "confirm.deleteMessage": "این پیام حذف شود؟ این کار قابل بازگشت نیست.",
 };

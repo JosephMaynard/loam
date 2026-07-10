@@ -278,4 +278,73 @@ export const ps: Catalog = {
   "admin.rename": "نوم بدلول",
   "admin.restore": "بیا راژوندي کول",
   "admin.archive": "آرشیف کول",
+
+  "sidebar.channels": "چینلونه",
+  "sidebar.dms": "مستقیم پیغامونه",
+  "sidebar.online": "آنلاین",
+  "sidebar.searchMessages": "پیغامونه لټول",
+  "sidebar.settings": "د یوځای کیدو QR او امستنې",
+  "sidebar.statusConnecting": "وصلیږي",
+  "sidebar.statusLive": "ژوندی",
+  "sidebar.statusOffline": "آفلاین",
+
+  "newChannel.new": "+ نوی چینل",
+  "newChannel.nameAria": "د نوي چینل نوم",
+  "newChannel.namePlaceholder": "د چینل نوم",
+  "newChannel.private": "خصوصي (یوازې د بلنې له لارې)",
+  "newChannel.create": "جوړول",
+
+  "search.error": "پیغامونه ونه لټول شول.",
+  "search.dmWith": "له {name} سره مستقیم پیغام",
+  "search.eyebrow": "لټون",
+  "search.title": "پیغامونه موندل",
+  "search.placeholder": "د چینل په پیغامونو او خپلو مستقیمو پیغامونو کې ولټوئ",
+  "search.searching": "لټول کیږي…",
+  "search.button": "لټول",
+  "search.noResults": "هیڅ پیغام سمون ونه خوړ.",
+
+  "invite.hide": "× بلنه پټول",
+  "invite.show": "⧉ یو څوک وبلئ",
+
+  "nodeLink.hide": "× لینک پټول",
+  "nodeLink.show": "⧉ بل نوډ نښلول",
+  "nodeLink.note":
+    "د بل نوډ د اډمین پر پرده همغږي فعاله کړئ او دا پته د همتا په توګه ورزیات کړئ (کوډ سکن کړئ یا URL پیسټ کړئ)۔",
+  "nodeLink.copied": "کاپي شو",
+  "nodeLink.copy": "پته کاپي کول",
+
+  "unreadBadge.label": "{n} ناکتلي",
+
+  "avatarEditor.loadError": "انځور پورته نشو.",
+  "avatarEditor.uploadError": "اواتار پورته نشو.",
+  "avatarEditor.tooLarge": "د اندازې له بدلون وروسته د اواتار انځور ډیر لوی دی.",
+  "avatarEditor.cropPreview": "د اواتار د پرېکړې مخکتنه",
+  "avatarEditor.chooseImage": "انځور غوره کول",
+  "avatarEditor.uploading": "پورته کیږي",
+  "avatarEditor.useCropped": "پرې‌شوی انځور کارول",
+  "avatarEditor.zoom": "لویول",
+  "avatarEditor.rotate": "څرخول",
+  "avatarEditor.invalidType": "د PNG، JPEG یا WebP انځور وټاکئ.",
+
+  "app.userUnrecognised": "سرور ناپېژندلی کاروونکی راستون کړ.",
+  "app.deleteError": "پیغام ړنګ نشو.",
+  "app.editError": "پیغام سم نشو.",
+  "app.sendInvalidJson": "د پیغام لېږل ناکام شو: ناسم JSON ځواب.",
+  "app.sendInvalidPayload": "د پیغام لېږل ناکام شو: ناسم ځواب.",
+  "app.attachmentUnrecognised": "سرور ناپېژندلې ضمیمه راستون کړه.",
+  "app.serverUnreachable": "د LOAM سرور ته لاسرسی ونشو.",
+  "app.messagesLoadError": "پیغامونه پورته نشول.",
+
+  "gate.deviceWipedTitle": "وسیله پاکه شوه",
+  "gate.deviceWipedBody": "د دې براوزر محلي کاپي پاکه شوه. د بیا نښلولو لپاره د یوځای کیدو QR سکن کړئ.",
+  "gate.disconnectedTitle": "نښلاک پرې شو",
+  "gate.disconnectedBody": "دا نوډ نور شتون نلري.",
+  "gate.bannedTitle": "له دې نوډ لرې شوی",
+  "gate.bannedBody": "یو څارونکي تاسو لرې کړئ. نور دلته نه شئ لیکلی یا لوستلی.",
+  "gate.pendingTitle": "تاسو په کتار کې یاست",
+  "gate.pendingBody":
+    "منتظر یاست چې پر دې نوډ څوک تاسو دننه پرېږدي. ستاسو له تصویب سره سم دا پرده سمدلاسه تازه کیږي.",
+  "gate.connection": "اړیکه: {status}",
+
+  "confirm.deleteMessage": "دا پیغام ړنګ کړئ؟ دا بیرته نشي کیدی.",
 };

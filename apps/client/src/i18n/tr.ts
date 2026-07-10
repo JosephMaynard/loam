@@ -278,4 +278,73 @@ export const tr: Catalog = {
   "admin.rename": "Yeniden adlandır",
   "admin.restore": "Geri yükle",
   "admin.archive": "Arşivle",
+
+  "sidebar.channels": "Kanallar",
+  "sidebar.dms": "Doğrudan mesajlar",
+  "sidebar.online": "Çevrimiçi",
+  "sidebar.searchMessages": "Mesajlarda ara",
+  "sidebar.settings": "Katılma QR’ı ve ayarlar",
+  "sidebar.statusConnecting": "bağlanıyor",
+  "sidebar.statusLive": "canlı",
+  "sidebar.statusOffline": "çevrimdışı",
+
+  "newChannel.new": "+ Yeni kanal",
+  "newChannel.nameAria": "Yeni kanal adı",
+  "newChannel.namePlaceholder": "Kanal adı",
+  "newChannel.private": "Özel (yalnızca davetle)",
+  "newChannel.create": "Oluştur",
+
+  "search.error": "Mesajlarda arama yapılamadı.",
+  "search.dmWith": "{name} ile DM",
+  "search.eyebrow": "Arama",
+  "search.title": "Mesaj bul",
+  "search.placeholder": "Kanal mesajlarında ve DM’lerinde ara",
+  "search.searching": "Aranıyor…",
+  "search.button": "Ara",
+  "search.noResults": "Eşleşen mesaj yok.",
+
+  "invite.hide": "× Daveti gizle",
+  "invite.show": "⧉ Birini davet et",
+
+  "nodeLink.hide": "× Bağlantıyı gizle",
+  "nodeLink.show": "⧉ Başka bir düğüm bağla",
+  "nodeLink.note":
+    "Diğer düğümün yönetim ekranında eşitlemeyi açın ve bu adresi eş olarak ekleyin (kodu tarayın veya URL’yi yapıştırın).",
+  "nodeLink.copied": "Kopyalandı",
+  "nodeLink.copy": "Adresi kopyala",
+
+  "unreadBadge.label": "{n} okunmamış",
+
+  "avatarEditor.loadError": "Görsel yüklenemedi.",
+  "avatarEditor.uploadError": "Avatar yüklenemedi.",
+  "avatarEditor.tooLarge": "Avatar görseli yeniden boyutlandırmadan sonra çok büyük.",
+  "avatarEditor.cropPreview": "Avatar kırpma önizlemesi",
+  "avatarEditor.chooseImage": "Görsel seç",
+  "avatarEditor.uploading": "Yükleniyor",
+  "avatarEditor.useCropped": "Kırpılmış görseli kullan",
+  "avatarEditor.zoom": "Yakınlaştır",
+  "avatarEditor.rotate": "Döndür",
+  "avatarEditor.invalidType": "PNG, JPEG veya WebP görsel seçin.",
+
+  "app.userUnrecognised": "Sunucu tanınmayan bir kullanıcı döndürdü.",
+  "app.deleteError": "Mesaj silinemedi.",
+  "app.editError": "Mesaj düzenlenemedi.",
+  "app.sendInvalidJson": "Mesaj gönderilemedi: geçersiz JSON yanıtı.",
+  "app.sendInvalidPayload": "Mesaj gönderilemedi: geçersiz yanıt.",
+  "app.attachmentUnrecognised": "Sunucu tanınmayan bir ek döndürdü.",
+  "app.serverUnreachable": "LOAM sunucusuna ulaşılamadı.",
+  "app.messagesLoadError": "Mesajlar yüklenemedi.",
+
+  "gate.deviceWipedTitle": "Cihaz silindi",
+  "gate.deviceWipedBody": "Bu tarayıcının yerel kopyası silindi. Yeniden bağlanmak için katılma QR’ını tarayın.",
+  "gate.disconnectedTitle": "Bağlantı kesildi",
+  "gate.disconnectedBody": "Bu düğüm artık kullanılabilir değil.",
+  "gate.bannedTitle": "Bu düğümden çıkarıldınız",
+  "gate.bannedBody": "Bir moderatör sizi çıkardı. Artık burada paylaşamaz veya okuyamazsınız.",
+  "gate.pendingTitle": "Sıradasınız",
+  "gate.pendingBody":
+    "Bu düğümdeki birinin sizi içeri almasını bekliyorsunuz. Onaylandığınız anda bu ekran güncellenir.",
+  "gate.connection": "Bağlantı: {status}",
+
+  "confirm.deleteMessage": "Bu mesaj silinsin mi? Bu geri alınamaz.",
 };

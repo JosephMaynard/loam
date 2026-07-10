@@ -278,4 +278,73 @@ export const bn: Catalog = {
   "admin.rename": "নাম বদলান",
   "admin.restore": "পুনরুদ্ধার",
   "admin.archive": "আর্কাইভ",
+
+  "sidebar.channels": "চ্যানেল",
+  "sidebar.dms": "সরাসরি বার্তা",
+  "sidebar.online": "অনলাইন",
+  "sidebar.searchMessages": "বার্তা খুঁজুন",
+  "sidebar.settings": "যোগদান QR ও সেটিংস",
+  "sidebar.statusConnecting": "সংযোগ হচ্ছে",
+  "sidebar.statusLive": "লাইভ",
+  "sidebar.statusOffline": "অফলাইন",
+
+  "newChannel.new": "+ নতুন চ্যানেল",
+  "newChannel.nameAria": "নতুন চ্যানেলের নাম",
+  "newChannel.namePlaceholder": "চ্যানেলের নাম",
+  "newChannel.private": "ব্যক্তিগত (শুধু আমন্ত্রণে)",
+  "newChannel.create": "তৈরি করুন",
+
+  "search.error": "বার্তা খোঁজা যায়নি।",
+  "search.dmWith": "{name}-এর সাথে DM",
+  "search.eyebrow": "অনুসন্ধান",
+  "search.title": "বার্তা খুঁজুন",
+  "search.placeholder": "চ্যানেল বার্তা ও আপনার DM-এ খুঁজুন",
+  "search.searching": "খোঁজা হচ্ছে…",
+  "search.button": "খুঁজুন",
+  "search.noResults": "কোনো বার্তা মেলেনি।",
+
+  "invite.hide": "× আমন্ত্রণ লুকান",
+  "invite.show": "⧉ কাউকে আমন্ত্রণ জানান",
+
+  "nodeLink.hide": "× লিঙ্ক লুকান",
+  "nodeLink.show": "⧉ আরেকটি নোড যুক্ত করুন",
+  "nodeLink.note":
+    "অন্য নোডের অ্যাডমিন স্ক্রিনে সিঙ্ক চালু করুন এবং এই ঠিকানাটি সমকক্ষ হিসেবে যোগ করুন (কোড স্ক্যান করুন বা URL পেস্ট করুন)।",
+  "nodeLink.copied": "কপি হয়েছে",
+  "nodeLink.copy": "ঠিকানা কপি করুন",
+
+  "unreadBadge.label": "{n}টি অপঠিত",
+
+  "avatarEditor.loadError": "ছবি লোড করা যায়নি।",
+  "avatarEditor.uploadError": "অ্যাভাটার আপলোড করা যায়নি।",
+  "avatarEditor.tooLarge": "আকার পরিবর্তনের পরেও অ্যাভাটার ছবিটি অনেক বড়।",
+  "avatarEditor.cropPreview": "অ্যাভাটার ক্রপ প্রিভিউ",
+  "avatarEditor.chooseImage": "ছবি বেছে নিন",
+  "avatarEditor.uploading": "আপলোড হচ্ছে",
+  "avatarEditor.useCropped": "ক্রপ করা ছবি ব্যবহার করুন",
+  "avatarEditor.zoom": "জুম",
+  "avatarEditor.rotate": "ঘোরান",
+  "avatarEditor.invalidType": "একটি PNG, JPEG বা WebP ছবি বেছে নিন।",
+
+  "app.userUnrecognised": "সার্ভার অচেনা ব্যবহারকারী ফেরত দিয়েছে।",
+  "app.deleteError": "বার্তা মোছা যায়নি।",
+  "app.editError": "বার্তা সম্পাদনা করা যায়নি।",
+  "app.sendInvalidJson": "বার্তা পাঠানো ব্যর্থ: অবৈধ JSON প্রতিক্রিয়া।",
+  "app.sendInvalidPayload": "বার্তা পাঠানো ব্যর্থ: অবৈধ প্রতিক্রিয়া।",
+  "app.attachmentUnrecognised": "সার্ভার অচেনা সংযুক্তি ফেরত দিয়েছে।",
+  "app.serverUnreachable": "LOAM সার্ভারে পৌঁছানো যায়নি।",
+  "app.messagesLoadError": "বার্তা লোড করা যায়নি।",
+
+  "gate.deviceWipedTitle": "ডিভাইস মোছা হয়েছে",
+  "gate.deviceWipedBody": "এই ব্রাউজারের স্থানীয় অনুলিপি মুছে ফেলা হয়েছে। পুনরায় সংযোগ করতে যোগদান QR স্ক্যান করুন।",
+  "gate.disconnectedTitle": "সংযোগ বিচ্ছিন্ন",
+  "gate.disconnectedBody": "এই নোড আর উপলব্ধ নয়।",
+  "gate.bannedTitle": "এই নোড থেকে সরানো হয়েছে",
+  "gate.bannedBody": "একজন মডারেটর আপনাকে সরিয়ে দিয়েছেন। আপনি এখানে আর পোস্ট বা পড়তে পারবেন না।",
+  "gate.pendingTitle": "আপনি সারিতে আছেন",
+  "gate.pendingBody":
+    "এই নোডের কেউ আপনাকে ঢুকতে দেওয়ার অপেক্ষায়। অনুমোদিত হওয়া মাত্রই এই স্ক্রিন আপডেট হবে।",
+  "gate.connection": "সংযোগ: {status}",
+
+  "confirm.deleteMessage": "এই বার্তা মুছবেন? এটি ফেরানো যাবে না।",
 };

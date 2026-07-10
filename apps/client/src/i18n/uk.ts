@@ -288,4 +288,73 @@ export const uk: Catalog = {
   "admin.rename": "Перейменувати",
   "admin.restore": "Відновити",
   "admin.archive": "Архівувати",
+
+  "sidebar.channels": "Канали",
+  "sidebar.dms": "Прямі повідомлення",
+  "sidebar.online": "У мережі",
+  "sidebar.searchMessages": "Пошук повідомлень",
+  "sidebar.settings": "QR приєднання та налаштування",
+  "sidebar.statusConnecting": "підключення",
+  "sidebar.statusLive": "наживо",
+  "sidebar.statusOffline": "офлайн",
+
+  "newChannel.new": "+ Новий канал",
+  "newChannel.nameAria": "Назва нового каналу",
+  "newChannel.namePlaceholder": "Назва каналу",
+  "newChannel.private": "Приватний (лише за запрошенням)",
+  "newChannel.create": "Створити",
+
+  "search.error": "Не вдалося виконати пошук повідомлень.",
+  "search.dmWith": "Особисте з {name}",
+  "search.eyebrow": "Пошук",
+  "search.title": "Знайти повідомлення",
+  "search.placeholder": "Шукайте в повідомленнях каналів і своїх особистих",
+  "search.searching": "Пошук…",
+  "search.button": "Шукати",
+  "search.noResults": "Жодне повідомлення не збіглося.",
+
+  "invite.hide": "× Сховати запрошення",
+  "invite.show": "⧉ Запросити когось",
+
+  "nodeLink.hide": "× Сховати посилання",
+  "nodeLink.show": "⧉ Зв’язати інший вузол",
+  "nodeLink.note":
+    "На екрані адміністрування іншого вузла увімкніть синхронізацію та додайте цю адресу як однолітка (скануйте код або вставте URL).",
+  "nodeLink.copied": "Скопійовано",
+  "nodeLink.copy": "Копіювати адресу",
+
+  "unreadBadge.label": "{n} непрочитаних",
+
+  "avatarEditor.loadError": "Не вдалося завантажити зображення.",
+  "avatarEditor.uploadError": "Не вдалося завантажити аватар.",
+  "avatarEditor.tooLarge": "Зображення аватара занадто велике після зміни розміру.",
+  "avatarEditor.cropPreview": "Попередній перегляд обрізки аватара",
+  "avatarEditor.chooseImage": "Вибрати зображення",
+  "avatarEditor.uploading": "Завантаження",
+  "avatarEditor.useCropped": "Використати обрізане зображення",
+  "avatarEditor.zoom": "Масштаб",
+  "avatarEditor.rotate": "Обернути",
+  "avatarEditor.invalidType": "Виберіть зображення PNG, JPEG або WebP.",
+
+  "app.userUnrecognised": "Сервер повернув нерозпізнаного користувача.",
+  "app.deleteError": "Не вдалося видалити повідомлення.",
+  "app.editError": "Не вдалося відредагувати повідомлення.",
+  "app.sendInvalidJson": "Не вдалося надіслати повідомлення: недійсна відповідь JSON.",
+  "app.sendInvalidPayload": "Не вдалося надіслати повідомлення: недійсна відповідь.",
+  "app.attachmentUnrecognised": "Сервер повернув нерозпізнане вкладення.",
+  "app.serverUnreachable": "Не вдалося зв’язатися із сервером LOAM.",
+  "app.messagesLoadError": "Не вдалося завантажити повідомлення.",
+
+  "gate.deviceWipedTitle": "Пристрій стерто",
+  "gate.deviceWipedBody": "Локальну копію цього браузера стерто. Скануйте QR приєднання, щоб перепідключитися.",
+  "gate.disconnectedTitle": "Від’єднано",
+  "gate.disconnectedBody": "Цей вузол більше недоступний.",
+  "gate.bannedTitle": "Вилучено з цього вузла",
+  "gate.bannedBody": "Модератор вилучив вас. Ви більше не можете тут писати чи читати.",
+  "gate.pendingTitle": "Ви в черзі",
+  "gate.pendingBody":
+    "Очікуємо, поки хтось на цьому вузлі впустить вас. Цей екран оновиться щойно вас схвалять.",
+  "gate.connection": "З’єднання: {status}",
+
+  "confirm.deleteMessage": "Видалити це повідомлення? Це не можна скасувати.",
 };

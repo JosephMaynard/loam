@@ -292,4 +292,73 @@ export const ar: Catalog = {
   "admin.rename": "إعادة تسمية",
   "admin.restore": "استعادة",
   "admin.archive": "أرشفة",
+
+  "sidebar.channels": "القنوات",
+  "sidebar.dms": "الرسائل المباشرة",
+  "sidebar.online": "متصل",
+  "sidebar.searchMessages": "بحث في الرسائل",
+  "sidebar.settings": "رمز الانضمام والإعدادات",
+  "sidebar.statusConnecting": "جارٍ الاتصال",
+  "sidebar.statusLive": "مباشر",
+  "sidebar.statusOffline": "غير متصل",
+
+  "newChannel.new": "+ قناة جديدة",
+  "newChannel.nameAria": "اسم القناة الجديدة",
+  "newChannel.namePlaceholder": "اسم القناة",
+  "newChannel.private": "خاصة (بالدعوة فقط)",
+  "newChannel.create": "إنشاء",
+
+  "search.error": "تعذّر البحث في الرسائل.",
+  "search.dmWith": "رسالة مباشرة مع {name}",
+  "search.eyebrow": "بحث",
+  "search.title": "البحث عن الرسائل",
+  "search.placeholder": "ابحث في رسائل القنوات ورسائلك المباشرة",
+  "search.searching": "جارٍ البحث…",
+  "search.button": "بحث",
+  "search.noResults": "لا رسائل مطابقة.",
+
+  "invite.hide": "× إخفاء الدعوة",
+  "invite.show": "⧉ ادعُ شخصًا",
+
+  "nodeLink.hide": "× إخفاء الرابط",
+  "nodeLink.show": "⧉ ربط عقدة أخرى",
+  "nodeLink.note":
+    "في شاشة إدارة العقدة الأخرى، فعّل المزامنة وأضف هذا العنوان كنظير (امسح الرمز أو الصق العنوان).",
+  "nodeLink.copied": "تم النسخ",
+  "nodeLink.copy": "نسخ العنوان",
+
+  "unreadBadge.label": "{n} غير مقروءة",
+
+  "avatarEditor.loadError": "تعذّر تحميل الصورة.",
+  "avatarEditor.uploadError": "تعذّر رفع الصورة الرمزية.",
+  "avatarEditor.tooLarge": "صورة الأفاتار كبيرة جدًا بعد إعادة التحجيم.",
+  "avatarEditor.cropPreview": "معاينة قص الصورة الرمزية",
+  "avatarEditor.chooseImage": "اختيار صورة",
+  "avatarEditor.uploading": "جارٍ الرفع",
+  "avatarEditor.useCropped": "استخدام الصورة المقصوصة",
+  "avatarEditor.zoom": "تكبير",
+  "avatarEditor.rotate": "تدوير",
+  "avatarEditor.invalidType": "اختر صورة PNG أو JPEG أو WebP.",
+
+  "app.userUnrecognised": "أعاد الخادم مستخدمًا غير معروف.",
+  "app.deleteError": "تعذّر حذف الرسالة.",
+  "app.editError": "تعذّر تعديل الرسالة.",
+  "app.sendInvalidJson": "فشل إرسال الرسالة: استجابة JSON غير صالحة.",
+  "app.sendInvalidPayload": "فشل إرسال الرسالة: استجابة غير صالحة.",
+  "app.attachmentUnrecognised": "أعاد الخادم مرفقًا غير معروف.",
+  "app.serverUnreachable": "تعذّر الوصول إلى خادم LOAM.",
+  "app.messagesLoadError": "تعذّر تحميل الرسائل.",
+
+  "gate.deviceWipedTitle": "تم مسح الجهاز",
+  "gate.deviceWipedBody": "تم مسح النسخة المحلية لهذا المتصفح. امسح رمز الانضمام لإعادة الاتصال.",
+  "gate.disconnectedTitle": "غير متصل",
+  "gate.disconnectedBody": "لم تعد هذه العقدة متاحة.",
+  "gate.bannedTitle": "تمت إزالتك من هذه العقدة",
+  "gate.bannedBody": "أزالك أحد المشرفين. لم يعد بإمكانك النشر أو القراءة هنا.",
+  "gate.pendingTitle": "أنت في قائمة الانتظار",
+  "gate.pendingBody":
+    "بانتظار أن يسمح لك أحد على هذه العقدة بالدخول. تتحدّث هذه الشاشة فور الموافقة عليك.",
+  "gate.connection": "الاتصال: {status}",
+
+  "confirm.deleteMessage": "حذف هذه الرسالة؟ لا يمكن التراجع عن ذلك.",
 };

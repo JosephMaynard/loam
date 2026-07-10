@@ -278,4 +278,73 @@ export const sw: Catalog = {
   "admin.rename": "Badilisha jina",
   "admin.restore": "Rejesha",
   "admin.archive": "Hifadhi",
+
+  "sidebar.channels": "Vituo",
+  "sidebar.dms": "Ujumbe wa moja kwa moja",
+  "sidebar.online": "Mtandaoni",
+  "sidebar.searchMessages": "Tafuta ujumbe",
+  "sidebar.settings": "QR ya kujiunga na mipangilio",
+  "sidebar.statusConnecting": "inaunganisha",
+  "sidebar.statusLive": "moja kwa moja",
+  "sidebar.statusOffline": "nje ya mtandao",
+
+  "newChannel.new": "+ Kituo kipya",
+  "newChannel.nameAria": "Jina la kituo kipya",
+  "newChannel.namePlaceholder": "Jina la kituo",
+  "newChannel.private": "Faragha (kwa mwaliko tu)",
+  "newChannel.create": "Unda",
+
+  "search.error": "Imeshindwa kutafuta ujumbe.",
+  "search.dmWith": "DM na {name}",
+  "search.eyebrow": "Tafuta",
+  "search.title": "Tafuta ujumbe",
+  "search.placeholder": "Tafuta katika ujumbe wa vituo na DM zako",
+  "search.searching": "Inatafuta…",
+  "search.button": "Tafuta",
+  "search.noResults": "Hakuna ujumbe uliolingana.",
+
+  "invite.hide": "× Ficha mwaliko",
+  "invite.show": "⧉ Mwalike mtu",
+
+  "nodeLink.hide": "× Ficha kiungo",
+  "nodeLink.show": "⧉ Unganisha nodi nyingine",
+  "nodeLink.note":
+    "Kwenye skrini ya usimamizi ya nodi nyingine, washa usawazishaji na ongeza anwani hii kama mwenza (skani msimbo au bandika URL).",
+  "nodeLink.copied": "Imenakiliwa",
+  "nodeLink.copy": "Nakili anwani",
+
+  "unreadBadge.label": "{n} ambazo hazijasomwa",
+
+  "avatarEditor.loadError": "Imeshindwa kupakia picha.",
+  "avatarEditor.uploadError": "Imeshindwa kupakia avatar.",
+  "avatarEditor.tooLarge": "Picha ya avatar ni kubwa mno baada ya kupunguza ukubwa.",
+  "avatarEditor.cropPreview": "Onyesho la awali la upunguzaji wa avatar",
+  "avatarEditor.chooseImage": "Chagua picha",
+  "avatarEditor.uploading": "Inapakia",
+  "avatarEditor.useCropped": "Tumia picha iliyopunguzwa",
+  "avatarEditor.zoom": "Kuza",
+  "avatarEditor.rotate": "Zungusha",
+  "avatarEditor.invalidType": "Chagua picha ya PNG, JPEG au WebP.",
+
+  "app.userUnrecognised": "Seva ilirudisha mtumiaji asiyetambulika.",
+  "app.deleteError": "Imeshindwa kufuta ujumbe.",
+  "app.editError": "Imeshindwa kuhariri ujumbe.",
+  "app.sendInvalidJson": "Kutuma ujumbe kumeshindwa: jibu batili la JSON.",
+  "app.sendInvalidPayload": "Kutuma ujumbe kumeshindwa: jibu batili.",
+  "app.attachmentUnrecognised": "Seva ilirudisha kiambatisho kisichotambulika.",
+  "app.serverUnreachable": "Imeshindwa kufikia seva ya LOAM.",
+  "app.messagesLoadError": "Imeshindwa kupakia ujumbe.",
+
+  "gate.deviceWipedTitle": "Kifaa kimefutwa",
+  "gate.deviceWipedBody": "Nakala ya ndani ya kivinjari hiki imefutwa. Skani QR ya kujiunga ili kuunganisha tena.",
+  "gate.disconnectedTitle": "Umetenganishwa",
+  "gate.disconnectedBody": "Nodi hii haipatikani tena.",
+  "gate.bannedTitle": "Umeondolewa kwenye nodi hii",
+  "gate.bannedBody": "Msimamizi amekuondoa. Huwezi tena kuchapisha wala kusoma hapa.",
+  "gate.pendingTitle": "Uko kwenye foleni",
+  "gate.pendingBody":
+    "Unasubiri mtu kwenye nodi hii akuruhusu kuingia. Skrini hii inasasishwa mara tu unapoidhinishwa.",
+  "gate.connection": "Muunganisho: {status}",
+
+  "confirm.deleteMessage": "Futa ujumbe huu? Hili haliwezi kutenduliwa.",
 };

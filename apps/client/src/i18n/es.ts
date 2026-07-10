@@ -278,4 +278,73 @@ export const es: Catalog = {
   "admin.rename": "Renombrar",
   "admin.restore": "Restaurar",
   "admin.archive": "Archivar",
+
+  "sidebar.channels": "Canales",
+  "sidebar.dms": "Mensajes directos",
+  "sidebar.online": "En línea",
+  "sidebar.searchMessages": "Buscar mensajes",
+  "sidebar.settings": "QR de acceso y ajustes",
+  "sidebar.statusConnecting": "conectando",
+  "sidebar.statusLive": "en vivo",
+  "sidebar.statusOffline": "sin conexión",
+
+  "newChannel.new": "+ Nuevo canal",
+  "newChannel.nameAria": "Nombre del nuevo canal",
+  "newChannel.namePlaceholder": "Nombre del canal",
+  "newChannel.private": "Privado (solo por invitación)",
+  "newChannel.create": "Crear",
+
+  "search.error": "No se pudieron buscar los mensajes.",
+  "search.dmWith": "MD con {name}",
+  "search.eyebrow": "Búsqueda",
+  "search.title": "Encontrar mensajes",
+  "search.placeholder": "Busca en mensajes de canal y tus MD",
+  "search.searching": "Buscando…",
+  "search.button": "Buscar",
+  "search.noResults": "Ningún mensaje coincide.",
+
+  "invite.hide": "× Ocultar invitación",
+  "invite.show": "⧉ Invitar a alguien",
+
+  "nodeLink.hide": "× Ocultar enlace",
+  "nodeLink.show": "⧉ Enlazar otro nodo",
+  "nodeLink.note":
+    "En la pantalla de administración del otro nodo, activa la sincronización y añade esta dirección como par (escanea el código o pega la URL).",
+  "nodeLink.copied": "Copiado",
+  "nodeLink.copy": "Copiar dirección",
+
+  "unreadBadge.label": "{n} sin leer",
+
+  "avatarEditor.loadError": "No se pudo cargar la imagen.",
+  "avatarEditor.uploadError": "No se pudo subir el avatar.",
+  "avatarEditor.tooLarge": "La imagen del avatar es demasiado grande tras redimensionarla.",
+  "avatarEditor.cropPreview": "Vista previa del recorte del avatar",
+  "avatarEditor.chooseImage": "Elegir imagen",
+  "avatarEditor.uploading": "Subiendo",
+  "avatarEditor.useCropped": "Usar imagen recortada",
+  "avatarEditor.zoom": "Zoom",
+  "avatarEditor.rotate": "Rotar",
+  "avatarEditor.invalidType": "Elige una imagen PNG, JPEG o WebP.",
+
+  "app.userUnrecognised": "El servidor devolvió un usuario no reconocido.",
+  "app.deleteError": "No se pudo eliminar el mensaje.",
+  "app.editError": "No se pudo editar el mensaje.",
+  "app.sendInvalidJson": "Fallo al enviar el mensaje: respuesta JSON no válida.",
+  "app.sendInvalidPayload": "Fallo al enviar el mensaje: respuesta no válida.",
+  "app.attachmentUnrecognised": "El servidor devolvió un adjunto no reconocido.",
+  "app.serverUnreachable": "No se pudo conectar con el servidor LOAM.",
+  "app.messagesLoadError": "No se pudieron cargar los mensajes.",
+
+  "gate.deviceWipedTitle": "Dispositivo borrado",
+  "gate.deviceWipedBody": "La copia local de este navegador se ha borrado. Escanea el QR de acceso para reconectarte.",
+  "gate.disconnectedTitle": "Desconectado",
+  "gate.disconnectedBody": "Este nodo ya no está disponible.",
+  "gate.bannedTitle": "Expulsado de este nodo",
+  "gate.bannedBody": "Un moderador te ha expulsado. Ya no puedes publicar ni leer aquí.",
+  "gate.pendingTitle": "Estás en la cola",
+  "gate.pendingBody":
+    "Esperando a que alguien de este nodo te deje entrar. Esta pantalla se actualiza en cuanto te aprueben.",
+  "gate.connection": "Conexión: {status}",
+
+  "confirm.deleteMessage": "¿Eliminar este mensaje? No se puede deshacer.",
 };

@@ -367,7 +367,7 @@ async function requestUser(method: "POST" | "PATCH", path: string, body?: unknow
     const parsed = UserSchema.safeParse(payload);
 
     if (!parsed.success) {
-      throw new Error("The server returned an unrecognised user payload.");
+      throw new Error(t("app.userUnrecognised"));
     }
 
     return parsed.data;
@@ -678,7 +678,7 @@ function LoamApp() {
 
   const deleteMessage = useCallback(
     async (messageId: string) => {
-      if (!window.confirm("Delete this message? This can't be undone.")) {
+      if (!window.confirm(t("confirm.deleteMessage"))) {
         return;
       }
 
@@ -705,7 +705,7 @@ function LoamApp() {
         // remove the target immediately for snappy feedback (the rest arrive over the socket).
         removeMessage(messageId);
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Unable to delete the message.");
+        setError(error instanceof Error ? error.message : t("app.deleteError"));
       } finally {
         window.clearTimeout(timeout);
       }
@@ -750,7 +750,7 @@ function LoamApp() {
         }
         return true;
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Unable to edit the message.");
+        setError(error instanceof Error ? error.message : t("app.editError"));
         return false;
       } finally {
         window.clearTimeout(timeout);
@@ -795,7 +795,7 @@ function LoamApp() {
         }
         return true;
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Unable to create the channel.");
+        setError(error instanceof Error ? error.message : t("admin.channelCreateError"));
         return false;
       } finally {
         window.clearTimeout(timeout);
@@ -879,13 +879,13 @@ function LoamApp() {
         try {
           payload = await response.json();
         } catch (error) {
-          throw new Error("Message send failed: invalid JSON response.", { cause: error });
+          throw new Error(t("app.sendInvalidJson"), { cause: error });
         }
 
         const result = parseMessageResponse(payload);
 
         if (!result) {
-          throw new Error("Message send failed: invalid response payload.");
+          throw new Error(t("app.sendInvalidPayload"));
         }
 
         if (result.message) {
@@ -1011,7 +1011,7 @@ function LoamApp() {
       const parsed = MessageAttachmentSchema.safeParse(payload);
 
       if (!parsed.success) {
-        throw new Error("The server returned an unrecognised attachment payload.");
+        throw new Error(t("app.attachmentUnrecognised"));
       }
 
       return parsed.data;
@@ -1185,7 +1185,7 @@ function LoamApp() {
           return;
         }
 
-        setError(nextError instanceof Error ? nextError.message : "Unable to reach the LOAM server.");
+        setError(nextError instanceof Error ? nextError.message : t("app.serverUnreachable"));
         setConnection("offline");
         // Retry with backoff — a one-shot boot fetch would strand the app offline forever when the
         // server is momentarily unreachable (previously a manual reload was the only way out).
@@ -1238,7 +1238,7 @@ function LoamApp() {
           return;
         }
 
-        setError(nextError instanceof Error ? nextError.message : "Unable to load messages.");
+        setError(nextError instanceof Error ? nextError.message : t("app.messagesLoadError"));
       });
 
     return () => {
@@ -1463,13 +1463,13 @@ function LoamApp() {
           <p className="brand-title">LOAM</p>
           {wipeScope === "device" ? (
             <>
-              <h1>Device wiped</h1>
-              <p>This browser&rsquo;s local copy has been erased. Scan the join QR to reconnect.</p>
+              <h1>{t("gate.deviceWipedTitle")}</h1>
+              <p>{t("gate.deviceWipedBody")}</p>
             </>
           ) : (
             <>
-              <h1>Disconnected</h1>
-              <p>This node is no longer available.</p>
+              <h1>{t("gate.disconnectedTitle")}</h1>
+              <p>{t("gate.disconnectedBody")}</p>
             </>
           )}
         </div>
@@ -1482,8 +1482,8 @@ function LoamApp() {
       <main className="wiped-screen">
         <div>
           <p className="brand-title">LOAM</p>
-          <h1>Removed from this node</h1>
-          <p>A moderator has removed you. You can no longer post or read here.</p>
+          <h1>{t("gate.bannedTitle")}</h1>
+          <p>{t("gate.bannedBody")}</p>
         </div>
       </main>
     );
@@ -1494,9 +1494,18 @@ function LoamApp() {
       <main className="wiped-screen">
         <div>
           <p className="brand-title">LOAM</p>
-          <h1>You&rsquo;re in the queue</h1>
-          <p>Waiting for someone on this node to let you in. This screen updates the moment you&rsquo;re approved.</p>
-          <p className="gate-status">Connection: {connection}</p>
+          <h1>{t("gate.pendingTitle")}</h1>
+          <p>{t("gate.pendingBody")}</p>
+          <p className="gate-status">
+            {t("gate.connection", {
+              status:
+                connection === "live"
+                  ? t("sidebar.statusLive")
+                  : connection === "offline"
+                    ? t("sidebar.statusOffline")
+                    : t("sidebar.statusConnecting"),
+            })}
+          </p>
         </div>
       </main>
     );
@@ -1685,20 +1694,26 @@ function Sidebar({
           <p className="brand-title" title={nodeName}>
             {nodeName ?? "LOAM"}
           </p>
-          <p className={`status-pill status-${connection}`}>{connection}</p>
+          <p className={`status-pill status-${connection}`}>
+            {connection === "live"
+              ? t("sidebar.statusLive")
+              : connection === "offline"
+                ? t("sidebar.statusOffline")
+                : t("sidebar.statusConnecting")}
+          </p>
         </div>
       </div>
 
       <section className="nav-section">
-        <h2>Channels</h2>
-        <nav aria-label="Channels">
+        <h2>{t("sidebar.channels")}</h2>
+        <nav aria-label={t("sidebar.channels")}>
           {channels.map((channel) => (
             <NavLink
               active={activeConversation?.kind === "channel" && activeConversation.id === channel.id}
               href={`/channel/${encodeURIComponent(channel.id)}`}
               key={channel.id}
             >
-              <span aria-label={channel.visibility === "private" ? "Private channel" : undefined} className="nav-glyph">
+              <span aria-label={channel.visibility === "private" ? t("members.eyebrow") : undefined} className="nav-glyph">
                 {channel.visibility === "private" ? "🔒" : "#"}
               </span>
               <span className="nav-label">{channel.name}</span>
@@ -1712,8 +1727,8 @@ function Sidebar({
       </section>
 
       <section className="nav-section">
-        <h2>Direct Messages</h2>
-        <nav aria-label="Direct messages">
+        <h2>{t("sidebar.dms")}</h2>
+        <nav aria-label={t("sidebar.dms")}>
           {peers.map((user) => (
             <NavLink
               active={activeConversation?.kind === "dm" && activeConversation.id === user.id}
@@ -1723,7 +1738,7 @@ function Sidebar({
               <span className="presence-anchor">
                 <Avatar avatar={user.avatar} id={user.id} />
                 {onlineUserIds.has(user.id) ? (
-                  <span aria-label="Online" className="presence-dot" title="Online" />
+                  <span aria-label={t("sidebar.online")} className="presence-dot" title={t("sidebar.online")} />
                 ) : null}
               </span>
               <span className="nav-label">{user.displayName}</span>
@@ -1736,24 +1751,24 @@ function Sidebar({
       <div className="sidebar-footer">
         <NavLink active={false} href="/search">
           <span className="nav-glyph">⌕</span>
-          Search messages
+          {t("sidebar.searchMessages")}
         </NavLink>
         {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} /> : null}
         {showPeople ? (
           <NavLink active={false} href="/people">
             <span className="nav-glyph">☺</span>
-            People and moderation
+            {t("people.title")}
           </NavLink>
         ) : null}
         {currentUser.isAdmin ? (
           <NavLink active={false} href="/admin">
             <span className="nav-glyph">⚙</span>
-            Admin
+            {t("admin.eyebrow")}
           </NavLink>
         ) : null}
         <NavLink active={false} href="/settings">
           <span className="nav-glyph">⌁</span>
-          Join QR and settings
+          {t("sidebar.settings")}
         </NavLink>
         <div className="current-user">
           <Avatar avatar={currentUser.avatar} id={currentUser.id} />
@@ -1804,7 +1819,7 @@ function NewChannelControl({
   if (!open) {
     return (
       <button className="new-channel-toggle" onClick={() => setOpen(true)} type="button">
-        + New channel
+        {t("newChannel.new")}
       </button>
     );
   }
@@ -1818,13 +1833,13 @@ function NewChannelControl({
       }}
     >
       <input
-        aria-label="New channel name"
+        aria-label={t("newChannel.nameAria")}
         // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus
         disabled={creating}
         maxLength={80}
         onInput={(event) => setName(event.currentTarget.value)}
-        placeholder="Channel name"
+        placeholder={t("newChannel.namePlaceholder")}
         value={name}
       />
       {allowPrivate ? (
@@ -1835,12 +1850,12 @@ function NewChannelControl({
             onInput={(event) => setIsPrivate(event.currentTarget.checked)}
             type="checkbox"
           />
-          Private (invite-only)
+          {t("newChannel.private")}
         </label>
       ) : null}
       <div className="new-channel-actions">
         <button disabled={creating || !name.trim()} type="submit">
-          {creating ? "Creating…" : "Create"}
+          {creating ? t("admin.creating") : t("newChannel.create")}
         </button>
         <button
           disabled={creating}
@@ -1850,7 +1865,7 @@ function NewChannelControl({
           }}
           type="button"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
       </div>
     </form>
@@ -2877,7 +2892,7 @@ function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
       const format = formats[index];
 
       if (!format) {
-        reject(new Error("Avatar image is too large after resizing."));
+        reject(new Error(t("avatarEditor.tooLarge")));
         return;
       }
 
@@ -3043,7 +3058,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
 
   async function selectImage(file: File): Promise<void> {
     if (!file.type.startsWith("image/") || file.type === "image/svg+xml") {
-      setError("Choose a PNG, JPEG, or WebP image.");
+      setError(t("avatarEditor.invalidType"));
       return;
     }
 
@@ -3074,7 +3089,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
         image.onerror = () => {
           image.onload = null;
           image.onerror = null;
-          reject(new Error("Unable to load image."));
+          reject(new Error(t("avatarEditor.loadError")));
         };
         image.src = url;
       });
@@ -3089,7 +3104,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       setError(undefined);
     } catch (nextError) {
       if (mountedRef.current && objectUrlRef.current === url) {
-        setError(nextError instanceof Error ? nextError.message : "Unable to load image.");
+        setError(nextError instanceof Error ? nextError.message : t("avatarEditor.loadError"));
       }
     } finally {
       if (objectUrlRef.current === url) {
@@ -3117,7 +3132,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       const blob = await blobFromCanvas(canvas);
       await onUpload(blob);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Unable to upload avatar.");
+      setError(nextError instanceof Error ? nextError.message : t("avatarEditor.uploadError"));
     } finally {
       setUploading(false);
     }
@@ -3126,7 +3141,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
   return (
     <div className="avatar-editor">
       <canvas
-        aria-label="Avatar crop preview"
+        aria-label={t("avatarEditor.cropPreview")}
         className="avatar-crop-canvas"
         height={AVATAR_OUTPUT_SIZE}
         onPointerDown={startDrag}
@@ -3153,14 +3168,14 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
       />
       <div className="avatar-editor-controls">
         <button disabled={disabled || uploading} onClick={() => fileInputRef.current?.click()} type="button">
-          Choose image
+          {t("avatarEditor.chooseImage")}
         </button>
         <button disabled={disabled || uploading || !hasImage} onClick={() => void upload()} type="button">
-          {uploading ? "Uploading" : "Use cropped image"}
+          {uploading ? t("avatarEditor.uploading") : t("avatarEditor.useCropped")}
         </button>
       </div>
       <label>
-        Zoom
+        {t("avatarEditor.zoom")}
         <input
           disabled={disabled || uploading || !hasImage}
           max="3"
@@ -3172,7 +3187,7 @@ function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps) {
         />
       </label>
       <label>
-        Rotate
+        {t("avatarEditor.rotate")}
         <input
           disabled={disabled || uploading || !hasImage}
           max="180"
@@ -3232,7 +3247,7 @@ function SearchView({
         }),
       );
     } catch (searchError) {
-      setError(searchError instanceof Error ? searchError.message : "Unable to search messages.");
+      setError(searchError instanceof Error ? searchError.message : t("search.error"));
     } finally {
       setSearching(false);
     }
@@ -3246,7 +3261,7 @@ function SearchView({
 
     if (message.type === "dm") {
       const peerId = message.authorId === currentUser.id ? message.recipientUserId : message.authorId;
-      return `DM with ${usersById.get(peerId)?.displayName ?? generateDisplayName(peerId)}`;
+      return t("search.dmWith", { name: usersById.get(peerId)?.displayName ?? generateDisplayName(peerId) });
     }
 
     return "";
@@ -3276,8 +3291,8 @@ function SearchView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">Search</p>
-          <h1>Find messages</h1>
+          <p className="eyebrow">{t("search.eyebrow")}</p>
+          <h1>{t("search.title")}</h1>
         </div>
       </header>
       {/* One wrapper = one grid row: .settings-view is a strict header/content 2-row grid. */}
@@ -3290,7 +3305,7 @@ function SearchView({
           }}
         >
           <label className="sr-only" for={searchInputId}>
-            Search messages
+            {t("sidebar.searchMessages")}
           </label>
           <input
             dir="auto"
@@ -3298,16 +3313,16 @@ function SearchView({
             id={searchInputId}
             maxLength={200}
             onInput={(event) => setQuery(event.currentTarget.value)}
-            placeholder="Search channel messages and your DMs"
+            placeholder={t("search.placeholder")}
             type="search"
             value={query}
           />
           <button disabled={searching || !query.trim()} type="submit">
-            {searching ? "Searching…" : "Search"}
+            {searching ? t("search.searching") : t("search.button")}
           </button>
         </form>
         {error ? <p className="form-error">{error}</p> : null}
-        {results && !results.length ? <p className="form-note">No messages matched.</p> : null}
+        {results && !results.length ? <p className="form-note">{t("search.noResults")}</p> : null}
         {results?.length ? (
           <ul className="search-results">
             {results.map((message) => {
