@@ -4,7 +4,7 @@
 // Storage defaults to a user-writable directory (never inside the global package). Default DB driver
 // is the built-in node:sqlite (Node ≥22) — zero node-gyp; `--encrypt` opts into the optional native
 // SQLCipher driver.
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -53,6 +53,19 @@ const port = optionValue("--port") ?? process.env.PORT ?? "3000";
 process.env.LOAM_DATA_DIR = dataDir;
 process.env.LOAM_CLIENT_DIST = join(pkgRoot, "client");
 process.env.PORT = String(port);
+
+// Advertise this package's version to the server, which surfaces it to clients in /api/config as
+// "LOAM v…". Best-effort: an unreadable manifest just leaves the server on its "dev" fallback.
+if (!process.env.LOAM_VERSION) {
+  try {
+    const pkg = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8"));
+    if (typeof pkg.version === "string" && pkg.version) {
+      process.env.LOAM_VERSION = pkg.version;
+    }
+  } catch {
+    // best effort
+  }
+}
 
 if (args.includes("--encrypt")) {
   // A passphrase if provided, else "ephemeral" → a random RAM-only key (lost on reboot). Either way
