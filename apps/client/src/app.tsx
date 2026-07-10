@@ -3424,7 +3424,7 @@ function SettingsView({
     try {
       await onUpdateCurrentUser(update);
     } catch (error) {
-      setProfileError(error instanceof Error ? error.message : "Unable to update profile.");
+      setProfileError(error instanceof Error ? error.message : t("settings.profileError"));
     } finally {
       setSaving(false);
     }
@@ -3444,8 +3444,8 @@ function SettingsView({
           ←
         </NavLink>
         <div>
-          <p className="eyebrow">Local access</p>
-          <h1>Join this LOAM node</h1>
+          <p className="eyebrow">{t("settings.joinEyebrow")}</p>
+          <h1>{t("settings.joinTitle")}</h1>
         </div>
       </header>
       <div className="settings-grid">
@@ -3456,7 +3456,7 @@ function SettingsView({
         <div className="identity-panel">
           <Avatar avatar={previewUser.avatar} id={currentUser.id} />
           <div>
-            <p className="eyebrow">This browser</p>
+            <p className="eyebrow">{t("settings.thisBrowser")}</p>
             <h2>{displayName}</h2>
             <p>{currentUser.id}</p>
           </div>
@@ -3469,11 +3469,11 @@ function SettingsView({
           }}
         >
           <div>
-            <p className="eyebrow">Profile</p>
-            <h2>Local identity</h2>
+            <p className="eyebrow">{t("settings.profileEyebrow")}</p>
+            <h2>{t("settings.profileTitle")}</h2>
           </div>
           <label>
-            Display name
+            {t("settings.displayName")}
             <input
               disabled={!allowDisplayNameEdit || saving}
               maxLength={80}
@@ -3482,7 +3482,7 @@ function SettingsView({
             />
           </label>
           <label>
-            Avatar style
+            {t("settings.avatarStyle")}
             <select
               disabled={!allowAvatarEdit || saving || avatarKind === "image"}
               onInput={(event) => {
@@ -3500,27 +3500,27 @@ function SettingsView({
           </label>
           <div className="profile-actions">
             <button disabled={!allowAvatarEdit || saving} onClick={randomizeAvatar} type="button">
-              New avatar
+              {t("settings.newAvatar")}
             </button>
             <button disabled={saving || (!allowDisplayNameEdit && !allowAvatarEdit)} type="submit">
-              {saving ? "Saving" : "Save profile"}
+              {saving ? t("common.saving") : t("settings.saveProfile")}
             </button>
           </div>
           <div className="avatar-upload-panel">
             <div>
-              <p className="eyebrow">Image avatar</p>
-              <h2>Crop upload</h2>
+              <p className="eyebrow">{t("settings.imageAvatarEyebrow")}</p>
+              <h2>{t("settings.cropUpload")}</h2>
             </div>
             <AvatarImageEditor
               disabled={!allowAvatarEdit || !allowAvatarUpload || saving}
               onUpload={onUploadAvatarImage}
             />
             {!allowAvatarUpload ? (
-              <p className="form-note">Image avatar uploads are disabled on this LOAM node.</p>
+              <p className="form-note">{t("settings.avatarUploadDisabled")}</p>
             ) : null}
           </div>
           {!allowDisplayNameEdit && !allowAvatarEdit ? (
-            <p className="form-note">Profile editing is disabled on this LOAM node.</p>
+            <p className="form-note">{t("settings.profileEditingDisabled")}</p>
           ) : null}
           {profileError ? <p className="form-error">{profileError}</p> : null}
         </form>
@@ -3559,16 +3559,13 @@ function DeviceWipePanel({ onWipeDevice }: { onWipeDevice: () => Promise<void> }
   return (
     <div className="profile-panel">
       <div>
-        <p className="eyebrow">Security</p>
-        <h2>Wipe this device</h2>
+        <p className="eyebrow">{t("settings.securityEyebrow")}</p>
+        <h2>{t("settings.wipeTitle")}</h2>
       </div>
       <div className="danger-zone">
-        <p className="form-note">
-          Erases this browser&rsquo;s local copy — messages, your identity, and cached data. It does
-          not wipe the node or anyone else&rsquo;s device.
-        </p>
+        <p className="form-note">{t("settings.wipeBody")}</p>
         <label>
-          Type <strong>wipe</strong> to confirm
+          {t("settings.wipeConfirmBefore")} <strong>wipe</strong> {t("settings.wipeConfirmAfter")}
           <input
             autoComplete="off"
             disabled={wiping}
@@ -3583,7 +3580,7 @@ function DeviceWipePanel({ onWipeDevice }: { onWipeDevice: () => Promise<void> }
             onClick={() => void wipe()}
             type="button"
           >
-            {wiping ? "Wiping…" : "Wipe this device"}
+            {wiping ? t("settings.wiping") : t("settings.wipeTitle")}
           </button>
         </div>
       </div>
@@ -3616,7 +3613,7 @@ function AdminAccessPanel({
       await onClaimAdmin(secret.trim());
       setSecret("");
     } catch (error) {
-      setClaimError(error instanceof Error ? error.message : "Unable to claim admin access.");
+      setClaimError(error instanceof Error ? error.message : t("settings.claimError"));
     } finally {
       setClaiming(false);
     }
@@ -3625,12 +3622,12 @@ function AdminAccessPanel({
   return (
     <div className="profile-panel">
       <div>
-        <p className="eyebrow">Administration</p>
-        <h2>{currentUser.isAdmin ? "Admin tools" : "Admin access"}</h2>
+        <p className="eyebrow">{t("settings.adminEyebrow")}</p>
+        <h2>{currentUser.isAdmin ? t("settings.adminTools") : t("settings.adminAccess")}</h2>
       </div>
       {currentUser.isAdmin ? (
         <NavLink active={false} className="nav-link" href="/admin">
-          Open the admin area →
+          {t("settings.openAdmin")}
         </NavLink>
       ) : allowAdminClaim ? (
         <form
@@ -3640,7 +3637,7 @@ function AdminAccessPanel({
           }}
         >
           <label>
-            Setup code or passphrase
+            {t("settings.claimLabel")}
             <input
               autoComplete="off"
               disabled={claiming}
@@ -3651,13 +3648,13 @@ function AdminAccessPanel({
           </label>
           <div className="profile-actions">
             <button disabled={claiming || !secret.trim()} type="submit">
-              {claiming ? "Checking" : "Unlock admin"}
+              {claiming ? t("settings.checking") : t("settings.unlockAdmin")}
             </button>
           </div>
           {claimError ? <p className="form-error">{claimError}</p> : null}
         </form>
       ) : (
-        <p className="form-note">Admin claiming is not enabled on this LOAM node.</p>
+        <p className="form-note">{t("settings.claimDisabled")}</p>
       )}
     </div>
   );

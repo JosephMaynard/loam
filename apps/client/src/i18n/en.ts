@@ -81,6 +81,38 @@ export const en = {
   "thread.close": "Close thread",
   "thread.noReplies": "No replies yet",
   "thread.replyLabel": "Reply in thread",
+
+  // Settings view (join panel, profile, avatar, device wipe, admin access).
+  "settings.profileError": "Unable to update profile.",
+  "settings.joinEyebrow": "Local access",
+  "settings.joinTitle": "Join this LOAM node",
+  "settings.thisBrowser": "This browser",
+  "settings.profileEyebrow": "Profile",
+  "settings.profileTitle": "Local identity",
+  "settings.displayName": "Display name",
+  "settings.avatarStyle": "Avatar style",
+  "settings.newAvatar": "New avatar",
+  "settings.saveProfile": "Save profile",
+  "settings.imageAvatarEyebrow": "Image avatar",
+  "settings.cropUpload": "Crop upload",
+  "settings.avatarUploadDisabled": "Image avatar uploads are disabled on this LOAM node.",
+  "settings.profileEditingDisabled": "Profile editing is disabled on this LOAM node.",
+  "settings.securityEyebrow": "Security",
+  "settings.wipeTitle": "Wipe this device",
+  "settings.wipeBody":
+    "Erases this browser's local copy — messages, your identity, and cached data. It does not wipe the node or anyone else's device.",
+  "settings.wipeConfirmBefore": "Type",
+  "settings.wipeConfirmAfter": "to confirm",
+  "settings.wiping": "Wiping…",
+  "settings.adminEyebrow": "Administration",
+  "settings.adminTools": "Admin tools",
+  "settings.adminAccess": "Admin access",
+  "settings.openAdmin": "Open the admin area →",
+  "settings.claimLabel": "Setup code or passphrase",
+  "settings.checking": "Checking",
+  "settings.unlockAdmin": "Unlock admin",
+  "settings.claimError": "Unable to claim admin access.",
+  "settings.claimDisabled": "Admin claiming is not enabled on this LOAM node.",
 };
 
 /**
