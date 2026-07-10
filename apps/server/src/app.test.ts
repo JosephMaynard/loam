@@ -2968,6 +2968,23 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
     expect((missing.json() as { code?: string }).code).toBe("channel_not_found");
   });
 
+  it("surfaces the node version in /api/config", async () => {
+    // makeApp builds with no version option, so it reports the "dev" fallback.
+    const app = await makeApp();
+    const dev = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as { version: string };
+    expect(dev.version).toBe("dev");
+
+    // An explicit version (as server.ts / the npm CLI inject) is echoed back verbatim.
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    const versioned = await buildApp({ dataDir, logger: false, version: "9.9.9" });
+    cleanups.push(async () => {
+      await versioned.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+    const reported = (await versioned.server.inject({ method: "GET", url: "/api/config" })).json() as { version: string };
+    expect(reported.version).toBe("9.9.9");
+  });
+
   it("lets an admin promote a member, but not non-admins, bots, or pending users", async () => {
     const app = await makeApp({
       access: { joinPolicy: "approval" },
