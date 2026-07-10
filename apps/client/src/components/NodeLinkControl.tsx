@@ -1,5 +1,6 @@
 import { useMemo, useState } from "preact/hooks";
 
+import { t } from "../i18n";
 import { safeQrSvg } from "../lib/qr";
 
 /**
@@ -36,7 +37,7 @@ export function NodeLinkControl({ joinUrl }: { joinUrl?: string }) {
         onClick={() => setOpen((previous) => !previous)}
         type="button"
       >
-        {open ? "× Hide link" : "⧉ Link another node"}
+        {open ? t("nodeLink.hide") : t("nodeLink.show")}
       </button>
       {open ? (
         <div className="invite-panel">
@@ -44,12 +45,9 @@ export function NodeLinkControl({ joinUrl }: { joinUrl?: string }) {
               announce the address itself rather than raw SVG. */}
           <div aria-hidden="true" className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
           <p className="invite-url">{joinUrl}</p>
-          <p className="form-note">
-            On the other node&rsquo;s admin screen, enable sync and add this address as a peer (scan
-            the code or paste the URL).
-          </p>
+          <p className="form-note">{t("nodeLink.note")}</p>
           <button className="ghost-button" onClick={() => void copy()} type="button">
-            {copied ? "Copied" : "Copy address"}
+            {copied ? t("nodeLink.copied") : t("nodeLink.copy")}
           </button>
         </div>
       ) : null}

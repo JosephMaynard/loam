@@ -61,14 +61,41 @@ describe("@loam/schema", () => {
         allowAdminClaim: false,
         joinPolicy: "open",
         securityProfile: "standard",
+        locale: "en",
       }),
     ).not.toThrow();
+  });
+
+  it("rejects an unknown UI locale in network configuration", () => {
+    expect(
+      NetworkConfigSchema.safeParse({
+        nodeName: "Test Net",
+        enablePublicChannels: true,
+        enablePrivateChannels: false,
+        enableUserChannels: true,
+        enableReplies: true,
+        enableDMs: false,
+        enableReactions: true,
+        enableMarkdown: true,
+        enableAttachments: true,
+        enablePresence: true,
+        enableLLMChat: false,
+        enableLLMStreaming: false,
+        allowUserDisplayNameEdit: false,
+        allowUserAvatarEdit: false,
+        allowUserAvatarUpload: false,
+        allowAdminClaim: false,
+        joinPolicy: "open",
+        securityProfile: "standard",
+        locale: "xx",
+      }).success,
+    ).toBe(false);
   });
 
   it("validates the node configuration and partial updates", () => {
     expect(() =>
       LoamConfigSchema.parse({
-        node: { name: "Test Net" },
+        node: { name: "Test Net", locale: "ar" },
         identity: {
           allowUserDisplayNameEdit: true,
           allowUserAvatarEdit: true,
@@ -108,8 +135,11 @@ describe("@loam/schema", () => {
       LoamConfigUpdateSchema.parse({
         features: { enableReplies: false },
         admin: { bootstrap: "passphrase", passphrase: "" },
+        node: { locale: "prs" },
       }),
     ).not.toThrow();
+
+    expect(LoamConfigUpdateSchema.safeParse({ node: { locale: "xx" } }).success).toBe(false);
 
     expect(LoamConfigUpdateSchema.safeParse({ admin: { bootstrap: "dictator" } }).success).toBe(false);
     expect(LoamConfigUpdateSchema.safeParse({ features: { enableReplies: "yes" } }).success).toBe(false);

@@ -59,6 +59,31 @@ export type JoinPolicy = z.infer<typeof JoinPolicySchema>;
 export const SecurityProfileSchema = z.enum(["open", "standard", "hardened", "custom"]);
 export type SecurityProfile = z.infer<typeof SecurityProfileSchema>;
 
+/**
+ * The UI languages LOAM ships. The admin selects one for the whole node (`node.locale`), applied to
+ * every user — there is no per-user picker. `en` is the source of truth and the guaranteed fallback.
+ * Five are right-to-left scripts: `ar`, `fa`, `ur`, `prs` (Dari), `ps` (Pashto). Dari uses the ISO
+ * 639-3 tag `prs`; the client maps it to `fa-AF` where `Intl` needs a CLDR locale.
+ */
+export const LocaleSchema = z.enum([
+  "en",
+  "es",
+  "fr",
+  "ar",
+  "fa",
+  "pt",
+  "uk",
+  "ru",
+  "tr",
+  "my",
+  "ur",
+  "prs",
+  "ps",
+  "sw",
+  "bn",
+]);
+export type Locale = z.infer<typeof LocaleSchema>;
+
 /** The already-enforced security axes a non-`custom` profile applies as one coherent bundle. */
 export type SecurityProfilePreset = {
   /** Who may join: everyone immediately (`open`) or a greeter/admin approves newcomers (`approval`). */
@@ -173,6 +198,8 @@ export const NetworkConfigSchema = z.object({
   joinPolicy: JoinPolicySchema,
   /** The node's active security posture, surfaced so the client can gate secure-only affordances. */
   securityProfile: SecurityProfileSchema,
+  /** Admin-selected UI language for the whole node; the client renders every label in it. */
+  locale: LocaleSchema,
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
 
@@ -197,6 +224,8 @@ export type FeatureFlags = z.infer<typeof FeatureFlagsSchema>;
 export const NodeIdentityConfigSchema = z.object({
   /** Network name shown to everyone in the client. */
   name: z.string().trim().min(1).max(80),
+  /** UI language for the whole node, chosen by the admin and applied to every user. */
+  locale: LocaleSchema,
 });
 export type NodeIdentityConfig = z.infer<typeof NodeIdentityConfigSchema>;
 

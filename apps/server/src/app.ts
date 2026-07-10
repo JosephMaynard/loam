@@ -181,6 +181,106 @@ const defaultChannels: Channel[] = [
 const seedUsers = ["user.1234", "user.5678"];
 
 /**
+ * Stable snake_case code for every error message the server can return, so clients can localize the
+ * message from a catalog while the English `error` string stays as the fallback (unknown codes → the
+ * client shows `error` verbatim). Keep these codes stable across releases — they are a wire contract
+ * with a mixed-version mesh. Every value must have a matching `error.<code>` key in the client i18n
+ * catalogs (enforced by `apps/client/src/i18n/i18n.test.ts`).
+ */
+const ERROR_CODES: Record<string, string> = {
+  "Admin access required": "admin_required",
+  "Admin claiming is not enabled on this LOAM node": "admin_claim_disabled",
+  "Admin user editing is disabled on this LOAM node": "admin_user_edit_disabled",
+  "Approve or unban this user before promoting them": "promote_requires_active",
+  "Attachment does not exist": "attachment_not_found",
+  "Attachment image must be 256KB or smaller": "attachment_too_large",
+  "Attachment image type does not match the uploaded data": "attachment_type_mismatch",
+  "Attachments are disabled on this LOAM node": "attachments_disabled",
+  "Avatar image does not exist": "avatar_not_found",
+  "Avatar image must be 128KB or smaller": "avatar_too_large",
+  "Avatar image type does not match the uploaded data": "avatar_type_mismatch",
+  "Cannot change the roles of an admin": "roles_admin_immutable",
+  "Cannot react to this message": "reaction_not_allowed",
+  "Channel does not exist": "channel_not_found",
+  "Channel posting is disabled on this LOAM node": "channel_posting_disabled",
+  "Creating channels is disabled on this LOAM node": "channel_create_disabled",
+  'Confirmation required: send { "confirm": "wipe" }': "confirmation_required",
+  "Direct messages are disabled on this LOAM node": "dms_disabled",
+  "Enable sync and add at least one peer first": "sync_requires_peer",
+  "Greeter access required": "greeter_required",
+  "Invalid admin claim request": "invalid_admin_claim",
+  "Invalid admin secret": "invalid_admin_secret",
+  "Invalid attachment upload request": "invalid_attachment_upload",
+  "Invalid avatar image upload request": "invalid_avatar_upload",
+  "Invalid channel create request": "invalid_channel_create",
+  "Invalid channel update request": "invalid_channel_update",
+  "Invalid config update request": "invalid_config_update",
+  "Invalid config values": "invalid_config_values",
+  "Invalid kill-switch request": "invalid_kill_switch",
+  "Invalid member request": "invalid_member_request",
+  "Invalid message edit request": "invalid_message_edit",
+  "Invalid message request": "invalid_message_request",
+  "Invalid moderation request": "invalid_moderation_request",
+  "Invalid request": "invalid_request",
+  "Invalid roles update request": "invalid_roles_update",
+  "Invalid sync request": "invalid_sync_request",
+  "Invalid token": "invalid_token",
+  "Invalid user update request": "invalid_user_update",
+  "Message does not exist": "message_not_found",
+  "Moderator access required": "moderator_required",
+  "Not found": "not_found",
+  "Only pending users can be denied": "deny_requires_pending",
+  "Only people can be admins": "admin_humans_only",
+  "Only private channels have a member list": "member_list_private_only",
+  "Only the channel owner or an admin can change this channel": "channel_change_forbidden",
+  "Only the channel owner or an admin can invite members": "member_invite_forbidden",
+  "Only the channel owner or an admin can remove members": "member_remove_forbidden",
+  "Parent message belongs to a different channel": "parent_wrong_channel",
+  "Parent message does not exist": "parent_not_found",
+  "Private channels are disabled on this LOAM node": "private_channels_disabled",
+  "Provide a search query (?q=)": "search_query_required",
+  "Reactions are disabled on this LOAM node": "reactions_disabled",
+  "Reactions cannot be edited": "reaction_not_editable",
+  "Recipient user does not exist": "recipient_not_found",
+  "Replies are disabled on this LOAM node": "replies_disabled",
+  "Target message does not exist": "target_not_found",
+  "That user has been removed from this node": "user_removed",
+  "That user is not a member of this channel": "not_channel_member",
+  "The channel owner cannot be removed from their own channel": "owner_not_removable",
+  "The kill switch is not enabled on this LOAM node": "kill_switch_disabled",
+  "The passphrase bootstrap strategy requires a passphrase": "passphrase_required",
+  "This message is still being written": "message_streaming",
+  "This session is no longer valid": "session_invalid",
+  "This thread has replies from other people — only an admin can delete it": "thread_has_replies",
+  "Too many attempts": "too_many_attempts",
+  "Too many claim attempts; try again later": "too_many_claim_attempts",
+  "Unable to create message": "message_create_failed",
+  "Unauthenticated websocket": "websocket_unauthenticated",
+  "Unknown attachment": "unknown_attachment",
+  "User avatar uploads are disabled on this LOAM node": "user_avatar_upload_disabled",
+  "User does not exist": "user_not_found",
+  "User profile editing is disabled on this LOAM node": "user_profile_edit_disabled",
+  "You can only delete your own messages": "delete_own_only",
+  "You can only edit your own messages": "edit_own_only",
+  "You cannot deny an admin or yourself": "deny_forbidden",
+  "You cannot moderate an admin or yourself": "moderate_forbidden",
+};
+
+/** All stable error codes, exported so tests can assert client-catalog coverage. */
+export const ALL_ERROR_CODES: readonly string[] = Object.values(ERROR_CODES);
+
+/**
+ * Build an error response envelope, attaching the stable `code` for known messages. Unknown messages
+ * carry no code, so the client falls back to the English `error` string. The `error` field is always
+ * present and unchanged, so existing clients keep working.
+ */
+function errorBody(message: string | undefined): { error: string; code?: string } {
+  const text = message ?? "Unknown error";
+  const code = ERROR_CODES[text];
+  return code ? { error: text, code } : { error: text };
+}
+
+/**
  * Create the default LOAM configuration: conservative identity permissions, all core messaging
  * features on, Ollama disabled, `firstUser` admin bootstrap, and the `standard` security profile.
  */
@@ -188,6 +288,7 @@ export function defaultLoamConfig(): LoamConfig {
   return {
     node: {
       name: "LOAM local",
+      locale: "en",
     },
     identity: {
       allowUserDisplayNameEdit: false,
@@ -842,6 +943,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
       joinPolicy: appConfig.access.joinPolicy,
       securityProfile: appConfig.security.profile,
+      locale: appConfig.node.locale,
     };
   }
 
@@ -2403,7 +2505,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     return visibleUsers();
@@ -2412,21 +2514,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const body = UserUpdateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid user update request" });
+      return reply.code(400).send(errorBody("Invalid user update request"));
     }
 
     if (
       (body.data.displayName !== undefined && !appConfig.identity.allowUserDisplayNameEdit) ||
       (body.data.avatar !== undefined && !appConfig.identity.allowUserAvatarEdit)
     ) {
-      return reply.code(403).send({ error: "User profile editing is disabled on this LOAM node" });
+      return reply.code(403).send(errorBody("User profile editing is disabled on this LOAM node"));
     }
 
     const user = ensureSessionUser(getSessionUserId(request, reply));
     const accessError = participationError(user);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     return applyUserUpdate(user, body.data);
@@ -2436,30 +2538,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
     async (request, reply) => {
     if (!appConfig.identity.allowUserAvatarEdit || !appConfig.identity.allowUserAvatarUpload) {
-      return reply.code(403).send({ error: "User avatar uploads are disabled on this LOAM node" });
+      return reply.code(403).send(errorBody("User avatar uploads are disabled on this LOAM node"));
     }
 
     const uploader = ensureSessionUser(getSessionUserId(request, reply));
     const accessError = participationError(uploader);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const body = AvatarImageUploadRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid avatar image upload request" });
+      return reply.code(400).send(errorBody("Invalid avatar image upload request"));
     }
 
     const image = Buffer.from(body.data.data, "base64");
 
     if (image.length === 0 || image.length > 128 * 1024) {
-      return reply.code(400).send({ error: "Avatar image must be 128KB or smaller" });
+      return reply.code(400).send(errorBody("Avatar image must be 128KB or smaller"));
     }
 
     if (!avatarImageHasExpectedSignature(image, body.data.mimeType)) {
-      return reply.code(400).send({ error: "Avatar image type does not match the uploaded data" });
+      return reply.code(400).send(errorBody("Avatar image type does not match the uploaded data"));
     }
 
     const user = uploader;
@@ -2490,19 +2592,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const body = UserUpdateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid user update request" });
+      return reply.code(400).send(errorBody("Invalid user update request"));
     }
 
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin || !appConfig.identity.allowAdminUserEdit) {
-      return reply.code(403).send({ error: "Admin user editing is disabled on this LOAM node" });
+      return reply.code(403).send(errorBody("Admin user editing is disabled on this LOAM node"));
     }
 
     const user = data.users.find((candidate) => candidate.id === request.params.userId);
 
     if (!user) {
-      return reply.code(404).send({ error: "User does not exist" });
+      return reply.code(404).send(errorBody("User does not exist"));
     }
 
     return applyUserUpdate(user, body.data);
@@ -2514,23 +2616,23 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     const body = RolesUpdateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid roles update request" });
+      return reply.code(400).send(errorBody("Invalid roles update request"));
     }
 
     const user = data.users.find((candidate) => candidate.id === request.params.userId);
 
     if (!user) {
-      return reply.code(404).send({ error: "User does not exist" });
+      return reply.code(404).send(errorBody("User does not exist"));
     }
 
     if (user.isAdmin) {
-      return reply.code(400).send({ error: "Cannot change the roles of an admin" });
+      return reply.code(400).send(errorBody("Cannot change the roles of an admin"));
     }
 
     return applyUserModeration(user, { roles: body.data.roles });
@@ -2543,21 +2645,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     const user = data.users.find((candidate) => candidate.id === request.params.userId);
 
     if (!user) {
-      return reply.code(404).send({ error: "User does not exist" });
+      return reply.code(404).send(errorBody("User does not exist"));
     }
 
     if (user.type !== "human") {
-      return reply.code(400).send({ error: "Only people can be admins" });
+      return reply.code(400).send(errorBody("Only people can be admins"));
     }
 
     if (user.banned || user.pending) {
-      return reply.code(400).send({ error: "Approve or unban this user before promoting them" });
+      return reply.code(400).send(errorBody("Approve or unban this user before promoting them"));
     }
 
     if (user.isAdmin) {
@@ -2577,23 +2679,23 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!canModerate(currentUser)) {
-      return reply.code(403).send({ error: "Moderator access required" });
+      return reply.code(403).send(errorBody("Moderator access required"));
     }
 
     const body = ModerationUpdateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid moderation request" });
+      return reply.code(400).send(errorBody("Invalid moderation request"));
     }
 
     const user = data.users.find((candidate) => candidate.id === request.params.userId);
 
     if (!user) {
-      return reply.code(404).send({ error: "User does not exist" });
+      return reply.code(404).send(errorBody("User does not exist"));
     }
 
     if (user.isAdmin || user.id === currentUser.id) {
-      return reply.code(403).send({ error: "You cannot moderate an admin or yourself" });
+      return reply.code(403).send(errorBody("You cannot moderate an admin or yourself"));
     }
 
     const changes: Partial<Pick<User, "banned" | "shadowBanned">> = {};
@@ -2623,7 +2725,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!canModerate(currentUser)) {
-      return reply.code(403).send({ error: "Moderator access required" });
+      return reply.code(403).send(errorBody("Moderator access required"));
     }
 
     return data.users.filter((user) => user.type === "human");
@@ -2634,7 +2736,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!canGreet(currentUser)) {
-      return reply.code(403).send({ error: "Greeter access required" });
+      return reply.code(403).send(errorBody("Greeter access required"));
     }
 
     return data.users.filter((user) => user.type === "human" && user.pending === true);
@@ -2645,13 +2747,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!canGreet(currentUser)) {
-      return reply.code(403).send({ error: "Greeter access required" });
+      return reply.code(403).send(errorBody("Greeter access required"));
     }
 
     const user = data.users.find((candidate) => candidate.id === request.params.userId);
 
     if (!user) {
-      return reply.code(404).send({ error: "User does not exist" });
+      return reply.code(404).send(errorBody("User does not exist"));
     }
 
     return applyUserModeration(user, { pending: false });
@@ -2663,24 +2765,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!canGreet(currentUser)) {
-      return reply.code(403).send({ error: "Greeter access required" });
+      return reply.code(403).send(errorBody("Greeter access required"));
     }
 
     const user = data.users.find((candidate) => candidate.id === request.params.userId);
 
     if (!user) {
-      return reply.code(404).send({ error: "User does not exist" });
+      return reply.code(404).send(errorBody("User does not exist"));
     }
 
     if (user.isAdmin || user.id === currentUser.id) {
-      return reply.code(403).send({ error: "You cannot deny an admin or yourself" });
+      return reply.code(403).send(errorBody("You cannot deny an admin or yourself"));
     }
 
     // Deny is an onboarding action, scoped to pending newcomers. Banning an established member is a
     // moderation action that requires the moderator role (PATCH /api/moderation/users/:id) — without
     // this guard, a greeter could ban any approved member (privilege escalation).
     if (!user.pending) {
-      return reply.code(400).send({ error: "Only pending users can be denied" });
+      return reply.code(400).send(errorBody("Only pending users can be denied"));
     }
 
     const updated = applyUserModeration(user, { banned: true, pending: false });
@@ -2695,7 +2797,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const avatar = parseAvatarImageId(request.params.fileName);
 
     if (!avatar) {
-      return reply.code(404).send({ error: "Avatar image does not exist" });
+      return reply.code(404).send(errorBody("Avatar image does not exist"));
     }
 
     try {
@@ -2703,7 +2805,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.type(avatar.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return reply.code(404).send({ error: "Avatar image does not exist" });
+        return reply.code(404).send(errorBody("Avatar image does not exist"));
       }
 
       throw error;
@@ -2720,27 +2822,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const accessError = participationError(currentUser);
 
       if (accessError) {
-        return reply.code(403).send({ error: accessError });
+        return reply.code(403).send(errorBody(accessError));
       }
 
       if (!appConfig.features.enableAttachments) {
-        return reply.code(403).send({ error: "Attachments are disabled on this LOAM node" });
+        return reply.code(403).send(errorBody("Attachments are disabled on this LOAM node"));
       }
 
       const body = AttachmentUploadRequestSchema.safeParse(request.body);
 
       if (!body.success) {
-        return reply.code(400).send({ error: "Invalid attachment upload request" });
+        return reply.code(400).send(errorBody("Invalid attachment upload request"));
       }
 
       const image = Buffer.from(body.data.data, "base64");
 
       if (image.length === 0 || image.length > attachmentMaxBytes) {
-        return reply.code(400).send({ error: "Attachment image must be 256KB or smaller" });
+        return reply.code(400).send(errorBody("Attachment image must be 256KB or smaller"));
       }
 
       if (!avatarImageHasExpectedSignature(image, body.data.mimeType)) {
-        return reply.code(400).send({ error: "Attachment image type does not match the uploaded data" });
+        return reply.code(400).send(errorBody("Attachment image type does not match the uploaded data"));
       }
 
       const attachment: MessageAttachment = {
@@ -2763,7 +2865,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const attachment = parseAttachmentFileName(request.params.fileName);
 
       if (!attachment) {
-        return reply.code(404).send({ error: "Attachment does not exist" });
+        return reply.code(404).send(errorBody("Attachment does not exist"));
       }
 
       // Audience-gate the file exactly like its owning message: attachments on public messages
@@ -2778,7 +2880,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (!owningMessage) {
         if (!sessionUserId || attachmentOwners.get(attachment.id)?.userId !== sessionUserId) {
-          return reply.code(404).send({ error: "Attachment does not exist" });
+          return reply.code(404).send(errorBody("Attachment does not exist"));
         }
       } else if (!isSyncableMessage(owningMessage)) {
         const user = sessionUserId
@@ -2786,13 +2888,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           : undefined;
 
         if (!user || participationError(user)) {
-          return reply.code(404).send({ error: "Attachment does not exist" });
+          return reply.code(404).send(errorBody("Attachment does not exist"));
         }
 
         const audience = messageAudienceUserIds(owningMessage);
 
         if (audience && !audience.has(user.id)) {
-          return reply.code(404).send({ error: "Attachment does not exist" });
+          return reply.code(404).send(errorBody("Attachment does not exist"));
         }
       }
 
@@ -2804,7 +2906,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          return reply.code(404).send({ error: "Attachment does not exist" });
+          return reply.code(404).send(errorBody("Attachment does not exist"));
         }
 
         throw error;
@@ -2817,7 +2919,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     return data.channels.filter((channel) => !channel.archived && canAccessChannel(channel, currentUser.id));
@@ -2827,7 +2929,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const userId = currentUser.id;
@@ -2836,7 +2938,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // Unknown channels and inaccessible private channels answer identically, so probing this
     // endpoint can never confirm that a private channel exists.
     if (!channel || !canAccessChannel(channel, userId)) {
-      return reply.code(404).send({ error: "Channel does not exist" });
+      return reply.code(404).send(errorBody("Channel does not exist"));
     }
 
     return channelMessages(channel.id);
@@ -2849,17 +2951,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
-      return reply.code(404).send({ error: "Channel does not exist" });
+      return reply.code(404).send(errorBody("Channel does not exist"));
     }
 
     if (channel.visibility !== "private") {
-      return reply.code(400).send({ error: "Only private channels have a member list" });
+      return reply.code(400).send(errorBody("Only private channels have a member list"));
     }
 
     const members = channelMemberIds(channel);
@@ -2874,37 +2976,37 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
-      return reply.code(404).send({ error: "Channel does not exist" });
+      return reply.code(404).send(errorBody("Channel does not exist"));
     }
 
     if (channel.visibility !== "private") {
-      return reply.code(400).send({ error: "Only private channels have a member list" });
+      return reply.code(400).send(errorBody("Only private channels have a member list"));
     }
 
     if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
-      return reply.code(403).send({ error: "Only the channel owner or an admin can invite members" });
+      return reply.code(403).send(errorBody("Only the channel owner or an admin can invite members"));
     }
 
     const body = ChannelMemberAddRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid member request" });
+      return reply.code(400).send(errorBody("Invalid member request"));
     }
 
     const target = data.users.find((user) => user.id === body.data.userId);
 
     if (!target || target.type !== "human") {
-      return reply.code(400).send({ error: "User does not exist" });
+      return reply.code(400).send(errorBody("User does not exist"));
     }
 
     if (target.banned) {
-      return reply.code(400).send({ error: "That user has been removed from this node" });
+      return reply.code(400).send(errorBody("That user has been removed from this node"));
     }
 
     const members = channelMemberIds(channel);
@@ -2926,33 +3028,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const accessError = participationError(currentUser);
 
       if (accessError) {
-        return reply.code(403).send({ error: accessError });
+        return reply.code(403).send(errorBody(accessError));
       }
 
       const channel = ensureChannel(request.params.channelId);
 
       if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
-        return reply.code(404).send({ error: "Channel does not exist" });
+        return reply.code(404).send(errorBody("Channel does not exist"));
       }
 
       if (channel.visibility !== "private") {
-        return reply.code(400).send({ error: "Only private channels have a member list" });
+        return reply.code(400).send(errorBody("Only private channels have a member list"));
       }
 
       const targetId = request.params.userId;
 
       if (targetId !== currentUser.id && !currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
-        return reply.code(403).send({ error: "Only the channel owner or an admin can remove members" });
+        return reply.code(403).send(errorBody("Only the channel owner or an admin can remove members"));
       }
 
       if (targetId === channel.ownerUserId) {
-        return reply.code(400).send({ error: "The channel owner cannot be removed from their own channel" });
+        return reply.code(400).send(errorBody("The channel owner cannot be removed from their own channel"));
       }
 
       const members = channelMemberIds(channel);
 
       if (!members.has(targetId)) {
-        return reply.code(400).send({ error: "That user is not a member of this channel" });
+        return reply.code(400).send(errorBody("That user is not a member of this channel"));
       }
 
       members.delete(targetId);
@@ -2966,7 +3068,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     return dmMessages(request.params.userId, currentUser.id);
@@ -2980,13 +3082,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const query = (request.query.q ?? "").trim();
 
     if (!query) {
-      return reply.code(400).send({ error: "Provide a search query (?q=)" });
+      return reply.code(400).send(errorBody("Provide a search query (?q=)"));
     }
 
     const needle = query.toLowerCase();
@@ -3038,7 +3140,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
     async (_request, reply) => {
       if (!appConfig.sync.enabled) {
-        return reply.code(404).send({ error: "Not found" });
+        return reply.code(404).send(errorBody("Not found"));
       }
 
       return buildSyncDigest();
@@ -3050,13 +3152,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       if (!appConfig.sync.enabled) {
-        return reply.code(404).send({ error: "Not found" });
+        return reply.code(404).send(errorBody("Not found"));
       }
 
       const body = SyncMessagesRequestSchema.safeParse(request.body);
 
       if (!body.success) {
-        return reply.code(400).send({ error: "Invalid sync request" });
+        return reply.code(400).send(errorBody("Invalid sync request"));
       }
 
       const wanted = new Set(body.data.ids);
@@ -3071,7 +3173,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     return syncStatusReport();
@@ -3082,11 +3184,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     if (!appConfig.sync.enabled || !appConfig.sync.peers.length) {
-      return reply.code(400).send({ error: "Enable sync and add at least one peer first" });
+      return reply.code(400).send(errorBody("Enable sync and add at least one peer first"));
     }
 
     await runSyncLoop(true);
@@ -3097,14 +3199,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const body = MessageCreateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid message request" });
+      return reply.code(400).send(errorBody("Invalid message request"));
     }
 
     const result = createMessage(body.data, getSessionUserId(request, reply));
 
     if (result.error) {
       // Moderation rejections (banned/pending author) are 403; everything else is a bad request.
-      return reply.code(result.forbidden ? 403 : 400).send({ error: result.error });
+      return reply.code(result.forbidden ? 403 : 400).send(errorBody(result.error));
     }
 
     if (result.deletedMessageId && result.deletedMessage) {
@@ -3117,7 +3219,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     if (!result.message) {
-      return reply.code(400).send({ error: "Unable to create message" });
+      return reply.code(400).send(errorBody("Unable to create message"));
     }
 
     broadcast({ type: "messageCreated", message: result.message });
@@ -3130,18 +3232,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const target = data.messages.find((message) => message.id === request.params.messageId);
 
     if (!target) {
-      return reply.code(404).send({ error: "Message does not exist" });
+      return reply.code(404).send(errorBody("Message does not exist"));
     }
 
     // Don't delete a message that's still streaming: its in-flight writer would re-persist it.
     if (target.meta?.streaming) {
-      return reply.code(409).send({ error: "This message is still being written" });
+      return reply.code(409).send(errorBody("This message is still being written"));
     }
 
     const deletionSet = collectDeletionSet(target);
@@ -3151,7 +3253,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // another user's reply (clearing others' reactions on it is fine). Admins can delete anything
       // — moderation is part of the trusted-host model.
       if (target.authorId !== currentUser.id) {
-        return reply.code(403).send({ error: "You can only delete your own messages" });
+        return reply.code(403).send(errorBody("You can only delete your own messages"));
       }
 
       const removesOthersContent = deletionSet.some(
@@ -3161,7 +3263,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (removesOthersContent) {
         return reply
           .code(403)
-          .send({ error: "This thread has replies from other people — only an admin can delete it" });
+          .send(errorBody("This thread has replies from other people — only an admin can delete it"));
       }
     }
 
@@ -3174,33 +3276,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const target = data.messages.find((message) => message.id === request.params.messageId);
 
     if (!target) {
-      return reply.code(404).send({ error: "Message does not exist" });
+      return reply.code(404).send(errorBody("Message does not exist"));
     }
 
     // Only the author may edit — rewriting someone else's words is impersonation, so not even an
     // admin can (admins moderate by deleting instead).
     if (target.authorId !== currentUser.id) {
-      return reply.code(403).send({ error: "You can only edit your own messages" });
+      return reply.code(403).send(errorBody("You can only edit your own messages"));
     }
 
     if (target.type === "reaction") {
-      return reply.code(400).send({ error: "Reactions cannot be edited" });
+      return reply.code(400).send(errorBody("Reactions cannot be edited"));
     }
 
     if (target.meta?.streaming) {
-      return reply.code(409).send({ error: "This message is still being written" });
+      return reply.code(409).send(errorBody("This message is still being written"));
     }
 
     const body = MessageEditRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid message edit request" });
+      return reply.code(400).send(errorBody("Invalid message edit request"));
     }
 
     // Persist first, then mirror in memory — matching every other mutator, so a failed store write
@@ -3219,7 +3321,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const body = AdminClaimRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid admin claim request" });
+      return reply.code(400).send(errorBody("Invalid admin claim request"));
     }
 
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
@@ -3231,12 +3333,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const strategy = appConfig.admin.bootstrap;
 
     if (strategy !== "setupCode" && strategy !== "passphrase") {
-      return reply.code(403).send({ error: "Admin claiming is not enabled on this LOAM node" });
+      return reply.code(403).send(errorBody("Admin claiming is not enabled on this LOAM node"));
     }
 
     // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie.
     if (attemptRateLimited(claimAttempts, request.ip)) {
-      return reply.code(429).send({ error: "Too many claim attempts; try again later" });
+      return reply.code(429).send(errorBody("Too many claim attempts; try again later"));
     }
 
     const expected = strategy === "setupCode" ? adminSetupCode : appConfig.admin.passphrase;
@@ -3247,7 +3349,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         : verifySecret(body.data.secret, expected));
 
     if (!secretMatches) {
-      return reply.code(403).send({ error: "Invalid admin secret" });
+      return reply.code(403).send(errorBody("Invalid admin secret"));
     }
 
     if (strategy === "setupCode") {
@@ -3264,7 +3366,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     return redactedConfig();
@@ -3274,21 +3376,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     if (!appConfig.killSwitch.enabled) {
-      return reply.code(403).send({ error: "The kill switch is not enabled on this LOAM node" });
+      return reply.code(403).send(errorBody("The kill switch is not enabled on this LOAM node"));
     }
 
     const body = KillSwitchRequestSchema.safeParse(request.body ?? {});
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid kill-switch request" });
+      return reply.code(400).send(errorBody("Invalid kill-switch request"));
     }
 
     if (appConfig.killSwitch.requireConfirmation && body.data.confirm !== "wipe") {
-      return reply.code(400).send({ error: 'Confirmation required: send { "confirm": "wipe" }' });
+      return reply.code(400).send(errorBody('Confirmation required: send { "confirm": "wipe" }'));
     }
 
     await executeKillSwitch();
@@ -3303,21 +3405,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
     async (request, reply) => {
     if (!appConfig.killSwitch.enabled || !appConfig.killSwitch.panicToken) {
-      return reply.code(404).send({ error: "Not found" });
+      return reply.code(404).send(errorBody("Not found"));
     }
 
     const body = PanicRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid request" });
+      return reply.code(400).send(errorBody("Invalid request"));
     }
 
     if (attemptRateLimited(panicAttempts, request.ip)) {
-      return reply.code(429).send({ error: "Too many attempts" });
+      return reply.code(429).send(errorBody("Too many attempts"));
     }
 
     if (!verifySecret(body.data.token, appConfig.killSwitch.panicToken)) {
-      return reply.code(403).send({ error: "Invalid token" });
+      return reply.code(403).send(errorBody("Invalid token"));
     }
 
     await executeKillSwitch();
@@ -3328,13 +3430,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     const body = LoamConfigUpdateSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid config update request" });
+      return reply.code(400).send(errorBody("Invalid config update request"));
     }
 
     let next: LoamConfig;
@@ -3342,13 +3444,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     try {
       next = mergeConfig(appConfig, body.data);
     } catch {
-      return reply.code(400).send({ error: "Invalid config values" });
+      return reply.code(400).send(errorBody("Invalid config values"));
     }
 
     // Passphrase bootstrap without a passphrase would advertise a claim flow that can never
     // succeed (and clearing the passphrase while the mode is active would lock admins out).
     if (next.admin.bootstrap === "passphrase" && !next.admin.passphrase) {
-      return reply.code(400).send({ error: "The passphrase bootstrap strategy requires a passphrase" });
+      return reply.code(400).send(errorBody("The passphrase bootstrap strategy requires a passphrase"));
     }
 
     appConfig = next;
@@ -3366,7 +3468,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
     if (!currentUser.isAdmin) {
-      return reply.code(403).send({ error: "Admin access required" });
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     return data.channels;
@@ -3379,21 +3481,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     if (!currentUser.isAdmin && !appConfig.features.enableUserChannels) {
-      return reply.code(403).send({ error: "Creating channels is disabled on this LOAM node" });
+      return reply.code(403).send(errorBody("Creating channels is disabled on this LOAM node"));
     }
 
     const body = ChannelCreateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid channel create request" });
+      return reply.code(400).send(errorBody("Invalid channel create request"));
     }
 
     if (body.data.visibility === "private" && !appConfig.features.enablePrivateChannels) {
-      return reply.code(403).send({ error: "Private channels are disabled on this LOAM node" });
+      return reply.code(403).send(errorBody("Private channels are disabled on this LOAM node"));
     }
 
     return reply.code(201).send(createChannelFromRequest(body.data, currentUser.id));
@@ -3405,23 +3507,23 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const accessError = participationError(currentUser);
 
     if (accessError) {
-      return reply.code(403).send({ error: accessError });
+      return reply.code(403).send(errorBody(accessError));
     }
 
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel) {
-      return reply.code(404).send({ error: "Channel does not exist" });
+      return reply.code(404).send(errorBody("Channel does not exist"));
     }
 
     if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
-      return reply.code(403).send({ error: "Only the channel owner or an admin can change this channel" });
+      return reply.code(403).send(errorBody("Only the channel owner or an admin can change this channel"));
     }
 
     const body = ChannelUpdateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send({ error: "Invalid channel update request" });
+      return reply.code(400).send(errorBody("Invalid channel update request"));
     }
 
     return applyChannelUpdate(channel, body.data);
@@ -3458,7 +3560,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith("/api/")) {
-      void reply.code(404).send({ error: "Not found" });
+      void reply.code(404).send(errorBody("Not found"));
       return;
     }
 

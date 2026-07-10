@@ -50,6 +50,7 @@ const networkConfig: NetworkConfig = {
   allowAdminClaim: false,
   joinPolicy: "open",
   securityProfile: "standard",
+  locale: "en",
 };
 
 function frame(value: unknown): string {
