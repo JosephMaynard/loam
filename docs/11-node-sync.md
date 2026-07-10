@@ -59,8 +59,15 @@ hotspot running too if the phone's chipset allows it".
   the same content any open session on the LAN could read. Enabling sync is an explicit operator
   action; it defaults off and `hardened`-minded operators should leave it off or pair it with the
   approval join policy for humans (sync is unaffected by join policy — it is node-level trust).
-- No peer authentication yet: a shared-token handshake (and, with docs/08, transport encryption)
-  is the designated follow-up before recommending sync in hostile environments.
+- **Peer authentication (shared token)** — built. Set `sync.token` (admin → Network → "Shared mesh
+  token", or config) and this node **requires** every peer to present it in the `x-loam-sync-token`
+  header before it serves the digest/messages, and presents it when pulling from its own peers. A
+  missing or wrong token 404s identically to sync being disabled, so a prober can't distinguish a
+  token-guarded node from one without the feature. Give every node in the mesh the **same** token.
+  It's a bearer secret the node must transmit, so it's stored in the clear (unlike the scrypt-hashed
+  admin passphrase / panic token) — protect it with encryption-at-rest, and rely on transport
+  encryption (docs/08, still unbuilt) to stop on-wire capture in a hostile network. Unset = open (any
+  node that can reach the endpoints may sync public data — the original behaviour).
 - User ids are random enough (`user.<8hex>`) that cross-node collisions are unlikely; a collision
   would merge two strangers' display identities on one node (cosmetic, not an auth issue — sessions
   never sync).

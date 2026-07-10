@@ -61,6 +61,24 @@ Install on a device/emulator: `adb install -r app/build/outputs/apk/release/app-
 launch it. First cold start takes ~1 minute (asset copy + first `require`); the screen shows
 "Starting host…" until the server answers, then swaps to the WebView.
 
+### Signing the release APK
+
+By default `assembleRelease` signs with Android's **debug** keystore — fine for `adb install`, but
+that key is regenerated per machine, so it can't sign durable updates (Android requires every update
+to be signed with the same key). To sign with a real, stable key:
+
+```bash
+pnpm --filter app keystore     # creates apps/app/release.jks + keystore.properties (both gitignored)
+pnpm --filter app apk          # now signs the release APK with that key
+```
+
+`plugins/with-release-signing.js` injects the release `signingConfig` at prebuild **only when
+`apps/app/keystore.properties` exists** — with no keystore it's a no-op, so the debug-signed build
+above keeps working unchanged. `release.jks` and `keystore.properties` are gitignored; **back them
+up** (losing the key means users must uninstall before they can update). For Play Store distribution,
+enable Play App Signing and treat this key as the upload key. See `keystore.properties.example` for
+the file format if you'd rather supply your own key than generate one.
+
 > **Installing to a phone (not the emulator):** `adb` must list the phone. Enable **Developer
 > options** (Settings → About → tap Build number 7×) → **USB debugging**, accept the *"Allow USB
 > debugging?"* prompt, and use a **data** cable set to *File transfer*. If both a phone and the

@@ -16,14 +16,19 @@ afterEach(async () => {
   }
 });
 
-async function makeApp(config?: unknown): Promise<{ app: LoamApp; dataDir: string } & LoamApp> {
+async function makeApp(
+  config?: unknown,
+  opts?: Partial<AppOptions>,
+): Promise<{ app: LoamApp; dataDir: string } & LoamApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
 
   if (config !== undefined) {
     writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
   }
 
-  const app = await buildApp({ dataDir, logger: false });
+  // A high identity cap so the per-IP new-identity limiter (all inject requests share 127.0.0.1)
+  // never trips across a suite that mints many sessions; a dedicated test drives it low on purpose.
+  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(async () => {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -1928,6 +1933,74 @@ describe("private channels", () => {
 
     expect((await readMessages(next, member.cookie, channel.id)).statusCode).toBe(200);
   });
+
+  function transfer(app: LoamApp, cookie: string, channelId: string, userId: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: `/api/channels/${channelId}/transfer`,
+      headers: { cookie },
+      payload: { userId },
+    });
+  }
+
+  it("transfers ownership, adding the new owner to the roster and keeping the old owner a member", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const owner = await newSession(app);
+    const heir = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    const response = await transfer(app, owner.cookie, channel.id, heir.userId);
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json() as PrivateChannelBody;
+    expect(body.ownerUserId).toBe(heir.userId);
+    // New owner joined the roster; the previous owner stays a member.
+    expect(body.memberUserIds).toEqual([owner.userId, heir.userId]);
+
+    // The new owner can now manage members; the old owner no longer can.
+    expect((await addMember(app, heir.cookie, channel.id, owner.userId)).statusCode).toBe(200);
+    const oldOwnerInvites = await addMember(app, owner.cookie, channel.id, (await newSession(app)).userId);
+    expect(oldOwnerInvites.statusCode).toBe(403);
+  });
+
+  it("lets a node admin transfer ownership but forbids a non-owner member", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app); // firstUser → admin
+    const owner = await newSession(app);
+    const member = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+    await addMember(app, owner.cookie, channel.id, member.userId);
+
+    // A plain member cannot transfer.
+    expect((await transfer(app, member.cookie, channel.id, member.userId)).statusCode).toBe(403);
+    // An admin can, even without being a member.
+    const asAdmin = await transfer(app, admin.cookie, channel.id, member.userId);
+    expect(asAdmin.statusCode).toBe(200);
+    expect((asAdmin.json() as PrivateChannelBody).ownerUserId).toBe(member.userId);
+  });
+
+  it("404s a transfer on a channel the caller can't see and rejects a banned target", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const channel = await createPrivateChannel(app, owner.cookie);
+
+    // An outsider can't even tell the channel exists.
+    expect((await transfer(app, outsider.cookie, channel.id, owner.userId)).statusCode).toBe(404);
+
+    // Ban the outsider, then try to hand them the channel — rejected.
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${outsider.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+    expect((await transfer(app, owner.cookie, channel.id, outsider.userId)).statusCode).toBe(400);
+  });
 });
 
 describe("message search", () => {
@@ -3229,5 +3302,90 @@ describe("security hardening", () => {
     const plain = await app.server.inject({ method: "GET", url: "/api/config" });
     expect(String(plain.headers["set-cookie"])).toContain("loam_session=");
     expect(String(plain.headers["set-cookie"])).not.toContain("Secure");
+  });
+});
+
+describe("sync peer authentication (shared token)", () => {
+  const TOKEN = "mesh-shared-secret-token-01";
+
+  function digest(app: LoamApp, token?: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "GET",
+      url: "/api/sync/digest",
+      headers: token ? { "x-loam-sync-token": token } : {},
+    });
+  }
+
+  it("serves the digest openly when no token is configured", async () => {
+    const app = await makeApp({ sync: { enabled: true } });
+    expect((await digest(app)).statusCode).toBe(200);
+  });
+
+  it("404s an unauthenticated or wrong-token peer, 200s the right token", async () => {
+    const app = await makeApp({ sync: { enabled: true, token: TOKEN } });
+
+    // Missing token and wrong token both look exactly like sync being disabled (404) — a prober
+    // can't tell a token-guarded node from one without the feature.
+    expect((await digest(app)).statusCode).toBe(404);
+    expect((await digest(app, "not-the-token-xxxxxxxxxx")).statusCode).toBe(404);
+    expect((await digest(app, TOKEN)).statusCode).toBe(200);
+  });
+
+  it("gates the messages endpoint on the same token", async () => {
+    const app = await makeApp({ sync: { enabled: true, token: TOKEN } });
+
+    const unauth = await app.server.inject({
+      method: "POST",
+      url: "/api/sync/messages",
+      payload: { ids: ["message.unknown"] },
+    });
+    expect(unauth.statusCode).toBe(404);
+
+    const authed = await app.server.inject({
+      method: "POST",
+      url: "/api/sync/messages",
+      headers: { "x-loam-sync-token": TOKEN },
+      payload: { ids: ["message.unknown"] },
+    });
+    expect(authed.statusCode).toBe(200);
+    expect((authed.json() as { messages: unknown[] }).messages).toEqual([]);
+  });
+
+  it("clears the token when an admin PATCHes it to an empty string", async () => {
+    const app = await makeApp({ sync: { enabled: true, token: TOKEN } });
+    const admin = await newSession(app);
+
+    // Confirmed guarded first.
+    expect((await digest(app)).statusCode).toBe(404);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { sync: { token: "" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    // Token cleared → open again.
+    expect((await digest(app)).statusCode).toBe(200);
+  });
+});
+
+describe("anonymous identity minting limit", () => {
+  it("429s new identities from one IP past the cap but lets cookie'd requests through", async () => {
+    const app = await makeApp(undefined, { maxNewIdentitiesPerWindow: 3 });
+
+    const first = await app.server.inject({ method: "GET", url: "/api/config" });
+    expect(first.statusCode).toBe(200);
+    const cookie = sessionCookie(first);
+
+    // Two more fresh mints (count 2, 3) are allowed; the 4th cookieless request exceeds the cap.
+    expect((await app.server.inject({ method: "GET", url: "/api/config" })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: "/api/config" })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: "/api/config" })).statusCode).toBe(429);
+
+    // A request that carries an existing session cookie mints nothing, so it's unaffected.
+    const returning = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie } });
+    expect(returning.statusCode).toBe(200);
   });
 });

@@ -33,7 +33,8 @@
           "imageWidth": 200
         }
       ],
-      "./plugins/with-loam-host"
+      "./plugins/with-loam-host",
+      "./plugins/with-release-signing"
     ],
     "experiments": {
       "typedRoutes": true,

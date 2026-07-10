@@ -1527,6 +1527,17 @@ a {
   gap: 8px;
 }
 
+.sync-token-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sync-token-row input {
+  flex: 1;
+  min-width: 0;
+}
+
 .sync-peer .moderation-name span {
   overflow-wrap: anywhere;
 }

@@ -18,6 +18,9 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# Release signing credentials (see scripts/generate-keystore.mjs) — never commit
+keystore.properties
+
 # Built APK (from `pnpm --filter app apk`)
 *.apk
 

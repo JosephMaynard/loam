@@ -129,6 +129,7 @@ describe("i18n catalogs", () => {
       "user_not_found", "user_profile_edit_disabled", "delete_own_only", "edit_own_only", "deny_forbidden",
       "moderate_forbidden", "removed_from_node", "awaiting_approval", "channel_archived",
       "channel_replies_disabled", "channel_owner_post_only", "channel_admins_post_only",
+      "channel_transfer_forbidden",
     ];
 
     for (const code of SERVER_ERROR_CODES) {

@@ -2170,6 +2170,28 @@ function ChannelMembersPanel({
     }
   }
 
+  async function transfer(userId: string): Promise<void> {
+    if (!window.confirm(t("members.transferConfirm"))) {
+      return;
+    }
+
+    setBusy(true);
+    setError(undefined);
+
+    try {
+      const updated = await requestChannel(
+        "POST",
+        `/api/channels/${encodeURIComponent(channel.id)}/transfer`,
+        { userId },
+      );
+      onChannelUpsert([updated]);
+    } catch (transferError) {
+      setError(transferError instanceof Error ? transferError.message : t("members.transferError"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remove(userId: string): Promise<void> {
     const leaving = userId === currentUser.id;
 
@@ -2238,6 +2260,9 @@ function ChannelMembersPanel({
               </div>
               {canManage && member.id !== channel.ownerUserId ? (
                 <div className="moderation-actions">
+                  <button className="ghost-button" disabled={busy} onClick={() => void transfer(member.id)} type="button">
+                    {t("members.makeOwner")}
+                  </button>
                   <button className="danger-button" disabled={busy} onClick={() => void remove(member.id)} type="button">
                     {t("common.remove")}
                   </button>
@@ -4721,6 +4746,43 @@ function AdminView({
               {t("admin.syncEnable")}
             </label>
             <p className="form-note">{t("admin.syncNote")}</p>
+            {adminConfig.sync.enabled ? (
+              <label>
+                {t("admin.syncTokenLabel")}
+                <div className="sync-token-row">
+                  <input
+                    autoComplete="off"
+                    disabled={saving}
+                    maxLength={256}
+                    onInput={(event) =>
+                      setAdminConfig((previous) =>
+                        previous
+                          ? { ...previous, sync: { ...previous.sync, token: event.currentTarget.value || undefined } }
+                          : previous,
+                      )
+                    }
+                    placeholder={t("admin.syncTokenPlaceholder")}
+                    type="text"
+                    value={adminConfig.sync.token ?? ""}
+                  />
+                  <button
+                    className="ghost-button"
+                    disabled={saving}
+                    onClick={() => {
+                      const bytes = crypto.getRandomValues(new Uint8Array(16));
+                      const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+                      setAdminConfig((previous) =>
+                        previous ? { ...previous, sync: { ...previous.sync, token } } : previous,
+                      );
+                    }}
+                    type="button"
+                  >
+                    {t("admin.syncTokenGenerate")}
+                  </button>
+                </div>
+              </label>
+            ) : null}
+            {adminConfig.sync.enabled ? <p className="form-note">{t("admin.syncTokenNote")}</p> : null}
             {adminConfig.sync.enabled ? <NodeLinkControl joinUrl={joinUrl} /> : null}
             {adminConfig.sync.peers.length ? (
               <ul className="moderation-list">

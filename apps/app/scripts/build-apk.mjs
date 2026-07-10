@@ -8,6 +8,10 @@
 // Usage:  pnpm --filter app apk                 → writes apps/app/loam-host.apk
 //         pnpm --filter app apk -- --out ~/x.apk → also copies to the given path
 //
+// Signing: the release APK is signed with the throwaway debug key unless you first run
+// `pnpm --filter app keystore` (generates apps/app/keystore.properties, which
+// plugins/with-release-signing.js picks up at prebuild). See docs/04 "Signing the release APK".
+//
 // Prereqbs (see docs/04): a real JDK (Android Studio's JBR, not a bare JRE) and the Android SDK with
 // platform-tools + NDK r27+. JAVA_HOME / ANDROID_HOME are auto-detected on macOS if unset; otherwise
 // set them yourself. This script only builds — install with `adb install -r <printed path>`.

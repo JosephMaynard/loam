@@ -162,7 +162,9 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   for unknown and inaccessible channels (existence is never leaked, and posting as a non-member gets
   the same "Channel does not exist"); member management is
   `GET/POST /api/channels/:id/members` + `DELETE /api/channels/:id/members/:userId` (owner/admin
-  invite+remove, self-remove = leave, the owner can never be removed). **Node admins get no implicit
+  invite+remove, self-remove = leave, the owner can never be removed) +
+  `POST /api/channels/:id/transfer` (owner/admin hand ownership to another user; the new owner joins
+  the private roster if absent, the old owner stays a member). **Node admins get no implicit
   read access** — they manage private channels (rename/archive via `/api/admin/channels`) without
   joining their audience.
 - **Search**: `GET /api/search?q=&limit=` — case-insensitive substring over message bodies, newest
@@ -266,8 +268,10 @@ kill switch. See `docs/09-security-profiles.md`.
   one big module, so extracting more presentational components into `src/components/` to test them is
   high value.
 - **Private channels are implemented** (membership, full server-side enforcement, member management
-  UI, targeted `channelRemoved`) — see the server-architecture notes above. Remaining refinement
-  ideas: transferring channel ownership, and a join-request flow (today it is invite-only).
+  UI, targeted `channelRemoved`) — see the server-architecture notes above. **Ownership transfer**
+  landed too: `POST /api/channels/:id/transfer` (owner/admin only; the new owner is added to a private
+  roster if absent, the old owner stays a member) with a "Make owner" control in the Members panel.
+  Remaining refinement idea: a join-request flow (today it is invite-only).
 - Message search is server-side substring (`LIKE`-equivalent over the in-memory mirror); semantic
   search would fall out of the RAG embeddings (docs/06) if that lands.
 - `security.profile` is wired (see the feature-flag note) but only bundles the axes LOAM enforces
@@ -276,5 +280,15 @@ kill switch. See `docs/09-security-profiles.md`.
 - On-device SQLCipher (encrypted Android DB) is still deferred — needs a multiple-ciphers ABI-108
   android-arm64 prebuild (docs/01, docs/04).
 - LoRa / alternate transports: the node-to-node sync protocol (docs/11) is the transport-agnostic
-  layer a LoRa link would carry; the LoRa framing/bandwidth work itself is unbuilt. Sync v1 also
-  lacks peer authentication (docs/11 security posture) — a shared-token handshake is the follow-up.
+  layer a LoRa link would carry; the LoRa framing/bandwidth work itself is unbuilt. **Sync peer
+  authentication is now built**: an optional shared `sync.token` (stored in the clear — it's a bearer
+  secret the node must present) is required via the `x-loam-sync-token` header on `/api/sync/*` when
+  set, and attached when pulling; a missing/wrong token 404s identically to sync being off. Unset =
+  open (the pre-token behaviour). Transport encryption (docs/08) is still the remaining hostile-env
+  gap.
+- **Anonymous-user creation is bounded**: `getSessionUserId` mints a new identity only within a per-IP
+  budget (`maxNewIdentitiesPerWindow`, default 60 / 10 min; `AppOptions`), throwing a `429` past it —
+  a client that keeps its session cookie never touches it, and on a LAN each device has its own IP.
+- **Release APK signing**: `pnpm --filter app keystore` generates a real signing key;
+  `plugins/with-release-signing.js` injects the release `signingConfig` at prebuild **only when
+  `keystore.properties` exists** (no-op otherwise, so the default debug-signed build is unaffected).
