@@ -1266,14 +1266,35 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return clone;
   }
 
-  /** The roster as `viewer` may see it: everyone's public record, but `roles` are visible only on the
-   * viewer's own record — unless the viewer is a moderator/admin, who sees all roles. */
+  /** The single record of `user` that `viewer` is allowed to see: `roles` only on the viewer's own
+   * record or when the viewer is a moderator/admin; `shadowBanned` never. The one sanitizer every
+   * user-egress path (roster, channel members, pending queue, approve/deny) routes through. */
+  function sanitizeUserFor(viewer: User, user: User): User {
+    return canModerate(viewer) || user.id === viewer.id ? rolesVisibleUser(user) : publicUser(user);
+  }
+
+  /** A mesh sender's display id (`mesh.<hash>`) — a sealed-mail delivery artifact, not a public roster
+   * member (docs/16). Never a local session/seed/bot id (those are `user.`/`llm.`). */
+  function isMeshSentinelUser(id: string): boolean {
+    return id.startsWith("mesh.");
+  }
+
+  /** Whether `viewerId` has received sealed mail from mesh sender `meshId` — the only reason that
+   * sender's display record is visible to them (it never joins the shared roster). */
+  function meshSenderVisibleTo(meshId: string, viewerId: string): boolean {
+    return data.messages.some(
+      (message) => message.type === "dm" && message.authorId === meshId && message.recipientUserId === viewerId,
+    );
+  }
+
+  /** The roster as `viewer` may see it: sanitized per-user, and with mesh sender artifacts hidden
+   * except from the recipients they actually mailed. */
   function visibleUsers(viewer: User): User[] {
     const base = llmEnabled() ? data.users : data.users.filter((user) => user.type !== "bot");
-    const seesAllRoles = canModerate(viewer);
     return base
       .filter((user) => !user.banned && !user.pending)
-      .map((user) => (seesAllRoles || user.id === viewer.id ? rolesVisibleUser(user) : publicUser(user)));
+      .filter((user) => !isMeshSentinelUser(user.id) || meshSenderVisibleTo(user.id, viewer.id))
+      .map((user) => sanitizeUserFor(viewer, user));
   }
 
   function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
@@ -2610,7 +2631,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /** Best-effort copy of an imported message's attachment files from the peer that has them. */
-  async function importPeerAttachments(peerUrl: string, message: Message): Promise<void> {
+  async function importPeerAttachments(peerUrl: string, message: Message, generation: number): Promise<void> {
     if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
       return;
     }
@@ -2642,6 +2663,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         if (!bytes.length || !avatarImageHasExpectedSignature(bytes, attachment.mimeType)) {
           continue;
+        }
+
+        // A kill switch during the fetch just deleted the attachments dir — don't recreate it and
+        // write an orphaned file the wipe was meant to destroy (docs/15 #2).
+        if (wipeGeneration !== generation) {
+          return;
         }
 
         await mkdir(attachmentsDir, { recursive: true });
@@ -2764,9 +2791,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return tags;
   }
 
+  /** Ensure a display record exists for a remote mesh sender and make it resolvable to `recipientUserId`
+   * ONLY — never via the shared roster or a global broadcast. Putting a mesh sender on the public
+   * roster would leak that some local user just received sealed mail (docs/16); `visibleUsers` hides
+   * these ids from everyone but the recipients they've mailed, and this notifies just the recipient. */
+  function ensureMeshSenderUser(meshId: string, recipientUserId: string): void {
+    let user = data.users.find((candidate) => candidate.id === meshId);
+    if (!user) {
+      // Persist first, then mirror in memory — but no global broadcast (unlike ensureUser).
+      user = makeUser(meshId);
+      store.upsertUser(user);
+      data.users.push(user);
+    }
+    // Idempotent on the recipient's client; sent every delivery so a second recipient of the same
+    // sender still learns the record without it ever reaching a third party.
+    sendEventToUsers(new Set([recipientUserId]), { type: "userUpserted", user: publicUser(user) });
+  }
+
   /** Deliver an opened sealed message to a local user as an ordinary DM from the sender's mesh id. */
   function deliverSealedAsDm(recipientUserId: string, senderMeshId: string, plaintext: string, now: number): void {
-    ensureUser(senderMeshId); // a display-only contact for the remote sender's mesh identity
+    ensureMeshSenderUser(senderMeshId, recipientUserId); // display-only, recipient-scoped (not the shared roster)
     const dm = MessageSchema.parse({
       id: newMessageId("mesh"),
       type: "dm",
@@ -2974,7 +3018,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           }
         }
 
-        await importPeerAttachments(peerUrl, message);
+        await importPeerAttachments(peerUrl, message, generation);
         // A kill switch during the attachment fetch just wiped the store — stop before we insert
         // this (and any later) message back onto it (docs/15 #2).
         if (wipeGeneration !== generation) {
@@ -3490,7 +3534,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("Greeter access required"));
     }
 
-    return data.users.filter((user) => user.type === "human" && user.pending === true);
+    return data.users
+      .filter((user) => user.type === "human" && user.pending === true)
+      .map((user) => sanitizeUserFor(currentUser, user));
   });
 
   // Approve a pending user so they can participate. Admins and greeters.
@@ -3507,7 +3553,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(404).send(errorBody("User does not exist"));
     }
 
-    return applyUserModeration(user, { pending: false });
+    return sanitizeUserFor(currentUser, applyUserModeration(user, { pending: false }));
   });
 
   // Deny a pending user: bans them (clearing pending) and tears down their sessions. Admins and
@@ -3538,7 +3584,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const updated = applyUserModeration(user, { banned: true, pending: false });
     invalidateUserSessions(user.id);
-    return updated;
+    return sanitizeUserFor(currentUser, updated);
   });
 
   server.get<{ Params: { fileName: string } }>(
@@ -3718,7 +3764,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const members = channelMemberIds(channel);
-    return data.users.filter((user) => members.has(user.id));
+    // Sanitize like the roster: a non-moderator member must not learn another member's roles/shadowBan.
+    return data.users.filter((user) => members.has(user.id)).map((user) => sanitizeUserFor(currentUser, user));
   });
 
   // Invite a user into a private channel. The channel owner or an admin only; adding an existing

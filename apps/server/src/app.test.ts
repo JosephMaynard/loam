@@ -1473,6 +1473,53 @@ describe("roles, moderation, and join policy", () => {
       expect(modConfig.currentUser.roles).toEqual(["moderator"]);
     });
 
+    it("does not leak roles/shadowBan via the private-channel member list to a non-moderator member", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const alice = await newSession(app);
+      const mod = await newSession(app);
+
+      const channelId = (
+        (
+          await app.server.inject({
+            method: "POST",
+            url: "/api/channels",
+            headers: { cookie: admin.cookie },
+            payload: { name: "ops", visibility: "private" },
+          })
+        ).json() as { id: string }
+      ).id;
+      for (const member of [alice, mod]) {
+        expect(
+          (
+            await app.server.inject({
+              method: "POST",
+              url: `/api/channels/${channelId}/members`,
+              headers: { cookie: admin.cookie },
+              payload: { userId: member.userId },
+            })
+          ).statusCode,
+        ).toBe(200);
+      }
+      expect((await setRoles(app, admin.cookie, mod.userId, ["moderator"])).statusCode).toBe(200);
+      expect((await moderate(app, admin.cookie, mod.userId, { shadowBanned: true })).statusCode).toBe(200);
+
+      const membersFor = async (cookie: string) =>
+        (await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/members`, headers: { cookie } }))
+          .json() as { id: string; roles?: string[]; shadowBanned?: boolean }[];
+
+      // Alice is an ordinary member — she must not learn the moderator's roles or shadow-ban state.
+      const asAlice = (await membersFor(alice.cookie)).find((entry) => entry.id === mod.userId);
+      expect(asAlice).toBeDefined();
+      expect(asAlice?.roles).toBeUndefined();
+      expect(asAlice?.shadowBanned).toBeUndefined();
+
+      // The admin (a moderator) still sees roles (but never shadowBanned, which is moderation-endpoint only).
+      const asAdmin = (await membersFor(admin.cookie)).find((entry) => entry.id === mod.userId);
+      expect(asAdmin?.roles).toEqual(["moderator"]);
+      expect(asAdmin?.shadowBanned).toBeUndefined();
+    });
+
     it("rejects role changes from a non-admin", async () => {
       const app = await makeApp();
       const admin = await newSession(app);
@@ -3926,6 +3973,31 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     const contact = (await roster(app, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
     expect(contact).toBeDefined();
     expect(await dmBodies(app, bob.cookie, contact!.id)).toContain("meet at the old bridge");
+  });
+
+  it("keeps a mesh sender off the shared roster — visible only to the recipient it mailed", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const carol = await newSession(app); // uninvolved third party on the same node
+
+    const bobCard = await meshCard(app, bob.cookie);
+    expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/mesh/messages",
+          headers: { cookie: alice.cookie },
+          payload: { toMeshId: bobCard.meshId, body: "quiet word" },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    // Bob (the recipient) resolves the mesh sender in his roster...
+    expect((await roster(app, bob.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(true);
+    // ...but Carol never learns a mesh sender appeared (no leak that Bob received sealed mail).
+    expect((await roster(app, carol.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
   });
 
   it("404s a send to a mesh id that isn't a contact (sealing requires an added card)", async () => {

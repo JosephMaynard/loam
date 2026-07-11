@@ -19,14 +19,20 @@ ranked within each group. Each entry names the file and the concrete change.
    (`feat/mesh-secure-addressing`): a `wipeGeneration` counter is bumped at the top of
    `executeKillSwitch` (before its first await); `syncWithPeer` snapshots it and bails after the digest
    fetch, after each message fetch, and `importPeerMessages` bails after its attachment fetch — so a
-   pull that resumes after a wipe abandons the round instead of re-persisting peer data. Covered by a
-   deterministic gated-peer test (kill switch fires while the pull is suspended on the peer's response).
+   pull that resumes after a wipe abandons the round instead of re-persisting peer data.
+   `importPeerAttachments` also bails after its download (before recreating the just-deleted attachments
+   dir), so no orphaned file survives the wipe. Covered by a deterministic gated-peer test (kill switch
+   fires while the pull is suspended on the peer's response).
 3. ~~**`roles` leak.**~~ **RESOLVED** (`feat/mesh-secure-addressing`): `publicUser` now strips `roles`
    as well as `shadowBanned`; a new `rolesVisibleUser` keeps them for the subject's own record and for
-   moderators. Applied at every egress — `GET /api/users` (`visibleUsers(viewer)`: own roles + all
-   roles for moderators, stripped otherwise), `/api/config` `currentUser` (own roles kept), the
-   recipient-aware `userUpserted` broadcast (roles only to subject + moderators), and the sync
-   author export. Covered by a roster/config/moderator test.
+   moderators, and one `sanitizeUserFor(viewer, user)` helper is the single decision every user-egress
+   path routes through. Covered: `GET /api/users` (`visibleUsers(viewer)`), `/api/config` `currentUser`
+   (own roles kept), the recipient-aware `userUpserted` broadcast (roles only to subject + moderators),
+   the sync author export, **the private-channel member list** (`GET /api/channels/:id/members` — a
+   non-moderator member no longer sees others' roles/shadowBan), and **the pending-access endpoints**
+   (`/api/access/pending|approve|deny` — a non-moderator greeter no longer sees them). Member-list and
+   roster tests cover it. (Known residual: `isAdmin` is still enumerable to everyone — lower
+   sensitivity, pre-existing, left as-is.)
 4. **"Wipe this device" can't revoke the server session.** The identity is the HttpOnly
    `loam_session` cookie, which JS can't clear, so a reload re-mints the same identity and re-hydrates
    the cache (`purgeLocalData`, `apps/client/src/app.tsx`). Add an endpoint to invalidate the current

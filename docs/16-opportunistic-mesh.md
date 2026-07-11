@@ -15,7 +15,10 @@ Building on v1 (below), the mesh now addresses sealed mail by the recipient's **
   `mailboxToken`**, so it is exchanged deliberately (shown as a QR / copied string, added by the
   recipient) and **never rides sync**. Discovery no longer depends on a recipient having posted
   publicly. Contacts are **per-local-user and private** — one user's address book isn't exposed on the
-  shared roster.
+  shared roster. Likewise, when sealed mail is delivered the remote sender's display record
+  (`mesh.<hash>`) is **recipient-scoped**: `visibleUsers` hides it from everyone but the recipients it
+  mailed, and its `userUpserted` is targeted to the recipient — so a third party never learns from the
+  roster that some local user just received mesh mail (a timing/metadata leak the first cut had).
 - **Self-certifying addressing defeats substitution.** `POST /api/mesh/messages` now takes `toMeshId`
   and seals only to a **contact** the sender explicitly added. `addMeshContact` re-verifies the card
   server-side — `meshId === base32(sha256(sign))` **and** `verifyKxBinding(sign, kx, kxSig)` — so a
