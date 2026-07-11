@@ -35,6 +35,15 @@
 2. **Recipient discovery** — a sender needs the recipient's published `identityKey`, which today
    propagates only when the recipient has authored public content (the normal user-profile sync). A
    dedicated contact/QR exchange is a follow-up.
+2b. **Active key-substitution (residual)** — because v1 ids are session-random (`user.<8hex>`), **not**
+   derived from the signing key, a `mesh.` id can't self-certify its key the way §1 designs. `importPeerUsers`
+   defends as far as it can: it **verifies `kxSig` (kx↔sign binding)** and strips an invalid key, and applies
+   **trust-on-first-use** (a known user's key is never silently overwritten by a later sync). But an active
+   man-in-the-middle who introduces a user to a node *before* their real key syncs — over the unauthenticated
+   plain-HTTP sync — can still bind a forged key. So v1 sealed-mail **confidentiality holds against passive
+   carriers** (the primary "C carries but can't read" threat), not against an active MITM at first
+   introduction. The real fixes are **addressing by the self-certifying `mesh.<hash-of-sign>` id** (§1) and/or
+   sync **peer authentication** (docs/11 `sync.token`) — both follow-ups.
 3. **AAD** binds `toTag`+`ttlExpiresAt` (both immutable); the original hop budget is bounded by the
    schema max rather than the signature (v2 refinement).
 4. **Phase 3 (opportunistic transport — BLE discovery + Wi-Fi Aware)** is **not built**: it needs
@@ -45,6 +54,9 @@
 5. **Tombstone GC** — expired-sealed tombstones aren't yet horizon-GC'd (matches docs/11's existing
    unbounded-tombstone behaviour); the bounded-GC in §3 is a follow-up.
 6. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
+7. **Schema bounds** — the shipped `SealedMessageSchema` uses generous round caps (`toTag` ≤ 64 chars,
+   `sealed` ≤ 90 000 chars) rather than the tight computed bounds in §2 below (22 / 87 480). Same
+   headroom for the full-size envelope, just simpler numbers.
 
 ---
 

@@ -3807,6 +3807,32 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     expect(await dmBodies(app, bob.cookie, contact!.id)).toContain("meet at the old bridge");
   });
 
+  it("silently drops a shadow-banned sender's sealed mail (200, but nothing delivered)", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const admin = await newSession(app); // firstUser → admin (can moderate)
+    const spammer = await newSession(app);
+    const bob = await newSession(app);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${spammer.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    // The send looks successful to the shadow-banned sender...
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: spammer.cookie },
+      payload: { toUserId: bob.userId, body: "spam spam spam" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    // ...but nothing was sealed or delivered — Bob has no mesh contact / DM.
+    expect((await roster(app, bob.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+  });
+
   it("carries A→C→B: an intermediary relays sealed mail it cannot read", async () => {
     const nodeA = await makeApp({ sync: { enabled: true }, mesh: MESH });
     const nodeB = await makeApp({ sync: { enabled: true }, mesh: MESH });
@@ -3850,7 +3876,7 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     // The carrier C holds the sealed blob but never learned the plaintext — no DM anywhere on C
     // contains the secret, and its stored copy is opaque ciphertext.
     const cMessages = (
-      await nodeC.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: cAdmin } })
+      await nodeC.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: cAdmin.cookie } })
     ).json() as { body?: string }[];
     expect(cMessages.some((m) => (m.body ?? "").includes("dawn"))).toBe(false);
     // C carried it: its store holds a sealed-type message whose serialized form doesn't contain the plaintext.

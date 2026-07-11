@@ -50,6 +50,19 @@ async function runInference(messages: ChatMessage[], callbacks: InferenceCallbac
  * platform — if no on-device requests ever arrive (backend disabled, or non-Android), it does
  * nothing. Returns a cleanup that removes the listener.
  */
+const CHAT_ROLES = new Set(['system', 'user', 'assistant']);
+
+/** Validate a single message from the bridge (defensive — each entry's role + content, not just the
+ * array container) so a malformed payload can never reach the model. */
+function isChatMessage(value: unknown): value is ChatMessage {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    CHAT_ROLES.has((value as { role?: unknown }).role as string) &&
+    typeof (value as { content?: unknown }).content === 'string'
+  );
+}
+
 export function registerOnDeviceLlm(channel: BridgeChannel): () => void {
   const onRequest = (payload: LlmRequest): void => {
     const id = payload?.id;
@@ -58,7 +71,7 @@ export function registerOnDeviceLlm(channel: BridgeChannel): () => void {
       return;
     }
 
-    const messages: ChatMessage[] = Array.isArray(payload?.messages) ? (payload.messages as ChatMessage[]) : [];
+    const messages: ChatMessage[] = (Array.isArray(payload?.messages) ? payload.messages : []).filter(isChatMessage);
 
     void runInference(messages, {
       onDelta: (text) => channel.post('loam-llm-delta', { id, text }),

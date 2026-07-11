@@ -12,6 +12,7 @@ import {
   mailboxTag,
   openMailbox,
   sealMailbox,
+  verifyKxBinding,
   type MeshIdentity,
 } from "@loam/crypto";
 import { generateDisplayName } from "@loam/display-name";
@@ -1931,6 +1932,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       wake = undefined;
     };
 
+    // Bound the request like the Ollama path: if the host hook goes silent (a wedged model, a dropped
+    // rn-bridge round-trip) the generator would otherwise hang forever. After 5 minutes, fail it.
+    const timeout = setTimeout(
+      () => {
+        if (!finished) {
+          failure = new Error("The on-device model timed out.");
+          finished = true;
+          signal();
+        }
+      },
+      5 * 60 * 1000,
+    );
+
     hook(messages, {
       onDelta: (text) => {
         if (text) {
@@ -1949,20 +1963,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       },
     });
 
-    while (true) {
-      if (queue.length) {
-        yield queue.shift() as string;
-        continue;
+    try {
+      while (true) {
+        if (queue.length) {
+          yield queue.shift() as string;
+          continue;
+        }
+        if (failure) {
+          throw failure;
+        }
+        if (finished) {
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
       }
-      if (failure) {
-        throw failure;
-      }
-      if (finished) {
-        return;
-      }
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -2184,11 +2202,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   /** Drop sealed mailbox mail past its own `ttlExpiresAt` (independent of retention). Deleted +
    * tombstoned so a peer can't re-hand it; never broadcast (clients never saw the blob). This, with
-   * the hop limit and per-carrier cap, is what makes carried mail converge instead of flood. */
+   * the hop limit and per-carrier cap, is what makes carried mail converge instead of flood. Runs
+   * regardless of `mesh.enabled` so turning mesh off doesn't strand already-expired sealed rows. */
   function reapExpiredSealed(): void {
-    if (!appConfig.mesh.enabled) {
-      return;
-    }
     const now = Date.now();
     const expired = data.messages.filter(
       (message): message is SealedMessage => message.type === "sealed" && message.ttlExpiresAt <= now,
@@ -2197,9 +2213,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
     const ids = new Set(expired.map((message) => message.id));
+    store.transaction(() => {
+      for (const id of ids) {
+        store.deleteMessage(id);
+        store.addTombstone(id);
+      }
+    });
     for (const id of ids) {
-      store.deleteMessage(id);
-      store.addTombstone(id);
       tombstones.add(id);
     }
     data.messages = data.messages.filter((message) => !ids.has(message.id));
@@ -2503,7 +2523,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function importPeerUsers(users: User[]): void {
     for (const user of users) {
-      if (data.users.some((candidate) => candidate.id === user.id)) {
+      // Accept a published mesh key only if its kx is cryptographically bound to its sign (kxSig);
+      // otherwise strip it — the user is still imported as a display contact, just not sealable-to via
+      // this record. (v1 ids aren't key-derived, so this proves kx↔sign but NOT key↔identity — the
+      // TOFU below and docs/16's limitation cover the residual active-substitution risk.)
+      const importedKey =
+        user.identityKey && verifyKxBinding(user.identityKey.sign, user.identityKey.kx, user.identityKey.kxSig)
+          ? user.identityKey
+          : undefined;
+
+      const existing = data.users.find((candidate) => candidate.id === user.id);
+      if (existing) {
+        // Trust-on-first-use: adopt a valid key the FIRST time we see one for a known user, but never
+        // overwrite an existing key from a later (possibly hostile) sync — a peer can't silently rebind
+        // a user we already hold a key for.
+        if (!existing.identityKey && importedKey) {
+          const next = UserSchema.parse({ ...existing, identityKey: importedKey });
+          store.upsertUser(next);
+          Object.assign(existing, next);
+          broadcast({ type: "userUpserted", user: existing });
+        }
         continue;
       }
 
@@ -2514,6 +2553,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         banned: undefined,
         shadowBanned: undefined,
         pending: undefined,
+        identityKey: importedKey,
       });
       store.upsertUser(sanitized);
       data.users.push(sanitized);
@@ -2677,7 +2717,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const aad = sealedAad(message.toTag, message.ttlExpiresAt);
-    for (const identity of meshIdentities.values()) {
+    for (const [recipientUserId, identity] of meshIdentities) {
       if (!localTagsForWindow(identity, now).has(message.toTag)) {
         continue; // cheap tag pre-check before an ECDH decrypt attempt
       }
@@ -2685,10 +2725,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (!opened) {
         continue; // not actually ours, or tampered
       }
-      const recipientUserId = [...meshIdentities.entries()].find(([, value]) => value === identity)?.[0];
-      if (recipientUserId) {
-        deliverSealedAsDm(recipientUserId, opened.senderMeshId, opened.plaintext, now);
-      }
+      deliverSealedAsDm(recipientUserId, opened.senderMeshId, opened.plaintext, now);
       store.addTombstone(message.id);
       tombstones.add(message.id);
       return true;
@@ -2732,6 +2769,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function sendSealed(sender: MeshIdentity, recipientUser: User, body: string): string | undefined {
     if (!recipientUser.identityKey) {
       return "That user has no mesh identity to receive sealed mail.";
+    }
+    // Bound self-originated mail by the same per-node storage cap as relayed mail, so a local
+    // participant can't fill the store with undeliverable sealed blobs (they persist until TTL).
+    const carried = data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
+    if (carried >= appConfig.mesh.maxCarried) {
+      return "This node's sealed-mail queue is full; try again later.";
     }
     const now = Date.now();
     const ttlExpiresAt = now + appConfig.mesh.ttlMs;
@@ -3834,7 +3877,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Send a sealed mailbox message (opportunistic-mesh — docs/16) to a known user who has published a
   // mesh identityKey. The server seals it to that user's key and lets the sync layer carry it; only
   // the recipient's home node can open it. 404 unless mesh is enabled (indistinguishable from absent).
-  server.post("/api/mesh/messages", async (request, reply) => {
+  server.post(
+    "/api/mesh/messages",
+    // Sealing runs public-key crypto and consumes relay/storage capacity across the mesh, so cap it
+    // well below the global limit (like avatar/attachment uploads).
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
     const accessError = participationError(currentUser);
 
@@ -3862,6 +3910,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (!recipient || !recipient.identityKey) {
       return reply.code(404).send(errorBody("Recipient has no mesh identity"));
+    }
+
+    // A shadow-banned sender gets a normal-looking success, but the mail is silently dropped — never
+    // sealed or propagated — mirroring how their public posts go nowhere without revealing the ban.
+    if (currentUser.shadowBanned) {
+      return { ok: true };
     }
 
     const sendError = sendSealed(sender, recipient, body.data.body);
