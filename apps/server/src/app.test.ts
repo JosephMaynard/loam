@@ -6,8 +6,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { currentEpoch, mailboxTag } from "@loam/crypto";
-import { MeshIdentityCardSchema, type MeshIdentityCard } from "@loam/schema";
+import { currentEpoch, mailboxTag, transportClientDerive, transportClientHello } from "@loam/crypto";
+import { MeshIdentityCardSchema, TransportHandshakeResponseSchema, type MeshIdentityCard } from "@loam/schema";
 
 import { buildApp, type AppOptions, type LoamApp } from "./app.js";
 
@@ -4176,5 +4176,93 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     const epoch = currentEpoch(sealedMsg.ttlExpiresAt - MESH.ttlMs, 24 * 3_600_000);
     expect(sealedMsg.toTag).toBe(mailboxTag(bobCard.mailboxToken, epoch));
     expect(sealedMsg.toTag).not.toBe(mailboxTag(bobCard.kx, epoch));
+  });
+});
+
+describe("transport encryption foundation (docs/08)", () => {
+  it("404s the handshake and advertises no host key when transport encryption is off", async () => {
+    const app = await makeApp(); // default: off
+    const hello = transportClientHello();
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/handshake",
+      payload: { clientEphemeralPublic: hello.ephemeralPublic },
+    });
+    expect(res.statusCode).toBe(404);
+
+    const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { transportEncryption: string; transportPublicKey?: string };
+    };
+    expect(cfg.networkConfig.transportEncryption).toBe("off");
+    expect(cfg.networkConfig.transportPublicKey).toBeUndefined();
+  });
+
+  it("completes a handshake and matches the host key advertised in /api/config", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const hello = transportClientHello();
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/handshake",
+      payload: { clientEphemeralPublic: hello.ephemeralPublic },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = TransportHandshakeResponseSchema.parse(res.json());
+
+    const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { transportEncryption: string; transportPublicKey?: string };
+    };
+    expect(cfg.networkConfig.transportEncryption).toBe("optional");
+    expect(cfg.networkConfig.transportPublicKey).toBe(body.hostPublicKey);
+
+    // The client can finish the handshake to a 32-byte session key.
+    const key = transportClientDerive({
+      clientEphemeralSecret: hello.ephemeralSecret,
+      hostPublic: body.hostPublicKey,
+      hostEphemeralPublic: body.hostEphemeralPublic,
+    });
+    expect(key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    // A malformed client key is a clean 400, never a 500.
+    const bad = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/handshake",
+      payload: { clientEphemeralPublic: "!!!not-base64!!!" },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("persists the host transport key across a restart (stable join QR)", async () => {
+    const { app, dataDir } = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const keyOf = async (target: LoamApp) =>
+      (
+        (await target.server.inject({ method: "GET", url: "/api/config" })).json() as {
+          networkConfig: { transportPublicKey?: string };
+        }
+      ).networkConfig.transportPublicKey;
+
+    const before = await keyOf(app);
+    expect(before).toBeTruthy();
+    const reopened = await reopenApp(app, dataDir);
+    expect(await keyOf(reopened)).toBe(before);
+  });
+
+  it("a named profile forces the transport axis (hardened → required)", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { security: { profile: "hardened" } },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const cfg = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { transportEncryption: string; transportPublicKey?: string } };
+    expect(cfg.networkConfig.transportEncryption).toBe("required");
+    expect(cfg.networkConfig.transportPublicKey).toBeTruthy(); // now advertised
   });
 });

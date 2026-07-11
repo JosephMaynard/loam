@@ -84,6 +84,7 @@ describe("@loam/schema", () => {
         allowAdminClaim: false,
         joinPolicy: "open",
         securityProfile: "standard",
+        transportEncryption: "off",
         locale: "en",
       }),
     ).not.toThrow();
@@ -111,6 +112,7 @@ describe("@loam/schema", () => {
         allowAdminClaim: false,
         joinPolicy: "open",
         securityProfile: "standard",
+        transportEncryption: "off",
         locale: "xx",
       }).success,
     ).toBe(false);
@@ -150,7 +152,7 @@ describe("@loam/schema", () => {
         admin: { bootstrap: "firstUser" },
         killSwitch: { enabled: false, requireConfirmation: true },
         retention: {},
-        security: { profile: "standard" },
+        security: { profile: "standard", transportEncryption: "off" },
         access: { joinPolicy: "open" },
         sync: { enabled: false, peers: [], intervalMs: 30_000 },
         mesh: { enabled: false, relay: false, ttlMs: 259_200_000, hopLimit: 6, maxCarried: 5_000, maxContacts: 1_000 },
@@ -303,16 +305,27 @@ describe("@loam/schema", () => {
     expect(securityProfilePreset("custom")).toBeNull();
 
     const hardened = securityProfilePreset("hardened");
-    expect(hardened).toEqual({ joinPolicy: "approval", messageTtlMs: 3_600_000, killSwitchEnabled: true });
+    expect(hardened).toEqual({
+      joinPolicy: "approval",
+      messageTtlMs: 3_600_000,
+      killSwitchEnabled: true,
+      transportEncryption: "required",
+    });
 
-    // open/standard share today's enforced settings; only hardened tightens them.
-    for (const profile of ["open", "standard"] as const) {
-      expect(securityProfilePreset(profile)).toEqual({
-        joinPolicy: "open",
-        messageTtlMs: null,
-        killSwitchEnabled: false,
-      });
-    }
+    // open and standard now differ on transport encryption (the axis docs/08 added); the other
+    // enforced axes still match.
+    expect(securityProfilePreset("open")).toEqual({
+      joinPolicy: "open",
+      messageTtlMs: null,
+      killSwitchEnabled: false,
+      transportEncryption: "off",
+    });
+    expect(securityProfilePreset("standard")).toEqual({
+      joinPolicy: "open",
+      messageTtlMs: null,
+      killSwitchEnabled: false,
+      transportEncryption: "optional",
+    });
   });
 
   it("validates LLM stream events", () => {

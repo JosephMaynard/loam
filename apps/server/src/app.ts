@@ -8,13 +8,16 @@ import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import {
   createMeshIdentity,
+  createTransportIdentity,
   currentEpoch,
   mailboxTag,
   meshIdFromSignPublic,
   openMailbox,
   sealMailbox,
+  transportServerAccept,
   verifyKxBinding,
   type MeshIdentity,
+  type TransportIdentity,
 } from "@loam/crypto";
 import { generateDisplayName } from "@loam/display-name";
 import {
@@ -41,6 +44,7 @@ import {
   SyncDigestSchema,
   SyncMessagesRequestSchema,
   SyncMessagesResponseSchema,
+  TransportHandshakeRequestSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -400,6 +404,9 @@ export function defaultLoamConfig(): LoamConfig {
       // defaults and an operator can set join/retention/kill-switch directly without a named profile
       // silently overriding them. Selecting open/standard/hardened opts into the coherent bundle.
       profile: "custom",
+      // Off by default so existing plain-HTTP deployments are unchanged; operators opt in via a profile
+      // or this axis (docs/08).
+      transportEncryption: "off",
     },
     access: {
       joinPolicy: "open",
@@ -485,6 +492,7 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     merged.access.joinPolicy = preset.joinPolicy;
     merged.retention.messageTtlMs = preset.messageTtlMs ?? undefined;
     merged.killSwitch.enabled = preset.killSwitchEnabled;
+    merged.security.transportEncryption = preset.transportEncryption;
   }
 
   return LoamConfigSchema.parse(merged);
@@ -511,8 +519,11 @@ function reconcileLegacyProfile(update: LoamConfigUpdate): { update: LoamConfigU
     update.access?.joinPolicy !== undefined && update.access.joinPolicy !== preset.joinPolicy;
   const ttl = update.retention?.messageTtlMs;
   const ttlDiverges = ttl !== undefined && (ttl ?? null) !== preset.messageTtlMs;
+  const transportDiverges =
+    update.security?.transportEncryption !== undefined &&
+    update.security.transportEncryption !== preset.transportEncryption;
 
-  if (killSwitchDiverges || joinDiverges || ttlDiverges) {
+  if (killSwitchDiverges || joinDiverges || ttlDiverges || transportDiverges) {
     return { update: { ...update, security: { ...update.security, profile: "custom" } }, changed: true };
   }
   return { update, changed: false };
@@ -784,6 +795,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
+  // The host's static transport keypair (docs/08). Loaded/generated in loadData, persisted in the
+  // config table (encrypted at rest when the DB is), rotated by the kill switch. Its public key goes
+  // in the join QR + NetworkConfig.
+  let transportIdentity: TransportIdentity | undefined;
+  // Live transport sessions: sessionId → derived key + expiry. In-memory only; cleared by the kill
+  // switch. Ephemeral handshakes mean a lost entry just forces a re-handshake.
+  const transportSessions = new Map<string, { key: string; expiresAt: number }>();
+  const TRANSPORT_SESSION_TTL_MS = 12 * 3_600_000;
   // Per-IP new-identity budget (RAM-only): bounds how many fresh anonymous users one address can mint
   // per window, so a client discarding its cookie can't grow the user table without limit. Pruned on
   // the reaper timer. On a LAN each device gets its own IP, so this reads as per-device.
@@ -1092,6 +1111,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
       joinPolicy: appConfig.access.joinPolicy,
       securityProfile: appConfig.security.profile,
+      transportEncryption: appConfig.security.transportEncryption,
+      // Publish the host's static public key only when transport encryption is in play, so the client
+      // can handshake + show the fingerprint. The client still prefers the QR-delivered key (docs/08).
+      transportPublicKey:
+        appConfig.security.transportEncryption === "off" ? undefined : transportIdentity?.publicKey,
       locale: appConfig.node.locale,
     };
   }
@@ -1103,6 +1127,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       admin: { ...appConfig.admin, passphrase: undefined },
       killSwitch: { ...appConfig.killSwitch, panicToken: undefined },
     };
+  }
+
+  /** Load the host's persisted transport keypair (docs/08), or mint + persist one on first boot.
+   * Idempotent; the secret is stored in the config table (encrypted at rest when the DB is). */
+  function ensureTransportIdentity(): TransportIdentity {
+    if (transportIdentity) {
+      return transportIdentity;
+    }
+    const stored = store.getConfigValue("transportIdentity");
+    if (stored) {
+      try {
+        transportIdentity = JSON.parse(stored) as TransportIdentity;
+        return transportIdentity;
+      } catch {
+        // Corrupt record — fall through and regenerate.
+      }
+    }
+    transportIdentity = createTransportIdentity();
+    store.setConfigValue("transportIdentity", JSON.stringify(transportIdentity));
+    return transportIdentity;
+  }
+
+  /** Rotate to a fresh transport keypair (kill switch) — the old join QR stops working and every live
+   * transport session is invalidated, matching the "emergency reset" intent (docs/08). */
+  function rotateTransportIdentity(): void {
+    transportIdentity = createTransportIdentity();
+    store.setConfigValue("transportIdentity", JSON.stringify(transportIdentity));
+    transportSessions.clear();
   }
 
   /**
@@ -2139,6 +2191,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       tombstones.add(id);
     }
 
+    transportIdentity = undefined;
+    ensureTransportIdentity();
+
     meshIdentities.clear();
     loadMeshIdentities();
     meshContacts.clear();
@@ -2254,6 +2309,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     data = { users: [], channels: [], messages: [] };
     loadData();
+    // Rotate the transport keypair + drop all live sessions: the old join QR stops working and no
+    // captured session key survives the wipe (docs/08). loadData reloaded whatever was persisted
+    // (the old key on an unencrypted wipe), so rotate explicitly to guarantee a fresh one on both paths.
+    rotateTransportIdentity();
 
     if (appConfig.admin.bootstrap === "setupCode") {
       adminSetupCode = makeAdminSetupCode();
@@ -3314,6 +3373,57 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       networkConfig: currentNetworkConfig(),
     };
   });
+
+  // Transport handshake (docs/08): client sends its ephemeral X25519 public key; the host derives a
+  // session key against its static transport key + a fresh ephemeral and returns its ephemeral public
+  // + a session id (used in `x-loam-enc` on subsequent encrypted requests). Unauthenticated (it's
+  // bootstrap, before any session), rate-limited, and 404 when transport encryption is off.
+  server.post(
+    "/api/transport/handshake",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (appConfig.security.transportEncryption === "off") {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const body = TransportHandshakeRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid handshake request"));
+      }
+
+      const identity = ensureTransportIdentity();
+      let accepted: { hostEphemeralPublic: string; sessionKey: string };
+      try {
+        accepted = transportServerAccept({
+          hostSecret: identity.secretKey,
+          clientEphemeralPublic: body.data.clientEphemeralPublic,
+        });
+      } catch {
+        return reply.code(400).send(errorBody("Invalid handshake request"));
+      }
+
+      // Opportunistic prune so the session map can't accrete abandoned handshakes forever.
+      if (transportSessions.size > 5_000) {
+        const now = Date.now();
+        for (const [id, session] of transportSessions) {
+          if (session.expiresAt <= now) {
+            transportSessions.delete(id);
+          }
+        }
+      }
+
+      const sessionId = randomUUID();
+      transportSessions.set(sessionId, {
+        key: accepted.sessionKey,
+        expiresAt: Date.now() + TRANSPORT_SESSION_TTL_MS,
+      });
+      return {
+        sessionId,
+        hostEphemeralPublic: accepted.hostEphemeralPublic,
+        hostPublicKey: identity.publicKey,
+      };
+    },
+  );
 
   server.get("/api/users", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
