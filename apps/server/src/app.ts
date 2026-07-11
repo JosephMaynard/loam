@@ -1245,15 +1245,31 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function publicUser(user: User): User {
     // Always drop the property (not just when truthy): if a restored user carried `shadowBanned:
     // false` while a shadow-banned user's copy omitted it, the field's mere presence/absence would
-    // itself leak status. Removing it unconditionally makes every public record uniform.
+    // itself leak status. Removing it unconditionally makes every public record uniform. `roles`
+    // (moderator/greeter) is stripped for the same reason a joiner must not be able to enumerate who
+    // holds authority on the node — only the subject themselves and moderators see it (rolesVisibleUser).
+    const clone = { ...user };
+    delete clone.shadowBanned;
+    delete clone.roles;
+    return clone;
+  }
+
+  /** Like `publicUser` but keeps `roles` — for the record's own owner (so their client can gate its
+   * moderation UI) and for moderators (who legitimately manage roles). Still never leaks shadowBanned. */
+  function rolesVisibleUser(user: User): User {
     const clone = { ...user };
     delete clone.shadowBanned;
     return clone;
   }
 
-  function visibleUsers(): User[] {
+  /** The roster as `viewer` may see it: everyone's public record, but `roles` are visible only on the
+   * viewer's own record — unless the viewer is a moderator/admin, who sees all roles. */
+  function visibleUsers(viewer: User): User[] {
     const base = llmEnabled() ? data.users : data.users.filter((user) => user.type !== "bot");
-    return base.filter((user) => !user.banned && !user.pending).map(publicUser);
+    const seesAllRoles = canModerate(viewer);
+    return base
+      .filter((user) => !user.banned && !user.pending)
+      .map((user) => (seesAllRoles || user.id === viewer.id ? rolesVisibleUser(user) : publicUser(user)));
   }
 
   function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
@@ -1531,12 +1547,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function broadcast(event: ClientEvent): void {
-    // Never put a user's shadow-ban state on the wire — not even to themselves (the point of a
-    // *shadow* ban) or moderators (who read it via /api/moderation/users). The ban still takes full
-    // effect server-side; this only hides the flag. Serialize the sanitized copy once for all sockets.
-    const outbound = event.type === "userUpserted" ? { ...event, user: publicUser(event.user) } : event;
-    const payload = JSON.stringify(outbound);
+    if (event.type === "userUpserted") {
+      // Two shapes: `roles` (moderator/greeter) reach only the subject (so their own client can gate
+      // its moderation UI) and moderators (who manage roles); everyone else gets the fully-public
+      // record. `shadowBanned` is never on the wire in EITHER shape — not even to self or moderators
+      // (they read it via /api/moderation/users). The ban still takes full effect server-side.
+      const subject = event.user;
+      const strippedPayload = JSON.stringify({ ...event, user: publicUser(subject) });
+      const rolesPayload = JSON.stringify({ ...event, user: rolesVisibleUser(subject) });
 
+      for (const { socket, userId } of sockets) {
+        if (socket.readyState !== socket.OPEN || !socketCanReceiveEvent(userId, event)) {
+          continue;
+        }
+        const recipient = data.users.find((candidate) => candidate.id === userId);
+        const seesRoles = userId === subject.id || (!!recipient && canModerate(recipient));
+        socket.send(seesRoles ? rolesPayload : strippedPayload);
+      }
+      return;
+    }
+
+    const payload = JSON.stringify(event);
     for (const { socket, userId } of sockets) {
       if (socket.readyState === socket.OPEN && socketCanReceiveEvent(userId, event)) {
         socket.send(payload);
@@ -3189,7 +3220,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       version: options.version ?? "dev",
       joinUrl: `http://${joinHost}:${clientPort}`,
       websocketPath: "/ws",
-      currentUser: publicUser(currentUser),
+      currentUser: rolesVisibleUser(currentUser),
       networkConfig: currentNetworkConfig(),
     };
   });
@@ -3202,7 +3233,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody(accessError));
     }
 
-    return visibleUsers();
+    return visibleUsers(currentUser);
   });
   server.patch("/api/users/me", async (request, reply) => {
     const body = UserUpdateRequestSchema.safeParse(request.body);
@@ -3941,7 +3972,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const wanted = new Set(body.data.ids);
       const messages = data.messages.filter((message) => wanted.has(message.id) && isSyncableMessage(message));
       const authorIds = new Set(messages.map((message) => message.authorId));
-      const users = data.users.filter((user) => authorIds.has(user.id));
+      // Sanitize author records before they cross to a peer: a peer operator has no more business
+      // enumerating who holds authority here than a joiner does (`publicUser` strips roles +
+      // shadowBanned), and an import strips authority regardless.
+      const users = data.users.filter((user) => authorIds.has(user.id)).map(publicUser);
       return { messages, users };
     },
   );

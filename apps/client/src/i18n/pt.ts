@@ -239,6 +239,17 @@ export const pt: Catalog = {
   "admin.syncTokenNote": "Quando definido, apenas os pares que apresentarem este token exato podem sincronizar. Dê o mesmo token a cada nó da sua malha.",
   "admin.noPeers": "Ainda não há pares.",
   "admin.peerChangesNote": "As alterações de pares são aplicadas ao salvar a configuração do nó abaixo.",
+  "admin.meshHeading": "Malha oportunista",
+  "admin.meshEnable": "Ativar a entrega por malha oportunista",
+  "admin.meshNote":
+    "Entrega por caixa lacrada que permite que uma mensagem salte de nó em nó até um destinatário offline (docs/16). Desativado por padrão.",
+  "admin.meshRelay": "Retransmitir a correspondência lacrada de outras pessoas",
+  "admin.meshLifetimeLabel": "Duração da mensagem (horas)",
+  "admin.meshLifetimeNote":
+    "Por quanto tempo uma mensagem lacrada continua se propagando antes de os nós a descartarem, de 1 hora até 168 horas (7 dias).",
+  "admin.meshHopLimitLabel": "Limite de saltos",
+  "admin.meshMaxCarriedLabel": "Máximo de mensagens transportadas",
+  "admin.meshMaxContactsLabel": "Máximo de contatos",
   "admin.bootstrapEyebrow": "Acesso de administrador",
   "admin.bootstrapHeading": "Inicialização",
   "admin.strategy": "Estratégia",

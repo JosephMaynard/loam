@@ -239,6 +239,17 @@ export const ur: Catalog = {
   "admin.syncTokenNote": "مقرر ہونے پر، صرف وہی پیئرز سنک کر سکتے ہیں جو بالکل یہی ٹوکن پیش کریں۔ اپنے میش کے ہر نوڈ کو یہی ٹوکن دیں۔",
   "admin.noPeers": "ابھی کوئی ہم مرتبہ نہیں۔",
   "admin.peerChangesNote": "ہم مرتبہ تبدیلیاں نیچے نوڈ کی ترتیب محفوظ کرنے پر لاگو ہوتی ہیں۔",
+  "admin.meshHeading": "موقع پرست میش (mesh)",
+  "admin.meshEnable": "موقع پرست میش ترسیل فعال کریں",
+  "admin.meshNote":
+    "مہر بند میل باکس کی ترسیل جو پیغام کو آف لائن وصول کنندہ کی طرف نوڈ سے نوڈ تک چھلانگ لگانے دیتی ہے (docs/16)۔ پہلے سے غیر فعال۔",
+  "admin.meshRelay": "دوسرے لوگوں کی مہر بند میل آگے relay کریں",
+  "admin.meshLifetimeLabel": "پیغام کی مدت (گھنٹے)",
+  "admin.meshLifetimeNote":
+    "نوڈز کے پیغام کو حذف کرنے سے پہلے مہر بند پیغام کتنی دیر پھیلتا رہتا ہے، 1 گھنٹے سے 168 گھنٹے (7 دن) تک۔",
+  "admin.meshHopLimitLabel": "ہاپ کی حد",
+  "admin.meshMaxCarriedLabel": "زیادہ سے زیادہ منتقل شدہ پیغامات",
+  "admin.meshMaxContactsLabel": "زیادہ سے زیادہ رابطے",
   "admin.bootstrapEyebrow": "منتظم رسائی",
   "admin.bootstrapHeading": "بوٹ اسٹریپ",
   "admin.strategy": "حکمتِ عملی",

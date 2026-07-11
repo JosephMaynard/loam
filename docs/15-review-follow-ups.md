@@ -20,10 +20,12 @@ ranked within each group. Each entry names the file and the concrete change.
    onto the freshly-wiped store. Add a wipe **generation counter**; have `syncWithPeer`/
    `importPeerMessages` bail after each `await` if the generation changed (or await the in-flight
    round before wiping).
-3. **`roles` leak.** `GET /api/users` / `visibleUsers` returns every user's `roles`, so any joiner
-   learns who the moderators/greeters are. Strip `roles` for non-moderator recipients (same shape as
-   the `shadowBanned` strip already landed via `publicUser`), keeping the current user's own roles so
-   the client can still gate its moderation UI.
+3. ~~**`roles` leak.**~~ **RESOLVED** (`feat/mesh-secure-addressing`): `publicUser` now strips `roles`
+   as well as `shadowBanned`; a new `rolesVisibleUser` keeps them for the subject's own record and for
+   moderators. Applied at every egress — `GET /api/users` (`visibleUsers(viewer)`: own roles + all
+   roles for moderators, stripped otherwise), `/api/config` `currentUser` (own roles kept), the
+   recipient-aware `userUpserted` broadcast (roles only to subject + moderators), and the sync
+   author export. Covered by a roster/config/moderator test.
 4. **"Wipe this device" can't revoke the server session.** The identity is the HttpOnly
    `loam_session` cookie, which JS can't clear, so a reload re-mints the same identity and re-hydrates
    the cache (`purgeLocalData`, `apps/client/src/app.tsx`). Add an endpoint to invalidate the current

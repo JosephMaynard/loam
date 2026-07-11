@@ -239,6 +239,17 @@ export const fr: Catalog = {
   "admin.syncTokenNote": "Une fois défini, seuls les pairs présentant ce jeton exact peuvent se synchroniser. Donnez le même jeton à chaque nœud de votre maillage.",
   "admin.noPeers": "Aucun pair pour l’instant.",
   "admin.peerChangesNote": "Les changements de pairs s’appliquent lorsque vous enregistrez la configuration du nœud ci-dessous.",
+  "admin.meshHeading": "Maillage opportuniste",
+  "admin.meshEnable": "Activer la diffusion par maillage opportuniste",
+  "admin.meshNote":
+    "Livraison par boîte scellée qui permet à un message de sauter de nœud en nœud vers un destinataire hors ligne (docs/16). Désactivé par défaut.",
+  "admin.meshRelay": "Relayer le courrier scellé d’autres personnes",
+  "admin.meshLifetimeLabel": "Durée de vie du message (heures)",
+  "admin.meshLifetimeNote":
+    "Durée pendant laquelle un message scellé continue de se propager avant que les nœuds ne l’abandonnent, de 1 heure jusqu’à 168 heures (7 jours).",
+  "admin.meshHopLimitLabel": "Limite de sauts",
+  "admin.meshMaxCarriedLabel": "Nombre maximal de messages transportés",
+  "admin.meshMaxContactsLabel": "Nombre maximal de contacts",
   "admin.bootstrapEyebrow": "Accès admin",
   "admin.bootstrapHeading": "Amorçage",
   "admin.strategy": "Stratégie",

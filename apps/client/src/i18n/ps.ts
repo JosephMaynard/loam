@@ -239,6 +239,17 @@ export const ps: Catalog = {
   "admin.syncTokenNote": "کله چې تنظیم شي، یوازې هغه پیرونه چې دا دقیق ټوکن وړاندې کړي سنک کولی شي. خپل میش کې هر نوډ ته ورته ټوکن ورکړئ.",
   "admin.noPeers": "تر اوسه همتا نشته.",
   "admin.peerChangesNote": "د همتا بدلونونه هغه وخت پلي کیږي چې لاندې د نوډ پیکربندي خوندي کړئ.",
+  "admin.meshHeading": "Opportunistic mesh",
+  "admin.meshEnable": "Enable opportunistic mesh delivery",
+  "admin.meshNote":
+    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient (docs/16). Off by default.",
+  "admin.meshRelay": "Relay other people's sealed mail onward",
+  "admin.meshLifetimeLabel": "Message lifetime (hours)",
+  "admin.meshLifetimeNote":
+    "How long a sealed message keeps propagating before nodes drop it, from 1 hour up to 168 hours (7 days).",
+  "admin.meshHopLimitLabel": "Hop limit",
+  "admin.meshMaxCarriedLabel": "Max carried messages",
+  "admin.meshMaxContactsLabel": "Max contacts",
   "admin.bootstrapEyebrow": "د اډمین لاسرسی",
   "admin.bootstrapHeading": "بوټ‌سټرپ",
   "admin.strategy": "ستراتیژي",

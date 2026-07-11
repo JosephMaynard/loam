@@ -239,6 +239,17 @@ export const my: Catalog = {
   "admin.syncTokenNote": "သတ်မှတ်ထားပါက ဤတိုကင်အတိအကျ တင်ပြသည့် peer များသာ sync လုပ်နိုင်သည်။ သင့် mesh ရှိ node တိုင်းကို တူညီသော တိုကင် ပေးပါ။",
   "admin.noPeers": "peer မရှိသေးပါ။",
   "admin.peerChangesNote": "Peer ပြောင်းလဲမှုများသည် အောက်ရှိ node config ကို သိမ်းသောအခါ သက်ရောက်သည်။",
+  "admin.meshHeading": "Opportunistic mesh",
+  "admin.meshEnable": "Enable opportunistic mesh delivery",
+  "admin.meshNote":
+    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient (docs/16). Off by default.",
+  "admin.meshRelay": "Relay other people's sealed mail onward",
+  "admin.meshLifetimeLabel": "Message lifetime (hours)",
+  "admin.meshLifetimeNote":
+    "How long a sealed message keeps propagating before nodes drop it, from 1 hour up to 168 hours (7 days).",
+  "admin.meshHopLimitLabel": "Hop limit",
+  "admin.meshMaxCarriedLabel": "Max carried messages",
+  "admin.meshMaxContactsLabel": "Max contacts",
   "admin.bootstrapEyebrow": "အက်ဒမင် ဝင်ရောက်ခွင့်",
   "admin.bootstrapHeading": "Bootstrap",
   "admin.strategy": "နည်းဗျူဟာ",

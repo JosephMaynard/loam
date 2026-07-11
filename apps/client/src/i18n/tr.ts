@@ -239,6 +239,17 @@ export const tr: Catalog = {
   "admin.syncTokenNote": "Ayarlandığında yalnızca tam olarak bu belirteci sunan eşler eşitlenebilir. Ağınızdaki her düğüme aynı belirteci verin.",
   "admin.noPeers": "Henüz eş yok.",
   "admin.peerChangesNote": "Eş değişiklikleri, aşağıdaki düğüm yapılandırmasını kaydettiğinizde uygulanır.",
+  "admin.meshHeading": "Fırsatçı ağ (mesh)",
+  "admin.meshEnable": "Fırsatçı ağ iletimini etkinleştir",
+  "admin.meshNote":
+    "Bir mesajın çevrimdışı bir alıcıya doğru düğümden düğüme atlamasını sağlayan mühürlü posta kutusu iletimi (docs/16). Varsayılan olarak kapalı.",
+  "admin.meshRelay": "Başkalarının mühürlü postasını ileri aktar",
+  "admin.meshLifetimeLabel": "Mesaj ömrü (saat)",
+  "admin.meshLifetimeNote":
+    "Düğümler bir mühürlü mesajı silmeden önce ne kadar süre yayılmaya devam edeceği, 1 saatten 168 saate (7 gün) kadar.",
+  "admin.meshHopLimitLabel": "Atlama (hop) sınırı",
+  "admin.meshMaxCarriedLabel": "Taşınan maksimum mesaj sayısı",
+  "admin.meshMaxContactsLabel": "Maksimum kişi sayısı",
   "admin.bootstrapEyebrow": "Yönetici erişimi",
   "admin.bootstrapHeading": "Başlatma",
   "admin.strategy": "Strateji",

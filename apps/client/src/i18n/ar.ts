@@ -246,6 +246,17 @@ export const ar: Catalog = {
   "admin.syncTokenNote": "عند تعيينه، تتمكن فقط العُقد التي تقدّم هذا الرمز بالضبط من المزامنة. امنح كل عقدة في شبكتك الرمز نفسه.",
   "admin.noPeers": "لا نظراء بعد.",
   "admin.peerChangesNote": "تُطبّق تغييرات النظراء عند حفظ إعدادات العقدة أدناه.",
+  "admin.meshHeading": "شبكة انتهازية (mesh)",
+  "admin.meshEnable": "تفعيل التسليم عبر الشبكة الانتهازية",
+  "admin.meshNote":
+    "تسليم عبر صندوق بريد مختوم يتيح للرسالة القفز من عقدة إلى عقدة نحو مستلم غير متصل (docs/16). معطّل افتراضيًا.",
+  "admin.meshRelay": "ترحيل البريد المختوم الخاص بالآخرين",
+  "admin.meshLifetimeLabel": "مدة صلاحية الرسالة (ساعات)",
+  "admin.meshLifetimeNote":
+    "المدة التي تستمر فيها الرسالة المختومة بالانتشار قبل أن تتخلص منها العقد، من ساعة واحدة حتى 168 ساعة (7 أيام).",
+  "admin.meshHopLimitLabel": "حد القفزات (hops)",
+  "admin.meshMaxCarriedLabel": "الحد الأقصى للرسائل المنقولة",
+  "admin.meshMaxContactsLabel": "الحد الأقصى لجهات الاتصال",
   "admin.bootstrapEyebrow": "وصول المشرف",
   "admin.bootstrapHeading": "التهيئة",
   "admin.strategy": "الاستراتيجية",

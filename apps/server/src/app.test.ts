@@ -1370,6 +1370,37 @@ describe("roles, moderation, and join policy", () => {
       expect((granted.json() as { roles: string[] }).roles).toEqual(["moderator", "greeter"]);
     });
 
+    it("does not leak a member's roles to ordinary joiners, but shows them to self and moderators", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const mod = await newSession(app);
+      const stranger = await newSession(app);
+
+      expect((await setRoles(app, admin.cookie, mod.userId, ["moderator"])).statusCode).toBe(200);
+
+      const rosterFor = async (cookie: string) =>
+        (await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie } })).json() as {
+          id: string;
+          roles?: string[];
+        }[];
+
+      // A stranger still sees the moderator in the roster, but their roles are stripped (can't
+      // enumerate who holds authority).
+      const strangerRoster = await rosterFor(stranger.cookie);
+      expect(strangerRoster.find((entry) => entry.id === mod.userId)).toBeDefined();
+      expect(strangerRoster.find((entry) => entry.id === mod.userId)?.roles).toBeUndefined();
+
+      // A moderator sees roles across the whole roster...
+      const modRoster = await rosterFor(mod.cookie);
+      expect(modRoster.find((entry) => entry.id === mod.userId)?.roles).toEqual(["moderator"]);
+
+      // ...and sees their OWN roles via /api/config, so the client can gate its moderation UI.
+      const modConfig = (
+        await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: mod.cookie } })
+      ).json() as { currentUser: { roles?: string[] } };
+      expect(modConfig.currentUser.roles).toEqual(["moderator"]);
+    });
+
     it("rejects role changes from a non-admin", async () => {
       const app = await makeApp();
       const admin = await newSession(app);

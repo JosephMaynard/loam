@@ -35,10 +35,11 @@ only to an **added contact**, so key-substitution is defeated; routing `toTag` d
 `mailboxToken` (metadata-unlinkable — a carrier can't correlate a blob to a recipient). All gated on
 `mesh.enabled` (default off; client UI shows only when `networkConfig.enableMesh`). It's **entirely
 server-side** (LOAM's host is already trusted for its local users, so the E2E guarantee is against
-carrier *nodes*), rides the existing sync transport, and doesn't touch public sync. **Not built:**
-Phase 3 (BLE/Wi-Fi-Aware opportunistic transport — needs physical devices), an in-band contact-request
-flow, sync peer authentication (`sync.token`), group fan-out, and an admin-UI mesh toggle. Do not rush
-the unbuilt crypto/transport — that's the documented way comparable apps (Bridgefy, FireChat) failed.
+carrier *nodes*), rides the existing sync transport, and doesn't touch public sync. An operator turns
+it on and tunes it (relay/TTL/hop/caps) from the **admin UI Mesh panel** (`PATCH /api/admin/config`).
+**Not built:** Phase 3 (BLE/Wi-Fi-Aware opportunistic transport — needs physical devices), an in-band
+contact-request flow, sync peer authentication (`sync.token`), group fan-out, and tombstone GC. Do not
+rush the unbuilt crypto/transport — that's the documented way comparable apps (Bridgefy, FireChat) failed.
 
 ## Layout
 

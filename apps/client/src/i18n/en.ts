@@ -275,6 +275,18 @@ export const en = {
   "admin.syncTokenNote": "When set, only peers presenting this exact token can sync. Give every node in your mesh the same token.",
   "admin.noPeers": "No peers yet.",
   "admin.peerChangesNote": "Peer changes apply when you save the node config below.",
+  // Admin view — opportunistic mesh panel.
+  "admin.meshHeading": "Opportunistic mesh",
+  "admin.meshEnable": "Enable opportunistic mesh delivery",
+  "admin.meshNote":
+    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient (docs/16). Off by default.",
+  "admin.meshRelay": "Relay other people's sealed mail onward",
+  "admin.meshLifetimeLabel": "Message lifetime (hours)",
+  "admin.meshLifetimeNote":
+    "How long a sealed message keeps propagating before nodes drop it, from 1 hour up to 168 hours (7 days).",
+  "admin.meshHopLimitLabel": "Hop limit",
+  "admin.meshMaxCarriedLabel": "Max carried messages",
+  "admin.meshMaxContactsLabel": "Max contacts",
   // Admin view — bootstrap panel.
   "admin.bootstrapEyebrow": "Admin access",
   "admin.bootstrapHeading": "Bootstrap",

@@ -239,6 +239,17 @@ export const es: Catalog = {
   "admin.syncTokenNote": "Cuando se establece, solo los pares que presenten este token exacto pueden sincronizar. Da a cada nodo de tu malla el mismo token.",
   "admin.noPeers": "Aún no hay pares.",
   "admin.peerChangesNote": "Los cambios de pares se aplican al guardar la configuración del nodo abajo.",
+  "admin.meshHeading": "Malla oportunista",
+  "admin.meshEnable": "Habilitar la entrega por malla oportunista",
+  "admin.meshNote":
+    "Entrega por buzón sellado que permite que un mensaje salte de nodo a nodo hacia un destinatario sin conexión (docs/16). Desactivado de forma predeterminada.",
+  "admin.meshRelay": "Retransmitir el correo sellado de otras personas",
+  "admin.meshLifetimeLabel": "Duración del mensaje (horas)",
+  "admin.meshLifetimeNote":
+    "Cuánto tiempo sigue propagándose un mensaje sellado antes de que los nodos lo descarten, de 1 hora hasta 168 horas (7 días).",
+  "admin.meshHopLimitLabel": "Límite de saltos",
+  "admin.meshMaxCarriedLabel": "Máximo de mensajes transportados",
+  "admin.meshMaxContactsLabel": "Máximo de contactos",
   "admin.bootstrapEyebrow": "Acceso de administrador",
   "admin.bootstrapHeading": "Arranque",
   "admin.strategy": "Estrategia",

@@ -239,6 +239,17 @@ export const bn: Catalog = {
   "admin.syncTokenNote": "সেট করা থাকলে, শুধু এই সঠিক টোকেন উপস্থাপনকারী পিয়াররাই সিঙ্ক করতে পারে। আপনার মেশের প্রতিটি নোডকে একই টোকেন দিন।",
   "admin.noPeers": "এখনও কোনো সমকক্ষ নেই।",
   "admin.peerChangesNote": "নিচে নোড কনফিগ সংরক্ষণ করলে সমকক্ষ পরিবর্তন প্রযোজ্য হয়।",
+  "admin.meshHeading": "সুযোগসন্ধানী মেশ",
+  "admin.meshEnable": "সুযোগসন্ধানী মেশ ডেলিভারি সক্ষম করুন",
+  "admin.meshNote":
+    "সিলড-মেইলবক্স ডেলিভারি যা একটি বার্তাকে অফলাইন প্রাপকের দিকে নোড থেকে নোডে লাফ দিতে দেয় (docs/16)। ডিফল্টরূপে বন্ধ।",
+  "admin.meshRelay": "অন্যদের সিলড মেইল রিলে করুন",
+  "admin.meshLifetimeLabel": "বার্তার আয়ুষ্কাল (ঘণ্টা)",
+  "admin.meshLifetimeNote":
+    "নোডগুলো একটি সিলড বার্তা মুছে ফেলার আগে তা কতক্ষণ ছড়াতে থাকে, ১ ঘণ্টা থেকে ১৬৮ ঘণ্টা (৭ দিন) পর্যন্ত।",
+  "admin.meshHopLimitLabel": "হপ সীমা",
+  "admin.meshMaxCarriedLabel": "সর্বোচ্চ বহন করা বার্তা",
+  "admin.meshMaxContactsLabel": "সর্বোচ্চ পরিচিতি",
   "admin.bootstrapEyebrow": "অ্যাডমিন অ্যাক্সেস",
   "admin.bootstrapHeading": "বুটস্ট্র্যাপ",
   "admin.strategy": "কৌশল",

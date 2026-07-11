@@ -239,6 +239,17 @@ export const sw: Catalog = {
   "admin.syncTokenNote": "Ikiwekwa, ni wenzao wanaowasilisha tokeni hii kamili pekee wanaoweza kusawazisha. Mpe kila nodi kwenye mtandao wako tokeni ile ile.",
   "admin.noPeers": "Bado hakuna wenza.",
   "admin.peerChangesNote": "Mabadiliko ya wenza hutumika utakapohifadhi usanidi wa nodi hapa chini.",
+  "admin.meshHeading": "Mesh ya fursa",
+  "admin.meshEnable": "Wezesha uwasilishaji wa mesh ya fursa",
+  "admin.meshNote":
+    "Uwasilishaji wa sanduku la barua lililofungwa unaoruhusu ujumbe kuruka kutoka nodi hadi nodi kuelekea kwa mpokeaji asiye mtandaoni (docs/16). Imezimwa kwa chaguo-msingi.",
+  "admin.meshRelay": "Sambaza barua zilizofungwa za watu wengine",
+  "admin.meshLifetimeLabel": "Muda wa ujumbe (masaa)",
+  "admin.meshLifetimeNote":
+    "Muda ambao ujumbe uliofungwa unaendelea kusambaa kabla nodi hazijauondoa, kuanzia saa 1 hadi saa 168 (siku 7).",
+  "admin.meshHopLimitLabel": "Kikomo cha hop",
+  "admin.meshMaxCarriedLabel": "Idadi ya juu ya ujumbe unaobebwa",
+  "admin.meshMaxContactsLabel": "Idadi ya juu ya anwani",
   "admin.bootstrapEyebrow": "Ufikiaji wa msimamizi",
   "admin.bootstrapHeading": "Uanzishaji",
   "admin.strategy": "Mkakati",

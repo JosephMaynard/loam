@@ -102,6 +102,12 @@ type ToastItem = {
 const AVATAR_MODES = ["face", "initial", "pattern"] as const;
 const AVATAR_OUTPUT_SIZE = 256;
 const AVATAR_MAX_UPLOAD_BYTES = 128 * 1024;
+// Opportunistic-mesh (docs/16) `ttlMs` bounds, mirrored from `MeshConfigSchema` in @loam/schema —
+// the admin panel edits the value in hours, so these are the ms bounds converted for display/clamp.
+const MESH_TTL_MS_MIN = 60_000;
+const MESH_TTL_MS_MAX = 7 * 24 * 3_600_000;
+const MESH_TTL_HOURS_MIN = MESH_TTL_MS_MIN / 3_600_000;
+const MESH_TTL_HOURS_MAX = MESH_TTL_MS_MAX / 3_600_000;
 
 /**
  * Generates a random client user identifier.
@@ -4649,6 +4655,7 @@ function AdminView({
         security: adminConfig.security,
         access: adminConfig.access,
         sync: adminConfig.sync,
+        mesh: adminConfig.mesh,
       };
       const response = await fetch(apiUrl("/api/admin/config"), {
         method: "PATCH",
@@ -4715,6 +4722,12 @@ function AdminView({
   function setKillSwitch(update: Partial<LoamConfig["killSwitch"]>): void {
     setAdminConfig((previous) =>
       previous ? { ...previous, killSwitch: { ...previous.killSwitch, ...update } } : previous,
+    );
+  }
+
+  function setMesh(update: Partial<LoamConfig["mesh"]>): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, mesh: { ...previous.mesh, ...update } } : previous,
     );
   }
 
@@ -5241,6 +5254,99 @@ function AdminView({
             />
             <p className="form-note">{t("admin.peerChangesNote")}</p>
             <SyncStatusPanel />
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
+              <h2>{t("admin.meshHeading")}</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.mesh.enabled}
+                disabled={saving}
+                onInput={(event) => setMesh({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              {t("admin.meshEnable")}
+            </label>
+            <p className="form-note">{t("admin.meshNote")}</p>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.mesh.relay}
+                disabled={saving || !adminConfig.mesh.enabled}
+                onInput={(event) => setMesh({ relay: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              {t("admin.meshRelay")}
+            </label>
+            <label>
+              {t("admin.meshLifetimeLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={MESH_TTL_HOURS_MAX}
+                min={MESH_TTL_HOURS_MIN}
+                onInput={(event) => {
+                  const hours = Number.parseFloat(event.currentTarget.value);
+                  if (Number.isFinite(hours)) {
+                    setMesh({
+                      ttlMs: clamp(Math.round(hours * 3_600_000), MESH_TTL_MS_MIN, MESH_TTL_MS_MAX),
+                    });
+                  }
+                }}
+                step="0.5"
+                type="number"
+                value={String(Math.round((adminConfig.mesh.ttlMs / 3_600_000) * 100) / 100)}
+              />
+            </label>
+            <p className="form-note">{t("admin.meshLifetimeNote")}</p>
+            <label>
+              {t("admin.meshHopLimitLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={16}
+                min={1}
+                onInput={(event) => {
+                  const hopLimit = Number.parseInt(event.currentTarget.value, 10);
+                  if (Number.isFinite(hopLimit)) {
+                    setMesh({ hopLimit: clamp(hopLimit, 1, 16) });
+                  }
+                }}
+                type="number"
+                value={String(adminConfig.mesh.hopLimit)}
+              />
+            </label>
+            <label>
+              {t("admin.meshMaxCarriedLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={100_000}
+                min={0}
+                onInput={(event) => {
+                  const maxCarried = Number.parseInt(event.currentTarget.value, 10);
+                  if (Number.isFinite(maxCarried)) {
+                    setMesh({ maxCarried: clamp(maxCarried, 0, 100_000) });
+                  }
+                }}
+                type="number"
+                value={String(adminConfig.mesh.maxCarried)}
+              />
+            </label>
+            <label>
+              {t("admin.meshMaxContactsLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={100_000}
+                min={0}
+                onInput={(event) => {
+                  const maxContacts = Number.parseInt(event.currentTarget.value, 10);
+                  if (Number.isFinite(maxContacts)) {
+                    setMesh({ maxContacts: clamp(maxContacts, 0, 100_000) });
+                  }
+                }}
+                type="number"
+                value={String(adminConfig.mesh.maxContacts)}
+              />
+            </label>
           </div>
           <div className="profile-panel">
             <div>

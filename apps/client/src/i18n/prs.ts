@@ -240,6 +240,17 @@ export const prs: Catalog = {
   "admin.syncTokenNote": "پس از تنظیم، تنها همتاهایی که دقیقاً همین توکن را ارائه کنند می‌توانند همگام‌سازی کنند. همین توکن را به هر گره شبکه‌تان بدهید.",
   "admin.noPeers": "هنوز همتایی نیست.",
   "admin.peerChangesNote": "تغییرات همتا هنگام ذخیرهٔ پیکربندی گره در پایین اعمال می‌شود.",
+  "admin.meshHeading": "شبکهٔ فرصت‌طلبانه",
+  "admin.meshEnable": "فعال‌سازی تحویل شبکهٔ فرصت‌طلبانه",
+  "admin.meshNote":
+    "تحویل صندوق پستی مهروموم‌شده که به پیام اجازه می‌دهد گره‌به‌گره به‌سوی گیرندهٔ آفلاین جهش کند (docs/16). به‌صورت پیش‌فرض خاموش است.",
+  "admin.meshRelay": "بازپخش نامه‌های مهروموم‌شدهٔ دیگران",
+  "admin.meshLifetimeLabel": "طول عمر پیام (ساعت)",
+  "admin.meshLifetimeNote":
+    "مدت‌زمانی که یک پیام مهروموم‌شده پیش از حذف توسط گره‌ها به انتشار خود ادامه می‌دهد، از ۱ ساعت تا ۱۶۸ ساعت (۷ روز).",
+  "admin.meshHopLimitLabel": "محدودیت گام (hop)",
+  "admin.meshMaxCarriedLabel": "حداکثر پیام‌های حمل‌شده",
+  "admin.meshMaxContactsLabel": "حداکثر مخاطبان",
   "admin.bootstrapEyebrow": "دسترسی مدیر",
   "admin.bootstrapHeading": "راه‌اندازی اولیه",
   "admin.strategy": "راهبرد",
