@@ -34,8 +34,8 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
-    "esbuild": "^0.28.1",
-    "typescript": "~7.0.2"
+    "esbuild": "catalog:",
+    "typescript": "catalog:"
   },
   "scripts": {
     "start": "expo start",

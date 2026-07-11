@@ -15,17 +15,17 @@
     "@loam/qr": "workspace:*",
     "@loam/schema": "workspace:*",
     "dompurify": "^3.4.11",
-    "preact": "^10.29.7",
+    "preact": "catalog:",
     "preact-iso": "^2.12.0",
     "snarkdown": "^2.0.0"
   },
   "devDependencies": {
-    "@preact/preset-vite": "^2.10.4",
-    "@types/node": "^24.13.3",
+    "@preact/preset-vite": "catalog:",
+    "@types/node": "catalog:",
     "fake-indexeddb": "^6.2.5",
-    "jsdom": "^29.1.1",
-    "typescript": "~7.0.2",
-    "vite": "^8.1.4",
-    "vitest": "^4.1.10"
+    "jsdom": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
   }
 }

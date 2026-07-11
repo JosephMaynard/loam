@@ -23,14 +23,14 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@preact/preset-vite": "^2.10.4",
+    "@preact/preset-vite": "catalog:",
     "@tailwindcss/vite": "^4.3.2",
-    "@types/node": "^24.13.3",
-    "jsdom": "^29.1.1",
-    "preact": "^10.29.7",
+    "@types/node": "catalog:",
+    "jsdom": "catalog:",
+    "preact": "catalog:",
     "tailwindcss": "^4.3.2",
-    "typescript": "~7.0.2",
-    "vite": "^8.1.4",
-    "vitest": "^4.1.10"
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
   }
 }
