@@ -808,6 +808,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const peerSyncStatus = new Map<string, PeerSyncStatus>();
   let syncRunning = false;
   let lastSyncLoopAt = 0;
+  // Bumped by every kill-switch wipe. A sync round captures it before its first await and abandons
+  // itself the moment it changes, so an in-flight pull can't re-persist peer data onto the freshly
+  // wiped store (docs/15 #2). A monotonic counter, never reset — only equality across a round matters.
+  let wipeGeneration = 0;
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -2181,6 +2185,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * kill-switch settings themselves) survives — the wipe destroys data, not settings.
    */
   async function executeKillSwitch(): Promise<void> {
+    // Invalidate any in-flight sync round up front (before the first await here): a pull that resumes
+    // after this point will see the changed generation and bail instead of writing peer data back
+    // onto the store we're about to wipe (docs/15 #2).
+    wipeGeneration += 1;
+
     if (encryptionEnabled) {
       // Cryptographic wipe: destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh
       // key, so any bytes a forensic tool recovers from flash are unreadable — stronger than a
@@ -2913,7 +2922,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * land first), never into private/unknown channels (a malicious peer must not inject into a
    * local private channel id), never over a tombstone, and edits only when strictly newer.
    */
-  async function importPeerMessages(peerUrl: string, messages: Message[]): Promise<number> {
+  async function importPeerMessages(peerUrl: string, messages: Message[], generation: number): Promise<number> {
     const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
     const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
     let imported = 0;
@@ -2966,6 +2975,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
 
         await importPeerAttachments(peerUrl, message);
+        // A kill switch during the attachment fetch just wiped the store — stop before we insert
+        // this (and any later) message back onto it (docs/15 #2).
+        if (wipeGeneration !== generation) {
+          return imported;
+        }
       }
 
       const existing = data.messages.find((candidate) => candidate.id === message.id);
@@ -2997,12 +3011,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /** One pull round against one peer: digest → diff (skipping tombstones) → fetch → import. */
   async function syncWithPeer(peer: SyncPeer): Promise<void> {
+    // Snapshot the wipe generation: if a kill switch fires mid-round, every post-await check below
+    // abandons the round rather than writing peer data back onto the wiped store (docs/15 #2).
+    const generation = wipeGeneration;
     const status = peerSyncStatus.get(peer.url) ?? { imported: 0 };
     peerSyncStatus.set(peer.url, status);
     status.lastAttemptAt = Date.now();
 
     try {
       const digest = await fetchPeerJson(peer.url, "/api/sync/digest", SyncDigestSchema);
+      if (wipeGeneration !== generation) {
+        return;
+      }
 
       for (const channel of digest.channels) {
         if (channel.visibility !== "public" || ensureChannel(channel.id)) {
@@ -3058,8 +3078,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           SyncMessagesResponseSchema,
           { ids: wanted.slice(start, start + 200) },
         );
+        if (wipeGeneration !== generation) {
+          return;
+        }
         importPeerUsers(payload.users);
-        imported += await importPeerMessages(peer.url, payload.messages);
+        imported += await importPeerMessages(peer.url, payload.messages, generation);
+        if (wipeGeneration !== generation) {
+          return;
+        }
       }
 
       status.lastSuccessAt = Date.now();

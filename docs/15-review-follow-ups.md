@@ -15,11 +15,12 @@ ranked within each group. Each entry names the file and the concrete change.
    *which* peers may talk. Next: reject an imported message whose `authorId` matches a locally
    *authoritative* user (admin/moderator/greeter) unless that author record was itself imported;
    longer-term, per-peer **signed authors** (docs/11).
-2. **Kill switch can be partially undone by an in-flight sync round.** `executeKillSwitch` deletes +
-   re-seeds while a `runSyncLoop` round is mid-`await`; the resuming import re-persists peer messages
-   onto the freshly-wiped store. Add a wipe **generation counter**; have `syncWithPeer`/
-   `importPeerMessages` bail after each `await` if the generation changed (or await the in-flight
-   round before wiping).
+2. ~~**Kill switch can be partially undone by an in-flight sync round.**~~ **RESOLVED**
+   (`feat/mesh-secure-addressing`): a `wipeGeneration` counter is bumped at the top of
+   `executeKillSwitch` (before its first await); `syncWithPeer` snapshots it and bails after the digest
+   fetch, after each message fetch, and `importPeerMessages` bails after its attachment fetch — so a
+   pull that resumes after a wipe abandons the round instead of re-persisting peer data. Covered by a
+   deterministic gated-peer test (kill switch fires while the pull is suspended on the peer's response).
 3. ~~**`roles` leak.**~~ **RESOLVED** (`feat/mesh-secure-addressing`): `publicUser` now strips `roles`
    as well as `shadowBanned`; a new `rolesVisibleUser` keeps them for the subject's own record and for
    moderators. Applied at every egress — `GET /api/users` (`visibleUsers(viewer)`: own roles + all

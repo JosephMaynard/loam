@@ -1,4 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -363,6 +365,76 @@ describe("kill switch", () => {
     const admin = await newSession(app);
 
     expect((await postKillSwitch(app, admin.cookie, {})).statusCode).toBe(200);
+  });
+
+  it("abandons an in-flight sync round when a kill switch fires mid-pull (docs/15 #2)", async () => {
+    // A controllable peer: it advertises one message, then HOLDS the /api/sync/messages response until
+    // we release it — so we can fire the kill switch while node A is suspended awaiting that fetch.
+    let sawMessagesRequest!: () => void;
+    const messagesRequested = new Promise<void>((resolve) => (sawMessagesRequest = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+
+    const peerMessage = {
+      id: "msg.peer-race",
+      type: "channelPost",
+      authorId: "user.peerauthor",
+      channelId: "general",
+      body: "from the peer",
+      createdAt: 1,
+    };
+    const peerAuthor = {
+      id: "user.peerauthor",
+      displayName: "Peer Author",
+      type: "human",
+      isAdmin: false,
+      createdAt: 1,
+      ephemeral: true,
+    };
+
+    const peer = createServer((req, res) => {
+      if (req.url === "/api/sync/digest") {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ channels: [], messages: [{ id: peerMessage.id }] }));
+        return;
+      }
+      if (req.url === "/api/sync/messages") {
+        sawMessagesRequest();
+        void gate.then(() => {
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ messages: [peerMessage], users: [peerAuthor] }));
+        });
+        return;
+      }
+      res.statusCode = 404;
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => peer.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => new Promise<void>((resolve) => peer.close(() => resolve())));
+    const peerUrl = `http://127.0.0.1:${(peer.address() as AddressInfo).port}`;
+
+    const app = await makeApp({
+      killSwitch: { enabled: true, requireConfirmation: false },
+      sync: { enabled: true, peers: [{ url: peerUrl }] },
+    });
+    const admin = await newSession(app);
+
+    // Kick off a sync round; it blocks awaiting the held /api/sync/messages response.
+    const syncInFlight = app.server.inject({
+      method: "POST",
+      url: "/api/admin/sync/run",
+      headers: { cookie: admin.cookie },
+    });
+
+    await messagesRequested; // A is now mid-pull, suspended on the peer's message payload
+    expect((await postKillSwitch(app, admin.cookie, {})).statusCode).toBe(200); // wipe fires mid-round
+    release(); // let the peer's response through; the resuming sync must bail on the changed generation
+    await syncInFlight;
+
+    // The peer's message (and author) were NOT written back onto the freshly wiped store.
+    const stored = app.store.loadMessages();
+    expect(stored.some((message) => message.id === peerMessage.id)).toBe(false);
+    expect(app.store.loadUsers().some((user) => user.id === peerAuthor.id)).toBe(false);
   });
 
   it("rejects non-admins and admins on nodes where it is disabled", async () => {
