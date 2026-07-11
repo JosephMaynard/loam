@@ -75,6 +75,7 @@ describe("@loam/schema", () => {
         enableMarkdown: true,
         enableAttachments: true,
         enablePresence: true,
+        enableMesh: false,
         enableLLMChat: false,
         enableLLMStreaming: false,
         allowUserDisplayNameEdit: false,
@@ -101,6 +102,7 @@ describe("@loam/schema", () => {
         enableMarkdown: true,
         enableAttachments: true,
         enablePresence: true,
+        enableMesh: false,
         enableLLMChat: false,
         enableLLMStreaming: false,
         allowUserDisplayNameEdit: false,
@@ -151,7 +153,7 @@ describe("@loam/schema", () => {
         security: { profile: "standard" },
         access: { joinPolicy: "open" },
         sync: { enabled: false, peers: [], intervalMs: 30_000 },
-        mesh: { enabled: false, relay: false, ttlMs: 259_200_000, hopLimit: 6, maxCarried: 5_000 },
+        mesh: { enabled: false, relay: false, ttlMs: 259_200_000, hopLimit: 6, maxCarried: 5_000, maxContacts: 1_000 },
       }),
     ).not.toThrow();
 

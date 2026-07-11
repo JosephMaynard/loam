@@ -40,6 +40,9 @@ export type RouteState =
     }
   | {
       screen: "search";
+    }
+  | {
+      screen: "mesh";
     };
 
 export type MessageResponse = {
@@ -113,6 +116,10 @@ export function parseRoute(path: string): RouteState {
 
   if (path === "/search") {
     return { screen: "search" };
+  }
+
+  if (path === "/mesh") {
+    return { screen: "mesh" };
   }
 
   const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);

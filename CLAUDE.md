@@ -23,16 +23,24 @@ technically honest** — the distinction is documenting privacy accurately vs. p
 law-enforcement avoidance as the purpose.
 
 **Opportunistic mesh / DTN** (`docs/16-opportunistic-mesh.md`) — delay-tolerant "carry my message"
-(A→C→B) delivery. **Phases 0–2 are BUILT & TESTED** (see the doc's "Implementation status"):
-`packages/crypto` (`@loam/crypto`) is the Ed25519/X25519 sealed-sender primitive; the server has a
-`sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL table), `POST
-/api/mesh/messages` to seal, and bounded relay (TTL/hop/cap, no acks) — all gated on `mesh.enabled`
-(default off; enable via config for now). It's **entirely server-side** (LOAM's host is already
-trusted for its local users, so the E2E guarantee is against carrier *nodes*), rides the existing
-sync transport, and doesn't touch public sync. **Not built:** Phase 3 (BLE/Wi-Fi-Aware opportunistic
-transport — needs physical devices), the secret-token `toTag` (v1 tags derive from the public kx → no
-metadata-unlinkability yet), contact/QR key discovery, and an admin-UI mesh toggle. Do not rush the
-unbuilt crypto/transport — that's the documented way comparable apps (Bridgefy, FireChat) failed.
+(A→C→B) delivery. **Phases 0–2 + v2 secure addressing are BUILT & TESTED** (see the doc's
+"Implementation status"): `packages/crypto` (`@loam/crypto`) is the Ed25519/X25519 sealed-sender
+primitive; the server has a `sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL
+table), and bounded relay (TTL/hop/cap, no acks). **v2** addresses mail by the recipient's
+**self-certifying `mesh.` id** and exchanges keys via **mesh identity cards** — `GET /api/mesh/identity`
+(your card: public keys + secret `mailboxToken`) → shown as a QR / pasted → `POST /api/mesh/contacts`
+(re-verified server-side: `meshId===hash(sign)` + `kxSig` binding; stored per-user in the
+`mesh_contacts` DAL table, private to each local user). `POST /api/mesh/messages {toMeshId,body}` seals
+only to an **added contact**, so key-substitution is defeated; routing `toTag` derives from the secret
+`mailboxToken` (unlinkable to a **carrier** that lacks the token — an authorized sender or a
+compromised contact that holds the token can still derive and correlate the tag). All gated on
+`mesh.enabled` (default off; client UI shows only when `networkConfig.enableMesh`). It's **entirely
+server-side** (LOAM's host is already trusted for its local users, so the E2E guarantee is against
+carrier *nodes*), rides the existing sync transport, and doesn't touch public sync. An operator turns
+it on and tunes it (relay/TTL/hop/caps) from the **admin UI Mesh panel** (`PATCH /api/admin/config`).
+**Not built:** Phase 3 (BLE/Wi-Fi-Aware opportunistic transport — needs physical devices), an in-band
+contact-request flow, sync peer authentication (`sync.token`), group fan-out, and tombstone GC. Do not
+rush the unbuilt crypto/transport — that's the documented way comparable apps (Bridgefy, FireChat) failed.
 
 ## Layout
 

@@ -4,6 +4,8 @@ import {
   JoinPolicySchema,
   LoamConfigSchema,
   LocaleSchema,
+  MeshContactSchema,
+  MeshIdentityCardSchema,
   MessageAttachmentSchema,
   MessageSchema,
   securityProfilePreset,
@@ -19,6 +21,8 @@ import {
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
+  type MeshContact,
+  type MeshIdentityCard,
   type NetworkConfig,
   type Role,
   type SecurityProfile,
@@ -98,6 +102,12 @@ type ToastItem = {
 const AVATAR_MODES = ["face", "initial", "pattern"] as const;
 const AVATAR_OUTPUT_SIZE = 256;
 const AVATAR_MAX_UPLOAD_BYTES = 128 * 1024;
+// Opportunistic-mesh (docs/16) `ttlMs` bounds, mirrored from `MeshConfigSchema` in @loam/schema —
+// the admin panel edits the value in hours, so these are the ms bounds converted for display/clamp.
+const MESH_TTL_MS_MIN = 60_000;
+const MESH_TTL_MS_MAX = 7 * 24 * 3_600_000;
+const MESH_TTL_HOURS_MIN = MESH_TTL_MS_MIN / 3_600_000;
+const MESH_TTL_HOURS_MAX = MESH_TTL_MS_MAX / 3_600_000;
 
 /**
  * Generates a random client user identifier.
@@ -415,7 +425,8 @@ function LoamApp() {
     routeState.screen === "settings" ||
     routeState.screen === "people" ||
     routeState.screen === "admin" ||
-    routeState.screen === "search"
+    routeState.screen === "search" ||
+    routeState.screen === "mesh"
       ? "settings-open"
       : undefined,
   ]
@@ -1552,6 +1563,7 @@ function LoamApp() {
         nodeName={config?.networkConfig.nodeName}
         onCreateChannel={createChannel}
         onlineUserIds={onlineUserIds}
+        showMesh={!!config?.networkConfig.enableMesh}
         unreadByConversation={unreadByConversation}
         users={users}
       />
@@ -1566,6 +1578,8 @@ function LoamApp() {
         <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} />
       ) : routeState.screen === "search" ? (
         <SearchView channels={channels} currentUser={currentUser} usersById={usersById} />
+      ) : routeState.screen === "mesh" && config?.networkConfig.enableMesh ? (
+        <MeshView />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           config={config}
@@ -1681,6 +1695,7 @@ interface SidebarProps {
   nodeName?: string;
   onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
   onlineUserIds: ReadonlySet<string>;
+  showMesh: boolean;
   unreadByConversation: Map<string, number>;
   users: User[];
 }
@@ -1706,6 +1721,7 @@ function Sidebar({
   nodeName,
   onCreateChannel,
   onlineUserIds,
+  showMesh,
   unreadByConversation,
   users,
 }: SidebarProps) {
@@ -1785,6 +1801,12 @@ function Sidebar({
           <NavLink active={false} href="/people">
             <span className="nav-glyph">☺</span>
             {t("people.title")}
+          </NavLink>
+        ) : null}
+        {showMesh ? (
+          <NavLink active={false} href="/mesh">
+            <span className="nav-glyph">✉</span>
+            {t("sidebar.meshMail")}
           </NavLink>
         ) : null}
         {currentUser.isAdmin ? (
@@ -3403,6 +3425,356 @@ function SearchView({
 }
 
 /**
+ * Parse a `GET /api/mesh/contacts` payload into validated contacts, dropping any entries that fail
+ * the schema (mirrors `parseUserList`).
+ */
+function parseMeshContactList(payload: unknown): MeshContact[] {
+  return Array.isArray(payload)
+    ? payload.flatMap((item) => {
+        const parsed = MeshContactSchema.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      })
+    : [];
+}
+
+/**
+ * Mesh mail (opportunistic-mesh sealed mailbox — docs/16). Only rendered when
+ * `networkConfig.enableMesh` is on. Three panels: this user's own shareable mesh identity card (QR +
+ * copy, so someone else can add them as a contact), a paste-a-card form to add a contact, and the
+ * contact list with a per-contact compose box for sending sealed mail (delivered to the recipient as
+ * an ordinary DM once opened — there is no separate "inbox" here).
+ */
+function MeshView() {
+  const [card, setCard] = useState<MeshIdentityCard>();
+  const [cardLoading, setCardLoading] = useState(true);
+  const [cardError, setCardError] = useState<string>();
+  const [copied, setCopied] = useState(false);
+
+  const [contacts, setContacts] = useState<MeshContact[]>();
+  const [contactsError, setContactsError] = useState<string>();
+  const [contactsReloadKey, setContactsReloadKey] = useState(0);
+
+  const [addValue, setAddValue] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+  const [addError, setAddError] = useState<string>();
+  const [addSuccess, setAddSuccess] = useState<string>();
+
+  const [selectedMeshId, setSelectedMeshId] = useState<string>();
+  const [composeBody, setComposeBody] = useState("");
+  const [composeBusy, setComposeBusy] = useState(false);
+  const [composeError, setComposeError] = useState<string>();
+  const [composeSuccess, setComposeSuccess] = useState<string>();
+
+  const addContactId = useId();
+
+  useEffect(() => {
+    let active = true;
+    setCardLoading(true);
+    setCardError(undefined);
+
+    fetchJson<unknown>("/api/mesh/identity")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        const parsed = MeshIdentityCardSchema.safeParse(payload);
+        if (!parsed.success) {
+          setCardError(t("mesh.myCardUnrecognised"));
+          return;
+        }
+
+        setCard(parsed.data);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setCardError(error instanceof Error ? error.message : t("mesh.myCardLoadError"));
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setCardLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setContactsError(undefined);
+
+    fetchJson<unknown>("/api/mesh/contacts")
+      .then((payload) => {
+        if (active) {
+          setContacts(parseMeshContactList(payload));
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setContactsError(error instanceof Error ? error.message : t("mesh.contactsLoadError"));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [contactsReloadKey]);
+
+  const cardJson = useMemo(() => (card ? JSON.stringify(card) : undefined), [card]);
+  const qrSvg = useMemo(() => safeQrSvg(cardJson, "#16271f"), [cardJson]);
+
+  // Clear the "Copied" flash timer on unmount (the file's cleanup discipline; Preact tolerates a
+  // late setState but we match the surrounding effects).
+  const copyTimerRef = useRef<number>();
+  useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
+
+  async function copyCard(): Promise<void> {
+    if (!cardJson) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(cardJson);
+      setCopied(true);
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard is unavailable on insecure-context browsers — which is the norm on LOAM's plain-HTTP
+      // LAN. The card is also rendered as a visible, selectable read-only field below, so the user can
+      // still copy it by hand; this button is a convenience only.
+    }
+  }
+
+  async function addContact(): Promise<void> {
+    let parsedBody: unknown;
+
+    try {
+      parsedBody = JSON.parse(addValue);
+    } catch {
+      setAddError(t("mesh.addContactInvalidJson"));
+      return;
+    }
+
+    setAddBusy(true);
+    setAddError(undefined);
+    setAddSuccess(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(apiUrl("/api/mesh/contacts"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify(parsedBody),
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        throw new Error(errorText(payload, t("mesh.addContactError")));
+      }
+
+      setAddValue("");
+      setAddSuccess(t("mesh.addContactSuccess"));
+      setContactsReloadKey((key) => key + 1);
+    } catch (error) {
+      setAddError(error instanceof Error ? error.message : t("mesh.addContactError"));
+    } finally {
+      window.clearTimeout(timeout);
+      setAddBusy(false);
+    }
+  }
+
+  function selectContact(meshId: string): void {
+    setSelectedMeshId((current) => (current === meshId ? undefined : meshId));
+    setComposeBody("");
+    setComposeError(undefined);
+    setComposeSuccess(undefined);
+  }
+
+  async function sendMail(): Promise<void> {
+    const toMeshId = selectedMeshId;
+    const body = composeBody.trim();
+
+    if (!toMeshId || !body) {
+      return;
+    }
+
+    setComposeBusy(true);
+    setComposeError(undefined);
+    setComposeSuccess(undefined);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(apiUrl("/api/mesh/messages"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ toMeshId, body }),
+      });
+      const payload: unknown = await response.json().catch(() => undefined);
+
+      if (!response.ok) {
+        throw new Error(errorText(payload, t("mesh.composeError")));
+      }
+
+      setComposeBody("");
+      setComposeSuccess(t("mesh.composeSuccess"));
+    } catch (error) {
+      setComposeError(error instanceof Error ? error.message : t("mesh.composeError"));
+    } finally {
+      window.clearTimeout(timeout);
+      setComposeBusy(false);
+    }
+  }
+
+  return (
+    <section className="settings-view">
+      <header className="conversation-header">
+        <NavLink active={false} className="mobile-back" href="/channels">
+          ←
+        </NavLink>
+        <div>
+          <p className="eyebrow">{t("mesh.eyebrow")}</p>
+          <h1>{t("mesh.title")}</h1>
+        </div>
+      </header>
+      <div className="settings-grid">
+        <div className="profile-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{t("mesh.myCardEyebrow")}</p>
+              <h2>{t("mesh.myCardTitle")}</h2>
+            </div>
+          </div>
+          <p className="form-note">{t("mesh.myCardNote")}</p>
+          {cardLoading ? <p className="form-note">{t("mesh.myCardLoading")}</p> : null}
+          {cardError ? <p className="form-error">{cardError}</p> : null}
+          {card ? (
+            <>
+              {qrSvg ? (
+                <div aria-hidden="true" className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+              ) : (
+                <p className="form-note">{t("mesh.myCardQrTooLarge")}</p>
+              )}
+              {/* Visible, selectable copy of the card so a clipboard-less (insecure-context) browser —
+                  the norm on LOAM's plain-HTTP LAN — and screen readers (the QR is aria-hidden) can
+                  still get it out, mirroring the join-QR panel's URL fallback. */}
+              <textarea
+                aria-label={t("mesh.myCardTitle")}
+                className="mesh-card-text"
+                onFocus={(event) => event.currentTarget.select()}
+                readOnly
+                rows={3}
+                value={cardJson}
+              />
+              <div className="profile-actions">
+                <button onClick={() => void copyCard()} type="button">
+                  {copied ? t("mesh.copyCardCopied") : t("mesh.copyCard")}
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
+
+        <div className="profile-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{t("mesh.addContactEyebrow")}</p>
+              <h2>{t("mesh.addContactTitle")}</h2>
+            </div>
+          </div>
+          <label className="sr-only" for={addContactId}>
+            {t("mesh.addContactTitle")}
+          </label>
+          <textarea
+            dir="auto"
+            disabled={addBusy}
+            id={addContactId}
+            onInput={(event) => setAddValue(event.currentTarget.value)}
+            placeholder={t("mesh.addContactPlaceholder")}
+            rows={4}
+            value={addValue}
+          />
+          {addError ? <p className="form-error">{addError}</p> : null}
+          {addSuccess ? <p className="form-note">{addSuccess}</p> : null}
+          <div className="profile-actions">
+            <button disabled={addBusy || !addValue.trim()} onClick={() => void addContact()} type="button">
+              {addBusy ? t("mesh.addContactAdding") : t("mesh.addContactButton")}
+            </button>
+          </div>
+        </div>
+
+        <div className="profile-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{t("mesh.contactsEyebrow")}</p>
+              <h2>{t("mesh.contactsTitle")}</h2>
+            </div>
+            <button className="ghost-button" onClick={() => setContactsReloadKey((key) => key + 1)} type="button">
+              {t("common.refresh")}
+            </button>
+          </div>
+          {contacts === undefined && !contactsError ? <p className="form-note">{t("mesh.contactsLoading")}</p> : null}
+          {contactsError ? <p className="form-error">{contactsError}</p> : null}
+          {contacts && contacts.length === 0 ? <p className="form-note">{t("mesh.contactsEmpty")}</p> : null}
+          {contacts?.length ? (
+            <ul className="moderation-list">
+              {contacts.map((contact) => (
+                <li className="moderation-row" key={contact.meshId}>
+                  <div className="moderation-identity">
+                    <div className="moderation-name">
+                      <strong>{contact.displayName ?? contact.meshId}</strong>
+                      {contact.displayName ? <span>{contact.meshId}</span> : null}
+                    </div>
+                  </div>
+                  <div className="moderation-actions">
+                    <button onClick={() => selectContact(contact.meshId)} type="button">
+                      {selectedMeshId === contact.meshId ? t("mesh.composeHide") : t("mesh.composeShow")}
+                    </button>
+                  </div>
+                  {selectedMeshId === contact.meshId ? (
+                    <div className="mesh-compose">
+                      <textarea
+                        dir="auto"
+                        disabled={composeBusy}
+                        onInput={(event) => setComposeBody(event.currentTarget.value)}
+                        placeholder={t("mesh.composePlaceholder")}
+                        rows={3}
+                        value={composeBody}
+                      />
+                      <p className="form-note">{t("mesh.composeReplyNote")}</p>
+                      {composeError ? <p className="form-error">{composeError}</p> : null}
+                      {composeSuccess ? <p className="form-note">{composeSuccess}</p> : null}
+                      <div className="profile-actions">
+                        <button
+                          disabled={composeBusy || !composeBody.trim()}
+                          onClick={() => void sendMail()}
+                          type="button"
+                        >
+                          {composeBusy ? t("mesh.composeSending") : t("mesh.composeSend")}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
  * Renders the settings screen for the current user, including join QR, identity preview,
  * profile form (display name and generated avatar style), and an image crop upload editor.
  *
@@ -4283,6 +4655,7 @@ function AdminView({
         security: adminConfig.security,
         access: adminConfig.access,
         sync: adminConfig.sync,
+        mesh: adminConfig.mesh,
       };
       const response = await fetch(apiUrl("/api/admin/config"), {
         method: "PATCH",
@@ -4349,6 +4722,12 @@ function AdminView({
   function setKillSwitch(update: Partial<LoamConfig["killSwitch"]>): void {
     setAdminConfig((previous) =>
       previous ? { ...previous, killSwitch: { ...previous.killSwitch, ...update } } : previous,
+    );
+  }
+
+  function setMesh(update: Partial<LoamConfig["mesh"]>): void {
+    setAdminConfig((previous) =>
+      previous ? { ...previous, mesh: { ...previous.mesh, ...update } } : previous,
     );
   }
 
@@ -4875,6 +5254,99 @@ function AdminView({
             />
             <p className="form-note">{t("admin.peerChangesNote")}</p>
             <SyncStatusPanel />
+          </div>
+          <div className="profile-panel">
+            <div>
+              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
+              <h2>{t("admin.meshHeading")}</h2>
+            </div>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.mesh.enabled}
+                disabled={saving}
+                onInput={(event) => setMesh({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              {t("admin.meshEnable")}
+            </label>
+            <p className="form-note">{t("admin.meshNote")}</p>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.mesh.relay}
+                disabled={saving || !adminConfig.mesh.enabled}
+                onInput={(event) => setMesh({ relay: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              {t("admin.meshRelay")}
+            </label>
+            <label>
+              {t("admin.meshLifetimeLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={MESH_TTL_HOURS_MAX}
+                min={MESH_TTL_HOURS_MIN}
+                onInput={(event) => {
+                  const hours = Number.parseFloat(event.currentTarget.value);
+                  if (Number.isFinite(hours)) {
+                    setMesh({
+                      ttlMs: clamp(Math.round(hours * 3_600_000), MESH_TTL_MS_MIN, MESH_TTL_MS_MAX),
+                    });
+                  }
+                }}
+                step="0.5"
+                type="number"
+                value={String(Math.round((adminConfig.mesh.ttlMs / 3_600_000) * 100) / 100)}
+              />
+            </label>
+            <p className="form-note">{t("admin.meshLifetimeNote")}</p>
+            <label>
+              {t("admin.meshHopLimitLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={16}
+                min={1}
+                onInput={(event) => {
+                  const hopLimit = Number.parseInt(event.currentTarget.value, 10);
+                  if (Number.isFinite(hopLimit)) {
+                    setMesh({ hopLimit: clamp(hopLimit, 1, 16) });
+                  }
+                }}
+                type="number"
+                value={String(adminConfig.mesh.hopLimit)}
+              />
+            </label>
+            <label>
+              {t("admin.meshMaxCarriedLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={100_000}
+                min={0}
+                onInput={(event) => {
+                  const maxCarried = Number.parseInt(event.currentTarget.value, 10);
+                  if (Number.isFinite(maxCarried)) {
+                    setMesh({ maxCarried: clamp(maxCarried, 0, 100_000) });
+                  }
+                }}
+                type="number"
+                value={String(adminConfig.mesh.maxCarried)}
+              />
+            </label>
+            <label>
+              {t("admin.meshMaxContactsLabel")}
+              <input
+                disabled={saving || !adminConfig.mesh.enabled}
+                max={100_000}
+                min={0}
+                onInput={(event) => {
+                  const maxContacts = Number.parseInt(event.currentTarget.value, 10);
+                  if (Number.isFinite(maxContacts)) {
+                    setMesh({ maxContacts: clamp(maxContacts, 0, 100_000) });
+                  }
+                }}
+                type="number"
+                value={String(adminConfig.mesh.maxContacts)}
+              />
+            </label>
           </div>
           <div className="profile-panel">
             <div>

@@ -10,6 +10,7 @@ import {
   createMeshIdentity,
   currentEpoch,
   mailboxTag,
+  meshIdFromSignPublic,
   openMailbox,
   sealMailbox,
   verifyKxBinding,
@@ -30,6 +31,7 @@ import {
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
   MessageEditRequestSchema,
+  MeshIdentityCardSchema,
   MeshSendRequestSchema,
   MessageSchema,
   ModerationUpdateRequestSchema,
@@ -50,6 +52,8 @@ import {
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
+  type MeshContact,
+  type MeshIdentityCard,
   type SealedMessage,
   type NetworkConfig,
   type OllamaConfig,
@@ -412,6 +416,7 @@ export function defaultLoamConfig(): LoamConfig {
       ttlMs: 72 * 3_600_000,
       hopLimit: 6,
       maxCarried: 5_000,
+      maxContacts: 1_000,
     },
   };
 }
@@ -803,6 +808,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const peerSyncStatus = new Map<string, PeerSyncStatus>();
   let syncRunning = false;
   let lastSyncLoopAt = 0;
+  // Bumped by every kill-switch wipe. A sync round captures it before its first await and abandons
+  // itself the moment it changes, so an in-flight pull can't re-persist peer data onto the freshly
+  // wiped store (docs/15 #2). A monotonic counter, never reset — only equality across a round matters.
+  let wipeGeneration = 0;
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -1070,6 +1079,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return {
       nodeName: appConfig.node.name,
       ...appConfig.features,
+      enableMesh: appConfig.mesh.enabled,
       enableLLMChat: llmEnabled(),
       enableLLMStreaming: llmEnabled(),
       allowUserDisplayNameEdit: appConfig.identity.allowUserDisplayNameEdit,
@@ -1239,15 +1249,52 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function publicUser(user: User): User {
     // Always drop the property (not just when truthy): if a restored user carried `shadowBanned:
     // false` while a shadow-banned user's copy omitted it, the field's mere presence/absence would
-    // itself leak status. Removing it unconditionally makes every public record uniform.
+    // itself leak status. Removing it unconditionally makes every public record uniform. `roles`
+    // (moderator/greeter) is stripped for the same reason a joiner must not be able to enumerate who
+    // holds authority on the node — only the subject themselves and moderators see it (rolesVisibleUser).
+    const clone = { ...user };
+    delete clone.shadowBanned;
+    delete clone.roles;
+    return clone;
+  }
+
+  /** Like `publicUser` but keeps `roles` — for the record's own owner (so their client can gate its
+   * moderation UI) and for moderators (who legitimately manage roles). Still never leaks shadowBanned. */
+  function rolesVisibleUser(user: User): User {
     const clone = { ...user };
     delete clone.shadowBanned;
     return clone;
   }
 
-  function visibleUsers(): User[] {
+  /** The single record of `user` that `viewer` is allowed to see: `roles` only on the viewer's own
+   * record or when the viewer is a moderator/admin; `shadowBanned` never. The one sanitizer every
+   * user-egress path (roster, channel members, pending queue, approve/deny) routes through. */
+  function sanitizeUserFor(viewer: User, user: User): User {
+    return canModerate(viewer) || user.id === viewer.id ? rolesVisibleUser(user) : publicUser(user);
+  }
+
+  /** A mesh sender's display id (`mesh.<hash>`) — a sealed-mail delivery artifact, not a public roster
+   * member (docs/16). Never a local session/seed/bot id (those are `user.`/`llm.`). */
+  function isMeshSentinelUser(id: string): boolean {
+    return id.startsWith("mesh.");
+  }
+
+  /** Whether `viewerId` has received sealed mail from mesh sender `meshId` — the only reason that
+   * sender's display record is visible to them (it never joins the shared roster). */
+  function meshSenderVisibleTo(meshId: string, viewerId: string): boolean {
+    return data.messages.some(
+      (message) => message.type === "dm" && message.authorId === meshId && message.recipientUserId === viewerId,
+    );
+  }
+
+  /** The roster as `viewer` may see it: sanitized per-user, and with mesh sender artifacts hidden
+   * except from the recipients they actually mailed. */
+  function visibleUsers(viewer: User): User[] {
     const base = llmEnabled() ? data.users : data.users.filter((user) => user.type !== "bot");
-    return base.filter((user) => !user.banned && !user.pending).map(publicUser);
+    return base
+      .filter((user) => !user.banned && !user.pending)
+      .filter((user) => !isMeshSentinelUser(user.id) || meshSenderVisibleTo(user.id, viewer.id))
+      .map((user) => sanitizeUserFor(viewer, user));
   }
 
   function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
@@ -1525,12 +1572,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function broadcast(event: ClientEvent): void {
-    // Never put a user's shadow-ban state on the wire — not even to themselves (the point of a
-    // *shadow* ban) or moderators (who read it via /api/moderation/users). The ban still takes full
-    // effect server-side; this only hides the flag. Serialize the sanitized copy once for all sockets.
-    const outbound = event.type === "userUpserted" ? { ...event, user: publicUser(event.user) } : event;
-    const payload = JSON.stringify(outbound);
+    if (event.type === "userUpserted") {
+      // Two shapes: `roles` (moderator/greeter) reach only the subject (so their own client can gate
+      // its moderation UI) and moderators (who manage roles); everyone else gets the fully-public
+      // record. `shadowBanned` is never on the wire in EITHER shape — not even to self or moderators
+      // (they read it via /api/moderation/users). The ban still takes full effect server-side.
+      const subject = event.user;
+      const strippedPayload = JSON.stringify({ ...event, user: publicUser(subject) });
+      const rolesPayload = JSON.stringify({ ...event, user: rolesVisibleUser(subject) });
 
+      for (const { socket, userId } of sockets) {
+        if (socket.readyState !== socket.OPEN || !socketCanReceiveEvent(userId, event)) {
+          continue;
+        }
+        const recipient = data.users.find((candidate) => candidate.id === userId);
+        const seesRoles = userId === subject.id || (!!recipient && canModerate(recipient));
+        socket.send(seesRoles ? rolesPayload : strippedPayload);
+      }
+      return;
+    }
+
+    const payload = JSON.stringify(event);
     for (const { socket, userId } of sockets) {
       if (socket.readyState === socket.OPEN && socketCanReceiveEvent(userId, event)) {
         socket.send(payload);
@@ -2079,6 +2141,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     meshIdentities.clear();
     loadMeshIdentities();
+    meshContacts.clear();
+    loadMeshContacts();
 
     sessions.clear();
 
@@ -2142,6 +2206,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * kill-switch settings themselves) survives — the wipe destroys data, not settings.
    */
   async function executeKillSwitch(): Promise<void> {
+    // Invalidate any in-flight sync round up front (before the first await here): a pull that resumes
+    // after this point will see the changed generation and bail instead of writing peer data back
+    // onto the store we're about to wipe (docs/15 #2).
+    wipeGeneration += 1;
+
     if (encryptionEnabled) {
       // Cryptographic wipe: destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh
       // key, so any bytes a forensic tool recovers from flash are unreadable — stronger than a
@@ -2562,7 +2631,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /** Best-effort copy of an imported message's attachment files from the peer that has them. */
-  async function importPeerAttachments(peerUrl: string, message: Message): Promise<void> {
+  async function importPeerAttachments(peerUrl: string, message: Message, generation: number): Promise<void> {
     if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
       return;
     }
@@ -2596,8 +2665,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           continue;
         }
 
+        // A kill switch during the fetch just deleted the attachments dir — don't recreate it and
+        // write an orphaned file the wipe was meant to destroy (docs/15 #2).
+        if (wipeGeneration !== generation) {
+          return;
+        }
+
         await mkdir(attachmentsDir, { recursive: true });
         await writeFile(filePath, bytes);
+
+        // ...and if the wipe landed *during* the write, remove the file we just orphaned.
+        if (wipeGeneration !== generation) {
+          await rm(filePath, { force: true });
+          return;
+        }
       } catch {
         // Message still imports; the image 404s until a later sync round retries... it won't —
         // acceptable v1 tradeoff, the text is the payload that matters off-grid.
@@ -2622,6 +2703,42 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       } catch {
         // Skip a corrupt row rather than crash boot.
       }
+    }
+  }
+
+  // Per-local-user mesh address book (ownerUserId → recipient meshId → the recipient's card). A card
+  // carries the contact's secret mailbox token, so it lives here (not on the public user record) and is
+  // exchanged deliberately (QR/paste), never synced. Sealing to a contact is the ONLY send path: it
+  // needs the token, and the card's self-certifying meshId defeats the key-substitution a synced
+  // identityKey couldn't (docs/16).
+  const meshContacts = new Map<string, Map<string, MeshIdentityCard>>();
+
+  function loadMeshContacts(): void {
+    for (const { ownerUserId, meshId, data: json } of store.loadMeshContacts()) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(json);
+      } catch {
+        continue; // corrupt JSON — skip rather than crash boot
+      }
+      // Re-validate on the way in: a stored row could have been tampered with. The card must parse,
+      // its row key must match the card's own id, and it must still be self-certifying + key-bound —
+      // exactly the checks addMeshContact applied before it was ever stored.
+      const result = MeshIdentityCardSchema.safeParse(parsed);
+      if (
+        !result.success ||
+        result.data.meshId !== meshId ||
+        meshIdFromSignPublic(result.data.sign) !== result.data.meshId ||
+        !verifyKxBinding(result.data.sign, result.data.kx, result.data.kxSig)
+      ) {
+        continue;
+      }
+      let book = meshContacts.get(ownerUserId);
+      if (!book) {
+        book = new Map();
+        meshContacts.set(ownerUserId, book);
+      }
+      book.set(meshId, result.data);
     }
   }
 
@@ -2679,21 +2796,40 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /** Routing tags a local identity answers to across the live TTL window (+ one epoch clock-skew).
-   * v1 derives the tag from the recipient's PUBLIC kx (no metadata-unlinkability — a documented v1
-   * limitation; the secret mailbox-token tag in docs/16 §2 is the v2 privacy upgrade). */
+   * Derived from the identity's SECRET mailbox token, so only the recipient and the senders it handed
+   * a card to can compute them — a passive carrier holding the sealed blob cannot correlate it to a
+   * recipient (metadata-unlinkability; docs/16 §2). A sender computes the same tag from the contact's
+   * `mailboxToken`, which it obtained out-of-band with the rest of the card. */
   function localTagsForWindow(identity: MeshIdentity, now: number): Set<string> {
     const tags = new Set<string>();
     const start = currentEpoch(now - appConfig.mesh.ttlMs, MESH_EPOCH_WINDOW_MS);
     const end = currentEpoch(now + MESH_EPOCH_WINDOW_MS, MESH_EPOCH_WINDOW_MS);
     for (let epoch = start; epoch <= end; epoch += 1) {
-      tags.add(mailboxTag(identity.kxPublic, epoch));
+      tags.add(mailboxTag(identity.mailboxToken, epoch));
     }
     return tags;
   }
 
+  /** Ensure a display record exists for a remote mesh sender and make it resolvable to `recipientUserId`
+   * ONLY — never via the shared roster or a global broadcast. Putting a mesh sender on the public
+   * roster would leak that some local user just received sealed mail (docs/16); `visibleUsers` hides
+   * these ids from everyone but the recipients they've mailed, and this notifies just the recipient. */
+  function ensureMeshSenderUser(meshId: string, recipientUserId: string): void {
+    let user = data.users.find((candidate) => candidate.id === meshId);
+    if (!user) {
+      // Persist first, then mirror in memory — but no global broadcast (unlike ensureUser).
+      user = makeUser(meshId);
+      store.upsertUser(user);
+      data.users.push(user);
+    }
+    // Idempotent on the recipient's client; sent every delivery so a second recipient of the same
+    // sender still learns the record without it ever reaching a third party.
+    sendEventToUsers(new Set([recipientUserId]), { type: "userUpserted", user: publicUser(user) });
+  }
+
   /** Deliver an opened sealed message to a local user as an ordinary DM from the sender's mesh id. */
   function deliverSealedAsDm(recipientUserId: string, senderMeshId: string, plaintext: string, now: number): void {
-    ensureUser(senderMeshId); // a display-only contact for the remote sender's mesh identity
+    ensureMeshSenderUser(senderMeshId, recipientUserId); // display-only, recipient-scoped (not the shared roster)
     const dm = MessageSchema.parse({
       id: newMessageId("mesh"),
       type: "dm",
@@ -2763,13 +2899,53 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return true; // opaque — no client broadcast
   }
 
-  /** Seal a message to a known recipient (by their published identityKey) and inject it into the mesh:
+  /** Verify and store a mesh contact card in `ownerUserId`'s address book. Rejects a card whose
+   * self-certifying `meshId` doesn't derive from its signing key, or whose `kxSig` doesn't bind its
+   * agreement key — the two checks that make sealing to a contact immune to key substitution. The
+   * card (name included) stays in the caller's private address book; it is NOT promoted to a shared
+   * roster user, so one local user's contacts aren't exposed to the others. Returns an error string
+   * on failure. */
+  function addMeshContact(ownerUserId: string, card: MeshIdentityCard): string | undefined {
+    if (meshIdFromSignPublic(card.sign) !== card.meshId) {
+      return "This mesh card is invalid (id does not match its key).";
+    }
+    if (!verifyKxBinding(card.sign, card.kx, card.kxSig)) {
+      return "This mesh card is invalid (key binding failed).";
+    }
+    let book = meshContacts.get(ownerUserId);
+    if (!book) {
+      book = new Map();
+      meshContacts.set(ownerUserId, book);
+    }
+    // Bound the address book so an authenticated client can't grow mesh_contacts without limit.
+    // Re-adding an existing contact (a key/name refresh) is always allowed — only NEW ids are capped.
+    if (!book.has(card.meshId) && book.size >= appConfig.mesh.maxContacts) {
+      return "Your mesh contact list is full.";
+    }
+    // Persist first, then mirror in memory — if the store write throws, the book doesn't diverge.
+    store.upsertMeshContact(ownerUserId, card.meshId, JSON.stringify(card));
+    book.set(card.meshId, card);
+    return undefined;
+  }
+
+  /** The current user's own shareable mesh identity card — public keys PLUS the secret mailbox token,
+   * so a recipient can be sealed to. Returned only over the authenticated identity endpoint. */
+  function meshIdentityCard(identity: MeshIdentity, displayName: string): MeshIdentityCard {
+    return {
+      meshId: identity.meshId,
+      alg: "ed25519",
+      sign: identity.signPublic,
+      kx: identity.kxPublic,
+      kxSig: identity.kxSig,
+      mailboxToken: identity.mailboxToken,
+      displayName,
+    };
+  }
+
+  /** Seal a message to a contact (a card the sender previously added) and inject it into the mesh:
    * delivered immediately if the recipient is local, else stored for sync to carry. Returns an error
    * string on failure. */
-  function sendSealed(sender: MeshIdentity, recipientUser: User, body: string): string | undefined {
-    if (!recipientUser.identityKey) {
-      return "That user has no mesh identity to receive sealed mail.";
-    }
+  function sendSealed(sender: MeshIdentity, contact: MeshIdentityCard, body: string): string | undefined {
     // Bound self-originated mail by the same per-node storage cap as relayed mail, so a local
     // participant can't fill the store with undeliverable sealed blobs (they persist until TTL).
     const carried = data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
@@ -2778,10 +2954,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     const now = Date.now();
     const ttlExpiresAt = now + appConfig.mesh.ttlMs;
-    const toTag = mailboxTag(recipientUser.identityKey.kx, currentEpoch(now, MESH_EPOCH_WINDOW_MS));
+    const toTag = mailboxTag(contact.mailboxToken, currentEpoch(now, MESH_EPOCH_WINDOW_MS));
     const aad = sealedAad(toTag, ttlExpiresAt);
     const blob = sealMailbox({
-      recipientKxPublic: recipientUser.identityKey.kx,
+      recipientKxPublic: contact.kx,
       sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
       plaintext: body,
       aad,
@@ -2810,7 +2986,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * land first), never into private/unknown channels (a malicious peer must not inject into a
    * local private channel id), never over a tombstone, and edits only when strictly newer.
    */
-  async function importPeerMessages(peerUrl: string, messages: Message[]): Promise<number> {
+  async function importPeerMessages(peerUrl: string, messages: Message[], generation: number): Promise<number> {
     const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
     const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
     let imported = 0;
@@ -2862,7 +3038,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           }
         }
 
-        await importPeerAttachments(peerUrl, message);
+        await importPeerAttachments(peerUrl, message, generation);
+        // A kill switch during the attachment fetch just wiped the store — stop before we insert
+        // this (and any later) message back onto it (docs/15 #2).
+        if (wipeGeneration !== generation) {
+          return imported;
+        }
       }
 
       const existing = data.messages.find((candidate) => candidate.id === message.id);
@@ -2894,12 +3075,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /** One pull round against one peer: digest → diff (skipping tombstones) → fetch → import. */
   async function syncWithPeer(peer: SyncPeer): Promise<void> {
+    // Snapshot the wipe generation: if a kill switch fires mid-round, every post-await check below
+    // abandons the round rather than writing peer data back onto the wiped store (docs/15 #2).
+    const generation = wipeGeneration;
     const status = peerSyncStatus.get(peer.url) ?? { imported: 0 };
     peerSyncStatus.set(peer.url, status);
     status.lastAttemptAt = Date.now();
 
     try {
       const digest = await fetchPeerJson(peer.url, "/api/sync/digest", SyncDigestSchema);
+      if (wipeGeneration !== generation) {
+        return;
+      }
 
       for (const channel of digest.channels) {
         if (channel.visibility !== "public" || ensureChannel(channel.id)) {
@@ -2955,8 +3142,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           SyncMessagesResponseSchema,
           { ids: wanted.slice(start, start + 200) },
         );
+        if (wipeGeneration !== generation) {
+          return;
+        }
         importPeerUsers(payload.users);
-        imported += await importPeerMessages(peer.url, payload.messages);
+        imported += await importPeerMessages(peer.url, payload.messages, generation);
+        if (wipeGeneration !== generation) {
+          return;
+        }
       }
 
       status.lastSuccessAt = Date.now();
@@ -3117,7 +3310,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       version: options.version ?? "dev",
       joinUrl: `http://${joinHost}:${clientPort}`,
       websocketPath: "/ws",
-      currentUser: publicUser(currentUser),
+      currentUser: rolesVisibleUser(currentUser),
       networkConfig: currentNetworkConfig(),
     };
   });
@@ -3130,7 +3323,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody(accessError));
     }
 
-    return visibleUsers();
+    return visibleUsers(currentUser);
   });
   server.patch("/api/users/me", async (request, reply) => {
     const body = UserUpdateRequestSchema.safeParse(request.body);
@@ -3361,7 +3554,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("Greeter access required"));
     }
 
-    return data.users.filter((user) => user.type === "human" && user.pending === true);
+    return data.users
+      .filter((user) => user.type === "human" && user.pending === true)
+      .map((user) => sanitizeUserFor(currentUser, user));
   });
 
   // Approve a pending user so they can participate. Admins and greeters.
@@ -3378,7 +3573,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(404).send(errorBody("User does not exist"));
     }
 
-    return applyUserModeration(user, { pending: false });
+    return sanitizeUserFor(currentUser, applyUserModeration(user, { pending: false }));
   });
 
   // Deny a pending user: bans them (clearing pending) and tears down their sessions. Admins and
@@ -3409,7 +3604,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const updated = applyUserModeration(user, { banned: true, pending: false });
     invalidateUserSessions(user.id);
-    return updated;
+    return sanitizeUserFor(currentUser, updated);
   });
 
   server.get<{ Params: { fileName: string } }>(
@@ -3589,7 +3784,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const members = channelMemberIds(channel);
-    return data.users.filter((user) => members.has(user.id));
+    // Sanitize like the roster: a non-moderator member must not learn another member's roles/shadowBan.
+    return data.users.filter((user) => members.has(user.id)).map((user) => sanitizeUserFor(currentUser, user));
   });
 
   // Invite a user into a private channel. The channel owner or an admin only; adding an existing
@@ -3869,14 +4065,87 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const wanted = new Set(body.data.ids);
       const messages = data.messages.filter((message) => wanted.has(message.id) && isSyncableMessage(message));
       const authorIds = new Set(messages.map((message) => message.authorId));
-      const users = data.users.filter((user) => authorIds.has(user.id));
+      // Sanitize author records before they cross to a peer: a peer operator has no more business
+      // enumerating who holds authority here than a joiner does (`publicUser` strips roles +
+      // shadowBanned), and an import strips authority regardless.
+      const users = data.users.filter((user) => authorIds.has(user.id)).map(publicUser);
       return { messages, users };
     },
   );
 
-  // Send a sealed mailbox message (opportunistic-mesh — docs/16) to a known user who has published a
-  // mesh identityKey. The server seals it to that user's key and lets the sync layer carry it; only
-  // the recipient's home node can open it. 404 unless mesh is enabled (indistinguishable from absent).
+  // The current user's own shareable mesh identity card (opportunistic-mesh — docs/16): public keys
+  // PLUS the secret mailbox token, so a peer can add it as a contact and seal mail to them. Returned
+  // only over this authenticated endpoint — the token never rides sync. 404 unless mesh is enabled.
+  server.get("/api/mesh/identity", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+    if (!appConfig.mesh.enabled) {
+      return reply.code(404).send(errorBody("Not found"));
+    }
+
+    const identity = ensureMeshIdentity(currentUser.id);
+    if (!identity) {
+      return reply.code(400).send(errorBody("This user has no mesh identity"));
+    }
+    return meshIdentityCard(identity, currentUser.displayName);
+  });
+
+  // Add a mesh contact from a scanned/pasted identity card (docs/16). The card is re-verified
+  // server-side (self-certifying id + kx binding) before storing, so a forged or substituted card
+  // can't be added and later sealed to. 404 unless mesh is enabled (indistinguishable from absent).
+  server.post(
+    "/api/mesh/contacts",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+      if (!appConfig.mesh.enabled) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const card = MeshIdentityCardSchema.safeParse(request.body);
+      if (!card.success) {
+        return reply.code(400).send(errorBody("Invalid mesh card"));
+      }
+
+      const addError = addMeshContact(currentUser.id, card.data);
+      if (addError) {
+        return reply.code(400).send(errorBody(addError));
+      }
+      return { ok: true, meshId: card.data.meshId };
+    },
+  );
+
+  // The current user's mesh address book (docs/16) — meshId + display name only, never any secret.
+  server.get("/api/mesh/contacts", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+    if (!appConfig.mesh.enabled) {
+      return reply.code(404).send(errorBody("Not found"));
+    }
+
+    const book = meshContacts.get(currentUser.id);
+    const contacts: MeshContact[] = book
+      ? [...book.values()].map((card) => ({ meshId: card.meshId, displayName: card.displayName }))
+      : [];
+    return contacts;
+  });
+
+  // Send a sealed mailbox message (opportunistic-mesh — docs/16) to a contact the sender has already
+  // added (by their self-certifying mesh id). The server seals it to that contact's key and lets the
+  // sync layer carry it; only the recipient's home node can open it. 404 unless mesh is enabled.
   server.post(
     "/api/mesh/messages",
     // Sealing runs public-key crypto and consumes relay/storage capacity across the mesh, so cap it
@@ -3906,10 +4175,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send(errorBody("This user has no mesh identity"));
     }
 
-    const recipient = data.users.find((user) => user.id === body.data.toUserId);
+    const contact = meshContacts.get(currentUser.id)?.get(body.data.toMeshId);
 
-    if (!recipient || !recipient.identityKey) {
-      return reply.code(404).send(errorBody("Recipient has no mesh identity"));
+    if (!contact) {
+      return reply.code(404).send(errorBody("No such mesh contact"));
     }
 
     // A shadow-banned sender gets a normal-looking success, but the mail is silently dropped — never
@@ -3918,7 +4187,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { ok: true };
     }
 
-    const sendError = sendSealed(sender, recipient, body.data.body);
+    const sendError = sendSealed(sender, contact, body.data.body);
 
     if (sendError) {
       return reply.code(400).send(errorBody(sendError));

@@ -15,15 +15,25 @@ ranked within each group. Each entry names the file and the concrete change.
    *which* peers may talk. Next: reject an imported message whose `authorId` matches a locally
    *authoritative* user (admin/moderator/greeter) unless that author record was itself imported;
    longer-term, per-peer **signed authors** (docs/11).
-2. **Kill switch can be partially undone by an in-flight sync round.** `executeKillSwitch` deletes +
-   re-seeds while a `runSyncLoop` round is mid-`await`; the resuming import re-persists peer messages
-   onto the freshly-wiped store. Add a wipe **generation counter**; have `syncWithPeer`/
-   `importPeerMessages` bail after each `await` if the generation changed (or await the in-flight
-   round before wiping).
-3. **`roles` leak.** `GET /api/users` / `visibleUsers` returns every user's `roles`, so any joiner
-   learns who the moderators/greeters are. Strip `roles` for non-moderator recipients (same shape as
-   the `shadowBanned` strip already landed via `publicUser`), keeping the current user's own roles so
-   the client can still gate its moderation UI.
+2. ~~**Kill switch can be partially undone by an in-flight sync round.**~~ **RESOLVED**
+   (`feat/mesh-secure-addressing`): a `wipeGeneration` counter is bumped at the top of
+   `executeKillSwitch` (before its first await); `syncWithPeer` snapshots it and bails after the digest
+   fetch, after each message fetch, and `importPeerMessages` bails after its attachment fetch — so a
+   pull that resumes after a wipe abandons the round instead of re-persisting peer data.
+   `importPeerAttachments` carries the same guard (bails after its download, and unlinks the file if a
+   wipe lands during the write), so no orphaned attachment survives. The deterministic gated-peer test
+   (kill switch fires while the pull is suspended on the peer's response) verifies the **message + user**
+   path specifically; the attachment guard is the same construction, not separately fixtured.
+3. ~~**`roles` leak.**~~ **RESOLVED** (`feat/mesh-secure-addressing`): `publicUser` now strips `roles`
+   as well as `shadowBanned`; a new `rolesVisibleUser` keeps them for the subject's own record and for
+   moderators, and one `sanitizeUserFor(viewer, user)` helper is the single decision every user-egress
+   path routes through. Covered: `GET /api/users` (`visibleUsers(viewer)`), `/api/config` `currentUser`
+   (own roles kept), the recipient-aware `userUpserted` broadcast (roles only to subject + moderators),
+   the sync author export, **the private-channel member list** (`GET /api/channels/:id/members` — a
+   non-moderator member no longer sees others' roles/`shadowBanned`), and **the pending-access endpoints**
+   (`/api/access/pending|approve|deny` — a non-moderator greeter no longer sees them). Member-list and
+   roster tests cover it. (Known residual: `isAdmin` is still enumerable to everyone — lower
+   sensitivity, pre-existing, left as-is.)
 4. **"Wipe this device" can't revoke the server session.** The identity is the HttpOnly
    `loam_session` cookie, which JS can't clear, so a reload re-mints the same identity and re-hydrates
    the cache (`purgeLocalData`, `apps/client/src/app.tsx`). Add an endpoint to invalidate the current

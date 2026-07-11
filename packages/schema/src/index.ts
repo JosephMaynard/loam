@@ -218,6 +218,8 @@ export const NetworkConfigSchema = z.object({
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
   enablePresence: z.boolean(),
+  /** Opportunistic sealed-mailbox mesh (docs/16). When on, the client shows the mesh contacts + card UI. */
+  enableMesh: z.boolean(),
   enableLLMChat: z.boolean(),
   enableLLMStreaming: z.boolean(),
   allowUserDisplayNameEdit: z.boolean(),
@@ -342,6 +344,9 @@ export const MeshConfigSchema = z.object({
   ttlMs: z.number().int().min(60_000).max(7 * 24 * 3_600_000),
   hopLimit: z.number().int().min(1).max(16),
   maxCarried: z.number().int().min(0).max(100_000),
+  /** Cap on a single local user's mesh address book, so an authenticated client can't grow the
+   * `mesh_contacts` store without bound (mirrors `maxCarried` for sealed blobs). */
+  maxContacts: z.number().int().min(0).max(100_000),
 });
 export type MeshConfig = z.infer<typeof MeshConfigSchema>;
 
@@ -692,12 +697,44 @@ export const SyncMessagesResponseSchema = z.object({
 export type SyncMessagesResponse = z.infer<typeof SyncMessagesResponseSchema>;
 
 /**
- * Client request to send a sealed mailbox message (opportunistic-mesh — docs/16) to a known user who
- * has published a mesh `identityKey`. The server seals it to that user's key and lets it propagate;
- * only the recipient's home node can open it. The recipient reads it as an ordinary DM once delivered.
+ * A shareable **mesh identity card** (opportunistic-mesh — docs/16): everything a peer needs to seal
+ * mail to this identity. Unlike the public `identityKey` synced on a user record, the card ALSO carries
+ * the secret `mailboxToken` (used to derive the recipient's rotating routing tag), so it must be
+ * exchanged deliberately — shown as a QR / copied string and added by the recipient — never broadcast.
+ * `GET /api/mesh/identity` returns your own card; `POST /api/mesh/contacts` accepts one. `meshId`
+ * self-certifies `sign` (`meshId = base32(hash(sign))`) and `kxSig` binds `kx` to `sign`, so a forged
+ * card can't impersonate an identity: both are re-verified server-side before a contact is stored.
+ */
+const Base64Url = z.string().regex(/^[A-Za-z0-9_-]+$/, "must be base64url");
+export const MeshIdentityCardSchema = z.object({
+  meshId: z.string().min(1).max(64),
+  alg: z.literal("ed25519"),
+  // The key fields must be well-formed base64url: the server feeds them straight to the crypto
+  // (`meshIdFromSignPublic`, `mailboxTag`), whose base64url decoder throws on any other character —
+  // so rejecting malformed input here keeps a garbage card a clean 400, never a 500 down the line.
+  sign: Base64Url.min(1).max(64),
+  kx: Base64Url.min(1).max(64),
+  kxSig: Base64Url.min(1).max(128),
+  mailboxToken: Base64Url.min(1).max(64),
+  displayName: z.string().min(1).max(80).optional(),
+});
+export type MeshIdentityCard = z.infer<typeof MeshIdentityCardSchema>;
+
+/** One entry in a local user's mesh address book (`GET /api/mesh/contacts`) — never exposes secrets. */
+export const MeshContactSchema = z.object({
+  meshId: z.string().min(1).max(64),
+  displayName: z.string().min(1).max(80).optional(),
+});
+export type MeshContact = z.infer<typeof MeshContactSchema>;
+
+/**
+ * Client request to send a sealed mailbox message (opportunistic-mesh — docs/16) to a **contact** the
+ * sender has already added (via a mesh identity card). Addressed by the recipient's self-certifying
+ * `mesh.` id, the server seals it to that contact's key and lets the sync layer carry it; only the
+ * recipient's home node can open it. The recipient reads it as an ordinary DM once delivered.
  */
 export const MeshSendRequestSchema = z.object({
-  toUserId: IdSchema,
+  toMeshId: z.string().min(1).max(64),
   body: z.string().min(1).max(8000),
 });
 export type MeshSendRequest = z.infer<typeof MeshSendRequestSchema>;
