@@ -1,10 +1,55 @@
 # 16 — Opportunistic mesh / delay-tolerant delivery (the "carry my message" evolution)
 
-> **Status: committed direction, not yet started. Phased, security-first.** This is the plan of
-> record for evolving LOAM from "two nodes that share a LAN sync" into "phones that carry each other's
-> messages across time and distance." It is a multi-session initiative. **Do not implement it in a
-> hurry** — see the guardrails; rushing the crypto/transport is the documented way every comparable
-> project has failed.
+> **Status: Phases 0–2 BUILT & TESTED; Phase 3 is the remaining hardware step.** The sealed-mailbox
+> A→C→B delivery works today over the existing sync transport (configured peers / courier). The rest
+> of this doc is the full design; the box below records what actually shipped and where it differs.
+
+## Implementation status (v1 — shipped)
+
+- **Phase 0 — `packages/crypto` (`@loam/crypto`)**: Ed25519 identity, X25519 sealed-sender envelope
+  (ephemeral-key ECDH → HKDF → XChaCha20-Poly1305, inner Ed25519 signature, AAD-bound relay
+  metadata), self-certifying `mesh.` id, `kx`↔`sign` binding, routing tags. Pure JS (`@noble/*`,
+  pinned Node-18-safe). 13 tests.
+- **Phase 1 — sealed mailbox (server)**: `sealed` `Message` arm, `User.identityKey`, `mesh` config,
+  `SyncDigest.sealed`. **Entirely server-side** — because LOAM's host is already trusted for its own
+  local users, per-user mesh keypairs live server-side (DB `mesh_identities`, public keys published
+  on the user record + synced) and the E2E guarantee is against **carrier nodes**, not a user's home
+  host. `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
+  DM.
+- **Phase 2 — bounded relay (server)**: carriers import sealed blobs opaquely and deliver-if-ours,
+  else relay onward (hop-decremented, per-carrier cap), else drop; the reaper expires + tombstones by
+  TTL. **TTL + hop + cap converge — acks are intentionally NOT implemented** (that sub-design is
+  threat-model-*blocked*, §3/§6). Proven by a 3-node A→C→B test: the carrier relays mail whose
+  ciphertext never contains the plaintext; the recipient decrypts it.
+- **Gated & non-breaking**: everything is behind `mesh.enabled` (default off, currently set via
+  `config.json` / `PATCH /api/admin/config` — an admin-UI toggle is a follow-up). With it off, public
+  sync is byte-identical to before; all pre-existing tests still pass.
+
+**Where v1 differs from the design below (deliberate, documented):**
+
+1. **Routing tag privacy** — v1 derives `toTag` from the recipient's **public** `kx`, so it routes
+   correctly but gives **no metadata-unlinkability** (anyone with the pubkey can compute the tag).
+   E2E **confidentiality** (carriers can't read content) is fully preserved. The secret-mailbox-token
+   `toTag` in §2 is the **v2 privacy hardening** (needs a contact-exchange channel to distribute the
+   token).
+2. **Recipient discovery** — a sender needs the recipient's published `identityKey`, which today
+   propagates only when the recipient has authored public content (the normal user-profile sync). A
+   dedicated contact/QR exchange is a follow-up.
+3. **AAD** binds `toTag`+`ttlExpiresAt` (both immutable); the original hop budget is bounded by the
+   schema max rather than the signature (v2 refinement).
+4. **Phase 3 (opportunistic transport — BLE discovery + Wi-Fi Aware)** is **not built**: it needs
+   physical Android devices to build+verify, and adding unverified native BLE/Wi-Fi-Aware code would
+   jeopardize the working APK (the same principled call as the on-device-LLM native inference). The
+   sealed layer already relays over **any** sync transport it's given (configured peers, the sequential
+   courier), so Phase 3 is purely *automation of discovery*, not a prerequisite for the feature to work.
+5. **Tombstone GC** — expired-sealed tombstones aren't yet horizon-GC'd (matches docs/11's existing
+   unbounded-tombstone behaviour); the bounded-GC in §3 is a follow-up.
+6. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
+
+---
+
+> **Design of record (below).** Phased, security-first. **Do not rush the unbuilt parts** — rushing
+> the crypto/transport is the documented way every comparable project has failed.
 
 ## The scenario
 

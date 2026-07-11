@@ -22,11 +22,17 @@ non-inflammatory (the node-wide wipe is "Emergency Reset" in public copy; code i
 technically honest** — the distinction is documenting privacy accurately vs. presenting
 law-enforcement avoidance as the purpose.
 
-**Next major initiative:** `docs/16-opportunistic-mesh.md` — delay-tolerant "carry my message" (A→C→B)
-delivery: cryptographic identity + E2EE sealed mailboxes + bounded epidemic relay over the existing
-sync engine, Android-first transport. Phased and security-first; **start at Phase 0** (a new
-`packages/crypto` identity primitive). Do not rush the crypto/transport — that's the documented way
-comparable apps (Bridgefy, FireChat) failed.
+**Opportunistic mesh / DTN** (`docs/16-opportunistic-mesh.md`) — delay-tolerant "carry my message"
+(A→C→B) delivery. **Phases 0–2 are BUILT & TESTED** (see the doc's "Implementation status"):
+`packages/crypto` (`@loam/crypto`) is the Ed25519/X25519 sealed-sender primitive; the server has a
+`sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL table), `POST
+/api/mesh/messages` to seal, and bounded relay (TTL/hop/cap, no acks) — all gated on `mesh.enabled`
+(default off; enable via config for now). It's **entirely server-side** (LOAM's host is already
+trusted for its local users, so the E2E guarantee is against carrier *nodes*), rides the existing
+sync transport, and doesn't touch public sync. **Not built:** Phase 3 (BLE/Wi-Fi-Aware opportunistic
+transport — needs physical devices), the secret-token `toTag` (v1 tags derive from the public kx → no
+metadata-unlinkability yet), contact/QR key discovery, and an admin-UI mesh toggle. Do not rush the
+unbuilt crypto/transport — that's the documented way comparable apps (Bridgefy, FireChat) failed.
 
 ## Layout
 
