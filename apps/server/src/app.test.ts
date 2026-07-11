@@ -7,9 +7,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { currentEpoch, mailboxTag } from "@loam/crypto";
-import { MeshIdentityCardSchema, type MeshIdentityCard } from "@loam/schema";
+import { MeshIdentityCardSchema, SERVER_ERROR_CODES, type MeshIdentityCard } from "@loam/schema";
 
-import { buildApp, type AppOptions, type LoamApp } from "./app.js";
+import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.js";
 
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 
@@ -75,6 +75,20 @@ async function claim(app: LoamApp, cookie: string, secret: string): Promise<Inje
     payload: { secret },
   });
 }
+
+describe("error codes", () => {
+  it("every error code the server actually returns is drawn from the canonical @loam/schema list", () => {
+    // ALL_ERROR_CODES (Object.values of the server's ERROR_CODES map) is typed against
+    // ServerErrorCode, so this is really a belt-and-braces runtime check that nothing slipped
+    // through — the real guarantee is the compile-time type constraint in app.ts.
+    for (const code of ALL_ERROR_CODES) {
+      expect(SERVER_ERROR_CODES as readonly string[], `unknown code ${code}`).toContain(code);
+    }
+    // No duplicate English messages mapping to the same code by accident, and every canonical
+    // code is unique too (both are asserted so the two lists can't quietly drift apart).
+    expect(new Set(ALL_ERROR_CODES).size).toBe(ALL_ERROR_CODES.length);
+  });
+});
 
 describe("admin bootstrap", () => {
   it("firstUser (default): the first session becomes admin, later ones do not", async () => {

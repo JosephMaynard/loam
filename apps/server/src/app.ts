@@ -59,6 +59,7 @@ import {
   type OllamaConfig,
   type StreamEvent,
   type SyncDigest,
+  type ServerErrorCode,
   type SyncPeer,
   type SyncStatusReport,
   type User,
@@ -240,10 +241,12 @@ const seedUsers = ["user.1234", "user.5678"];
  * Stable snake_case code for every error message the server can return, so clients can localize the
  * message from a catalog while the English `error` string stays as the fallback (unknown codes → the
  * client shows `error` verbatim). Keep these codes stable across releases — they are a wire contract
- * with a mixed-version mesh. Every value must have a matching `error.<code>` key in the client i18n
- * catalogs (enforced by `apps/client/src/i18n/i18n.test.ts`).
+ * with a mixed-version mesh. The canonical set of codes is `SERVER_ERROR_CODES` in `@loam/schema`
+ * (values here are typed against it, so a typo or unlisted code fails to compile); every code must
+ * also have a matching `error.<code>` key in the client i18n catalogs (enforced by
+ * `apps/client/src/i18n/i18n.test.ts`, which asserts against the same `SERVER_ERROR_CODES` list).
  */
-const ERROR_CODES: Record<string, string> = {
+const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Admin access required": "admin_required",
   "Admin claiming is not enabled on this LOAM node": "admin_claim_disabled",
   "Admin user editing is disabled on this LOAM node": "admin_user_edit_disabled",
@@ -332,8 +335,8 @@ const ERROR_CODES: Record<string, string> = {
   "Only admins can post in this channel": "channel_admins_post_only",
 };
 
-/** All stable error codes, exported so tests can assert client-catalog coverage. */
-export const ALL_ERROR_CODES: readonly string[] = Object.values(ERROR_CODES);
+/** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */
+export const ALL_ERROR_CODES: readonly ServerErrorCode[] = Object.values(ERROR_CODES);
 
 /**
  * Build an error response envelope, attaching the stable `code` for known messages. Unknown messages
