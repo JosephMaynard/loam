@@ -4,6 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { currentEpoch, mailboxTag } from "@loam/crypto";
+import type { MeshIdentityCard } from "@loam/schema";
+
 import { buildApp, type AppOptions, type LoamApp } from "./app.js";
 
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
@@ -3742,7 +3745,7 @@ describe("on-device LLM provider", () => {
 });
 
 describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
-  const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000 };
+  const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000, maxContacts: 1000 };
 
   function listen(app: LoamApp): Promise<string> {
     return app.server.listen({ host: "127.0.0.1", port: 0 });
@@ -3774,30 +3777,45 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       ).json() as { body?: string }[]
     ).map((message) => message.body ?? "");
   }
+  /** Fetch a user's shareable mesh identity card (the out-of-band contact exchange). */
+  async function meshCard(app: LoamApp, cookie: string): Promise<MeshIdentityCard> {
+    const res = await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie } });
+    expect(res.statusCode).toBe(200);
+    return res.json() as MeshIdentityCard;
+  }
+  /** Add a mesh card to the caller's address book (POST /api/mesh/contacts). */
+  function addContact(app: LoamApp, cookie: string, card: MeshIdentityCard): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/mesh/contacts", headers: { cookie }, payload: card });
+  }
 
   it("404s /api/mesh/messages when mesh is disabled", async () => {
     const app = await makeApp();
     const user = await newSession(app);
-    const other = await newSession(app);
     const res = await app.server.inject({
       method: "POST",
       url: "/api/mesh/messages",
       headers: { cookie: user.cookie },
-      payload: { toUserId: other.userId, body: "hi" },
+      payload: { toMeshId: "mesh.absent", body: "hi" },
     });
     expect(res.statusCode).toBe(404);
+    // The whole mesh surface is absent when disabled — identity + contacts too.
+    expect((await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie: user.cookie } })).statusCode).toBe(404);
   });
 
-  it("delivers sealed mail to a local recipient as a DM (seal + open on one node)", async () => {
+  it("delivers sealed mail to a contact as a DM (card exchange + seal + open on one node)", async () => {
     const app = await makeApp({ mesh: MESH });
     const alice = await newSession(app);
-    const bob = await newSession(app); // both get published mesh identities via the session hook
+    const bob = await newSession(app); // both get mesh identities via the session hook
+
+    // Alice adds Bob out-of-band (his card), then seals to his self-certifying mesh id.
+    const bobCard = await meshCard(app, bob.cookie);
+    expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
 
     const send = await app.server.inject({
       method: "POST",
       url: "/api/mesh/messages",
       headers: { cookie: alice.cookie },
-      payload: { toUserId: bob.userId, body: "meet at the old bridge" },
+      payload: { toMeshId: bobCard.meshId, body: "meet at the old bridge" },
     });
     expect(send.statusCode).toBe(200);
 
@@ -3807,11 +3825,94 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     expect(await dmBodies(app, bob.cookie, contact!.id)).toContain("meet at the old bridge");
   });
 
+  it("404s a send to a mesh id that isn't a contact (sealing requires an added card)", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const bobCard = await meshCard(app, bob.cookie);
+    // Alice never added Bob → cannot seal to him even though his id self-certifies.
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: alice.cookie },
+      payload: { toMeshId: bobCard.meshId, body: "hi" },
+    });
+    expect(send.statusCode).toBe(404);
+  });
+
+  it("rejects a forged mesh card (id/key mismatch and bad kx binding) so it can't be sealed to", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const mallory = await newSession(app);
+    const bobCard = await meshCard(app, bob.cookie);
+    const malloryCard = await meshCard(app, mallory.cookie);
+
+    // Substitution attempt: Bob's id but Mallory's keys — meshId no longer derives from `sign`.
+    const forgedId = { ...malloryCard, meshId: bobCard.meshId };
+    expect((await addContact(app, alice.cookie, forgedId)).statusCode).toBe(400);
+
+    // Tampered binding: valid id/sign, but kx swapped for Mallory's (kxSig no longer binds).
+    const forgedKx = { ...bobCard, kx: malloryCard.kx };
+    expect((await addContact(app, alice.cookie, forgedKx)).statusCode).toBe(400);
+
+    // Neither forgery was stored, so a send to Bob's id 404s (no contact).
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: alice.cookie },
+      payload: { toMeshId: bobCard.meshId, body: "hijack" },
+    });
+    expect(send.statusCode).toBe(404);
+  });
+
+  it("rejects a malformed mesh card (non-base64url key field) with 400, never a 500", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const bobCard = await meshCard(app, bob.cookie);
+
+    // A garbage `sign`/`mailboxToken` would otherwise reach the crypto's base64url decoder (which
+    // throws) — the schema must reject it at the boundary as a clean 400.
+    for (const bad of [
+      { ...bobCard, sign: "!!!not-base64!!!" },
+      { ...bobCard, mailboxToken: "has spaces" },
+    ]) {
+      expect((await addContact(app, alice.cookie, bad)).statusCode).toBe(400);
+    }
+    // And no forged card was stored, so a later send to Bob's id still 404s (no 500 anywhere).
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: alice.cookie },
+      payload: { toMeshId: bobCard.meshId, body: "hi" },
+    });
+    expect(send.statusCode).toBe(404);
+  });
+
+  it("caps the mesh address book at mesh.maxContacts (new ids blocked, refreshes allowed)", async () => {
+    const app = await makeApp({ mesh: { ...MESH, maxContacts: 1 } });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const mallory = await newSession(app);
+    const bobCard = await meshCard(app, bob.cookie);
+    const malloryCard = await meshCard(app, mallory.cookie);
+
+    expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
+    // A second DISTINCT contact exceeds the cap of 1.
+    expect((await addContact(app, alice.cookie, malloryCard)).statusCode).toBe(400);
+    // Re-adding an existing contact (a key/name refresh) is still allowed at the cap.
+    expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
+  });
+
   it("silently drops a shadow-banned sender's sealed mail (200, but nothing delivered)", async () => {
     const app = await makeApp({ mesh: MESH });
     const admin = await newSession(app); // firstUser → admin (can moderate)
     const spammer = await newSession(app);
     const bob = await newSession(app);
+
+    const bobCard = await meshCard(app, bob.cookie);
+    expect((await addContact(app, spammer.cookie, bobCard)).statusCode).toBe(200);
 
     await app.server.inject({
       method: "PATCH",
@@ -3825,7 +3926,7 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       method: "POST",
       url: "/api/mesh/messages",
       headers: { cookie: spammer.cookie },
-      payload: { toUserId: bob.userId, body: "spam spam spam" },
+      payload: { toMeshId: bobCard.meshId, body: "spam spam spam" },
     });
     expect(send.statusCode).toBe(200);
 
@@ -3842,26 +3943,21 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     const cAdmin = await adminOf(nodeC);
 
     const [aUrl, bUrl, cUrl] = await Promise.all([listen(nodeA), listen(nodeB), listen(nodeC)]);
-    // Pull topology: A learns Bob from B; C carries from A; B receives from C — A and B never meet.
+    // Pull topology: C carries from A; B receives from C — A and B never meet directly.
     expect((await setPeers(nodeA, aAdmin.cookie, [bUrl])).statusCode).toBe(200);
     expect((await setPeers(nodeC, cAdmin.cookie, [aUrl])).statusCode).toBe(200);
     expect((await setPeers(nodeB, bob.cookie, [cUrl])).statusCode).toBe(200);
 
-    // Bob posts publicly so his profile + published identityKey propagate to A.
-    await nodeB.server.inject({
-      method: "POST",
-      url: "/api/messages",
-      headers: { cookie: bob.cookie },
-      payload: { type: "channelPost", channelId: "general", body: "bob is here" },
-    });
-    await syncNow(nodeA, aAdmin.cookie); // A now knows Bob (with his mesh identityKey)
+    // Alice and Bob exchange cards out-of-band (no reliance on public-post sync); Alice adds Bob.
+    const bobCard = await meshCard(nodeB, bob.cookie);
+    expect((await addContact(nodeA, aAdmin.cookie, bobCard)).statusCode).toBe(200);
 
-    // Alice (node A) seals a message to Bob.
+    // Alice (node A) seals a message to Bob's mesh id.
     const send = await nodeA.server.inject({
       method: "POST",
       url: "/api/mesh/messages",
       headers: { cookie: aAdmin.cookie },
-      payload: { toUserId: bob.userId, body: "the rendezvous is at dawn" },
+      payload: { toMeshId: bobCard.meshId, body: "the rendezvous is at dawn" },
     });
     expect(send.statusCode).toBe(200);
 
@@ -3884,5 +3980,13 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     const sealed = cStored.find((m) => m.type === "sealed");
     expect(sealed).toBeDefined();
     expect(JSON.stringify(sealed)).not.toContain("dawn");
+
+    // Metadata privacy: the routing tag is derived from Bob's SECRET mailbox token, not his public kx —
+    // so a carrier holding only public key material (as v1 leaked) cannot recompute it. The sealer
+    // stamped `ttlExpiresAt = sendTime + ttlMs`, so we recover the exact send-time epoch.
+    const sealedMsg = sealed as { ttlExpiresAt: number; toTag: string };
+    const epoch = currentEpoch(sealedMsg.ttlExpiresAt - MESH.ttlMs, 24 * 3_600_000);
+    expect(sealedMsg.toTag).toBe(mailboxTag(bobCard.mailboxToken, epoch));
+    expect(sealedMsg.toTag).not.toBe(mailboxTag(bobCard.kx, epoch));
   });
 });

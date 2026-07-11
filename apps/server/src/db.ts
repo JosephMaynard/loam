@@ -133,6 +133,14 @@ export interface LoamStore {
    */
   upsertMeshIdentity(userId: string, data: string): void;
   loadMeshIdentities(): { userId: string; data: string }[];
+  /**
+   * Store (or replace) one entry in a local user's mesh address book (docs/16): the owner's user id,
+   * the contact's `mesh.` id, and an opaque JSON card (public keys + the contact's secret mailbox
+   * token, needed to seal to them). Per-owner so one local user's contacts aren't another's; wiped by
+   * the kill switch.
+   */
+  upsertMeshContact(ownerUserId: string, meshId: string, data: string): void;
+  loadMeshContacts(): { ownerUserId: string; meshId: string; data: string }[];
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -224,6 +232,12 @@ function buildStore(db: SqliteConnection): LoamStore {
       user_id TEXT PRIMARY KEY,
       data TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS mesh_contacts (
+      owner_user_id TEXT NOT NULL,
+      mesh_id TEXT NOT NULL,
+      data TEXT NOT NULL,
+      PRIMARY KEY (owner_user_id, mesh_id)
+    );
   `);
 
   const upsertUserStmt = db.prepare(
@@ -257,6 +271,11 @@ function buildStore(db: SqliteConnection): LoamStore {
     "INSERT INTO mesh_identities (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
   );
   const loadMeshIdentitiesStmt = db.prepare("SELECT user_id, data FROM mesh_identities");
+  const upsertMeshContactStmt = db.prepare(
+    `INSERT INTO mesh_contacts (owner_user_id, mesh_id, data) VALUES (?, ?, ?)
+     ON CONFLICT(owner_user_id, mesh_id) DO UPDATE SET data = excluded.data`,
+  );
+  const loadMeshContactsStmt = db.prepare("SELECT owner_user_id, mesh_id, data FROM mesh_contacts");
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -332,6 +351,16 @@ function buildStore(db: SqliteConnection): LoamStore {
     loadMeshIdentities() {
       return loadMeshIdentitiesStmt.all().map((row) => ({ userId: row.user_id as string, data: row.data as string }));
     },
+    upsertMeshContact(ownerUserId, meshId, data) {
+      upsertMeshContactStmt.run(ownerUserId, meshId, data);
+    },
+    loadMeshContacts() {
+      return loadMeshContactsStmt.all().map((row) => ({
+        ownerUserId: row.owner_user_id as string,
+        meshId: row.mesh_id as string,
+        data: row.data as string,
+      }));
+    },
     transaction(fn) {
       db.exec("BEGIN IMMEDIATE");
 
@@ -356,6 +385,7 @@ function buildStore(db: SqliteConnection): LoamStore {
         db.exec("DELETE FROM channels");
         db.exec("DELETE FROM tombstones");
         db.exec("DELETE FROM mesh_identities");
+        db.exec("DELETE FROM mesh_contacts");
       });
     },
     close() {

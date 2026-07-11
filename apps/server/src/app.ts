@@ -10,6 +10,7 @@ import {
   createMeshIdentity,
   currentEpoch,
   mailboxTag,
+  meshIdFromSignPublic,
   openMailbox,
   sealMailbox,
   verifyKxBinding,
@@ -30,6 +31,7 @@ import {
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
   MessageEditRequestSchema,
+  MeshIdentityCardSchema,
   MeshSendRequestSchema,
   MessageSchema,
   ModerationUpdateRequestSchema,
@@ -50,6 +52,8 @@ import {
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
+  type MeshContact,
+  type MeshIdentityCard,
   type SealedMessage,
   type NetworkConfig,
   type OllamaConfig,
@@ -412,6 +416,7 @@ export function defaultLoamConfig(): LoamConfig {
       ttlMs: 72 * 3_600_000,
       hopLimit: 6,
       maxCarried: 5_000,
+      maxContacts: 1_000,
     },
   };
 }
@@ -1070,6 +1075,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return {
       nodeName: appConfig.node.name,
       ...appConfig.features,
+      enableMesh: appConfig.mesh.enabled,
       enableLLMChat: llmEnabled(),
       enableLLMStreaming: llmEnabled(),
       allowUserDisplayNameEdit: appConfig.identity.allowUserDisplayNameEdit,
@@ -2079,6 +2085,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     meshIdentities.clear();
     loadMeshIdentities();
+    meshContacts.clear();
+    loadMeshContacts();
 
     sessions.clear();
 
@@ -2625,6 +2633,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
+  // Per-local-user mesh address book (ownerUserId → recipient meshId → the recipient's card). A card
+  // carries the contact's secret mailbox token, so it lives here (not on the public user record) and is
+  // exchanged deliberately (QR/paste), never synced. Sealing to a contact is the ONLY send path: it
+  // needs the token, and the card's self-certifying meshId defeats the key-substitution a synced
+  // identityKey couldn't (docs/16).
+  const meshContacts = new Map<string, Map<string, MeshIdentityCard>>();
+
+  function loadMeshContacts(): void {
+    for (const { ownerUserId, meshId, data: json } of store.loadMeshContacts()) {
+      try {
+        const card = JSON.parse(json) as MeshIdentityCard;
+        let book = meshContacts.get(ownerUserId);
+        if (!book) {
+          book = new Map();
+          meshContacts.set(ownerUserId, book);
+        }
+        book.set(meshId, card);
+      } catch {
+        // Skip a corrupt row rather than crash boot.
+      }
+    }
+  }
+
   /** Mint (if needed) and publish a local human user's mesh identity — the public keys land on the
    * user's `identityKey` so senders on other nodes can seal mail to them. No-op when mesh is off. */
   function ensureMeshIdentity(userId: string): MeshIdentity | undefined {
@@ -2679,14 +2710,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /** Routing tags a local identity answers to across the live TTL window (+ one epoch clock-skew).
-   * v1 derives the tag from the recipient's PUBLIC kx (no metadata-unlinkability — a documented v1
-   * limitation; the secret mailbox-token tag in docs/16 §2 is the v2 privacy upgrade). */
+   * Derived from the identity's SECRET mailbox token, so only the recipient and the senders it handed
+   * a card to can compute them — a passive carrier holding the sealed blob cannot correlate it to a
+   * recipient (metadata-unlinkability; docs/16 §2). A sender computes the same tag from the contact's
+   * `mailboxToken`, which it obtained out-of-band with the rest of the card. */
   function localTagsForWindow(identity: MeshIdentity, now: number): Set<string> {
     const tags = new Set<string>();
     const start = currentEpoch(now - appConfig.mesh.ttlMs, MESH_EPOCH_WINDOW_MS);
     const end = currentEpoch(now + MESH_EPOCH_WINDOW_MS, MESH_EPOCH_WINDOW_MS);
     for (let epoch = start; epoch <= end; epoch += 1) {
-      tags.add(mailboxTag(identity.kxPublic, epoch));
+      tags.add(mailboxTag(identity.mailboxToken, epoch));
     }
     return tags;
   }
@@ -2763,13 +2796,52 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return true; // opaque — no client broadcast
   }
 
-  /** Seal a message to a known recipient (by their published identityKey) and inject it into the mesh:
+  /** Verify and store a mesh contact card in `ownerUserId`'s address book. Rejects a card whose
+   * self-certifying `meshId` doesn't derive from its signing key, or whose `kxSig` doesn't bind its
+   * agreement key — the two checks that make sealing to a contact immune to key substitution. The
+   * card (name included) stays in the caller's private address book; it is NOT promoted to a shared
+   * roster user, so one local user's contacts aren't exposed to the others. Returns an error string
+   * on failure. */
+  function addMeshContact(ownerUserId: string, card: MeshIdentityCard): string | undefined {
+    if (meshIdFromSignPublic(card.sign) !== card.meshId) {
+      return "This mesh card is invalid (id does not match its key).";
+    }
+    if (!verifyKxBinding(card.sign, card.kx, card.kxSig)) {
+      return "This mesh card is invalid (key binding failed).";
+    }
+    let book = meshContacts.get(ownerUserId);
+    if (!book) {
+      book = new Map();
+      meshContacts.set(ownerUserId, book);
+    }
+    // Bound the address book so an authenticated client can't grow mesh_contacts without limit.
+    // Re-adding an existing contact (a key/name refresh) is always allowed — only NEW ids are capped.
+    if (!book.has(card.meshId) && book.size >= appConfig.mesh.maxContacts) {
+      return "Your mesh contact list is full.";
+    }
+    book.set(card.meshId, card);
+    store.upsertMeshContact(ownerUserId, card.meshId, JSON.stringify(card));
+    return undefined;
+  }
+
+  /** The current user's own shareable mesh identity card — public keys PLUS the secret mailbox token,
+   * so a recipient can be sealed to. Returned only over the authenticated identity endpoint. */
+  function meshIdentityCard(identity: MeshIdentity, displayName: string): MeshIdentityCard {
+    return {
+      meshId: identity.meshId,
+      alg: "ed25519",
+      sign: identity.signPublic,
+      kx: identity.kxPublic,
+      kxSig: identity.kxSig,
+      mailboxToken: identity.mailboxToken,
+      displayName,
+    };
+  }
+
+  /** Seal a message to a contact (a card the sender previously added) and inject it into the mesh:
    * delivered immediately if the recipient is local, else stored for sync to carry. Returns an error
    * string on failure. */
-  function sendSealed(sender: MeshIdentity, recipientUser: User, body: string): string | undefined {
-    if (!recipientUser.identityKey) {
-      return "That user has no mesh identity to receive sealed mail.";
-    }
+  function sendSealed(sender: MeshIdentity, contact: MeshIdentityCard, body: string): string | undefined {
     // Bound self-originated mail by the same per-node storage cap as relayed mail, so a local
     // participant can't fill the store with undeliverable sealed blobs (they persist until TTL).
     const carried = data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
@@ -2778,10 +2850,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     const now = Date.now();
     const ttlExpiresAt = now + appConfig.mesh.ttlMs;
-    const toTag = mailboxTag(recipientUser.identityKey.kx, currentEpoch(now, MESH_EPOCH_WINDOW_MS));
+    const toTag = mailboxTag(contact.mailboxToken, currentEpoch(now, MESH_EPOCH_WINDOW_MS));
     const aad = sealedAad(toTag, ttlExpiresAt);
     const blob = sealMailbox({
-      recipientKxPublic: recipientUser.identityKey.kx,
+      recipientKxPublic: contact.kx,
       sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
       plaintext: body,
       aad,
@@ -3874,9 +3946,79 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     },
   );
 
-  // Send a sealed mailbox message (opportunistic-mesh — docs/16) to a known user who has published a
-  // mesh identityKey. The server seals it to that user's key and lets the sync layer carry it; only
-  // the recipient's home node can open it. 404 unless mesh is enabled (indistinguishable from absent).
+  // The current user's own shareable mesh identity card (opportunistic-mesh — docs/16): public keys
+  // PLUS the secret mailbox token, so a peer can add it as a contact and seal mail to them. Returned
+  // only over this authenticated endpoint — the token never rides sync. 404 unless mesh is enabled.
+  server.get("/api/mesh/identity", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+    if (!appConfig.mesh.enabled) {
+      return reply.code(404).send(errorBody("Not found"));
+    }
+
+    const identity = ensureMeshIdentity(currentUser.id);
+    if (!identity) {
+      return reply.code(400).send(errorBody("This user has no mesh identity"));
+    }
+    return meshIdentityCard(identity, currentUser.displayName);
+  });
+
+  // Add a mesh contact from a scanned/pasted identity card (docs/16). The card is re-verified
+  // server-side (self-certifying id + kx binding) before storing, so a forged or substituted card
+  // can't be added and later sealed to. 404 unless mesh is enabled (indistinguishable from absent).
+  server.post(
+    "/api/mesh/contacts",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+      if (!appConfig.mesh.enabled) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const card = MeshIdentityCardSchema.safeParse(request.body);
+      if (!card.success) {
+        return reply.code(400).send(errorBody("Invalid mesh card"));
+      }
+
+      const addError = addMeshContact(currentUser.id, card.data);
+      if (addError) {
+        return reply.code(400).send(errorBody(addError));
+      }
+      return { ok: true, meshId: card.data.meshId };
+    },
+  );
+
+  // The current user's mesh address book (docs/16) — meshId + display name only, never any secret.
+  server.get("/api/mesh/contacts", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+    if (!appConfig.mesh.enabled) {
+      return reply.code(404).send(errorBody("Not found"));
+    }
+
+    const book = meshContacts.get(currentUser.id);
+    const contacts: MeshContact[] = book
+      ? [...book.values()].map((card) => ({ meshId: card.meshId, displayName: card.displayName }))
+      : [];
+    return contacts;
+  });
+
+  // Send a sealed mailbox message (opportunistic-mesh — docs/16) to a contact the sender has already
+  // added (by their self-certifying mesh id). The server seals it to that contact's key and lets the
+  // sync layer carry it; only the recipient's home node can open it. 404 unless mesh is enabled.
   server.post(
     "/api/mesh/messages",
     // Sealing runs public-key crypto and consumes relay/storage capacity across the mesh, so cap it
@@ -3906,10 +4048,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send(errorBody("This user has no mesh identity"));
     }
 
-    const recipient = data.users.find((user) => user.id === body.data.toUserId);
+    const contact = meshContacts.get(currentUser.id)?.get(body.data.toMeshId);
 
-    if (!recipient || !recipient.identityKey) {
-      return reply.code(404).send(errorBody("Recipient has no mesh identity"));
+    if (!contact) {
+      return reply.code(404).send(errorBody("No such mesh contact"));
     }
 
     // A shadow-banned sender gets a normal-looking success, but the mail is silently dropped — never
@@ -3918,7 +4060,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { ok: true };
     }
 
-    const sendError = sendSealed(sender, recipient, body.data.body);
+    const sendError = sendSealed(sender, contact, body.data.body);
 
     if (sendError) {
       return reply.code(400).send(errorBody(sendError));

@@ -42,6 +42,7 @@ const networkConfig: NetworkConfig = {
   enableMarkdown: true,
   enableAttachments: true,
   enablePresence: true,
+  enableMesh: false,
   enableLLMChat: false,
   enableLLMStreaming: false,
   allowUserDisplayNameEdit: false,
@@ -65,6 +66,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/admin")).toEqual({ screen: "admin" });
     expect(parseRoute("/people")).toEqual({ screen: "people" });
     expect(parseRoute("/search")).toEqual({ screen: "search" });
+    expect(parseRoute("/mesh")).toEqual({ screen: "mesh" });
   });
 
   it("parses a channel route", () => {

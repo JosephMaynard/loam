@@ -1247,6 +1247,22 @@ a {
   gap: 8px;
 }
 
+/* Mesh mail (opportunistic-mesh sealed mailbox — docs/16): per-contact compose box. */
+.mesh-compose {
+  display: grid;
+  gap: 8px;
+}
+
+/* The selectable fallback copy of a mesh identity card (clipboard-less browsers / screen readers). */
+.mesh-card-text {
+  width: 100%;
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  word-break: break-all;
+  resize: vertical;
+}
+
 .moderation-actions button {
   min-height: 36px;
   border-radius: 8px;
