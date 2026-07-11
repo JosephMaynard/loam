@@ -446,23 +446,36 @@ describe("panic endpoint", () => {
       payload: { type: "channelPost", channelId: "general", body: "to be wiped" },
     });
 
-    expect((await panic(app, "wrong-token")).statusCode).toBe(403);
+    // A wrong token answers 404 — identical to an unconfigured node — so the panic route can't be
+    // fingerprinted; the message survives.
+    expect((await panic(app, "wrong-token")).statusCode).toBe(404);
     expect(app.store.loadMessages().length).toBe(1);
 
     expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(200);
     expect(app.store.loadMessages()).toEqual([]);
   });
 
-  it("rate-limits repeated wrong tokens", async () => {
+  it("rate-limits repeated attempts (indistinguishably) and blocks the wipe once tripped", async () => {
     const app = await makeApp({
       killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
     });
+    const admin = await newSession(app);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "survives the brute force" },
+    });
 
+    // Every wrong attempt looks like a 404 (not a distinguishable 403/429).
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect((await panic(app, `wrong-${attempt}`)).statusCode).toBe(403);
+      expect((await panic(app, `wrong-${attempt}`)).statusCode).toBe(404);
     }
 
-    expect((await panic(app, "wrong-again")).statusCode).toBe(429);
+    // Once the attempt limiter trips, even the CORRECT token is refused (checked after the limiter)
+    // and the node is NOT wiped.
+    expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(404);
+    expect(app.store.loadMessages().length).toBe(1);
   });
 });
 
@@ -584,6 +597,21 @@ describe("message authorization", () => {
       payload: { type: "reaction", targetMessageId: dmId, reaction: "👍" },
     });
     expect(participant.statusCode).toBe(201);
+  });
+
+  it("rejects DMs when enableDMs is off", async () => {
+    const app = await makeApp({ features: { enableDMs: false } });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "dm", recipientUserId: bob.userId, body: "secret" },
+    });
+    expect(dm.statusCode).toBe(400);
+    expect((dm.json() as { code?: string }).code).toBe("dms_disabled");
   });
 
   it("enforces channel posting policy server-side", async () => {
@@ -1424,16 +1452,56 @@ describe("roles, moderation, and join policy", () => {
       const messageId = (post.json() as { message: { id: string } }).message.id;
       expect(app.store.loadMessages().some((message) => message.id === messageId)).toBe(true);
 
-      // A shadow-banned user stays a visible participant — only their messages are withheld (via the
-      // socket broadcast filter). The flag is observable to moderators.
+      // A shadow-banned user stays a visible participant — only their messages are withheld. But the
+      // `shadowBanned` flag is stripped from the general roster (even for an admin — they read it via
+      // the gated moderation endpoint), so no one can enumerate who is shadow-banned.
       const roster = (
         await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: admin.cookie } })
       ).json() as { id: string; shadowBanned?: boolean }[];
-      expect(roster.find((user) => user.id === member.userId)?.shadowBanned).toBe(true);
+      const listed = roster.find((user) => user.id === member.userId);
+      expect(listed).toBeDefined();
+      expect(listed?.shadowBanned).toBeUndefined();
+
+      // The target must NOT learn their own shadow-ban (that would defeat the "shadow") — their own
+      // /api/config currentUser carries no flag.
+      const selfConfig = (
+        await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: member.cookie } })
+      ).json() as { currentUser: { shadowBanned?: boolean } };
+      expect(selfConfig.currentUser.shadowBanned).toBeUndefined();
+
+      // Moderators still see it via the gated endpoint.
+      const modRoster = (
+        await app.server.inject({ method: "GET", url: "/api/moderation/users", headers: { cookie: admin.cookie } })
+      ).json() as { id: string; shadowBanned?: boolean }[];
+      expect(modRoster.find((user) => user.id === member.userId)?.shadowBanned).toBe(true);
 
       // Un-shadow-ban clears the flag.
       const restore = await moderate(app, admin.cookie, member.userId, { shadowBanned: false });
       expect((restore.json() as { shadowBanned?: boolean }).shadowBanned).toBe(false);
+    });
+
+    it("withholds a shadow-banned author's messages from REST reads, but not from the author", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const spammer = await newSession(app);
+      const viewer = await newSession(app);
+
+      await moderate(app, admin.cookie, spammer.userId, { shadowBanned: true });
+      expect((await postChannel(app, spammer.cookie, "buy my thing")).statusCode).toBe(201);
+
+      const read = async (cookie: string): Promise<string[]> =>
+        (
+          (
+            await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie } })
+          ).json() as { body?: string }[]
+        ).map((message) => message.body ?? "");
+
+      // The author still sees their own post (shadow ban is invisible to them)...
+      expect(await read(spammer.cookie)).toContain("buy my thing");
+      // ...but nobody else does — not even an admin — via the REST path the client refetches on every
+      // channel open and reconnect. Without the fix the WS-level concealment would be cosmetic.
+      expect(await read(viewer.cookie)).not.toContain("buy my thing");
+      expect(await read(admin.cookie)).not.toContain("buy my thing");
     });
 
     it("exposes the full human roster (incl. banned) to moderators only", async () => {

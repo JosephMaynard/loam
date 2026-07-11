@@ -384,6 +384,7 @@ export const en = {
   "app.userUnrecognised": "The server returned an unrecognised user payload.",
   "app.deleteError": "Unable to delete the message.",
   "app.editError": "Unable to edit the message.",
+  "app.sendError": "Unable to send the message.",
   "app.sendInvalidJson": "Message send failed: invalid JSON response.",
   "app.sendInvalidPayload": "Message send failed: invalid response payload.",
   "app.attachmentUnrecognised": "The server returned an unrecognised attachment payload.",

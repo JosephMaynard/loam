@@ -336,6 +336,7 @@ export const ur: Catalog = {
   "app.userUnrecognised": "سرور نے ناقابلِ شناخت صارف واپس کیا۔",
   "app.deleteError": "پیغام حذف نہیں ہو سکا۔",
   "app.editError": "پیغام میں ترمیم نہیں ہو سکی۔",
+  "app.sendError": "پیغام بھیجا نہیں جا سکا۔",
   "app.sendInvalidJson": "پیغام بھیجنا ناکام: غلط JSON جواب۔",
   "app.sendInvalidPayload": "پیغام بھیجنا ناکام: غلط جواب۔",
   "app.attachmentUnrecognised": "سرور نے ناقابلِ شناخت منسلکہ واپس کیا۔",

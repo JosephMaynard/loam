@@ -336,6 +336,7 @@ export const fa: Catalog = {
   "app.userUnrecognised": "سرور کاربر ناشناخته‌ای بازگرداند.",
   "app.deleteError": "حذف پیام ممکن نشد.",
   "app.editError": "ویرایش پیام ممکن نشد.",
+  "app.sendError": "ارسال پیام ممکن نشد.",
   "app.sendInvalidJson": "ارسال پیام ناموفق بود: پاسخ JSON نامعتبر.",
   "app.sendInvalidPayload": "ارسال پیام ناموفق بود: پاسخ نامعتبر.",
   "app.attachmentUnrecognised": "سرور پیوست ناشناخته‌ای بازگرداند.",

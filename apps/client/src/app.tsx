@@ -873,7 +873,9 @@ function LoamApp() {
         });
 
         if (!response.ok) {
-          throw new Error(`Message send failed: ${response.status}`);
+          // Localize a server error code when present (e.g. dms_disabled), else a generic message.
+          const errorPayload: unknown = await response.json().catch(() => undefined);
+          throw new Error(errorText(errorPayload, t("common.requestFailed", { status: response.status })));
         }
 
         let payload: unknown;
@@ -897,6 +899,11 @@ function LoamApp() {
         if (result.deletedMessageId) {
           removeMessage(result.deletedMessageId);
         }
+      } catch (error) {
+        // Surface the failure (matching editMessage/deleteMessage) so a send/reaction that fails
+        // isn't silent, then re-throw so the composer keeps the unsent text for a retry.
+        setError(error instanceof Error ? error.message : t("app.sendError"));
+        throw error;
       } finally {
         window.clearTimeout(timeout);
       }
@@ -2511,7 +2518,7 @@ function MessageItem({
             <button
               className={reaction.active ? "reaction active" : "reaction"}
               key={reaction.reaction}
-              onClick={() => void onReact(message.id, reaction.reaction)}
+              onClick={() => void onReact(message.id, reaction.reaction).catch(() => {})}
               type="button"
             >
               {reaction.reaction} {reaction.count}
@@ -2523,7 +2530,7 @@ function MessageItem({
             <button
               className="quick-reaction"
               key={reaction}
-              onClick={() => void onReact(message.id, reaction)}
+              onClick={() => void onReact(message.id, reaction).catch(() => {})}
               type="button"
             >
               {reaction}
@@ -2639,6 +2646,9 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
       await onSend(body, readyAttachments.length ? readyAttachments : undefined);
       setValue("");
       setPending([]);
+    } catch {
+      // onSend surfaces its own error (setError); keep the composer text so the user can retry
+      // instead of losing what they typed (and don't leave the rejection unhandled).
     } finally {
       setSending(false);
     }

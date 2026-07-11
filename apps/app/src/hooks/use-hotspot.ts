@@ -49,22 +49,27 @@ const START_TIMEOUT_MS = 20_000;
 function startWithTimeout(): Promise<HotspotCredentials> {
   const start = startHotspot();
   let timedOut = false;
+  let timer: ReturnType<typeof setTimeout>;
 
   const timeout = new Promise<never>((_resolve, reject) => {
-    setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
       reject(new Error("The hotspot didn't start in time. This device may not support one."));
     }, START_TIMEOUT_MS);
   });
 
   // Attach a cleanup handler to the real start; if it wins after the timeout, stop the orphan.
+  // Either way, clear the timer once start settles so it isn't left armed for ~20s after success.
   void start.then(
     () => {
+      clearTimeout(timer);
       if (timedOut) {
         stopHotspot();
       }
     },
-    () => undefined,
+    () => {
+      clearTimeout(timer);
+    },
   );
 
   return Promise.race([start, timeout]);

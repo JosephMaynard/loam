@@ -336,6 +336,7 @@ export const bn: Catalog = {
   "app.userUnrecognised": "সার্ভার অচেনা ব্যবহারকারী ফেরত দিয়েছে।",
   "app.deleteError": "বার্তা মোছা যায়নি।",
   "app.editError": "বার্তা সম্পাদনা করা যায়নি।",
+  "app.sendError": "বার্তা পাঠানো যায়নি।",
   "app.sendInvalidJson": "বার্তা পাঠানো ব্যর্থ: অবৈধ JSON প্রতিক্রিয়া।",
   "app.sendInvalidPayload": "বার্তা পাঠানো ব্যর্থ: অবৈধ প্রতিক্রিয়া।",
   "app.attachmentUnrecognised": "সার্ভার অচেনা সংযুক্তি ফেরত দিয়েছে।",

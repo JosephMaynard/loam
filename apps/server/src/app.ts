@@ -1148,11 +1148,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * participants — moderators and greeters reach them via the dedicated moderation/access
    * endpoints). Shadow-banned users stay visible; only their messages are withheld.
    */
+  /**
+   * A user record safe to expose to ordinary clients: the `shadowBanned` flag is stripped, so a
+   * *shadow*-banned user can't discover their own status (which would defeat the feature) and no one
+   * can enumerate who is shadow-banned. Moderators still see it via the gated `/api/moderation/users`
+   * endpoint, which returns the raw records. Applied at every public egress: the REST roster,
+   * `/api/config`'s `currentUser`, and the `userUpserted` broadcast.
+   */
+  function publicUser(user: User): User {
+    return user.shadowBanned ? { ...user, shadowBanned: undefined } : user;
+  }
+
   function visibleUsers(): User[] {
     const base = appConfig.llm.ollama.enabled
       ? data.users
       : data.users.filter((user) => user.type !== "bot");
-    return base.filter((user) => !user.banned && !user.pending);
+    return base.filter((user) => !user.banned && !user.pending).map(publicUser);
   }
 
   function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
@@ -1288,13 +1299,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return undefined;
   }
 
-  function channelMessages(channelId: string): Message[] {
+  /**
+   * Hide messages (and reactions) authored by a shadow-banned user from everyone but that author —
+   * the same rule `socketCanReceiveEvent` and search apply. Without this, the REST read paths (which
+   * the client refetches on every channel open and reconnect) would return a shadow-banned author's
+   * content to the whole network, making the WS-level concealment cosmetic.
+   */
+  function withoutShadowBanned(messages: Message[], viewerId: string): Message[] {
+    return messages.filter((message) => {
+      const author = data.users.find((candidate) => candidate.id === message.authorId);
+      return !author?.shadowBanned || message.authorId === viewerId;
+    });
+  }
+
+  function channelMessages(channelId: string, viewerId: string): Message[] {
     const directMessages = data.messages.filter((message) => isChannelMessage(message, channelId));
     const ids = new Set(directMessages.map((message) => message.id));
     const reactions = data.messages.filter(
       (message) => message.type === "reaction" && ids.has(message.targetMessageId),
     );
-    return [...directMessages, ...reactions].sort((a, b) => a.createdAt - b.createdAt);
+    return withoutShadowBanned([...directMessages, ...reactions], viewerId).sort((a, b) => a.createdAt - b.createdAt);
   }
 
   function dmMessages(peerId: string, currentUserId: string): Message[] {
@@ -1308,7 +1332,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const reactions = data.messages.filter(
       (message) => message.type === "reaction" && ids.has(message.targetMessageId),
     );
-    return [...directMessages, ...reactions].sort((a, b) => a.createdAt - b.createdAt);
+    return withoutShadowBanned([...directMessages, ...reactions], currentUserId).sort(
+      (a, b) => a.createdAt - b.createdAt,
+    );
   }
 
   function messageAudienceUserIds(message: Message): Set<string> | undefined {
@@ -1397,7 +1423,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function broadcast(event: ClientEvent): void {
-    const payload = JSON.stringify(event);
+    // Never put a user's shadow-ban state on the wire — not even to themselves (the point of a
+    // *shadow* ban) or moderators (who read it via /api/moderation/users). The ban still takes full
+    // effect server-side; this only hides the flag. Serialize the sanitized copy once for all sockets.
+    const outbound = event.type === "userUpserted" ? { ...event, user: publicUser(event.user) } : event;
+    const payload = JSON.stringify(outbound);
 
     for (const { socket, userId } of sockets) {
       if (socket.readyState === socket.OPEN && socketCanReceiveEvent(userId, event)) {
@@ -2583,7 +2613,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       version: options.version ?? "dev",
       joinUrl: `http://${joinHost}:${clientPort}`,
       websocketPath: "/ws",
-      currentUser,
+      currentUser: publicUser(currentUser),
       networkConfig: currentNetworkConfig(),
     };
   });
@@ -3029,7 +3059,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(404).send(errorBody("Channel does not exist"));
     }
 
-    return channelMessages(channel.id);
+    return channelMessages(channel.id, userId);
   });
 
   // The member roster of a private channel. Members only — like every private-channel endpoint,
@@ -3573,6 +3603,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/panic",
     { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
     async (request, reply) => {
+    // Every non-success answers 404 — identical to an unconfigured node — so a prober can't tell a
+    // panic-armed node from a plain one (only someone holding the token learns otherwise, and that
+    // fires the wipe). The rate limiter still blocks brute force; it just doesn't reveal itself.
     if (!appConfig.killSwitch.enabled || !appConfig.killSwitch.panicToken) {
       return reply.code(404).send(errorBody("Not found"));
     }
@@ -3580,15 +3613,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const body = PanicRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send(errorBody("Invalid request"));
+      return reply.code(404).send(errorBody("Not found"));
     }
 
     if (attemptRateLimited(panicAttempts, request.ip)) {
-      return reply.code(429).send(errorBody("Too many attempts"));
+      return reply.code(404).send(errorBody("Not found"));
     }
 
     if (!verifySecret(body.data.token, appConfig.killSwitch.panicToken)) {
-      return reply.code(403).send(errorBody("Invalid token"));
+      return reply.code(404).send(errorBody("Not found"));
     }
 
     await executeKillSwitch();

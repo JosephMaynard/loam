@@ -350,6 +350,7 @@ export const ar: Catalog = {
   "app.userUnrecognised": "أعاد الخادم مستخدمًا غير معروف.",
   "app.deleteError": "تعذّر حذف الرسالة.",
   "app.editError": "تعذّر تعديل الرسالة.",
+  "app.sendError": "تعذّر إرسال الرسالة.",
   "app.sendInvalidJson": "فشل إرسال الرسالة: استجابة JSON غير صالحة.",
   "app.sendInvalidPayload": "فشل إرسال الرسالة: استجابة غير صالحة.",
   "app.attachmentUnrecognised": "أعاد الخادم مرفقًا غير معروف.",

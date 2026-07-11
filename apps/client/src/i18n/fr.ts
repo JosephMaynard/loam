@@ -336,6 +336,7 @@ export const fr: Catalog = {
   "app.userUnrecognised": "Le serveur a renvoyé un utilisateur non reconnu.",
   "app.deleteError": "Impossible de supprimer le message.",
   "app.editError": "Impossible de modifier le message.",
+  "app.sendError": "Impossible d'envoyer le message.",
   "app.sendInvalidJson": "Échec de l’envoi du message : réponse JSON non valide.",
   "app.sendInvalidPayload": "Échec de l’envoi du message : réponse non valide.",
   "app.attachmentUnrecognised": "Le serveur a renvoyé une pièce jointe non reconnue.",

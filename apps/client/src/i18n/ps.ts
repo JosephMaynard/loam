@@ -336,6 +336,7 @@ export const ps: Catalog = {
   "app.userUnrecognised": "سرور ناپېژندلی کاروونکی راستون کړ.",
   "app.deleteError": "پیغام ړنګ نشو.",
   "app.editError": "پیغام سم نشو.",
+  "app.sendError": "پیغام لېږل ونشو.",
   "app.sendInvalidJson": "د پیغام لېږل ناکام شو: ناسم JSON ځواب.",
   "app.sendInvalidPayload": "د پیغام لېږل ناکام شو: ناسم ځواب.",
   "app.attachmentUnrecognised": "سرور ناپېژندلې ضمیمه راستون کړه.",

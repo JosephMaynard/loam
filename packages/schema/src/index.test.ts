@@ -25,6 +25,28 @@ describe("@loam/schema", () => {
     ).not.toThrow();
   });
 
+  it("bounds stored strings so an oversized value can't be persisted or imported", () => {
+    const baseUser = { id: "usr_123", type: "human" as const, isAdmin: false, createdAt: 1712850000, ephemeral: true };
+    // displayName is capped at 80 (a hostile sync peer can't import a giant name).
+    expect(() => UserSchema.parse({ ...baseUser, displayName: "x".repeat(81) })).toThrow();
+    expect(() => UserSchema.parse({ ...baseUser, displayName: "x".repeat(80) })).not.toThrow();
+    // Avatar palette/face/accessory are short keys, capped at 64 (no megabyte-avatar DoS via PATCH).
+    expect(() =>
+      UserSchema.parse({ ...baseUser, displayName: "ok", avatar: { face: "x".repeat(65) } }),
+    ).toThrow();
+
+    const baseChannel = {
+      id: "chn_1",
+      visibility: "public" as const,
+      allowPosting: "everyone" as const,
+      allowReplies: true,
+      discoverable: true,
+      createdAt: 1712850000,
+    };
+    expect(() => ChannelSchema.parse({ ...baseChannel, name: "x".repeat(81) })).toThrow();
+    expect(() => ChannelSchema.parse({ ...baseChannel, name: "ok", description: "x".repeat(281) })).toThrow();
+  });
+
   it("validates channels", () => {
     expect(() =>
       ChannelSchema.parse({

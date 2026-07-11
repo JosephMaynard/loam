@@ -346,6 +346,7 @@ export const ru: Catalog = {
   "app.userUnrecognised": "Сервер вернул нераспознанного пользователя.",
   "app.deleteError": "Не удалось удалить сообщение.",
   "app.editError": "Не удалось отредактировать сообщение.",
+  "app.sendError": "Не удалось отправить сообщение.",
   "app.sendInvalidJson": "Не удалось отправить сообщение: недопустимый ответ JSON.",
   "app.sendInvalidPayload": "Не удалось отправить сообщение: недопустимый ответ.",
   "app.attachmentUnrecognised": "Сервер вернул нераспознанное вложение.",

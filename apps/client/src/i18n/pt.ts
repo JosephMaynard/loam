@@ -336,6 +336,7 @@ export const pt: Catalog = {
   "app.userUnrecognised": "O servidor retornou um usuário não reconhecido.",
   "app.deleteError": "Não foi possível excluir a mensagem.",
   "app.editError": "Não foi possível editar a mensagem.",
+  "app.sendError": "Não foi possível enviar a mensagem.",
   "app.sendInvalidJson": "Falha ao enviar a mensagem: resposta JSON inválida.",
   "app.sendInvalidPayload": "Falha ao enviar a mensagem: resposta inválida.",
   "app.attachmentUnrecognised": "O servidor retornou um anexo não reconhecido.",

@@ -336,6 +336,7 @@ export const tr: Catalog = {
   "app.userUnrecognised": "Sunucu tanınmayan bir kullanıcı döndürdü.",
   "app.deleteError": "Mesaj silinemedi.",
   "app.editError": "Mesaj düzenlenemedi.",
+  "app.sendError": "Mesaj gönderilemedi.",
   "app.sendInvalidJson": "Mesaj gönderilemedi: geçersiz JSON yanıtı.",
   "app.sendInvalidPayload": "Mesaj gönderilemedi: geçersiz yanıt.",
   "app.attachmentUnrecognised": "Sunucu tanınmayan bir ek döndürdü.",

@@ -337,6 +337,7 @@ export const prs: Catalog = {
   "app.userUnrecognised": "سرور کاربر ناشناخته بازگرداند.",
   "app.deleteError": "حذف پیام ممکن نشد.",
   "app.editError": "ویرایش پیام ممکن نشد.",
+  "app.sendError": "ارسال پیام ممکن نشد.",
   "app.sendInvalidJson": "روان‌کردن پیام ناکام شد: پاسخ JSON نامعتبر.",
   "app.sendInvalidPayload": "روان‌کردن پیام ناکام شد: پاسخ نامعتبر.",
   "app.attachmentUnrecognised": "سرور ضمیمهٔ ناشناخته بازگرداند.",

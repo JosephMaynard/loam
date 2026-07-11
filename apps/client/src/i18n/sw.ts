@@ -336,6 +336,7 @@ export const sw: Catalog = {
   "app.userUnrecognised": "Seva ilirudisha mtumiaji asiyetambulika.",
   "app.deleteError": "Imeshindwa kufuta ujumbe.",
   "app.editError": "Imeshindwa kuhariri ujumbe.",
+  "app.sendError": "Imeshindwa kutuma ujumbe.",
   "app.sendInvalidJson": "Kutuma ujumbe kumeshindwa: jibu batili la JSON.",
   "app.sendInvalidPayload": "Kutuma ujumbe kumeshindwa: jibu batili.",
   "app.attachmentUnrecognised": "Seva ilirudisha kiambatisho kisichotambulika.",
