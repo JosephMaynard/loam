@@ -3279,6 +3279,31 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
       ),
     ).toBe(true);
 
+    // Presence lists visible users only: a banned user is excluded. Bring Dana online, confirm she
+    // shows, then have admin-Alice ban her — Alice's next presence event drops her.
+    const dana = await newSession(app);
+    const danaSocket = await connect(dana.cookie);
+    expect(
+      await waitUntil(() =>
+        aliceSocket.events.some(
+          (event) => event.type === "presence" && !!event.onlineUserIds?.includes(dana.userId),
+        ),
+      ),
+    ).toBe(true);
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${dana.userId}`,
+      headers: { cookie: alice.cookie },
+      payload: { banned: true },
+    });
+    expect(
+      await waitUntil(() => {
+        const last = [...aliceSocket.events].reverse().find((event) => event.type === "presence");
+        return !!last && !last.onlineUserIds?.includes(dana.userId);
+      }),
+    ).toBe(true);
+    danaSocket.socket.close();
+
     // Bob disconnects; Alice's next presence event no longer lists him.
     bobSocket.socket.close();
     expect(
