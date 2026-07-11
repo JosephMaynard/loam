@@ -402,6 +402,7 @@ export const uk: Catalog = {
   "error.invalid_config_values": "Недійсні значення конфігурації",
   "error.invalid_kill_switch": "Недійсний запит аварійного вимикача",
   "error.invalid_member_request": "Недійсний запит учасника",
+  "error.invalid_transfer_request": "Недійсний запит на передачу",
   "error.invalid_message_edit": "Недійсний запит редагування повідомлення",
   "error.invalid_message_request": "Недійсний запит повідомлення",
   "error.invalid_moderation_request": "Недійсний запит модерації",

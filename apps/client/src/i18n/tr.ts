@@ -392,6 +392,7 @@ export const tr: Catalog = {
   "error.invalid_config_values": "Geçersiz yapılandırma değerleri",
   "error.invalid_kill_switch": "Geçersiz acil kapatma isteği",
   "error.invalid_member_request": "Geçersiz üye isteği",
+  "error.invalid_transfer_request": "Geçersiz devir isteği",
   "error.invalid_message_edit": "Geçersiz mesaj düzenleme isteği",
   "error.invalid_message_request": "Geçersiz mesaj isteği",
   "error.invalid_moderation_request": "Geçersiz moderasyon isteği",

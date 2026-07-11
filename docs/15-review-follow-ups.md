@@ -26,8 +26,8 @@ ranked within each group. Each entry names the file and the concrete change.
    the client can still gate its moderation UI.
 4. **"Wipe this device" can't revoke the server session.** The identity is the HttpOnly
    `loam_session` cookie, which JS can't clear, so a reload re-mints the same identity and re-hydrates
-   the cache (`purgeLocalData`, `apps/client/src/app.tsx`). Add a self session-invalidate endpoint the
-   wipe calls, and guard `putRecords`/`putRecord` against writing after a wipe flag is set (a
+   the cache (`purgeLocalData`, `apps/client/src/app.tsx`). Add an endpoint to invalidate the current
+   session that the wipe calls, and guard `putRecords`/`putRecord` against writing after a wipe flag is set (a
    racing in-flight fetch can otherwise re-create the DB). Or document that device-wipe is cache-only.
 5. **Transport encryption (docs/08).** LOAM serves plain HTTP on the LAN by design — fine for a
    trusted room, not an adversarial network. This is the largest remaining hostile-environment gap.

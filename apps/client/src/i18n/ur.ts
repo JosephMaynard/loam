@@ -392,6 +392,7 @@ export const ur: Catalog = {
   "error.invalid_config_values": "غلط ترتیب کی اقدار",
   "error.invalid_kill_switch": "کِل سوئچ کی غلط درخواست",
   "error.invalid_member_request": "رکن کی غلط درخواست",
+  "error.invalid_transfer_request": "غلط منتقلی درخواست",
   "error.invalid_message_edit": "پیغام میں ترمیم کی غلط درخواست",
   "error.invalid_message_request": "پیغام کی غلط درخواست",
   "error.invalid_moderation_request": "نگرانی کی غلط درخواست",

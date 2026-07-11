@@ -392,6 +392,7 @@ export const fr: Catalog = {
   "error.invalid_config_values": "Valeurs de configuration non valides",
   "error.invalid_kill_switch": "Demande de coupe-circuit non valide",
   "error.invalid_member_request": "Demande de membre non valide",
+  "error.invalid_transfer_request": "Requête de transfert invalide",
   "error.invalid_message_edit": "Demande de modification de message non valide",
   "error.invalid_message_request": "Demande de message non valide",
   "error.invalid_moderation_request": "Demande de modération non valide",

@@ -29,6 +29,10 @@ function requiredValue(name) {
   if (index < 0) {
     return undefined;
   }
+  if (index !== args.lastIndexOf(name)) {
+    console.error(`${name} was given more than once.`);
+    process.exit(1);
+  }
   const next = args[index + 1];
   if (!next || next.startsWith("-")) {
     console.error(`${name} requires a value. See \`loam --help\`.`);

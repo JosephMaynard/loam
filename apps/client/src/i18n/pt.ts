@@ -392,6 +392,7 @@ export const pt: Catalog = {
   "error.invalid_config_values": "Valores de configuração inválidos",
   "error.invalid_kill_switch": "Solicitação de botão de emergência inválida",
   "error.invalid_member_request": "Solicitação de membro inválida",
+  "error.invalid_transfer_request": "Solicitação de transferência inválida",
   "error.invalid_message_edit": "Solicitação de edição de mensagem inválida",
   "error.invalid_message_request": "Solicitação de mensagem inválida",
   "error.invalid_moderation_request": "Solicitação de moderação inválida",

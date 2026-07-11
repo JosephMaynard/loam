@@ -392,6 +392,7 @@ export const sw: Catalog = {
   "error.invalid_config_values": "Thamani batili za usanidi",
   "error.invalid_kill_switch": "Ombi batili la swichi ya kuzima",
   "error.invalid_member_request": "Ombi batili la mwanachama",
+  "error.invalid_transfer_request": "Ombi batili la uhamisho",
   "error.invalid_message_edit": "Ombi batili la kuhariri ujumbe",
   "error.invalid_message_request": "Ombi batili la ujumbe",
   "error.invalid_moderation_request": "Ombi batili la usimamizi",

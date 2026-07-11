@@ -242,6 +242,7 @@ const ERROR_CODES: Record<string, string> = {
   "Invalid config values": "invalid_config_values",
   "Invalid kill-switch request": "invalid_kill_switch",
   "Invalid member request": "invalid_member_request",
+  "Invalid transfer request": "invalid_transfer_request",
   "Invalid message edit request": "invalid_message_edit",
   "Invalid message request": "invalid_message_request",
   "Invalid moderation request": "invalid_moderation_request",
@@ -3207,7 +3208,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const body = ChannelTransferRequestSchema.safeParse(request.body);
 
     if (!body.success) {
-      return reply.code(400).send(errorBody("Invalid member request"));
+      return reply.code(400).send(errorBody("Invalid transfer request"));
     }
 
     const target = data.users.find((user) => user.id === body.data.userId);

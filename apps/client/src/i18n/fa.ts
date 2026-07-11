@@ -392,6 +392,7 @@ export const fa: Catalog = {
   "error.invalid_config_values": "مقادیر پیکربندی نامعتبر است",
   "error.invalid_kill_switch": "درخواست کلید توقف نامعتبر است",
   "error.invalid_member_request": "درخواست عضو نامعتبر است",
+  "error.invalid_transfer_request": "درخواست انتقال نامعتبر",
   "error.invalid_message_edit": "درخواست ویرایش پیام نامعتبر است",
   "error.invalid_message_request": "درخواست پیام نامعتبر است",
   "error.invalid_moderation_request": "درخواست نظارت نامعتبر است",

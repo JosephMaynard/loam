@@ -392,6 +392,7 @@ export const ps: Catalog = {
   "error.invalid_config_values": "د پیکربندۍ ناسمې ارزښتونه",
   "error.invalid_kill_switch": "د بندولو کیلي ناسمه غوښتنه",
   "error.invalid_member_request": "د غړي ناسمه غوښتنه",
+  "error.invalid_transfer_request": "ناسم د لیږد غوښتنه",
   "error.invalid_message_edit": "د پیغام سمولو ناسمه غوښتنه",
   "error.invalid_message_request": "د پیغام ناسمه غوښتنه",
   "error.invalid_moderation_request": "د څارنې ناسمه غوښتنه",

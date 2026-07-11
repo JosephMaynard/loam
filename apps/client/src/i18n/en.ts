@@ -443,6 +443,7 @@ export const en = {
   "error.invalid_config_values": "Invalid config values",
   "error.invalid_kill_switch": "Invalid kill-switch request",
   "error.invalid_member_request": "Invalid member request",
+  "error.invalid_transfer_request": "Invalid transfer request",
   "error.invalid_message_edit": "Invalid message edit request",
   "error.invalid_message_request": "Invalid message request",
   "error.invalid_moderation_request": "Invalid moderation request",

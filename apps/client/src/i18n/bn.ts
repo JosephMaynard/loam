@@ -392,6 +392,7 @@ export const bn: Catalog = {
   "error.invalid_config_values": "অবৈধ কনফিগ মান",
   "error.invalid_kill_switch": "অবৈধ কিল-সুইচ অনুরোধ",
   "error.invalid_member_request": "অবৈধ সদস্য অনুরোধ",
+  "error.invalid_transfer_request": "অবৈধ হস্তান্তর অনুরোধ",
   "error.invalid_message_edit": "অবৈধ বার্তা সম্পাদনা অনুরোধ",
   "error.invalid_message_request": "অবৈধ বার্তা অনুরোধ",
   "error.invalid_moderation_request": "অবৈধ মডারেশন অনুরোধ",

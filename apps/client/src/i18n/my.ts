@@ -392,6 +392,7 @@ export const my: Catalog = {
   "error.invalid_config_values": "မမှန်ကန်သော ဖွဲ့စည်းမှု တန်ဖိုးများ",
   "error.invalid_kill_switch": "မမှန်ကန်သော kill-switch တောင်းဆိုချက်",
   "error.invalid_member_request": "မမှန်ကန်သော အဖွဲ့ဝင် တောင်းဆိုချက်",
+  "error.invalid_transfer_request": "မမှန်ကန်သော လွှဲပြောင်းတောင်းဆိုမှု",
   "error.invalid_message_edit": "မမှန်ကန်သော စာတည်းဖြတ်မှု တောင်းဆိုချက်",
   "error.invalid_message_request": "မမှန်ကန်သော စာ တောင်းဆိုချက်",
   "error.invalid_moderation_request": "မမှန်ကန်သော ကြီးကြပ်မှု တောင်းဆိုချက်",

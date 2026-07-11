@@ -406,6 +406,7 @@ export const ar: Catalog = {
   "error.invalid_config_values": "قيم الإعدادات غير صالحة",
   "error.invalid_kill_switch": "طلب زر الإيقاف غير صالح",
   "error.invalid_member_request": "طلب العضو غير صالح",
+  "error.invalid_transfer_request": "طلب نقل غير صالح",
   "error.invalid_message_edit": "طلب تعديل الرسالة غير صالح",
   "error.invalid_message_request": "طلب الرسالة غير صالح",
   "error.invalid_moderation_request": "طلب الإشراف غير صالح",

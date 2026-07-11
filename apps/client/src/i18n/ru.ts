@@ -402,6 +402,7 @@ export const ru: Catalog = {
   "error.invalid_config_values": "Недопустимые значения конфигурации",
   "error.invalid_kill_switch": "Недопустимый запрос аварийного выключателя",
   "error.invalid_member_request": "Недопустимый запрос участника",
+  "error.invalid_transfer_request": "Недействительный запрос на передачу",
   "error.invalid_message_edit": "Недопустимый запрос редактирования сообщения",
   "error.invalid_message_request": "Недопустимый запрос сообщения",
   "error.invalid_moderation_request": "Недопустимый запрос модерации",
