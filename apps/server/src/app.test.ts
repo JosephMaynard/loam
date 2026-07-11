@@ -477,6 +477,21 @@ describe("panic endpoint", () => {
     expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(404);
     expect(app.store.loadMessages().length).toBe(1);
   });
+
+  it("answers 404 (never 429) even past the route-level rate limit", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+
+    // The route allows 10/min; push well past it. Every rejection — including the route-level
+    // rate-limit hit — must be a 404, so a 429 can never reveal that the panic route exists here.
+    const codes: number[] = [];
+    for (let attempt = 0; attempt < 13; attempt += 1) {
+      codes.push((await panic(app, `wrong-${attempt}`)).statusCode);
+    }
+    expect(codes).not.toContain(429);
+    expect(codes.every((code) => code === 404)).toBe(true);
+  });
 });
 
 describe("message retention (ephemeral messages)", () => {
@@ -1502,6 +1517,36 @@ describe("roles, moderation, and join policy", () => {
       // channel open and reconnect. Without the fix the WS-level concealment would be cosmetic.
       expect(await read(viewer.cookie)).not.toContain("buy my thing");
       expect(await read(admin.cookie)).not.toContain("buy my thing");
+    });
+
+    it("drops orphan reactions that target a shadow-banned author's now-hidden message", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const spammer = await newSession(app);
+      const viewer = await newSession(app);
+
+      // Spammer posts and the viewer reacts — both visible while nobody is shadow-banned.
+      const post = await postChannel(app, spammer.cookie, "root by spammer");
+      const rootId = (post.json() as { message: { id: string } }).message.id;
+      expect(
+        (
+          await app.server.inject({
+            method: "POST",
+            url: "/api/messages",
+            headers: { cookie: viewer.cookie },
+            payload: { type: "reaction", targetMessageId: rootId, reaction: "👍" },
+          })
+        ).statusCode,
+      ).toBe(201);
+
+      // Shadow-ban the spammer. The viewer's read must contain neither the hidden root nor their own
+      // reaction to it — a surviving reaction would leak that the root exists.
+      await moderate(app, admin.cookie, spammer.userId, { shadowBanned: true });
+      const seen = (
+        await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: viewer.cookie } })
+      ).json() as { id: string; type: string; targetMessageId?: string }[];
+      expect(seen.some((message) => message.id === rootId)).toBe(false);
+      expect(seen.some((message) => message.type === "reaction" && message.targetMessageId === rootId)).toBe(false);
     });
 
     it("exposes the full human roster (incl. banned) to moderators only", async () => {

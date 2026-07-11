@@ -1157,7 +1157,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * `/api/config`'s `currentUser`, and the `userUpserted` broadcast.
    */
   function publicUser(user: User): User {
-    return user.shadowBanned ? { ...user, shadowBanned: undefined } : user;
+    // Always drop the property (not just when truthy): if a restored user carried `shadowBanned:
+    // false` while a shadow-banned user's copy omitted it, the field's mere presence/absence would
+    // itself leak status. Removing it unconditionally makes every public record uniform.
+    const clone = { ...user };
+    delete clone.shadowBanned;
+    return clone;
   }
 
   function visibleUsers(): User[] {
@@ -1314,28 +1319,40 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function channelMessages(channelId: string, viewerId: string): Message[] {
-    const directMessages = data.messages.filter((message) => isChannelMessage(message, channelId));
-    const ids = new Set(directMessages.map((message) => message.id));
-    const reactions = data.messages.filter(
-      (message) => message.type === "reaction" && ids.has(message.targetMessageId),
+    // Filter the root messages by shadow-ban FIRST, then keep only reactions that target a still-
+    // visible root (and whose own author isn't shadow-banned). Deriving the reaction ids from the
+    // unfiltered roots would leave orphan reactions pointing at a hidden message — leaking that a
+    // shadow-banned author's post exists.
+    const roots = withoutShadowBanned(
+      data.messages.filter((message) => isChannelMessage(message, channelId)),
+      viewerId,
     );
-    return withoutShadowBanned([...directMessages, ...reactions], viewerId).sort((a, b) => a.createdAt - b.createdAt);
+    const visibleRootIds = new Set(roots.map((message) => message.id));
+    const reactions = withoutShadowBanned(
+      data.messages.filter((message) => message.type === "reaction" && visibleRootIds.has(message.targetMessageId)),
+      viewerId,
+    );
+    return [...roots, ...reactions].sort((a, b) => a.createdAt - b.createdAt);
   }
 
   function dmMessages(peerId: string, currentUserId: string): Message[] {
-    const directMessages = data.messages.filter(
-      (message) =>
-        message.type === "dm" &&
-        ((message.authorId === currentUserId && message.recipientUserId === peerId) ||
-          (message.authorId === peerId && message.recipientUserId === currentUserId)),
+    // Same ordering as channelMessages: shadow-ban the roots first, then only reactions on visible
+    // roots survive, so a hidden DM never leaks via a dangling reaction.
+    const roots = withoutShadowBanned(
+      data.messages.filter(
+        (message) =>
+          message.type === "dm" &&
+          ((message.authorId === currentUserId && message.recipientUserId === peerId) ||
+            (message.authorId === peerId && message.recipientUserId === currentUserId)),
+      ),
+      currentUserId,
     );
-    const ids = new Set(directMessages.map((message) => message.id));
-    const reactions = data.messages.filter(
-      (message) => message.type === "reaction" && ids.has(message.targetMessageId),
+    const visibleRootIds = new Set(roots.map((message) => message.id));
+    const reactions = withoutShadowBanned(
+      data.messages.filter((message) => message.type === "reaction" && visibleRootIds.has(message.targetMessageId)),
+      currentUserId,
     );
-    return withoutShadowBanned([...directMessages, ...reactions], currentUserId).sort(
-      (a, b) => a.createdAt - b.createdAt,
-    );
+    return [...roots, ...reactions].sort((a, b) => a.createdAt - b.createdAt);
   }
 
   function messageAudienceUserIds(message: Message): Set<string> | undefined {
@@ -3602,7 +3619,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // is configured, so the route stays indistinguishable from absent on ordinary nodes.
   server.post(
     "/api/panic",
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+          // Answer 404 (not the default 429) when the route limit trips, so a rate-limited prober
+          // sees the same "not found" as every other failure path here — no 429 to reveal the route.
+          errorResponseBuilder: () => {
+            const error = new Error("Not found") as Error & { statusCode: number };
+            error.statusCode = 404;
+            return error;
+          },
+        },
+      },
+    },
     async (request, reply) => {
     // Every non-success answers 404 — identical to an unconfigured node — so a prober can't tell a
     // panic-armed node from a plain one (only someone holding the token learns otherwise, and that
