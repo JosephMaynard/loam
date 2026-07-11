@@ -76,6 +76,61 @@ async function claim(app: LoamApp, cookie: string, secret: string): Promise<Inje
   });
 }
 
+type OllamaChatRequestBody = { model?: string; stream?: boolean; messages?: { role: string; content: string }[] };
+
+/**
+ * Minimal mock of Ollama's streaming `/api/chat` endpoint (node:http), emitting the same
+ * newline-delimited JSON shape `streamOllamaChat` (apps/server/src/app.ts) parses: one
+ * `{"message":{"content":...},"done":false}` line per delta (with a real delay between them, so a
+ * test can tell genuine streaming from one lump), then a final `{"done":true}` line. Captures every
+ * request body it receives for assertions (e.g. that the DM history was forwarded as `messages`).
+ */
+function startMockOllama(
+  deltas: string[],
+  opts: { delayMs?: number } = {},
+): { url: Promise<string>; close: () => Promise<void>; requests: OllamaChatRequestBody[] } {
+  const delayMs = opts.delayMs ?? 10;
+  const requests: OllamaChatRequestBody[] = [];
+
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk: Buffer) => (raw += chunk));
+    req.on("end", () => {
+      void (async () => {
+        try {
+          requests.push(JSON.parse(raw || "{}") as OllamaChatRequestBody);
+        } catch {
+          // Malformed capture is surfaced by an empty `requests` entry never appearing; irrelevant
+          // to the streaming behaviour under test.
+        }
+
+        res.writeHead(200, { "content-type": "application/x-ndjson" });
+        for (const delta of deltas) {
+          res.write(`${JSON.stringify({ message: { role: "assistant", content: delta }, done: false })}\n`);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        res.end(`${JSON.stringify({ done: true })}\n`);
+      })();
+    });
+  });
+
+  const url = new Promise<string>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`));
+  });
+
+  return { url, close: () => new Promise<void>((resolve) => server.close(() => resolve())), requests };
+}
+
+/** A `http://127.0.0.1:<port>` URL nothing is listening on, to simulate Ollama being unreachable. */
+async function unusedLocalUrl(): Promise<string> {
+  const probe = createServer();
+  const url = await new Promise<string>((resolve) => {
+    probe.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(probe.address() as AddressInfo).port}`));
+  });
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return url;
+}
+
 describe("error codes", () => {
   it("every error code the server actually returns is drawn from the canonical @loam/schema list", () => {
     // ALL_ERROR_CODES (Object.values of the server's ERROR_CODES map) is typed against
@@ -2488,7 +2543,14 @@ describe("participation gating (banned / pending read access)", () => {
 });
 
 describe("websocket privacy filtering", () => {
-  type WireEvent = { type?: string; messageId?: string; user?: { id?: string; pending?: boolean }; message?: { id?: string } };
+  type WireEvent = {
+    type?: string;
+    messageId?: string;
+    text?: string;
+    error?: string;
+    user?: { id?: string; pending?: boolean };
+    message?: { id?: string; authorId?: string; body?: string; meta?: { streaming?: boolean } };
+  };
 
   const openSockets: WebSocket[] = [];
 
@@ -2665,6 +2727,76 @@ describe("websocket privacy filtering", () => {
     // The moderator receiving their copy proves the broadcast completed before the negative check.
     expect(await waitFor(() => sawBanned(adminSocket.events))).toBe(true);
     expect(sawBanned(bystanderSocket.events)).toBe(false);
+  });
+
+  it("streams Ollama deltas to the DM and converges to a single final messageUpdated (docs/15 #15)", async () => {
+    const ollama = startMockOllama(["Hello", " from", " Ollama"]);
+    cleanups.push(ollama.close);
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const user = await newSession(app);
+    const baseUrl = await listen(app);
+    const userSocket = await connect(baseUrl, user.cookie);
+    const BOT_ID = "llm.ollama.gemma4"; // default botId (unchanged by the config override above)
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    expect(dm.statusCode).toBe(201);
+
+    expect(await waitFor(() => userSocket.events.some((event) => event.type === "end"))).toBe(true);
+
+    // Genuinely streamed (more than one delta event), and the deltas concatenate to the full reply.
+    const deltas = userSocket.events.filter((event) => event.type === "delta");
+    expect(deltas.length).toBeGreaterThan(1);
+    expect(deltas.map((event) => event.text).join("")).toBe("Hello from Ollama");
+
+    // Exactly one persisted messageUpdated for the assistant message — clients converge on a single
+    // final body instead of one broadcast per delta.
+    const updates = userSocket.events.filter(
+      (event) => event.type === "messageUpdated" && event.message?.authorId === BOT_ID,
+    );
+    expect(updates.length).toBe(1);
+    expect(updates[0]?.message?.body).toBe("Hello from Ollama");
+    expect(updates[0]?.message?.meta?.streaming).toBe(false);
+
+    // The DM history was actually forwarded to Ollama.
+    expect(ollama.requests[0]?.messages?.at(-1)).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("never delivers Ollama stream deltas (or the bot DM) to a bystander outside the DM (docs/15 #15)", async () => {
+    const ollama = startMockOllama(["secret", " reply"]);
+    cleanups.push(ollama.close);
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const user = await newSession(app);
+    const bystander = await newSession(app);
+    const baseUrl = await listen(app);
+    const userSocket = await connect(baseUrl, user.cookie);
+    const bystanderSocket = await connect(baseUrl, bystander.cookie);
+    const BOT_ID = "llm.ollama.gemma4";
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+
+    // The DM participant seeing the stream complete proves the round finished, making the
+    // bystander's silence below a real verdict rather than a timing artifact.
+    expect(await waitFor(() => userSocket.events.some((event) => event.type === "end"))).toBe(true);
+
+    expect(bystanderSocket.events.some((event) => event.type === "start")).toBe(false);
+    expect(bystanderSocket.events.some((event) => event.type === "delta")).toBe(false);
+    expect(bystanderSocket.events.some((event) => event.type === "end")).toBe(false);
+    expect(
+      bystanderSocket.events.some(
+        (event) =>
+          (event.type === "messageCreated" || event.type === "messageUpdated") && event.message?.authorId === BOT_ID,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -3908,6 +4040,96 @@ describe("on-device LLM provider", () => {
       await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } })
     ).json() as { id: string }[];
     expect(users.some((entry) => entry.id === BOT_ID)).toBe(false);
+  });
+});
+
+describe("Ollama LLM streaming (docs/15 #15)", () => {
+  const BOT_ID = "llm.ollama.gemma4"; // shared bot identity, default botId
+
+  /** The bot reply is created + streamed asynchronously after the DM POST returns; poll for it to
+   * settle (a body present and no longer marked `streaming`), mirroring the on-device helper above. */
+  async function settledAssistantReply(
+    app: LoamApp,
+    cookie: string,
+  ): Promise<{ body?: string; streaming?: boolean } | undefined> {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const thread = (
+        await app.server.inject({ method: "GET", url: `/api/dms/${BOT_ID}`, headers: { cookie } })
+      ).json() as { authorId: string; body?: string; meta?: { streaming?: boolean } }[];
+      const reply = thread.find((message) => message.authorId === BOT_ID && (message.body ?? "").length > 0);
+      if (reply && reply.meta?.streaming !== true) {
+        return { body: reply.body, streaming: reply.meta?.streaming };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return undefined;
+  }
+
+  it("degrades to a graceful assistant error when Ollama is unreachable, without crashing the server", async () => {
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await unusedLocalUrl() } } });
+    const user = await newSession(app);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    // The POST itself never fails because of a bad LLM backend — the failure surfaces async, in the
+    // assistant's own reply, exactly like an on-device hook failure.
+    expect(dm.statusCode).toBe(201);
+
+    const reply = await settledAssistantReply(app, user.cookie);
+    expect(reply?.body).toMatch(/LLM error/i);
+
+    // The server itself stayed healthy — an unrelated request right after still succeeds.
+    expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+  });
+
+  it("gates the bot contact and enableLLMChat/enableLLMStreaming on llm.ollama.enabled", async () => {
+    const disabledApp = await makeApp();
+    const disabledUser = await newSession(disabledApp);
+
+    const disabledConfig = (
+      await disabledApp.server.inject({
+        method: "GET",
+        url: "/api/config",
+        headers: { cookie: disabledUser.cookie },
+      })
+    ).json() as { networkConfig: { enableLLMChat: boolean; enableLLMStreaming: boolean } };
+    expect(disabledConfig.networkConfig.enableLLMChat).toBe(false);
+    expect(disabledConfig.networkConfig.enableLLMStreaming).toBe(false);
+
+    const disabledUsers = (
+      await disabledApp.server.inject({ method: "GET", url: "/api/users", headers: { cookie: disabledUser.cookie } })
+    ).json() as { id: string }[];
+    expect(disabledUsers.some((entry) => entry.id === BOT_ID)).toBe(false);
+
+    // With no backend enabled the bot doesn't exist at all, so a DM "to" its id is just a DM to a
+    // nonexistent recipient — no assistant reply is ever triggered.
+    const blindDm = await disabledApp.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: disabledUser.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    expect(blindDm.statusCode).toBe(400);
+
+    const ollama = startMockOllama(["hi there"]);
+    cleanups.push(ollama.close);
+    const enabledApp = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const enabledUser = await newSession(enabledApp);
+
+    const enabledConfig = (
+      await enabledApp.server.inject({ method: "GET", url: "/api/config", headers: { cookie: enabledUser.cookie } })
+    ).json() as { networkConfig: { enableLLMChat: boolean; enableLLMStreaming: boolean } };
+    expect(enabledConfig.networkConfig.enableLLMChat).toBe(true);
+    expect(enabledConfig.networkConfig.enableLLMStreaming).toBe(true);
+
+    const enabledUsers = (
+      await enabledApp.server.inject({ method: "GET", url: "/api/users", headers: { cookie: enabledUser.cookie } })
+    ).json() as { id: string; type: string }[];
+    expect(enabledUsers.some((entry) => entry.id === BOT_ID && entry.type === "bot")).toBe(true);
   });
 });
 
