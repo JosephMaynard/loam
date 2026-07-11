@@ -14,6 +14,20 @@ Priorities, in order: **simplicity** (no setup), **privacy** (anonymous/ephemera
 (low bandwidth, intermittent connectivity). It is transport-agnostic by design (WiFi today; LoRa
 relay is a stated future goal).
 
+**Positioning & governance.** LOAM is framed as *local communication for crowded or disrupted
+environments* (emergencies, travel, community events) — see `MISSION.md`, `ACCEPTABLE_USE.md`, and the
+translation policy in `docs/13`. Keep **user-facing/marketing copy** (site, README) accurate but
+non-inflammatory (the node-wide wipe is "Emergency Reset" in public copy; code identifiers like
+`killSwitch`/`/api/panic` and the blunt security docs stay as-is). The **security docs stay
+technically honest** — the distinction is documenting privacy accurately vs. presenting
+law-enforcement avoidance as the purpose.
+
+**Next major initiative:** `docs/16-opportunistic-mesh.md` — delay-tolerant "carry my message" (A→C→B)
+delivery: cryptographic identity + E2EE sealed mailboxes + bounded epidemic relay over the existing
+sync engine, Android-first transport. Phased and security-first; **start at Phase 0** (a new
+`packages/crypto` identity primitive). Do not rush the crypto/transport — that's the documented way
+comparable apps (Bridgefy, FireChat) failed.
+
 ## Layout
 
 pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `24.13.1`
