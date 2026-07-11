@@ -127,6 +127,12 @@ export interface LoamStore {
   addTombstone(messageId: string): void;
   loadTombstones(): string[];
   /**
+   * Delete tombstones stamped before `cutoffMs` — the horizon GC that keeps the table bounded on a
+   * long-lived node (see the `addTombstone` note; the horizon is enforced by the caller, not here).
+   * Returns the pruned message ids so the caller can drop them from its in-memory mirror too.
+   */
+  pruneTombstonesOlderThan(cutoffMs: number): string[];
+  /**
    * Store (or replace) a local user's mesh keypair record — the opportunistic-mesh identity, secret
    * keys included (docs/16), as an opaque JSON string. Kept out of the `users` table since it holds
    * private material; wiped with everything else by the kill switch.
@@ -187,6 +193,23 @@ export function openStore(path: string, options: OpenStoreOptions = {}): LoamSto
 }
 
 /**
+ * Backfill the `tombstones.created_at` column onto a database created before horizon-based GC
+ * existed. `CREATE TABLE IF NOT EXISTS` is a no-op on an already-existing table, so a plain
+ * `ALTER TABLE` here is the only way an older `.loam/loam.db` picks up the column. Existing rows
+ * (whose real delete time is lost) are backfilled to "now" — the safe direction, since it starts
+ * their horizon clock fresh rather than expiring them early and re-exposing an old delete to sync.
+ */
+function migrateTombstonesCreatedAt(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(tombstones)").all() as { name: string }[];
+  const hasCreatedAt = columns.some((column) => column.name === "created_at");
+
+  if (!hasCreatedAt) {
+    db.exec("ALTER TABLE tombstones ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
+    db.prepare("UPDATE tombstones SET created_at = ? WHERE created_at = 0").run(Date.now());
+  }
+}
+
+/**
  * Initialise the schema and prepared statements on an open connection and return the store.
  * Split out so `openStore` can close the connection if any setup step throws.
  */
@@ -226,7 +249,8 @@ function buildStore(db: SqliteConnection): LoamStore {
       value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS tombstones (
-      message_id TEXT PRIMARY KEY
+      message_id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS mesh_identities (
       user_id TEXT PRIMARY KEY,
@@ -239,6 +263,7 @@ function buildStore(db: SqliteConnection): LoamStore {
       PRIMARY KEY (owner_user_id, mesh_id)
     );
   `);
+  migrateTombstonesCreatedAt(db);
 
   const upsertUserStmt = db.prepare(
     "INSERT INTO users (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
@@ -265,8 +290,10 @@ function buildStore(db: SqliteConnection): LoamStore {
   );
   const getConfigStmt = db.prepare("SELECT value FROM config WHERE key = ?");
   const addTombstoneStmt = db.prepare(
-    "INSERT INTO tombstones (message_id) VALUES (?) ON CONFLICT(message_id) DO NOTHING",
+    "INSERT INTO tombstones (message_id, created_at) VALUES (?, ?) ON CONFLICT(message_id) DO NOTHING",
   );
+  const pruneTombstonesStmt = db.prepare("SELECT message_id FROM tombstones WHERE created_at < ?");
+  const deletePrunedTombstonesStmt = db.prepare("DELETE FROM tombstones WHERE created_at < ?");
   const upsertMeshIdentityStmt = db.prepare(
     "INSERT INTO mesh_identities (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
   );
@@ -337,13 +364,18 @@ function buildStore(db: SqliteConnection): LoamStore {
       setConfigStmt.run(key, value);
     },
     addTombstone(messageId) {
-      addTombstoneStmt.run(messageId);
+      addTombstoneStmt.run(messageId, Date.now());
     },
     loadTombstones() {
       return db
         .prepare("SELECT message_id FROM tombstones ORDER BY rowid")
         .all()
         .map((row) => row.message_id as string);
+    },
+    pruneTombstonesOlderThan(cutoffMs) {
+      const pruned = pruneTombstonesStmt.all(cutoffMs).map((row) => row.message_id as string);
+      deletePrunedTombstonesStmt.run(cutoffMs);
+      return pruned;
     },
     upsertMeshIdentity(userId, data) {
       upsertMeshIdentityStmt.run(userId, data);
