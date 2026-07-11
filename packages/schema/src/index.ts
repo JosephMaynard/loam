@@ -164,6 +164,15 @@ export const ChannelMemberAddRequestSchema = z.object({
 });
 export type ChannelMemberAddRequest = z.infer<typeof ChannelMemberAddRequestSchema>;
 
+/**
+ * Request to transfer a channel's ownership to another user (current owner or an admin only). For a
+ * private channel the new owner must already be — or is automatically added as — a member.
+ */
+export const ChannelTransferRequestSchema = z.object({
+  userId: IdSchema,
+});
+export type ChannelTransferRequest = z.infer<typeof ChannelTransferRequestSchema>;
+
 /** Admin request to update an existing channel. Every field is optional; omitted fields are left as-is. */
 export const ChannelUpdateRequestSchema = z
   .object({
@@ -302,6 +311,15 @@ export const SyncConfigSchema = z.object({
   peers: z.array(SyncPeerSchema).max(16),
   /** How often the pull loop runs against each peer. */
   intervalMs: z.number().int().min(5_000).max(3_600_000),
+  /**
+   * Shared mesh secret. When set, this node **requires** every peer to present it (header
+   * `x-loam-sync-token`) before serving the sync digest/messages, and presents it when pulling from
+   * its own peers — so only nodes that know the token can join the mesh. Unlike the admin passphrase
+   * or panic token this is stored in the clear (the node must transmit it to peers, exactly like an
+   * outbound API key), so protect it via encryption-at-rest, not hashing. Unset = open (any node on
+   * the LAN that can reach the endpoints may sync public data, the pre-token behaviour).
+   */
+  token: z.string().min(16).max(256).optional(),
 });
 export type SyncConfig = z.infer<typeof SyncConfigSchema>;
 
@@ -350,8 +368,13 @@ export const LoamConfigUpdateSchema = z.object({
     .optional(),
   security: SecurityConfigSchema.partial().optional(),
   access: AccessConfigSchema.partial().optional(),
-  // `peers` replaces the whole list when present.
-  sync: SyncConfigSchema.partial().optional(),
+  // `peers` replaces the whole list when present. An empty-string `token` clears the shared secret
+  // (back to open sync); a non-empty one must meet the same minimum as SyncConfigSchema.
+  sync: SyncConfigSchema.partial()
+    .extend({
+      token: z.literal("").or(z.string().min(16).max(256)).optional(),
+    })
+    .optional(),
 });
 export type LoamConfigUpdate = z.infer<typeof LoamConfigUpdateSchema>;
 

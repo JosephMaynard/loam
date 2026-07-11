@@ -70,6 +70,9 @@ export const en = {
   "members.leave": "Leave channel",
   "members.loading": "Loading members…",
   "members.owner": "Owner",
+  "members.makeOwner": "Make owner",
+  "members.transferConfirm": "Transfer ownership to this person? You'll no longer be the owner.",
+  "members.transferError": "Unable to transfer ownership.",
   "members.inviteLabel": "Invite someone",
   "members.choosePerson": "Choose a person…",
   "members.allMembers": "Everyone is already a member",
@@ -263,6 +266,10 @@ export const en = {
   "admin.syncEnable": "Sync public channels with peer nodes",
   "admin.syncNote":
     "Pull-based: this node fetches public channels, their messages, and profiles from each peer. DMs and private channels never leave a node. A peer's join URL (from its join QR) is its sync address. Enabling this also lets peers pull this node's public content.",
+  "admin.syncTokenLabel": "Shared mesh token",
+  "admin.syncTokenPlaceholder": "Leave blank for open sync",
+  "admin.syncTokenGenerate": "Generate",
+  "admin.syncTokenNote": "When set, only peers presenting this exact token can sync. Give every node in your mesh the same token.",
   "admin.noPeers": "No peers yet.",
   "admin.peerChangesNote": "Peer changes apply when you save the node config below.",
   // Admin view — bootstrap panel.
@@ -452,6 +459,7 @@ export const en = {
   "error.channel_change_forbidden": "Only the channel owner or an admin can change this channel",
   "error.member_invite_forbidden": "Only the channel owner or an admin can invite members",
   "error.member_remove_forbidden": "Only the channel owner or an admin can remove members",
+  "error.channel_transfer_forbidden": "Only the channel owner or an admin can transfer ownership",
   "error.parent_wrong_channel": "Parent message belongs to a different channel",
   "error.parent_not_found": "Parent message does not exist",
   "error.private_channels_disabled": "Private channels are disabled on this LOAM node",

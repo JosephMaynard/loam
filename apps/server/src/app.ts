@@ -13,6 +13,7 @@ import {
   AvatarImageUploadRequestSchema,
   ChannelCreateRequestSchema,
   ChannelMemberAddRequestSchema,
+  ChannelTransferRequestSchema,
   ChannelSchema,
   ChannelUpdateRequestSchema,
   KillSwitchRequestSchema,
@@ -136,8 +137,29 @@ export type AppOptions = {
   dbDriver?: StoreDriver;
   /** Node version string shown to clients (via `/api/config`). Defaults to `"dev"`. */
   version?: string;
+  /**
+   * Cap on how many *new* anonymous identities a single client IP may mint within
+   * `identityWindowMs`, bounding the user-row/session growth an attacker can force by discarding its
+   * session cookie and re-requesting. A device that keeps its cookie mints once and is unaffected; on
+   * a LAN each device has its own IP, so this is effectively per-device. Defaults to 60.
+   */
+  maxNewIdentitiesPerWindow?: number;
+  /** Sliding window (ms) for `maxNewIdentitiesPerWindow`. Defaults to 10 minutes. */
+  identityWindowMs?: number;
   logger?: boolean;
 };
+
+/**
+ * Thrown by `getSessionUserId` when a client IP exceeds its new-identity budget. The `statusCode`
+ * makes Fastify's default error handler answer `429 Too Many Requests` without a custom handler.
+ */
+class IdentityLimitError extends Error {
+  readonly statusCode = 429;
+  constructor() {
+    super("Too many new identities from this address");
+    this.name = "IdentityLimitError";
+  }
+}
 
 export type LoamApp = {
   server: FastifyInstance;
@@ -237,6 +259,7 @@ const ERROR_CODES: Record<string, string> = {
   "Only the channel owner or an admin can change this channel": "channel_change_forbidden",
   "Only the channel owner or an admin can invite members": "member_invite_forbidden",
   "Only the channel owner or an admin can remove members": "member_remove_forbidden",
+  "Only the channel owner or an admin can transfer ownership": "channel_transfer_forbidden",
   "Parent message belongs to a different channel": "parent_wrong_channel",
   "Parent message does not exist": "parent_not_found",
   "Private channels are disabled on this LOAM node": "private_channels_disabled",
@@ -397,6 +420,11 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     : undefined;
 
   merged.retention.messageTtlMs = merged.retention.messageTtlMs ?? undefined;
+
+  // The sync token is a bearer secret the node must transmit to peers, so it's stored in the clear
+  // (not hashed like the passphrase/panic token). An empty string clears it back to open sync.
+  const syncToken = merged.sync.token?.trim();
+  merged.sync.token = syncToken || undefined;
 
   // A named security profile (anything but `custom`) is authoritative for the axes it bundles: force
   // them onto the effective config so the profile actually drives behaviour and can't be silently
@@ -705,6 +733,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
+  // Per-IP new-identity budget (RAM-only): bounds how many fresh anonymous users one address can mint
+  // per window, so a client discarding its cookie can't grow the user table without limit. Pruned on
+  // the reaper timer. On a LAN each device gets its own IP, so this reads as per-device.
+  const identityMintCounters = new Map<string, { count: number; resetAt: number }>();
+  const maxNewIdentitiesPerWindow = options.maxNewIdentitiesPerWindow ?? 60;
+  const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
   // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
   // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
   // restart loses (and uploads abandoned past the grace period) are swept by
@@ -823,12 +857,37 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return data.users.some((user) => user.isAdmin);
   }
 
+  /**
+   * Consume one unit of a client IP's new-identity budget (fixed window). Returns false once the IP
+   * has minted `maxNewIdentitiesPerWindow` identities within `identityWindowMs`; the window then
+   * resets on its next expiry. Only reached on a genuine mint (requests with a valid session cookie
+   * return earlier), so a well-behaved client that keeps its cookie never touches this.
+   */
+  function consumeIdentityBudget(ip: string): boolean {
+    const now = Date.now();
+    const entry = identityMintCounters.get(ip);
+
+    if (!entry || entry.resetAt <= now) {
+      identityMintCounters.set(ip, { count: 1, resetAt: now + identityWindowMs });
+      return true;
+    }
+
+    entry.count += 1;
+    return entry.count <= maxNewIdentitiesPerWindow;
+  }
+
   function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string {
     const cookieToken = readCookie(request.headers.cookie, sessionCookieName);
     const cookieUserId = cookieToken ? sessions.get(cookieToken) : undefined;
 
     if (cookieUserId) {
       return cookieUserId;
+    }
+
+    // No valid session — this request will mint a brand-new identity. Bound how fast one address can
+    // do that (429) so an attacker can't flood the user table by discarding cookies.
+    if (!consumeIdentityBudget(request.ip)) {
+      throw new IdentityLimitError();
     }
 
     const userId = makeSessionUserId();
@@ -2148,9 +2207,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const timeout = setTimeout(() => controller.abort(), 10_000);
 
     try {
+      // Present the shared mesh token (if configured) so a token-guarded peer will serve us; harmless
+      // when the peer runs open.
+      const headers: Record<string, string> = {};
+      if (body !== undefined) {
+        headers["content-type"] = "application/json";
+      }
+      if (appConfig.sync.token) {
+        headers["x-loam-sync-token"] = appConfig.sync.token;
+      }
+
       const response = await fetch(`${peerUrl.replace(/\/+$/, "")}${path}`, {
         method: body === undefined ? "GET" : "POST",
-        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       });
@@ -2444,6 +2513,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       reapExpiredMessages();
     } catch (error) {
       server.log.error(error);
+    }
+
+    // Drop expired per-IP identity counters so the map can't grow unbounded across many peers.
+    const now = Date.now();
+    for (const [ip, entry] of identityMintCounters) {
+      if (entry.resetAt <= now) {
+        identityMintCounters.delete(ip);
+      }
     }
 
     void reapOrphanedAttachments().catch((error: unknown) => server.log.error(error));
@@ -3074,6 +3151,65 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { ok: true };
     },
   );
+
+  // Transfer a channel's ownership to another user. The current owner or an admin may do this; for a
+  // private channel the new owner is added to the roster if absent (so they can actually reach it).
+  // Ownership drives the `owner`-only posting policy and who may manage the channel, so it's a
+  // deliberate, audited hand-off — the previous owner stays a member but loses owner powers.
+  server.post<{ Params: { channelId: string } }>("/api/channels/:channelId/transfer", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
+    const channel = ensureChannel(request.params.channelId);
+
+    if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+      return reply.code(404).send(errorBody("Channel does not exist"));
+    }
+
+    if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+      return reply.code(403).send(errorBody("Only the channel owner or an admin can transfer ownership"));
+    }
+
+    const body = ChannelTransferRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send(errorBody("Invalid member request"));
+    }
+
+    const target = data.users.find((user) => user.id === body.data.userId);
+
+    if (!target || target.type !== "human") {
+      return reply.code(400).send(errorBody("User does not exist"));
+    }
+
+    if (target.banned) {
+      return reply.code(400).send(errorBody("That user has been removed from this node"));
+    }
+
+    if (channel.ownerUserId === target.id) {
+      return channel;
+    }
+
+    // For a private channel, materialise the full roster (channelMemberIds folds in the *current*
+    // owner, who may only be an implicit member) and add the new owner. Doing this unconditionally —
+    // not just when the target is absent — keeps the previous owner an explicit member after they
+    // stop being the implicit one, so they don't silently lose access on a legacy channel whose
+    // stored memberUserIds omitted the owner.
+    const members = channelMemberIds(channel);
+    members.add(target.id);
+    const memberUserIds = channel.visibility === "private" ? [...members] : channel.memberUserIds;
+
+    const next = ChannelSchema.parse({ ...channel, ownerUserId: target.id, memberUserIds });
+    store.upsertChannel(next);
+    Object.assign(channel, next);
+    broadcast({ type: "channelUpserted", channel });
+    return channel;
+  });
+
   server.get<{ Params: { userId: string } }>("/api/dms/:userId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
     const accessError = participationError(currentUser);
@@ -3146,11 +3282,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // same content any open session on the LAN could read; enabling sync is the operator's explicit
   // decision to share it with peer nodes.
 
+  /**
+   * Whether a peer request may be served: true when sync runs open (no shared token), or the request
+   * presents the matching token (constant-time). A missing/wrong token is treated exactly like sync
+   * being disabled — a 404 — so a prober can't distinguish "token-guarded" from "feature off".
+   */
+  function syncPeerAuthorized(request: FastifyRequest): boolean {
+    const required = appConfig.sync.token;
+    if (!required) {
+      return true;
+    }
+
+    const header = request.headers["x-loam-sync-token"];
+    const provided = Array.isArray(header) ? header[0] : header;
+    if (typeof provided !== "string") {
+      return false;
+    }
+
+    const a = Buffer.from(provided);
+    const b = Buffer.from(required);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
   server.get(
     "/api/sync/digest",
     { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
-    async (_request, reply) => {
-      if (!appConfig.sync.enabled) {
+    async (request, reply) => {
+      if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
       }
 
@@ -3162,7 +3320,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/sync/messages",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-      if (!appConfig.sync.enabled) {
+      if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
       }
 
