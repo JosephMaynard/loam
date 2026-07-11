@@ -1,5 +1,16 @@
 # 08 — Transport security on an off-grid LAN (no HTTPS)
 
+> **Status: Layer 1 (QR-bootstrapped session encryption) is BUILT — server + crypto done, client in
+> progress** (`feat/transport-encryption`). `@loam/crypto` has the X25519 handshake (host-static +
+> ephemeral, forward-secret) + XChaCha20-Poly1305 framing + emoji fingerprint. The server persists a
+> host transport keypair (rotated by the kill switch), serves `POST /api/transport/handshake`, and
+> transparently decrypts request bodies / encrypts responses (global Fastify hooks) + seals WS frames
+> for `/ws?enc=<sid>`. Gated by `security.transportEncryption` (`off` default / `optional` / `required`),
+> which is now the axis that distinguishes the `open`/`standard`/`hardened` profiles (the docs/09 gap).
+> **Layer-1 scope (documented below):** request/response BODIES + WS frames are encrypted; GET request
+> paths + query strings and image bytes remain visible metadata (the tunnel + image encryption are v2).
+
+
 ## The problem
 
 Off-grid, everyone joins a WiFi hotspot and reaches LOAM at a private address like `http://192.168.0.1`.
