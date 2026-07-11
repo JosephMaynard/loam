@@ -60,4 +60,47 @@ describe("encodeQR", () => {
 
     expect(svg).not.toContain("<image");
   });
+
+  describe("level M (docs/15 #10 — WiFi payload capacity)", () => {
+    it("encodes a WiFi payload too long for level H's version-6 ceiling (58 bytes)", () => {
+      // A realistic LocalOnlyHotspot SSID + escaped passphrase: comfortably over H's 58-byte cap,
+      // but well within M's 106-byte cap at version 6.
+      const payload =
+        "WIFI:T:WPA;S:LocalOnlyHotspot-8F3A21;P:a-realistic\\;long\\,passphrase\\:with\\\"escapes-99;;";
+      expect(new TextEncoder().encode(payload).length).toBeGreaterThan(58);
+
+      expect(() => encodeQRDetailed(payload, { ecLevel: "H" })).toThrow(/exceeds QR version 6-H capacity/);
+
+      const result = encodeQRDetailed(payload, { ecLevel: "M" });
+      expect(result.matrix.version).toBe(6);
+    });
+
+    it("produces a stable golden matrix for a long WiFi payload at level M", () => {
+      const payload =
+        "WIFI:T:WPA;S:LocalOnlyHotspot-8F3A21;P:a-realistic\\;long\\,passphrase\\:with\\\"escapes-99;;";
+      const result = encodeQRDetailed(payload, { ecLevel: "M" });
+
+      expect({
+        version: result.matrix.version,
+        maskId: result.maskId,
+        rows: matrixRows(result.matrix.data, result.matrix.size),
+      }).toMatchSnapshot();
+    });
+
+    it("throws when a level-M payload exceeds version 6-M capacity", () => {
+      const tooLong = "x".repeat(107);
+      expect(() => encodeQRDetailed(tooLong, { ecLevel: "M" })).toThrow(/exceeds QR version 6-M capacity/);
+    });
+
+    it("fits exactly at each version's M capacity boundary (62 / 84 / 106 bytes)", () => {
+      expect(encodeQRDetailed("x".repeat(62), { ecLevel: "M" }).matrix.version).toBe(4);
+      expect(encodeQRDetailed("x".repeat(84), { ecLevel: "M" }).matrix.version).toBe(5);
+      expect(encodeQRDetailed("x".repeat(106), { ecLevel: "M" }).matrix.version).toBe(6);
+    });
+
+    it("still defaults to level H when ecLevel is omitted (small join-link QRs unaffected)", () => {
+      const result = encodeQRDetailed("http://loam.local/user/aZ4kP2");
+      expect(result.matrix.version).toBe(encodeQRDetailed("http://loam.local/user/aZ4kP2", { ecLevel: "H" }).matrix.version);
+    });
+  });
 });

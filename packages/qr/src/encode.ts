@@ -4,15 +4,19 @@ import { placeFormatInfo } from "./format-info.js";
 import { applyBestMask } from "./mask.js";
 import { buildMatrix, flattenMatrix } from "./matrix.js";
 import { interleaveBlocks, rsEncodeBlock } from "./reed-solomon.js";
-import type { EncodeOptions, QRMatrix, QRVersion } from "./types.js";
+import type { EncodeOptions, QRErrorCorrectionLevel, QRMatrix, QRVersion } from "./types.js";
 
 type EncodedDetails = {
   matrix: QRMatrix;
   maskId: number;
 };
 
-function buildDataCodewords(inputBytes: Uint8Array, version: QRVersion): Uint8Array {
-  const { dataCodewords } = getVersionInfo(version);
+function buildDataCodewords(
+  inputBytes: Uint8Array,
+  version: QRVersion,
+  ecLevel: QRErrorCorrectionLevel,
+): Uint8Array {
+  const { dataCodewords } = getVersionInfo(version, ecLevel);
   const buffer = new BitBuffer();
   const totalDataBits = dataCodewords * 8;
 
@@ -22,7 +26,7 @@ function buildDataCodewords(inputBytes: Uint8Array, version: QRVersion): Uint8Ar
 
   if (buffer.length > totalDataBits) {
     throw new Error(
-      `Input is too large for QR version ${version}-H (${inputBytes.length} UTF-8 bytes)`,
+      `Input is too large for QR version ${version}-${ecLevel} (${inputBytes.length} UTF-8 bytes)`,
     );
   }
 
@@ -40,8 +44,8 @@ function buildDataCodewords(inputBytes: Uint8Array, version: QRVersion): Uint8Ar
   return buffer.toBytes();
 }
 
-function splitIntoBlocks(version: QRVersion, dataCodewords: Uint8Array) {
-  const versionInfo = getVersionInfo(version);
+function splitIntoBlocks(version: QRVersion, ecLevel: QRErrorCorrectionLevel, dataCodewords: Uint8Array) {
+  const versionInfo = getVersionInfo(version, ecLevel);
   const blocks: { data: Uint8Array; ecc: Uint8Array }[] = [];
   let offset = 0;
 
@@ -73,23 +77,24 @@ function codewordsToBits(codewords: Uint8Array): number[] {
 }
 
 export function encodeQRDetailed(input: string, options: EncodeOptions = {}): EncodedDetails {
+  const ecLevel = options.ecLevel ?? "H";
   const inputBytes = new TextEncoder().encode(input);
-  const version = options.version ?? chooseVersion(inputBytes.length);
-  const versionInfo = getVersionInfo(version);
+  const version = options.version ?? chooseVersion(inputBytes.length, ecLevel);
+  const versionInfo = getVersionInfo(version, ecLevel);
 
-  if (inputBytes.length > versionInfo.byteCapacityH) {
+  if (inputBytes.length > versionInfo.byteCapacity) {
     throw new Error(
-      `Input is ${inputBytes.length} bytes in UTF-8, which exceeds QR version ${version}-H capacity (${versionInfo.byteCapacityH} bytes)`,
+      `Input is ${inputBytes.length} bytes in UTF-8, which exceeds QR version ${version}-${ecLevel} capacity (${versionInfo.byteCapacity} bytes)`,
     );
   }
 
-  const dataCodewords = buildDataCodewords(inputBytes, version);
-  const blocks = splitIntoBlocks(version, dataCodewords);
+  const dataCodewords = buildDataCodewords(inputBytes, version, ecLevel);
+  const blocks = splitIntoBlocks(version, ecLevel, dataCodewords);
   const interleaved = interleaveBlocks(blocks);
   const matrixWithData = buildMatrix(version, codewordsToBits(interleaved));
   const { masked, maskId } = applyBestMask(matrixWithData);
 
-  placeFormatInfo(masked, maskId);
+  placeFormatInfo(masked, maskId, ecLevel);
 
   return {
     maskId,
