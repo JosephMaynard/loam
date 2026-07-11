@@ -3740,3 +3740,123 @@ describe("on-device LLM provider", () => {
     expect(users.some((entry) => entry.id === BOT_ID)).toBe(false);
   });
 });
+
+describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
+  const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000 };
+
+  function listen(app: LoamApp): Promise<string> {
+    return app.server.listen({ host: "127.0.0.1", port: 0 });
+  }
+  async function adminOf(app: LoamApp): Promise<{ cookie: string; userId: string }> {
+    const session = await newSession(app);
+    return { cookie: session.cookie, userId: session.userId };
+  }
+  function setPeers(app: LoamApp, cookie: string, urls: string[]): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie },
+      payload: { sync: { peers: urls.map((url) => ({ url })) } },
+    });
+  }
+  function syncNow(app: LoamApp, cookie: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
+  }
+  async function roster(app: LoamApp, cookie: string): Promise<{ id: string }[]> {
+    return (await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie } })).json() as {
+      id: string;
+    }[];
+  }
+  async function dmBodies(app: LoamApp, cookie: string, peerId: string): Promise<string[]> {
+    return (
+      (
+        await app.server.inject({ method: "GET", url: `/api/dms/${peerId}`, headers: { cookie } })
+      ).json() as { body?: string }[]
+    ).map((message) => message.body ?? "");
+  }
+
+  it("404s /api/mesh/messages when mesh is disabled", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+    const other = await newSession(app);
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: user.cookie },
+      payload: { toUserId: other.userId, body: "hi" },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("delivers sealed mail to a local recipient as a DM (seal + open on one node)", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const alice = await newSession(app);
+    const bob = await newSession(app); // both get published mesh identities via the session hook
+
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: alice.cookie },
+      payload: { toUserId: bob.userId, body: "meet at the old bridge" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    // Delivery creates a "mesh.<sender>" contact and a DM to Bob from it.
+    const contact = (await roster(app, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+    expect(contact).toBeDefined();
+    expect(await dmBodies(app, bob.cookie, contact!.id)).toContain("meet at the old bridge");
+  });
+
+  it("carries A→C→B: an intermediary relays sealed mail it cannot read", async () => {
+    const nodeA = await makeApp({ sync: { enabled: true }, mesh: MESH });
+    const nodeB = await makeApp({ sync: { enabled: true }, mesh: MESH });
+    const nodeC = await makeApp({ sync: { enabled: true }, mesh: MESH });
+    const aAdmin = await adminOf(nodeA);
+    const bob = await adminOf(nodeB); // Bob is node B's real (admin) session user, not a seed
+    const cAdmin = await adminOf(nodeC);
+
+    const [aUrl, bUrl, cUrl] = await Promise.all([listen(nodeA), listen(nodeB), listen(nodeC)]);
+    // Pull topology: A learns Bob from B; C carries from A; B receives from C — A and B never meet.
+    expect((await setPeers(nodeA, aAdmin.cookie, [bUrl])).statusCode).toBe(200);
+    expect((await setPeers(nodeC, cAdmin.cookie, [aUrl])).statusCode).toBe(200);
+    expect((await setPeers(nodeB, bob.cookie, [cUrl])).statusCode).toBe(200);
+
+    // Bob posts publicly so his profile + published identityKey propagate to A.
+    await nodeB.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: bob.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "bob is here" },
+    });
+    await syncNow(nodeA, aAdmin.cookie); // A now knows Bob (with his mesh identityKey)
+
+    // Alice (node A) seals a message to Bob.
+    const send = await nodeA.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: aAdmin.cookie },
+      payload: { toUserId: bob.userId, body: "the rendezvous is at dawn" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    await syncNow(nodeC, cAdmin.cookie); // C carries the sealed blob from A (cannot open it)
+    await syncNow(nodeB, bob.cookie); // B pulls from C, recognises the tag, decrypts, delivers
+
+    // Bob received the plaintext.
+    const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+    expect(contact).toBeDefined();
+    expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("the rendezvous is at dawn");
+
+    // The carrier C holds the sealed blob but never learned the plaintext — no DM anywhere on C
+    // contains the secret, and its stored copy is opaque ciphertext.
+    const cMessages = (
+      await nodeC.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: cAdmin } })
+    ).json() as { body?: string }[];
+    expect(cMessages.some((m) => (m.body ?? "").includes("dawn"))).toBe(false);
+    // C carried it: its store holds a sealed-type message whose serialized form doesn't contain the plaintext.
+    const cStored = nodeC.store.loadMessages();
+    const sealed = cStored.find((m) => m.type === "sealed");
+    expect(sealed).toBeDefined();
+    expect(JSON.stringify(sealed)).not.toContain("dawn");
+  });
+});

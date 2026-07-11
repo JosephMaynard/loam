@@ -50,6 +50,21 @@ export const UserSchema = z.object({
   shadowBanned: z.boolean().optional(),
   /** Awaiting a greeter/admin's approval to participate (when the node's joinPolicy is "approval"). */
   pending: z.boolean().optional(),
+  /**
+   * Public mesh identity keys (opportunistic-mesh — docs/16), present when the node has `mesh.enabled`
+   * and has minted a keypair for this local user. Published so senders on other nodes can seal mail to
+   * them: `sign` is the Ed25519 public key (the `mesh.` id derives from it), `kx` the X25519 agreement
+   * public key, `kxSig` binds `kx` to `sign`. The private keys and the secret mailbox token never
+   * leave the home node. Absent for legacy / non-mesh users, who are unaffected.
+   */
+  identityKey: z
+    .object({
+      alg: z.literal("ed25519"),
+      sign: z.string().min(1).max(64),
+      kx: z.string().min(1).max(64),
+      kxSig: z.string().min(1).max(128),
+    })
+    .optional(),
   createdAt: TimestampSchema,
   ephemeral: z.boolean(),
 });
@@ -314,6 +329,22 @@ export const SecurityConfigSchema = z.object({
 });
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
 
+/**
+ * Opportunistic-mesh / sealed-mailbox delivery (docs/16). The whole sealed-mail surface is gated on
+ * `enabled` (default off) — with it off, public-data sync is byte-identical to today. `relay` (a
+ * narrower gate) governs whether this node carries *other people's* sealed mail; a node can have
+ * `enabled: true, relay: false` to send/receive its own mail without being a courier. `ttlMs` /
+ * `hopLimit` bound how long/far a sent message propagates; `maxCarried` caps carried blobs.
+ */
+export const MeshConfigSchema = z.object({
+  enabled: z.boolean(),
+  relay: z.boolean(),
+  ttlMs: z.number().int().min(60_000).max(7 * 24 * 3_600_000),
+  hopLimit: z.number().int().min(1).max(16),
+  maxCarried: z.number().int().min(0).max(100_000),
+});
+export type MeshConfig = z.infer<typeof MeshConfigSchema>;
+
 /** Access control for who may join and participate. */
 export const AccessConfigSchema = z.object({
   joinPolicy: JoinPolicySchema,
@@ -359,6 +390,7 @@ export const LoamConfigSchema = z.object({
   security: SecurityConfigSchema,
   access: AccessConfigSchema,
   sync: SyncConfigSchema,
+  mesh: MeshConfigSchema,
 });
 export type LoamConfig = z.infer<typeof LoamConfigSchema>;
 
@@ -402,6 +434,7 @@ export const LoamConfigUpdateSchema = z.object({
       token: z.literal("").or(z.string().min(16).max(256)).optional(),
     })
     .optional(),
+  mesh: MeshConfigSchema.partial().optional(),
 });
 export type LoamConfigUpdate = z.infer<typeof LoamConfigUpdateSchema>;
 
@@ -477,6 +510,7 @@ export const MessageTypeSchema = z.enum([
   "channelReply",
   "dm",
   "reaction",
+  "sealed",
 ]);
 export type MessageType = z.infer<typeof MessageTypeSchema>;
 
@@ -585,11 +619,29 @@ export const ReactionMessageSchema = BaseMessageSchema.extend({
 });
 export type ReactionMessage = z.infer<typeof ReactionMessageSchema>;
 
+/**
+ * A **sealed mailbox** message (opportunistic-mesh / DTN — docs/16). End-to-end encrypted to a single
+ * recipient's key so intermediaries carry it as opaque bytes: `authorId` is the neutral sentinel
+ * `"mesh.sealed"` (the real sender is authenticated *inside* the ciphertext), `toTag` is the routing
+ * tag a recipient recognises, `sealed` is the base64url AEAD blob, and `ttlExpiresAt` / `hopLimit`
+ * bound how far and how long it propagates. Only the recipient node can open it; the whole surface is
+ * gated on `mesh.enabled`.
+ */
+export const SealedMessageSchema = BaseMessageSchema.extend({
+  type: z.literal("sealed"),
+  toTag: z.string().min(1).max(64),
+  sealed: z.string().min(1).max(90_000),
+  ttlExpiresAt: TimestampSchema,
+  hopLimit: z.number().int().min(0).max(16),
+});
+export type SealedMessage = z.infer<typeof SealedMessageSchema>;
+
 export const MessageSchema = z.discriminatedUnion("type", [
   ChannelPostMessageSchema,
   ChannelReplyMessageSchema,
   DirectMessageSchema,
   ReactionMessageSchema,
+  SealedMessageSchema,
 ]);
 export type Message = z.infer<typeof MessageSchema>;
 
@@ -606,6 +658,23 @@ export const SyncDigestSchema = z.object({
       editedAt: TimestampSchema.optional(),
     }),
   ),
+  /**
+   * Sealed mailbox mail on offer (opportunistic-mesh — docs/16). Present only when the node has
+   * `mesh.enabled`; omitted otherwise, so a mixed-version / mesh-off peer's digest is unchanged and
+   * the public-data flow is byte-identical to today. Sealed blobs are never edited, so no `editedAt`;
+   * the tag/TTL/hop are advertised up front so a puller decides relevance + relay-worthiness before
+   * fetching the bytes.
+   */
+  sealed: z
+    .array(
+      z.object({
+        id: IdSchema,
+        toTag: z.string().min(1).max(64),
+        ttlExpiresAt: TimestampSchema,
+        hopLimit: z.number().int().min(0).max(16),
+      }),
+    )
+    .optional(),
 });
 export type SyncDigest = z.infer<typeof SyncDigestSchema>;
 
@@ -621,6 +690,17 @@ export const SyncMessagesResponseSchema = z.object({
   users: z.array(UserSchema),
 });
 export type SyncMessagesResponse = z.infer<typeof SyncMessagesResponseSchema>;
+
+/**
+ * Client request to send a sealed mailbox message (opportunistic-mesh — docs/16) to a known user who
+ * has published a mesh `identityKey`. The server seals it to that user's key and lets it propagate;
+ * only the recipient's home node can open it. The recipient reads it as an ordinary DM once delivered.
+ */
+export const MeshSendRequestSchema = z.object({
+  toUserId: IdSchema,
+  body: z.string().min(1).max(8000),
+});
+export type MeshSendRequest = z.infer<typeof MeshSendRequestSchema>;
 
 /** Live per-peer sync bookkeeping, as reported by `GET /api/admin/sync`. */
 export const SyncPeerStatusSchema = z.object({

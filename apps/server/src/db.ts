@@ -126,6 +126,13 @@ export interface LoamStore {
    */
   addTombstone(messageId: string): void;
   loadTombstones(): string[];
+  /**
+   * Store (or replace) a local user's mesh keypair record — the opportunistic-mesh identity, secret
+   * keys included (docs/16), as an opaque JSON string. Kept out of the `users` table since it holds
+   * private material; wiped with everything else by the kill switch.
+   */
+  upsertMeshIdentity(userId: string, data: string): void;
+  loadMeshIdentities(): { userId: string; data: string }[];
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -213,6 +220,10 @@ function buildStore(db: SqliteConnection): LoamStore {
     CREATE TABLE IF NOT EXISTS tombstones (
       message_id TEXT PRIMARY KEY
     );
+    CREATE TABLE IF NOT EXISTS mesh_identities (
+      user_id TEXT PRIMARY KEY,
+      data TEXT NOT NULL
+    );
   `);
 
   const upsertUserStmt = db.prepare(
@@ -242,6 +253,10 @@ function buildStore(db: SqliteConnection): LoamStore {
   const addTombstoneStmt = db.prepare(
     "INSERT INTO tombstones (message_id) VALUES (?) ON CONFLICT(message_id) DO NOTHING",
   );
+  const upsertMeshIdentityStmt = db.prepare(
+    "INSERT INTO mesh_identities (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
+  );
+  const loadMeshIdentitiesStmt = db.prepare("SELECT user_id, data FROM mesh_identities");
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -311,6 +326,12 @@ function buildStore(db: SqliteConnection): LoamStore {
         .all()
         .map((row) => row.message_id as string);
     },
+    upsertMeshIdentity(userId, data) {
+      upsertMeshIdentityStmt.run(userId, data);
+    },
+    loadMeshIdentities() {
+      return loadMeshIdentitiesStmt.all().map((row) => ({ userId: row.user_id as string, data: row.data as string }));
+    },
     transaction(fn) {
       db.exec("BEGIN IMMEDIATE");
 
@@ -334,6 +355,7 @@ function buildStore(db: SqliteConnection): LoamStore {
         db.exec("DELETE FROM users");
         db.exec("DELETE FROM channels");
         db.exec("DELETE FROM tombstones");
+        db.exec("DELETE FROM mesh_identities");
       });
     },
     close() {

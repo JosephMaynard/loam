@@ -13,6 +13,7 @@
     "@fastify/rate-limit": "^11.1.0",
     "@fastify/static": "^9.3.0",
     "@fastify/websocket": "^11.3.0",
+    "@loam/crypto": "workspace:*",
     "@loam/display-name": "workspace:*",
     "@loam/schema": "workspace:*",
     "better-sqlite3-multiple-ciphers": "^12.11.1",

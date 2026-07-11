@@ -529,7 +529,9 @@ function LoamApp() {
       const authorName = usersByIdRef.current.get(message.authorId)?.displayName ?? generateDisplayName(message.authorId);
       const body =
         bodyFor(message) ||
-        (message.type !== "reaction" && message.attachments?.length ? t("toast.imageFallback") : "");
+        (message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length
+          ? t("toast.imageFallback")
+          : "");
       let title = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
 
@@ -2496,7 +2498,7 @@ function MessageItem({
             dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
           />
         )}
-        {message.type !== "reaction" && message.attachments?.length ? (
+        {message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (
           <div className="message-attachments">
             {message.attachments.map((attachment) => (
               <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
