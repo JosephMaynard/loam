@@ -73,6 +73,8 @@ export const ru: Catalog = {
   "settings.joinEyebrow": "Локальный доступ",
   "settings.joinTitle": "Присоединитесь к этому узлу LOAM",
   "settings.thisBrowser": "Этот браузер",
+  "settings.transportEncryptedLine": "🔒 Зашифровано · {fingerprint}",
+  "settings.transportKeyMismatch": "Отсканированный QR-код не совпадает с ключом этого узла.",
   "settings.profileEyebrow": "Профиль",
   "settings.profileTitle": "Локальная личность",
   "settings.displayName": "Отображаемое имя",
@@ -411,6 +413,8 @@ export const ru: Catalog = {
   "gate.pendingBody":
     "Ожидаем, пока кто-нибудь на этом узле впустит вас. Этот экран обновится, как только вас одобрят.",
   "gate.connection": "Соединение: {status}",
+  "gate.needsQrTitle": "Отсканируйте QR-код приглашения для безопасного подключения",
+  "gate.needsQrBody": "Этому узлу требуется отсканированный QR-код приглашения перед подключением.",
 
   "confirm.deleteMessage": "Удалить это сообщение? Это нельзя отменить.",
 

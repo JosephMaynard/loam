@@ -69,6 +69,8 @@ export const prs: Catalog = {
   "settings.joinEyebrow": "دسترسی محلی",
   "settings.joinTitle": "به این گرهِ LOAM بپیوندید",
   "settings.thisBrowser": "این مرورگر",
+  "settings.transportEncryptedLine": "🔒 رمزگذاری‌شده · {fingerprint}",
+  "settings.transportKeyMismatch": "کد QR که سکن کردید با کلید این گره مطابقت ندارد.",
   "settings.profileEyebrow": "پروفایل",
   "settings.profileTitle": "هویت محلی",
   "settings.displayName": "نام نمایشی",
@@ -402,6 +404,8 @@ export const prs: Catalog = {
   "gate.pendingBody":
     "منتظرید کسی در این گره شما را راه دهد. این صفحه به‌مجرد تأیید شما تازه می‌شود.",
   "gate.connection": "اتصال: {status}",
+  "gate.needsQrTitle": "برای اتصال امن، کد QR پیوستن را سکن کنید",
+  "gate.needsQrBody": "این گره پیش از اتصال به یک کد QR پیوستن سکن‌شده نیاز دارد.",
 
   "confirm.deleteMessage": "این پیام حذف شود؟ این کار بیرته نمی‌شود.",
 

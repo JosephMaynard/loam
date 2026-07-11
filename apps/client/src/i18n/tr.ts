@@ -68,6 +68,8 @@ export const tr: Catalog = {
   "settings.joinEyebrow": "Yerel erişim",
   "settings.joinTitle": "Bu LOAM düğümüne katılın",
   "settings.thisBrowser": "Bu tarayıcı",
+  "settings.transportEncryptedLine": "🔒 Şifreli · {fingerprint}",
+  "settings.transportKeyMismatch": "Taradığınız QR bu düğümün anahtarıyla eşleşmiyor.",
   "settings.profileEyebrow": "Profil",
   "settings.profileTitle": "Yerel kimlik",
   "settings.displayName": "Görünen ad",
@@ -401,6 +403,8 @@ export const tr: Catalog = {
   "gate.pendingBody":
     "Bu düğümdeki birinin sizi içeri almasını bekliyorsunuz. Onaylandığınız anda bu ekran güncellenir.",
   "gate.connection": "Bağlantı: {status}",
+  "gate.needsQrTitle": "Güvenli bağlanmak için katılım QR kodunu tarayın",
+  "gate.needsQrBody": "Bu düğüm bağlanmadan önce taranmış bir katılım QR kodu gerektirir.",
 
   "confirm.deleteMessage": "Bu mesaj silinsin mi? Bu geri alınamaz.",
 

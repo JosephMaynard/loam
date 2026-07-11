@@ -68,6 +68,8 @@ export const pt: Catalog = {
   "settings.joinEyebrow": "Acesso local",
   "settings.joinTitle": "Entrar neste nó LOAM",
   "settings.thisBrowser": "Este navegador",
+  "settings.transportEncryptedLine": "🔒 Criptografado · {fingerprint}",
+  "settings.transportKeyMismatch": "O QR code que você escaneou não corresponde à chave deste nó.",
   "settings.profileEyebrow": "Perfil",
   "settings.profileTitle": "Identidade local",
   "settings.displayName": "Nome de exibição",
@@ -401,6 +403,8 @@ export const pt: Catalog = {
   "gate.pendingBody":
     "Aguardando alguém deste nó deixar você entrar. Esta tela é atualizada assim que você for aprovado.",
   "gate.connection": "Conexão: {status}",
+  "gate.needsQrTitle": "Escaneie o QR de acesso para se conectar com segurança",
+  "gate.needsQrBody": "Este nó requer que o QR de acesso seja escaneado antes de se conectar.",
 
   "confirm.deleteMessage": "Excluir esta mensagem? Isto não pode ser desfeito.",
 

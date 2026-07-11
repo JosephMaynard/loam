@@ -68,6 +68,8 @@ export const ur: Catalog = {
   "settings.joinEyebrow": "مقامی رسائی",
   "settings.joinTitle": "اِس LOAM نوڈ میں شامل ہوں",
   "settings.thisBrowser": "یہ براؤزر",
+  "settings.transportEncryptedLine": "🔒 مرمز · {fingerprint}",
+  "settings.transportKeyMismatch": "آپ نے جو QR اسکین کیا وہ اس نوڈ کی کلید سے مطابقت نہیں رکھتا۔",
   "settings.profileEyebrow": "پروفائل",
   "settings.profileTitle": "مقامی شناخت",
   "settings.displayName": "ظاہر ہونے والا نام",
@@ -401,6 +403,8 @@ export const ur: Catalog = {
   "gate.pendingBody":
     "اِس نوڈ پر کسی کے آپ کو داخل کرنے کا انتظار ہے۔ منظوری ملتے ہی یہ اسکرین اپ ڈیٹ ہو جائے گی۔",
   "gate.connection": "کنکشن: {status}",
+  "gate.needsQrTitle": "محفوظ طریقے سے جڑنے کے لیے جوائن QR اسکین کریں",
+  "gate.needsQrBody": "اس نوڈ کو جڑنے سے پہلے اسکین شدہ جوائن QR درکار ہے۔",
 
   "confirm.deleteMessage": "یہ پیغام حذف کریں؟ یہ واپس نہیں ہو سکتا۔",
 

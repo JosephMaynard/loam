@@ -68,6 +68,8 @@ export const sw: Catalog = {
   "settings.joinEyebrow": "Ufikiaji wa ndani",
   "settings.joinTitle": "Jiunge na nodi hii ya LOAM",
   "settings.thisBrowser": "Kivinjari hiki",
+  "settings.transportEncryptedLine": "🔒 Imesimbwa · {fingerprint}",
+  "settings.transportKeyMismatch": "QR uliyoichanganua haifanani na ufunguo wa nodi hii.",
   "settings.profileEyebrow": "Wasifu",
   "settings.profileTitle": "Utambulisho wa ndani",
   "settings.displayName": "Jina la kuonyesha",
@@ -401,6 +403,8 @@ export const sw: Catalog = {
   "gate.pendingBody":
     "Unasubiri mtu kwenye nodi hii akuruhusu kuingia. Skrini hii inasasishwa mara tu unapoidhinishwa.",
   "gate.connection": "Muunganisho: {status}",
+  "gate.needsQrTitle": "Changanua QR ya kujiunga ili kuunganisha kwa usalama",
+  "gate.needsQrBody": "Nodi hii inahitaji QR ya kujiunga iliyochanganuliwa kabla ya kuunganisha.",
 
   "confirm.deleteMessage": "Futa ujumbe huu? Hili haliwezi kutenduliwa.",
 

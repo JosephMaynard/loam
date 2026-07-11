@@ -68,6 +68,8 @@ export const my: Catalog = {
   "settings.joinEyebrow": "ဒေသတွင်း ဝင်ရောက်ခွင့်",
   "settings.joinTitle": "ဤ LOAM node သို့ ဝင်ရောက်ပါ",
   "settings.thisBrowser": "ဤ browser",
+  "settings.transportEncryptedLine": "🔒 ကုဒ်ဝှက်ထား · {fingerprint}",
+  "settings.transportKeyMismatch": "သင်စကင်ဖတ်ခဲ့သည့် QR သည် ဤနုဒ်၏ key နှင့် မကိုက်ညီပါ။",
   "settings.profileEyebrow": "ပရိုဖိုင်",
   "settings.profileTitle": "ဒေသတွင်း ကိုယ်ပိုင်မှတ်ပုံ",
   "settings.displayName": "ပြသနာမည်",
@@ -401,6 +403,8 @@ export const my: Catalog = {
   "gate.pendingBody":
     "ဤ node ရှိ တစ်စုံတစ်ဦးက သင့်ကို ဝင်ခွင့်ပေးရန် စောင့်နေသည်။ သင် အတည်ပြုခံရသည်နှင့် ဤစာမျက်နှာ ချက်ချင်း အပ်ဒိတ်ဖြစ်သည်။",
   "gate.connection": "ချိတ်ဆက်မှု- {status}",
+  "gate.needsQrTitle": "လုံခြုံစွာ ချိတ်ဆက်ရန် join QR ကို စကင်ဖတ်ပါ",
+  "gate.needsQrBody": "ဤနုဒ်သည် ချိတ်ဆက်ခြင်းမပြုမီ join QR ကို စကင်ဖတ်ရန် လိုအပ်သည်။",
 
   "confirm.deleteMessage": "ဤစာကို ဖျက်မလား။ ၎င်းကို ပြန်ပြင်၍မရပါ။",
 
