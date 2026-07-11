@@ -7,7 +7,27 @@ import {
   openMailbox,
   mailboxTag,
   currentEpoch,
+  createTransportIdentity,
+  transportFingerprint,
+  transportClientHello,
+  transportServerAccept,
+  transportClientDerive,
+  sealTransport,
+  openTransport,
 } from "./index.js";
+
+/** Run a full client↔host transport handshake and return the two derived session keys. */
+function handshake(): { hostSecret: string; hostPublic: string; clientKey: string; serverKey: string } {
+  const host = createTransportIdentity();
+  const hello = transportClientHello();
+  const accepted = transportServerAccept({ hostSecret: host.secretKey, clientEphemeralPublic: hello.ephemeralPublic });
+  const clientKey = transportClientDerive({
+    clientEphemeralSecret: hello.ephemeralSecret,
+    hostPublic: host.publicKey,
+    hostEphemeralPublic: accepted.hostEphemeralPublic,
+  });
+  return { hostSecret: host.secretKey, hostPublic: host.publicKey, clientKey, serverKey: accepted.sessionKey };
+}
 
 /** Build the `sender` shape sealMailbox expects from a full identity. */
 function senderOf(id: ReturnType<typeof createMeshIdentity>) {
@@ -148,5 +168,70 @@ describe("routing tags", () => {
     expect(currentEpoch(999, 1000)).toBe(0);
     expect(currentEpoch(1000, 1000)).toBe(1);
     expect(currentEpoch(86_400_000 * 3 + 5, 86_400_000)).toBe(3);
+  });
+});
+
+describe("transport session (docs/08)", () => {
+  it("client and host derive the same session key from the handshake", () => {
+    const { clientKey, serverKey } = handshake();
+    expect(clientKey).toBe(serverKey);
+    expect(clientKey).toMatch(/^[A-Za-z0-9_-]{43}$/); // 32 bytes base64url
+  });
+
+  it("a fresh handshake yields a different key each time (ephemeral)", () => {
+    const host = createTransportIdentity();
+    const keyOf = () => {
+      const hello = transportClientHello();
+      return transportServerAccept({ hostSecret: host.secretKey, clientEphemeralPublic: hello.ephemeralPublic })
+        .sessionKey;
+    };
+    expect(keyOf()).not.toBe(keyOf());
+  });
+
+  it("a wrong host key breaks agreement (authenticates the host / defeats MITM)", () => {
+    const hello = transportClientHello();
+    const realHost = createTransportIdentity();
+    const impostor = createTransportIdentity();
+    const accepted = transportServerAccept({
+      hostSecret: impostor.secretKey,
+      clientEphemeralPublic: hello.ephemeralPublic,
+    });
+    // The client trusts the REAL host's public key (from the QR); an impostor's reply won't agree.
+    const clientKey = transportClientDerive({
+      clientEphemeralSecret: hello.ephemeralSecret,
+      hostPublic: realHost.publicKey,
+      hostEphemeralPublic: accepted.hostEphemeralPublic,
+    });
+    expect(clientKey).not.toBe(accepted.sessionKey);
+  });
+
+  it("seals and opens a frame round-trip with bound aad", () => {
+    const { clientKey, serverKey } = handshake();
+    const blob = sealTransport(clientKey, JSON.stringify({ hello: "world" }), "POST|/api/messages");
+    expect(openTransport(serverKey, blob, "POST|/api/messages")).toBe('{"hello":"world"}');
+  });
+
+  it("rejects a frame opened under a different aad (no cross-route replay)", () => {
+    const { clientKey, serverKey } = handshake();
+    const blob = sealTransport(clientKey, "secret", "POST|/api/messages");
+    expect(openTransport(serverKey, blob, "POST|/api/admin/kill-switch")).toBeNull();
+  });
+
+  it("rejects a tampered frame and a wrong key", () => {
+    const { clientKey } = handshake();
+    const other = handshake();
+    const blob = sealTransport(clientKey, "secret", "aad");
+    expect(openTransport(other.clientKey, blob, "aad")).toBeNull(); // wrong key
+    expect(openTransport(clientKey, blob.slice(0, -2) + "AA", "aad")).toBeNull(); // tampered
+    expect(openTransport(clientKey, "!!!not-base64!!!", "aad")).toBeNull(); // malformed
+  });
+
+  it("fingerprint is stable per key, differs across keys, and is 5 emoji", () => {
+    const a = createTransportIdentity();
+    const b = createTransportIdentity();
+    expect(transportFingerprint(a.publicKey)).toBe(transportFingerprint(a.publicKey));
+    expect([...transportFingerprint(a.publicKey)].length).toBe(5);
+    // Extremely unlikely to collide; guards against a constant/empty implementation.
+    expect(transportFingerprint(a.publicKey)).not.toBe(transportFingerprint(b.publicKey));
   });
 });
