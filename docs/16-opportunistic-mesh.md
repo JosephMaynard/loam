@@ -1,10 +1,67 @@
 # 16 — Opportunistic mesh / delay-tolerant delivery (the "carry my message" evolution)
 
-> **Status: committed direction, not yet started. Phased, security-first.** This is the plan of
-> record for evolving LOAM from "two nodes that share a LAN sync" into "phones that carry each other's
-> messages across time and distance." It is a multi-session initiative. **Do not implement it in a
-> hurry** — see the guardrails; rushing the crypto/transport is the documented way every comparable
-> project has failed.
+> **Status: Phases 0–2 BUILT & TESTED; Phase 3 is the remaining hardware step.** The sealed-mailbox
+> A→C→B delivery works today over the existing sync transport (configured peers / courier). The rest
+> of this doc is the full design; the box below records what actually shipped and where it differs.
+
+## Implementation status (v1 — shipped)
+
+- **Phase 0 — `packages/crypto` (`@loam/crypto`)**: Ed25519 identity, X25519 sealed-sender envelope
+  (ephemeral-key ECDH → HKDF → XChaCha20-Poly1305, inner Ed25519 signature, AAD-bound relay
+  metadata), self-certifying `mesh.` id, `kx`↔`sign` binding, routing tags. Pure JS (`@noble/*`,
+  pinned Node-18-safe). 13 tests.
+- **Phase 1 — sealed mailbox (server)**: `sealed` `Message` arm, `User.identityKey`, `mesh` config,
+  `SyncDigest.sealed`. **Entirely server-side** — because LOAM's host is already trusted for its own
+  local users, per-user mesh keypairs live server-side (DB `mesh_identities`, public keys published
+  on the user record + synced) and the E2E guarantee is against **carrier nodes**, not a user's home
+  host. `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
+  DM.
+- **Phase 2 — bounded relay (server)**: carriers import sealed blobs opaquely and deliver-if-ours,
+  else relay onward (hop-decremented, per-carrier cap), else drop; the reaper expires + tombstones by
+  TTL. **TTL + hop + cap converge — acks are intentionally NOT implemented** (that sub-design is
+  threat-model-*blocked*, §3/§6). Proven by a 3-node A→C→B test: the carrier relays mail whose
+  ciphertext never contains the plaintext; the recipient decrypts it.
+- **Gated & non-breaking**: everything is behind `mesh.enabled` (default off, currently set via
+  `config.json` / `PATCH /api/admin/config` — an admin-UI toggle is a follow-up). With it off, public
+  sync is byte-identical to before; all pre-existing tests still pass.
+
+**Where v1 differs from the design below (deliberate, documented):**
+
+1. **Routing tag privacy** — v1 derives `toTag` from the recipient's **public** `kx`, so it routes
+   correctly but gives **no metadata-unlinkability** (anyone with the pubkey can compute the tag).
+   E2E **confidentiality** (carriers can't read content) is fully preserved. The secret-mailbox-token
+   `toTag` in §2 is the **v2 privacy hardening** (needs a contact-exchange channel to distribute the
+   token).
+2. **Recipient discovery** — a sender needs the recipient's published `identityKey`, which today
+   propagates only when the recipient has authored public content (the normal user-profile sync). A
+   dedicated contact/QR exchange is a follow-up.
+2b. **Active key-substitution (residual)** — because v1 ids are session-random (`user.<8hex>`), **not**
+   derived from the signing key, a `mesh.` id can't self-certify its key the way §1 designs. `importPeerUsers`
+   defends as far as it can: it **verifies `kxSig` (kx↔sign binding)** and strips an invalid key, and applies
+   **trust-on-first-use** (a known user's key is never silently overwritten by a later sync). But an active
+   man-in-the-middle who introduces a user to a node *before* their real key syncs — over the unauthenticated
+   plain-HTTP sync — can still bind a forged key. So v1 sealed-mail **confidentiality holds against passive
+   carriers** (the primary "C carries but can't read" threat), not against an active MITM at first
+   introduction. The real fixes are **addressing by the self-certifying `mesh.<hash-of-sign>` id** (§1) and/or
+   sync **peer authentication** (docs/11 `sync.token`) — both follow-ups.
+3. **AAD** binds `toTag`+`ttlExpiresAt` (both immutable); the original hop budget is bounded by the
+   schema max rather than the signature (v2 refinement).
+4. **Phase 3 (opportunistic transport — BLE discovery + Wi-Fi Aware)** is **not built**: it needs
+   physical Android devices to build+verify, and adding unverified native BLE/Wi-Fi-Aware code would
+   jeopardize the working APK (the same principled call as the on-device-LLM native inference). The
+   sealed layer already relays over **any** sync transport it's given (configured peers, the sequential
+   courier), so Phase 3 is purely *automation of discovery*, not a prerequisite for the feature to work.
+5. **Tombstone GC** — expired-sealed tombstones aren't yet horizon-GC'd (matches docs/11's existing
+   unbounded-tombstone behaviour); the bounded-GC in §3 is a follow-up.
+6. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
+7. **Schema bounds** — the shipped `SealedMessageSchema` uses generous round caps (`toTag` ≤ 64 chars,
+   `sealed` ≤ 90 000 chars) rather than the tight computed bounds in §2 below (22 / 87 480). Same
+   headroom for the full-size envelope, just simpler numbers.
+
+---
+
+> **Design of record (below).** Phased, security-first. **Do not rush the unbuilt parts** — rushing
+> the crypto/transport is the documented way every comparable project has failed.
 
 ## The scenario
 
@@ -63,10 +120,18 @@ session identity (which keeps working unchanged for LAN-local use):
   `mesh.` prefix distinguishes it from a legacy `user.<8hex>` everywhere ids flow; verification is
   intrinsic (recompute the hash from the pubkey — SSB's property, no PKI). A `mesh.` id feeds the
   existing `display-name`/`avatar` packages unchanged, so it gets a stable name + SVG avatar for free.
-- `UserSchema` gains an **optional** `identityKey: { alg:"ed25519", sign, kx }` block (base64url
-  32-byte pubkeys) — additive, old records validate unchanged. `importPeerUsers` (which already strips
-  authority on import) **must also verify** that an imported user's id derives from `identityKey.sign`,
-  dropping any user whose id and key disagree — this is what makes a `mesh.` id un-spoofable.
+- `UserSchema` gains an **optional** `identityKey: { alg:"ed25519", sign, kx, kxSig }` block (base64url
+  32-byte pubkeys; `kxSig` a 64-byte signature) — additive, old records validate unchanged. Because the
+  `mesh.` id derives from **`sign` only**, a raw `kx` is unauthenticated and a carrier could swap it to
+  hijack the sealed channel, so `kx` must be **bound to `sign`**: the identity owner publishes
+  `kxSig = Ed25519(sign_sk, "loam.mesh.kxbind.v1" ‖ kx)`. `importPeerUsers` (which already strips
+  authority on import) **must verify, for any record carrying `identityKey`:** (a) the user's id derives
+  from `identityKey.sign` (the un-spoofable-id check), and (b) `kxSig` is a valid signature by `sign`
+  over `kx` — **dropping any user whose id/key disagree or whose `kx` is missing, malformed, or
+  unbound.** Records **without** an `identityKey` block are legacy and pass through untouched (LAN-only,
+  no sealed mail). (A deterministic derivation of `kx` from the Ed25519 seed is an acceptable
+  alternative to `kxSig` if both ends compute it identically, but the explicit signed binding is
+  preferred — it survives independent key rotation.)
 
 **Library — one code path, no native deps, Node 18 *and* browser (`@noble/*`).** The constraint is
 tight: the PWA runs in an **insecure context** (`http://<lan-ip>`), so **`crypto.subtle` is
@@ -75,6 +140,15 @@ unavailable** — the WebCrypto path is closed regardless of Node. The embedded 
 **`@noble/curves` (ed25519, x25519) + `@noble/ciphers` (xchacha20poly1305) + `@noble/hashes`** — pure
 JS, uses only `getRandomValues`, runs byte-identically in the insecure-context browser and in Node
 18/24 (both ends must produce identical envelopes). This is the same choice docs/08 already made.
+
+**Pin to Node-18-compatible releases.** The embedded Android runtime is **Node 18** (arm64), so pin
+the `@noble/*` majors verified to run there — the `@noble/curves` 1.x / `@noble/ciphers` 1.x /
+`@noble/hashes` 1.x line (ES2020, depending only on `globalThis.crypto.getRandomValues`, which Node 18
+provides) — with exact `package.json` versions rather than floating `^` ranges that could roll onto a
+later major that raises its engines floor or emits syntax the Node 18 build can't parse. Treat "builds
+and runs on Node 18 arm64" as a CI constraint so a dependency bump can't silently break the embedded
+server; the pure-JS + insecure-context-browser + Node baseline is non-negotiable.
+
 Put it in a **new `packages/crypto`** workspace package (remember the CLAUDE.md gotcha: the server
 consumes the compiled `dist/`, so build it after edits; relative imports need `.js` extensions).
 
@@ -101,13 +175,19 @@ carrier; **(2)** C must store-and-forward without decrypting. So add a **new dis
 // packages/schema/src/index.ts — new arm in MessageSchema / MessageCreateRequestSchema
 type: z.literal("sealed"),
 toTag: z.string().regex(/^[A-Za-z0-9_-]{22}$/),  // rotating per-recipient tag — NOT the recipient id
-sealed: z.string().min(1).max(64_000),           // opaque AEAD blob: e_pk ‖ nonce ‖ ciphertext ‖ tag
+sealed: z.string().min(1).max(87_480),           // base64url(e_pk‖nonce‖ct‖tag); ≤65 608 raw bytes — see §2 size math
 ttlExpiresAt: TimestampSchema,                    // hard drop-dead time
 hopLimit: z.number().int().min(0).max(16),        // decremented per relay
 ```
 
 `authorId` on a `sealed` message is a **neutral sentinel** (`"mesh.sealed"`), not the sender — the
-real sender is inside the ciphertext.
+real sender is inside the ciphertext. Because the sentinel makes the author invisible to the
+sync-time shadow-ban check, **shadow-ban must be enforced at creation instead:** `createMessage`
+resolves the sealing identity's local `mesh.` id to its session/moderation record and **refuses to
+create a `sealed` message for a shadow-banned (or banned) sender**, exactly as it drops a shadow-banned
+public post — with a test asserting a shadow-banned identity's sealed mail is never minted or
+advertised. (A node can't enforce this on *relayed* strangers' mail — it can't read the sender — but
+the originating node always can, which is where the ban lives.)
 
 **Envelope (sealed-sender, modelled on SSB `private-box` / libsodium `crypto_box_seal` + inner
 signature — structurally what Signal sealed-sender does):**
@@ -118,23 +198,61 @@ signature — structurally what Signal sealed-sender does):**
   fresh per message so ciphertexts to B are unlinkable by key material. 24-byte nonce → random nonces
   are safe with no per-pair counter (essential for store-and-forward).
 - *Inner (the real message, sender-authenticated):* `{ from: "mesh.<b32>", fromKx, createdAt, body,
-  attachments?, sig: Ed25519(sender, canonical(...)) }`. B verifies `from` derives from the signing
-  key and `sig` is valid — the **sealed-sender guarantee**: the sender proves who they are *to the
-  recipient only*, never to a carrier.
+  sig: Ed25519(sender, canonical(...)) }` (the exact signed field set is fixed in the authentication
+  bullet below). B verifies `from` derives from the signing key and `sig` is valid — the
+  **sealed-sender guarantee**: the sender proves who they are *to the recipient only*, never to a
+  carrier.
+- **Attachments are rejected on `sealed` messages in v1 (text-only).** A normal `attachments` entry is
+  an `att_` id pointing at a **server-local** file the originating host serves over `/api/attachments`;
+  a remote recipient reached only via carriers can't resolve it, and shipping the id in cleartext would
+  leak a fetchable handle. So `createMessage` **rejects a `sealed` message carrying `attachments`** and
+  the compose UI hides them for sealed mail (this is why the inner payload omits `attachments`).
+  **Follow-up (v2):** carry attachments *inside* the sealed envelope — an encrypted manifest plus the
+  ciphertext bytes sized into the same padding buckets — so they inherit the sealed-sender/opacity
+  guarantees instead of relying on a host-local fetch.
 - **Padding** `inner` to fixed buckets (256B/1K/4K/16K/64K) before sealing so ciphertext length
-  doesn't fingerprint message size.
+  doesn't fingerprint message size. This sets the **`sealed` size cap**: the largest bucket is 64 KiB =
+  65 536 B of padded plaintext; XChaCha20-Poly1305 adds no length expansion beyond its 16 B tag, and the
+  envelope prepends the 32 B ephemeral `e_pk` and 24 B nonce → **raw blob ≤ 65 536 + 32 + 24 + 16 =
+  65 608 bytes**. base64url-encoded that is `ceil(65 608 / 3) × 4 = 87 480` characters, so the schema
+  uses `.max(87_480)` — **not** `64_000`, which would truncate a full-size message — while `.min(1)`
+  keeps the non-empty guard.
+- **Authenticate the immutable relay metadata.** `toTag`, `ttlExpiresAt`, and the **original** hop
+  budget `hopLimit0` travel in cleartext (carriers route on them) but must be **bound to the envelope**
+  so a carrier can't extend the TTL, retarget the tag, or reset hops undetected. Include them in the
+  inner signed payload — `sig = Ed25519(sender, canonical({from, fromKx, createdAt, body, toTag,
+  ttlExpiresAt, hopLimit0}))` — **and** pass the same triple as the XChaCha20-Poly1305 **AAD**, so both
+  the signature and the outer AEAD fail on any edit. The recipient recomputes and rejects on mismatch; a
+  tampered blob neither opens nor verifies. The only field that legitimately mutates in flight is the
+  **remaining** hop count (not signed — it can't be), constrained instead by the merge rules in §3.
 
-**`toTag` — routing without a recipient id.** `toTag = base64url(HKDF(B.kx, info="loam.mesh.tag.v1" ‖
-epoch)[0..15])`, `epoch = floor(createdAt/windowMs)` (e.g. daily). A node can compute tags **for its
-own local identities** and check "is any sealed blob addressed to someone here?" — but cannot compute
-tags for strangers, so it can't attribute a blob to a person. Recipients self-select by tag (a
-**probabilistic mailbox**). Honest trade-off: `toTag` gives *unlinkability to a person*, not
-*path privacy* — a global observer watching every node still sees the tag reappear across hops and can
-trace one message's path (not its endpoints). Full PSI/onion-rewrap privacy is v2.
+**`toTag` — routing without a recipient id.** The tag must be computable **only by the recipient and
+the senders it authorizes** — never from public key material. Deriving it from `B.kx` (which is
+published in `UserSchema.identityKey`, so every peer already holds it) would let anyone with B's pubkey,
+or a global observer, recompute B's tags and correlate *all* mail to B — the unlinkability claim would
+be false. Instead key the tag on a **secret mailbox token** `B.mtk` (32 random bytes) that B generates
+with its keypair and **discloses only to contacts it authorizes to write to it**, handed over
+out-of-band at contact exchange — carried in the join/contact QR payload right next to the `mesh.`
+pubkey, and re-shareable/rotatable the same way. `toTag = base64url(HKDF(B.mtk, info="loam.mesh.tag.v1"
+‖ epoch)[0..15])`, `epoch = floor(createdAt/windowMs)` (e.g. daily). A node computes tags **for its own
+local identities** (it holds their `mtk`) and checks "is any sealed blob addressed to someone here?"; an
+authorized sender computes B's tag only because B gave it `B.mtk`; a carrier holding neither the token
+nor a local copy **cannot recompute the tag from the published pubkey**, so it can neither attribute a
+blob to a person nor forge a tag. Recipients self-select by tag (a **probabilistic mailbox**). **Epoch
+coverage on lookup:** because the tag is stamped with the message's `createdAt` epoch, a recipient must
+*not* match only the current epoch — it computes its tag set for **every epoch in the live TTL window**,
+from `floor((now − ttlMax)/windowMs)` to `floor((now + skew)/windowMs)` (a small clock-skew margin), so
+mail composed in epoch N is still recognised when checked in epoch N+1 or any later epoch before it
+expires. Honest trade-off: the secret-token `toTag` gives *unlinkability to a person for anyone who
+lacks `mtk`*, not *path privacy* — an authorized carrier that itself holds `B.mtk`, or a global observer
+correlating one tag value as it reappears across hops, can still trace a single message's path (never
+its endpoints), and rotating `mtk` means re-distributing it to contacts. Full PSI/onion-rewrap privacy
+is v2.
 
 **Coexistence with today's public-only sync (must not regress):** `isSyncableMessage` gets a `sealed`
-branch (syncable iff unexpired, `hopLimit>0`, not tombstoned — no channel/visibility check, author
-shadow-ban skipped); `buildSyncDigest` gains a `sealed: [{id,toTag,ttlExpiresAt,hopLimit}]` array
+branch (syncable iff **`mesh.enabled`**, unexpired, `hopLimit>0`, not tombstoned — no channel/visibility
+check; the author sentinel means **sender shadow-ban is enforced at *creation*, not here**, see §3);
+`buildSyncDigest` gains a `sealed: [{id,toTag,ttlExpiresAt,hopLimit}]` array **only when `mesh.enabled`**
 (additive — old peers ignore it, so **mixed-version meshes keep working**); `/api/sync/messages`
 round-trips a `sealed` message through the existing `SyncMessagesResponseSchema` once the union has the
 arm (**no new endpoint**). The `dm` type is **untouched** — LAN-local plaintext DMs to a co-present
@@ -150,32 +268,80 @@ Bound on four axes, converge via acks, reusing the tombstone machinery:
   30s reaper: a `sealed` message past its TTL is deleted **and tombstoned** (`store.addTombstone` +
   `tombstones.add`) so peers can't hand it back. Add a `ttl_expires_at` column so the reaper indexes
   instead of scanning JSON.
+- **Bounded tombstone retention (don't grow forever):** sealed TTL/ack tombstones would otherwise
+  accumulate one row per message ever carried — unbounded — so give them their own **GC horizon**. Store
+  a small `expires_at` on each sealed/ack tombstone = the message's `ttlExpiresAt` **plus a
+  re-advertisement grace window** `graceMs` (comfortably longer than the mesh's convergence/gossip
+  period, e.g. a few ×`ttlMax`); the reaper deletes such a tombstone only once `now > expires_at`. This
+  is safe because after `ttlExpiresAt` the message is *independently* rejectable on its own expiry: an
+  inbound copy past its (signed) `ttlExpiresAt` is dropped by the TTL check whether or not a tombstone
+  still exists, so the tombstone only needs to outlive the message's live window plus grace — long
+  enough to stop re-import churn — not forever. (Public-data sync tombstones keep docs/11's existing
+  policy; only the sealed/ack tombstones get this horizon.)
 - **Hop count (path):** `importPeerMessages` stores an accepted sealed message with `hopLimit - 1`; at
   0 a node may still *deliver* to a local recipient but must not re-advertise it. Id is constant across
-  hops (dedup on id as `importPeerMessages` already does).
-- **Per-carrier storage cap (space):** a new `mesh: { relay, maxCarriedBytes, maxCarriedCount, ttlMax,
-  hopMax }` config. On accept, enforce the cap with **eviction = soonest-to-expire, highest-hop first**.
-  `relay:false` is a valid low-resource "leaf" (receives own mail by `toTag`, carries nothing else).
-- **Delivery acks → convergence (the important part):** when B opens a blob it emits a **signed
-  delivery ack** `{ msgId, ackedBy, at, sig=Ed25519(B,...) }` (only B could decrypt, so only B can
-  honestly ack). Acks propagate as a tiny new syncable kind (digest `acks:[msgId]`); a carrier
-  receiving a valid ack **deletes its copy, records `msgId` in the existing `tombstones` table, and
-  re-advertises** — an acked blob becomes indistinguishable from a locally-deleted one. This is a
-  deliberate change from docs/11's "deletes don't propagate": delivery-acks are the one delete signal
-  we *do* gossip, because convergence requires it. Undelivered mail is bounded by TTL+hop+cap; both
-  directions terminate.
+  hops (dedup on id as `importPeerMessages` already does). **Merge rules for duplicate copies (a blob
+  arrives from two carriers):** dedup by id as today, and treat relay state as **monotonic** — accept a
+  later copy only if its mutable state is *validly more-progressed*, never regressed or inflated.
+  Concretely: re-derive every bound from the **signed** `ttlExpiresAt`/`toTag`/`hopLimit0` (never the
+  cleartext routing fields, so a forged larger `hopLimit0` fails the signature); **reject** any copy
+  whose `ttlExpiresAt` exceeds the signed value or whose `toTag` differs from the signed value (that
+  blob is tampered); and **never raise** the stored remaining hop count —
+  `remaining ← min(existing_remaining, incoming_remaining)`, so a copy claiming *more* remaining hops is
+  a hop-budget reset attempt and is clamped, not trusted. Duplicates thus converge to the *least*
+  remaining budget, and no carrier can extend a message's life, retarget it, or grant it more hops.
+- **Per-carrier storage cap (space):** a new `mesh: { enabled, relay, maxCarriedBytes, maxCarriedCount,
+  ttlMax, hopMax }` config. On accept, enforce the cap with **eviction = soonest-to-expire, highest-hop
+  first**. `relay:false` is a valid low-resource "leaf" (receives own mail by `toTag`, carries nothing
+  else).
+- **`mesh.enabled` — the master opt-in (default `false`).** The entire sealed-mail surface is gated on
+  this one flag; **public-data sync is completely unchanged when it is `false`** — the digest carries no
+  `sealed`/`acks` arrays and every sealed path is inert. Enforcement points, each short-circuiting when
+  `mesh.enabled` is false: **`createMessage`** refuses to create a `sealed` message (like any disabled
+  feature flag); **`isSyncableMessage`** returns false for the `sealed`/ack branch so nothing sealed is
+  advertised or served; **`buildSyncDigest`** omits the `sealed`/`acks` arrays entirely;
+  **`importPeerMessages`** ignores inbound `sealed`/ack entries (no accept, no store, no cap logic); the
+  **reaper's** sealed-TTL/tombstone branch does nothing; and the client **compose-sealed / tag-matched
+  inbox UI** is hidden. `mesh.relay` is a *second, narrower* gate governing only the carrying of *other
+  people's* mail: with `mesh.enabled:true, relay:false` a node still creates and receives its own sealed
+  mail but carries nothing for others; with `mesh.enabled:false` none of it exists.
+- **Delivery acks → convergence (the important part).** When B opens a blob it can emit a **delivery
+  ack** so carriers stop carrying a delivered message. **This sub-design is BLOCKED pending a
+  threat-model decision (§6.1) and must not ship in Phase 2 in its identity-exposing form:** the naïve
+  ack `{ msgId, ackedBy, at, sig=Ed25519(B,…) }` names the recipient (`ackedBy` = B's `mesh.` id) with a
+  signature verifiable against B's public key, which re-links a delivered message to B and undoes the
+  `toTag` unlinkability the sealed envelope buys. Before Phase 2 the ack must instead prove "the holder
+  of the sealing secret for `msgId` acked" **without naming B** — e.g. a per-message ack key derived
+  inside the envelope (`ackKey = HKDF(shared, info="loam.mesh.ack.v1")`, known only to sender and
+  recipient), so the ack is `{ msgId, at, mac=HMAC(ackKey, msgId‖at) }`, blinded of any recipient
+  identity and validatable only by a carrier that also holds `ackKey` — or ack is dropped entirely and
+  TTL+hop+cap remain the sole convergence mechanism. **Ack record, once the blinded form is chosen:** a
+  **standalone syncable kind** (not message metadata — the delivered message is being deleted),
+  advertised as its own `acks:[{msgId}]` digest array; **on the wire** `{ msgId, at, mac }` (no author,
+  no signature over B's key); **stored** in a dedicated `mesh_acks` table keyed by `msgId` alongside the
+  `tombstones` table. A carrier receiving a **well-formed, validatable** ack **deletes its copy of
+  `msgId`, writes `msgId` to the existing `tombstones` table, records the ack in `mesh_acks`, and
+  re-advertises both** — an acked blob becomes indistinguishable from a locally-deleted one.
+  **Mixed-version:** old peers lacking the `acks` digest array simply ignore it and keep carrying until
+  TTL (safe; convergence just slower). This is a deliberate change from docs/11's "deletes don't
+  propagate": delivery-acks are the one delete signal we *do* gossip, because convergence requires it.
+  Undelivered mail is bounded by TTL+hop+cap regardless, so **both directions terminate even if ack
+  ships disabled.**
 
-> **⚠️ The subtlest tension (flag for security review): unforgeable acks vs recipient unlinkability.**
-> An unforgeable ack wants the recipient's key exposed; unlinkable delivery wants it hidden. A node
-> holding the ciphertext could forge/suppress a "delivered, stop carrying" ack — a censorship/DoS
-> vector. v1 compromise: ack carries `ackedBy` + signature, carriers verify well-formedness and trust
-> the id; **TTL is the backstop** guaranteeing eventual purge even if acks are gamed. This needs a
-> dedicated decision, not a default.
+> **⚠️ The subtlest tension (BLOCKED — security-review decision required before Phase 2): unforgeable
+> acks vs recipient unlinkability.** An ack verifiable against B's public key exposes B's identity and
+> re-links delivered mail to B; an unlinkable ack cannot name B. The identity-exposing
+> `ackedBy`+signature form is **rejected**, not adopted as a "v1 compromise," because it silently undoes
+> the envelope's unlinkability. The candidate replacement is the per-message blinded MAC above (`ackKey`
+> shared only by sender+recipient, no recipient id on the wire); a carrier holding the ciphertext could
+> still forge/suppress an ack it can validate — a censorship/DoS vector — so **TTL remains the backstop**
+> guaranteeing eventual purge even if acks are gamed or disabled. Ship acks only after this decision
+> lands; until then convergence rests on TTL+hop+cap.
 
 ### 4. How it layers on the current sync protocol
 
 **Reused verbatim:** `runSyncLoop` (ticker), `fetchPeerJson`/`readPeerBody` (size-capped validated
-fetch — sealed blobs ≤64KB, well under `maxPeerJsonBytes`), `syncPeerAuthorized` + `x-loam-sync-token`
+fetch — a sealed blob is ≤65 608 raw bytes → ≤87 480 base64url chars (§2), well under `maxPeerJsonBytes`), `syncPeerAuthorized` + `x-loam-sync-token`
 (**no new auth surface**), the `/api/sync/digest` + `/api/sync/messages` routes (same 404-when-disabled
 indistinguishability), the `tombstones` set+table, global message-id uniqueness (idempotent gossip).
 **Minimally changed:** `buildSyncDigest` (+`sealed`/`acks` arrays), `syncWithPeer` (+sealed & ack
@@ -202,10 +368,14 @@ per-OEM battery-optimization allowlisting to be needed (document it honestly).
 
 ### 6. Hardest / riskiest parts (call them out)
 
-1. **Ack unforgeability vs recipient unlinkability** (§3) — deepest tension; needs a security-review
-   decision, TTL is the safety net.
-2. **Metadata / traffic analysis** — `toTag` hides *who*, not *path*; defends against carriers, not a
-   global passive observer. Onion re-wrap would fix it at large complexity cost (v2+).
+1. **Ack unforgeability vs recipient unlinkability** (§3) — deepest tension; **blocked pending a
+   security-review decision.** The identity-exposing `ackedBy` form is rejected; the blinded per-message
+   MAC is the candidate; TTL is the safety net and acks ship only after the decision lands.
+2. **Metadata / traffic analysis** — the secret-token `toTag` hides *who* from anyone without `B.mtk`
+   (carriers included), but not *path*: an authorized carrier that holds `mtk`, or a global passive
+   observer correlating a repeated tag across hops, still traces a message's route (never its
+   endpoints). Token distribution/rotation is the added cost. Onion re-wrap would fix path privacy at
+   large complexity cost (v2+).
 3. **Key lifecycle & the kill switch** — does a panic wipe destroy the `mesh.` keyseed? Decide per
    security profile (docs/09); likely **hardened → identity is DB-bound and dies with the wipe.**
 4. **Battery/background on real OEMs** — the Briar graveyard; duty-cycling + opt-in metering mandatory.
@@ -221,9 +391,9 @@ per-OEM battery-optimization allowlisting to be needed (document it honestly).
 
 | Concern | Reused | Changed | Net-new |
 |---|---|---|---|
-| Identity | `makeSessionUserId`, `display-name`/`avatar` | `importPeerUsers` (verify id↔key), `UserSchema` (+`identityKey`) | `packages/crypto`, keyseed storage |
+| Identity | `makeSessionUserId`, `display-name`/`avatar` | `importPeerUsers` (verify id↔`sign`, `kx`↔`sign`), `UserSchema` (+`identityKey`+`kxSig`) | `packages/crypto`, keyseed storage |
 | Sealed mail | `MessageSchema` union, `createMessage`, `newMessageId` | new `sealed` arm; `db.ts` columns/index | seal/open, `toTag`, padding, compose+inbox UI |
-| Relay bounds | reaper, `tombstones` set+table, `store.addTombstone` | reaper TTL branch, `importPeerMessages` hop/cap/ack | `mesh` config, eviction, signed acks |
+| Relay bounds | reaper, `tombstones` set+table, `store.addTombstone` | reaper TTL branch, tombstone GC horizon, `importPeerMessages` hop/cap/ack | `mesh` config, eviction, blinded acks (§3 — blocked) |
 | Sync layering | `runSyncLoop`, `fetchPeerJson`, `syncPeerAuthorized`, `/api/sync/*` | `buildSyncDigest`, `syncWithPeer`, `importPeerMessages`, `isSyncableMessage`, `SyncDigestSchema` | ack kind, sealed digest arrays |
 | Transport | `LoamHostService`, `LocalOnlyHotspot`, `with-loam-host.js` | duty-cycled hosting policy | BLE discovery, Wi-Fi Aware bulk link (Android-first) |
 
@@ -235,10 +405,13 @@ order. **A later phase must never ship before its predecessor's gate is green.**
 
 ### Phase 0 — Cryptographic identity foundation *(no hardware; isolated; no behaviour change)*
 - **Goal:** a stable keypair identity primitive, in its own package, wired into *nothing* yet.
-- **Do:** create `packages/identity` (or extend `@loam/schema`) with keypair generation, id-derived-
-  from-public-key, sign/verify, and sealed-box encrypt/decrypt, using the primitives chosen in the
-  Architecture section. **No native deps** (must run on the embedded Node 18 Android runtime and
-  desktop). Full round-trip + known-answer unit tests.
+- **Do:** create **`packages/crypto`** (the single canonical home for this — *not* `packages/identity`,
+  *not* folded into `@loam/schema`) with keypair generation, id-derived-from-public-key, sign/verify,
+  and sealed-box encrypt/decrypt, using the primitives chosen in the Architecture section. **No native
+  deps** (must run on the embedded Node 18 Android runtime and desktop). Observe the CLAUDE.md build
+  boundary: the server consumes the compiled **`dist/`**, so rebuild after edits, and relative imports
+  inside `packages/crypto/src` use explicit **`.js`** extensions. Full round-trip + known-answer unit
+  tests.
 - **Gate:** package builds and tests pass on the workspace; used by no runtime path yet; a written
   crypto note reviewed (ideally a second set of eyes) before anything depends on it.
 
@@ -316,4 +489,4 @@ only after Android Phases 3–4 prove the model; expect a foreground-only experi
 
 Start at **Phase 0**. Read this file and the Architecture section, then the existing sync engine in
 `apps/server/src/app.ts` and `packages/schema/src/index.ts`. The first concrete deliverable is the
-`packages/identity` primitive with tests — nothing wired into the running app yet.
+**`packages/crypto`** primitive with tests — nothing wired into the running app yet.

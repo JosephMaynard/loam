@@ -243,6 +243,9 @@ export const en = {
   "admin.llmModel": "Model",
   "admin.llmBotName": "Bot display name",
   "admin.llmSystemPrompt": "System prompt (optional)",
+  "admin.llmOnDeviceEnable": "Run the model on this device (Android host only)",
+  "admin.llmOnDeviceModel": "On-device model name",
+  "admin.llmOnDeviceNote": "Runs a small model on the phone itself instead of a laptop's Ollama. Works only on the Android host with a compatible model file added on-device (never shipped); a no-op elsewhere. Off by default.",
   // Admin view — retention panel.
   "admin.privacyEyebrow": "Privacy",
   "admin.retentionHeading": "Message retention",

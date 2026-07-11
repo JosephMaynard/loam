@@ -143,6 +143,7 @@ describe("@loam/schema", () => {
             botId: "llm.ollama.gemma4",
             botDisplayName: "Gemma",
           },
+          onDevice: { enabled: false },
         },
         admin: { bootstrap: "firstUser" },
         killSwitch: { enabled: false, requireConfirmation: true },
@@ -150,6 +151,7 @@ describe("@loam/schema", () => {
         security: { profile: "standard" },
         access: { joinPolicy: "open" },
         sync: { enabled: false, peers: [], intervalMs: 30_000 },
+        mesh: { enabled: false, relay: false, ttlMs: 259_200_000, hopLimit: 6, maxCarried: 5_000 },
       }),
     ).not.toThrow();
 

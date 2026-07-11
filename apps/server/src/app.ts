@@ -6,6 +6,15 @@ import { join } from "node:path";
 import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
+import {
+  createMeshIdentity,
+  currentEpoch,
+  mailboxTag,
+  openMailbox,
+  sealMailbox,
+  verifyKxBinding,
+  type MeshIdentity,
+} from "@loam/crypto";
 import { generateDisplayName } from "@loam/display-name";
 import {
   AdminClaimRequestSchema,
@@ -21,6 +30,7 @@ import {
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
   MessageEditRequestSchema,
+  MeshSendRequestSchema,
   MessageSchema,
   ModerationUpdateRequestSchema,
   PanicRequestSchema,
@@ -40,6 +50,7 @@ import {
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
+  type SealedMessage,
   type NetworkConfig,
   type OllamaConfig,
   type StreamEvent,
@@ -108,6 +119,23 @@ type ClientEvent =
   | {
       type: "wipe";
     };
+
+/**
+ * Streaming callbacks for on-device LLM inference. The Android host's launcher
+ * (`apps/app/nodejs-project-template/main.js`) installs a function of this shape on
+ * `globalThis.__loamOnDeviceChat` before requiring the server bundle; it forwards chat messages to
+ * the RN/native model over the `rn-bridge` channel and streams the reply back through these
+ * callbacks. It is **absent on every other host** (desktop, Pi, CI) — the server checks for it and
+ * degrades gracefully — so the server bundle never depends on `rn-bridge` or any native module.
+ */
+export type OnDeviceChatHook = (
+  messages: { role: "system" | "user" | "assistant"; content: string }[],
+  callbacks: {
+    onDelta: (text: string) => void;
+    onEnd: () => void;
+    onError: (message: string) => void;
+  },
+) => void;
 
 export type AppOptions = {
   /** Directory holding the SQLite DB, avatars, and (by default) config.json. */
@@ -349,6 +377,11 @@ export function defaultLoamConfig(): LoamConfig {
         botId: "llm.ollama.gemma4",
         botDisplayName: "Gemma",
       },
+      // On-device backend, off by default. Enabling it is a no-op unless the host provides the
+      // inference hook (the Android host) AND a model has been added — otherwise a graceful error.
+      onDevice: {
+        enabled: false,
+      },
     },
     admin: {
       bootstrap: "firstUser",
@@ -371,6 +404,14 @@ export function defaultLoamConfig(): LoamConfig {
       enabled: false,
       peers: [],
       intervalMs: 30_000,
+    },
+    // Opportunistic sealed-mailbox mesh, off by default (docs/16). Inert until an operator enables it.
+    mesh: {
+      enabled: false,
+      relay: false,
+      ttlMs: 72 * 3_600_000,
+      hopLimit: 6,
+      maxCarried: 5_000,
     },
   };
 }
@@ -398,13 +439,17 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     node: { ...base.node, ...update.node },
     identity: { ...base.identity, ...update.identity },
     features: { ...base.features, ...update.features },
-    llm: { ollama: { ...base.llm.ollama, ...update.llm?.ollama } },
+    llm: {
+      ollama: { ...base.llm.ollama, ...update.llm?.ollama },
+      onDevice: { ...base.llm.onDevice, ...update.llm?.onDevice },
+    },
     admin: { ...base.admin, ...update.admin },
     killSwitch: { ...base.killSwitch, ...update.killSwitch },
     retention: { ...base.retention, ...update.retention },
     security: { ...base.security, ...update.security },
     access: { ...base.access, ...update.access },
     sync: { ...base.sync, ...update.sync },
+    mesh: { ...base.mesh, ...update.mesh },
   };
   const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
   merged.llm.ollama.systemPrompt = systemPrompt || undefined;
@@ -948,18 +993,42 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function ensureSessionUser(id: string): User {
     const isAdmin = appConfig.admin.bootstrap === "firstUser" && !anyAdminExists();
     const pending = !isAdmin && appConfig.access.joinPolicy === "approval";
-    return ensureUser(id, isAdmin, pending);
+    const user = ensureUser(id, isAdmin, pending);
+    // Give a real local user a mesh identity the first time we see them under mesh mode, so they can
+    // send and receive sealed mail (no-op when mesh is off or they already have one).
+    if (appConfig.mesh.enabled && user.type === "human" && !user.identityKey) {
+      ensureMeshIdentity(user.id);
+    }
+    return user;
+  }
+
+  /** Whether any LLM backend is active — the laptop Ollama connection or the on-device model. The
+   * bot DM contact, streaming, and all LLM routes are gated on this, so it stays off unless the
+   * operator explicitly enables a backend (both default off). */
+  function llmEnabled(): boolean {
+    return appConfig.llm.ollama.enabled || appConfig.llm.onDevice.enabled;
+  }
+
+  /** The model label shown on assistant replies — the on-device model when that backend is active,
+   * else the Ollama model. */
+  function activeLlmModel(): string {
+    if (appConfig.llm.onDevice.enabled) {
+      return appConfig.llm.onDevice.model ?? "on-device";
+    }
+    return appConfig.llm.ollama.model;
   }
 
   /**
-   * Ensures the configured Ollama bot user exists in the in-memory user store and is up to date.
+   * Ensures the assistant bot user exists in the in-memory user store and is up to date. The bot's
+   * identity (id, display name) is shared from `llm.ollama` regardless of which backend answers, so
+   * switching between the laptop-Ollama and on-device backends keeps the same DM contact.
    *
-   * If Ollama is disabled in the current configuration, no changes are made.
+   * If no LLM backend is enabled, no changes are made.
    *
-   * @returns The bot `User` after creation or update, or `undefined` if Ollama is disabled.
+   * @returns The bot `User` after creation or update, or `undefined` when no backend is enabled.
    */
-  function ensureOllamaBotUser(): User | undefined {
-    if (!appConfig.llm.ollama.enabled) {
+  function ensureBotUser(): User | undefined {
+    if (!llmEnabled()) {
       return undefined;
     }
 
@@ -1001,8 +1070,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return {
       nodeName: appConfig.node.name,
       ...appConfig.features,
-      enableLLMChat: appConfig.llm.ollama.enabled,
-      enableLLMStreaming: appConfig.llm.ollama.enabled,
+      enableLLMChat: llmEnabled(),
+      enableLLMStreaming: llmEnabled(),
       allowUserDisplayNameEdit: appConfig.identity.allowUserDisplayNameEdit,
       allowUserAvatarEdit: appConfig.identity.allowUserAvatarEdit,
       allowUserAvatarUpload: appConfig.identity.allowUserAvatarUpload,
@@ -1060,6 +1129,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function canGreet(user: User): boolean {
     return !user.banned && !user.pending && (user.isAdmin || !!user.roles?.includes("greeter"));
+  }
+
+  /**
+   * Whether a user id belongs to a locally-authoritative identity (admin / moderator / greeter). Used
+   * to reject sync-imported content that tries to impersonate one — a peer must never be able to make
+   * a message render as authored by this node's admin. Imported users are always stripped of authority
+   * (`importPeerUsers`), so an authoritative local id is by definition a real local identity.
+   */
+  function isLocallyAuthoritative(userId: string): boolean {
+    const user = data.users.find((candidate) => candidate.id === userId);
+    return !!user && (canModerate(user) || canGreet(user));
   }
 
   /**
@@ -1166,9 +1246,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function visibleUsers(): User[] {
-    const base = appConfig.llm.ollama.enabled
-      ? data.users
-      : data.users.filter((user) => user.type !== "bot");
+    const base = llmEnabled() ? data.users : data.users.filter((user) => user.type !== "bot");
     return base.filter((user) => !user.banned && !user.pending).map(publicUser);
   }
 
@@ -1363,6 +1441,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (message.type === "reaction") {
       const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
       return target ? messageAudienceUserIds(target) : new Set([message.authorId]);
+    }
+
+    // Sealed mailbox mail is opaque and never broadcast to any client — it moves only over sync and is
+    // delivered (decrypted) as a fresh DM. Empty audience = no socket receives the sealed blob itself.
+    if (message.type === "sealed") {
+      return new Set();
     }
 
     // Channel messages: a private channel's messages (and, via the reaction recursion above, the
@@ -1822,13 +1906,101 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Triggers an Ollama LLM assistant reply to a direct message and streams the assistant's
-   * content into a new DM message via StreamEvent deltas, persisting the final body once.
+   * Stream a reply from the **on-device** model. Inference doesn't run in this (embedded Node)
+   * process — it runs in the Android host's RN/native layer, reachable via a hook the launcher
+   * (`nodejs-project-template/main.js`) installs on `globalThis.__loamOnDeviceChat` before requiring
+   * the server bundle. On any other host (desktop, Pi, CI) the hook is simply absent, so enabling the
+   * on-device backend there yields a clean error rather than a crash — messaging is never affected.
+   * The callback-style hook is adapted into the same `AsyncGenerator<string>` shape as Ollama so the
+   * assistant flow below is backend-agnostic.
+   */
+  async function* streamOnDeviceChat(
+    messages: { role: "system" | "user" | "assistant"; content: string }[],
+  ): AsyncGenerator<string> {
+    const hook = (globalThis as { __loamOnDeviceChat?: OnDeviceChatHook }).__loamOnDeviceChat;
+
+    if (typeof hook !== "function") {
+      throw new Error("The on-device model is not available on this host.");
+    }
+
+    const queue: string[] = [];
+    let finished = false;
+    let failure: Error | undefined;
+    let wake: (() => void) | undefined;
+    const signal = () => {
+      wake?.();
+      wake = undefined;
+    };
+
+    // Bound the request like the Ollama path: if the host hook goes silent (a wedged model, a dropped
+    // rn-bridge round-trip) the generator would otherwise hang forever. After 5 minutes, fail it.
+    const timeout = setTimeout(
+      () => {
+        if (!finished) {
+          failure = new Error("The on-device model timed out.");
+          finished = true;
+          signal();
+        }
+      },
+      5 * 60 * 1000,
+    );
+
+    hook(messages, {
+      onDelta: (text) => {
+        if (text) {
+          queue.push(text);
+        }
+        signal();
+      },
+      onEnd: () => {
+        finished = true;
+        signal();
+      },
+      onError: (message) => {
+        failure = new Error(message || "The on-device model failed.");
+        finished = true;
+        signal();
+      },
+    });
+
+    try {
+      while (true) {
+        if (queue.length) {
+          yield queue.shift() as string;
+          continue;
+        }
+        if (failure) {
+          throw failure;
+        }
+        if (finished) {
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /** Stream from whichever LLM backend is active: the on-device model takes precedence when enabled,
+   * otherwise the laptop Ollama connection. */
+  function streamChat(
+    messages: { role: "system" | "user" | "assistant"; content: string }[],
+  ): AsyncGenerator<string> {
+    return appConfig.llm.onDevice.enabled ? streamOnDeviceChat(messages) : streamOllamaChat(messages);
+  }
+
+  /**
+   * Triggers an LLM assistant reply to a direct message and streams the assistant's content into a
+   * new DM message via StreamEvent deltas, persisting the final body once. Backend-agnostic — the
+   * deltas come from `streamChat` (Ollama or the on-device model).
    *
    * @param userMessage - The incoming DM message that may trigger the bot response
    */
-  async function createOllamaResponse(userMessage: Message): Promise<void> {
-    if (!appConfig.llm.ollama.enabled || userMessage.type !== "dm") {
+  async function createAssistantResponse(userMessage: Message): Promise<void> {
+    if (!llmEnabled() || userMessage.type !== "dm") {
       return;
     }
 
@@ -1847,7 +2019,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       createdAt: Date.now(),
       meta: {
         source: "llm",
-        model: appConfig.llm.ollama.model,
+        model: activeLlmModel(),
         markdown: true,
         streaming: true,
       },
@@ -1861,7 +2033,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     broadcastStreamEvent(audience, { type: "start", messageId: assistantMessage.id });
 
     try {
-      for await (const delta of streamOllamaChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
+      for await (const delta of streamChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
         body += delta;
 
         // Keep the in-memory copy current for mid-stream REST reads, but defer persistence and the
@@ -1876,7 +2048,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       updateMessage(assistantMessage, body.trim() || "(No response.)", false);
       broadcastStreamEvent(audience, { type: "end", messageId: assistantMessage.id });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown Ollama error.";
+      const message = error instanceof Error ? error.message : "Unknown LLM error.";
       updateMessage(assistantMessage, `${body}\n\nLLM error: ${message}`.trim(), false);
       broadcastStreamEvent(audience, { type: "error", messageId: assistantMessage.id, error: message });
       server.log.error(error);
@@ -1905,6 +2077,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       tombstones.add(id);
     }
 
+    meshIdentities.clear();
+    loadMeshIdentities();
+
     sessions.clear();
 
     for (const session of store.loadSessions()) {
@@ -1929,7 +2104,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    ensureOllamaBotUser();
+    ensureBotUser();
+    ensureAllMeshIdentities();
   }
 
   /**
@@ -2024,7 +2200,35 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * local caches too. In-flight streaming messages are spared until they finish. No-op when no TTL
    * is configured.
    */
+  /** Drop sealed mailbox mail past its own `ttlExpiresAt` (independent of retention). Deleted +
+   * tombstoned so a peer can't re-hand it; never broadcast (clients never saw the blob). This, with
+   * the hop limit and per-carrier cap, is what makes carried mail converge instead of flood. Runs
+   * regardless of `mesh.enabled` so turning mesh off doesn't strand already-expired sealed rows. */
+  function reapExpiredSealed(): void {
+    const now = Date.now();
+    const expired = data.messages.filter(
+      (message): message is SealedMessage => message.type === "sealed" && message.ttlExpiresAt <= now,
+    );
+    if (!expired.length) {
+      return;
+    }
+    const ids = new Set(expired.map((message) => message.id));
+    store.transaction(() => {
+      for (const id of ids) {
+        store.deleteMessage(id);
+        store.addTombstone(id);
+      }
+    });
+    for (const id of ids) {
+      tombstones.add(id);
+    }
+    data.messages = data.messages.filter((message) => !ids.has(message.id));
+    server.log.info(`Mesh reaper dropped ${ids.size} expired sealed message(s)`);
+  }
+
   function reapExpiredMessages(): void {
+    reapExpiredSealed();
+
     const ttl = appConfig.retention.messageTtlMs;
 
     if (!ttl) {
@@ -2073,7 +2277,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const referenced = new Set<string>();
 
     for (const message of data.messages) {
-      if (message.type !== "reaction") {
+      if (message.type !== "reaction" && message.type !== "sealed") {
         for (const attachment of message.attachments ?? []) {
           referenced.add(attachment.id);
         }
@@ -2153,7 +2357,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     // Best-effort removal of the deleted messages' attachment files.
     for (const message of messages) {
-      if (message.type !== "reaction") {
+      if (message.type !== "reaction" && message.type !== "sealed") {
         for (const attachment of message.attachments ?? []) {
           rm(join(attachmentsDir, attachmentFileName(attachment)), { force: true }).catch(
             (error: unknown) => server.log.warn(error),
@@ -2179,6 +2383,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return false;
     }
 
+    // Sealed mailbox mail (opportunistic-mesh, docs/16): syncable only when mesh is enabled, still
+    // within its TTL, and with hop budget left. No channel/shadow-ban checks — it carries no channel
+    // and its real author is sealed inside the ciphertext.
+    if (message.type === "sealed") {
+      return appConfig.mesh.enabled && message.ttlExpiresAt > Date.now() && message.hopLimit > 0;
+    }
+
     // The author check applies to every type — a shadow-banned user's *reactions* are withheld
     // from local broadcasts too, so they must not leak out through the sync export either.
     const author = data.users.find((candidate) => candidate.id === message.authorId);
@@ -2200,10 +2411,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function buildSyncDigest(): SyncDigest {
     return {
       channels: data.channels.filter((channel) => channel.visibility === "public" && !channel.archived),
-      messages: data.messages.filter(isSyncableMessage).map((message) => ({
-        id: message.id,
-        ...(message.editedAt !== undefined ? { editedAt: message.editedAt } : {}),
-      })),
+      messages: data.messages
+        .filter((message) => message.type !== "sealed" && isSyncableMessage(message))
+        .map((message) => ({
+          id: message.id,
+          ...(message.editedAt !== undefined ? { editedAt: message.editedAt } : {}),
+        })),
+      // Sealed mailbox mail on offer — only when mesh is enabled (else the array is omitted and the
+      // digest is byte-identical to today). Tag/TTL/hop up front so a puller decides before fetching.
+      ...(appConfig.mesh.enabled
+        ? {
+            sealed: data.messages
+              .filter((message): message is SealedMessage => message.type === "sealed" && isSyncableMessage(message))
+              .map((message) => ({
+                id: message.id,
+                toTag: message.toTag,
+                ttlExpiresAt: message.ttlExpiresAt,
+                hopLimit: message.hopLimit,
+              })),
+          }
+        : {}),
     };
   }
 
@@ -2296,7 +2523,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function importPeerUsers(users: User[]): void {
     for (const user of users) {
-      if (data.users.some((candidate) => candidate.id === user.id)) {
+      // Accept a published mesh key only if its kx is cryptographically bound to its sign (kxSig);
+      // otherwise strip it — the user is still imported as a display contact, just not sealable-to via
+      // this record. (v1 ids aren't key-derived, so this proves kx↔sign but NOT key↔identity — the
+      // TOFU below and docs/16's limitation cover the residual active-substitution risk.)
+      const importedKey =
+        user.identityKey && verifyKxBinding(user.identityKey.sign, user.identityKey.kx, user.identityKey.kxSig)
+          ? user.identityKey
+          : undefined;
+
+      const existing = data.users.find((candidate) => candidate.id === user.id);
+      if (existing) {
+        // Trust-on-first-use: adopt a valid key the FIRST time we see one for a known user, but never
+        // overwrite an existing key from a later (possibly hostile) sync — a peer can't silently rebind
+        // a user we already hold a key for.
+        if (!existing.identityKey && importedKey) {
+          const next = UserSchema.parse({ ...existing, identityKey: importedKey });
+          store.upsertUser(next);
+          Object.assign(existing, next);
+          broadcast({ type: "userUpserted", user: existing });
+        }
         continue;
       }
 
@@ -2307,6 +2553,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         banned: undefined,
         shadowBanned: undefined,
         pending: undefined,
+        identityKey: importedKey,
       });
       store.upsertUser(sanitized);
       data.users.push(sanitized);
@@ -2316,7 +2563,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /** Best-effort copy of an imported message's attachment files from the peer that has them. */
   async function importPeerAttachments(peerUrl: string, message: Message): Promise<void> {
-    if (message.type === "reaction" || !message.attachments?.length) {
+    if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
       return;
     }
 
@@ -2358,18 +2605,235 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
+  // ---- Opportunistic mesh: sealed mailbox (docs/16) ----------------------------------------------
+  // Sealed mail is end-to-end encrypted to a single recipient's key: intermediaries carry opaque
+  // bytes, only the recipient's home node can open it. All of this is gated on `mesh.enabled`; with
+  // it off nothing below runs and the public-data flow is byte-identical to today.
+
+  const MESH_EPOCH_WINDOW_MS = 24 * 3_600_000; // daily routing-tag epoch
+  const MESH_SENTINEL_AUTHOR = "mesh.sealed"; // opaque authorId on a sealed message (real sender is inside)
+  // Local users' mesh keypairs (userId → identity), mirrored from the store. Secret keys stay here.
+  const meshIdentities = new Map<string, MeshIdentity>();
+
+  function loadMeshIdentities(): void {
+    for (const { userId, data: json } of store.loadMeshIdentities()) {
+      try {
+        meshIdentities.set(userId, JSON.parse(json) as MeshIdentity);
+      } catch {
+        // Skip a corrupt row rather than crash boot.
+      }
+    }
+  }
+
+  /** Mint (if needed) and publish a local human user's mesh identity — the public keys land on the
+   * user's `identityKey` so senders on other nodes can seal mail to them. No-op when mesh is off. */
+  function ensureMeshIdentity(userId: string): MeshIdentity | undefined {
+    if (!appConfig.mesh.enabled) {
+      return undefined;
+    }
+
+    const user = data.users.find((candidate) => candidate.id === userId);
+    if (!user || user.type !== "human" || user.banned) {
+      return undefined;
+    }
+
+    let identity = meshIdentities.get(userId);
+    if (!identity) {
+      identity = createMeshIdentity();
+      meshIdentities.set(userId, identity);
+      store.upsertMeshIdentity(userId, JSON.stringify(identity));
+    }
+
+    const identityKey = {
+      alg: "ed25519" as const,
+      sign: identity.signPublic,
+      kx: identity.kxPublic,
+      kxSig: identity.kxSig,
+    };
+    if (JSON.stringify(user.identityKey) !== JSON.stringify(identityKey)) {
+      const next = UserSchema.parse({ ...user, identityKey });
+      store.upsertUser(next);
+      Object.assign(user, next);
+      broadcast({ type: "userUpserted", user });
+    }
+    return identity;
+  }
+
+  /** Publish mesh identities for every eligible local user (boot + whenever mesh is enabled). */
+  function ensureAllMeshIdentities(): void {
+    if (!appConfig.mesh.enabled) {
+      return;
+    }
+    for (const user of data.users) {
+      if (user.type === "human" && !user.banned) {
+        ensureMeshIdentity(user.id);
+      }
+    }
+  }
+
+  /** Immutable relay metadata authenticated by the envelope (AEAD AAD + inner signature): a carrier
+   * can't extend the TTL or retarget the tag without breaking decryption. (v1 binds toTag+TTL; the
+   * original hop budget is bounded by the schema max instead — docs/16.) */
+  function sealedAad(toTag: string, ttlExpiresAt: number): string {
+    return `${toTag}|${ttlExpiresAt}`;
+  }
+
+  /** Routing tags a local identity answers to across the live TTL window (+ one epoch clock-skew).
+   * v1 derives the tag from the recipient's PUBLIC kx (no metadata-unlinkability — a documented v1
+   * limitation; the secret mailbox-token tag in docs/16 §2 is the v2 privacy upgrade). */
+  function localTagsForWindow(identity: MeshIdentity, now: number): Set<string> {
+    const tags = new Set<string>();
+    const start = currentEpoch(now - appConfig.mesh.ttlMs, MESH_EPOCH_WINDOW_MS);
+    const end = currentEpoch(now + MESH_EPOCH_WINDOW_MS, MESH_EPOCH_WINDOW_MS);
+    for (let epoch = start; epoch <= end; epoch += 1) {
+      tags.add(mailboxTag(identity.kxPublic, epoch));
+    }
+    return tags;
+  }
+
+  /** Deliver an opened sealed message to a local user as an ordinary DM from the sender's mesh id. */
+  function deliverSealedAsDm(recipientUserId: string, senderMeshId: string, plaintext: string, now: number): void {
+    ensureUser(senderMeshId); // a display-only contact for the remote sender's mesh identity
+    const dm = MessageSchema.parse({
+      id: newMessageId("mesh"),
+      type: "dm",
+      authorId: senderMeshId,
+      recipientUserId,
+      body: plaintext,
+      createdAt: now,
+      meta: { source: "system" },
+    });
+    store.insertMessage(dm);
+    data.messages.push(dm);
+    broadcast({ type: "messageCreated", message: dm });
+  }
+
+  /** Try to open a sealed blob for one of our local users and deliver it. Returns true when it was
+   * ours (delivered + tombstoned so it isn't re-imported or carried further). */
+  function tryDeliverSealed(message: SealedMessage): boolean {
+    const now = Date.now();
+    if (message.ttlExpiresAt <= now) {
+      return false;
+    }
+
+    const aad = sealedAad(message.toTag, message.ttlExpiresAt);
+    for (const [recipientUserId, identity] of meshIdentities) {
+      if (!localTagsForWindow(identity, now).has(message.toTag)) {
+        continue; // cheap tag pre-check before an ECDH decrypt attempt
+      }
+      const opened = openMailbox({ blob: message.sealed, recipientKxSecret: identity.kxSecret, aad });
+      if (!opened) {
+        continue; // not actually ours, or tampered
+      }
+      deliverSealedAsDm(recipientUserId, opened.senderMeshId, opened.plaintext, now);
+      store.addTombstone(message.id);
+      tombstones.add(message.id);
+      return true;
+    }
+    return false;
+  }
+
+  /** Handle a sealed message pulled from a peer: deliver locally, else relay onward (hop-decremented,
+   * bounded), else drop. Never broadcast to clients. Returns true when accepted (delivered or carried). */
+  function acceptSealedFromPeer(message: SealedMessage): boolean {
+    if (!appConfig.mesh.enabled) {
+      return false;
+    }
+    const now = Date.now();
+    if (message.ttlExpiresAt <= now || message.hopLimit <= 0 || tombstones.has(message.id)) {
+      return false;
+    }
+    if (data.messages.some((candidate) => candidate.id === message.id)) {
+      return false; // already hold it
+    }
+    if (tryDeliverSealed(message)) {
+      return true;
+    }
+    // Not for a local user → carry it onward, if this node relays and has room.
+    if (!appConfig.mesh.relay) {
+      return false;
+    }
+    const carried = data.messages.reduce((count, candidate) => count + (candidate.type === "sealed" ? 1 : 0), 0);
+    if (carried >= appConfig.mesh.maxCarried) {
+      return false; // at capacity — refuse new mail (soonest-to-expire eviction is a v2 refinement)
+    }
+    const relayed = MessageSchema.parse({ ...message, hopLimit: message.hopLimit - 1 });
+    store.insertMessage(relayed);
+    data.messages.push(relayed);
+    return true; // opaque — no client broadcast
+  }
+
+  /** Seal a message to a known recipient (by their published identityKey) and inject it into the mesh:
+   * delivered immediately if the recipient is local, else stored for sync to carry. Returns an error
+   * string on failure. */
+  function sendSealed(sender: MeshIdentity, recipientUser: User, body: string): string | undefined {
+    if (!recipientUser.identityKey) {
+      return "That user has no mesh identity to receive sealed mail.";
+    }
+    // Bound self-originated mail by the same per-node storage cap as relayed mail, so a local
+    // participant can't fill the store with undeliverable sealed blobs (they persist until TTL).
+    const carried = data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
+    if (carried >= appConfig.mesh.maxCarried) {
+      return "This node's sealed-mail queue is full; try again later.";
+    }
+    const now = Date.now();
+    const ttlExpiresAt = now + appConfig.mesh.ttlMs;
+    const toTag = mailboxTag(recipientUser.identityKey.kx, currentEpoch(now, MESH_EPOCH_WINDOW_MS));
+    const aad = sealedAad(toTag, ttlExpiresAt);
+    const blob = sealMailbox({
+      recipientKxPublic: recipientUser.identityKey.kx,
+      sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
+      plaintext: body,
+      aad,
+    });
+    const message = MessageSchema.parse({
+      id: newMessageId("seal"),
+      type: "sealed",
+      authorId: MESH_SENTINEL_AUTHOR,
+      toTag,
+      sealed: blob,
+      ttlExpiresAt,
+      hopLimit: appConfig.mesh.hopLimit,
+      createdAt: now,
+    }) as SealedMessage;
+
+    // If the recipient is local, deliver now; otherwise store it so the sync layer carries it.
+    if (!tryDeliverSealed(message)) {
+      store.insertMessage(message);
+      data.messages.push(message);
+    }
+    return undefined;
+  }
+
   /**
    * Import a batch of peer messages: posts before replies before reactions (so parents/targets
    * land first), never into private/unknown channels (a malicious peer must not inject into a
    * local private channel id), never over a tombstone, and edits only when strictly newer.
    */
   async function importPeerMessages(peerUrl: string, messages: Message[]): Promise<number> {
-    const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3 } as const;
+    const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
     const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
     let imported = 0;
 
     for (const message of sorted) {
       if (message.type === "dm" || message.meta?.streaming || tombstones.has(message.id)) {
+        continue;
+      }
+
+      // Never import content attributed to one of *our* admins/moderators/greeters — a compromised or
+      // hostile peer could otherwise inject a message that renders as authored by this node's admin
+      // (local ids are discoverable; they're exported as message authorIds in the sync digest).
+      if (isLocallyAuthoritative(message.authorId)) {
+        continue;
+      }
+
+      // Sealed mailbox mail (opportunistic-mesh, docs/16) is handled entirely apart from the public
+      // flow: it's never broadcast to clients — it's decrypted-and-delivered to a local recipient, or
+      // relayed onward (hop-decremented, bounded), or dropped. Never falls through to store+broadcast.
+      if (message.type === "sealed") {
+        if (acceptSealedFromPeer(message)) {
+          imported += 1;
+        }
         continue;
       }
 
@@ -2459,6 +2923,28 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           return !mine || (entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0));
         })
         .map((entry) => entry.id);
+
+      // Sealed mailbox mail on offer: pull a blob only if it's addressed to a local identity (a tag
+      // match) or this node relays and has room — never mail that's neither ours nor carriable.
+      if (appConfig.mesh.enabled && digest.sealed?.length) {
+        const now = Date.now();
+        const localTags = new Set<string>();
+        for (const identity of meshIdentities.values()) {
+          for (const tag of localTagsForWindow(identity, now)) {
+            localTags.add(tag);
+          }
+        }
+        const carried = data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
+        const canRelay = appConfig.mesh.relay && carried < appConfig.mesh.maxCarried;
+        for (const entry of digest.sealed) {
+          if (tombstones.has(entry.id) || localById.has(entry.id) || entry.ttlExpiresAt <= now || entry.hopLimit <= 0) {
+            continue;
+          }
+          if (localTags.has(entry.toTag) || canRelay) {
+            wanted.push(entry.id);
+          }
+        }
+      }
 
       let imported = 0;
 
@@ -3010,7 +3496,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // (no owning message yet) is visible only to its uploader.
       const owningMessage = data.messages.find(
         (message) =>
-          message.type !== "reaction" && !!message.attachments?.some((entry) => entry.id === attachment.id),
+          message.type !== "reaction" &&
+          message.type !== "sealed" &&
+          !!message.attachments?.some((entry) => entry.id === attachment.id),
       );
       const sessionUserId = getSessionUserIdFromRequest(request);
 
@@ -3386,6 +3874,59 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     },
   );
 
+  // Send a sealed mailbox message (opportunistic-mesh — docs/16) to a known user who has published a
+  // mesh identityKey. The server seals it to that user's key and lets the sync layer carry it; only
+  // the recipient's home node can open it. 404 unless mesh is enabled (indistinguishable from absent).
+  server.post(
+    "/api/mesh/messages",
+    // Sealing runs public-key crypto and consumes relay/storage capacity across the mesh, so cap it
+    // well below the global limit (like avatar/attachment uploads).
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
+    if (!appConfig.mesh.enabled) {
+      return reply.code(404).send(errorBody("Not found"));
+    }
+
+    const body = MeshSendRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send(errorBody("Invalid mesh send request"));
+    }
+
+    const sender = ensureMeshIdentity(currentUser.id);
+
+    if (!sender) {
+      return reply.code(400).send(errorBody("This user has no mesh identity"));
+    }
+
+    const recipient = data.users.find((user) => user.id === body.data.toUserId);
+
+    if (!recipient || !recipient.identityKey) {
+      return reply.code(404).send(errorBody("Recipient has no mesh identity"));
+    }
+
+    // A shadow-banned sender gets a normal-looking success, but the mail is silently dropped — never
+    // sealed or propagated — mirroring how their public posts go nowhere without revealing the ban.
+    if (currentUser.shadowBanned) {
+      return { ok: true };
+    }
+
+    const sendError = sendSealed(sender, recipient, body.data.body);
+
+    if (sendError) {
+      return reply.code(400).send(errorBody(sendError));
+    }
+
+    return { ok: true };
+  });
+
   server.get("/api/admin/sync", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
@@ -3440,7 +3981,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     broadcast({ type: "messageCreated", message: result.message });
-    void createOllamaResponse(result.message);
+    void createAssistantResponse(result.message);
     return reply.code(201).send(result);
   });
 
@@ -3689,7 +4230,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     appConfig = next;
     store.setConfigValue("config", JSON.stringify(appConfig));
-    ensureOllamaBotUser();
+    ensureBotUser();
+    // Enabling mesh mints + publishes identity keys for existing local users so they're reachable.
+    ensureAllMeshIdentities();
     broadcast({ type: "configUpdated", networkConfig: currentNetworkConfig() });
     // If presence was just enabled, connected clients need the current roster to light up.
     broadcastPresence();

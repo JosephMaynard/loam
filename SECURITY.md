@@ -61,15 +61,21 @@ Please allow reasonable time for investigation and remediation before making any
 
 ## Good-faith safe harbor
 
-Security research conducted in good faith is welcome and considered authorized: testing against your
-own LOAM node or instance, not accessing data that isn't yours, and reporting privately before any
-public disclosure. We will not pursue, or support, legal action against researchers who follow this
-policy in good faith — even where a report turns out to describe intended behaviour rather than a bug.
-LOAM is maintained by a small volunteer team, not a paid bug-bounty programme with contractual SLAs;
-response times vary with maintainer availability, and reporters are credited in release notes unless
-they ask otherwise.
+Security research conducted in good faith is welcome and authorized, provided it is **non-disruptive**
+and directed only at a LOAM node or instance you control. This authorization does not extend to
+accessing data that isn't yours, denial-of-service testing, or any other destructive activity — those
+remain out of scope regardless of intent. Report any issue you find privately, before any public
+disclosure.
 
-If a report is accepted as a genuine security issue, I may credit the reporter in release notes or documentation, unless you would prefer to remain anonymous.
+To the extent it is within our legal authority, we will not pursue, or support, legal action against
+researchers who follow this policy in good faith — even where a report turns out to describe intended
+behaviour rather than a bug. We cannot waive the rights of third parties (for example, the operator of
+a LOAM instance you don't control), so this commitment reaches only as far as our own authority to
+grant it.
+
+LOAM is maintained by a small volunteer team, not a paid bug-bounty programme with contractual SLAs, so
+response times vary with maintainer availability. If a report is accepted as a genuine security issue,
+I will credit the reporter in release notes or documentation, unless they ask to remain anonymous.
 
 ## Threat model & accepted limitations
 

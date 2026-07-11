@@ -106,6 +106,71 @@ function retry(attempt) {
   setTimeout(() => waitForServer(attempt + 1), 500);
 }
 
+// ---- On-device LLM bridge (optional) --------------------------------------------------------
+// The embedded server has no LLM runtime of its own. When the operator enables the on-device backend
+// (llm.onDevice), the server calls global.__loamOnDeviceChat; we forward the chat over the rn-bridge
+// channel to the RN/native model (llama.rn, see apps/app/src/lib/on-device-llm) and stream the reply
+// back. Installed BEFORE requiring the server so the hook is present when config is first read.
+// Correlation ids keep concurrent DMs from crossing streams. If the RN side has no model loaded it
+// answers loam-llm-error, which the server surfaces as a graceful assistant error — crisis messaging
+// is never affected, and this whole block is inert unless the on-device backend is turned on.
+const onDeviceChats = new Map(); // id -> { onDelta, onEnd, onError }
+const onDeviceTimers = new Map(); // id -> timeout handle (bounds a wedged request)
+let onDeviceChatSeq = 0;
+const ON_DEVICE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Drop a request's callbacks + timer so a request that never ends can't leak a Map entry forever. */
+function clearOnDeviceChat(id) {
+  const timer = onDeviceTimers.get(id);
+  if (timer) {
+    clearTimeout(timer);
+  }
+  onDeviceTimers.delete(id);
+  onDeviceChats.delete(id);
+}
+
+rnBridge.channel.on('loam-llm-delta', (payload) => {
+  const chat = payload && onDeviceChats.get(payload.id);
+  if (chat && typeof payload.text === 'string') {
+    chat.onDelta(payload.text);
+  }
+});
+rnBridge.channel.on('loam-llm-end', (payload) => {
+  const chat = payload && onDeviceChats.get(payload.id);
+  if (chat) {
+    clearOnDeviceChat(payload.id);
+    chat.onEnd();
+  }
+});
+rnBridge.channel.on('loam-llm-error', (payload) => {
+  const chat = payload && onDeviceChats.get(payload.id);
+  if (chat) {
+    clearOnDeviceChat(payload.id);
+    chat.onError((payload && payload.error) || 'The on-device model failed.');
+  }
+});
+
+global.__loamOnDeviceChat = function (messages, callbacks) {
+  const id = String((onDeviceChatSeq += 1));
+  onDeviceChats.set(id, callbacks);
+  onDeviceTimers.set(
+    id,
+    setTimeout(function () {
+      const chat = onDeviceChats.get(id);
+      if (chat) {
+        clearOnDeviceChat(id);
+        chat.onError('The on-device model timed out.');
+      }
+    }, ON_DEVICE_TIMEOUT_MS),
+  );
+  try {
+    rnBridge.channel.post('loam-llm-request', { id: id, messages: messages });
+  } catch (err) {
+    clearOnDeviceChat(id);
+    callbacks.onError('Could not reach the on-device model: ' + String((err && err.message) || err));
+  }
+};
+
 notify('starting');
 
 try {

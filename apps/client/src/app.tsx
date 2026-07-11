@@ -529,7 +529,9 @@ function LoamApp() {
       const authorName = usersByIdRef.current.get(message.authorId)?.displayName ?? generateDisplayName(message.authorId);
       const body =
         bodyFor(message) ||
-        (message.type !== "reaction" && message.attachments?.length ? t("toast.imageFallback") : "");
+        (message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length
+          ? t("toast.imageFallback")
+          : "");
       let title = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
 
@@ -2496,7 +2498,7 @@ function MessageItem({
             dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
           />
         )}
-        {message.type !== "reaction" && message.attachments?.length ? (
+        {message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (
           <div className="message-attachments">
             {message.attachments.map((attachment) => (
               <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
@@ -4267,7 +4269,7 @@ function AdminView({
         node: adminConfig.node,
         identity: adminConfig.identity,
         features: adminConfig.features,
-        llm: { ollama: adminConfig.llm.ollama },
+        llm: { ollama: adminConfig.llm.ollama, onDevice: adminConfig.llm.onDevice },
         admin: {
           bootstrap: adminConfig.admin.bootstrap,
           ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
@@ -4331,7 +4333,15 @@ function AdminView({
   function setOllama(update: Partial<LoamConfig["llm"]["ollama"]>): void {
     setAdminConfig((previous) =>
       previous
-        ? { ...previous, llm: { ollama: { ...previous.llm.ollama, ...update } } }
+        ? { ...previous, llm: { ...previous.llm, ollama: { ...previous.llm.ollama, ...update } } }
+        : previous,
+    );
+  }
+
+  function setOnDevice(update: Partial<LoamConfig["llm"]["onDevice"]>): void {
+    setAdminConfig((previous) =>
+      previous
+        ? { ...previous, llm: { ...previous.llm, onDevice: { ...previous.llm.onDevice, ...update } } }
         : previous,
     );
   }
@@ -4635,6 +4645,25 @@ function AdminView({
                 value={adminConfig.llm.ollama.systemPrompt ?? ""}
               />
             </label>
+            <label className="admin-toggle">
+              <input
+                checked={adminConfig.llm.onDevice.enabled}
+                disabled={saving}
+                onInput={(event) => setOnDevice({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              {t("admin.llmOnDeviceEnable")}
+            </label>
+            <label>
+              {t("admin.llmOnDeviceModel")}
+              <input
+                disabled={saving || !adminConfig.llm.onDevice.enabled}
+                maxLength={120}
+                onInput={(event) => setOnDevice({ model: event.currentTarget.value || undefined })}
+                value={adminConfig.llm.onDevice.model ?? ""}
+              />
+            </label>
+            <p className="form-note">{t("admin.llmOnDeviceNote")}</p>
           </div>
           <div className="profile-panel">
             <div>

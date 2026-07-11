@@ -3583,6 +3583,63 @@ describe("sync peer authentication (shared token)", () => {
     });
     expect(none.statusCode).toBe(404);
   });
+
+  it("refuses to import messages attributed to a locally-authoritative identity (anti-impersonation)", async () => {
+    const peer = await makeApp({ sync: { enabled: true } });
+    const peerAdmin = await newSession(peer);
+    const channel = (
+      await peer.server.inject({
+        method: "POST",
+        url: "/api/channels",
+        headers: { cookie: peerAdmin.cookie },
+        payload: { name: "Mesh" },
+      })
+    ).json() as { id: string };
+    const post = (body: string) =>
+      peer.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: peerAdmin.cookie },
+        payload: { type: "channelPost", channelId: channel.id, body },
+      });
+    await post("m1");
+    const peerUrl = await peer.server.listen({ host: "127.0.0.1", port: 0 });
+
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: peerUrl }] } });
+    const pullerAdmin = await newSession(puller);
+    const sync = () =>
+      puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    const bodies = async (): Promise<string[]> =>
+      (
+        (
+          await puller.server.inject({
+            method: "GET",
+            url: `/api/messages/${channel.id}`,
+            headers: { cookie: pullerAdmin.cookie },
+          })
+        ).json() as { body?: string }[]
+      ).map((message) => message.body ?? "");
+
+    // First sync imports m1 and creates a local (authority-stripped) copy of the peer's author.
+    await sync();
+    expect(await bodies()).toContain("m1");
+
+    // Promote that imported identity to a LOCAL admin — its id is now locally authoritative.
+    const promote = await puller.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${peerAdmin.userId}/promote`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    expect(promote.statusCode).toBe(200);
+
+    // A further message the peer serves under that same id is now refused — a peer can't inject
+    // content that renders as authored by an identity this node treats as an authority.
+    await post("m2");
+    await sync();
+    const seen = await bodies();
+    expect(seen).toContain("m1"); // the pre-promotion import stays
+    expect(seen).not.toContain("m2"); // the impersonating message is dropped
+  });
 });
 
 describe("anonymous identity minting limit", () => {
@@ -3601,5 +3658,231 @@ describe("anonymous identity minting limit", () => {
     // A request that carries an existing session cookie mints nothing, so it's unaffected.
     const returning = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie } });
     expect(returning.statusCode).toBe(200);
+  });
+});
+
+describe("on-device LLM provider", () => {
+  const BOT_ID = "llm.ollama.gemma4"; // shared bot identity, default botId
+
+  afterEach(() => {
+    delete (globalThis as { __loamOnDeviceChat?: unknown }).__loamOnDeviceChat;
+  });
+
+  async function assistantReply(app: LoamApp, cookie: string): Promise<string | undefined> {
+    // The bot reply is created + streamed asynchronously after the DM POST returns; poll the thread.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const thread = (
+        await app.server.inject({ method: "GET", url: `/api/dms/${BOT_ID}`, headers: { cookie } })
+      ).json() as { authorId: string; body?: string }[];
+      const reply = thread.find((message) => message.authorId === BOT_ID && (message.body ?? "").length > 0);
+      if (reply) {
+        return reply.body;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return undefined;
+  }
+
+  it("streams a reply from the on-device hook, persists it, and shows the bot when enabled", async () => {
+    (globalThis as { __loamOnDeviceChat?: unknown }).__loamOnDeviceChat = (
+      _messages: unknown,
+      callbacks: { onDelta: (t: string) => void; onEnd: () => void; onError: (m: string) => void },
+    ) => {
+      callbacks.onDelta("Hello ");
+      callbacks.onDelta("from the phone");
+      callbacks.onEnd();
+    };
+
+    const app = await makeApp({ llm: { onDevice: { enabled: true, model: "gemma-test" } } });
+    const user = await newSession(app);
+
+    // The bot DM contact appears once a backend is enabled (here: on-device, with Ollama still off).
+    const users = (
+      await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } })
+    ).json() as { id: string; type: string }[];
+    expect(users.some((entry) => entry.id === BOT_ID && entry.type === "bot")).toBe(true);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    expect(dm.statusCode).toBe(201);
+
+    expect(await assistantReply(app, user.cookie)).toBe("Hello from the phone");
+  });
+
+  it("degrades to a graceful error when no on-device hook is present (e.g. desktop/CI)", async () => {
+    // No globalThis.__loamOnDeviceChat installed — every non-Android host.
+    const app = await makeApp({ llm: { onDevice: { enabled: true, model: "gemma-test" } } });
+    const user = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+
+    const reply = await assistantReply(app, user.cookie);
+    expect(reply).toMatch(/LLM error/i);
+    expect(reply).toMatch(/not available/i);
+  });
+
+  it("keeps the bot hidden and does not respond when no backend is enabled (default)", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+
+    const users = (
+      await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } })
+    ).json() as { id: string }[];
+    expect(users.some((entry) => entry.id === BOT_ID)).toBe(false);
+  });
+});
+
+describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
+  const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000 };
+
+  function listen(app: LoamApp): Promise<string> {
+    return app.server.listen({ host: "127.0.0.1", port: 0 });
+  }
+  async function adminOf(app: LoamApp): Promise<{ cookie: string; userId: string }> {
+    const session = await newSession(app);
+    return { cookie: session.cookie, userId: session.userId };
+  }
+  function setPeers(app: LoamApp, cookie: string, urls: string[]): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie },
+      payload: { sync: { peers: urls.map((url) => ({ url })) } },
+    });
+  }
+  function syncNow(app: LoamApp, cookie: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
+  }
+  async function roster(app: LoamApp, cookie: string): Promise<{ id: string }[]> {
+    return (await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie } })).json() as {
+      id: string;
+    }[];
+  }
+  async function dmBodies(app: LoamApp, cookie: string, peerId: string): Promise<string[]> {
+    return (
+      (
+        await app.server.inject({ method: "GET", url: `/api/dms/${peerId}`, headers: { cookie } })
+      ).json() as { body?: string }[]
+    ).map((message) => message.body ?? "");
+  }
+
+  it("404s /api/mesh/messages when mesh is disabled", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+    const other = await newSession(app);
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: user.cookie },
+      payload: { toUserId: other.userId, body: "hi" },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("delivers sealed mail to a local recipient as a DM (seal + open on one node)", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const alice = await newSession(app);
+    const bob = await newSession(app); // both get published mesh identities via the session hook
+
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: alice.cookie },
+      payload: { toUserId: bob.userId, body: "meet at the old bridge" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    // Delivery creates a "mesh.<sender>" contact and a DM to Bob from it.
+    const contact = (await roster(app, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+    expect(contact).toBeDefined();
+    expect(await dmBodies(app, bob.cookie, contact!.id)).toContain("meet at the old bridge");
+  });
+
+  it("silently drops a shadow-banned sender's sealed mail (200, but nothing delivered)", async () => {
+    const app = await makeApp({ mesh: MESH });
+    const admin = await newSession(app); // firstUser → admin (can moderate)
+    const spammer = await newSession(app);
+    const bob = await newSession(app);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${spammer.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+
+    // The send looks successful to the shadow-banned sender...
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: spammer.cookie },
+      payload: { toUserId: bob.userId, body: "spam spam spam" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    // ...but nothing was sealed or delivered — Bob has no mesh contact / DM.
+    expect((await roster(app, bob.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+  });
+
+  it("carries A→C→B: an intermediary relays sealed mail it cannot read", async () => {
+    const nodeA = await makeApp({ sync: { enabled: true }, mesh: MESH });
+    const nodeB = await makeApp({ sync: { enabled: true }, mesh: MESH });
+    const nodeC = await makeApp({ sync: { enabled: true }, mesh: MESH });
+    const aAdmin = await adminOf(nodeA);
+    const bob = await adminOf(nodeB); // Bob is node B's real (admin) session user, not a seed
+    const cAdmin = await adminOf(nodeC);
+
+    const [aUrl, bUrl, cUrl] = await Promise.all([listen(nodeA), listen(nodeB), listen(nodeC)]);
+    // Pull topology: A learns Bob from B; C carries from A; B receives from C — A and B never meet.
+    expect((await setPeers(nodeA, aAdmin.cookie, [bUrl])).statusCode).toBe(200);
+    expect((await setPeers(nodeC, cAdmin.cookie, [aUrl])).statusCode).toBe(200);
+    expect((await setPeers(nodeB, bob.cookie, [cUrl])).statusCode).toBe(200);
+
+    // Bob posts publicly so his profile + published identityKey propagate to A.
+    await nodeB.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: bob.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "bob is here" },
+    });
+    await syncNow(nodeA, aAdmin.cookie); // A now knows Bob (with his mesh identityKey)
+
+    // Alice (node A) seals a message to Bob.
+    const send = await nodeA.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: aAdmin.cookie },
+      payload: { toUserId: bob.userId, body: "the rendezvous is at dawn" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    await syncNow(nodeC, cAdmin.cookie); // C carries the sealed blob from A (cannot open it)
+    await syncNow(nodeB, bob.cookie); // B pulls from C, recognises the tag, decrypts, delivers
+
+    // Bob received the plaintext.
+    const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+    expect(contact).toBeDefined();
+    expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("the rendezvous is at dawn");
+
+    // The carrier C holds the sealed blob but never learned the plaintext — no DM anywhere on C
+    // contains the secret, and its stored copy is opaque ciphertext.
+    const cMessages = (
+      await nodeC.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: cAdmin.cookie } })
+    ).json() as { body?: string }[];
+    expect(cMessages.some((m) => (m.body ?? "").includes("dawn"))).toBe(false);
+    // C carried it: its store holds a sealed-type message whose serialized form doesn't contain the plaintext.
+    const cStored = nodeC.store.loadMessages();
+    const sealed = cStored.find((m) => m.type === "sealed");
+    expect(sealed).toBeDefined();
+    expect(JSON.stringify(sealed)).not.toContain("dawn");
   });
 });
