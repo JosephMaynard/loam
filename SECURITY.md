@@ -59,6 +59,16 @@ It does not cover:
 
 Please allow reasonable time for investigation and remediation before making any public disclosure.
 
+## Good-faith safe harbor
+
+Security research conducted in good faith is welcome and considered authorized: testing against your
+own LOAM node or instance, not accessing data that isn't yours, and reporting privately before any
+public disclosure. We will not pursue, or support, legal action against researchers who follow this
+policy in good faith — even where a report turns out to describe intended behaviour rather than a bug.
+LOAM is maintained by a small volunteer team, not a paid bug-bounty programme with contractual SLAs;
+response times vary with maintainer availability, and reporters are credited in release notes unless
+they ask otherwise.
+
 If a report is accepted as a genuine security issue, I may credit the reporter in release notes or documentation, unless you would prefer to remain anonymous.
 
 ## Threat model & accepted limitations

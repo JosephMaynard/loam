@@ -107,3 +107,12 @@ ranked within each group. Each entry names the file and the concrete change.
     a LoRa link would carry.
 25. **Release signing** is scaffolded (`pnpm --filter app keystore` + config plugin); the follow-up is
     an actual device-tested signed release + a backed-up production keystore.
+26. **In-app "Kill switch" → "Emergency Reset" rename.** The public marketing surfaces (site, README)
+    were softened per the framing review, but the admin-panel UI labels still say "Kill switch". Rename
+    the English values in `apps/client/src/i18n/en.ts` (`admin.killSwitch*`, `error.kill_switch_disabled`
+    message text, the `profile*Summary`/`axesManaged`/`retentionNote` mentions, "arm"→"unlock",
+    "firing"→"triggering") and carry the equivalent change across all 14 other catalogs. Keep the code
+    identifiers (`killSwitch` config, `/api/panic`, `error.kill_switch_disabled` **code**, filenames)
+    and the security docs unchanged — only display text.
+27. **Opportunistic mesh / DTN delivery** (`docs/16`) — the committed next major initiative: carry a
+    message from A to B via an intermediary C. Start at Phase 0 (`packages/crypto` identity primitive).

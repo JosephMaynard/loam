@@ -41,7 +41,7 @@ without an account, a data plan, or anyone in the middle.
 LOAM's priorities, in order:
 
 - **Simplicity** — no accounts, no installs, no setup. Scan and go.
-- **Privacy** — identities are anonymous and ephemeral by default.
+- **Privacy** — identities are ephemeral and privacy-preserving by default, with no account required.
 - **Resilience** — designed for very low bandwidth and intermittent connectivity.
 
 It is **transport-agnostic**: WiFi today, with low-bandwidth radio relay (LoRa) a stated design
@@ -51,14 +51,14 @@ goal, so a message can eventually hop device-to-device across a wider area with 
 
 - 📡 **Off-grid by design** — a local hotspot is the whole network; no internet required at any point.
 - 📱 **Nothing to install** — joiners open a link (or scan a QR); the host can run it from a laptop, Pi, or [an Android phone](docs/04-android-host-app.md).
-- 🕶️ **Anonymous & ephemeral** — every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
+- 🕶️ **Ephemeral, privacy-preserving identities** — every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
 - 💬 **Real messaging** — public and private (invite-only) channels, threaded replies, direct messages, reactions, image attachments, and message search.
 - 🕸️ **Node-to-node sync (optional)** — two LOAM nodes that can reach each other sync their public channels, so separate hotspots converge into one conversation ([docs/11](docs/11-node-sync.md)).
 - 🤖 **Optional local AI** — point it at a local [Ollama](https://ollama.com) model and a bot appears as a DM contact; replies stream in. Entirely local, entirely optional.
 - 🔌 **Works offline** — the client is an installable PWA that keeps working against its local cache when the connection drops.
 - 🌍 **Minimal by design** — an intentionally sparse interface that stays out of the way and renders text in any language, including right-to-left scripts.
 - 🌗 **Light & dark** — the client follows your system theme automatically.
-- 🔒 **Optional encryption at rest + a kill switch** — the host can encrypt the on-disk database and wipe everything in one action (see [Security](#security)).
+- 🔒 **Optional encryption at rest + an Emergency Reset** — the host can encrypt the on-disk database and wipe everything in one action (see [Security](#security)).
 
 ## Quick start
 
@@ -175,7 +175,7 @@ A [pnpm workspace](pnpm-workspace.yaml) (`apps/*`, `packages/*`).
 | [`apps/app`](apps/app) | Expo/React-Native Android host — runs the server on a phone and brings up a hotspot. |
 | [`apps/site`](apps/site) | The [loamnet.com](https://loamnet.com) landing site (static Vite build). |
 | [`packages/schema`](packages/schema) | The client↔server contract: shared Zod schemas + inferred types. |
-| [`packages/display-name`](packages/display-name) | Deterministic anonymous display names from an id. |
+| [`packages/display-name`](packages/display-name) | Deterministic, privacy-preserving display names from an id. |
 | [`packages/avatar`](packages/avatar) | Deterministic SVG avatars from an id. |
 | [`packages/qr`](packages/qr) | Dependency-free QR encoder + renderers used by the join flow. |
 
@@ -217,7 +217,7 @@ up stored messages. It's **off by default** and controlled by the `LOAM_DB_KEY` 
 
 - **unset** — no encryption; the database is a plain SQLite file.
 - **a passphrase** — encrypted at rest with SQLCipher (AES-256); the same passphrase is required on every start.
-- **`ephemeral`** — a random key is generated in memory and **never written to disk**. Data is readable only while the process runs; a reboot loses the key forever, and the [kill switch](docs/02-kill-switch.md) rotates to a fresh key so anything still physically on flash becomes unreadable.
+- **`ephemeral`** — a random key is generated in memory and **never written to disk**. Data is readable only while the process runs; a reboot loses the key forever, and an Emergency Reset ([kill switch](docs/02-kill-switch.md)) rotates to a fresh key so anything still physically on flash becomes unreadable.
 
 ```bash
 LOAM_DB_KEY=ephemeral pnpm --filter @loam/server start
@@ -229,8 +229,8 @@ key in memory, or coercion of a known passphrase can still expose data. Anyone w
 on this should seek a professional security review and not treat LOAM as sufficient on its own. See
 [`SECURITY.md`](SECURITY.md) and the [docs](#documentation) for the full threat model.
 
-> **A note on intent.** These protections exist to protect *ordinary people* — activists,
-> journalists, people organising where that is dangerous, communities cut off from the internet. They
+> **A note on intent.** These protections exist to protect *ordinary people* — during emergencies, in
+> communities cut off from connectivity, and in everyday situations where privacy and safety matter. They
 > are deliberately **not** marketed as a way to hide wrongdoing, and LOAM's other design choices (a
 > trusted host who can read and wipe everything, admin moderation) reflect that.
 
