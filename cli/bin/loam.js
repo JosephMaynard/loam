@@ -22,6 +22,25 @@ function optionValue(name) {
   return next && !next.startsWith("-") ? next : undefined;
 }
 
+// Like optionValue, but errors when the flag is present without a value instead of silently falling
+// back to a default (e.g. `loam --data-dir -bad` would otherwise use the default dir with no warning).
+function requiredValue(name) {
+  const index = args.indexOf(name);
+  if (index < 0) {
+    return undefined;
+  }
+  if (index !== args.lastIndexOf(name)) {
+    console.error(`${name} was given more than once.`);
+    process.exit(1);
+  }
+  const next = args[index + 1];
+  if (!next || next.startsWith("-")) {
+    console.error(`${name} requires a value. See \`loam --help\`.`);
+    process.exit(1);
+  }
+  return next;
+}
+
 if (args.includes("--help") || args.includes("-h")) {
   console.log(`loam — run a local LOAM node (off-grid messaging over your LAN)
 
@@ -45,10 +64,14 @@ network to join. Node ≥22 required.`);
 const defaultDataDir = process.env.XDG_DATA_HOME
   ? join(process.env.XDG_DATA_HOME, "loam")
   : join(homedir(), ".loam");
-const dataDir = optionValue("--data-dir") ?? process.env.LOAM_DATA_DIR ?? defaultDataDir;
+const dataDir = requiredValue("--data-dir") ?? process.env.LOAM_DATA_DIR ?? defaultDataDir;
 mkdirSync(dataDir, { recursive: true });
 
-const port = optionValue("--port") ?? process.env.PORT ?? "3000";
+const port = requiredValue("--port") ?? process.env.PORT ?? "3000";
+if (!/^\d+$/.test(String(port)) || Number(port) < 1 || Number(port) > 65535) {
+  console.error(`Invalid port "${port}": expected an integer between 1 and 65535.`);
+  process.exit(1);
+}
 
 process.env.LOAM_DATA_DIR = dataDir;
 process.env.LOAM_CLIENT_DIST = join(pkgRoot, "client");

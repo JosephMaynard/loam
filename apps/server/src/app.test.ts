@@ -446,23 +446,51 @@ describe("panic endpoint", () => {
       payload: { type: "channelPost", channelId: "general", body: "to be wiped" },
     });
 
-    expect((await panic(app, "wrong-token")).statusCode).toBe(403);
+    // A wrong token answers 404 — identical to an unconfigured node — so the panic route can't be
+    // fingerprinted; the message survives.
+    expect((await panic(app, "wrong-token")).statusCode).toBe(404);
     expect(app.store.loadMessages().length).toBe(1);
 
     expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(200);
     expect(app.store.loadMessages()).toEqual([]);
   });
 
-  it("rate-limits repeated wrong tokens", async () => {
+  it("rate-limits repeated attempts (indistinguishably) and blocks the wipe once tripped", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+    const admin = await newSession(app);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "survives the brute force" },
+    });
+
+    // Every wrong attempt looks like a 404 (not a distinguishable 403/429).
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await panic(app, `wrong-${attempt}`)).statusCode).toBe(404);
+    }
+
+    // Once the attempt limiter trips, even the CORRECT token is refused (checked after the limiter)
+    // and the node is NOT wiped.
+    expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(404);
+    expect(app.store.loadMessages().length).toBe(1);
+  });
+
+  it("answers 404 (never 429) even past the route-level rate limit", async () => {
     const app = await makeApp({
       killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
     });
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect((await panic(app, `wrong-${attempt}`)).statusCode).toBe(403);
+    // The route allows 10/min; push well past it. Every rejection — including the route-level
+    // rate-limit hit — must be a 404, so a 429 can never reveal that the panic route exists here.
+    const codes: number[] = [];
+    for (let attempt = 0; attempt < 13; attempt += 1) {
+      codes.push((await panic(app, `wrong-${attempt}`)).statusCode);
     }
-
-    expect((await panic(app, "wrong-again")).statusCode).toBe(429);
+    expect(codes).not.toContain(429);
+    expect(codes.every((code) => code === 404)).toBe(true);
   });
 });
 
@@ -584,6 +612,21 @@ describe("message authorization", () => {
       payload: { type: "reaction", targetMessageId: dmId, reaction: "👍" },
     });
     expect(participant.statusCode).toBe(201);
+  });
+
+  it("rejects DMs when enableDMs is off", async () => {
+    const app = await makeApp({ features: { enableDMs: false } });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "dm", recipientUserId: bob.userId, body: "secret" },
+    });
+    expect(dm.statusCode).toBe(400);
+    expect((dm.json() as { code?: string }).code).toBe("dms_disabled");
   });
 
   it("enforces channel posting policy server-side", async () => {
@@ -1424,16 +1467,86 @@ describe("roles, moderation, and join policy", () => {
       const messageId = (post.json() as { message: { id: string } }).message.id;
       expect(app.store.loadMessages().some((message) => message.id === messageId)).toBe(true);
 
-      // A shadow-banned user stays a visible participant — only their messages are withheld (via the
-      // socket broadcast filter). The flag is observable to moderators.
+      // A shadow-banned user stays a visible participant — only their messages are withheld. But the
+      // `shadowBanned` flag is stripped from the general roster (even for an admin — they read it via
+      // the gated moderation endpoint), so no one can enumerate who is shadow-banned.
       const roster = (
         await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: admin.cookie } })
       ).json() as { id: string; shadowBanned?: boolean }[];
-      expect(roster.find((user) => user.id === member.userId)?.shadowBanned).toBe(true);
+      const listed = roster.find((user) => user.id === member.userId);
+      expect(listed).toBeDefined();
+      expect(listed?.shadowBanned).toBeUndefined();
+
+      // The target must NOT learn their own shadow-ban (that would defeat the "shadow") — their own
+      // /api/config currentUser carries no flag.
+      const selfConfig = (
+        await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: member.cookie } })
+      ).json() as { currentUser: { shadowBanned?: boolean } };
+      expect(selfConfig.currentUser.shadowBanned).toBeUndefined();
+
+      // Moderators still see it via the gated endpoint.
+      const modRoster = (
+        await app.server.inject({ method: "GET", url: "/api/moderation/users", headers: { cookie: admin.cookie } })
+      ).json() as { id: string; shadowBanned?: boolean }[];
+      expect(modRoster.find((user) => user.id === member.userId)?.shadowBanned).toBe(true);
 
       // Un-shadow-ban clears the flag.
       const restore = await moderate(app, admin.cookie, member.userId, { shadowBanned: false });
       expect((restore.json() as { shadowBanned?: boolean }).shadowBanned).toBe(false);
+    });
+
+    it("withholds a shadow-banned author's messages from REST reads, but not from the author", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const spammer = await newSession(app);
+      const viewer = await newSession(app);
+
+      await moderate(app, admin.cookie, spammer.userId, { shadowBanned: true });
+      expect((await postChannel(app, spammer.cookie, "buy my thing")).statusCode).toBe(201);
+
+      const read = async (cookie: string): Promise<string[]> =>
+        (
+          (
+            await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie } })
+          ).json() as { body?: string }[]
+        ).map((message) => message.body ?? "");
+
+      // The author still sees their own post (shadow ban is invisible to them)...
+      expect(await read(spammer.cookie)).toContain("buy my thing");
+      // ...but nobody else does — not even an admin — via the REST path the client refetches on every
+      // channel open and reconnect. Without the fix the WS-level concealment would be cosmetic.
+      expect(await read(viewer.cookie)).not.toContain("buy my thing");
+      expect(await read(admin.cookie)).not.toContain("buy my thing");
+    });
+
+    it("drops orphan reactions that target a shadow-banned author's now-hidden message", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const spammer = await newSession(app);
+      const viewer = await newSession(app);
+
+      // Spammer posts and the viewer reacts — both visible while nobody is shadow-banned.
+      const post = await postChannel(app, spammer.cookie, "root by spammer");
+      const rootId = (post.json() as { message: { id: string } }).message.id;
+      expect(
+        (
+          await app.server.inject({
+            method: "POST",
+            url: "/api/messages",
+            headers: { cookie: viewer.cookie },
+            payload: { type: "reaction", targetMessageId: rootId, reaction: "👍" },
+          })
+        ).statusCode,
+      ).toBe(201);
+
+      // Shadow-ban the spammer. The viewer's read must contain neither the hidden root nor their own
+      // reaction to it — a surviving reaction would leak that the root exists.
+      await moderate(app, admin.cookie, spammer.userId, { shadowBanned: true });
+      const seen = (
+        await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: viewer.cookie } })
+      ).json() as { id: string; type: string; targetMessageId?: string }[];
+      expect(seen.some((message) => message.id === rootId)).toBe(false);
+      expect(seen.some((message) => message.type === "reaction" && message.targetMessageId === rootId)).toBe(false);
     });
 
     it("exposes the full human roster (incl. banned) to moderators only", async () => {
@@ -3210,6 +3323,31 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
         ),
       ),
     ).toBe(true);
+
+    // Presence lists visible users only: a banned user is excluded. Bring Dana online, confirm she
+    // shows, then have admin-Alice ban her — Alice's next presence event drops her.
+    const dana = await newSession(app);
+    const danaSocket = await connect(dana.cookie);
+    expect(
+      await waitUntil(() =>
+        aliceSocket.events.some(
+          (event) => event.type === "presence" && !!event.onlineUserIds?.includes(dana.userId),
+        ),
+      ),
+    ).toBe(true);
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${dana.userId}`,
+      headers: { cookie: alice.cookie },
+      payload: { banned: true },
+    });
+    expect(
+      await waitUntil(() => {
+        const last = [...aliceSocket.events].reverse().find((event) => event.type === "presence");
+        return !!last && !last.onlineUserIds?.includes(dana.userId);
+      }),
+    ).toBe(true);
+    danaSocket.socket.close();
 
     // Bob disconnects; Alice's next presence event no longer lists him.
     bobSocket.socket.close();

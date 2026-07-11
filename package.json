@@ -11,8 +11,8 @@
   },
   "devDependencies": {
     "@loam/qr": "workspace:*",
-    "esbuild": "^0.25.0",
-    "tsx": "^4.23.0"
+    "esbuild": "catalog:",
+    "tsx": "catalog:"
   },
   "keywords": [],
   "author": "Magic Zebra Ltd",

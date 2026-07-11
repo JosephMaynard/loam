@@ -2,6 +2,22 @@ packages:
   - apps/*
   - packages/*
 
+# Shared dev/build tooling versions live here once, and every workspace package references them with
+# `"<dep>": "catalog:"`. This guarantees the versions stay aligned across the workspace — bump a tool
+# in one place instead of hunting through eight package.json files (and no more silent drift like the
+# esbuild 0.25-vs-0.28 split this replaced). Only deps used by 2+ packages belong here; single-package
+# deps stay in their own manifest.
+catalog:
+  "@preact/preset-vite": ^2.10.4
+  "@types/node": ^24.13.3
+  esbuild: ^0.28.1
+  jsdom: ^29.1.1
+  preact: ^10.29.7
+  tsx: ^4.23.0
+  typescript: ~7.0.2
+  vite: ^8.1.4
+  vitest: ^4.1.10
+
 onlyBuiltDependencies:
   - better-sqlite3-multiple-ciphers
   - esbuild

@@ -65,9 +65,13 @@ hotspot running too if the phone's chipset allows it".
   missing or wrong token 404s identically to sync being disabled, so a prober can't distinguish a
   token-guarded node from one without the feature. Give every node in the mesh the **same** token.
   It's a bearer secret the node must transmit, so it's stored in the clear (unlike the scrypt-hashed
-  admin passphrase / panic token) — protect it with encryption-at-rest, and rely on transport
-  encryption (docs/08, still unbuilt) to stop on-wire capture in a hostile network. Unset = open (any
-  node that can reach the endpoints may sync public data — the original behaviour).
+  admin passphrase / panic token). Protecting it at rest depends on **where you set it**:
+  `LOAM_DB_KEY` encrypts only the **DB-persisted** config (a token set via the admin UI / `PATCH
+  /api/admin/config`); a token placed in **`config.json`** stays plaintext even on an encrypted node
+  (that file is never encrypted — see CLAUDE.md), so guard it with filesystem permissions or a
+  secret manager. And on LOAM's plain-HTTP LAN the token rides **in the clear on the wire** — transport
+  encryption (docs/08, still unbuilt) is what would stop on-path capture in a hostile network. Unset =
+  open (any node that can reach the endpoints may sync public data — the original behaviour).
 - User ids are random enough (`user.<8hex>`) that cross-node collisions are unlikely; a collision
   would merge two strangers' display identities on one node (cosmetic, not an auth issue — sessions
   never sync).

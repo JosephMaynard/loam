@@ -19,9 +19,11 @@ export const UserAvatarSchema = z.object({
   imageId: IdSchema.optional(),
   mimeType: AvatarImageMimeTypeSchema.optional(),
   uploadedAt: TimestampSchema.optional(),
-  palette: z.string().min(1).optional(),
-  face: z.string().min(1).optional(),
-  accessory: z.string().min(1).optional(),
+  // Short palette/feature keys — bounded so a PATCH to /api/users/me can't persist and broadcast
+  // megabyte strings (the message body is capped for the same reason).
+  palette: z.string().min(1).max(64).optional(),
+  face: z.string().min(1).max(64).optional(),
+  accessory: z.string().min(1).max(64).optional(),
 });
 export type UserAvatar = z.infer<typeof UserAvatarSchema>;
 
@@ -34,7 +36,9 @@ export type Role = z.infer<typeof RoleSchema>;
 
 export const UserSchema = z.object({
   id: IdSchema,
-  displayName: z.string().min(1),
+  // Bounded to the same 80 chars as the edit request (UserUpdateRequestSchema) so a hostile sync
+  // peer can't import a user with a giant displayName past the request boundary.
+  displayName: z.string().min(1).max(80),
   avatar: UserAvatarSchema.optional(),
   type: UserTypeSchema,
   isAdmin: z.boolean(),
@@ -126,8 +130,10 @@ export type ChannelPostingPolicy = z.infer<typeof ChannelPostingPolicySchema>;
 
 export const ChannelSchema = z.object({
   id: IdSchema,
-  name: z.string().min(1),
-  description: z.string().optional(),
+  // Bounded to the same limits as ChannelCreateRequest (80 / 280) so a hostile sync peer can't
+  // import a channel with a giant name/description that bypassed the request boundary.
+  name: z.string().min(1).max(80),
+  description: z.string().max(280).optional(),
   ownerUserId: IdSchema.optional(),
   visibility: ChannelVisibilitySchema,
   allowPosting: ChannelPostingPolicySchema,
