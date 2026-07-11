@@ -739,6 +739,18 @@ export const MeshSendRequestSchema = z.object({
 });
 export type MeshSendRequest = z.infer<typeof MeshSendRequestSchema>;
 
+/**
+ * Client request to broadcast ONE sealed mailbox message to MULTIPLE contacts (group/broadcast
+ * fan-out, opportunistic-mesh — docs/16) in a single call. Each recipient gets an independently
+ * sealed copy (no shared key), so per-recipient confidentiality/unlinkability is identical to
+ * `MeshSendRequestSchema` — this is purely a client-convenience batch over the same one-to-one send.
+ */
+export const MeshBroadcastRequestSchema = z.object({
+  toMeshIds: z.array(z.string().min(1).max(64)).min(1).max(50),
+  body: z.string().min(1).max(8000),
+});
+export type MeshBroadcastRequest = z.infer<typeof MeshBroadcastRequestSchema>;
+
 /** Live per-peer sync bookkeeping, as reported by `GET /api/admin/sync`. */
 export const SyncPeerStatusSchema = z.object({
   lastAttemptAt: TimestampSchema.optional(),
