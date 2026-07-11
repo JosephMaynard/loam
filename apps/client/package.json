@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@loam/avatar": "workspace:*",
+    "@loam/crypto": "workspace:*",
     "@loam/display-name": "workspace:*",
     "@loam/qr": "workspace:*",
     "@loam/schema": "workspace:*",

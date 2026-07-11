@@ -15,6 +15,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@loam/avatar": resolve(__dirname, "../../packages/avatar/src/index.ts"),
+      "@loam/crypto": resolve(__dirname, "../../packages/crypto/src/index.ts"),
       "@loam/display-name": resolve(__dirname, "../../packages/display-name/src/index.ts"),
       "@loam/qr": resolve(__dirname, "../../packages/qr/src/index.ts"),
       "@loam/schema": resolve(__dirname, "../../packages/schema/src/index.ts"),

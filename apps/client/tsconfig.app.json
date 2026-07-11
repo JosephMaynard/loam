@@ -9,6 +9,7 @@
     "skipLibCheck": true,
     "paths": {
       "@loam/avatar": ["../../packages/avatar/src/index.ts"],
+      "@loam/crypto": ["../../packages/crypto/src/index.ts"],
       "@loam/display-name": ["../../packages/display-name/src/index.ts"],
       "@loam/qr": ["../../packages/qr/src/index.ts"],
       "@loam/schema": ["../../packages/schema/src/index.ts"],
