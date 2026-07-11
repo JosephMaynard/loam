@@ -2412,7 +2412,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const ids = new Set(messages.map((message) => message.id));
-    // Tombstone alongside the delete: a peer that still holds these must not re-import them.
+    // Tombstone alongside the delete: a peer that still holds these must not re-import them. This is
+    // unconditional (NOT gated on sync.enabled) — sync is a runtime toggle, so a node that deletes
+    // while sync is off and joins a mesh later must still refuse the resurrected copy (docs/11). Bounding
+    // tombstone growth is a horizon-GC problem, not a skip-when-off one (docs/15 #7).
     store.transaction(() => {
       for (const id of ids) {
         store.deleteMessage(id);
@@ -3324,6 +3327,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     return visibleUsers(currentUser);
+  });
+
+  // End the caller's own session: invalidate the token server-side and clear the cookie. A device
+  // wipe calls this so that a reload afterwards mints a FRESH identity instead of re-presenting the
+  // same HttpOnly cookie (which JS can't clear) and re-hydrating the wiped identity (docs/15 #4).
+  // Deliberately unauthenticated and side-effect-only — it never mints a session, and an absent or
+  // unknown cookie is a no-op success.
+  server.post("/api/session/end", async (request, reply) => {
+    const token = readCookie(request.headers.cookie, sessionCookieName);
+    if (token) {
+      sessions.delete(token);
+      store.deleteSession(token);
+    }
+    // Match the mint path's attributes (incl. conditional Secure over TLS) so the browser reliably
+    // delete-matches and clears the cookie.
+    const secure = request.protocol === "https";
+    reply.header(
+      "set-cookie",
+      `${sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`,
+    );
+    return { ok: true };
   });
   server.patch("/api/users/me", async (request, reply) => {
     const body = UserUpdateRequestSchema.safeParse(request.body);
@@ -4497,8 +4521,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send(errorBody("The passphrase bootstrap strategy requires a passphrase"));
     }
 
+    const switchedToSetupCode = next.admin.bootstrap === "setupCode" && appConfig.admin.bootstrap !== "setupCode";
     appConfig = next;
     store.setConfigValue("config", JSON.stringify(appConfig));
+    // Drop live sync-status for peers an admin just removed, so peerSyncStatus can't accrete entries
+    // for peers that no longer exist (docs/15 #9).
+    const activePeerUrls = new Set(appConfig.sync.peers.map((peer) => peer.url));
+    for (const url of [...peerSyncStatus.keys()]) {
+      if (!activePeerUrls.has(url)) {
+        peerSyncStatus.delete(url);
+      }
+    }
+    // Switching INTO setupCode bootstrap at runtime must mint a code — otherwise the claim flow is
+    // enabled but no code was ever generated, so `allowAdminClaim` stays false and no one can claim
+    // (docs/15 #8). Only on the transition (not every PATCH while already in setupCode), so a code
+    // consumed by an earlier claim isn't silently re-minted. `/api/admin/claim` grants admin against
+    // a valid code regardless of existing admins, so this is the intended "let someone claim" lever.
+    if (switchedToSetupCode && adminSetupCode === undefined) {
+      adminSetupCode = makeAdminSetupCode();
+      server.log.info(`Admin setup code (single use): ${adminSetupCode}`);
+    }
     ensureBotUser();
     // Enabling mesh mints + publishes identity keys for existing local users so they're reachable.
     ensureAllMeshIdentities();
