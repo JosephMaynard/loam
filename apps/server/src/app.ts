@@ -13,7 +13,9 @@ import {
   mailboxTag,
   meshIdFromSignPublic,
   openMailbox,
+  openTransport,
   sealMailbox,
+  sealTransport,
   transportServerAccept,
   verifyKxBinding,
   type MeshIdentity,
@@ -82,6 +84,9 @@ type SocketClient = {
 type SocketSession = {
   socket: SocketClient;
   userId: string;
+  /** Transport session key (docs/08) when the client connected `/ws?enc=<sid>`; outbound frames are
+   * then XChaCha20-Poly1305-sealed. Undefined = plaintext frames (transport off / no session). */
+  transportKey?: string;
 };
 
 type AppData = {
@@ -803,6 +808,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // switch. Ephemeral handshakes mean a lost entry just forces a re-handshake.
   const transportSessions = new Map<string, { key: string; expiresAt: number }>();
   const TRANSPORT_SESSION_TTL_MS = 12 * 3_600_000;
+  // Per-request session key, resolved once in onRequest and reused to decrypt the body (preValidation)
+  // and encrypt the response (onSend). WeakMap so it's GC'd with the request — no manual cleanup.
+  const transportRequestKeys = new WeakMap<FastifyRequest, string>();
   // Per-IP new-identity budget (RAM-only): bounds how many fresh anonymous users one address can mint
   // per window, so a client discarding its cookie can't grow the user table without limit. Pruned on
   // the reaper timer. On a LAN each device gets its own IP, so this reads as per-device.
@@ -1155,6 +1163,50 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     transportIdentity = createTransportIdentity();
     store.setConfigValue("transportIdentity", JSON.stringify(transportIdentity));
     transportSessions.clear();
+  }
+
+  /** The transport session key a request presented via a valid, unexpired `x-loam-enc` header (the
+   * session id), or undefined. */
+  function transportKeyForRequest(request: FastifyRequest): string | undefined {
+    const sid = request.headers["x-loam-enc"];
+    if (typeof sid !== "string" || sid.length === 0) {
+      return undefined;
+    }
+    const session = transportSessions.get(sid);
+    if (!session || session.expiresAt <= Date.now()) {
+      return undefined;
+    }
+    return session.key;
+  }
+
+  /** The transport session key for a WebSocket connection, taken from the `?enc=<sid>` query (browsers
+   * can't set custom headers on a WS upgrade), or undefined. */
+  function wsTransportKey(url: string): string | undefined {
+    const query = url.split("?")[1];
+    if (!query) {
+      return undefined;
+    }
+    const sid = new URLSearchParams(query).get("enc");
+    if (!sid) {
+      return undefined;
+    }
+    const session = transportSessions.get(sid);
+    if (!session || session.expiresAt <= Date.now()) {
+      return undefined;
+    }
+    return session.key;
+  }
+
+  /** Paths reachable unencrypted even under `required` mode: the handshake/config/health bootstrap and
+   * the static app shell. Everything else must present a transport session when the node requires it. */
+  function isTransportBootstrapPath(url: string): boolean {
+    const path = url.split("?", 1)[0];
+    return (
+      path === "/api/config" ||
+      path === "/api/transport/handshake" ||
+      path === "/api/health" ||
+      !path.startsWith("/api/")
+    );
   }
 
   /**
@@ -1623,6 +1675,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return !audience || audience.has(userId);
   }
 
+  /** Send one already-serialized frame to a socket, sealed under its transport session key when the
+   * client connected `/ws?enc=<sid>` (docs/08), else plaintext. Callers keep their own readyState +
+   * audience checks; the WS aad is a constant ("ws") since frames aren't route-scoped. */
+  function wsSend(session: SocketSession, payload: string): void {
+    session.socket.send(session.transportKey ? sealTransport(session.transportKey, payload, "ws") : payload);
+  }
+
   function broadcast(event: ClientEvent): void {
     if (event.type === "userUpserted") {
       // Two shapes: `roles` (moderator/greeter) reach only the subject (so their own client can gate
@@ -1633,21 +1692,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const strippedPayload = JSON.stringify({ ...event, user: publicUser(subject) });
       const rolesPayload = JSON.stringify({ ...event, user: rolesVisibleUser(subject) });
 
-      for (const { socket, userId } of sockets) {
-        if (socket.readyState !== socket.OPEN || !socketCanReceiveEvent(userId, event)) {
+      for (const session of sockets) {
+        if (session.socket.readyState !== session.socket.OPEN || !socketCanReceiveEvent(session.userId, event)) {
           continue;
         }
-        const recipient = data.users.find((candidate) => candidate.id === userId);
-        const seesRoles = userId === subject.id || (!!recipient && canModerate(recipient));
-        socket.send(seesRoles ? rolesPayload : strippedPayload);
+        const recipient = data.users.find((candidate) => candidate.id === session.userId);
+        const seesRoles = session.userId === subject.id || (!!recipient && canModerate(recipient));
+        wsSend(session, seesRoles ? rolesPayload : strippedPayload);
       }
       return;
     }
 
     const payload = JSON.stringify(event);
-    for (const { socket, userId } of sockets) {
-      if (socket.readyState === socket.OPEN && socketCanReceiveEvent(userId, event)) {
-        socket.send(payload);
+    for (const session of sockets) {
+      if (session.socket.readyState === session.socket.OPEN && socketCanReceiveEvent(session.userId, event)) {
+        wsSend(session, payload);
       }
     }
   }
@@ -1689,9 +1748,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function sendEventToUsers(audience: Set<string>, event: ClientEvent): void {
     const payload = JSON.stringify(event);
 
-    for (const { socket, userId } of sockets) {
-      if (socket.readyState === socket.OPEN && audience.has(userId)) {
-        socket.send(payload);
+    for (const session of sockets) {
+      if (session.socket.readyState === session.socket.OPEN && audience.has(session.userId)) {
+        wsSend(session, payload);
       }
     }
   }
@@ -1705,9 +1764,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function broadcastStreamEvent(audience: Set<string>, event: StreamEvent): void {
     const payload = JSON.stringify(event);
 
-    for (const { socket, userId } of sockets) {
-      if (socket.readyState === socket.OPEN && audience.has(userId)) {
-        socket.send(payload);
+    for (const session of sockets) {
+      if (session.socket.readyState === session.socket.OPEN && audience.has(session.userId)) {
+        wsSend(session, payload);
       }
     }
   }
@@ -3323,6 +3382,59 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // ws:// to this host), so it needs no external origins. `nosniff` stops content-type confusion on
   // the user-uploaded images. `frame-ancestors 'none'` blocks clickjacking. No HSTS — LOAM runs on
   // plain-http LANs by design (docs/08), so forcing https would break it.
+  // ---- Transport encryption (docs/08): transparently decrypt requests / encrypt responses ----------
+  // With a live transport session (from POST /api/transport/handshake), the client sends request
+  // bodies as { enc: <sealed> } and gets responses back the same way, so plain HTTP carries only
+  // ciphertext for message/DM/config CONTENT. GET request paths + query strings and image bytes remain
+  // visible (metadata); that's the documented Layer-1 scope. All inert when the mode is `off`.
+  server.addHook("onRequest", async (request, reply) => {
+    const mode = appConfig.security.transportEncryption;
+    if (mode === "off") {
+      return;
+    }
+    const key = transportKeyForRequest(request);
+    if (key) {
+      transportRequestKeys.set(request, key);
+    } else if (mode === "required" && !isTransportBootstrapPath(request.url)) {
+      // No valid transport session on a node that requires one — refuse, but keep bootstrap open so a
+      // fresh client can fetch config + handshake first.
+      return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
+    }
+  });
+
+  server.addHook("preValidation", async (request, reply) => {
+    const key = transportRequestKeys.get(request);
+    if (!key) {
+      return;
+    }
+    // An encrypted request carries { enc: "<sealed>" }; a GET may carry no body (response-only sealing).
+    const body = request.body as { enc?: unknown } | undefined;
+    if (body && typeof body.enc === "string") {
+      const opened = openTransport(key, body.enc, `${request.method} ${request.url}`);
+      if (opened === null) {
+        return reply.code(400).send(errorBody("Malformed encrypted request"));
+      }
+      try {
+        request.body = opened.length ? JSON.parse(opened) : undefined;
+      } catch {
+        return reply.code(400).send(errorBody("Malformed encrypted request"));
+      }
+    }
+  });
+
+  server.addHook("onSend", async (request, reply, payload) => {
+    const key = transportRequestKeys.get(request);
+    // Only seal string payloads (JSON) — binary bodies (images, static files) pass through, and can't
+    // be app-decrypted by a browser <img> anyway (a documented Layer-1 limitation).
+    if (!key || typeof payload !== "string") {
+      return payload;
+    }
+    const sealed = sealTransport(key, payload, `${request.method} ${request.url}`);
+    reply.header("content-type", "application/json; charset=utf-8");
+    reply.header("x-loam-enc", "1");
+    return JSON.stringify({ enc: sealed });
+  });
+
   server.addHook("onSend", async (request, reply) => {
     reply.header("x-content-type-options", "nosniff");
 
@@ -4705,7 +4817,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    const socketSession = { socket: connection, userId };
+    // Transport encryption (docs/08): seal outbound frames when the client presented a session id via
+    // `/ws?enc=<sid>`, and refuse the connection under `required` mode without one.
+    const transportKey = appConfig.security.transportEncryption === "off" ? undefined : wsTransportKey(request.url);
+    if (appConfig.security.transportEncryption === "required" && !transportKey) {
+      connection.send(JSON.stringify({ type: "error", ...errorBody("This node requires an encrypted session") }));
+      connection.close();
+      return;
+    }
+
+    const socketSession: SocketSession = { socket: connection, userId, transportKey };
     sockets.add(socketSession);
     broadcastPresence();
     connection.on("close", () => {

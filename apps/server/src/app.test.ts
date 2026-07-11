@@ -6,7 +6,14 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { currentEpoch, mailboxTag, transportClientDerive, transportClientHello } from "@loam/crypto";
+import {
+  currentEpoch,
+  mailboxTag,
+  openTransport,
+  sealTransport,
+  transportClientDerive,
+  transportClientHello,
+} from "@loam/crypto";
 import { MeshIdentityCardSchema, TransportHandshakeResponseSchema, type MeshIdentityCard } from "@loam/schema";
 
 import { buildApp, type AppOptions, type LoamApp } from "./app.js";
@@ -1869,18 +1876,45 @@ describe("security profiles", () => {
     ).json() as FullConfig;
   }
 
-  it("hardened forces its coherent bundle: approval join, ephemeral TTL, armed kill switch", async () => {
+  it("hardened forces its coherent bundle: approval join, ephemeral TTL, armed kill switch, encryption", async () => {
     const app = await makeApp({ security: { profile: "hardened" } });
     const admin = await newSession(app);
     expect(admin.isAdmin).toBe(true);
 
+    // /api/config is a transport bootstrap path, so it's readable without a session even though
+    // hardened forces `required` transport encryption.
     const network = (
       await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
-    ).json() as { networkConfig: { joinPolicy: string; securityProfile: string } };
+    ).json() as { networkConfig: { joinPolicy: string; securityProfile: string; transportEncryption: string } };
     expect(network.networkConfig.securityProfile).toBe("hardened");
     expect(network.networkConfig.joinPolicy).toBe("approval");
+    expect(network.networkConfig.transportEncryption).toBe("required");
 
-    const full = await adminConfig(app, admin.cookie);
+    // The admin config is a content endpoint — under `required` it needs a transport session.
+    const hello = transportClientHello();
+    const hs = TransportHandshakeResponseSchema.parse(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/transport/handshake",
+          payload: { clientEphemeralPublic: hello.ephemeralPublic },
+        })
+      ).json(),
+    );
+    const key = transportClientDerive({
+      clientEphemeralSecret: hello.ephemeralSecret,
+      hostPublic: hs.hostPublicKey,
+      hostEphemeralPublic: hs.hostEphemeralPublic,
+    });
+    const res = await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie, "x-loam-enc": hs.sessionId },
+    });
+    expect(res.statusCode).toBe(200);
+    const full = JSON.parse(
+      openTransport(key, (res.json() as { enc: string }).enc, "GET /api/admin/config") as string,
+    ) as { access: { joinPolicy: string }; retention: { messageTtlMs: number }; killSwitch: { enabled: boolean } };
     expect(full.access.joinPolicy).toBe("approval");
     expect(full.retention.messageTtlMs).toBe(3_600_000);
     expect(full.killSwitch.enabled).toBe(true);
@@ -4264,5 +4298,151 @@ describe("transport encryption foundation (docs/08)", () => {
     ).json() as { networkConfig: { transportEncryption: string; transportPublicKey?: string } };
     expect(cfg.networkConfig.transportEncryption).toBe("required");
     expect(cfg.networkConfig.transportPublicKey).toBeTruthy(); // now advertised
+  });
+});
+
+describe("transport encryption transparent round-trip (docs/08)", () => {
+  /** Establish a transport session and return { sessionId, key } for encrypting requests. */
+  async function openSession(app: LoamApp): Promise<{ sessionId: string; key: string }> {
+    const hello = transportClientHello();
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/handshake",
+      payload: { clientEphemeralPublic: hello.ephemeralPublic },
+    });
+    const body = TransportHandshakeResponseSchema.parse(res.json());
+    return {
+      sessionId: body.sessionId,
+      key: transportClientDerive({
+        clientEphemeralSecret: hello.ephemeralSecret,
+        hostPublic: body.hostPublicKey,
+        hostEphemeralPublic: body.hostEphemeralPublic,
+      }),
+    };
+  }
+
+  it("encrypts request bodies and responses transparently (content never on the wire)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+
+    const method = "POST";
+    const url = "/api/messages";
+    const aad = `${method} ${url}`;
+    const secret = "rendezvous at the old mill at dawn";
+    const res = await app.server.inject({
+      method,
+      url,
+      headers: { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: { enc: sealTransport(session.key, JSON.stringify({ type: "channelPost", channelId: "general", body: secret }), aad) },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.headers["x-loam-enc"]).toBe("1");
+    // The plaintext is NOWHERE in the raw response...
+    expect(res.body).not.toContain("rendezvous");
+    // ...but decrypts to the created message.
+    const opened = openTransport(session.key, (res.json() as { enc: string }).enc, aad);
+    expect(opened).not.toBeNull();
+    expect((JSON.parse(opened as string) as { message: { body: string } }).message.body).toBe(secret);
+  });
+
+  it("required mode refuses unencrypted content requests but allows bootstrap", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const user = await newSession(app);
+
+    // Bootstrap endpoints stay open unencrypted.
+    expect((await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: user.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+
+    // A content endpoint without a transport session is refused.
+    const bare = await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } });
+    expect(bare.statusCode).toBe(401);
+
+    // With a session it works (and the response comes back sealed).
+    const session = await openSession(app);
+    const ok = await app.server.inject({
+      method: "GET",
+      url: "/api/users",
+      headers: { cookie: user.cookie, "x-loam-enc": session.sessionId },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.headers["x-loam-enc"]).toBe("1");
+    expect(openTransport(session.key, (ok.json() as { enc: string }).enc, "GET /api/users")).not.toBeNull();
+  });
+
+  it("rejects a frame sealed for a different route (aad binding)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    // Seal a body under the WRONG route's aad; the server opens against the real route → 400.
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: { enc: sealTransport(session.key, JSON.stringify({ type: "channelPost", channelId: "general", body: "x" }), "POST /api/admin/kill-switch") },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
+describe("transport encryption WebSocket frames (docs/08)", () => {
+  it("seals outbound WS frames for a session-bound socket", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const hello = transportClientHello();
+    const hs = TransportHandshakeResponseSchema.parse(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/transport/handshake",
+          payload: { clientEphemeralPublic: hello.ephemeralPublic },
+        })
+      ).json(),
+    );
+    const key = transportClientDerive({
+      clientEphemeralSecret: hello.ephemeralSecret,
+      hostPublic: hs.hostPublicKey,
+      hostEphemeralPublic: hs.hostEphemeralPublic,
+    });
+
+    const frames: string[] = [];
+    const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+      `${baseUrl.replace("http", "ws")}/ws?enc=${hs.sessionId}`,
+      { headers: { cookie: user.cookie } },
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve());
+        socket.addEventListener("error", () => reject(new Error("ws failed to connect")));
+      });
+      socket.addEventListener("message", (event) => frames.push(String((event as MessageEvent).data)));
+
+      // Trigger a broadcast to this socket: the user posts a public message.
+      await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: user.cookie },
+        payload: { type: "channelPost", channelId: "general", body: "over-the-wire secret" },
+      });
+
+      const deadline = Date.now() + 3_000;
+      while (!frames.some((f) => openTransport(key, f, "ws")?.includes("over-the-wire secret")) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      socket.close();
+    }
+
+    expect(frames.length).toBeGreaterThan(0);
+    // No frame is plaintext...
+    for (const frame of frames) {
+      expect(frame).not.toContain("over-the-wire secret");
+    }
+    // ...but a frame decrypts (aad "ws") to the broadcast event containing the message.
+    const decoded = frames.map((frame) => openTransport(key, frame, "ws")).filter((value): value is string => value !== null);
+    expect(decoded.some((value) => value.includes("over-the-wire secret"))).toBe(true);
   });
 });
