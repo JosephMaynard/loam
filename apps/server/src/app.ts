@@ -109,6 +109,23 @@ type ClientEvent =
       type: "wipe";
     };
 
+/**
+ * Streaming callbacks for on-device LLM inference. The Android host's launcher
+ * (`apps/app/nodejs-project-template/main.js`) installs a function of this shape on
+ * `globalThis.__loamOnDeviceChat` before requiring the server bundle; it forwards chat messages to
+ * the RN/native model over the `rn-bridge` channel and streams the reply back through these
+ * callbacks. It is **absent on every other host** (desktop, Pi, CI) — the server checks for it and
+ * degrades gracefully — so the server bundle never depends on `rn-bridge` or any native module.
+ */
+export type OnDeviceChatHook = (
+  messages: { role: "system" | "user" | "assistant"; content: string }[],
+  callbacks: {
+    onDelta: (text: string) => void;
+    onEnd: () => void;
+    onError: (message: string) => void;
+  },
+) => void;
+
 export type AppOptions = {
   /** Directory holding the SQLite DB, avatars, and (by default) config.json. */
   dataDir: string;
@@ -349,6 +366,11 @@ export function defaultLoamConfig(): LoamConfig {
         botId: "llm.ollama.gemma4",
         botDisplayName: "Gemma",
       },
+      // On-device backend, off by default. Enabling it is a no-op unless the host provides the
+      // inference hook (the Android host) AND a model has been added — otherwise a graceful error.
+      onDevice: {
+        enabled: false,
+      },
     },
     admin: {
       bootstrap: "firstUser",
@@ -398,7 +420,10 @@ function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
     node: { ...base.node, ...update.node },
     identity: { ...base.identity, ...update.identity },
     features: { ...base.features, ...update.features },
-    llm: { ollama: { ...base.llm.ollama, ...update.llm?.ollama } },
+    llm: {
+      ollama: { ...base.llm.ollama, ...update.llm?.ollama },
+      onDevice: { ...base.llm.onDevice, ...update.llm?.onDevice },
+    },
     admin: { ...base.admin, ...update.admin },
     killSwitch: { ...base.killSwitch, ...update.killSwitch },
     retention: { ...base.retention, ...update.retention },
@@ -951,15 +976,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return ensureUser(id, isAdmin, pending);
   }
 
+  /** Whether any LLM backend is active — the laptop Ollama connection or the on-device model. The
+   * bot DM contact, streaming, and all LLM routes are gated on this, so it stays off unless the
+   * operator explicitly enables a backend (both default off). */
+  function llmEnabled(): boolean {
+    return appConfig.llm.ollama.enabled || appConfig.llm.onDevice.enabled;
+  }
+
+  /** The model label shown on assistant replies — the on-device model when that backend is active,
+   * else the Ollama model. */
+  function activeLlmModel(): string {
+    if (appConfig.llm.onDevice.enabled) {
+      return appConfig.llm.onDevice.model ?? "on-device";
+    }
+    return appConfig.llm.ollama.model;
+  }
+
   /**
-   * Ensures the configured Ollama bot user exists in the in-memory user store and is up to date.
+   * Ensures the assistant bot user exists in the in-memory user store and is up to date. The bot's
+   * identity (id, display name) is shared from `llm.ollama` regardless of which backend answers, so
+   * switching between the laptop-Ollama and on-device backends keeps the same DM contact.
    *
-   * If Ollama is disabled in the current configuration, no changes are made.
+   * If no LLM backend is enabled, no changes are made.
    *
-   * @returns The bot `User` after creation or update, or `undefined` if Ollama is disabled.
+   * @returns The bot `User` after creation or update, or `undefined` when no backend is enabled.
    */
-  function ensureOllamaBotUser(): User | undefined {
-    if (!appConfig.llm.ollama.enabled) {
+  function ensureBotUser(): User | undefined {
+    if (!llmEnabled()) {
       return undefined;
     }
 
@@ -1001,8 +1044,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return {
       nodeName: appConfig.node.name,
       ...appConfig.features,
-      enableLLMChat: appConfig.llm.ollama.enabled,
-      enableLLMStreaming: appConfig.llm.ollama.enabled,
+      enableLLMChat: llmEnabled(),
+      enableLLMStreaming: llmEnabled(),
       allowUserDisplayNameEdit: appConfig.identity.allowUserDisplayNameEdit,
       allowUserAvatarEdit: appConfig.identity.allowUserAvatarEdit,
       allowUserAvatarUpload: appConfig.identity.allowUserAvatarUpload,
@@ -1166,9 +1209,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function visibleUsers(): User[] {
-    const base = appConfig.llm.ollama.enabled
-      ? data.users
-      : data.users.filter((user) => user.type !== "bot");
+    const base = llmEnabled() ? data.users : data.users.filter((user) => user.type !== "bot");
     return base.filter((user) => !user.banned && !user.pending).map(publicUser);
   }
 
@@ -1822,13 +1863,84 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Triggers an Ollama LLM assistant reply to a direct message and streams the assistant's
-   * content into a new DM message via StreamEvent deltas, persisting the final body once.
+   * Stream a reply from the **on-device** model. Inference doesn't run in this (embedded Node)
+   * process — it runs in the Android host's RN/native layer, reachable via a hook the launcher
+   * (`nodejs-project-template/main.js`) installs on `globalThis.__loamOnDeviceChat` before requiring
+   * the server bundle. On any other host (desktop, Pi, CI) the hook is simply absent, so enabling the
+   * on-device backend there yields a clean error rather than a crash — messaging is never affected.
+   * The callback-style hook is adapted into the same `AsyncGenerator<string>` shape as Ollama so the
+   * assistant flow below is backend-agnostic.
+   */
+  async function* streamOnDeviceChat(
+    messages: { role: "system" | "user" | "assistant"; content: string }[],
+  ): AsyncGenerator<string> {
+    const hook = (globalThis as { __loamOnDeviceChat?: OnDeviceChatHook }).__loamOnDeviceChat;
+
+    if (typeof hook !== "function") {
+      throw new Error("The on-device model is not available on this host.");
+    }
+
+    const queue: string[] = [];
+    let finished = false;
+    let failure: Error | undefined;
+    let wake: (() => void) | undefined;
+    const signal = () => {
+      wake?.();
+      wake = undefined;
+    };
+
+    hook(messages, {
+      onDelta: (text) => {
+        if (text) {
+          queue.push(text);
+        }
+        signal();
+      },
+      onEnd: () => {
+        finished = true;
+        signal();
+      },
+      onError: (message) => {
+        failure = new Error(message || "The on-device model failed.");
+        finished = true;
+        signal();
+      },
+    });
+
+    while (true) {
+      if (queue.length) {
+        yield queue.shift() as string;
+        continue;
+      }
+      if (failure) {
+        throw failure;
+      }
+      if (finished) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+    }
+  }
+
+  /** Stream from whichever LLM backend is active: the on-device model takes precedence when enabled,
+   * otherwise the laptop Ollama connection. */
+  function streamChat(
+    messages: { role: "system" | "user" | "assistant"; content: string }[],
+  ): AsyncGenerator<string> {
+    return appConfig.llm.onDevice.enabled ? streamOnDeviceChat(messages) : streamOllamaChat(messages);
+  }
+
+  /**
+   * Triggers an LLM assistant reply to a direct message and streams the assistant's content into a
+   * new DM message via StreamEvent deltas, persisting the final body once. Backend-agnostic — the
+   * deltas come from `streamChat` (Ollama or the on-device model).
    *
    * @param userMessage - The incoming DM message that may trigger the bot response
    */
-  async function createOllamaResponse(userMessage: Message): Promise<void> {
-    if (!appConfig.llm.ollama.enabled || userMessage.type !== "dm") {
+  async function createAssistantResponse(userMessage: Message): Promise<void> {
+    if (!llmEnabled() || userMessage.type !== "dm") {
       return;
     }
 
@@ -1847,7 +1959,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       createdAt: Date.now(),
       meta: {
         source: "llm",
-        model: appConfig.llm.ollama.model,
+        model: activeLlmModel(),
         markdown: true,
         streaming: true,
       },
@@ -1861,7 +1973,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     broadcastStreamEvent(audience, { type: "start", messageId: assistantMessage.id });
 
     try {
-      for await (const delta of streamOllamaChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
+      for await (const delta of streamChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
         body += delta;
 
         // Keep the in-memory copy current for mid-stream REST reads, but defer persistence and the
@@ -1876,7 +1988,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       updateMessage(assistantMessage, body.trim() || "(No response.)", false);
       broadcastStreamEvent(audience, { type: "end", messageId: assistantMessage.id });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown Ollama error.";
+      const message = error instanceof Error ? error.message : "Unknown LLM error.";
       updateMessage(assistantMessage, `${body}\n\nLLM error: ${message}`.trim(), false);
       broadcastStreamEvent(audience, { type: "error", messageId: assistantMessage.id, error: message });
       server.log.error(error);
@@ -1929,7 +2041,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    ensureOllamaBotUser();
+    ensureBotUser();
   }
 
   /**
@@ -3440,7 +3552,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     broadcast({ type: "messageCreated", message: result.message });
-    void createOllamaResponse(result.message);
+    void createAssistantResponse(result.message);
     return reply.code(201).send(result);
   });
 
@@ -3689,7 +3801,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     appConfig = next;
     store.setConfigValue("config", JSON.stringify(appConfig));
-    ensureOllamaBotUser();
+    ensureBotUser();
     broadcast({ type: "configUpdated", networkConfig: currentNetworkConfig() });
     // If presence was just enabled, connected clients need the current roster to light up.
     broadcastPresence();

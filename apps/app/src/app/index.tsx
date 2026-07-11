@@ -9,6 +9,7 @@ import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
@@ -150,6 +151,9 @@ export default function HostScreen() {
 
     nodejs.channel.addListener('loam-status', onStatus);
     nodejs.channel.addListener('loam-hostinfo', onHostInfo);
+    // Answer optional on-device LLM requests from the embedded server (no-op unless the operator
+    // enables the on-device backend and a model is wired — see docs/06).
+    const cleanupLlm = registerOnDeviceLlm(nodejs.channel);
 
     if (!nodeStarted) {
       nodeStarted = true;
@@ -161,6 +165,7 @@ export default function HostScreen() {
       clearTimeout(startupTimeout);
       nodejs.channel.removeListener('loam-status', onStatus);
       nodejs.channel.removeListener('loam-hostinfo', onHostInfo);
+      cleanupLlm();
     };
   }, []);
 

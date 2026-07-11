@@ -143,6 +143,7 @@ describe("@loam/schema", () => {
             botId: "llm.ollama.gemma4",
             botDisplayName: "Gemma",
           },
+          onDevice: { enabled: false },
         },
         admin: { bootstrap: "firstUser" },
         killSwitch: { enabled: false, requireConfirmation: true },

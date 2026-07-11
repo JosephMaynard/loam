@@ -3603,3 +3603,83 @@ describe("anonymous identity minting limit", () => {
     expect(returning.statusCode).toBe(200);
   });
 });
+
+describe("on-device LLM provider", () => {
+  const BOT_ID = "llm.ollama.gemma4"; // shared bot identity, default botId
+
+  afterEach(() => {
+    delete (globalThis as { __loamOnDeviceChat?: unknown }).__loamOnDeviceChat;
+  });
+
+  async function assistantReply(app: LoamApp, cookie: string): Promise<string | undefined> {
+    // The bot reply is created + streamed asynchronously after the DM POST returns; poll the thread.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const thread = (
+        await app.server.inject({ method: "GET", url: `/api/dms/${BOT_ID}`, headers: { cookie } })
+      ).json() as { authorId: string; body?: string }[];
+      const reply = thread.find((message) => message.authorId === BOT_ID && (message.body ?? "").length > 0);
+      if (reply) {
+        return reply.body;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return undefined;
+  }
+
+  it("streams a reply from the on-device hook, persists it, and shows the bot when enabled", async () => {
+    (globalThis as { __loamOnDeviceChat?: unknown }).__loamOnDeviceChat = (
+      _messages: unknown,
+      callbacks: { onDelta: (t: string) => void; onEnd: () => void; onError: (m: string) => void },
+    ) => {
+      callbacks.onDelta("Hello ");
+      callbacks.onDelta("from the phone");
+      callbacks.onEnd();
+    };
+
+    const app = await makeApp({ llm: { onDevice: { enabled: true, model: "gemma-test" } } });
+    const user = await newSession(app);
+
+    // The bot DM contact appears once a backend is enabled (here: on-device, with Ollama still off).
+    const users = (
+      await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } })
+    ).json() as { id: string; type: string }[];
+    expect(users.some((entry) => entry.id === BOT_ID && entry.type === "bot")).toBe(true);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    expect(dm.statusCode).toBe(201);
+
+    expect(await assistantReply(app, user.cookie)).toBe("Hello from the phone");
+  });
+
+  it("degrades to a graceful error when no on-device hook is present (e.g. desktop/CI)", async () => {
+    // No globalThis.__loamOnDeviceChat installed — every non-Android host.
+    const app = await makeApp({ llm: { onDevice: { enabled: true, model: "gemma-test" } } });
+    const user = await newSession(app);
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+
+    const reply = await assistantReply(app, user.cookie);
+    expect(reply).toMatch(/LLM error/i);
+    expect(reply).toMatch(/not available/i);
+  });
+
+  it("keeps the bot hidden and does not respond when no backend is enabled (default)", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+
+    const users = (
+      await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } })
+    ).json() as { id: string }[];
+    expect(users.some((entry) => entry.id === BOT_ID)).toBe(false);
+  });
+});

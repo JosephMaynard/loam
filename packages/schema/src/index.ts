@@ -262,6 +262,25 @@ export const OllamaConfigSchema = z.object({
 });
 export type OllamaConfig = z.infer<typeof OllamaConfigSchema>;
 
+/**
+ * On-device LLM backend (the Android host running a small model itself, e.g. Gemma via llama.cpp),
+ * as an alternative to reaching a laptop's Ollama. The bot's *identity* (botId / botDisplayName /
+ * systemPrompt) is shared from `llm.ollama`; this block only carries the on-device backend settings.
+ * The model weights are **never shipped** — the operator adds a GGUF file on-device and its
+ * app-private path lands in `modelPath`. Absent on non-Android hosts; enabling it there is a no-op
+ * (the server has no on-device inference hook, so it reports a graceful error). Off by default.
+ */
+export const OnDeviceLlmConfigSchema = z.object({
+  enabled: z.boolean(),
+  /** Display label for the loaded model (e.g. "gemma-2-2b-it-Q4_K_M"); cosmetic. */
+  model: z.string().min(1).max(120).optional(),
+  /** App-private path to the user-provided GGUF file (Android host only). */
+  modelPath: z.string().min(1).max(1024).optional(),
+  /** Context window to load the model with; defaults are chosen on-device. */
+  contextSize: z.number().int().positive().max(32_768).optional(),
+});
+export type OnDeviceLlmConfig = z.infer<typeof OnDeviceLlmConfigSchema>;
+
 export const AdminBootstrapStrategySchema = z.enum([
   "none",
   "firstUser",
@@ -333,7 +352,7 @@ export const LoamConfigSchema = z.object({
   node: NodeIdentityConfigSchema,
   identity: IdentityConfigSchema,
   features: FeatureFlagsSchema,
-  llm: z.object({ ollama: OllamaConfigSchema }),
+  llm: z.object({ ollama: OllamaConfigSchema, onDevice: OnDeviceLlmConfigSchema }),
   admin: AdminConfigSchema,
   killSwitch: KillSwitchConfigSchema,
   retention: RetentionConfigSchema,
@@ -352,7 +371,9 @@ export const LoamConfigUpdateSchema = z.object({
       ollama: OllamaConfigSchema.partial().extend({
         systemPrompt: z.string().max(4000).optional(),
       }),
+      onDevice: OnDeviceLlmConfigSchema.partial(),
     })
+    .partial()
     .optional(),
   admin: AdminConfigSchema.partial()
     .extend({
