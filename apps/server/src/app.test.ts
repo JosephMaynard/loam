@@ -3583,6 +3583,63 @@ describe("sync peer authentication (shared token)", () => {
     });
     expect(none.statusCode).toBe(404);
   });
+
+  it("refuses to import messages attributed to a locally-authoritative identity (anti-impersonation)", async () => {
+    const peer = await makeApp({ sync: { enabled: true } });
+    const peerAdmin = await newSession(peer);
+    const channel = (
+      await peer.server.inject({
+        method: "POST",
+        url: "/api/channels",
+        headers: { cookie: peerAdmin.cookie },
+        payload: { name: "Mesh" },
+      })
+    ).json() as { id: string };
+    const post = (body: string) =>
+      peer.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: peerAdmin.cookie },
+        payload: { type: "channelPost", channelId: channel.id, body },
+      });
+    await post("m1");
+    const peerUrl = await peer.server.listen({ host: "127.0.0.1", port: 0 });
+
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: peerUrl }] } });
+    const pullerAdmin = await newSession(puller);
+    const sync = () =>
+      puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    const bodies = async (): Promise<string[]> =>
+      (
+        (
+          await puller.server.inject({
+            method: "GET",
+            url: `/api/messages/${channel.id}`,
+            headers: { cookie: pullerAdmin.cookie },
+          })
+        ).json() as { body?: string }[]
+      ).map((message) => message.body ?? "");
+
+    // First sync imports m1 and creates a local (authority-stripped) copy of the peer's author.
+    await sync();
+    expect(await bodies()).toContain("m1");
+
+    // Promote that imported identity to a LOCAL admin — its id is now locally authoritative.
+    const promote = await puller.server.inject({
+      method: "POST",
+      url: `/api/admin/users/${peerAdmin.userId}/promote`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    expect(promote.statusCode).toBe(200);
+
+    // A further message the peer serves under that same id is now refused — a peer can't inject
+    // content that renders as authored by an identity this node treats as an authority.
+    await post("m2");
+    await sync();
+    const seen = await bodies();
+    expect(seen).toContain("m1"); // the pre-promotion import stays
+    expect(seen).not.toContain("m2"); // the impersonating message is dropped
+  });
 });
 
 describe("anonymous identity minting limit", () => {

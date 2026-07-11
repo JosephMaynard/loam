@@ -1106,6 +1106,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Whether a user id belongs to a locally-authoritative identity (admin / moderator / greeter). Used
+   * to reject sync-imported content that tries to impersonate one — a peer must never be able to make
+   * a message render as authored by this node's admin. Imported users are always stripped of authority
+   * (`importPeerUsers`), so an authoritative local id is by definition a real local identity.
+   */
+  function isLocallyAuthoritative(userId: string): boolean {
+    const user = data.users.find((candidate) => candidate.id === userId);
+    return !!user && (canModerate(user) || canGreet(user));
+  }
+
+  /**
    * Why a user may not read or create content on this node: banned users are fully locked out, and
    * under the `approval` join policy a pending user gets nothing until a greeter lets them in
    * (previously only *posting* was gated, so an unapproved or banned session could still read every
@@ -2482,6 +2493,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     for (const message of sorted) {
       if (message.type === "dm" || message.meta?.streaming || tombstones.has(message.id)) {
+        continue;
+      }
+
+      // Never import content attributed to one of *our* admins/moderators/greeters — a compromised or
+      // hostile peer could otherwise inject a message that renders as authored by this node's admin
+      // (local ids are discoverable; they're exported as message authorIds in the sync digest).
+      if (isLocallyAuthoritative(message.authorId)) {
         continue;
       }
 
