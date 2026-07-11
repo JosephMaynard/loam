@@ -329,7 +329,7 @@ export const sw: Catalog = {
   "mesh.title": "Barua ya wavu",
   "mesh.myCardEyebrow": "Anwani yako",
   "mesh.myCardTitle": "Kadi yako ya wavu",
-  "mesh.myCardNote": "Ishiriki na mtu unayetaka apate barua iliyotiwa muhuri kutoka kwako — skani msimbo au inakili na uipeleke unavyopenda.",
+  "mesh.myCardNote": "Ishiriki hii na mtu ambaye ungependa kupokea barua iliyotiwa muhuri kutoka kwake — skani msimbo au inakili na uitume kwa njia yoyote upendayo.",
   "mesh.myCardLoading": "Inapakia kadi yako ya wavu…",
   "mesh.myCardLoadError": "Imeshindikana kupakia kadi yako ya wavu.",
   "mesh.myCardUnrecognised": "Seva imerudisha kadi ya wavu isiyotambulika.",

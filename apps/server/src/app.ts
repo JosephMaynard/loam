@@ -2673,6 +2673,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         await mkdir(attachmentsDir, { recursive: true });
         await writeFile(filePath, bytes);
+
+        // ...and if the wipe landed *during* the write, remove the file we just orphaned.
+        if (wipeGeneration !== generation) {
+          await rm(filePath, { force: true });
+          return;
+        }
       } catch {
         // Message still imports; the image 404s until a later sync round retries... it won't —
         // acceptable v1 tradeoff, the text is the payload that matters off-grid.
@@ -2709,17 +2715,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   function loadMeshContacts(): void {
     for (const { ownerUserId, meshId, data: json } of store.loadMeshContacts()) {
+      let parsed: unknown;
       try {
-        const card = JSON.parse(json) as MeshIdentityCard;
-        let book = meshContacts.get(ownerUserId);
-        if (!book) {
-          book = new Map();
-          meshContacts.set(ownerUserId, book);
-        }
-        book.set(meshId, card);
+        parsed = JSON.parse(json);
       } catch {
-        // Skip a corrupt row rather than crash boot.
+        continue; // corrupt JSON — skip rather than crash boot
       }
+      // Re-validate on the way in: a stored row could have been tampered with. The card must parse,
+      // its row key must match the card's own id, and it must still be self-certifying + key-bound —
+      // exactly the checks addMeshContact applied before it was ever stored.
+      const result = MeshIdentityCardSchema.safeParse(parsed);
+      if (
+        !result.success ||
+        result.data.meshId !== meshId ||
+        meshIdFromSignPublic(result.data.sign) !== result.data.meshId ||
+        !verifyKxBinding(result.data.sign, result.data.kx, result.data.kxSig)
+      ) {
+        continue;
+      }
+      let book = meshContacts.get(ownerUserId);
+      if (!book) {
+        book = new Map();
+        meshContacts.set(ownerUserId, book);
+      }
+      book.set(meshId, result.data);
     }
   }
 
@@ -2903,8 +2922,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!book.has(card.meshId) && book.size >= appConfig.mesh.maxContacts) {
       return "Your mesh contact list is full.";
     }
-    book.set(card.meshId, card);
+    // Persist first, then mirror in memory — if the store write throws, the book doesn't diverge.
     store.upsertMeshContact(ownerUserId, card.meshId, JSON.stringify(card));
+    book.set(card.meshId, card);
     return undefined;
   }
 

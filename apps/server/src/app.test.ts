@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { currentEpoch, mailboxTag } from "@loam/crypto";
-import type { MeshIdentityCard } from "@loam/schema";
+import { MeshIdentityCardSchema, type MeshIdentityCard } from "@loam/schema";
 
 import { buildApp, type AppOptions, type LoamApp } from "./app.js";
 
@@ -427,8 +427,11 @@ describe("kill switch", () => {
     });
 
     await messagesRequested; // A is now mid-pull, suspended on the peer's message payload
-    expect((await postKillSwitch(app, admin.cookie, {})).statusCode).toBe(200); // wipe fires mid-round
-    release(); // let the peer's response through; the resuming sync must bail on the changed generation
+    try {
+      expect((await postKillSwitch(app, admin.cookie, {})).statusCode).toBe(200); // wipe fires mid-round
+    } finally {
+      release(); // always release the held response, even if the assertion throws, so nothing hangs
+    }
     await syncInFlight;
 
     // The peer's message (and author) were NOT written back onto the freshly wiped store.
@@ -3931,7 +3934,7 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
   async function meshCard(app: LoamApp, cookie: string): Promise<MeshIdentityCard> {
     const res = await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie } });
     expect(res.statusCode).toBe(200);
-    return res.json() as MeshIdentityCard;
+    return MeshIdentityCardSchema.parse(res.json());
   }
   /** Add a mesh card to the caller's address book (POST /api/mesh/contacts). */
   function addContact(app: LoamApp, cookie: string, card: MeshIdentityCard): Promise<InjectResponse> {
@@ -3950,6 +3953,16 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     expect(res.statusCode).toBe(404);
     // The whole mesh surface is absent when disabled — identity + contacts too.
     expect((await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie: user.cookie } })).statusCode).toBe(404);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/mesh/contacts",
+          headers: { cookie: user.cookie },
+          payload: { meshId: "mesh.absent", alg: "ed25519", sign: "AA", kx: "AA", kxSig: "AA", mailboxToken: "AA" },
+        })
+      ).statusCode,
+    ).toBe(404);
   });
 
   it("delivers sealed mail to a contact as a DM (card exchange + seal + open on one node)", async () => {

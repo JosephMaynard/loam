@@ -19,12 +19,16 @@ Building on v1 (below), the mesh now addresses sealed mail by the recipient's **
   (`mesh.<hash>`) is **recipient-scoped**: `visibleUsers` hides it from everyone but the recipients it
   mailed, and its `userUpserted` is targeted to the recipient — so a third party never learns from the
   roster that some local user just received mesh mail (a timing/metadata leak the first cut had).
-- **Self-certifying addressing defeats substitution.** `POST /api/mesh/messages` now takes `toMeshId`
-  and seals only to a **contact** the sender explicitly added. `addMeshContact` re-verifies the card
-  server-side — `meshId === base32(sha256(sign))` **and** `verifyKxBinding(sign, kx, kxSig)` — so a
-  forged or key-substituted card is rejected before it can ever be sealed to. Because the id commits to
-  the signing key and is exchanged out-of-band, the active-MITM-at-first-introduction hole (v1
-  deviation 2b) is closed.
+- **Self-certifying addressing defeats *key* substitution.** `POST /api/mesh/messages` now takes
+  `toMeshId` and seals only to a **contact** the sender explicitly added. `addMeshContact` re-verifies
+  `meshId === base32(sha256(sign))` **and** `verifyKxBinding(sign, kx, kxSig)`, so a card whose signing
+  or agreement key doesn't match its id is rejected before it can be sealed to — the
+  active-MITM key-substitution hole (v1 deviation 2b) is closed. **Scope of the guarantee:** this
+  authenticates the *keys* against the id, not the whole card. The `mailboxToken` is unauthenticated
+  (it's independent secret material — see the deviation list), so an attacker who can tamper the
+  serialized card in transit while leaving `sign`/`kx`/`kxSig` intact can swap only the token; the
+  result is delivery failure (the body stays sealed to the real `kx`), not disclosure. Card exchange
+  is trusted-out-of-band by design (QR/paste).
 - **Metadata-unlinkable routing tags.** `toTag` is now derived from the recipient's **secret**
   `mailboxToken` (`localTagsForWindow` and the sender both call `mailboxTag(token, epoch)`), not the
   public `kx`. A passive carrier holding the sealed blob **cannot correlate it to a recipient** — the
@@ -39,8 +43,9 @@ The published `User.identityKey` (public keys, synced) remains for mesh-capabili
 longer a sealing target — you cannot seal to it without the secret token, which only a card conveys.
 
 **Remaining v2+ follow-ups**: an in-band contact-*request* flow (today the card is exchanged fully
-out-of-band); sync **peer authentication** (docs/11 `sync.token`) to harden the transport itself;
-group/broadcast sealed fan-out; and the hardware transport (Phase 3, below).
+out-of-band); **mutual / rotating** sync peer authentication (the shared-bearer `sync.token` +
+`x-loam-sync-token` check via `syncPeerAuthorized` is already built — per-peer keys and rotation are
+the remaining hardening); group/broadcast sealed fan-out; and the hardware transport (Phase 3, below).
 
 ## Implementation status (v1 — shipped)
 
@@ -72,11 +77,13 @@ group/broadcast sealed fan-out; and the hardware transport (Phase 3, below).
    propagated once they'd posted publicly.~~ **Resolved in v2**: out-of-band mesh identity cards
    (`GET /api/mesh/identity` → QR/paste → `POST /api/mesh/contacts`) are the discovery+exchange channel.
 2b. ~~**Active key-substitution (residual)** — v1 ids were session-random, not key-derived, so an active
-   MITM introducing a user before their real key synced could bind a forged key.~~ **Resolved in v2**:
-   sealing addresses the **self-certifying `mesh.` id** and seals only to a **contact** whose card was
-   re-verified server-side (`meshId === base32(sha256(sign))` + `kxSig` binding) at add time, so a
-   substituted/forged card is rejected. (Sync **peer authentication** — docs/11 `sync.token` — remains a
-   worthwhile defence-in-depth for the transport itself.)
+   MITM introducing a user before their real key synced could bind a forged key.~~ **Resolved in v2**
+   for the *keys*: sealing addresses the **self-certifying `mesh.` id** and seals only to a **contact**
+   whose card was re-verified server-side (`meshId === base32(sha256(sign))` + `kxSig` binding) at add
+   time, so a card with a substituted signing/agreement key is rejected. The `mailboxToken` in the card
+   is *not* authenticated (independent secret material), so a tampered token yields delivery failure,
+   not disclosure — full card integrity would need a signature over the whole card. (Transport-level
+   `sync.token` peer admission is already built; mutual/rotating peer auth is the remaining hardening.)
 3. **AAD** binds `toTag`+`ttlExpiresAt` (both immutable); the original hop budget is bounded by the
    schema max rather than the signature (v2 refinement).
 4. **Phase 3 (opportunistic transport — BLE discovery + Wi-Fi Aware)** is **not built**: it needs

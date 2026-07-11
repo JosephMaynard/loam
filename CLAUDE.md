@@ -32,7 +32,8 @@ table), and bounded relay (TTL/hop/cap, no acks). **v2** addresses mail by the r
 (re-verified server-side: `meshId===hash(sign)` + `kxSig` binding; stored per-user in the
 `mesh_contacts` DAL table, private to each local user). `POST /api/mesh/messages {toMeshId,body}` seals
 only to an **added contact**, so key-substitution is defeated; routing `toTag` derives from the secret
-`mailboxToken` (metadata-unlinkable — a carrier can't correlate a blob to a recipient). All gated on
+`mailboxToken` (unlinkable to a **carrier** that lacks the token — an authorized sender or a
+compromised contact that holds the token can still derive and correlate the tag). All gated on
 `mesh.enabled` (default off; client UI shows only when `networkConfig.enableMesh`). It's **entirely
 server-side** (LOAM's host is already trusted for its local users, so the E2E guarantee is against
 carrier *nodes*), rides the existing sync transport, and doesn't touch public sync. An operator turns

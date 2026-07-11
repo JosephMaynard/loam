@@ -20,16 +20,17 @@ ranked within each group. Each entry names the file and the concrete change.
    `executeKillSwitch` (before its first await); `syncWithPeer` snapshots it and bails after the digest
    fetch, after each message fetch, and `importPeerMessages` bails after its attachment fetch — so a
    pull that resumes after a wipe abandons the round instead of re-persisting peer data.
-   `importPeerAttachments` also bails after its download (before recreating the just-deleted attachments
-   dir), so no orphaned file survives the wipe. Covered by a deterministic gated-peer test (kill switch
-   fires while the pull is suspended on the peer's response).
+   `importPeerAttachments` carries the same guard (bails after its download, and unlinks the file if a
+   wipe lands during the write), so no orphaned attachment survives. The deterministic gated-peer test
+   (kill switch fires while the pull is suspended on the peer's response) verifies the **message + user**
+   path specifically; the attachment guard is the same construction, not separately fixtured.
 3. ~~**`roles` leak.**~~ **RESOLVED** (`feat/mesh-secure-addressing`): `publicUser` now strips `roles`
    as well as `shadowBanned`; a new `rolesVisibleUser` keeps them for the subject's own record and for
    moderators, and one `sanitizeUserFor(viewer, user)` helper is the single decision every user-egress
    path routes through. Covered: `GET /api/users` (`visibleUsers(viewer)`), `/api/config` `currentUser`
    (own roles kept), the recipient-aware `userUpserted` broadcast (roles only to subject + moderators),
    the sync author export, **the private-channel member list** (`GET /api/channels/:id/members` — a
-   non-moderator member no longer sees others' roles/shadowBan), and **the pending-access endpoints**
+   non-moderator member no longer sees others' roles/`shadowBanned`), and **the pending-access endpoints**
    (`/api/access/pending|approve|deny` — a non-moderator greeter no longer sees them). Member-list and
    roster tests cover it. (Known residual: `isAdmin` is still enumerable to everyone — lower
    sensitivity, pre-existing, left as-is.)
