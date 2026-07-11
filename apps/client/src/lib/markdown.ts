@@ -19,6 +19,22 @@ function isSafeLink(href: string): boolean {
   }
 }
 
+/**
+ * Images only ever need to load from a normal http(s) URL. Unlike links,
+ * there is no legitimate `mailto:`/`data:` use case here, so — belt and
+ * braces alongside DOMPurify's own scheme filtering — restrict `<img src>`
+ * to `http:`/`https:` and drop anything else (control-char/whitespace/case
+ * obfuscated schemes, `data:`, `vbscript:`, etc. all fail the same way).
+ */
+function isSafeImageSrc(src: string): boolean {
+  try {
+    const url = new URL(src, window.location.origin);
+    return ["http:", "https:"].includes(url.protocol);
+  } catch {
+    return false;
+  }
+}
+
 export function renderMarkdown(markdown: string): string {
   const html = snarkdown(escapeHtml(markdown));
   const template = document.createElement("template");
@@ -34,6 +50,14 @@ export function renderMarkdown(markdown: string): string {
 
     link.setAttribute("rel", "noreferrer");
     link.setAttribute("target", "_blank");
+  }
+
+  for (const img of Array.from(template.content.querySelectorAll("img"))) {
+    const src = img.getAttribute("src") ?? "";
+
+    if (!isSafeImageSrc(src)) {
+      img.removeAttribute("src");
+    }
   }
 
   return template.innerHTML;
