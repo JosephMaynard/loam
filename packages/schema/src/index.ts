@@ -217,6 +217,8 @@ export const NetworkConfigSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  /** Share a place/coordinates on a message (docs/10). When on, the client shows the share affordance. */
+  enableLocationSharing: z.boolean(),
   enablePresence: z.boolean(),
   /** Opportunistic sealed-mailbox mesh (docs/16). When on, the client shows the mesh contacts + card UI. */
   enableMesh: z.boolean(),
@@ -244,6 +246,8 @@ export const FeatureFlagsSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  /** Share a place/coordinates on a message (docs/10). Default off; deliberate + ephemeral. */
+  enableLocationSharing: z.boolean(),
   /**
    * Broadcast who is currently connected (online dots). Default on; worth disabling on
    * high-risk deployments — presence reveals exactly who is reachable right now.
@@ -549,6 +553,24 @@ const MessageBodySchema = z.string();
 const MessageCreateBodySchema = z.string().max(8000);
 const MessageAttachmentsSchema = z.array(MessageAttachmentSchema).max(4);
 
+/**
+ * A shared location (docs/10): a human-readable place `label` ("the north gate", "camp 3") and/or
+ * coordinates. Carried on an ordinary message so it rides the existing channel/DM/sync flow — no new
+ * message type. Sharing is deliberate + ephemeral (retention TTL) and gated by `enableLocationSharing`;
+ * there is no continuous/background tracking. `lat`/`lng` are optional because off-grid clients have no
+ * secure-context GPS — a named label alone is a valid share.
+ */
+export const MessageLocationSchema = z
+  .object({
+    label: z.string().min(1).max(120).optional(),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional(),
+  })
+  .refine((location) => !!location.label || (location.lat !== undefined && location.lng !== undefined), {
+    message: "A shared location needs a label or coordinates",
+  });
+export type MessageLocation = z.infer<typeof MessageLocationSchema>;
+
 export const MessageCreateRequestSchema = z
   .discriminatedUnion("type", [
     z.object({
@@ -556,6 +578,7 @@ export const MessageCreateRequestSchema = z
       channelId: IdSchema,
       body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
+      location: MessageLocationSchema.optional(),
     }),
     z.object({
       type: z.literal("channelReply"),
@@ -563,12 +586,14 @@ export const MessageCreateRequestSchema = z
       parentMessageId: IdSchema,
       body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
+      location: MessageLocationSchema.optional(),
     }),
     z.object({
       type: z.literal("dm"),
       recipientUserId: IdSchema,
       body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
+      location: MessageLocationSchema.optional(),
     }),
     z.object({
       type: z.literal("reaction"),
@@ -576,9 +601,9 @@ export const MessageCreateRequestSchema = z
       reaction: z.string().min(1).max(64),
     }),
   ])
-  // A message needs text or at least one attachment (an image alone is a valid message).
+  // A message needs text, at least one attachment, or a shared location (any one alone is valid).
   .superRefine((value, ctx) => {
-    if (value.type !== "reaction" && !value.body.trim() && !value.attachments?.length) {
+    if (value.type !== "reaction" && !value.body.trim() && !value.attachments?.length && !value.location) {
       ctx.addIssue({ code: "custom", message: "Message body cannot be empty", path: ["body"] });
     }
   });
@@ -597,6 +622,7 @@ export const ChannelPostMessageSchema = BaseMessageSchema.extend({
   channelId: IdSchema,
   body: MessageBodySchema,
   attachments: MessageAttachmentsSchema.optional(),
+  location: MessageLocationSchema.optional(),
 });
 export type ChannelPostMessage = z.infer<typeof ChannelPostMessageSchema>;
 
@@ -606,6 +632,7 @@ export const ChannelReplyMessageSchema = BaseMessageSchema.extend({
   parentMessageId: IdSchema,
   body: MessageBodySchema,
   attachments: MessageAttachmentsSchema.optional(),
+  location: MessageLocationSchema.optional(),
 });
 export type ChannelReplyMessage = z.infer<typeof ChannelReplyMessageSchema>;
 
@@ -614,6 +641,7 @@ export const DirectMessageSchema = BaseMessageSchema.extend({
   recipientUserId: IdSchema,
   body: MessageBodySchema,
   attachments: MessageAttachmentsSchema.optional(),
+  location: MessageLocationSchema.optional(),
 });
 export type DirectMessage = z.infer<typeof DirectMessageSchema>;
 

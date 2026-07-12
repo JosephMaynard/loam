@@ -371,6 +371,7 @@ export function defaultLoamConfig(): LoamConfig {
       enableReactions: true,
       enableMarkdown: true,
       enableAttachments: true,
+      enableLocationSharing: false,
       enablePresence: true,
     },
     llm: {
@@ -1717,6 +1718,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           return { error: "Unknown attachment" };
         }
       }
+    }
+
+    if (input.type !== "reaction" && input.location && !appConfig.features.enableLocationSharing) {
+      return { error: "Location sharing is disabled on this LOAM node" };
     }
 
     if (input.type === "channelPost" || input.type === "channelReply") {

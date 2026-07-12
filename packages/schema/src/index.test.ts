@@ -74,6 +74,7 @@ describe("@loam/schema", () => {
         enableReactions: true,
         enableMarkdown: true,
         enableAttachments: true,
+        enableLocationSharing: false,
         enablePresence: true,
         enableMesh: false,
         enableLLMChat: false,
@@ -101,6 +102,7 @@ describe("@loam/schema", () => {
         enableReactions: true,
         enableMarkdown: true,
         enableAttachments: true,
+        enableLocationSharing: false,
         enablePresence: true,
         enableMesh: false,
         enableLLMChat: false,
@@ -135,6 +137,7 @@ describe("@loam/schema", () => {
           enableReactions: true,
           enableMarkdown: true,
           enableAttachments: true,
+          enableLocationSharing: false,
           enablePresence: true,
         },
         llm: {
