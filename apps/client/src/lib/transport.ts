@@ -309,6 +309,13 @@ async function attemptFetch(
     });
   }
 
+  // `required` mode (the hardened profile, always the case for a QR-pinned join) routes every request
+  // through the opaque tunnel so the real path + query — e.g. a search term, or which channel is being
+  // read — never appear on the wire. `optional` keeps the lighter per-route body sealing below.
+  if (lastParams?.mode === "required") {
+    return tunnelFetch(active, method, path, body, init, retried);
+  }
+
   const isSafe = SAFE_METHODS.has(method.toUpperCase());
   const aad = restAad(method, path);
   // A safe (GET/HEAD) call with no logical body keeps the pre-existing shape: no envelope at all.
@@ -363,6 +370,83 @@ async function attemptFetch(
   // A 401 means the server refused the request in `onRequest`, BEFORE any route handler ran (no
   // session presented, or an unknown/expired one) — nothing was applied server-side, so retrying is
   // safe regardless of method.
+  if (response.status === 401 && !retried && (await reHandshake())) {
+    return attemptFetch(method, path, body, init, true);
+  }
+
+  return response;
+}
+
+/** The single opaque endpoint every `required`-mode request is tunnelled through (docs/08). */
+const TUNNEL_PATH = "/api/transport/tunnel";
+
+/** Decode standard base64 (the tunnel descriptor's `bodyB64`, from Node's `Buffer.toString("base64")`)
+ * into a raw `ArrayBuffer`, so a tunnelled binary response (images) reconstructs losslessly while a
+ * JSON one still `.json()`s. `atob` is available in an insecure context (unlike most of WebCrypto). */
+function base64ToBytes(b64: string): ArrayBuffer {
+  const binary = atob(b64);
+  const buffer = new ArrayBuffer(binary.length);
+  const view = new Uint8Array(buffer);
+  for (let i = 0; i < binary.length; i += 1) {
+    view[i] = binary.charCodeAt(i);
+  }
+  return buffer;
+}
+
+/**
+ * Send a request through the metadata-hiding tunnel (docs/08 v2). The real `{ method, path, body }` is
+ * sealed inside the `{ s, b }` anti-replay envelope and POSTed to the single opaque
+ * `/api/transport/tunnel`, so the path/query (a search term, which channel is read) never hit the wire.
+ * The sealed response is a `{ status, contentType, bodyB64 }` descriptor rebuilt into a normal
+ * `Response`. Mirrors `attemptFetch`'s one-shot re-handshake retry (safe methods on a decrypt failure,
+ * any method on a 401), delegating the retry back through `attemptFetch` so it re-tunnels under the
+ * fresh session.
+ */
+async function tunnelFetch(
+  active: Session,
+  method: string,
+  path: string,
+  body: unknown,
+  init: EncryptedFetchInit,
+  retried: boolean,
+): Promise<Response> {
+  const aad = restAad("POST", TUNNEL_PATH);
+  const inner = body === undefined ? { m: method, p: path } : { m: method, p: path, body };
+  const requestBody = JSON.stringify({
+    enc: sealTransport(active.key, JSON.stringify({ s: ++active.seq, b: inner }), aad),
+  });
+
+  const response = await fetch(apiUrl(TUNNEL_PATH), {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
+    signal: init.signal,
+    body: requestBody,
+  });
+
+  const isSafe = SAFE_METHODS.has(method.toUpperCase());
+
+  if (response.headers.get("x-loam-enc") === "1") {
+    const payload: unknown = await response.json().catch(() => undefined);
+    const enc = payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
+    const opened = typeof enc === "string" ? openTransport(active.key, enc, aad) : null;
+
+    if (opened === null) {
+      if (isSafe && !retried && (await reHandshake())) {
+        return attemptFetch(method, path, body, init, true);
+      }
+      throw new Error("Transport session expired");
+    }
+
+    const descriptor = JSON.parse(opened) as { status: number; contentType: string; bodyB64: string };
+    // Rebuild a normal Response from the raw bytes (an ArrayBuffer is a valid BodyInit), so the caller's
+    // `.json()` / `.blob()` work exactly as on a direct response — text and binary (images) alike.
+    return new Response(base64ToBytes(descriptor.bodyB64), {
+      status: descriptor.status,
+      headers: { "content-type": descriptor.contentType },
+    });
+  }
+
   if (response.status === 401 && !retried && (await reHandshake())) {
     return attemptFetch(method, path, body, init, true);
   }

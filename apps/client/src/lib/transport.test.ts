@@ -490,6 +490,58 @@ describe("transport", () => {
     });
   });
 
+  describe("metadata-hiding tunnel (required mode, docs/08)", () => {
+    it("routes every request through /api/transport/tunnel so the real path never hits the wire", async () => {
+      const host = createTransportIdentity();
+      // A QR key forces `required` mode → the tunnel.
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      let tunnelHits = 0;
+      let capturedInner: { m: string; p: string; body?: unknown } | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        // Anything else MUST be the opaque tunnel endpoint — never the real path.
+        expect(url).toBe("/api/transport/tunnel");
+        tunnelHits += 1;
+        const wire = JSON.parse(init.body as string) as { enc: string };
+        const opened = openTransport(serverKey!, wire.enc, "POST /api/transport/tunnel");
+        const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string; body?: unknown } };
+        capturedInner = envelope.b;
+        // Reply with a sealed { status, contentType, bodyB64 } descriptor (standard base64, as the server sends).
+        const descriptor = JSON.stringify({
+          status: 200,
+          contentType: "application/json",
+          bodyB64: btoa(JSON.stringify({ ok: true, sawPath: envelope.b.p })),
+        });
+        return new Response(
+          JSON.stringify({ enc: sealTransport(serverKey!, descriptor, "POST /api/transport/tunnel") }),
+          { status: 200, headers: { "x-loam-enc": "1" } },
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      // A sensitive query string — the whole point of the tunnel is that `q=secret` never appears.
+      const res = await encryptedFetch("GET", "/api/search?q=secret");
+
+      expect(tunnelHits).toBe(1);
+      expect(capturedInner).toEqual({ m: "GET", p: "/api/search?q=secret" });
+      expect(await res.json()).toEqual({ ok: true, sawPath: "/api/search?q=secret" });
+    });
+  });
+
   describe("wsUrl", () => {
     it("passes the base URL through unchanged with no session", () => {
       expect(wsUrl("ws://host/ws")).toBe("ws://host/ws");
