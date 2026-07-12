@@ -4723,6 +4723,128 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       expect(bodies.filter((entry) => entry === "hi bob")).toHaveLength(1);
     });
   });
+
+  // ---- Opportunistic-mesh transport bridge (Phase 3 — docs/16 §5, docs/17) ----------------------
+  // The loopback endpoints the Android launcher uses to shuttle sealed blobs over the native BLE/
+  // Wi-Fi-Aware radio. They are a radio-fed mirror of the /api/sync/* sealed path.
+  describe("transport bridge (GET /api/mesh/outbound + POST /api/mesh/inbound)", () => {
+    it("404s both endpoints when mesh is disabled", async () => {
+      const app = await makeApp(); // mesh off by default
+      const out = await app.server.inject({ method: "GET", url: "/api/mesh/outbound" });
+      expect(out.statusCode).toBe(404);
+      const inbound = await app.server.inject({
+        method: "POST",
+        url: "/api/mesh/inbound",
+        payload: { messages: [] },
+      });
+      // Empty batch also fails the min(1) schema, but the 404 gate short-circuits before validation.
+      expect(inbound.statusCode).toBe(404);
+    });
+
+    it("hands a sealed blob A→B over the bridge without the sync loop", async () => {
+      // Two mesh nodes with NO sync peers configured — delivery rides only the transport bridge.
+      const nodeA = await makeApp({ mesh: MESH });
+      const nodeB = await makeApp({ mesh: MESH });
+      const alice = await adminOf(nodeA);
+      const bob = await adminOf(nodeB);
+
+      // Alice adds Bob's card (out-of-band) and seals a message to him. It has no local recipient on
+      // A, so it sits in A's outbound queue waiting for a carrier.
+      const bobCard = await meshCard(nodeB, bob.cookie);
+      expect((await addContact(nodeA, alice.cookie, bobCard)).statusCode).toBe(200);
+      const send = await nodeA.server.inject({
+        method: "POST",
+        url: "/api/mesh/messages",
+        headers: { cookie: alice.cookie },
+        payload: { toMeshId: bobCard.meshId, body: "carry me over the mesh" },
+      });
+      expect(send.statusCode).toBe(200);
+
+      // The courier reads A's outbound queue (what it would push over the radio).
+      const out = await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" });
+      expect(out.statusCode).toBe(200);
+      const outbound = out.json() as { messages: { type: string; sealed: string }[] };
+      expect(outbound.messages).toHaveLength(1);
+      expect(outbound.messages[0].type).toBe("sealed");
+      // Opaque on the wire — the plaintext is nowhere in the blob the radio would carry.
+      expect(JSON.stringify(outbound.messages)).not.toContain("carry me over the mesh");
+
+      // The receiving node's courier POSTs the received blob to its inbound endpoint → delivered.
+      const inbound = await nodeB.server.inject({
+        method: "POST",
+        url: "/api/mesh/inbound",
+        payload: { messages: outbound.messages },
+      });
+      expect(inbound.statusCode).toBe(200);
+      expect((inbound.json() as { accepted: number }).accepted).toBe(1);
+
+      const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+      expect(contact).toBeDefined();
+      expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("carry me over the mesh");
+
+      // Idempotent: re-delivering the same blob is a no-op (dedup by id + tombstone), not a dupe DM.
+      const again = await nodeB.server.inject({
+        method: "POST",
+        url: "/api/mesh/inbound",
+        payload: { messages: outbound.messages },
+      });
+      expect((again.json() as { accepted: number }).accepted).toBe(0);
+      expect((await dmBodies(nodeB, bob.cookie, contact!.id)).filter((b) => b === "carry me over the mesh")).toHaveLength(1);
+    });
+
+    it("relays through a carrier that cannot read the blob (bridge A→C→B)", async () => {
+      const nodeA = await makeApp({ mesh: MESH });
+      const nodeB = await makeApp({ mesh: MESH });
+      const nodeC = await makeApp({ mesh: MESH });
+      const alice = await adminOf(nodeA);
+      const bob = await adminOf(nodeB);
+      const carol = await adminOf(nodeC);
+
+      const bobCard = await meshCard(nodeB, bob.cookie);
+      expect((await addContact(nodeA, alice.cookie, bobCard)).statusCode).toBe(200);
+      expect(
+        (
+          await nodeA.server.inject({
+            method: "POST",
+            url: "/api/mesh/messages",
+            headers: { cookie: alice.cookie },
+            payload: { toMeshId: bobCard.meshId, body: "meet at the docks" },
+          })
+        ).statusCode,
+      ).toBe(200);
+
+      // A → C: the carrier takes it on (not for a local user → relayed, hop-decremented).
+      const fromA = (await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
+        messages: unknown[];
+      };
+      expect(
+        (
+          (
+            await nodeC.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: fromA.messages } })
+          ).json() as { accepted: number }
+        ).accepted,
+      ).toBe(1);
+      // Carol cannot read it.
+      const cSealed = nodeC.store.loadMessages().find((m) => m.type === "sealed");
+      expect(cSealed).toBeDefined();
+      expect(JSON.stringify(cSealed)).not.toContain("docks");
+
+      // C → B: the carrier re-offers it (still on its outbound), B decrypts + delivers.
+      const fromC = (await nodeC.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
+        messages: unknown[];
+      };
+      expect(fromC.messages).toHaveLength(1);
+      expect(
+        (
+          (
+            await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: fromC.messages } })
+          ).json() as { accepted: number }
+        ).accepted,
+      ).toBe(1);
+      const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+      expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("meet at the docks");
+    });
+  });
 });
 
 describe("transport encryption foundation (docs/08)", () => {

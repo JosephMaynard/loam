@@ -171,11 +171,180 @@ global.__loamOnDeviceChat = function (messages, callbacks) {
   }
 };
 
+// ---- Opportunistic-mesh transport courier (Phase 3 — docs/16 §5, docs/17) -------------------------
+// The COURIER BRAIN. The native BLE/Wi-Fi-Aware radio lives in the RN process and is driven by
+// src/mesh/mesh-courier.ts; this side decides WHAT to move, using two loopback-only server endpoints:
+//   - GET  /api/mesh/outbound  → sealed blobs this node offers (full SealedMessage records)
+//   - POST /api/mesh/inbound   → sealed blobs a peer just handed us (fed to the existing relay)
+// Both 404 unless the operator has turned `mesh.enabled` on, so the courier discovers the mesh state
+// purely by probing them — it needs no config access. Radios only spin up once mesh is enabled.
+//
+// Protocol (symmetric epidemic gossip, mirroring the sync layer): every node advertises + scans; on a
+// peer sighting it PUSHES each of its outbound blobs to that peer (deduped per session). The receiver
+// feeds them to /api/mesh/inbound, which dedups by id + tombstone and delivers-or-relays. Because both
+// sides push, a blob flows A→C→B without any pull step. TTL/hop/cap bounds live server-side.
+//
+// This whole block is inert unless mesh is enabled AND the RN side has the native module — with the
+// radios absent the RN courier is a no-op, so the posts below simply go unanswered. Never throws into
+// the server boot path.
+const MESH_POLL_MS = 30_000;
+let meshEnabled = false;
+let meshOutbound = []; // cached [{ id, base64 }] this node currently offers
+const meshSentToPeer = new Map(); // peerId -> Set(blobId) already pushed this session (bounded)
+const MESH_MAX_TRACKED_PEERS = 50;
+
+/** Loopback JSON request to the embedded server's mesh bridge endpoints. Calls back (err, status, json). */
+function meshRequest(method, path, body, callback) {
+  const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+  const request = http.request(
+    {
+      host: '127.0.0.1',
+      port: PORT,
+      path: path,
+      method: method,
+      timeout: 5000,
+      headers: payload
+        ? { 'content-type': 'application/json', 'content-length': payload.length }
+        : {},
+    },
+    (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        let json;
+        try {
+          json = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+        } catch (err) {
+          json = undefined;
+        }
+        callback(null, response.statusCode || 0, json);
+      });
+    },
+  );
+  request.on('error', (err) => callback(err, 0, undefined));
+  request.on('timeout', () => {
+    request.destroy();
+    callback(new Error('mesh request timeout'), 0, undefined);
+  });
+  if (payload) {
+    request.write(payload);
+  }
+  request.end();
+}
+
+/** Post a command to the RN mesh courier (best-effort; never throws). */
+function meshPost(name, payload) {
+  try {
+    rnBridge.channel.post(name, payload || {});
+  } catch (err) {
+    // The RN side may not be listening yet (host screen not mounted); the poll re-posts, so ignore.
+  }
+}
+
+/** Poll the outbound endpoint: it tells us whether mesh is on and what we're currently offering. */
+function refreshMesh() {
+  meshRequest('GET', '/api/mesh/outbound', undefined, (err, status, json) => {
+    if (err) {
+      return; // server momentarily unavailable — try again next tick
+    }
+    if (status === 404) {
+      // Mesh is off (or not loopback, which can't happen here). Stop the radios if we'd started them.
+      if (meshEnabled) {
+        meshEnabled = false;
+        meshOutbound = [];
+        meshSentToPeer.clear();
+        meshPost('loam-mesh-stop');
+      }
+      return;
+    }
+    if (status !== 200 || !json || !Array.isArray(json.messages)) {
+      return;
+    }
+    meshEnabled = true;
+    // Cache each sealed blob as the base64 of its JSON so a peer sighting can push it immediately.
+    meshOutbound = json.messages.map((message) => ({
+      id: String(message.id),
+      base64: Buffer.from(JSON.stringify(message)).toString('base64'),
+    }));
+    const haveMail = meshOutbound.length > 0;
+    // start is idempotent on the RN side; re-posting each poll covers the boot race where the RN
+    // courier mounts after the server. advertise updates the have-mail hint.
+    meshPost('loam-mesh-start', { haveMail: haveMail });
+    meshPost('loam-mesh-advertise', { haveMail: haveMail });
+  });
+}
+
+/** Push every outbound blob we haven't already sent to this peer this session. */
+function meshPushToPeer(peerId) {
+  if (!meshEnabled || !peerId || !meshOutbound.length) {
+    return;
+  }
+  let sent = meshSentToPeer.get(peerId);
+  if (!sent) {
+    if (meshSentToPeer.size >= MESH_MAX_TRACKED_PEERS) {
+      meshSentToPeer.clear(); // crude bound — re-pushing is harmless (receiver dedups by id)
+    }
+    sent = new Set();
+    meshSentToPeer.set(peerId, sent);
+  }
+  for (const blob of meshOutbound) {
+    if (sent.has(blob.id)) {
+      continue;
+    }
+    sent.add(blob.id);
+    meshPost('loam-mesh-send', { peerId: peerId, blobId: blob.id, base64: blob.base64 });
+  }
+}
+
+// A peer was discovered by the radio — push what we're holding to it.
+rnBridge.channel.on('loam-mesh-peer', (payload) => {
+  if (payload && typeof payload.peerId === 'string') {
+    meshPushToPeer(payload.peerId);
+  }
+});
+
+// A push completed; on failure, forget it so a later sighting retries.
+rnBridge.channel.on('loam-mesh-sent', (payload) => {
+  if (payload && payload.ok === false && typeof payload.peerId === 'string' && typeof payload.blobId === 'string') {
+    const sent = meshSentToPeer.get(payload.peerId);
+    if (sent) {
+      sent.delete(payload.blobId);
+    }
+  }
+});
+
+// A blob arrived over the radio — hand it to the relay (it validates + dedups + delivers/relays).
+rnBridge.channel.on('loam-mesh-received', (payload) => {
+  if (!payload || typeof payload.base64 !== 'string') {
+    return;
+  }
+  let message;
+  try {
+    message = JSON.parse(Buffer.from(payload.base64, 'base64').toString('utf8'));
+  } catch (err) {
+    return; // malformed transfer — drop
+  }
+  meshRequest('POST', '/api/mesh/inbound', { messages: [message] }, (err, status, json) => {
+    if (!err && status === 200 && json && json.accepted > 0) {
+      // Accepting mail may change what we now hold to carry — refresh our outbound + have-mail hint.
+      refreshMesh();
+    }
+  });
+});
+
+rnBridge.channel.on('loam-mesh-error', (payload) => {
+  console.warn('Mesh transport error', (payload && payload.error) || payload);
+});
+
 notify('starting');
 
 try {
   require('./loam-server.js');
   waitForServer(0);
+  // Start the mesh courier poll once the server is required. refreshMesh no-ops (404) until an operator
+  // enables mesh, so this costs one cheap loopback GET per 30s while off.
+  setInterval(refreshMesh, MESH_POLL_MS);
+  setTimeout(refreshMesh, 5000);
 } catch (err) {
   console.error('Failed to start the embedded LOAM server', err);
   notify('error', { message: String((err && err.message) || err) });
