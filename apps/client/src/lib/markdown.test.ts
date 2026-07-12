@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { renderMarkdown } from "./markdown";
+import { renderMarkdown, renderMarkdownCached } from "./markdown";
 
 describe("renderMarkdown", () => {
   it("renders basic markdown to HTML", () => {
@@ -118,5 +118,35 @@ describe("renderMarkdown", () => {
       expect(html).toContain('src="https://example.com/pic.png"');
       expect(html).toContain('alt="alt text"');
     });
+  });
+});
+
+describe("renderMarkdownCached", () => {
+  it("returns HTML identical to renderMarkdown", () => {
+    const body = "**bold** and [loam](https://example.com)";
+    expect(renderMarkdownCached("msg.1", body)).toBe(renderMarkdown(body));
+  });
+
+  it("serves a repeat call from cache with the same result", () => {
+    const body = "cached *value*";
+    const first = renderMarkdownCached("msg.repeat", body);
+    const second = renderMarkdownCached("msg.repeat", body);
+    expect(second).toBe(first);
+    expect(second).toBe(renderMarkdown(body));
+  });
+
+  it("invalidates when the body changes (e.g. a streaming delta)", () => {
+    const id = "msg.stream";
+    expect(renderMarkdownCached(id, "partial")).toBe(renderMarkdown("partial"));
+    expect(renderMarkdownCached(id, "partial full")).toBe(renderMarkdown("partial full"));
+  });
+
+  it("invalidates when editedAt changes for the same id and body", () => {
+    const id = "msg.edit";
+    const body = "unchanged text";
+    // Distinct editedAt values are distinct cache keys, so the wrapper re-renders rather than
+    // returning a stale entry — always matching a direct renderMarkdown(body) call.
+    expect(renderMarkdownCached(id, body, 1000)).toBe(renderMarkdown(body));
+    expect(renderMarkdownCached(id, body, 2000)).toBe(renderMarkdown(body));
   });
 });

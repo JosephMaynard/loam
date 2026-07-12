@@ -56,7 +56,7 @@ import {
   putRecords,
 } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
-import { renderMarkdown } from "./lib/markdown";
+import { renderMarkdownCached } from "./lib/markdown";
 import {
   apiUrl,
   encryptedFetch,
@@ -2769,7 +2769,9 @@ function MessageItem({
           <div
             className="markdown-body"
             dir="auto"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
+            dangerouslySetInnerHTML={{
+              __html: renderMarkdownCached(message.id, bodyFor(message), message.editedAt),
+            }}
           />
         )}
         {message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (
