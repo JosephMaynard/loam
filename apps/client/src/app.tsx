@@ -364,6 +364,14 @@ function groupReactionsByTarget(messages: Message[]): Map<string, Message[]> {
 }
 
 /**
+ * Per-locale cache of the hours-and-minutes time formatter. Building an `Intl.DateTimeFormat` is
+ * comparatively expensive and `displayTime` is called once per rendered message row (hundreds of
+ * times per render, many times a second while an LLM reply streams), so the formatter is built once
+ * per active locale and reused. Keyed on the resolved ICU locale string.
+ */
+const timeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/**
  * Format a numeric timestamp into a localized hours-and-minutes time string.
  *
  * @param timestamp - Milliseconds since the UNIX epoch
@@ -371,10 +379,15 @@ function groupReactionsByTarget(messages: Message[]): Map<string, Message[]> {
  */
 function displayTime(timestamp: number): string {
   // Node UI locale (via icuLocale), so times read in the same language as the rest of the chrome.
-  return new Intl.DateTimeFormat(icuLocale(getActiveLocale()), {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(timestamp);
+  const locale = icuLocale(getActiveLocale());
+  let formatter = timeFormatters.get(locale);
+
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
+    timeFormatters.set(locale, formatter);
+  }
+
+  return formatter.format(timestamp);
 }
 
 /**
