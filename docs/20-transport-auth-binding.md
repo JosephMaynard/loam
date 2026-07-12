@@ -1,6 +1,7 @@
 # 20 — Binding identity to the transport session (fixing the plaintext-cookie flaw)
 
-> **Status: DESIGN v3 (not built) — approved direction, incorporating two rounds of external review.**
+> **Status: APPROVED FOR IMPLEMENTATION (v3, simplified).** Incorporates two rounds of external design
+> review; migration/legacy-admin-reclaim machinery **cut** (no users to migrate — clean break).
 > Fixes the **Critical** finding: the `loam_session` **cookie** (the app's bearer credential) travels as
 > a plaintext HTTP header **outside the AEAD channel**, so a LAN attacker steals it and impersonates the
 > victim (up to admin). v3 settles the four pre-implementation blockers from the second review: a precise
@@ -48,9 +49,8 @@ an attacker's own sealed `/resume` and restore the whole attack.
   property — the server can't verify key provenance, so the server enforces the *session-state* rules of
   §2 instead). Over an `optional` non-QR session the client must **not** transmit a secure token: that
   session may have handshaked against a MITM-substituted config key, which could then decrypt resume.
-- **No safe auto-migration** from an exposed HttpOnly cookie: activating v2 required mode invalidates
-  legacy cookie credentials for content; existing required-mode users get new identities (admins →
-  §6 reclaim).
+- **Clean break, no migration** (§6): there is no legacy state to preserve — a cookie is simply never a
+  valid credential for a `bound` session, and any pre-existing `required`-mode identity is disposable.
 
 ## 4. Public bootstrap API (review blocker #1b)
 
@@ -102,18 +102,22 @@ an attacker's own sealed `/resume` and restore the whole attack.
 
 An `optional` non-QR client uses the old `/api/config` cookie bootstrap, stays `anonymous`, unchanged.
 
-## 6. Existing-admin reclaim (review blocker #3)
+## 6. No migration — clean break for a pre-release app
 
-Re-bootstrap is insufficient when admins already exist (`firstUser` won't grant authority with a legacy
-admin in the DB, and there may be no secure admin to promote a new identity). So, on first activation of
-v2 required mode when admins exist but none holds a secure token:
+LOAM has **no real users yet, so there is nothing to migrate.** We take a **clean breaking change** and
+deliberately do **not** build migration / legacy-admin-reclaim machinery (that would be solving a
+deployment problem we don't have):
 
-- The host prints a **one-time reclaim code** to the **host console / Android host UI** (local surface
-  only — reuses the `setupCode` machinery).
-- It is accepted **only inside a sealed request after a secure resume** (never over plaintext, never from
-  a cookie).
-- It **promotes the bound identity** to admin and is **consumed atomically**.
-- A legacy cookie is **never** evidence for reclaiming admin.
+- Introduce the new secure-token / session-binding model outright.
+- **Never** accept a cookie token as a secure token (the namespaces just coexist: cookies for
+  `anonymous`/optional sessions, secure tokens for `bound`).
+- Any pre-existing `required`-mode identity is **disposable**; the **first user** under the new model
+  receives normal **`firstUser` bootstrap administration** over the secure channel — no reclaim code.
+- A development database predating this change may simply need resetting.
+
+*(If LOAM ever gains real deployments to upgrade, a legacy-admin reclaim path — a one-time
+locally-surfaced code accepted only inside a sealed post-resume request — can be designed then. It is
+explicitly out of scope now.)*
 
 ## 7. WebSocket key-confirmation — reflection-safe (review blocker #4)
 
@@ -133,18 +137,21 @@ client → server   AAD "loam.ws.proof.v1"        { type:"proof",     connection
   AAD + typed plaintext suffice.
 - WS frames also get an **independent server→client sequence + replay window** (review #6): deltas
   *append* and config/presence *replace*, so replay is **not** idempotent (my v1 claim was wrong).
+- **Application frames are bound to the connection** so a frame captured on socket A can't be replayed
+  on a reconnected socket B under the same transport session: use AAD `loam.ws.frame.v1 ${connectionId}`
+  with a **per-connection** sequence (the `connectionId` is the challenge's, fresh per socket). Acceptance
+  test: a valid frame from connection A is rejected on connection B.
 
-## 8. Token lifecycle & mode transitions (Sol's answers folded in)
+## 8. Token lifecycle (the revocations are real; migration is not)
 
-- **optional → required (v2 activation):** legacy cookie creds invalid for content; clients re-bootstrap
-  + resume into secure tokens; admins use §6 reclaim.
-- **required → optional/off:** keep secure tokens **dormant — do NOT auto-revoke.** Never transmit them
-  while optional/unverified; preserve them so returning to required restores the identity.
-- **Revoke a secure token (delete its `tokenHash` row) + its bound sessions + its sockets** on: explicit
-  **logout / device wipe** (revoke server-side **before** deleting IndexedDB — closes docs/15 #4 for this
-  credential), **ban/deny**, **kill switch**, **explicit rotation**, or **admin invalidation**.
-- **transport-session eviction/expiry:** token survives (persisted); next handshake+resume rebinds.
-- **switching origins:** tokens namespaced per origin (client + server) — never cross-presented.
+- **Revoke a secure token** (delete its `tokenHash` row) **+ its bound sessions + its sockets** on:
+  explicit **logout / device wipe** (revoke server-side **before** deleting IndexedDB — also closes
+  docs/15 #4 for this credential), **ban/deny**, **kill switch**, or **explicit rotation**.
+- **transport-session eviction/expiry:** the token survives (persisted); the next handshake+resume
+  rebinds. Eviction drops only the session, not the identity.
+- **switching origins:** tokens are namespaced per origin (client + server) — never cross-presented.
+- **Mode changes** need no special handling (§6, clean break): a `bound` session keeps its secure rules;
+  an `optional`/`off` node simply doesn't *require* binding. No legacy state to preserve or migrate.
 
 ## 9. Co-design with anti-replay + response binding (review #3/#6)
 
@@ -211,11 +218,12 @@ timing, sizes, bootstrap) observable; `anonymous`/optional sessions keep the wea
 - **Session-state binding:** a `bound` session on an **optional** node still enforces all secure rules.
 - **WS challenge:** reflection of the challenge ciphertext is rejected; no presence/events pre-verify;
   unauthenticated sockets are capped + time out.
-- **Admin reclaim:** the one-time code promotes only a bound identity, over a sealed request, consumed
-  atomically; a legacy cookie can't reclaim admin.
 - **Response binding:** a response bound to a different `s/m/p` is rejected client-side.
-- **Lifecycle:** logout/wipe/ban/kill-switch revoke token + session + socket; downgrade leaves tokens
-  dormant (not revoked).
+- **WS connection binding:** a valid WS application frame captured on connection A is rejected on
+  connection B (reconnect under the same transport session).
+- **First-user admin:** on a fresh node the first user to bind via the secure channel becomes admin
+  (normal `firstUser` bootstrap) — no reclaim code involved.
+- **Lifecycle:** logout / wipe / ban / kill-switch revoke the token + its bound sessions + sockets.
 - **optional/off unchanged:** existing cookie-auth tests pass.
 
 ---
