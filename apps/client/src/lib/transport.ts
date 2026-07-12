@@ -262,11 +262,28 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   sessionQrVerified = hostPublicKey === qrKey;
 }
 
+/** A single in-flight re-handshake, shared by all concurrent callers (docs/20 §5.6/§9). Without this, a
+ * burst of parallel requests all 401ing on an expired session would each handshake AND resume, minting
+ * several fresh identities and fragmenting the client. */
+let reHandshakeInFlight: Promise<boolean> | undefined;
+
 /** Re-run the last `ensureSession` call's mode/host key after a session apparently expired
  * server-side. Best-effort: returns `false` on any failure so the caller's own error path takes over.
  * Mirrors `ensureSession`'s trust rule: `required` mode only ever re-handshakes against the QR-cached
- * key, never falling back to the config-advertised one. */
+ * key, never falling back to the config-advertised one. Concurrent calls share ONE in-flight op. */
 async function reHandshake(): Promise<boolean> {
+  if (reHandshakeInFlight) {
+    return reHandshakeInFlight;
+  }
+  reHandshakeInFlight = doReHandshake();
+  try {
+    return await reHandshakeInFlight;
+  } finally {
+    reHandshakeInFlight = undefined;
+  }
+}
+
+async function doReHandshake(): Promise<boolean> {
   if (!lastParams || lastParams.mode === "off") {
     return false;
   }
@@ -815,5 +832,6 @@ export function resetTransportStateForTests(): void {
   hostKeyMismatch = false;
   sessionQrVerified = false;
   lastParams = undefined;
+  reHandshakeInFlight = undefined;
   clearImageObjectUrls();
 }
