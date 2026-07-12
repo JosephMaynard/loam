@@ -911,6 +911,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
+  /** The bound identity carried by a genuine internal tunnel re-dispatch, or `undefined`. The tunnel
+   * handler sets `x-loam-user` to the tunnelling **bound** session's userId; we trust it ONLY when the
+   * request also carries the unforgeable internal token (external `x-loam-user` is stripped in
+   * `onRequest`, but gating on the token here is the real guarantee — a client can't produce it). This
+   * is how a `bound` session (docs/20 §2) authenticates content: the un-sniffable session key is the
+   * credential, resolved server-side to `session.userId`, never a cookie. An anonymous optional-mode
+   * tunnel carries no `x-loam-user`, so this returns `undefined` and the caller falls back to cookie. */
+  function tunnelBoundUserId(request: FastifyRequest): string | undefined {
+    if (!isInternalTunnelRequest(request)) {
+      return undefined;
+    }
+    const bound = request.headers["x-loam-user"];
+    return typeof bound === "string" && bound.length > 0 ? bound : undefined;
+  }
+
   /**
    * Anti-replay check for a sealed REST request's per-session sequence number (docs/08). Accepts a
    * sequence exactly once, tolerating up to `TRANSPORT_REPLAY_WINDOW` of reordering/concurrency:
@@ -1095,6 +1110,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string {
+    // A bound session's identity arrives via the internal tunnel (docs/20 §10) — trusted over any
+    // cookie, and it mints nothing (the identity already exists from resume). Checked first so a
+    // stale/forwarded cookie can never shadow the session-key-proven identity.
+    const boundUserId = tunnelBoundUserId(request);
+    if (boundUserId) {
+      return boundUserId;
+    }
+
     const cookieToken = readCookie(request.headers.cookie, sessionCookieName);
     const cookieUserId = cookieToken ? sessions.get(cookieToken) : undefined;
 
@@ -1128,6 +1151,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function getSessionUserIdFromRequest(request: FastifyRequest): string | undefined {
+    const boundUserId = tunnelBoundUserId(request);
+    if (boundUserId) {
+      return boundUserId;
+    }
     const cookieToken = readCookie(request.headers.cookie, sessionCookieName);
     return cookieToken ? sessions.get(cookieToken) : undefined;
   }
@@ -1365,27 +1392,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return session.key;
   }
 
-  /** Whether this request must present a transport session under `required` mode. Matched on the
-   * RESOLVED route pattern (`routeOptions.url`), NOT the raw request URL — Fastify percent-decodes the
-   * path before routing, so string-matching the raw URL let `/%61pi/users` (→ `/api/users`) slip past
-   * enforcement and be served in cleartext. Only non-bootstrap `/api/` content routes need a session;
-   * the static app shell, `/ws` (enforced separately via `?enc=`), unmatched 404s, and the
-   * handshake/config/health bootstrap endpoints are all exempt. */
+  /** Whether this **external** request is a content route that, under `required` mode, is reachable
+   * ONLY through the internal tunnel dispatch (docs/20) — so a direct hit is refused (401) and a
+   * captured session id / cookie is inert. Matched on the RESOLVED route pattern (`routeOptions.url`),
+   * NOT the raw request URL — Fastify percent-decodes the path before routing, so string-matching the
+   * raw URL let `/%61pi/users` (→ `/api/users`) slip past enforcement. The only DIRECTLY reachable
+   * `/api/` routes in required mode are the public bootstrap, health, the handshake, the sealed resume,
+   * and the tunnel endpoint itself; everything else — including `/api/config`, which now returns
+   * `currentUser` only for a bound session over the tunnel — is content. (Internal tunnel dispatches
+   * never reach this — they return at the top of `onRequest`; the static shell + `/ws` are handled
+   * separately.) */
   function requiresTransportSession(request: FastifyRequest): boolean {
     const routeUrl = request.routeOptions?.url;
     if (!routeUrl || !routeUrl.startsWith("/api/")) {
       return false;
     }
-    // Avatar/attachment image routes ARE required under a `required` node (docs/08 v2): a direct
-    // `<img src>` GET can't carry `x-loam-enc`, so refusing it (401) is what forces the client to fetch
-    // images through the metadata-hiding tunnel instead (where the inner request runs internally and the
-    // bytes come back sealed). This function is only consulted in `required` mode, so `optional`/`off`
-    // nodes still serve images directly in clear (the lighter, documented behaviour).
     return (
-      routeUrl !== "/api/config" &&
       routeUrl !== "/api/bootstrap" &&
+      routeUrl !== "/api/health" &&
       routeUrl !== "/api/transport/handshake" &&
-      routeUrl !== "/api/health"
+      routeUrl !== "/api/session/resume" &&
+      routeUrl !== "/api/transport/tunnel"
     );
   }
 
@@ -3607,8 +3634,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // (its response is sealed by the outer tunnel request instead). Checked before anything else so
     // it holds in every mode.
     if (isInternalTunnelRequest(request)) {
-      return;
+      return; // trusted internal re-dispatch — its x-loam-internal/x-loam-user headers are legitimate
     }
+    // This request is EXTERNAL: strip the trusted internal headers so a client can never forge identity
+    // or the tunnel bypass (docs/20 — defence in depth; the resolver already gates x-loam-user on the
+    // internal token, but these must never reach a handler on an external request).
+    delete request.headers["x-loam-internal"];
+    delete request.headers["x-loam-user"];
+
     const mode = appConfig.security.transportEncryption;
     if (mode === "off") {
       return;
@@ -3624,9 +3657,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // accepting plaintext — which in `optional` mode would downgrade the wire while the client's UI
       // still shows "encrypted" (docs/08).
       return reply.code(401).send(errorBody("Transport session expired"));
-    } else if (mode === "required" && requiresTransportSession(request)) {
-      // No transport session at all on a node that requires one — refuse, but keep bootstrap open so a
-      // fresh client can fetch config + handshake first.
+    }
+
+    // In `required` mode content is reachable ONLY through the internal tunnel dispatch (which returned
+    // above) — so a DIRECT external hit on a content route is refused EVEN WITH a valid session id or
+    // cookie, making a captured credential inert (docs/20). Only bootstrap/health/handshake/resume/tunnel
+    // are directly reachable. Fires regardless of whether a session was presented.
+    if (mode === "required" && requiresTransportSession(request)) {
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
     }
   });
@@ -3933,7 +3970,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const hasBody = payload?.body !== undefined;
     const headers: Record<string, string> = { "x-loam-internal": internalTunnelToken };
-    if (typeof request.headers.cookie === "string") {
+    // Identity for the inner request depends on how this session authenticated (docs/20 §2):
+    //  • bound  → carry `x-loam-user` (the session-key-proven identity); NEVER forward a cookie — a
+    //    bound session's cookie is not a credential, so a sniffed one is inert.
+    //  • anonymous → optional/off best-effort cookie-auth: forward the cookie as before. Under
+    //    `required` mode an anonymous session may not tunnel content at all — it must resume first,
+    //    else a captured cookie tunnelled through an attacker's own session would impersonate.
+    const tunnelSession = transportRequestSessions.get(request);
+    if (tunnelSession?.authMode === "bound" && tunnelSession.userId) {
+      headers["x-loam-user"] = tunnelSession.userId;
+    } else if (appConfig.security.transportEncryption === "required") {
+      return reply.code(401).send(errorBody("Resume an identity before tunnelling content"));
+    } else if (typeof request.headers.cookie === "string") {
       headers.cookie = request.headers.cookie;
     }
     if (hasBody) {

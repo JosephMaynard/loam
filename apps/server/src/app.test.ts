@@ -79,6 +79,81 @@ async function newSession(app: LoamApp): Promise<{ cookie: string; userId: strin
   return { cookie: sessionCookie(response), userId: body.currentUser.id, isAdmin: body.currentUser.isAdmin };
 }
 
+/** Run a docs/08 transport handshake against a node → the session id + derived client key. */
+async function openTransport08(app: LoamApp): Promise<{ sessionId: string; key: string }> {
+  const hello = transportClientHello();
+  const res = await app.server.inject({
+    method: "POST",
+    url: "/api/transport/handshake",
+    payload: { clientEphemeralPublic: hello.ephemeralPublic },
+  });
+  const body = TransportHandshakeResponseSchema.parse(res.json());
+  return {
+    sessionId: body.sessionId,
+    key: transportClientDerive({
+      clientEphemeralSecret: hello.ephemeralSecret,
+      hostPublic: body.hostPublicKey,
+      hostEphemeralPublic: body.hostEphemeralPublic,
+    }),
+  };
+}
+
+/** Seal a `{ s, b? }` anti-replay envelope (docs/08) at an explicit sequence. */
+function sealSeq(key: string, seq: number, aad: string, body?: unknown): string {
+  return sealTransport(key, JSON.stringify(body === undefined ? { s: seq } : { s: seq, b: body }), aad);
+}
+
+/** Bind a transport session to an identity (docs/20 resume): seal `{ token? }` at `seq`, unseal the
+ *  `{ currentUser, token }` reply. Afterwards the session is `bound` and reaches content via the tunnel. */
+async function resumeIdentity(
+  app: LoamApp,
+  session: { sessionId: string; key: string },
+  seq: number,
+  token?: string,
+): Promise<{ status: number; currentUser: { id: string; isAdmin: boolean }; token: string }> {
+  const aad = "POST /api/session/resume";
+  const res = await app.server.inject({
+    method: "POST",
+    url: "/api/session/resume",
+    headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+    payload: { enc: sealSeq(session.key, seq, aad, token === undefined ? {} : { token }) },
+  });
+  if (res.statusCode !== 200) {
+    return { status: res.statusCode, currentUser: { id: "", isAdmin: false }, token: "" };
+  }
+  const opened = openTransport(session.key, (res.json() as { enc: string }).enc, aad);
+  const body = JSON.parse(opened as string) as { currentUser: { id: string; isAdmin: boolean }; token: string };
+  return { status: res.statusCode, ...body };
+}
+
+/** Send an inner request through the metadata-hiding tunnel (docs/08 v2) on a bound session (docs/20):
+ *  seal `{ m, p, body? }` at `seq`, unseal the `{ status, contentType, body }` descriptor. */
+async function tunnelInner(
+  app: LoamApp,
+  session: { sessionId: string; key: string },
+  seq: number,
+  inner: { m: string; p: string; body?: unknown },
+): Promise<{ outerStatus: number; status: number; contentType: string; body: Buffer }> {
+  const aad = "POST /api/transport/tunnel";
+  const res = await app.server.inject({
+    method: "POST",
+    url: "/api/transport/tunnel",
+    headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+    payload: { enc: sealSeq(session.key, seq, aad, inner) },
+  });
+  if (res.statusCode !== 200) {
+    return { outerStatus: res.statusCode, status: res.statusCode, contentType: "", body: Buffer.alloc(0) };
+  }
+  const opened = openTransport(session.key, (res.json() as { enc: string }).enc, aad);
+  const desc = JSON.parse(opened as string) as { status: number; contentType: string; bodyB64: string };
+  return {
+    outerStatus: res.statusCode,
+    status: desc.status,
+    contentType: desc.contentType,
+    body: Buffer.from(desc.bodyB64, "base64"),
+  };
+}
+
 async function claim(app: LoamApp, cookie: string, secret: string): Promise<InjectResponse> {
   return app.server.inject({
     method: "POST",
@@ -1906,10 +1981,13 @@ describe("roles, moderation, and join policy", () => {
       expect((await deny(app, admin.cookie, another.user.id)).statusCode).toBe(400);
     });
 
-    it("surfaces the join policy and security profile on /api/config", async () => {
+    it("surfaces the join policy and security profile on the public bootstrap", async () => {
+      // `hardened` forces `required` transport, so `/api/config` is tunnel-only content now (docs/20).
+      // The same networkConfig is exposed cookie-free on the public `/api/bootstrap`, which is what a
+      // pre-session client reads to learn the mode + join policy.
       const app = await makeApp({ access: { joinPolicy: "approval" }, security: { profile: "hardened" } });
       const config = (
-        await app.server.inject({ method: "GET", url: "/api/config" })
+        await app.server.inject({ method: "GET", url: "/api/bootstrap" })
       ).json() as { networkConfig: { joinPolicy: string; securityProfile: string } };
       expect(config.networkConfig.joinPolicy).toBe("approval");
       expect(config.networkConfig.securityProfile).toBe("hardened");
@@ -1952,43 +2030,31 @@ describe("security profiles", () => {
 
   it("hardened forces its coherent bundle: approval join, ephemeral TTL, armed kill switch, encryption", async () => {
     const app = await makeApp({ security: { profile: "hardened" } });
-    const admin = await newSession(app);
-    expect(admin.isAdmin).toBe(true);
 
-    // /api/config is a transport bootstrap path, so it's readable without a session even though
-    // hardened forces `required` transport encryption.
+    // `hardened` forces `required` transport, so there is no cookie identity: the first client binds a
+    // secure identity over the sealed channel (docs/20) and, being first, becomes the `firstUser` admin.
+    // The public bootstrap advertises the forced axes cookie-free.
     const network = (
-      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+      await app.server.inject({ method: "GET", url: "/api/bootstrap" })
     ).json() as { networkConfig: { joinPolicy: string; securityProfile: string; transportEncryption: string } };
     expect(network.networkConfig.securityProfile).toBe("hardened");
     expect(network.networkConfig.joinPolicy).toBe("approval");
     expect(network.networkConfig.transportEncryption).toBe("required");
 
-    // The admin config is a content endpoint — under `required` it needs a transport session.
-    const hello = transportClientHello();
-    const hs = TransportHandshakeResponseSchema.parse(
-      (
-        await app.server.inject({
-          method: "POST",
-          url: "/api/transport/handshake",
-          payload: { clientEphemeralPublic: hello.ephemeralPublic },
-        })
-      ).json(),
-    );
-    const key = transportClientDerive({
-      clientEphemeralSecret: hello.ephemeralSecret,
-      hostPublic: hs.hostPublicKey,
-      hostEphemeralPublic: hs.hostEphemeralPublic,
-    });
-    const res = await app.server.inject({
-      method: "GET",
-      url: "/api/admin/config",
-      headers: { cookie: admin.cookie, "x-loam-enc": hs.sessionId },
-    });
-    expect(res.statusCode).toBe(200);
-    const full = JSON.parse(
-      openTransport(key, (res.json() as { enc: string }).enc, "GET /api/admin/config") as string,
-    ) as { access: { joinPolicy: string }; retention: { messageTtlMs: number }; killSwitch: { enabled: boolean } };
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1);
+    expect(bound.status).toBe(200);
+    expect(bound.currentUser.isAdmin).toBe(true); // first user under the secure model → firstUser admin
+
+    // The admin config is content — under `required` it is reachable ONLY through the tunnel, and the
+    // bound session (not a cookie) authorises it.
+    const inner = await tunnelInner(app, session, 2, { m: "GET", p: "/api/admin/config" });
+    expect(inner.status).toBe(200);
+    const full = JSON.parse(inner.body.toString("utf8")) as {
+      access: { joinPolicy: string };
+      retention: { messageTtlMs: number };
+      killSwitch: { enabled: boolean };
+    };
     expect(full.access.joinPolicy).toBe("approval");
     expect(full.retention.messageTtlMs).toBe(3_600_000);
     expect(full.killSwitch.enabled).toBe(true);
@@ -4709,8 +4775,10 @@ describe("transport encryption foundation (docs/08)", () => {
         })
       ).statusCode,
     ).toBe(200);
+    // After the switch to `required`, `/api/config` is tunnel-only content (docs/20) — the forced axis
+    // is read from the public, cookie-free bootstrap instead.
     const cfg = (
-      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+      await app.server.inject({ method: "GET", url: "/api/bootstrap" })
     ).json() as { networkConfig: { transportEncryption: string; transportPublicKey?: string } };
     expect(cfg.networkConfig.transportEncryption).toBe("required");
     expect(cfg.networkConfig.transportPublicKey).toBeTruthy(); // now advertised
@@ -4863,35 +4931,29 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     expect((JSON.parse(opened as string) as { message: { body: string } }).message.body).toBe(secret);
   });
 
-  it("required mode refuses unencrypted content requests but allows bootstrap", async () => {
+  it("required mode: only the public bootstrap is directly reachable; all content is tunnel-only", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
-    const user = await newSession(app);
 
-    // Bootstrap endpoints stay open unencrypted.
-    expect((await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: user.cookie } })).statusCode).toBe(200);
+    // The public, cookie-free bootstrap + health are the ONLY directly-reachable routes (docs/20).
+    expect((await app.server.inject({ method: "GET", url: "/api/bootstrap" })).statusCode).toBe(200);
     expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
 
+    // `/api/config` is now CONTENT (returns `currentUser`), so a direct hit is refused — a bound client
+    // reads it through the tunnel. This is the docs/20 tightening over docs/08.
+    expect((await app.server.inject({ method: "GET", url: "/api/config" })).statusCode).toBe(401);
+
     // A content endpoint without a transport session is refused.
-    const bare = await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } });
+    const bare = await app.server.inject({ method: "GET", url: "/api/users" });
     expect(bare.statusCode).toBe(401);
 
     // A percent-encoded `/api/` prefix must NOT bypass enforcement: `/%61pi/users` routes to
     // `/api/users`, so matching the RESOLVED route (not the raw URL) still refuses it (regression).
-    const encodedBypass = await app.server.inject({
-      method: "GET",
-      url: "/%61pi/users",
-      headers: { cookie: user.cookie },
-    });
+    const encodedBypass = await app.server.inject({ method: "GET", url: "/%61pi/users" });
     expect(encodedBypass.statusCode).toBe(401);
 
-    // Image endpoints are NO LONGER exempt in `required` mode (docs/08 v2): a direct image GET can't
-    // carry the session header, so it's 401'd to force the client to fetch images through the tunnel
-    // (where the bytes come back sealed) instead of serving them in clear.
-    const avatar = await app.server.inject({
-      method: "GET",
-      url: "/api/avatars/avt_deadbeefdeadbeef.webp",
-      headers: { cookie: user.cookie },
-    });
+    // Image endpoints are NOT exempt (docs/08 v2 / docs/20): a direct image GET is 401'd so the client
+    // must fetch images through the tunnel (bytes come back sealed) instead of serving them in clear.
+    const avatar = await app.server.inject({ method: "GET", url: "/api/avatars/avt_deadbeefdeadbeef.webp" });
     expect(avatar.statusCode).toBe(401);
 
     // A presented-but-unknown/expired transport session id is refused (both modes) so the client
@@ -4899,20 +4961,27 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     const staleSession = await app.server.inject({
       method: "GET",
       url: "/api/users",
-      headers: { cookie: user.cookie, "x-loam-enc": "unknown-or-expired-session-id" },
+      headers: { "x-loam-enc": "unknown-or-expired-session-id" },
     });
     expect(staleSession.statusCode).toBe(401);
 
-    // With a session it works (and the response comes back sealed).
-    const session = await openSession(app);
-    const ok = await app.server.inject({
+    // KEY docs/20 invariant: a DIRECT sealed content request is refused EVEN WITH a live session — a
+    // captured session id can't reach content off the tunnel. Content is reachable ONLY via the tunnel.
+    const session = await openTransport08(app);
+    const direct = await app.server.inject({
       method: "GET",
       url: "/api/users",
-      headers: { cookie: user.cookie, "x-loam-enc": session.sessionId },
+      headers: { "x-loam-enc": session.sessionId },
     });
-    expect(ok.statusCode).toBe(200);
-    expect(ok.headers["x-loam-enc"]).toBe("1");
-    expect(openTransport(session.key, (ok.json() as { enc: string }).enc, "GET /api/users")).not.toBeNull();
+    expect(direct.statusCode).toBe(401);
+
+    // Bind an identity over the sealed channel, then reach the same route through the tunnel: it works.
+    const bound = await resumeIdentity(app, session, 1);
+    expect(bound.status).toBe(200);
+    const inner = await tunnelInner(app, session, 2, { m: "GET", p: "/api/users" });
+    expect(inner.status).toBe(200);
+    const users = JSON.parse(inner.body.toString("utf8")) as { id: string }[];
+    expect(users.some((u) => u.id === bound.currentUser.id)).toBe(true);
   });
 
   it("rejects a frame sealed for a different route (aad binding)", async () => {
@@ -5053,19 +5122,18 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
   // --- Transport tunnel (docs/08 v2: path + response fully hidden) ---
   const TUNNEL_AAD = "POST /api/transport/tunnel";
 
-  /** Send a request through the tunnel: seal `{ s, b: { m, p, body } }` to /api/transport/tunnel. */
+  /** Send a request through the tunnel on a BOUND session (docs/20): seal `{ s, b: { m, p, body } }`
+   * to /api/transport/tunnel. No cookie — a bound session authenticates via its session key alone. */
   function tunnel(
     app: LoamApp,
     session: { sessionId: string; key: string },
     seq: number,
-    cookie: string | undefined,
     inner: { m: string; p: string; body?: unknown },
   ): Promise<InjectResponse> {
     return app.server.inject({
       method: "POST",
       url: "/api/transport/tunnel",
       headers: {
-        ...(cookie ? { cookie } : {}),
         "x-loam-enc": session.sessionId,
         "content-type": "application/json",
       },
@@ -5083,10 +5151,10 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
 
   it("tunnels a GET so the real path and response never appear on the wire (docs/08)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
-    const user = await newSession(app);
     const session = await openSession(app);
+    const bound = await resumeIdentity(app, session, 1); // bind identity before touching content
 
-    const res = await tunnel(app, session, 1, user.cookie, { m: "GET", p: "/api/users" });
+    const res = await tunnel(app, session, 2, { m: "GET", p: "/api/users" });
     expect(res.statusCode).toBe(200);
     expect(res.headers["x-loam-enc"]).toBe("1");
     // Neither the real target nor the response content is anywhere in the cleartext wire body.
@@ -5096,15 +5164,15 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     const inner = openTunnel(session, res);
     expect(inner.status).toBe(200);
     const users = JSON.parse(inner.body.toString("utf8")) as { id: string }[];
-    expect(users.some((u) => u.id === user.userId)).toBe(true);
+    expect(users.some((u) => u.id === bound.currentUser.id)).toBe(true);
   });
 
   it("tunnels a POST mutation end-to-end (creates a message; response tunnelled back)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
-    const user = await newSession(app);
     const session = await openSession(app);
+    await resumeIdentity(app, session, 1);
 
-    const res = await tunnel(app, session, 1, user.cookie, {
+    const res = await tunnel(app, session, 2, {
       m: "POST",
       p: "/api/messages",
       body: { type: "channelPost", channelId: "general", body: "via tunnel" },
@@ -5117,10 +5185,10 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
 
   it("carries response bytes losslessly (base64 body → binary images tunnel intact)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
-    const user = await newSession(app);
     const session = await openSession(app);
+    await resumeIdentity(app, session, 1);
     // A JSON response proves the base64 body is byte-exact; the same path carries image bytes.
-    const res = await tunnel(app, session, 1, user.cookie, { m: "GET", p: "/api/config" });
+    const res = await tunnel(app, session, 2, { m: "GET", p: "/api/config" });
     const inner = openTunnel(session, res);
     expect(inner.status).toBe(200);
     const parsed = JSON.parse(inner.body.toString("utf8")) as { nodeName: string };
@@ -5129,8 +5197,8 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
 
   it("refuses to tunnel the transport bootstrap or non-API paths — including percent-encoded evasions", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
-    const user = await newSession(app);
     const session = await openSession(app);
+    await resumeIdentity(app, session, 1);
 
     const refused = [
       "/api/transport/handshake",
@@ -5146,48 +5214,69 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
       "/%61pi/transport/handshake", // %61 = 'a' → /api/transport/handshake
     ];
     for (const [i, p] of refused.entries()) {
-      const res = await tunnel(app, session, i + 1, user.cookie, { m: "GET", p });
+      const res = await tunnel(app, session, i + 2, { m: "GET", p }); // seq 1 consumed by resume
       expect(res.statusCode, `expected 400 for tunnel target ${p}`).toBe(400);
     }
   });
 
   it("does not let a forged internal-token header bypass required-mode enforcement (docs/08)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
-    const user = await newSession(app);
     // A real client that guesses/sets x-loam-internal must NOT gain the internal bypass — the token is
-    // a per-boot secret it can't know, so a content request without a session is still refused.
+    // a per-boot secret it can't know (and onRequest strips a client-supplied one), so a content request
+    // without a session is still refused.
     const forged = await app.server.inject({
       method: "GET",
       url: "/api/users",
-      headers: { cookie: user.cookie, "x-loam-internal": "not-the-real-token" },
+      headers: { "x-loam-internal": "not-the-real-token" },
     });
     expect(forged.statusCode).toBe(401);
   });
 
-  it("bootstraps a fresh session through the tunnel (Set-Cookie forwarded)", async () => {
+  it("does not let a forged x-loam-user header impersonate an identity (docs/20)", async () => {
+    // The internal tunnel sets `x-loam-user`, trusted only behind the unforgeable `x-loam-internal`.
+    // A client that sets `x-loam-user` (with or without a guessed internal token) on an EXTERNAL request
+    // must gain nothing — onRequest strips both, so this is just an unauthenticated content hit → 401.
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const forged = await app.server.inject({
+      method: "GET",
+      url: "/api/users",
+      headers: { "x-loam-user": "user.deadbeef", "x-loam-internal": "not-the-real-token" },
+    });
+    expect(forged.statusCode).toBe(401);
+  });
+
+  it("binds a fresh identity through the sealed resume — no cookie is ever minted (docs/20)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
     const session = await openSession(app);
-    // No cookie: the inner request mints an identity; its Set-Cookie must reach the browser via the
-    // OUTER response header.
-    const res = await tunnel(app, session, 1, undefined, { m: "GET", p: "/api/users" });
+    // First contact with no token: resume mints a new identity + a 256-bit secure token, sealed. The
+    // secure token replaces the cookie entirely — the resume response must NOT set a session cookie.
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/session/resume",
+      headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: { enc: sealRequest(session.key, 1, "POST /api/session/resume", {}) },
+    });
     expect(res.statusCode).toBe(200);
-    expect(res.headers["set-cookie"]).toBeDefined();
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    const opened = openTransport(session.key, (res.json() as { enc: string }).enc, "POST /api/session/resume");
+    const body = JSON.parse(opened as string) as { currentUser: { id: string }; token: string };
+    expect(body.currentUser.id).toMatch(/^user\./);
+    expect(body.token.length).toBeGreaterThanOrEqual(43); // 256-bit base64url
   });
 
   it("serves images only through the tunnel in required mode (image encryption, docs/08 v2)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
-    const user = await newSession(app);
     const session = await openSession(app);
+    await resumeIdentity(app, session, 1);
     // A direct <img>-style GET can't carry the session header → refused, so bytes never serve in clear.
     const direct = await app.server.inject({
       method: "GET",
       url: "/api/avatars/avt_missing.webp",
-      headers: { cookie: user.cookie },
     });
     expect(direct.statusCode).toBe(401);
     // Through the tunnel it reaches the avatar route internally (404 for a missing file, NOT 401) —
     // i.e. a real image would come back as sealed bytes.
-    const res = await tunnel(app, session, 1, user.cookie, { m: "GET", p: "/api/avatars/avt_missing.webp" });
+    const res = await tunnel(app, session, 2, { m: "GET", p: "/api/avatars/avt_missing.webp" });
     expect(res.statusCode).toBe(200);
     expect(openTunnel(session, res).status).toBe(404);
   });
