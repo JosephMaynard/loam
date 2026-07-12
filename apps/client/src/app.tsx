@@ -264,6 +264,67 @@ function reactionSummary(
     .sort((left, right) => right.count - left.count || left.reaction.localeCompare(right.reaction));
 }
 
+/** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
+const EMPTY_MESSAGES: Message[] = [];
+
+/**
+ * Groups channel replies by parent message id so a conversation render can look up a message's
+ * replies in O(1) instead of every message rescanning the full conversation with `repliesFor`.
+ * Pass the resulting per-parent slice back through `repliesFor` (its filter becomes a no-op on an
+ * already-grouped slice) to keep the exact same sort order and output.
+ *
+ * @param messages - All messages in the current conversation scope.
+ * @returns A map from parent message id to its (unsorted) reply messages.
+ */
+function groupRepliesByParent(messages: Message[]): Map<string, Message[]> {
+  const grouped = new Map<string, Message[]>();
+
+  for (const message of messages) {
+    if (message.type !== "channelReply") {
+      continue;
+    }
+
+    const existing = grouped.get(message.parentMessageId);
+
+    if (existing) {
+      existing.push(message);
+    } else {
+      grouped.set(message.parentMessageId, [message]);
+    }
+  }
+
+  return grouped;
+}
+
+/**
+ * Groups reaction messages by target message id so a conversation render can look up a message's
+ * reactions in O(1) instead of every message rescanning the full conversation with
+ * `reactionSummary`. Pass the resulting per-target slice back through `reactionSummary` (its filter
+ * becomes a no-op on an already-grouped slice) to keep the exact same aggregation and sort order.
+ *
+ * @param messages - All messages in the current conversation scope.
+ * @returns A map from target message id to its reaction messages.
+ */
+function groupReactionsByTarget(messages: Message[]): Map<string, Message[]> {
+  const grouped = new Map<string, Message[]>();
+
+  for (const message of messages) {
+    if (message.type !== "reaction") {
+      continue;
+    }
+
+    const existing = grouped.get(message.targetMessageId);
+
+    if (existing) {
+      existing.push(message);
+    } else {
+      grouped.set(message.targetMessageId, [message]);
+    }
+  }
+
+  return grouped;
+}
+
 /**
  * Format a numeric timestamp into a localized hours-and-minutes time string.
  *
@@ -2023,7 +2084,15 @@ function ConversationView({
 }: ConversationViewProps) {
   const location = useLocation();
   const [membersOpen, setMembersOpen] = useState(false);
-  const topMessages = conversation ? topLevelMessages(messages, conversation) : [];
+  const topMessages = useMemo(
+    () => (conversation ? topLevelMessages(messages, conversation) : []),
+    [conversation, messages],
+  );
+  // Grouped once per `messages` change so the render loop below can look up each message's
+  // replies/reactions in O(1) instead of rescanning the whole conversation per message (was O(n^2)
+  // for a conversation with n messages).
+  const repliesByParent = useMemo(() => groupRepliesByParent(messages), [messages]);
+  const reactionsByTarget = useMemo(() => groupReactionsByTarget(messages), [messages]);
 
   // Never carry the members panel from one conversation into another.
   useEffect(() => {
@@ -2091,7 +2160,6 @@ function ConversationView({
         <MessageList
           conversation={conversation}
           currentUser={currentUser}
-          messages={messages}
           onDelete={onDelete}
           onEdit={onEdit}
           onOpenThread={(messageId) => {
@@ -2100,6 +2168,8 @@ function ConversationView({
             }
           }}
           onReact={onReact}
+          reactionsByTarget={reactionsByTarget}
+          repliesByParent={repliesByParent}
           topMessages={topMessages}
           usersById={usersById}
         />
@@ -2120,7 +2190,6 @@ function ConversationView({
         <ThreadPanel
           allowLocationSharing={allowLocationSharing}
           currentUser={currentUser}
-          messages={messages}
           onClose={() => location.route(backRouteForThread(conversation))}
           onDelete={onDelete}
           onEdit={onEdit}
@@ -2130,6 +2199,8 @@ function ConversationView({
           }
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
           parent={threadParent}
+          reactionsByTarget={reactionsByTarget}
+          repliesByParent={repliesByParent}
           usersById={usersById}
         />
       ) : null}
@@ -2378,11 +2449,12 @@ function ChannelMembersPanel({
 interface MessageListProps {
   conversation: Conversation;
   currentUser: User;
-  messages: Message[];
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
+  reactionsByTarget: Map<string, Message[]>;
+  repliesByParent: Map<string, Message[]>;
   topMessages: Message[];
   usersById: Map<string, User>;
 }
@@ -2390,11 +2462,12 @@ interface MessageListProps {
 function MessageList({
   conversation,
   currentUser,
-  messages,
   onDelete,
   onEdit,
   onOpenThread,
   onReact,
+  reactionsByTarget,
+  repliesByParent,
   topMessages,
   usersById,
 }: MessageListProps) {
@@ -2440,8 +2513,12 @@ function MessageList({
                 onEdit={onEdit}
                 onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
                 onReact={onReact}
-                reactions={reactionSummary(messages, message.id, currentUser.id)}
-                replyCount={repliesFor(messages, message.id).length}
+                reactions={reactionSummary(
+                  reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES,
+                  message.id,
+                  currentUser.id,
+                )}
+                replyCount={repliesFor(repliesByParent.get(message.id) ?? EMPTY_MESSAGES, message.id).length}
                 usersById={usersById}
               />
             </div>
@@ -2907,7 +2984,6 @@ interface ThreadPanelProps {
   /** When true, the reply composer offers the "share location" toggle (docs/10; off by default). */
   allowLocationSharing?: boolean;
   currentUser: User;
-  messages: Message[];
   onClose: () => void;
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
@@ -2915,6 +2991,8 @@ interface ThreadPanelProps {
   onReply: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
   onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   parent: Message;
+  reactionsByTarget: Map<string, Message[]>;
+  repliesByParent: Map<string, Message[]>;
   usersById: Map<string, User>;
 }
 
@@ -2922,8 +3000,9 @@ interface ThreadPanelProps {
  * Renders the thread side panel containing the thread parent message, its replies, and a reply composer.
  *
  * @param currentUser - The currently signed-in user (used to determine ownership and reaction state).
- * @param messages - All messages in the store; used to compute replies and reaction summaries for the thread.
  * @param parent - The parent message that the thread is showing replies for.
+ * @param reactionsByTarget - Reaction messages grouped by target message id (from `groupReactionsByTarget`), used to compute reaction summaries without rescanning the conversation.
+ * @param repliesByParent - Reply messages grouped by parent message id (from `groupRepliesByParent`), used to compute this thread's replies without rescanning the conversation.
  * @param usersById - Map of user id to User objects used to resolve author information for displayed messages.
  * @param onClose - Callback invoked when the panel should be closed (e.g., back or close button).
  * @param onReact - Callback invoked when a reaction action is triggered for a message.
@@ -2934,7 +3013,6 @@ interface ThreadPanelProps {
 function ThreadPanel({
   allowLocationSharing,
   currentUser,
-  messages,
   onClose,
   onDelete,
   onEdit,
@@ -2942,9 +3020,11 @@ function ThreadPanel({
   onReply,
   onUploadAttachment,
   parent,
+  reactionsByTarget,
+  repliesByParent,
   usersById,
 }: ThreadPanelProps) {
-  const replies = repliesFor(messages, parent.id);
+  const replies = repliesFor(repliesByParent.get(parent.id) ?? EMPTY_MESSAGES, parent.id);
 
   return (
     <aside className="thread-panel">
@@ -2967,7 +3047,7 @@ function ThreadPanel({
           onDelete={onDelete}
           onEdit={onEdit}
           onReact={onReact}
-          reactions={reactionSummary(messages, parent.id, currentUser.id)}
+          reactions={reactionSummary(reactionsByTarget.get(parent.id) ?? EMPTY_MESSAGES, parent.id, currentUser.id)}
           usersById={usersById}
         />
         <div className="reply-divider">
@@ -2981,7 +3061,7 @@ function ThreadPanel({
             onDelete={onDelete}
             onEdit={onEdit}
             onReact={onReact}
-            reactions={reactionSummary(messages, reply.id, currentUser.id)}
+            reactions={reactionSummary(reactionsByTarget.get(reply.id) ?? EMPTY_MESSAGES, reply.id, currentUser.id)}
             usersById={usersById}
           />
         ))}
