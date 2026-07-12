@@ -5036,6 +5036,20 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("refuses a sealed request with a non-positive or non-integer sequence (docs/08)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    const aad = "POST /api/messages";
+    const headers = { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" };
+    // 0, negative, and fractional sequences are all outside a valid monotonic window → refused.
+    for (const s of [0, -1, 1.5]) {
+      const enc = sealTransport(session.key, JSON.stringify({ s, b: { type: "channelPost", channelId: "general", body: "x" } }), aad);
+      const res = await app.server.inject({ method: "POST", url: "/api/messages", headers, payload: { enc } });
+      expect(res.statusCode).toBe(409);
+    }
+  });
+
   // --- Transport tunnel (docs/08 v2: path + response fully hidden) ---
   const TUNNEL_AAD = "POST /api/transport/tunnel";
 
