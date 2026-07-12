@@ -45,7 +45,14 @@ import { UnreadBadge } from "./components/UnreadBadge";
 import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { dayKey, dayLabel } from "./lib/dates";
-import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./lib/local-store";
+import {
+  deleteRecord,
+  destroyDatabase,
+  getAllRecords,
+  markLocalStoreWiped,
+  putRecord,
+  putRecords,
+} from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
 import {
@@ -825,6 +832,23 @@ function LoamApp() {
     // honestly (the node is still up). Best-effort on every step — nothing here may block another.
     setWipeScope(scope);
     setWiped(true);
+    // Latch the local store so any in-flight fetch that resolves after this can't rebuild the DB we
+    // are about to delete (docs/15 #4).
+    markLocalStoreWiped();
+    // A device wipe must also drop the server session, or the HttpOnly identity cookie (which JS
+    // can't clear) survives and a reload re-hydrates the wiped identity. A node kill switch already
+    // invalidated every session server-side, so only the device scope needs this (docs/15 #4).
+    if (scope === "device") {
+      // Bound it with the standard timeout so a hung/unreachable server can't stall the wipe — the
+      // local purge below is the part that actually matters and must always run (docs/15 #4).
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      await fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal: controller.signal })
+        .catch(() => {
+          // best effort — the local purge below still runs
+        })
+        .finally(() => window.clearTimeout(timeout));
+    }
     setMessages([]);
     setChannels([]);
     setUsers([]);

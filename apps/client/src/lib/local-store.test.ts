@@ -1,12 +1,21 @@
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { deleteRecord, destroyDatabase, getAllRecords, putRecord, putRecords } from "./local-store";
+import {
+  deleteRecord,
+  destroyDatabase,
+  getAllRecords,
+  markLocalStoreWiped,
+  putRecord,
+  putRecords,
+  resetLocalStoreForTests,
+} from "./local-store";
 
-// Each test gets a fresh in-memory IndexedDB. The module caches its connection promise across calls,
-// so we also destroy the DB (which clears that cache) between tests.
+// Each test gets a fresh in-memory IndexedDB. The module caches its connection promise across calls
+// and latches a wipe flag, so we reset both between tests to simulate a fresh page load.
 beforeEach(() => {
   globalThis.indexedDB = new IDBFactory();
+  resetLocalStoreForTests();
 });
 
 afterEach(async () => {
@@ -66,5 +75,21 @@ describe("local-store", () => {
   it("putRecords with an empty array is a no-op", async () => {
     await putRecords<Channel>("channels", []);
     expect(await getAllRecords<Channel>("channels")).toEqual([]);
+  });
+
+  it("stops writes after the wipe latch, so an in-flight fetch can't rebuild the DB (docs/15 #4)", async () => {
+    await putRecords<Channel>("channels", [{ id: "general", name: "General" }]);
+
+    markLocalStoreWiped();
+
+    // A racing write that resolves after the wipe is a no-op, and reads are gated (no re-open).
+    await putRecords<Channel>("channels", [{ id: "late", name: "Late" }]);
+    await putRecord<Channel>("channels", { id: "late2", name: "Late2" });
+    await deleteRecord("channels", "general");
+    expect(await getAllRecords<Channel>("channels")).toEqual([]);
+
+    // After a reload (latch cleared) the late writes never persisted — only the pre-wipe record.
+    resetLocalStoreForTests();
+    expect((await getAllRecords<Channel>("channels")).map((channel) => channel.id)).toEqual(["general"]);
   });
 });
