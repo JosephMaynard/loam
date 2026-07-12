@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const fr: Catalog = {
   "composer.thinking": "Réflexion…",
   "toast.imageFallback": "📷 Image",
+  "toast.locationFallback": "📍 Position",
 
   "common.save": "Enregistrer",
   "common.saving": "Enregistrement…",
@@ -40,6 +41,16 @@ export const fr: Catalog = {
   "composer.attachImage": "Joindre une image",
   "composer.attachImageHint": "Joindre une image (redimensionnée sur cet appareil avant l’envoi)",
   "composer.send": "Envoyer",
+
+  "composer.shareLocation": "Partager la position",
+  "composer.shareLocationHint": "Partagez un lieu — une étiquette fonctionne même sans GPS",
+  "composer.locationLabel": "Étiquette de position",
+  "composer.locationLabelPlaceholder": "p. ex. la porte nord",
+  "composer.locationLat": "Latitude (-90 à 90)",
+  "composer.locationLng": "Longitude (-180 à 180)",
+
+  "location.openInMaps": "Ouvrir dans les cartes",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "Impossible de charger les membres.",
   "members.inviteError": "Impossible d’inviter cette personne.",

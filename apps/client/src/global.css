@@ -1492,6 +1492,48 @@ a {
   background: var(--c-surf-1);
 }
 
+/* Shared-location card (docs/10) — a pin, the label/coordinates, and (when coordinates are present)
+   a geo: link opening the OS maps app. */
+.location-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(320px, 100%);
+  margin-top: 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surf-1);
+  padding: 8px 10px;
+}
+
+.location-pin {
+  font-size: 1.1rem;
+  line-height: 1.4;
+}
+
+.location-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.location-label {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.location-coords {
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+}
+
+.location-open-maps {
+  color: var(--c-moss);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .composer-attachments {
   grid-column: 1 / -1;
   display: flex;
@@ -1535,6 +1577,48 @@ a {
   border-radius: 8px;
   background: var(--c-surf-2);
   padding: 0 10px;
+}
+
+/* Leading composer controls (attach image, share location) share the grid's first "auto" column. */
+.composer-tools {
+  display: flex;
+  gap: 6px;
+}
+
+.composer-location-toggle[aria-pressed="true"] {
+  border-color: var(--c-moss);
+  background: var(--c-highlight);
+}
+
+/* Inline "share location" draft form (docs/10): label + optional lat/lng, shown above the composer
+   row while the location toggle is active. */
+.composer-location-form {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.composer-location-label {
+  flex: 1;
+  min-width: 140px;
+}
+
+.composer-location-coord {
+  width: 110px;
+}
+
+.composer-location-form input {
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-white);
+  color: var(--c-ink);
+  padding: 8px 10px;
+}
+
+.composer-location-form input:focus {
+  border-color: var(--c-moss);
+  outline: 3px solid rgba(47, 95, 76, 0.18);
 }
 
 /* Node-to-node sync admin panel. */

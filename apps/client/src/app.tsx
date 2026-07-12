@@ -21,6 +21,7 @@ import {
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
+  type MessageLocation,
   type MeshContact,
   type MeshIdentityCard,
   type NetworkConfig,
@@ -39,6 +40,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
 import { InviteControl } from "./components/InviteControl";
+import { LocationCard } from "./components/LocationCard";
 import { NodeLinkControl } from "./components/NodeLinkControl";
 import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
@@ -549,7 +551,9 @@ function LoamApp() {
         bodyFor(message) ||
         (message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length
           ? t("toast.imageFallback")
-          : "");
+          : message.type !== "reaction" && message.type !== "sealed" && message.location
+            ? t("toast.locationFallback")
+            : "");
       let title = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
 
@@ -1616,6 +1620,7 @@ function LoamApp() {
       ) : (
         <ConversationView
           allowAttachments={!!config?.networkConfig.enableAttachments}
+          allowLocationSharing={!!config?.networkConfig.enableLocationSharing}
           channels={channels}
           conversation={activeConversation}
           currentUser={currentUser}
@@ -1631,7 +1636,7 @@ function LoamApp() {
               reaction,
             })
           }
-          onSend={(body, attachments) => {
+          onSend={(body, attachments, messageLocation) => {
             if (!activeConversation) {
               return Promise.resolve();
             }
@@ -1642,6 +1647,7 @@ function LoamApp() {
                 channelId: activeConversation.id,
                 body,
                 ...(attachments?.length ? { attachments } : {}),
+                ...(messageLocation ? { location: messageLocation } : {}),
               });
             }
 
@@ -1650,9 +1656,10 @@ function LoamApp() {
               recipientUserId: activeConversation.id,
               body,
               ...(attachments?.length ? { attachments } : {}),
+              ...(messageLocation ? { location: messageLocation } : {}),
             });
           }}
-          onThreadReply={(parentMessageId, body, attachments) => {
+          onThreadReply={(parentMessageId, body, attachments, messageLocation) => {
             if (!activeConversation || activeConversation.kind !== "channel") {
               return Promise.resolve();
             }
@@ -1663,6 +1670,7 @@ function LoamApp() {
               parentMessageId,
               body,
               ...(attachments?.length ? { attachments } : {}),
+              ...(messageLocation ? { location: messageLocation } : {}),
             });
           }}
           onUploadAttachment={uploadAttachment}
@@ -1973,6 +1981,7 @@ function NavLink({ active, children, className, href }: NavLinkProps) {
 
 interface ConversationViewProps {
   allowAttachments: boolean;
+  allowLocationSharing: boolean;
   channels: Channel[];
   conversation?: Conversation;
   currentUser: User;
@@ -1982,8 +1991,13 @@ interface ConversationViewProps {
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onLeftChannel: (channelId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
-  onSend: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
-  onThreadReply: (parentMessageId: string, body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onSend: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
+  onThreadReply: (
+    parentMessageId: string,
+    body: string,
+    attachments?: MessageAttachment[],
+    location?: MessageLocation,
+  ) => Promise<void>;
   onUploadAttachment: (file: File) => Promise<MessageAttachment>;
   users: User[];
   usersById: Map<string, User>;
@@ -1991,6 +2005,7 @@ interface ConversationViewProps {
 
 function ConversationView({
   allowAttachments,
+  allowLocationSharing,
   channels,
   conversation,
   currentUser,
@@ -2089,6 +2104,7 @@ function ConversationView({
           usersById={usersById}
         />
         <MessageComposer
+          allowLocationSharing={allowLocationSharing}
           label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
           onSend={onSend}
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
@@ -2102,13 +2118,16 @@ function ConversationView({
 
       {threadParent ? (
         <ThreadPanel
+          allowLocationSharing={allowLocationSharing}
           currentUser={currentUser}
           messages={messages}
           onClose={() => location.route(backRouteForThread(conversation))}
           onDelete={onDelete}
           onEdit={onEdit}
           onReact={onReact}
-          onReply={(body, attachments) => onThreadReply(threadParent.id, body, attachments)}
+          onReply={(body, attachments, messageLocation) =>
+            onThreadReply(threadParent.id, body, attachments, messageLocation)
+          }
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
           parent={threadParent}
           usersById={usersById}
@@ -2560,6 +2579,9 @@ function MessageItem({
             ))}
           </div>
         ) : null}
+        {message.type !== "reaction" && message.type !== "sealed" && message.location ? (
+          <LocationCard location={message.location} />
+        ) : null}
         <div className="message-actions">
           {message.meta?.streaming ? <span className="streaming-pill">{t("message.streaming")}</span> : null}
           {!message.meta?.streaming && reactions.map((reaction) => (
@@ -2611,8 +2633,10 @@ function MessageItem({
 }
 
 interface MessageComposerProps {
+  /** When true, the composer offers the "share location" toggle (docs/10; off by default). */
+  allowLocationSharing?: boolean;
   label: string;
-  onSend: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onSend: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
   /** When present, the composer offers image attachments (resized on-device before upload). */
   onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   placeholder: string;
@@ -2626,16 +2650,48 @@ type PendingAttachment = {
   error?: string;
 };
 
-function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: MessageComposerProps) {
+/**
+ * Parse the composer's location draft fields into a `MessageLocation`, mirroring
+ * `MessageLocationSchema`'s rule that a share needs a label or both coordinates. Returns `undefined`
+ * when the draft doesn't (yet) satisfy that rule, so a half-entered coordinate never sends silently.
+ */
+function buildDraftLocation(label: string, latText: string, lngText: string): MessageLocation | undefined {
+  const trimmedLabel = label.trim();
+  const lat = latText.trim() === "" ? undefined : Number(latText);
+  const lng = lngText.trim() === "" ? undefined : Number(lngText);
+  const hasValidLat = lat !== undefined && Number.isFinite(lat) && lat >= -90 && lat <= 90;
+  const hasValidLng = lng !== undefined && Number.isFinite(lng) && lng >= -180 && lng <= 180;
+  const hasCoords = hasValidLat && hasValidLng;
+
+  if (!trimmedLabel && !hasCoords) {
+    return undefined;
+  }
+
+  return {
+    ...(trimmedLabel ? { label: trimmedLabel } : {}),
+    ...(hasCoords ? { lat, lng } : {}),
+  };
+}
+
+function MessageComposer({ allowLocationSharing, label, onSend, onUploadAttachment, placeholder }: MessageComposerProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState<PendingAttachment[]>([]);
+  const [locationOpen, setLocationOpen] = useState(false);
+  const [locationLabel, setLocationLabel] = useState("");
+  const [locationLat, setLocationLat] = useState("");
+  const [locationLng, setLocationLng] = useState("");
   const pendingKeyRef = useRef(0);
   const composerId = useId();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const readyAttachments = pending.flatMap((entry) => (entry.attachment ? [entry.attachment] : []));
   const uploading = pending.some((entry) => entry.status === "uploading");
+  const draftLocation = locationOpen ? buildDraftLocation(locationLabel, locationLat, locationLng) : undefined;
+  // The location panel is open but doesn't (yet) satisfy "a label or both coordinates" — block
+  // sending rather than silently dropping what the person typed.
+  const locationIncomplete =
+    locationOpen && !draftLocation && (locationLabel.trim() !== "" || locationLat.trim() !== "" || locationLng.trim() !== "");
 
   useEffect(() => {
     const textArea = textAreaRef.current;
@@ -2681,19 +2737,29 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
     }
   }
 
+  /** Close the location panel and discard its draft — sharing is deliberate per message (docs/10),
+   * so hiding the form never leaves a location silently queued to go out on the next send. */
+  function closeLocationForm(): void {
+    setLocationOpen(false);
+    setLocationLabel("");
+    setLocationLat("");
+    setLocationLng("");
+  }
+
   async function submit(): Promise<void> {
     const body = value.trim();
 
-    if ((!body && !readyAttachments.length) || sending || uploading) {
+    if ((!body && !readyAttachments.length && !draftLocation) || sending || uploading || locationIncomplete) {
       return;
     }
 
     setSending(true);
 
     try {
-      await onSend(body, readyAttachments.length ? readyAttachments : undefined);
+      await onSend(body, readyAttachments.length ? readyAttachments : undefined, draftLocation);
       setValue("");
       setPending([]);
+      closeLocationForm();
     } catch {
       // onSend surfaces its own error (setError); keep the composer text so the user can retry
       // instead of losing what they typed (and don't leave the rejection unhandled).
@@ -2704,7 +2770,7 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
 
   return (
     <form
-      className={onUploadAttachment ? "composer has-attach" : "composer"}
+      className={onUploadAttachment || allowLocationSharing ? "composer has-attach" : "composer"}
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
@@ -2730,33 +2796,87 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
           ))}
         </div>
       ) : null}
+      {allowLocationSharing && locationOpen ? (
+        <div className="composer-location-form">
+          <input
+            aria-label={t("composer.locationLabel")}
+            className="composer-location-label"
+            dir="auto"
+            onInput={(event) => setLocationLabel(event.currentTarget.value)}
+            placeholder={t("composer.locationLabelPlaceholder")}
+            type="text"
+            value={locationLabel}
+          />
+          <input
+            aria-label={t("composer.locationLat")}
+            className="composer-location-coord"
+            inputMode="decimal"
+            max={90}
+            min={-90}
+            onInput={(event) => setLocationLat(event.currentTarget.value)}
+            placeholder={t("composer.locationLat")}
+            step="any"
+            type="number"
+            value={locationLat}
+          />
+          <input
+            aria-label={t("composer.locationLng")}
+            className="composer-location-coord"
+            inputMode="decimal"
+            max={180}
+            min={-180}
+            onInput={(event) => setLocationLng(event.currentTarget.value)}
+            placeholder={t("composer.locationLng")}
+            step="any"
+            type="number"
+            value={locationLng}
+          />
+        </div>
+      ) : null}
       <label className="sr-only" for={composerId}>
         {label}
       </label>
-      {onUploadAttachment ? (
-        <>
-          <input
-            accept="image/png,image/jpeg,image/webp,image/*"
-            className="sr-only"
-            multiple
-            onInput={(event) => {
-              attachFiles(event.currentTarget.files);
-              event.currentTarget.value = "";
-            }}
-            ref={fileInputRef}
-            type="file"
-          />
-          <button
-            aria-label={t("composer.attachImage")}
-            className="composer-attach"
-            disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
-            onClick={() => fileInputRef.current?.click()}
-            title={t("composer.attachImageHint")}
-            type="button"
-          >
-            🖼
-          </button>
-        </>
+      {onUploadAttachment || allowLocationSharing ? (
+        <div className="composer-tools">
+          {onUploadAttachment ? (
+            <>
+              <input
+                accept="image/png,image/jpeg,image/webp,image/*"
+                className="sr-only"
+                multiple
+                onInput={(event) => {
+                  attachFiles(event.currentTarget.files);
+                  event.currentTarget.value = "";
+                }}
+                ref={fileInputRef}
+                type="file"
+              />
+              <button
+                aria-label={t("composer.attachImage")}
+                className="composer-attach"
+                disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
+                onClick={() => fileInputRef.current?.click()}
+                title={t("composer.attachImageHint")}
+                type="button"
+              >
+                🖼
+              </button>
+            </>
+          ) : null}
+          {allowLocationSharing ? (
+            <button
+              aria-label={t("composer.shareLocation")}
+              aria-pressed={locationOpen}
+              className="composer-attach composer-location-toggle"
+              disabled={sending}
+              onClick={() => (locationOpen ? closeLocationForm() : setLocationOpen(true))}
+              title={t("composer.shareLocationHint")}
+              type="button"
+            >
+              📍
+            </button>
+          ) : null}
+        </div>
       ) : null}
       <textarea
         dir="auto"
@@ -2773,7 +2893,10 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
         rows={1}
         value={value}
       />
-      <button disabled={(!value.trim() && !readyAttachments.length) || sending || uploading} type="submit">
+      <button
+        disabled={(!value.trim() && !readyAttachments.length && !draftLocation) || sending || uploading || locationIncomplete}
+        type="submit"
+      >
         {t("composer.send")}
       </button>
     </form>
@@ -2781,13 +2904,15 @@ function MessageComposer({ label, onSend, onUploadAttachment, placeholder }: Mes
 }
 
 interface ThreadPanelProps {
+  /** When true, the reply composer offers the "share location" toggle (docs/10; off by default). */
+  allowLocationSharing?: boolean;
   currentUser: User;
   messages: Message[];
   onClose: () => void;
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onReact: (messageId: string, reaction: string) => Promise<void>;
-  onReply: (body: string, attachments?: MessageAttachment[]) => Promise<void>;
+  onReply: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
   onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   parent: Message;
   usersById: Map<string, User>;
@@ -2807,6 +2932,7 @@ interface ThreadPanelProps {
  * @returns The thread panel JSX element.
  */
 function ThreadPanel({
+  allowLocationSharing,
   currentUser,
   messages,
   onClose,
@@ -2861,6 +2987,7 @@ function ThreadPanel({
         ))}
       </div>
       <MessageComposer
+        allowLocationSharing={allowLocationSharing}
         label={t("thread.replyLabel")}
         onSend={onReply}
         onUploadAttachment={onUploadAttachment}

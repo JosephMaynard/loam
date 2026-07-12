@@ -4716,3 +4716,51 @@ describe("deploy hardening (docs/15)", () => {
     expect(readded.peers.some((peer) => peer.url === "http://peer-a.invalid" && peer.status)).toBe(true);
   });
 });
+
+describe("location sharing (docs/10)", () => {
+  it("rejects a shared location when the feature is off (default), accepts it when on", async () => {
+    const off = await makeApp();
+    const offUser = await newSession(off);
+    const rejected = await off.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: offUser.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "meet here", location: { label: "north gate" } },
+    });
+    expect(rejected.statusCode).toBe(400);
+
+    const on = await makeApp({ features: { enableLocationSharing: true } });
+    const onUser = await newSession(on);
+    const accepted = await on.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: onUser.cookie },
+      payload: {
+        type: "channelPost",
+        channelId: "general",
+        body: "",
+        location: { label: "north gate", lat: 51.5, lng: -0.12 },
+      },
+    });
+    expect(accepted.statusCode).toBe(201);
+    const stored = (accepted.json() as { message: { location?: { label?: string; lat?: number; lng?: number } } }).message;
+    expect(stored.location).toEqual({ label: "north gate", lat: 51.5, lng: -0.12 });
+
+    // Config advertises the flag to the client.
+    const cfg = (await on.server.inject({ method: "GET", url: "/api/config", headers: { cookie: onUser.cookie } }))
+      .json() as { networkConfig: { enableLocationSharing: boolean } };
+    expect(cfg.networkConfig.enableLocationSharing).toBe(true);
+  });
+
+  it("rejects a location with neither a label nor coordinates", async () => {
+    const app = await makeApp({ features: { enableLocationSharing: true } });
+    const user = await newSession(app);
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "x", location: { lat: 51.5 } },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
