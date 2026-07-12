@@ -233,6 +233,11 @@ export type LoamApp = {
   reapExpiredMessages(): void;
   /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
   reapOrphanedAttachments(): Promise<void>;
+  /** Drop expired per-IP rate-limit entries (identity budget + claim/panic attempt limiters) now
+   * (also runs on the reaper timer) so the maps stay bounded to the IPs active within a window. */
+  pruneExpiredRateLimiters(): void;
+  /** Test/introspection hook: current entry counts of the per-IP rate-limit maps. */
+  rateLimiterEntryCounts(): { claim: number; panic: number; identity: number };
   close(): Promise<void>;
 };
 
@@ -2392,6 +2397,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Drop expired entries from the per-IP rate-limit maps: the claim and panic attempt limiters and
+   * the new-identity budget. Each keys on source IP and is written only on its semantic path, so
+   * without periodic pruning a long-lived node facing many distinct peers would retain one dead entry
+   * per IP forever. Runs on the 30s reaper timer, bounding growth to the IPs active within a single
+   * window rather than every IP ever seen (docs/15 #9). Behaviour is otherwise unchanged: an expired
+   * entry and a pruned one both reset on the next access.
+   */
+  function pruneExpiredRateLimiters(): void {
+    const now = Date.now();
+    for (const counters of [claimAttempts, panicAttempts, identityMintCounters]) {
+      for (const [key, entry] of counters) {
+        if (entry.resetAt <= now) {
+          counters.delete(key);
+        }
+      }
+    }
+  }
+
+  /**
    * Execute the kill switch: wipe all persisted and in-memory data (messages, users, channels,
    * sessions, avatar files), signal connected clients to purge their local caches, close their
    * sockets, and re-seed the node's defaults so it comes back factory-fresh. Config (including the
@@ -3464,13 +3488,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       server.log.error(error);
     }
 
-    // Drop expired per-IP identity counters so the map can't grow unbounded across many peers.
-    const now = Date.now();
-    for (const [ip, entry] of identityMintCounters) {
-      if (entry.resetAt <= now) {
-        identityMintCounters.delete(ip);
-      }
-    }
+    // Drop expired per-IP rate-limit entries (identity budget + claim/panic attempt limiters) so the
+    // maps can't grow unbounded across many source IPs (docs/15 #9).
+    pruneExpiredRateLimiters();
 
     void reapOrphanedAttachments().catch((error: unknown) => server.log.error(error));
   }, 30_000);
@@ -5106,6 +5126,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     getAdminSetupCode: () => adminSetupCode,
     reapExpiredMessages,
     reapOrphanedAttachments,
+    pruneExpiredRateLimiters,
+    rateLimiterEntryCounts: () => ({
+      claim: claimAttempts.size,
+      panic: panicAttempts.size,
+      identity: identityMintCounters.size,
+    }),
     async close() {
       clearInterval(reaperTimer);
       clearInterval(syncTimer);
