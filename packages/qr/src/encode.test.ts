@@ -38,6 +38,23 @@ describe("encodeQR", () => {
     }).toMatchSnapshot();
   });
 
+  it("produces a stable golden matrix for a version 5-H payload (multi-block interleave)", () => {
+    // A 36-byte join link lands at version 5-H, whose Reed-Solomon layout splits the data into TWO
+    // groups of unequal length (2 blocks of 11 codewords + 2 of 12). That two-size-class split +
+    // interleave is the subtle path the smaller version-4-H golden above (a single 4×9 group) never
+    // exercises, so this golden is what would catch a regression in `splitIntoBlocks`/`interleaveBlocks`
+    // for the mixed-length case, end-to-end through module placement.
+    const payload = "http://loam.local/user/aZ4kP2xY7mNq8";
+    const result = encodeQRDetailed(payload);
+    expect(result.matrix.version).toBe(5);
+
+    expect({
+      version: result.matrix.version,
+      maskId: result.maskId,
+      rows: matrixRows(result.matrix.data, result.matrix.size),
+    }).toMatchSnapshot();
+  });
+
   it("renders compact SVG and terminal output from the encoded matrix", () => {
     const result = encodeQRDetailed("http://loam.local/channel/general");
     const svg = renderQRToSvg(result.matrix, {

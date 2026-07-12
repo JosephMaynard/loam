@@ -4,7 +4,10 @@ import {
   LoamConfigSchema,
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
+  MessageEditRequestSchema,
+  MessageLocationSchema,
   MessageSchema,
+  ModerationUpdateRequestSchema,
   NetworkConfigSchema,
   securityProfilePreset,
   SERVER_ERROR_CODES,
@@ -348,5 +351,79 @@ describe("@loam/schema", () => {
     for (const code of SERVER_ERROR_CODES) {
       expect(code).toMatch(/^[a-z][a-z0-9_]*$/);
     }
+  });
+});
+
+describe("schema refinements", () => {
+  describe("MessageLocationSchema (label-or-coordinates rule)", () => {
+    it("accepts a label alone, coordinates alone, or both together", () => {
+      expect(() => MessageLocationSchema.parse({ label: "the north gate" })).not.toThrow();
+      expect(() => MessageLocationSchema.parse({ lat: 51.5, lng: -0.12 })).not.toThrow();
+      expect(() => MessageLocationSchema.parse({ label: "camp 3", lat: 0, lng: 0 })).not.toThrow();
+    });
+
+    it("rejects an empty share and a lone coordinate (one axis is not a location)", () => {
+      expect(() => MessageLocationSchema.parse({})).toThrow();
+      // A single coordinate without its partner (and no label) can't place anything.
+      expect(() => MessageLocationSchema.parse({ lat: 51.5 })).toThrow();
+      expect(() => MessageLocationSchema.parse({ lng: -0.12 })).toThrow();
+    });
+
+    it("enforces the field bounds (label length, coordinate range)", () => {
+      expect(() => MessageLocationSchema.parse({ label: "" })).toThrow();
+      expect(() => MessageLocationSchema.parse({ label: "x".repeat(121) })).toThrow();
+      expect(() => MessageLocationSchema.parse({ lat: 91, lng: 0 })).toThrow();
+      expect(() => MessageLocationSchema.parse({ lat: 0, lng: 181 })).toThrow();
+    });
+  });
+
+  describe("ModerationUpdateRequestSchema (at-least-one-field rule)", () => {
+    it("accepts any request that sets at least one field, including an explicit false", () => {
+      expect(() => ModerationUpdateRequestSchema.parse({ banned: true })).not.toThrow();
+      // `false` is defined, so it satisfies the rule — the check is `!== undefined`, not truthiness.
+      expect(() => ModerationUpdateRequestSchema.parse({ shadowBanned: false })).not.toThrow();
+      expect(() => ModerationUpdateRequestSchema.parse({ banned: false, shadowBanned: true })).not.toThrow();
+    });
+
+    it("rejects an empty update (nothing to change)", () => {
+      expect(() => ModerationUpdateRequestSchema.parse({})).toThrow();
+    });
+  });
+
+  describe("MessageEditRequestSchema (non-empty body rule)", () => {
+    it("accepts a body with visible content up to the 8000-char cap", () => {
+      expect(() => MessageEditRequestSchema.parse({ body: "edited" })).not.toThrow();
+      expect(() => MessageEditRequestSchema.parse({ body: "x".repeat(8000) })).not.toThrow();
+    });
+
+    it("rejects an empty/whitespace body and one past the cap", () => {
+      expect(() => MessageEditRequestSchema.parse({ body: "" })).toThrow();
+      expect(() => MessageEditRequestSchema.parse({ body: "   \n\t " })).toThrow();
+      expect(() => MessageEditRequestSchema.parse({ body: "x".repeat(8001) })).toThrow();
+    });
+  });
+
+  describe("MessageCreateRequestSchema (non-reaction needs content)", () => {
+    it("accepts a location-only post (empty body, no attachments)", () => {
+      // The superRefine's location branch: a shared place alone is a valid message.
+      expect(() =>
+        MessageCreateRequestSchema.parse({
+          type: "channelPost",
+          channelId: "chn_general",
+          body: "",
+          location: { label: "the north gate" },
+        }),
+      ).not.toThrow();
+    });
+
+    it("still rejects a post with no body, no attachments, and no location", () => {
+      expect(() =>
+        MessageCreateRequestSchema.parse({
+          type: "channelPost",
+          channelId: "chn_general",
+          body: "   ",
+        }),
+      ).toThrow();
+    });
   });
 });
