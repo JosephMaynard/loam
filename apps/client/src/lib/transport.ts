@@ -133,7 +133,7 @@ export function getSession(): Session | undefined {
  * `joinUrl` unchanged when transport encryption is off / no key is available.
  */
 export function joinQrUrl(joinUrl: string, transportPublicKey?: string): string {
-  return transportPublicKey ? `${joinUrl}/#k=${transportPublicKey}` : joinUrl;
+  return transportPublicKey ? `${joinUrl}#k=${transportPublicKey}` : joinUrl;
 }
 
 /** Emoji fingerprint of a host public key (docs/08) — defaults to the live session's host key. */
@@ -174,11 +174,14 @@ async function handshake(hostPublicKey: string): Promise<void> {
 
 /**
  * Establish (or refresh) a transport session for the given mode. `off` clears any session and is
- * otherwise a no-op. Otherwise the QR-delivered key (this boot's `#k=` fragment, else a previously
- * cached one for this origin) is preferred over the server-advertised `configHostKey`; when both are
- * present and disagree, the QR key is trusted (see `getHostKeyMismatch`) — the QR is the
- * out-of-band-authenticated channel, config is not. When `required` and no key is available from
- * either source, throws `TransportNeedsQrError`.
+ * otherwise a no-op. In `required` mode ONLY the QR-delivered key (this boot's `#k=` fragment, else a
+ * previously cached one for this origin) is ever trusted for the handshake — falling back to the
+ * server-advertised `configHostKey` would let an active MITM simply hand out its own key over the same
+ * plain-HTTP channel the QR is meant to protect, defeating the reason `required` mode exists. In
+ * `optional` mode `configHostKey` stays a fallback (best-effort encryption without the MITM guarantee)
+ * when no QR key is available. When both a QR key and a config key are present and disagree, the QR
+ * key is what gets used either way (see `getHostKeyMismatch`) — the QR is the out-of-band-authenticated
+ * channel, config is not. When `required` and no QR key is available, throws `TransportNeedsQrError`.
  */
 export async function ensureSession(mode: TransportEncryption, configHostKey?: string): Promise<void> {
   lastParams = { mode, hostKey: configHostKey };
@@ -193,7 +196,7 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   const hashKey = consumeHashKey();
   const qrKey = hashKey ?? getCachedHostPublicKey();
   hostKeyMismatch = !!qrKey && !!configHostKey && qrKey !== configHostKey;
-  const hostPublicKey = qrKey ?? configHostKey;
+  const hostPublicKey = mode === "required" ? qrKey : (qrKey ?? configHostKey);
 
   if (!hostPublicKey) {
     if (mode === "required") {
@@ -210,14 +213,16 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
 }
 
 /** Re-run the last `ensureSession` call's mode/host key after a session apparently expired
- * server-side. Best-effort: returns `false` on any failure so the caller's own error path takes over. */
+ * server-side. Best-effort: returns `false` on any failure so the caller's own error path takes over.
+ * Mirrors `ensureSession`'s trust rule: `required` mode only ever re-handshakes against the QR-cached
+ * key, never falling back to the config-advertised one. */
 async function reHandshake(): Promise<boolean> {
   if (!lastParams || lastParams.mode === "off") {
     return false;
   }
 
   const cachedKey = getCachedHostPublicKey();
-  const hostPublicKey = cachedKey ?? lastParams.hostKey;
+  const hostPublicKey = lastParams.mode === "required" ? cachedKey : (cachedKey ?? lastParams.hostKey);
 
   if (!hostPublicKey) {
     return false;
@@ -242,14 +247,21 @@ export interface EncryptedFetchInit {
   signal?: AbortSignal;
 }
 
+/** Methods that never mutate server state — safe to retry after ANY kind of failure, including one
+ * where the server may already have processed the request (see `attemptFetch`'s decrypt-failure
+ * branch). */
+const SAFE_METHODS = new Set(["GET", "HEAD"]);
+
 /**
  * The single REST entry point every call site uses instead of a bare `fetch(apiUrl(path), …)`. With
  * no live session (mode `off`, or `optional` with no key yet) this is a byte-for-byte pass-through —
  * same method/credentials/headers/body shape as the pre-transport-encryption client. With a live
- * session: the body (if any) is sealed as `{ enc }`, the `x-loam-enc: <sessionId>` header asks the
- * server to seal the response too, and the response is transparently unsealed back into a normal
- * `Response` the caller can `.json()` / check `.ok` on exactly as before. A decrypt failure or a 401
- * (the session likely expired) triggers exactly one re-handshake + retry before giving up.
+ * session: the body is sealed as `{ enc }` (even an empty payload, for any non-GET/HEAD method — see
+ * below), the `x-loam-enc: <sessionId>` header asks the server to seal the response too, and the
+ * response is transparently unsealed back into a normal `Response` the caller can `.json()` / check
+ * `.ok` on exactly as before. A 401 or a decrypt failure (the session likely expired) triggers exactly
+ * one re-handshake + retry before giving up — but see `attemptFetch` for why a decrypt failure only
+ * retries for safe methods.
  *
  * @param method - HTTP method, exactly as it will appear on the wire (e.g. `"POST"`).
  * @param path - The server-relative path + query string (e.g. `/api/messages`, `/api/search?q=x`).
@@ -284,11 +296,18 @@ async function attemptFetch(
     });
   }
 
+  const isSafe = SAFE_METHODS.has(method.toUpperCase());
   const aad = restAad(method, path);
+  // A safe (GET/HEAD) call with no logical body keeps the pre-existing shape: no envelope at all.
+  // Every other method is ALWAYS sealed, even with an empty payload — the server (docs/08) requires a
+  // sealed `{ enc }` body from any mutation presented under a live session, so a bodyless mutation
+  // still needs an (empty) envelope to prove it actually went through the session.
   const requestBody =
-    body === undefined
+    isSafe && body === undefined
       ? undefined
-      : JSON.stringify({ enc: sealTransport(active.key, JSON.stringify(body), aad) });
+      : JSON.stringify({
+          enc: sealTransport(active.key, body === undefined ? "" : JSON.stringify(body), aad),
+        });
 
   const response = await fetch(apiUrl(path), {
     method,
@@ -305,7 +324,11 @@ async function attemptFetch(
     const opened = typeof enc === "string" ? openTransport(active.key, enc, aad) : null;
 
     if (opened === null) {
-      if (!retried && (await reHandshake())) {
+      // The server replied `x-loam-enc: 1` — i.e. its handler already ran and produced a response —
+      // and we simply can't decrypt it (e.g. the session key changed between request and response).
+      // Retrying is only safe here for methods that don't mutate state: retrying a POST/PATCH/DELETE
+      // would re-apply a mutation the server already committed.
+      if (isSafe && !retried && (await reHandshake())) {
         return attemptFetch(method, path, body, init, true);
       }
 
@@ -315,6 +338,9 @@ async function attemptFetch(
     return new Response(opened, { status: response.status, statusText: response.statusText });
   }
 
+  // A 401 means the server refused the request in `onRequest`, BEFORE any route handler ran (no
+  // session presented, or an unknown/expired one) — nothing was applied server-side, so retrying is
+  // safe regardless of method.
   if (response.status === 401 && !retried && (await reHandshake())) {
     return attemptFetch(method, path, body, init, true);
   }

@@ -1378,17 +1378,39 @@ function LoamApp() {
       reconnectAttempts += 1;
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = undefined;
-        connectWebSocket();
+        void connectWebSocket();
       }, delay);
     }
 
-    function connectWebSocket(): void {
+    async function connectWebSocket(): Promise<void> {
       if (disposed) {
         return;
       }
 
       socketAttempt += 1;
       const attempt = socketAttempt;
+
+      // A reconnect (anything past the first attempt) may follow the transport session having
+      // expired or been invalidated server-side (TTL, kill-switch key rotation, node restart) — the
+      // module-scoped session in transport.ts only ever gets refreshed by a REST call's own
+      // decrypt-failure/401 retry, which the WebSocket path never triggers. Without refreshing here,
+      // `wsUrl` would keep sending a dead `?enc=<sid>`: under `required` mode the server refuses the
+      // connection outright (an unrecoverable reconnect loop), and under `optional` mode the socket
+      // opens unsealed while the client still expects sealed frames, so every inbound frame fails to
+      // decrypt and is silently dropped (docs/08). Best-effort: on any failure, fall through and try
+      // to connect anyway — the existing reconnect loop already handles a connection that still can't
+      // succeed.
+      if (attempt > 1 && config) {
+        await ensureSession(
+          config.networkConfig.transportEncryption,
+          config.networkConfig.transportPublicKey,
+        ).catch(() => undefined);
+
+        if (disposed || attempt !== socketAttempt) {
+          return;
+        }
+      }
+
       const nextSocket = new WebSocket(wsUrl(socketUrl));
       socket = nextSocket;
       setConnection("connecting");
@@ -1499,7 +1521,7 @@ function LoamApp() {
       };
     }
 
-    connectWebSocket();
+    void connectWebSocket();
 
     return () => {
       disposed = true;

@@ -105,7 +105,7 @@ describe("transport", () => {
       expect(getSession()).toBeUndefined();
     });
 
-    it("performs a real handshake against the given config host key and establishes a session", async () => {
+    it("optional mode performs a real handshake against the config host key when no QR key is present", async () => {
       const host = createTransportIdentity();
       const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
         const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
@@ -113,13 +113,50 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
 
       const session = getSession();
       expect(session).toBeDefined();
       expect(session?.hostPublicKey).toBe(host.publicKey);
       expect(session?.sessionId).toBe("sess-1");
       expect(getHostKeyMismatch()).toBe(false);
+    });
+
+    it("required mode NEVER falls back to the config host key — only a QR-delivered key is trusted (docs/08)", async () => {
+      // A MITM node can advertise any `transportPublicKey` it likes over `/api/config` — that channel
+      // isn't out-of-band-authenticated. If `required` mode trusted it as a fallback, an active
+      // attacker could hand out its own key and defeat the entire point of requiring the QR. This is
+      // the regression test for that: even with a configHostKey present, no QR key means no session.
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async () => {
+        throw new Error("must not attempt a handshake without a QR-delivered key in required mode");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(ensureSession("required", host.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
+
+      expect(getSession()).toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("required mode DOES establish a session once a QR key is available, ignoring a disagreeing config key", async () => {
+      const host = createTransportIdentity();
+      const impostor = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        // The server side only knows about `host`'s keypair — proof the QR key (not the impostor
+        // config key) is what actually gets used for the handshake.
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", impostor.publicKey);
+
+      const session = getSession();
+      expect(session?.hostPublicKey).toBe(host.publicKey);
+      expect(getHostKeyMismatch()).toBe(true);
     });
 
     it("prefers a QR-delivered (#k=) key over the config key and flags a mismatch when they disagree", async () => {
@@ -187,7 +224,7 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
       const response = await encryptedFetch("POST", "/api/messages", { text: "hello" });
 
       expect(capturedRequestBody).toBeDefined();
@@ -235,7 +272,7 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
       expect(handshakeCalls).toBe(1);
 
       const response = await encryptedFetch("POST", "/api/messages", { text: "hi" });
@@ -265,7 +302,7 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
       expect(handshakeCalls).toBe(1);
 
       const response = await encryptedFetch("GET", "/api/channels");
@@ -297,12 +334,98 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
 
       await expect(encryptedFetch("GET", "/api/channels")).rejects.toThrow("Transport session expired");
 
       expect(contentCalls).toBe(2);
       expect(handshakeCalls).toBe(2);
+    });
+
+    it("does NOT retry a decrypt failure on a mutating method — the server already applied it (docs/08)", async () => {
+      // Unlike a 401 (refused before the handler ran), a response claiming `x-loam-enc: 1` means the
+      // server's handler already executed and produced a reply — we just can't read it back. Retrying
+      // a POST/PATCH/DELETE here would silently re-send (and the server would re-apply) the same
+      // mutation. Only safe (GET/HEAD) methods may retry that case; this is the regression test.
+      const host = createTransportIdentity();
+      let contentCalls = 0;
+      let handshakeCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          handshakeCalls += 1;
+          return handshakeResponder(host)(url, init);
+        }
+
+        contentCalls += 1;
+        return new Response(JSON.stringify({ enc: "not-a-real-sealed-payload" }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+
+      await expect(encryptedFetch("POST", "/api/messages", { text: "hi" })).rejects.toThrow(
+        "Transport session expired",
+      );
+
+      // No retry at all: one content attempt, no additional (re-handshake) call.
+      expect(contentCalls).toBe(1);
+      expect(handshakeCalls).toBe(1);
+    });
+  });
+
+  describe("mutations always carry a sealed envelope, even with no logical body (docs/08)", () => {
+    it("seals an empty envelope for a bodyless mutation (POST/DELETE) under a live session", async () => {
+      const host = createTransportIdentity();
+      let capturedBody: unknown;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+
+        capturedBody = init.body;
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      await encryptedFetch("POST", "/api/admin/sync/run", undefined);
+
+      // A plaintext-injected mutation body is rejected server-side unless it's `{ enc }` — a bodyless
+      // mutation must still carry a (empty) envelope, never a bare absent body, to pass that gate.
+      expect(typeof capturedBody).toBe("string");
+      const wire = JSON.parse(capturedBody as string) as { enc: string };
+      expect(wire.enc).toBeTypeOf("string");
+
+      const session = getSession();
+      const opened = openTransport(session!.key, wire.enc, "POST /api/admin/sync/run");
+      expect(opened).toBe("");
+    });
+
+    it("keeps a bodyless GET a pure passthrough under a live session (no envelope needed)", async () => {
+      const host = createTransportIdentity();
+      let capturedBody: unknown;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+
+        capturedBody = init.body;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      await encryptedFetch("GET", "/api/channels");
+
+      expect(capturedBody).toBeUndefined();
     });
   });
 
@@ -319,7 +442,7 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
 
       expect(wsUrl("ws://host/ws")).toBe(`ws://host/ws?enc=${encodeURIComponent("sess-1")}`);
       expect(wsUrl("ws://host/ws?foo=bar")).toBe(`ws://host/ws?foo=bar&enc=${encodeURIComponent("sess-1")}`);
@@ -340,7 +463,7 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
       const key = getSession()?.key;
       expect(key).toBeDefined();
 
@@ -356,7 +479,7 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
       expect(openWsFrame("not a valid sealed frame")).toBeNull();
     });
   });
@@ -376,7 +499,7 @@ describe("transport", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await ensureSession("required", host.publicKey);
+      await ensureSession("optional", host.publicKey);
       expect(fingerprint()).toBe(fingerprint(host.publicKey));
     });
   });
