@@ -229,8 +229,16 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   session; global `onRequest`/`preValidation`/`onSend` hooks transparently decrypt request bodies +
   encrypt responses (aad `METHOD url`), and WS frames are sealed (aad `"ws"`) for `/ws?enc=<sid>`. The
   client routes all fetches/WS through `apps/client/src/lib/transport.ts`; `off` is a pure passthrough.
-  Bodies + WS frames are encrypted; GET paths/queries + image bytes stay visible (Layer-1 scope). This
-  is the axis that now distinguishes the `open`/`standard`/`hardened` profiles.
+  Bodies + WS frames are encrypted. **Anti-replay:** each sealed REST request carries a per-session
+  monotonic sequence inside its `{ s, b }` envelope; the server enforces a DTLS-style sliding window
+  (`TRANSPORT_REPLAY_WINDOW`), 409 on replay/out-of-window. **Path-hiding tunnel (`required` mode):** the
+  client tunnels every request through an opaque `POST /api/transport/tunnel` (sealed `{ m, p, body }`),
+  re-dispatched server-side via `server.inject` (caller's cookie + an unforgeable per-boot internal
+  token, rate-limit-exempt) and the response sealed back — so paths/queries are hidden too. `optional`
+  mode keeps per-route body sealing (paths visible). Remaining Layer-1 item: image BYTES still served in
+  clear (they render via `<img src>`; the tunnel carries binary losslessly, so wiring images through it
+  into `blob:` URLs is the documented next step — docs/08). This is the axis that now distinguishes the
+  `open`/`standard`/`hardened` profiles.
 - **REST endpoints**: `GET /api/health` (liveness, mints no identity — the Android launcher probes
   this so it can't consume the `firstUser` admin grant), `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,

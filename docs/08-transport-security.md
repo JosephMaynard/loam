@@ -15,11 +15,19 @@
 > per-session monotonic sequence number *inside* its authenticated envelope, and the server enforces a
 > DTLS-style sliding window (`TRANSPORT_REPLAY_WINDOW`), so a captured ciphertext replayed within the
 > session's lifetime is refused (409) before its handler runs — a duplicate/out-of-window sequence is
-> rejected while modest reordering/concurrency is tolerated. **Remaining Layer-1 scope (documented
-> below):** request/response BODIES + WS frames are encrypted; GET request paths + query strings and
-> image bytes remain visible metadata — the path-hiding tunnel + image encryption are the v2 follow-up
-> (in progress). (WS frames aren't sequence-numbered: a replayed server→client frame is idempotent
-> client-side — every event is upserted by id — so it has no effect.)
+> rejected while modest reordering/concurrency is tolerated. **Path-hiding tunnel is now built:** in
+> `required` mode the client sends every post-handshake request as an opaque `POST /api/transport/tunnel`
+> whose sealed body is `{ m, p, body }`; the server re-dispatches it internally (`server.inject`, with
+> the caller's cookie + an unforgeable per-boot internal token) and seals the `{ status, contentType,
+> bodyB64 }` response back — so the real method, path/query (a search term, which channel is read), and
+> response body are all ciphertext; only `POST /api/transport/tunnel` is on the wire. `optional` mode
+> keeps the lighter per-route body sealing (path visible). **Remaining v2 item:** image BYTES
+> (`/api/avatars`, `/api/attachments`) are still served in clear even in `required` mode, because they
+> render via `<img src>` which can't carry the session header — the tunnel already proves it carries
+> binary losslessly (base64 body), so the remaining work is purely client-side: fetch images through the
+> tunnel into `blob:` object URLs (with an `imageId → objectURL` cache, since avatars render constantly)
+> and swap the `<img src>` in `Avatar`/the attachment grid. (WS frames aren't sequence-numbered: a
+> replayed server→client frame is idempotent client-side — every event is upserted by id.)
 
 
 ## The problem
