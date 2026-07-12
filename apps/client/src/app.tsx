@@ -877,7 +877,11 @@ function LoamApp() {
       // local purge below is the part that actually matters and must always run (docs/15 #4).
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      await fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal: controller.signal })
+      // Route through `encryptedFetch`, not a bare `fetch`: under `required` transport mode an
+      // unsealed POST is refused (401) and the session would never actually be revoked — the wipe
+      // would silently leave the server-side identity alive. `encryptedFetch` seals it under the
+      // active session (bodyless → empty envelope); still best-effort, so the local purge always runs.
+      await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })
         .catch(() => {
           // best effort — the local purge below still runs
         })
