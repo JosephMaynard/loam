@@ -235,10 +235,11 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   client tunnels every request through an opaque `POST /api/transport/tunnel` (sealed `{ m, p, body }`),
   re-dispatched server-side via `server.inject` (caller's cookie + an unforgeable per-boot internal
   token, rate-limit-exempt) and the response sealed back — so paths/queries are hidden too. `optional`
-  mode keeps per-route body sealing (paths visible). Remaining Layer-1 item: image BYTES still served in
-  clear (they render via `<img src>`; the tunnel carries binary losslessly, so wiring images through it
-  into `blob:` URLs is the documented next step — docs/08). This is the axis that now distinguishes the
-  `open`/`standard`/`hardened` profiles.
+  mode keeps per-route body sealing (paths visible). **Image encryption** (required mode): avatar/
+  attachment routes are no longer exempt, so a direct `<img>` GET is 401'd — the client fetches images
+  through the tunnel (`encryptedImageUrl`/`useEncryptedImage` → cached `blob:` URL); optional/off serve
+  images in clear. So required mode leaves only "a tunnel request happened" + ciphertext size/timing as
+  wire metadata. This is the axis that now distinguishes the `open`/`standard`/`hardened` profiles.
 - **REST endpoints**: `GET /api/health` (liveness, mints no identity — the Android launcher probes
   this so it can't consume the `firstUser` admin grant), `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
