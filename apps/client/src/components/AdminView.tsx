@@ -21,6 +21,7 @@ import { encryptedFetch } from "../lib/transport";
 import { AddSyncPeerControl } from "./AddSyncPeerControl";
 import { AdminChannelsPanel } from "./AdminChannelsPanel";
 import { GettingStartedPanel } from "./GettingStartedPanel";
+import { LlmPanel } from "./LlmPanel";
 import { MeshPanel } from "./MeshPanel";
 import { NavLink } from "./NavLink";
 import { NodeLinkControl } from "./NodeLinkControl";
@@ -447,74 +448,13 @@ export function AdminView({
               </label>
             ))}
           </div>
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.llmEyebrow")}</p>
-              <h2>{t("admin.llmHeading")}</h2>
-            </div>
-            <label className="admin-toggle">
-              <input
-                checked={adminConfig.llm.ollama.enabled}
-                disabled={saving}
-                onInput={(event) => setOllama({ enabled: event.currentTarget.checked })}
-                type="checkbox"
-              />
-              {t("admin.llmEnable")}
-            </label>
-            <label>
-              {t("admin.llmBaseUrl")}
-              <input
-                disabled={saving}
-                onInput={(event) => setOllama({ baseUrl: event.currentTarget.value })}
-                value={adminConfig.llm.ollama.baseUrl}
-              />
-            </label>
-            <label>
-              {t("admin.llmModel")}
-              <input
-                disabled={saving}
-                onInput={(event) => setOllama({ model: event.currentTarget.value })}
-                value={adminConfig.llm.ollama.model}
-              />
-            </label>
-            <label>
-              {t("admin.llmBotName")}
-              <input
-                disabled={saving}
-                maxLength={80}
-                onInput={(event) => setOllama({ botDisplayName: event.currentTarget.value })}
-                value={adminConfig.llm.ollama.botDisplayName}
-              />
-            </label>
-            <label>
-              {t("admin.llmSystemPrompt")}
-              <textarea
-                disabled={saving}
-                onInput={(event) => setOllama({ systemPrompt: event.currentTarget.value || undefined })}
-                rows={3}
-                value={adminConfig.llm.ollama.systemPrompt ?? ""}
-              />
-            </label>
-            <label className="admin-toggle">
-              <input
-                checked={adminConfig.llm.onDevice.enabled}
-                disabled={saving}
-                onInput={(event) => setOnDevice({ enabled: event.currentTarget.checked })}
-                type="checkbox"
-              />
-              {t("admin.llmOnDeviceEnable")}
-            </label>
-            <label>
-              {t("admin.llmOnDeviceModel")}
-              <input
-                disabled={saving || !adminConfig.llm.onDevice.enabled}
-                maxLength={120}
-                onInput={(event) => setOnDevice({ model: event.currentTarget.value || undefined })}
-                value={adminConfig.llm.onDevice.model ?? ""}
-              />
-            </label>
-            <p className="form-note">{t("admin.llmOnDeviceNote")}</p>
-          </div>
+          <LlmPanel
+            onDevice={adminConfig.llm.onDevice}
+            ollama={adminConfig.llm.ollama}
+            onOllamaChange={setOllama}
+            onOnDeviceChange={setOnDevice}
+            saving={saving}
+          />
           <div className="profile-panel">
             <div>
               <p className="eyebrow">{t("admin.privacyEyebrow")}</p>
