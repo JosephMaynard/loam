@@ -28,6 +28,9 @@ type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 const cleanups: (() => Promise<void> | void)[] = [];
 
 afterEach(async () => {
+  // Restore real timers before tearing anything down, so a test that installed fake timers can't
+  // leave `app.close()` (which awaits Fastify shutdown) or the next test running on a frozen clock.
+  vi.useRealTimers();
   while (cleanups.length) {
     await cleanups.pop()?.();
   }
@@ -655,10 +658,14 @@ describe("panic endpoint", () => {
 
 describe("message retention (ephemeral messages)", () => {
   it("reaps messages older than the configured TTL and keeps newer ones", async () => {
-    // Generous margins keep this deterministic on slow CI: the old message is ~700ms old at reap
-    // time (TTL 500ms) while the fresh one is only as old as the two intervening inject calls.
+    // Fake timers make the age boundary exact and instant (was a real ~700ms sleep): the old
+    // message is posted, the clock jumps a full TTL past its `createdAt`, then the fresh one is
+    // posted so it sits safely inside the window while the old one falls outside it. Fake only
+    // `Date` — the reaper's cutoff is the only clock this cares about, and faking the whole event
+    // loop would deadlock `server.inject` (it needs real setImmediate/timers).
     const app = await makeApp({ retention: { messageTtlMs: 500 } });
     const session = await newSession(app);
+    vi.useFakeTimers({ toFake: ["Date"] });
 
     const oldPost = await app.server.inject({
       method: "POST",
@@ -668,7 +675,7 @@ describe("message retention (ephemeral messages)", () => {
     });
     expect(oldPost.statusCode).toBe(201);
 
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await vi.advanceTimersByTimeAsync(700);
 
     const freshPost = await app.server.inject({
       method: "POST",
@@ -707,6 +714,8 @@ describe("message retention (ephemeral messages)", () => {
   it("applies a TTL set via the admin config API and clears it with null", async () => {
     const app = await makeApp();
     const admin = await newSession(app);
+    // Fake only `Date` (see the reap-and-keep test): faking timers wholesale would hang inject.
+    vi.useFakeTimers({ toFake: ["Date"] });
 
     await app.server.inject({
       method: "POST",
@@ -723,7 +732,8 @@ describe("message retention (ephemeral messages)", () => {
     });
     expect(patch.statusCode).toBe(200);
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Advance past the 1ms TTL so the message is reliably expired (was a real 10ms sleep).
+    await vi.advanceTimersByTimeAsync(10);
     app.reapExpiredMessages();
     expect(app.store.loadMessages()).toEqual([]);
 
@@ -2884,6 +2894,8 @@ describe("review hardening fixes", () => {
   it("retention reaper cascades an expired thread root to its replies and reactions", async () => {
     const app = await makeApp({ retention: { messageTtlMs: 500 } });
     const session = await newSession(app);
+    // Fake only `Date` (see the reap-and-keep test): faking timers wholesale would hang inject.
+    vi.useFakeTimers({ toFake: ["Date"] });
 
     const root = await app.server.inject({
       method: "POST",
@@ -2893,7 +2905,9 @@ describe("review hardening fixes", () => {
     });
     const rootId = (root.json() as { message: { id: string } }).message.id;
 
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    // Jump a full TTL past the root's `createdAt` (was a real 700ms sleep); the reply + reaction
+    // added afterwards are young, so only the cascade — not their own age — can reap them.
+    await vi.advanceTimersByTimeAsync(700);
 
     // Young reply + reaction attached to the now-expired root.
     await app.server.inject({
