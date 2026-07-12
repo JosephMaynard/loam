@@ -7,7 +7,9 @@ import { apiUrl, encryptedImageUrl, isTunnelActive } from "./transport";
  * just the same-origin URL, returned synchronously so there's no flash. When the tunnel is active
  * (`required` mode) the raw endpoint won't serve a direct `<img>` GET, so the bytes are fetched through
  * the tunnel and a `blob:` URL is swapped in once ready — `undefined` until then, so nothing renders a
- * broken image. `undefined` in → `undefined` out.
+ * broken image. If the tunnelled fetch FAILS, `encryptedImageUrl` fails closed with `""` (never the raw
+ * plaintext URL, docs/20); we map that to `undefined` so no `src` is set — an empty `src` would make the
+ * browser re-request the current page URL. `undefined` in → `undefined` out.
  *
  * @param path - The server-relative image path (e.g. `/api/avatars/<id>.webp`), or `undefined`.
  * @returns The `src` to use, or `undefined` while a tunnelled image is still resolving.
@@ -32,7 +34,8 @@ export function useEncryptedImage(path: string | undefined): string | undefined 
     setSrc(undefined);
     void encryptedImageUrl(path).then((resolved) => {
       if (active) {
-        setSrc(resolved);
+        // Fail-closed "" → undefined: never set an empty src (the browser would re-request the page URL).
+        setSrc(resolved || undefined);
       }
     });
 

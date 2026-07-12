@@ -1,7 +1,13 @@
 # 20 — Binding identity to the transport session (fixing the plaintext-cookie flaw)
 
-> **Status: APPROVED FOR IMPLEMENTATION (v3, simplified).** Incorporates two rounds of external design
-> review; migration/legacy-admin-reclaim machinery **cut** (no users to migrate — clean break).
+> **Status: BUILT & TESTED (v3, simplified) — pending external implementation review.** Server + client
+> landed on `feat/transport-auth-binding` (server 238 tests, client 177, full build + app typecheck
+> green): session `authMode`, the separate `transport_identity_tokens` namespace, `GET /api/bootstrap`,
+> the sealed `POST /api/session/resume` + `/api/session/logout`, tunnel-only content with identity via a
+> trusted internal `x-loam-user`, the reflection-safe WS challenge + connection-bound frames, response
+> `{s,m,p}` binding, and the §8 lifecycle revocations. The §14 acceptance suite is implemented. Incorporates
+> two rounds of external design review; migration/legacy-admin-reclaim machinery **cut** (no users to
+> migrate — clean break).
 > Fixes the **Critical** finding: the `loam_session` **cookie** (the app's bearer credential) travels as
 > a plaintext HTTP header **outside the AEAD channel**, so a LAN attacker steals it and impersonates the
 > victim (up to admin). v3 settles the four pre-implementation blockers from the second review: a precise
