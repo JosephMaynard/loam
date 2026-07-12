@@ -1,8 +1,12 @@
 # 16 — Opportunistic mesh / delay-tolerant delivery (the "carry my message" evolution)
 
-> **Status: Phases 0–2 BUILT & TESTED; Phase 3 is the remaining hardware step.** The sealed-mailbox
-> A→C→B delivery works today over the existing sync transport (configured peers / courier). The rest
-> of this doc is the full design; the box below records what actually shipped and where it differs.
+> **Status: Phases 0–2 BUILT & TESTED; Phase 3 SCAFFOLDED (native-unverified).** The sealed-mailbox
+> A→C→B delivery works today over the existing sync transport (configured peers / courier). The
+> Phase-3 opportunistic transport (BLE discovery + Wi-Fi Aware bulk transfer) is now scaffolded end to
+> end — native Expo module, TS transport abstraction, launcher courier, and two loopback bridge
+> endpoints — but the Kotlin has **not** been compiled or run against radios (CI has none). See
+> **docs/17** for the exact real-device test procedure and every stub/risk. The rest of this doc is the
+> full design; the box below records what actually shipped and where it differs.
 
 ## Implementation status (v2 — contact-based secure addressing, shipped)
 
@@ -86,11 +90,20 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    `sync.token` peer admission is already built; mutual/rotating peer auth is the remaining hardening.)
 3. **AAD** binds `toTag`+`ttlExpiresAt` (both immutable); the original hop budget is bounded by the
    schema max rather than the signature (v2 refinement).
-4. **Phase 3 (opportunistic transport — BLE discovery + Wi-Fi Aware)** is **not built**: it needs
-   physical Android devices to build+verify, and adding unverified native BLE/Wi-Fi-Aware code would
-   jeopardize the working APK (the same principled call as the on-device-LLM native inference). The
-   sealed layer already relays over **any** sync transport it's given (configured peers, the sequential
-   courier), so Phase 3 is purely *automation of discovery*, not a prerequisite for the feature to work.
+4. **Phase 3 (opportunistic transport — BLE discovery + Wi-Fi Aware)** is now **scaffolded, not
+   verified** (was "not built"). What landed: a new `apps/app/modules/loam-mesh-transport` Expo module
+   (Kotlin BLE advertise/scan + a fixed LOAM GATT service, Wi-Fi Aware publish/subscribe + a data-path
+   socket, a BLE-only chunked *fallback* left as a marked TODO), a TS `MeshTransport` abstraction +
+   RN↔launcher courier bridge (`apps/app/src/mesh/`), and two **loopback-only** server endpoints
+   (`GET /api/mesh/outbound` + `POST /api/mesh/inbound`) that let the in-process launcher shuttle sealed
+   blobs between the radio and the existing relay — a radio-fed mirror of the `/api/sync/*` sealed path,
+   reusing `acceptSealedFromPeer` verbatim so no new crypto/relay trust is introduced. The bridge
+   endpoints are covered by desktop tests (A→B, A→C→B carrier-can't-read, idempotent re-delivery,
+   404-when-off). The **Kotlin is native-unverified** (no radios in CI/emulator — the same principled
+   call as the on-device-LLM inference stub); a real-device build is expected to need adjustments to the
+   Wi-Fi Aware data-path handshake + port exchange, and to finish the BLE fallback. Full procedure +
+   risk list: **docs/17**. As before, the sealed layer already relays over **any** transport it's given,
+   so Phase 3 is *automation of discovery*, not a prerequisite for the feature to work.
 5. **Tombstone GC** — expired-sealed tombstones aren't yet horizon-GC'd (matches docs/11's existing
    unbounded-tombstone behaviour); the bounded-GC in §3 is a follow-up.
 6. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
@@ -472,13 +485,21 @@ order. **A later phase must never ship before its predecessor's gate is green.**
 - **Gate:** simulated N-node relay delivers and then garbage-collects; storage stays bounded; no
   resurrection of delivered/expired mail; DoS/spam bounds tested.
 
-### Phase 3 — Opportunistic transport, Android-first *(hardware; native)*
+### Phase 3 — Opportunistic transport, Android-first *(hardware; native)* — **SCAFFOLDED**
 - **Goal:** phones discover each other and sync automatically when near, foreground.
 - **Do:** BLE beacon for "is this a LOAM peer + which group?" discovery/wake, then a Wi-Fi Aware /
   Direct / hotspot handoff for the bulk sync (runs the Phase 1–2 protocol). Build on the existing
   `LoamHostService` foreground service + LocalOnlyHotspot native module. **Android only** to start.
-- **Gate:** two physical Android phones, app foregrounded, auto-discover and sync a sealed message
-  with no user action beyond being in range. **Requires real-device testing — no emulator substitute.**
+- **Landed (scaffold):** `apps/app/modules/loam-mesh-transport` (BLE advertise/scan + GATT service,
+  Wi-Fi Aware publish/subscribe + data-path socket, BLE-only chunked fallback TODO), the TS
+  `MeshTransport` + `mesh-courier` bridge (`apps/app/src/mesh/`), the launcher courier brain
+  (`nodejs-project-template/main.js`), and the loopback `GET /api/mesh/outbound` / `POST /api/mesh/inbound`
+  endpoints. Manifest perms (BLUETOOTH_ADVERTISE/SCAN/CONNECT + optional BLE/Wi-Fi-Aware features) via
+  `with-loam-host.js`. Bridge endpoints are desktop-tested; the native transport is **unverified** (no
+  radios in CI). See **docs/17**.
+- **Gate (NOT YET MET — needs hardware):** two physical Android phones, app foregrounded, auto-discover
+  and sync a sealed message with no user action beyond being in range. **Requires real-device testing —
+  no emulator substitute.** docs/17 is the procedure that closes this gate.
 
 ### Phase 4 — Background duty-cycling + battery *(hardware; the hard part)*
 - **Goal:** it works while the phone is used normally, without wrecking the battery.

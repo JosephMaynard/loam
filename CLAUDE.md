@@ -38,9 +38,17 @@ compromised contact that holds the token can still derive and correlate the tag)
 server-side** (LOAM's host is already trusted for its local users, so the E2E guarantee is against
 carrier *nodes*), rides the existing sync transport, and doesn't touch public sync. An operator turns
 it on and tunes it (relay/TTL/hop/caps) from the **admin UI Mesh panel** (`PATCH /api/admin/config`).
-**Not built:** Phase 3 (BLE/Wi-Fi-Aware opportunistic transport — needs physical devices), an in-band
-contact-request flow, sync peer authentication (`sync.token`), group fan-out, and tombstone GC. Do not
-rush the unbuilt crypto/transport — that's the documented way comparable apps (Bridgefy, FireChat) failed.
+**Phase 3 (opportunistic transport) is SCAFFOLDED, native-unverified** (docs/16 status, docs/17): a new
+`apps/app/modules/loam-mesh-transport` Expo module (Kotlin BLE advertise/scan + a fixed LOAM GATT
+service, Wi-Fi Aware publish/subscribe + data-path socket, BLE-only chunked fallback = TODO), a TS
+`MeshTransport` + `mesh-courier` RN↔launcher bridge (`apps/app/src/mesh/`), the launcher courier brain
+(`nodejs-project-template/main.js`), and two **loopback-only** server endpoints (`GET /api/mesh/outbound`,
+`POST /api/mesh/inbound`) that shuttle sealed blobs between the radio and the existing relay — a radio-fed
+mirror of `/api/sync/*` reusing `acceptSealedFromPeer` (desktop-tested; the Kotlin has NOT been compiled
+against radios — no CI hardware). **Still not built:** the Wi-Fi Aware handshake/port-exchange finish +
+BLE fallback + Phase 4 background/battery duty-cycling (all real-device work), an in-band contact-request
+flow, group fan-out, and tombstone GC. Do not rush the unbuilt crypto/transport — that's the documented
+way comparable apps (Bridgefy, FireChat) failed.
 
 ## Layout
 
