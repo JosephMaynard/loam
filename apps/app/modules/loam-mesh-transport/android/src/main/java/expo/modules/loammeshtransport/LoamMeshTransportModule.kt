@@ -62,7 +62,7 @@ class LoamMeshTransportModule : Module() {
       val context = safeContext() ?: return@AsyncFunction promise.resolve(caps(false, false))
       val bleOk = ensureBle(context).isSupported()
       val awareOk =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
           context.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_AWARE) &&
           ensureAware(context)?.isSupported() == true
       promise.resolve(caps(bleOk, awareOk))
@@ -138,8 +138,8 @@ class LoamMeshTransportModule : Module() {
   }
 
   private fun ensureAware(context: Context): MeshWifiAwareController? {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-      return null
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      return null // Wi-Fi Aware data paths need API 29+; older devices are BLE-only
     }
     if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_AWARE)) {
       return null // fall back to BLE-only (with the documented chunked-transfer TODO)

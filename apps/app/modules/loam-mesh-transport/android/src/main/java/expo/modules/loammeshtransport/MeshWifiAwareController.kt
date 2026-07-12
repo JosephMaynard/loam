@@ -41,7 +41,9 @@ import java.util.concurrent.Executors
  * initiating), the port-exchange over the message channel, and per-OEM Aware quirks. Guarded on
  * [WifiAwareManager.isAvailable] and `FEATURE_WIFI_AWARE`; when absent the module falls back to BLE.
  */
-@RequiresApi(Build.VERSION_CODES.O)
+// Gated on API 29 (Q): WifiAwareManager itself is API 26, but the data-path primitives this uses
+// (WifiAwareNetworkSpecifier) are API 29+. Pre-29 devices fall back to BLE.
+@RequiresApi(Build.VERSION_CODES.Q)
 internal class MeshWifiAwareController(
   private val context: Context,
   private val listener: Listener,
