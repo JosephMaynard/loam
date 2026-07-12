@@ -1197,15 +1197,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return session.key;
   }
 
-  /** Paths reachable unencrypted even under `required` mode: the handshake/config/health bootstrap and
-   * the static app shell. Everything else must present a transport session when the node requires it. */
-  function isTransportBootstrapPath(url: string): boolean {
-    const path = url.split("?", 1)[0];
+  /** Whether this request must present a transport session under `required` mode. Matched on the
+   * RESOLVED route pattern (`routeOptions.url`), NOT the raw request URL — Fastify percent-decodes the
+   * path before routing, so string-matching the raw URL let `/%61pi/users` (→ `/api/users`) slip past
+   * enforcement and be served in cleartext. Only non-bootstrap `/api/` content routes need a session;
+   * the static app shell, `/ws` (enforced separately via `?enc=`), unmatched 404s, and the
+   * handshake/config/health bootstrap endpoints are all exempt. */
+  function requiresTransportSession(request: FastifyRequest): boolean {
+    const routeUrl = request.routeOptions?.url;
+    if (!routeUrl || !routeUrl.startsWith("/api/")) {
+      return false;
+    }
     return (
-      path === "/api/config" ||
-      path === "/api/transport/handshake" ||
-      path === "/api/health" ||
-      !path.startsWith("/api/")
+      routeUrl !== "/api/config" && routeUrl !== "/api/transport/handshake" && routeUrl !== "/api/health"
     );
   }
 
@@ -3395,7 +3399,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const key = transportKeyForRequest(request);
     if (key) {
       transportRequestKeys.set(request, key);
-    } else if (mode === "required" && !isTransportBootstrapPath(request.url)) {
+    } else if (mode === "required" && requiresTransportSession(request)) {
       // No valid transport session on a node that requires one — refuse, but keep bootstrap open so a
       // fresh client can fetch config + handshake first.
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));

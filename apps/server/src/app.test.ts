@@ -4359,6 +4359,15 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     const bare = await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: user.cookie } });
     expect(bare.statusCode).toBe(401);
 
+    // A percent-encoded `/api/` prefix must NOT bypass enforcement: `/%61pi/users` routes to
+    // `/api/users`, so matching the RESOLVED route (not the raw URL) still refuses it (regression).
+    const encodedBypass = await app.server.inject({
+      method: "GET",
+      url: "/%61pi/users",
+      headers: { cookie: user.cookie },
+    });
+    expect(encodedBypass.statusCode).toBe(401);
+
     // With a session it works (and the response comes back sealed).
     const session = await openSession(app);
     const ok = await app.server.inject({
