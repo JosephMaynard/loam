@@ -42,12 +42,16 @@ export class TransportNeedsQrError extends Error {
   }
 }
 
-/** The live transport session: a handshake-derived key, its server-side session id, and the host
- * public key it was derived against (for the fingerprint UI). */
+/** The live transport session: a handshake-derived key, its server-side session id, the host public
+ * key it was derived against (for the fingerprint UI), and a monotonic per-session request counter.
+ * `seq` is bumped for every sealed REST request and carried inside the authenticated envelope so the
+ * server can reject replays within the session's lifetime (docs/08); it resets to 0 on every fresh
+ * handshake because the server starts each session's replay window empty. */
 interface Session {
   sessionId: string;
   key: string;
   hostPublicKey: string;
+  seq: number;
 }
 
 let session: Session | undefined;
@@ -169,7 +173,7 @@ async function handshake(hostPublicKey: string): Promise<void> {
     hostEphemeralPublic: parsed.data.hostEphemeralPublic,
   });
 
-  session = { sessionId: parsed.data.sessionId, key, hostPublicKey };
+  session = { sessionId: parsed.data.sessionId, key, hostPublicKey, seq: 0 };
 }
 
 /**
@@ -311,11 +315,20 @@ async function attemptFetch(
   // Every other method is ALWAYS sealed, even with an empty payload — the server (docs/08) requires a
   // sealed `{ enc }` body from any mutation presented under a live session, so a bodyless mutation
   // still needs an (empty) envelope to prove it actually went through the session.
+  //
+  // The sealed plaintext is a `{ s, b? }` envelope: `s` is this session's next monotonic sequence
+  // number (for the server's replay window) and `b` the actual body (omitted when there is none).
+  // `++active.seq` is atomic under JS's single thread, so concurrent in-flight requests each get a
+  // distinct, ever-increasing number.
   const requestBody =
     isSafe && body === undefined
       ? undefined
       : JSON.stringify({
-          enc: sealTransport(active.key, body === undefined ? "" : JSON.stringify(body), aad),
+          enc: sealTransport(
+            active.key,
+            JSON.stringify(body === undefined ? { s: ++active.seq } : { s: ++active.seq, b: body }),
+            aad,
+          ),
         });
 
   const response = await fetch(apiUrl(path), {

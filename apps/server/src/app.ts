@@ -836,10 +836,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // config table (encrypted at rest when the DB is), rotated by the kill switch. Its public key goes
   // in the join QR + NetworkConfig.
   let transportIdentity: TransportIdentity | undefined;
-  // Live transport sessions: sessionId → derived key + expiry. In-memory only; cleared by the kill
-  // switch. Ephemeral handshakes mean a lost entry just forces a re-handshake.
-  const transportSessions = new Map<string, { key: string; expiresAt: number }>();
+  // Live transport sessions: sessionId → derived key + expiry + anti-replay window. In-memory only;
+  // cleared by the kill switch. Ephemeral handshakes mean a lost entry just forces a re-handshake.
+  // `maxSeq`/`seen` implement a DTLS-style sliding replay window (docs/08): every sealed REST request
+  // carries a per-session monotonically increasing sequence number inside its authenticated envelope,
+  // and a captured ciphertext replayed within the session's 12h life is rejected because its sequence
+  // was already spent. `seen` holds only the sequence numbers still inside the window (pruned as it
+  // advances), so it stays bounded regardless of how long the session lives.
+  interface TransportSession {
+    key: string;
+    expiresAt: number;
+    maxSeq: number;
+    seen: Set<number>;
+  }
+  const transportSessions = new Map<string, TransportSession>();
   const TRANSPORT_SESSION_TTL_MS = 12 * 3_600_000;
+  // How far a sealed request's sequence number may lag `maxSeq` and still be accepted — i.e. how much
+  // reordering/concurrency the replay window tolerates. Browsers open only a handful of concurrent
+  // connections per origin, so real reordering is tiny; this is generous headroom. A sequence at or
+  // below `maxSeq - WINDOW` is refused as too old (indistinguishable from a replay of an evicted entry).
+  const TRANSPORT_REPLAY_WINDOW = 1_024;
   // Hard cap on live sessions: the handshake endpoint is deliberately unauthenticated (it's the
   // bootstrap step before any session exists), so without a real bound a flood of handshakes from many
   // IPs could grow this map without limit even though each IP is individually rate-limited.
@@ -847,6 +863,42 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Per-request session key, resolved once in onRequest and reused to decrypt the body (preValidation)
   // and encrypt the response (onSend). WeakMap so it's GC'd with the request — no manual cleanup.
   const transportRequestKeys = new WeakMap<FastifyRequest, string>();
+  // The resolved transport session for a request, so `preValidation` can run the anti-replay window
+  // against the same session `onRequest` authenticated. WeakMap → GC'd with the request.
+  const transportRequestSessions = new WeakMap<FastifyRequest, TransportSession>();
+
+  /**
+   * Anti-replay check for a sealed REST request's per-session sequence number (docs/08). Accepts a
+   * sequence exactly once, tolerating up to `TRANSPORT_REPLAY_WINDOW` of reordering/concurrency:
+   * a higher-than-seen sequence advances the window (and prunes entries that fall out of it); a
+   * sequence still inside the window is accepted only if unseen; anything at/below the window floor,
+   * a duplicate, or a non-positive/non-integer value is rejected. Returns `true` iff the request may
+   * proceed. Mutates `session.maxSeq`/`session.seen`.
+   */
+  function acceptTransportSeq(session: TransportSession, seq: number): boolean {
+    if (!Number.isInteger(seq) || seq < 1) {
+      return false;
+    }
+
+    if (seq > session.maxSeq) {
+      session.maxSeq = seq;
+      session.seen.add(seq);
+      const floor = seq - TRANSPORT_REPLAY_WINDOW;
+      for (const previous of session.seen) {
+        if (previous <= floor) {
+          session.seen.delete(previous);
+        }
+      }
+      return true;
+    }
+
+    if (seq <= session.maxSeq - TRANSPORT_REPLAY_WINDOW || session.seen.has(seq)) {
+      return false;
+    }
+
+    session.seen.add(seq);
+    return true;
+  }
   // Per-IP new-identity budget (RAM-only): bounds how many fresh anonymous users one address can mint
   // per window, so a client discarding its cookie can't grow the user table without limit. Pruned on
   // the reaper timer. On a LAN each device gets its own IP, so this reads as per-device.
@@ -1230,7 +1282,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /** The transport session key a request presented via a valid, unexpired `x-loam-enc` header (the
    * session id), or undefined. */
-  function transportKeyForRequest(request: FastifyRequest): string | undefined {
+  function transportSessionForRequest(request: FastifyRequest): TransportSession | undefined {
     const sid = request.headers["x-loam-enc"];
     if (typeof sid !== "string" || sid.length === 0) {
       return undefined;
@@ -1239,7 +1291,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!session || session.expiresAt <= Date.now()) {
       return undefined;
     }
-    return session.key;
+    return session;
   }
 
   /** The transport session key for a WebSocket connection, taken from the `?enc=<sid>` query (browsers
@@ -3496,10 +3548,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (mode === "off") {
       return;
     }
-    const key = transportKeyForRequest(request);
+    const activeSession = transportSessionForRequest(request);
     const presentedSessionId = request.headers["x-loam-enc"];
-    if (key) {
-      transportRequestKeys.set(request, key);
+    if (activeSession) {
+      transportRequestKeys.set(request, activeSession.key);
+      transportRequestSessions.set(request, activeSession);
     } else if (typeof presentedSessionId === "string" && presentedSessionId.length > 0) {
       // The client presented a transport session that is unknown/expired (server restart or 12h TTL).
       // Refuse with 401 in BOTH modes so its re-handshake path fires, rather than silently serving or
@@ -3525,11 +3578,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (opened === null) {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
+      // The sealed plaintext is a `{ s: <seq>, b?: <body> }` envelope (docs/08): `s` is a per-session
+      // monotonic sequence for replay protection, `b` the actual request body (omitted for a bodyless
+      // mutation). `s` lives INSIDE the AEAD, so it's authenticated — an attacker can't renumber a
+      // replay to dodge the window without breaking the tag.
+      let envelope: { s?: unknown; b?: unknown };
       try {
-        request.body = opened.length ? JSON.parse(opened) : undefined;
+        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown };
       } catch {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
+      const activeSession = transportRequestSessions.get(request);
+      if (!activeSession || typeof envelope.s !== "number" || !acceptTransportSeq(activeSession, envelope.s)) {
+        // Replayed, reordered beyond the window, or a missing/garbage sequence — refuse before the
+        // handler runs. 409 (not 401) so a legitimate client doesn't mistake it for an expired session
+        // and silently re-handshake+retry: a real client never reuses a sequence, so this fires only on
+        // a captured-and-replayed request (docs/08).
+        return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
+      }
+      request.body = envelope.b;
       return;
     }
     // A GET/HEAD may legitimately carry no body at all (response-only sealing) — nothing to enforce.
@@ -3660,6 +3727,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       transportSessions.set(sessionId, {
         key: accepted.sessionKey,
         expiresAt: Date.now() + TRANSPORT_SESSION_TTL_MS,
+        maxSeq: 0,
+        seen: new Set(),
       });
       return {
         sessionId,

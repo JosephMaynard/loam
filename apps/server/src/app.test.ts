@@ -4831,6 +4831,12 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     };
   }
 
+  /** Seal a request into the `{ s, b? }` envelope the server expects (docs/08), at an explicit
+   * sequence number so replay/ordering tests can control it. `body` omitted → a bodyless envelope. */
+  function sealRequest(key: string, seq: number, aad: string, body?: unknown): string {
+    return sealTransport(key, JSON.stringify(body === undefined ? { s: seq } : { s: seq, b: body }), aad);
+  }
+
   it("encrypts request bodies and responses transparently (content never on the wire)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
     const user = await newSession(app);
@@ -4844,7 +4850,7 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
       method,
       url,
       headers: { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" },
-      payload: { enc: sealTransport(session.key, JSON.stringify({ type: "channelPost", channelId: "general", body: secret }), aad) },
+      payload: { enc: sealRequest(session.key, 1, aad, { type: "channelPost", channelId: "general", body: secret }) },
     });
 
     expect(res.statusCode).toBe(201);
@@ -4971,9 +4977,62 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
       method: "POST",
       url: `/api/admin/users/${member.userId}/promote`,
       headers: { cookie: admin.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" },
-      payload: { enc: sealTransport(session.key, "", aad) },
+      payload: { enc: sealRequest(session.key, 1, aad) },
     });
     expect(res.statusCode).toBe(200);
+  });
+
+  it("rejects a replayed sealed request within the session window (anti-replay, docs/08)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    const aad = "POST /api/messages";
+    const headers = { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" };
+    // A captured ciphertext (fixed bytes) replayed verbatim reuses sequence 1.
+    const enc = sealRequest(session.key, 1, aad, { type: "channelPost", channelId: "general", body: "once" });
+
+    const first = await app.server.inject({ method: "POST", url: "/api/messages", headers, payload: { enc } });
+    expect(first.statusCode).toBe(201);
+    const replay = await app.server.inject({ method: "POST", url: "/api/messages", headers, payload: { enc } });
+    expect(replay.statusCode).toBe(409);
+    // The handler never ran the second time — exactly one message exists.
+    expect(app.store.loadMessages().filter((message) => "body" in message && message.body === "once")).toHaveLength(1);
+  });
+
+  it("accepts reordered sequences inside the window but refuses a duplicate (docs/08)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    const aad = "POST /api/messages";
+    const headers = { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" };
+    const send = (seq: number, body: string) =>
+      app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers,
+        payload: { enc: sealRequest(session.key, seq, aad, { type: "channelPost", channelId: "general", body }) },
+      });
+
+    expect((await send(3, "c")).statusCode).toBe(201); // advances the window to 3
+    expect((await send(1, "a")).statusCode).toBe(201); // older but unseen + within window → accepted
+    expect((await send(2, "b")).statusCode).toBe(201); // ditto
+    expect((await send(2, "again")).statusCode).toBe(409); // a now-seen sequence → refused
+  });
+
+  it("refuses a sealed request that carries no sequence number (docs/08)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    const aad = "POST /api/messages";
+    // A pre-anti-replay envelope (the raw body, no `s`) must be refused, not run.
+    const enc = sealTransport(session.key, JSON.stringify({ type: "channelPost", channelId: "general", body: "no seq" }), aad);
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: { enc },
+    });
+    expect(res.statusCode).toBe(409);
   });
 });
 

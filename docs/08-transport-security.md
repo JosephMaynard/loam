@@ -11,11 +11,15 @@
 > Gated by `security.transportEncryption` (`off` default / `optional` / `required`), which is now the
 > axis that distinguishes the `open`/`standard`/`hardened` profiles (the docs/09 gap). `required` mode
 > is deployable today: a client with no QR-delivered host key simply cannot connect, so there is no
-> silent downgrade to plaintext. **Layer-1 scope (documented below):** request/response BODIES + WS
-> frames are encrypted; GET request paths + query strings and image bytes remain visible metadata (the
-> tunnel + image encryption are v2); per-request replay protection is also not yet built (a captured
-> ciphertext could be replayed verbatim within its session lifetime) — a documented follow-up, not a
-> regression from today's guarantees.
+> silent downgrade to plaintext. **Anti-replay is now built:** every sealed REST request carries a
+> per-session monotonic sequence number *inside* its authenticated envelope, and the server enforces a
+> DTLS-style sliding window (`TRANSPORT_REPLAY_WINDOW`), so a captured ciphertext replayed within the
+> session's lifetime is refused (409) before its handler runs — a duplicate/out-of-window sequence is
+> rejected while modest reordering/concurrency is tolerated. **Remaining Layer-1 scope (documented
+> below):** request/response BODIES + WS frames are encrypted; GET request paths + query strings and
+> image bytes remain visible metadata — the path-hiding tunnel + image encryption are the v2 follow-up
+> (in progress). (WS frames aren't sequence-numbered: a replayed server→client frame is idempotent
+> client-side — every event is upserted by id — so it has no effect.)
 
 
 ## The problem

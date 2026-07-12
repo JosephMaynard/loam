@@ -239,7 +239,9 @@ describe("transport", () => {
         const aad = `${init.method} ${url}`;
         const opened = openTransport(sessionKeyOnServer!, wireBody.enc, aad);
         expect(opened).not.toBeNull();
-        expect(JSON.parse(opened!)).toEqual({ text: "hello" });
+        // The sealed plaintext is the `{ s, b }` anti-replay envelope: sequence 1 (first request on a
+        // fresh session) carrying the body under `b`.
+        expect(JSON.parse(opened!)).toEqual({ s: 1, b: { text: "hello" } });
 
         const sealedResponse = sealTransport(sessionKeyOnServer!, JSON.stringify({ id: "msg_1" }), aad);
         return new Response(JSON.stringify({ enc: sealedResponse }), {
@@ -254,6 +256,39 @@ describe("transport", () => {
 
       expect(capturedRequestBody).toBeDefined();
       expect(await response.json()).toEqual({ id: "msg_1" });
+    });
+
+    it("assigns a strictly increasing per-session sequence to each sealed request (anti-replay)", async () => {
+      const host = createTransportIdentity();
+      let serverKey: string | undefined;
+      const seqs: number[] = [];
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        const wire = JSON.parse(init.body as string) as { enc: string };
+        const opened = openTransport(serverKey!, wire.enc, `${init.method} ${url}`);
+        seqs.push((JSON.parse(opened!) as { s: number }).s);
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      await encryptedFetch("POST", "/api/messages", { n: 1 });
+      await encryptedFetch("POST", "/api/messages", { n: 2 });
+      await encryptedFetch("DELETE", "/api/messages/x");
+
+      expect(seqs).toEqual([1, 2, 3]);
     });
   });
 
@@ -429,7 +464,8 @@ describe("transport", () => {
 
       const session = getSession();
       const opened = openTransport(session!.key, wire.enc, "POST /api/admin/sync/run");
-      expect(opened).toBe("");
+      // A bodyless mutation still seals the `{ s }` anti-replay envelope (sequence only, no `b`).
+      expect(JSON.parse(opened!)).toEqual({ s: 1 });
     });
 
     it("keeps a bodyless GET a pure passthrough under a live session (no envelope needed)", async () => {
