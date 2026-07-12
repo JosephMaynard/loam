@@ -4884,14 +4884,15 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     });
     expect(encodedBypass.statusCode).toBe(401);
 
-    // Image endpoints are EXEMPT (a browser <img> can't send the header) — a missing avatar 404s, it
-    // is not 401'd, so a `required` node doesn't break every image.
+    // Image endpoints are NO LONGER exempt in `required` mode (docs/08 v2): a direct image GET can't
+    // carry the session header, so it's 401'd to force the client to fetch images through the tunnel
+    // (where the bytes come back sealed) instead of serving them in clear.
     const avatar = await app.server.inject({
       method: "GET",
       url: "/api/avatars/avt_deadbeefdeadbeef.webp",
       headers: { cookie: user.cookie },
     });
-    expect(avatar.statusCode).not.toBe(401);
+    expect(avatar.statusCode).toBe(401);
 
     // A presented-but-unknown/expired transport session id is refused (both modes) so the client
     // re-handshakes rather than the wire silently downgrading to plaintext.
@@ -5144,6 +5145,24 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     const res = await tunnel(app, session, 1, undefined, { m: "GET", p: "/api/users" });
     expect(res.statusCode).toBe(200);
     expect(res.headers["set-cookie"]).toBeDefined();
+  });
+
+  it("serves images only through the tunnel in required mode (image encryption, docs/08 v2)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    // A direct <img>-style GET can't carry the session header → refused, so bytes never serve in clear.
+    const direct = await app.server.inject({
+      method: "GET",
+      url: "/api/avatars/avt_missing.webp",
+      headers: { cookie: user.cookie },
+    });
+    expect(direct.statusCode).toBe(401);
+    // Through the tunnel it reaches the avatar route internally (404 for a missing file, NOT 401) —
+    // i.e. a real image would come back as sealed bytes.
+    const res = await tunnel(app, session, 1, user.cookie, { m: "GET", p: "/api/avatars/avt_missing.webp" });
+    expect(res.statusCode).toBe(200);
+    expect(openTunnel(session, res).status).toBe(404);
   });
 });
 

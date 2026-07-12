@@ -4,11 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   apiUrl,
   encryptedFetch,
+  encryptedImageUrl,
   ensureSession,
   fingerprint,
   getCachedHostPublicKey,
   getHostKeyMismatch,
   getSession,
+  isTunnelActive,
   openWsFrame,
   resetTransportStateForTests,
   SERVER_URL_KEY,
@@ -539,6 +541,27 @@ describe("transport", () => {
       expect(tunnelHits).toBe(1);
       expect(capturedInner).toEqual({ m: "GET", p: "/api/search?q=secret" });
       expect(await res.json()).toEqual({ ok: true, sawPath: "/api/search?q=secret" });
+    });
+  });
+
+  describe("encryptedImageUrl", () => {
+    it("is a raw same-origin passthrough when not tunnelling (no session)", async () => {
+      expect(isTunnelActive()).toBe(false);
+      expect(await encryptedImageUrl("/api/avatars/x.webp")).toBe("/api/avatars/x.webp");
+    });
+
+    it("reports the tunnel active only once a required-mode session exists", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      expect(isTunnelActive()).toBe(false);
+      await ensureSession("required", host.publicKey);
+      expect(isTunnelActive()).toBe(true);
     });
   });
 

@@ -21,13 +21,15 @@
 > the caller's cookie + an unforgeable per-boot internal token) and seals the `{ status, contentType,
 > bodyB64 }` response back — so the real method, path/query (a search term, which channel is read), and
 > response body are all ciphertext; only `POST /api/transport/tunnel` is on the wire. `optional` mode
-> keeps the lighter per-route body sealing (path visible). **Remaining v2 item:** image BYTES
-> (`/api/avatars`, `/api/attachments`) are still served in clear even in `required` mode, because they
-> render via `<img src>` which can't carry the session header — the tunnel already proves it carries
-> binary losslessly (base64 body), so the remaining work is purely client-side: fetch images through the
-> tunnel into `blob:` object URLs (with an `imageId → objectURL` cache, since avatars render constantly)
-> and swap the `<img src>` in `Avatar`/the attachment grid. (WS frames aren't sequence-numbered: a
-> replayed server→client frame is idempotent client-side — every event is upserted by id.)
+> keeps the lighter per-route body sealing (path visible). **Image encryption is now built too:** in
+> `required` mode the avatar/attachment routes are no longer exempt — a direct `<img src>` GET (which
+> can't carry the session header) is refused (401), forcing the client to fetch images through the tunnel
+> (`encryptedImageUrl` / the `useEncryptedImage` hook) and render them from a cached `blob:` object URL,
+> so image bytes are sealed on the wire like everything else. `optional`/`off` nodes still serve images
+> directly in clear (lighter). So in `required` mode the only plaintext metadata left on the wire is that
+> a `POST /api/transport/tunnel` happened, plus coarse ciphertext size/timing. (WS frames aren't
+> sequence-numbered: a replayed server→client frame is idempotent client-side — every event is upserted
+> by id.)
 
 
 ## The problem

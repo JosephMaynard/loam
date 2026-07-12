@@ -454,6 +454,60 @@ async function tunnelFetch(
   return response;
 }
 
+/** Whether requests are currently being tunnelled (required mode with a live session). When true, the
+ * server refuses a direct `<img>` GET for avatars/attachments, so images must be fetched through the
+ * tunnel and rendered from a `blob:` URL — see `encryptedImageUrl`. */
+export function isTunnelActive(): boolean {
+  return !!session && lastParams?.mode === "required";
+}
+
+/** Bounded cache of tunnelled image object URLs (`path → blob: URL`), so an avatar that appears in
+ * dozens of rows is fetched once. Evicting (or resetting) revokes the URL to release the blob. */
+const imageObjectUrls = new Map<string, string>();
+const IMAGE_URL_CACHE_MAX = 200;
+
+/**
+ * Resolve an image path to a render-ready `src`. With the tunnel active (required mode) the raw
+ * endpoint refuses a direct `<img>` GET, so the bytes are fetched through the tunnel (coming back
+ * sealed) and handed back as a cached `blob:` object URL. Otherwise returns the plain same-origin URL
+ * unchanged. On any failure falls back to the raw URL — a broken image beats a thrown render.
+ */
+export async function encryptedImageUrl(path: string): Promise<string> {
+  if (!isTunnelActive()) {
+    return apiUrl(path);
+  }
+  const cached = imageObjectUrls.get(path);
+  if (cached) {
+    return cached;
+  }
+  try {
+    const response = await encryptedFetch("GET", path);
+    if (!response.ok) {
+      return apiUrl(path);
+    }
+    const objectUrl = URL.createObjectURL(await response.blob());
+    if (imageObjectUrls.size >= IMAGE_URL_CACHE_MAX) {
+      const oldest = imageObjectUrls.keys().next().value;
+      if (oldest !== undefined) {
+        URL.revokeObjectURL(imageObjectUrls.get(oldest) as string);
+        imageObjectUrls.delete(oldest);
+      }
+    }
+    imageObjectUrls.set(path, objectUrl);
+    return objectUrl;
+  } catch {
+    return apiUrl(path);
+  }
+}
+
+/** Revoke every cached image object URL (on wipe / test reset) so blobs aren't leaked. */
+export function clearImageObjectUrls(): void {
+  for (const url of imageObjectUrls.values()) {
+    URL.revokeObjectURL(url);
+  }
+  imageObjectUrls.clear();
+}
+
 /** Append the live session's `?enc=<sessionId>` to a WebSocket URL (docs/08), so the server knows to
  * seal inbound frames; unchanged when no session is active. */
 export function wsUrl(base: string): string {
@@ -479,4 +533,5 @@ export function resetTransportStateForTests(): void {
   hostKeyMismatch = false;
   sessionQrVerified = false;
   lastParams = undefined;
+  clearImageObjectUrls();
 }

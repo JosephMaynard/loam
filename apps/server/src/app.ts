@@ -1343,13 +1343,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!routeUrl || !routeUrl.startsWith("/api/")) {
       return false;
     }
-    // Avatar/attachment IMAGE bytes are fetched by the browser as plain <img src> GETs, which can't
-    // carry the x-loam-enc header — and image bytes aren't sealed anyway (the onSend hook only wraps
-    // string payloads). Exempt them so a `required` node doesn't 401 every image; their bytes staying
-    // visible is the documented Layer-1 metadata exposure (docs/08), not a regression.
-    if (routeUrl === "/api/avatars/:fileName" || routeUrl === "/api/attachments/:fileName") {
-      return false;
-    }
+    // Avatar/attachment image routes ARE required under a `required` node (docs/08 v2): a direct
+    // `<img src>` GET can't carry `x-loam-enc`, so refusing it (401) is what forces the client to fetch
+    // images through the metadata-hiding tunnel instead (where the inner request runs internally and the
+    // bytes come back sealed). This function is only consulted in `required` mode, so `optional`/`off`
+    // nodes still serve images directly in clear (the lighter, documented behaviour).
     return (
       routeUrl !== "/api/config" && routeUrl !== "/api/transport/handshake" && routeUrl !== "/api/health"
     );
