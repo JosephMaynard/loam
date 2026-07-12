@@ -43,6 +43,7 @@ import { AvatarImageEditor } from "./components/AvatarImageEditor";
 import { InviteControl } from "./components/InviteControl";
 import { MessageComposer } from "./components/MessageComposer";
 import { MessageItem } from "./components/MessageItem";
+import { NavLink } from "./components/NavLink";
 import { NodeLinkControl } from "./components/NodeLinkControl";
 import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
@@ -1948,31 +1949,6 @@ function NewChannelControl({
   );
 }
 
-interface NavLinkProps {
-  active: boolean;
-  children: ComponentChildren;
-  className?: string;
-  href: string;
-}
-
-function NavLink({ active, children, className, href }: NavLinkProps) {
-  const location = useLocation();
-  const linkClassName = className ?? `nav-link${active ? " active" : ""}`;
-
-  return (
-    <a
-      aria-current={active ? "page" : undefined}
-      className={linkClassName}
-      href={href}
-      onClick={(event) => {
-        event.preventDefault();
-        location.route(href);
-      }}
-    >
-      {children}
-    </a>
-  );
-}
 
 interface ConversationViewProps {
   allowAttachments: boolean;
