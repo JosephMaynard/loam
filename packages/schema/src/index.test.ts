@@ -7,6 +7,7 @@ import {
   MessageSchema,
   NetworkConfigSchema,
   securityProfilePreset,
+  SERVER_ERROR_CODES,
   StreamEventSchema,
   UserSchema,
 } from "./index.js";
@@ -323,5 +324,13 @@ describe("@loam/schema", () => {
         text: "Hello",
       }),
     ).not.toThrow();
+  });
+
+  it("keeps SERVER_ERROR_CODES a non-empty, duplicate-free list of snake_case codes", () => {
+    expect(SERVER_ERROR_CODES.length).toBeGreaterThan(0);
+    expect(new Set(SERVER_ERROR_CODES).size).toBe(SERVER_ERROR_CODES.length);
+    for (const code of SERVER_ERROR_CODES) {
+      expect(code).toMatch(/^[a-z][a-z0-9_]*$/);
+    }
   });
 });
