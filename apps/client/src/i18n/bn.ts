@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const bn: Catalog = {
   "composer.thinking": "ভাবছে…",
   "toast.imageFallback": "📷 ছবি",
+  "toast.locationFallback": "📍 অবস্থান",
 
   "common.save": "সংরক্ষণ",
   "common.saving": "সংরক্ষণ হচ্ছে…",
@@ -40,6 +41,16 @@ export const bn: Catalog = {
   "composer.attachImage": "একটি ছবি সংযুক্ত করুন",
   "composer.attachImageHint": "একটি ছবি সংযুক্ত করুন (আপলোডের আগে এই ডিভাইসে আকার ছোট করা হয়)",
   "composer.send": "পাঠান",
+
+  "composer.shareLocation": "অবস্থান শেয়ার করুন",
+  "composer.shareLocationHint": "একটি স্থান শেয়ার করুন — GPS ছাড়াও একটি লেবেল কাজ করে",
+  "composer.locationLabel": "অবস্থানের লেবেল",
+  "composer.locationLabelPlaceholder": "যেমন, উত্তর গেট",
+  "composer.locationLat": "অক্ষাংশ (-90 থেকে 90)",
+  "composer.locationLng": "দ্রাঘিমাংশ (-180 থেকে 180)",
+
+  "location.openInMaps": "মানচিত্রে খুলুন",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "সদস্যদের লোড করা যায়নি।",
   "members.inviteError": "সেই ব্যক্তিকে আমন্ত্রণ জানানো যায়নি।",

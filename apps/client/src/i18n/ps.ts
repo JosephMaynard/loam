@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const ps: Catalog = {
   "composer.thinking": "فکر کوي…",
   "toast.imageFallback": "📷 انځور",
+  "toast.locationFallback": "📍 موقعیت",
 
   "common.save": "خوندي کول",
   "common.saving": "خوندي کیږي…",
@@ -40,6 +41,16 @@ export const ps: Catalog = {
   "composer.attachImage": "انځور ضمیمه کول",
   "composer.attachImageHint": "انځور ضمیمه کړئ (له پورته کولو مخکې پر همدې وسیله بیا اندازه کیږي)",
   "composer.send": "لیږل",
+
+  "composer.shareLocation": "د موقعیت شریکول",
+  "composer.shareLocationHint": "یو ځای شریک کړئ — لیبل حتی پرته له GPS هم کار کوي",
+  "composer.locationLabel": "د موقعیت لیبل",
+  "composer.locationLabelPlaceholder": "لکه، شمالي دروازه",
+  "composer.locationLat": "عرض البلد (-90 څخه تر 90)",
+  "composer.locationLng": "طول البلد (-180 څخه تر 180)",
+
+  "location.openInMaps": "په نقشو کې پرانیزل",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "غړي نه شول پورته کیدی.",
   "members.inviteError": "هغه کس بلل نشول.",

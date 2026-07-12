@@ -54,4 +54,69 @@ describe("renderMarkdown", () => {
     expect(html).toContain("&lt;");
     expect(html).toContain("&gt;");
   });
+
+  describe("image src XSS vectors", () => {
+    // A dangerous `src` is one that can execute script when the browser loads
+    // it as an image: a `javascript:`/`vbscript:` URL (in any case/whitespace
+    // obfuscation) that would run on load in legacy engines, or a live
+    // `data:` URI. None of these should ever survive in the rendered `src`.
+    function assertNoDangerousSrc(html: string): void {
+      expect(html).not.toMatch(/src\s*=\s*"javascript:/i);
+      expect(html).not.toMatch(/src\s*=\s*"vbscript:/i);
+      expect(html).not.toMatch(/src\s*=\s*"data:/i);
+      expect(html.toLowerCase()).not.toContain("alert(1)");
+    }
+
+    it("drops javascript: image src while keeping the alt text", () => {
+      const html = renderMarkdown("![x](javascript:alert(1))");
+      assertNoDangerousSrc(html);
+      expect(html).toContain("<img");
+      expect(html).toContain('alt="x"');
+    });
+
+    it("drops obfuscated-case JaVaScRiPt: image src", () => {
+      const html = renderMarkdown("![x](JaVaScRiPt:alert(1))");
+      assertNoDangerousSrc(html);
+    });
+
+    it("drops javascript: image src obfuscated with a leading tab", () => {
+      const html = renderMarkdown("![x](\tjavascript:alert(1))");
+      assertNoDangerousSrc(html);
+    });
+
+    it("drops javascript: image src obfuscated with leading whitespace", () => {
+      const html = renderMarkdown("![x]( javascript:alert(1))");
+      assertNoDangerousSrc(html);
+    });
+
+    it("drops javascript: image src obfuscated with an embedded tab in the scheme", () => {
+      const html = renderMarkdown("![x](java\tscript:alert(1))");
+      assertNoDangerousSrc(html);
+    });
+
+    it("drops vbscript: image src", () => {
+      const html = renderMarkdown("![x](vbscript:msgbox(1))");
+      assertNoDangerousSrc(html);
+    });
+
+    it("drops data: image src (including an SVG payload carrying an onload handler)", () => {
+      const html = renderMarkdown(
+        "![x](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+)",
+      );
+      assertNoDangerousSrc(html);
+    });
+
+    it("drops data:text/html image src", () => {
+      const html = renderMarkdown(
+        "![x](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
+      );
+      assertNoDangerousSrc(html);
+    });
+
+    it("keeps a safe https image src intact", () => {
+      const html = renderMarkdown("![alt text](https://example.com/pic.png)");
+      expect(html).toContain('src="https://example.com/pic.png"');
+      expect(html).toContain('alt="alt text"');
+    });
+  });
 });

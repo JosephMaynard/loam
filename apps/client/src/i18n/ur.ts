@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const ur: Catalog = {
   "composer.thinking": "سوچ رہا ہے…",
   "toast.imageFallback": "📷 تصویر",
+  "toast.locationFallback": "📍 مقام",
 
   "common.save": "محفوظ کریں",
   "common.saving": "محفوظ ہو رہا ہے…",
@@ -40,6 +41,16 @@ export const ur: Catalog = {
   "composer.attachImage": "تصویر منسلک کریں",
   "composer.attachImageHint": "تصویر منسلک کریں (اپ لوڈ سے پہلے اِسی آلے پر سائز تبدیل ہوتا ہے)",
   "composer.send": "بھیجیں",
+
+  "composer.shareLocation": "مقام شیئر کریں",
+  "composer.shareLocationHint": "کوئی جگہ شیئر کریں — لیبل GPS کے بغیر بھی کام کرتا ہے",
+  "composer.locationLabel": "مقام کا لیبل",
+  "composer.locationLabelPlaceholder": "مثلاً شمالی دروازہ",
+  "composer.locationLat": "عرض بلد (-90 سے 90)",
+  "composer.locationLng": "طول بلد (-180 سے 180)",
+
+  "location.openInMaps": "نقشوں میں کھولیں",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "اراکین لوڈ نہیں ہو سکے۔",
   "members.inviteError": "اُس شخص کو مدعو نہیں کیا جا سکا۔",

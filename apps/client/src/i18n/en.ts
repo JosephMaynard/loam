@@ -18,6 +18,8 @@ export const en = {
   "composer.thinking": "Thinking…",
   // Fallback body used in notification toasts for an image-only message.
   "toast.imageFallback": "📷 Image",
+  // Fallback body used in notification toasts for a location-only message.
+  "toast.locationFallback": "📍 Location",
 
   // Shared button/label strings reused across views.
   "common.save": "Save",
@@ -59,6 +61,18 @@ export const en = {
   "composer.attachImage": "Attach an image",
   "composer.attachImageHint": "Attach an image (resized on this device before upload)",
   "composer.send": "Send",
+
+  // Message composer — share a location (docs/10; no map, no GPS — a named label or coordinates).
+  "composer.shareLocation": "Share location",
+  "composer.shareLocationHint": "Share a place — a label works even without GPS",
+  "composer.locationLabel": "Location label",
+  "composer.locationLabelPlaceholder": "e.g. north gate",
+  "composer.locationLat": "Latitude (-90 to 90)",
+  "composer.locationLng": "Longitude (-180 to 180)",
+
+  // Shared-location card (below a message body).
+  "location.openInMaps": "Open in maps",
+  "location.coordinates": "{lat}, {lng}",
 
   // Private-channel members panel.
   "members.loadError": "Unable to load members.",

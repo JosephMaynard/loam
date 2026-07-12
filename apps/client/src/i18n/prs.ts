@@ -5,6 +5,7 @@ import type { Catalog } from "./en";
 export const prs: Catalog = {
   "composer.thinking": "در حال فکر کردن…",
   "toast.imageFallback": "📷 تصویر",
+  "toast.locationFallback": "📍 موقعیت",
 
   "common.save": "ذخیره",
   "common.saving": "در حال ذخیره…",
@@ -41,6 +42,16 @@ export const prs: Catalog = {
   "composer.attachImage": "ضمیمه‌کردن تصویر",
   "composer.attachImageHint": "ضمیمه‌کردن تصویر (پیش از بارگذاری روی همین دستگاه اندازه‌اش تغییر می‌کند)",
   "composer.send": "روان‌کردن",
+
+  "composer.shareLocation": "شریک‌کردن موقعیت",
+  "composer.shareLocationHint": "یک جای را شریک کنید — نشان حتی بدون GPS کار می‌کند",
+  "composer.locationLabel": "نشان موقعیت",
+  "composer.locationLabelPlaceholder": "مثلاً دروازهٔ شمالی",
+  "composer.locationLat": "عرض جغرافیایی (-90 الی 90)",
+  "composer.locationLng": "طول جغرافیایی (-180 الی 180)",
+
+  "location.openInMaps": "باز کردن در نقشه‌ها",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "بارگیری اعضا ممکن نشد.",
   "members.inviteError": "دعوت آن شخص ممکن نشد.",

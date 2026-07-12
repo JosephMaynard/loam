@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const ru: Catalog = {
   "composer.thinking": "Думает…",
   "toast.imageFallback": "📷 Изображение",
+  "toast.locationFallback": "📍 Местоположение",
 
   "common.save": "Сохранить",
   "common.saving": "Сохранение…",
@@ -45,6 +46,16 @@ export const ru: Catalog = {
   "composer.attachImage": "Прикрепить изображение",
   "composer.attachImageHint": "Прикрепить изображение (перед загрузкой размер меняется на этом устройстве)",
   "composer.send": "Отправить",
+
+  "composer.shareLocation": "Поделиться местоположением",
+  "composer.shareLocationHint": "Поделитесь местом — подпись работает даже без GPS",
+  "composer.locationLabel": "Подпись места",
+  "composer.locationLabelPlaceholder": "например, северные ворота",
+  "composer.locationLat": "Широта (от -90 до 90)",
+  "composer.locationLng": "Долгота (от -180 до 180)",
+
+  "location.openInMaps": "Открыть в картах",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "Не удалось загрузить участников.",
   "members.inviteError": "Не удалось пригласить этого человека.",

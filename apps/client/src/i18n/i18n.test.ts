@@ -1,4 +1,4 @@
-import { LocaleSchema, type Locale } from "@loam/schema";
+import { LocaleSchema, SERVER_ERROR_CODES, type Locale } from "@loam/schema";
 import { describe, expect, it } from "vitest";
 
 import { ar } from "./ar";
@@ -105,35 +105,20 @@ describe("i18n catalogs", () => {
     }
   });
 
-  it("every server error code has a matching error.<code> catalog key", () => {
-    // Snapshot of apps/server/src/app.ts ERROR_CODES values. The server exports ALL_ERROR_CODES for
-    // cross-checking; keep this list in sync. A code missing here means that server error would fall
-    // back to English on every locale instead of localizing.
-    const SERVER_ERROR_CODES = [
-      "admin_required", "admin_claim_disabled", "admin_user_edit_disabled", "promote_requires_active",
-      "attachment_not_found", "attachment_too_large", "attachment_type_mismatch", "attachments_disabled",
-      "avatar_not_found", "avatar_too_large", "avatar_type_mismatch", "roles_admin_immutable",
-      "reaction_not_allowed", "channel_not_found", "channel_posting_disabled", "channel_create_disabled",
-      "confirmation_required", "dms_disabled", "sync_requires_peer", "greeter_required", "invalid_admin_claim",
-      "invalid_admin_secret", "invalid_attachment_upload", "invalid_avatar_upload", "invalid_channel_create",
-      "invalid_channel_update", "invalid_config_update", "invalid_config_values", "invalid_kill_switch",
-      "invalid_member_request", "invalid_message_edit", "invalid_message_request", "invalid_moderation_request",
-      "invalid_request", "invalid_roles_update", "invalid_sync_request", "invalid_token", "invalid_user_update",
-      "message_not_found", "moderator_required", "not_found", "deny_requires_pending", "admin_humans_only",
-      "member_list_private_only", "channel_change_forbidden", "member_invite_forbidden", "member_remove_forbidden",
-      "parent_wrong_channel", "parent_not_found", "private_channels_disabled", "search_query_required",
-      "reactions_disabled", "reaction_not_editable", "recipient_not_found", "replies_disabled", "target_not_found",
-      "user_removed", "not_channel_member", "owner_not_removable", "kill_switch_disabled", "passphrase_required",
-      "message_streaming", "session_invalid", "thread_has_replies", "too_many_attempts", "too_many_claim_attempts",
-      "message_create_failed", "websocket_unauthenticated", "unknown_attachment", "user_avatar_upload_disabled",
-      "user_not_found", "user_profile_edit_disabled", "delete_own_only", "edit_own_only", "deny_forbidden",
-      "moderate_forbidden", "removed_from_node", "awaiting_approval", "channel_archived",
-      "channel_replies_disabled", "channel_owner_post_only", "channel_admins_post_only",
-      "channel_transfer_forbidden", "invalid_transfer_request",
-    ];
+  it("every catalog covers exactly the canonical SERVER_ERROR_CODES (@loam/schema) — no dropped or stray codes", () => {
+    // SERVER_ERROR_CODES is the single source of truth (also relied on by the server: its
+    // ERROR_CODES map is typed against it, so a new code can't be introduced there without also
+    // appearing here). A code missing an `error.<code>` key would fall back to English on every
+    // locale instead of localizing; a stray `error.*` key with no matching code is dead weight
+    // that can mask a rename. Checking both directions catches either drift.
+    const expectedKeys = SERVER_ERROR_CODES.map((code) => `error.${code}`).sort();
 
-    for (const code of SERVER_ERROR_CODES) {
-      expect(`error.${code}` in en, `en catalog has error.${code}`).toBe(true);
+    for (const locale of LOCALES) {
+      const catalog = ALL_CATALOGS[locale] as Record<string, unknown>;
+      const actualErrorKeys = Object.keys(catalog)
+        .filter((key) => key.startsWith("error."))
+        .sort();
+      expect(actualErrorKeys, `locale ${locale} error.* keys`).toEqual(expectedKeys);
     }
   });
 });

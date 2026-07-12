@@ -1,4 +1,4 @@
-import { encodeQR } from '@loam/qr';
+import { encodeQR, type QRErrorCorrectionLevel } from '@loam/qr';
 import { memo, useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -7,6 +7,12 @@ type QRCodeProps = {
   value: string;
   /** Overall pixel size of the square rendered box, including the quiet-zone border. Default 220. */
   size?: number;
+  /**
+   * Error correction level; defaults to `"H"`. The WiFi step passes `"M"` — a `LocalOnlyHotspot`
+   * SSID plus a longer/escaped passphrase can exceed level H's version-6 ceiling (docs/15 #10),
+   * and `M` roughly doubles capacity at each version.
+   */
+  ecLevel?: QRErrorCorrectionLevel;
 };
 
 // Standard 4-module quiet zone so phone cameras lock on reliably.
@@ -22,12 +28,12 @@ const LIGHT = '#ffffff';
  * Wrapped in `memo`: the cell tree is hundreds of views, so skip re-rendering when `value`/`size`
  * are unchanged (e.g. when the parent re-renders on unrelated host-state updates).
  */
-export const QRCode = memo(function QRCode({ value, size = 220 }: QRCodeProps) {
+export const QRCode = memo(function QRCode({ value, size = 220, ecLevel }: QRCodeProps) {
   const rows = useMemo(() => {
     let matrix;
 
     try {
-      matrix = encodeQR(value);
+      matrix = encodeQR(value, { ecLevel });
     } catch (error) {
       // Overflows @loam/qr's version-6 capacity (rare — long hotspot creds); the caller still shows
       // the value as scannable-free text, but surface the failure rather than vanishing silently.
@@ -42,7 +48,7 @@ export const QRCode = memo(function QRCode({ value, size = 220 }: QRCodeProps) {
     }
 
     return { grid, moduleCount: matrix.size };
-  }, [value]);
+  }, [value, ecLevel]);
 
   if (!rows) {
     return (

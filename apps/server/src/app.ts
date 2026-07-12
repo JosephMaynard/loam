@@ -36,6 +36,7 @@ import {
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
   MessageEditRequestSchema,
+  MeshBroadcastRequestSchema,
   MeshIdentityCardSchema,
   MeshSendRequestSchema,
   MessageSchema,
@@ -65,6 +66,7 @@ import {
   type OllamaConfig,
   type StreamEvent,
   type SyncDigest,
+  type ServerErrorCode,
   type SyncPeer,
   type SyncStatusReport,
   type User,
@@ -195,6 +197,13 @@ export type AppOptions = {
    * make room. Defaults to 5,000; lowered in tests to exercise eviction without 5,000 iterations.
    */
   transportSessionCap?: number;
+  /**
+   * How long (ms) a tombstone blocks re-import before the reaper GCs it (docs/15 #7). Defaults to
+   * 30 days — deliberately generous, longer than any realistic sync/courier window. Overridable
+   * only so tests can exercise the GC without waiting; production deployments should leave it at
+   * the default.
+   */
+  tombstoneHorizonMs?: number;
   logger?: boolean;
 };
 
@@ -232,6 +241,13 @@ const sessionCookieMaxAge = 60 * 60 * 24 * 365;
 const defaultChannelCreatedAt = 1_704_067_200_000;
 const claimAttemptLimit = 5;
 const claimAttemptWindowMs = 5 * 60_000;
+// Default for `AppOptions.tombstoneHorizonMs` (docs/15 #7): how long a tombstone blocks re-import
+// before it's GC'd. Deliberately generous — far longer than any realistic sync/courier interval —
+// so within the horizon a deleted message can never resurface from a peer or a mesh carrier; only
+// a peer offline longer than this window can hand it back, an accepted DTN limitation (not gated
+// on `sync.enabled`: a delete made while sync is off must still stick once a peer/mesh link
+// appears later, or moderation is bypassable).
+const defaultTombstoneHorizonMs = 30 * 24 * 60 * 60 * 1000;
 
 const defaultChannels: Channel[] = [
   {
@@ -262,10 +278,12 @@ const seedUsers = ["user.1234", "user.5678"];
  * Stable snake_case code for every error message the server can return, so clients can localize the
  * message from a catalog while the English `error` string stays as the fallback (unknown codes → the
  * client shows `error` verbatim). Keep these codes stable across releases — they are a wire contract
- * with a mixed-version mesh. Every value must have a matching `error.<code>` key in the client i18n
- * catalogs (enforced by `apps/client/src/i18n/i18n.test.ts`).
+ * with a mixed-version mesh. The canonical set of codes is `SERVER_ERROR_CODES` in `@loam/schema`
+ * (values here are typed against it, so a typo or unlisted code fails to compile); every code must
+ * also have a matching `error.<code>` key in the client i18n catalogs (enforced by
+ * `apps/client/src/i18n/i18n.test.ts`, which asserts against the same `SERVER_ERROR_CODES` list).
  */
-const ERROR_CODES: Record<string, string> = {
+const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Admin access required": "admin_required",
   "Admin claiming is not enabled on this LOAM node": "admin_claim_disabled",
   "Admin user editing is disabled on this LOAM node": "admin_user_edit_disabled",
@@ -354,8 +372,8 @@ const ERROR_CODES: Record<string, string> = {
   "Only admins can post in this channel": "channel_admins_post_only",
 };
 
-/** All stable error codes, exported so tests can assert client-catalog coverage. */
-export const ALL_ERROR_CODES: readonly string[] = Object.values(ERROR_CODES);
+/** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */
+export const ALL_ERROR_CODES: readonly ServerErrorCode[] = Object.values(ERROR_CODES);
 
 /**
  * Build an error response envelope, attaching the stable `code` for known messages. Unknown messages
@@ -393,6 +411,7 @@ export function defaultLoamConfig(): LoamConfig {
       enableReactions: true,
       enableMarkdown: true,
       enableAttachments: true,
+      enableLocationSharing: false,
       enablePresence: true,
     },
     llm: {
@@ -834,6 +853,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const identityMintCounters = new Map<string, { count: number; resetAt: number }>();
   const maxNewIdentitiesPerWindow = options.maxNewIdentitiesPerWindow ?? 60;
   const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
+  const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
   // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
   // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
   // restart loses (and uploads abandoned past the grace period) are swept by
@@ -1884,6 +1904,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    if (input.type !== "reaction" && input.location && !appConfig.features.enableLocationSharing) {
+      return { error: "Location sharing is disabled on this LOAM node" };
+    }
+
     if (input.type === "channelPost" || input.type === "channelReply") {
       const channel = ensureChannel(input.channelId);
 
@@ -2467,8 +2491,31 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     server.log.info(`Mesh reaper dropped ${ids.size} expired sealed message(s)`);
   }
 
+  /**
+   * Horizon GC for the `tombstones` table (docs/15 #7): a tombstone is added forever on every
+   * delete (so sync/mesh never re-hands a locally deleted message back), which would otherwise
+   * grow without bound on a long-lived node. Pruning is unconditional — not gated on
+   * `sync.enabled` — because a delete made while sync is off must still block re-import once sync
+   * or a mesh link comes on later; gating it reintroduces a moderation bypass. Runs on every
+   * reaper tick, so a tombstone is only ever vulnerable to resurrection once its peer has been
+   * unreachable for longer than the horizon.
+   */
+  function pruneTombstonesHorizon(): void {
+    const cutoff = Date.now() - tombstoneHorizonMs;
+    const pruned = store.pruneTombstonesOlderThan(cutoff);
+
+    for (const id of pruned) {
+      tombstones.delete(id);
+    }
+
+    if (pruned.length) {
+      server.log.info(`Tombstone GC pruned ${pruned.length} entr${pruned.length === 1 ? "y" : "ies"} past the horizon`);
+    }
+  }
+
   function reapExpiredMessages(): void {
     reapExpiredSealed();
+    pruneTombstonesHorizon();
 
     const ttl = appConfig.retention.messageTtlMs;
 
@@ -4523,6 +4570,73 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     return { ok: true };
   });
+
+  // Broadcast a sealed mailbox message (opportunistic-mesh group/broadcast fan-out — docs/16) to
+  // MULTIPLE contacts in one call. Each recipient is sealed independently via `sendSealed` — there is
+  // no shared key, so per-recipient confidentiality/unlinkability is identical to the single-send path
+  // above; this is purely a client-convenience batch. Same gating as `/api/mesh/messages`: 404 unless
+  // mesh is enabled, a shadow-banned sender's mail silently drops, and a `toMeshId` that isn't an
+  // already-added contact is reported back rather than 404ing the whole request (unlike the single-send
+  // route, since a mix of valid/invalid recipients in one call shouldn't fail the valid ones).
+  server.post(
+    "/api/mesh/broadcast",
+    // Same per-route cap as the single-send route — a broadcast still costs one request, but seals up
+    // to `MeshBroadcastRequestSchema`'s cap (50) worth of public-key crypto, so keep it tightly limited.
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      if (!appConfig.mesh.enabled) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const body = MeshBroadcastRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid mesh broadcast request"));
+      }
+
+      const sender = ensureMeshIdentity(currentUser.id);
+
+      if (!sender) {
+        return reply.code(400).send(errorBody("This user has no mesh identity"));
+      }
+
+      // A shadow-banned sender gets a normal-looking success, but nothing is sealed or sent — same
+      // silent-drop behaviour as the single-send route.
+      if (currentUser.shadowBanned) {
+        return { ok: true, sent: 0, skipped: [] };
+      }
+
+      const book = meshContacts.get(currentUser.id);
+      const toMeshIds = [...new Set(body.data.toMeshIds)]; // de-duplicate: never mail a contact twice
+
+      let sent = 0;
+      const skipped: string[] = [];
+      for (const toMeshId of toMeshIds) {
+        const contact = book?.get(toMeshId);
+        if (!contact) {
+          skipped.push(toMeshId);
+          continue;
+        }
+        // `sendSealed` enforces the same `mesh.maxCarried` storage bound as the single-send path; if
+        // the queue fills partway through, stop here and report what actually went out rather than
+        // silently dropping the remainder or throwing away the count of what succeeded.
+        const sendError = sendSealed(sender, contact, body.data.body);
+        if (sendError) {
+          break;
+        }
+        sent += 1;
+      }
+
+      return { ok: true, sent, skipped };
+    },
+  );
 
   server.get("/api/admin/sync", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));

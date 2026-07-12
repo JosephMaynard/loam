@@ -245,6 +245,8 @@ export const NetworkConfigSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  /** Share a place/coordinates on a message (docs/10). When on, the client shows the share affordance. */
+  enableLocationSharing: z.boolean(),
   enablePresence: z.boolean(),
   /** Opportunistic sealed-mailbox mesh (docs/16). When on, the client shows the mesh contacts + card UI. */
   enableMesh: z.boolean(),
@@ -278,6 +280,8 @@ export const FeatureFlagsSchema = z.object({
   enableReactions: z.boolean(),
   enableMarkdown: z.boolean(),
   enableAttachments: z.boolean(),
+  /** Share a place/coordinates on a message (docs/10). Default off; deliberate + ephemeral. */
+  enableLocationSharing: z.boolean(),
   /**
    * Broadcast who is currently connected (online dots). Default on; worth disabling on
    * high-risk deployments — presence reveals exactly who is reachable right now.
@@ -586,6 +590,24 @@ const MessageBodySchema = z.string();
 const MessageCreateBodySchema = z.string().max(8000);
 const MessageAttachmentsSchema = z.array(MessageAttachmentSchema).max(4);
 
+/**
+ * A shared location (docs/10): a human-readable place `label` ("the north gate", "camp 3") and/or
+ * coordinates. Carried on an ordinary message so it rides the existing channel/DM/sync flow — no new
+ * message type. Sharing is deliberate + ephemeral (retention TTL) and gated by `enableLocationSharing`;
+ * there is no continuous/background tracking. `lat`/`lng` are optional because off-grid clients have no
+ * secure-context GPS — a named label alone is a valid share.
+ */
+export const MessageLocationSchema = z
+  .object({
+    label: z.string().min(1).max(120).optional(),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional(),
+  })
+  .refine((location) => !!location.label || (location.lat !== undefined && location.lng !== undefined), {
+    message: "A shared location needs a label or coordinates",
+  });
+export type MessageLocation = z.infer<typeof MessageLocationSchema>;
+
 export const MessageCreateRequestSchema = z
   .discriminatedUnion("type", [
     z.object({
@@ -593,6 +615,7 @@ export const MessageCreateRequestSchema = z
       channelId: IdSchema,
       body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
+      location: MessageLocationSchema.optional(),
     }),
     z.object({
       type: z.literal("channelReply"),
@@ -600,12 +623,14 @@ export const MessageCreateRequestSchema = z
       parentMessageId: IdSchema,
       body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
+      location: MessageLocationSchema.optional(),
     }),
     z.object({
       type: z.literal("dm"),
       recipientUserId: IdSchema,
       body: MessageCreateBodySchema,
       attachments: MessageAttachmentsSchema.optional(),
+      location: MessageLocationSchema.optional(),
     }),
     z.object({
       type: z.literal("reaction"),
@@ -613,9 +638,9 @@ export const MessageCreateRequestSchema = z
       reaction: z.string().min(1).max(64),
     }),
   ])
-  // A message needs text or at least one attachment (an image alone is a valid message).
+  // A message needs text, at least one attachment, or a shared location (any one alone is valid).
   .superRefine((value, ctx) => {
-    if (value.type !== "reaction" && !value.body.trim() && !value.attachments?.length) {
+    if (value.type !== "reaction" && !value.body.trim() && !value.attachments?.length && !value.location) {
       ctx.addIssue({ code: "custom", message: "Message body cannot be empty", path: ["body"] });
     }
   });
@@ -634,6 +659,7 @@ export const ChannelPostMessageSchema = BaseMessageSchema.extend({
   channelId: IdSchema,
   body: MessageBodySchema,
   attachments: MessageAttachmentsSchema.optional(),
+  location: MessageLocationSchema.optional(),
 });
 export type ChannelPostMessage = z.infer<typeof ChannelPostMessageSchema>;
 
@@ -643,6 +669,7 @@ export const ChannelReplyMessageSchema = BaseMessageSchema.extend({
   parentMessageId: IdSchema,
   body: MessageBodySchema,
   attachments: MessageAttachmentsSchema.optional(),
+  location: MessageLocationSchema.optional(),
 });
 export type ChannelReplyMessage = z.infer<typeof ChannelReplyMessageSchema>;
 
@@ -651,6 +678,7 @@ export const DirectMessageSchema = BaseMessageSchema.extend({
   recipientUserId: IdSchema,
   body: MessageBodySchema,
   attachments: MessageAttachmentsSchema.optional(),
+  location: MessageLocationSchema.optional(),
 });
 export type DirectMessage = z.infer<typeof DirectMessageSchema>;
 
@@ -776,6 +804,18 @@ export const MeshSendRequestSchema = z.object({
 });
 export type MeshSendRequest = z.infer<typeof MeshSendRequestSchema>;
 
+/**
+ * Client request to broadcast ONE sealed mailbox message to MULTIPLE contacts (group/broadcast
+ * fan-out, opportunistic-mesh — docs/16) in a single call. Each recipient gets an independently
+ * sealed copy (no shared key), so per-recipient confidentiality/unlinkability is identical to
+ * `MeshSendRequestSchema` — this is purely a client-convenience batch over the same one-to-one send.
+ */
+export const MeshBroadcastRequestSchema = z.object({
+  toMeshIds: z.array(z.string().min(1).max(64)).min(1).max(50),
+  body: z.string().min(1).max(8000),
+});
+export type MeshBroadcastRequest = z.infer<typeof MeshBroadcastRequestSchema>;
+
 /** Live per-peer sync bookkeeping, as reported by `GET /api/admin/sync`. */
 export const SyncPeerStatusSchema = z.object({
   lastAttemptAt: TimestampSchema.optional(),
@@ -791,6 +831,101 @@ export const SyncStatusReportSchema = z.object({
   peers: z.array(SyncPeerSchema.extend({ status: SyncPeerStatusSchema.optional() })),
 });
 export type SyncStatusReport = z.infer<typeof SyncStatusReportSchema>;
+
+/**
+ * Stable snake_case code for every error message the server can return (`apps/server/src/app.ts`
+ * `ERROR_CODES`). This is the canonical list: the server's `ERROR_CODES` map is typed against
+ * `ServerErrorCode` (so a value that doesn't appear here fails to compile), and the client i18n
+ * completeness test (`apps/client/src/i18n/i18n.test.ts`) asserts every catalog covers exactly
+ * this set — so a new code can't ship untranslated without also failing the client build.
+ */
+export const SERVER_ERROR_CODES = [
+  "admin_required",
+  "admin_claim_disabled",
+  "admin_user_edit_disabled",
+  "promote_requires_active",
+  "attachment_not_found",
+  "attachment_too_large",
+  "attachment_type_mismatch",
+  "attachments_disabled",
+  "avatar_not_found",
+  "avatar_too_large",
+  "avatar_type_mismatch",
+  "roles_admin_immutable",
+  "reaction_not_allowed",
+  "channel_not_found",
+  "channel_posting_disabled",
+  "channel_create_disabled",
+  "confirmation_required",
+  "dms_disabled",
+  "sync_requires_peer",
+  "greeter_required",
+  "invalid_admin_claim",
+  "invalid_admin_secret",
+  "invalid_attachment_upload",
+  "invalid_avatar_upload",
+  "invalid_channel_create",
+  "invalid_channel_update",
+  "invalid_config_update",
+  "invalid_config_values",
+  "invalid_kill_switch",
+  "invalid_member_request",
+  "invalid_transfer_request",
+  "invalid_message_edit",
+  "invalid_message_request",
+  "invalid_moderation_request",
+  "invalid_request",
+  "invalid_roles_update",
+  "invalid_sync_request",
+  "invalid_token",
+  "invalid_user_update",
+  "message_not_found",
+  "moderator_required",
+  "not_found",
+  "deny_requires_pending",
+  "admin_humans_only",
+  "member_list_private_only",
+  "channel_change_forbidden",
+  "member_invite_forbidden",
+  "member_remove_forbidden",
+  "channel_transfer_forbidden",
+  "parent_wrong_channel",
+  "parent_not_found",
+  "private_channels_disabled",
+  "search_query_required",
+  "reactions_disabled",
+  "reaction_not_editable",
+  "recipient_not_found",
+  "replies_disabled",
+  "target_not_found",
+  "user_removed",
+  "not_channel_member",
+  "owner_not_removable",
+  "kill_switch_disabled",
+  "passphrase_required",
+  "message_streaming",
+  "session_invalid",
+  "thread_has_replies",
+  "too_many_attempts",
+  "too_many_claim_attempts",
+  "message_create_failed",
+  "websocket_unauthenticated",
+  "unknown_attachment",
+  "user_avatar_upload_disabled",
+  "user_not_found",
+  "user_profile_edit_disabled",
+  "delete_own_only",
+  "edit_own_only",
+  "deny_forbidden",
+  "moderate_forbidden",
+  "removed_from_node",
+  "awaiting_approval",
+  "channel_archived",
+  "channel_replies_disabled",
+  "channel_owner_post_only",
+  "channel_admins_post_only",
+] as const;
+export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 
 export const StreamEventSchema = z.discriminatedUnion("type", [
   z.object({

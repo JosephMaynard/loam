@@ -14,9 +14,14 @@ import {
   transportClientDerive,
   transportClientHello,
 } from "@loam/crypto";
-import { MeshIdentityCardSchema, TransportHandshakeResponseSchema, type MeshIdentityCard } from "@loam/schema";
+import {
+  MeshIdentityCardSchema,
+  SERVER_ERROR_CODES,
+  TransportHandshakeResponseSchema,
+  type MeshIdentityCard,
+} from "@loam/schema";
 
-import { buildApp, type AppOptions, type LoamApp } from "./app.js";
+import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.js";
 
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 
@@ -82,6 +87,75 @@ async function claim(app: LoamApp, cookie: string, secret: string): Promise<Inje
     payload: { secret },
   });
 }
+
+type OllamaChatRequestBody = { model?: string; stream?: boolean; messages?: { role: string; content: string }[] };
+
+/**
+ * Minimal mock of Ollama's streaming `/api/chat` endpoint (node:http), emitting the same
+ * newline-delimited JSON shape `streamOllamaChat` (apps/server/src/app.ts) parses: one
+ * `{"message":{"content":...},"done":false}` line per delta (with a real delay between them, so a
+ * test can tell genuine streaming from one lump), then a final `{"done":true}` line. Captures every
+ * request body it receives for assertions (e.g. that the DM history was forwarded as `messages`).
+ */
+function startMockOllama(
+  deltas: string[],
+  opts: { delayMs?: number } = {},
+): { url: Promise<string>; close: () => Promise<void>; requests: OllamaChatRequestBody[] } {
+  const delayMs = opts.delayMs ?? 10;
+  const requests: OllamaChatRequestBody[] = [];
+
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk: Buffer) => (raw += chunk));
+    req.on("end", () => {
+      void (async () => {
+        try {
+          requests.push(JSON.parse(raw || "{}") as OllamaChatRequestBody);
+        } catch {
+          // Malformed capture is surfaced by an empty `requests` entry never appearing; irrelevant
+          // to the streaming behaviour under test.
+        }
+
+        res.writeHead(200, { "content-type": "application/x-ndjson" });
+        for (const delta of deltas) {
+          res.write(`${JSON.stringify({ message: { role: "assistant", content: delta }, done: false })}\n`);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        res.end(`${JSON.stringify({ done: true })}\n`);
+      })();
+    });
+  });
+
+  const url = new Promise<string>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`));
+  });
+
+  return { url, close: () => new Promise<void>((resolve) => server.close(() => resolve())), requests };
+}
+
+/** A `http://127.0.0.1:<port>` URL nothing is listening on, to simulate Ollama being unreachable. */
+async function unusedLocalUrl(): Promise<string> {
+  const probe = createServer();
+  const url = await new Promise<string>((resolve) => {
+    probe.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(probe.address() as AddressInfo).port}`));
+  });
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return url;
+}
+
+describe("error codes", () => {
+  it("every error code the server actually returns is drawn from the canonical @loam/schema list", () => {
+    // ALL_ERROR_CODES (Object.values of the server's ERROR_CODES map) is typed against
+    // ServerErrorCode, so this is really a belt-and-braces runtime check that nothing slipped
+    // through — the real guarantee is the compile-time type constraint in app.ts.
+    for (const code of ALL_ERROR_CODES) {
+      expect(SERVER_ERROR_CODES as readonly string[], `unknown code ${code}`).toContain(code);
+    }
+    // No duplicate English messages mapping to the same code by accident, and every canonical
+    // code is unique too (both are asserted so the two lists can't quietly drift apart).
+    expect(new Set(ALL_ERROR_CODES).size).toBe(ALL_ERROR_CODES.length);
+  });
+});
 
 describe("admin bootstrap", () => {
   it("firstUser (default): the first session becomes admin, later ones do not", async () => {
@@ -2508,7 +2582,14 @@ describe("participation gating (banned / pending read access)", () => {
 });
 
 describe("websocket privacy filtering", () => {
-  type WireEvent = { type?: string; messageId?: string; user?: { id?: string; pending?: boolean }; message?: { id?: string } };
+  type WireEvent = {
+    type?: string;
+    messageId?: string;
+    text?: string;
+    error?: string;
+    user?: { id?: string; pending?: boolean };
+    message?: { id?: string; authorId?: string; body?: string; meta?: { streaming?: boolean } };
+  };
 
   const openSockets: WebSocket[] = [];
 
@@ -2685,6 +2766,76 @@ describe("websocket privacy filtering", () => {
     // The moderator receiving their copy proves the broadcast completed before the negative check.
     expect(await waitFor(() => sawBanned(adminSocket.events))).toBe(true);
     expect(sawBanned(bystanderSocket.events)).toBe(false);
+  });
+
+  it("streams Ollama deltas to the DM and converges to a single final messageUpdated (docs/15 #15)", async () => {
+    const ollama = startMockOllama(["Hello", " from", " Ollama"]);
+    cleanups.push(ollama.close);
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const user = await newSession(app);
+    const baseUrl = await listen(app);
+    const userSocket = await connect(baseUrl, user.cookie);
+    const BOT_ID = "llm.ollama.gemma4"; // default botId (unchanged by the config override above)
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    expect(dm.statusCode).toBe(201);
+
+    expect(await waitFor(() => userSocket.events.some((event) => event.type === "end"))).toBe(true);
+
+    // Genuinely streamed (more than one delta event), and the deltas concatenate to the full reply.
+    const deltas = userSocket.events.filter((event) => event.type === "delta");
+    expect(deltas.length).toBeGreaterThan(1);
+    expect(deltas.map((event) => event.text).join("")).toBe("Hello from Ollama");
+
+    // Exactly one persisted messageUpdated for the assistant message — clients converge on a single
+    // final body instead of one broadcast per delta.
+    const updates = userSocket.events.filter(
+      (event) => event.type === "messageUpdated" && event.message?.authorId === BOT_ID,
+    );
+    expect(updates.length).toBe(1);
+    expect(updates[0]?.message?.body).toBe("Hello from Ollama");
+    expect(updates[0]?.message?.meta?.streaming).toBe(false);
+
+    // The DM history was actually forwarded to Ollama.
+    expect(ollama.requests[0]?.messages?.at(-1)).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("never delivers Ollama stream deltas (or the bot DM) to a bystander outside the DM (docs/15 #15)", async () => {
+    const ollama = startMockOllama(["secret", " reply"]);
+    cleanups.push(ollama.close);
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const user = await newSession(app);
+    const bystander = await newSession(app);
+    const baseUrl = await listen(app);
+    const userSocket = await connect(baseUrl, user.cookie);
+    const bystanderSocket = await connect(baseUrl, bystander.cookie);
+    const BOT_ID = "llm.ollama.gemma4";
+
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+
+    // The DM participant seeing the stream complete proves the round finished, making the
+    // bystander's silence below a real verdict rather than a timing artifact.
+    expect(await waitFor(() => userSocket.events.some((event) => event.type === "end"))).toBe(true);
+
+    expect(bystanderSocket.events.some((event) => event.type === "start")).toBe(false);
+    expect(bystanderSocket.events.some((event) => event.type === "delta")).toBe(false);
+    expect(bystanderSocket.events.some((event) => event.type === "end")).toBe(false);
+    expect(
+      bystanderSocket.events.some(
+        (event) =>
+          (event.type === "messageCreated" || event.type === "messageUpdated") && event.message?.authorId === BOT_ID,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -3076,6 +3227,43 @@ describe("node-to-node sync", () => {
     });
     await runSync(puller, pullerAdmin.cookie);
     expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("keep me (edited)");
+  });
+
+  it("horizon GC: a tombstone blocks re-import within the horizon, but is prunable past it (docs/15 #7)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const doomedId = await post(source, sourceAdmin.cookie, "general", "delete me locally, horizon test");
+    const sourceUrl = await listenApp(source);
+
+    // A tiny horizon (test-only override) so the GC boundary can be exercised without waiting days.
+    const puller = await makeApp(
+      { sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } },
+      { tombstoneHorizonMs: 50 },
+    );
+    const pullerAdmin = await newSession(puller);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("delete me locally, horizon test");
+
+    await puller.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${doomedId}`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    expect(puller.store.loadTombstones()).toContain(doomedId);
+
+    // Still within the horizon: the reaper leaves the tombstone alone, and sync must not resurrect it.
+    puller.reapExpiredMessages();
+    expect(puller.store.loadTombstones()).toContain(doomedId);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).not.toContain("delete me locally, horizon test");
+
+    // Past the horizon: the reaper GCs the tombstone, and a subsequent pull can hand the message
+    // back — the accepted DTN limitation for a peer that was offline longer than the horizon.
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    puller.reapExpiredMessages();
+    expect(puller.store.loadTombstones()).not.toContain(doomedId);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("delete me locally, horizon test");
   });
 });
 
@@ -3931,6 +4119,96 @@ describe("on-device LLM provider", () => {
   });
 });
 
+describe("Ollama LLM streaming (docs/15 #15)", () => {
+  const BOT_ID = "llm.ollama.gemma4"; // shared bot identity, default botId
+
+  /** The bot reply is created + streamed asynchronously after the DM POST returns; poll for it to
+   * settle (a body present and no longer marked `streaming`), mirroring the on-device helper above. */
+  async function settledAssistantReply(
+    app: LoamApp,
+    cookie: string,
+  ): Promise<{ body?: string; streaming?: boolean } | undefined> {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const thread = (
+        await app.server.inject({ method: "GET", url: `/api/dms/${BOT_ID}`, headers: { cookie } })
+      ).json() as { authorId: string; body?: string; meta?: { streaming?: boolean } }[];
+      const reply = thread.find((message) => message.authorId === BOT_ID && (message.body ?? "").length > 0);
+      if (reply && reply.meta?.streaming !== true) {
+        return { body: reply.body, streaming: reply.meta?.streaming };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return undefined;
+  }
+
+  it("degrades to a graceful assistant error when Ollama is unreachable, without crashing the server", async () => {
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await unusedLocalUrl() } } });
+    const user = await newSession(app);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    // The POST itself never fails because of a bad LLM backend — the failure surfaces async, in the
+    // assistant's own reply, exactly like an on-device hook failure.
+    expect(dm.statusCode).toBe(201);
+
+    const reply = await settledAssistantReply(app, user.cookie);
+    expect(reply?.body).toMatch(/LLM error/i);
+
+    // The server itself stayed healthy — an unrelated request right after still succeeds.
+    expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+  });
+
+  it("gates the bot contact and enableLLMChat/enableLLMStreaming on llm.ollama.enabled", async () => {
+    const disabledApp = await makeApp();
+    const disabledUser = await newSession(disabledApp);
+
+    const disabledConfig = (
+      await disabledApp.server.inject({
+        method: "GET",
+        url: "/api/config",
+        headers: { cookie: disabledUser.cookie },
+      })
+    ).json() as { networkConfig: { enableLLMChat: boolean; enableLLMStreaming: boolean } };
+    expect(disabledConfig.networkConfig.enableLLMChat).toBe(false);
+    expect(disabledConfig.networkConfig.enableLLMStreaming).toBe(false);
+
+    const disabledUsers = (
+      await disabledApp.server.inject({ method: "GET", url: "/api/users", headers: { cookie: disabledUser.cookie } })
+    ).json() as { id: string }[];
+    expect(disabledUsers.some((entry) => entry.id === BOT_ID)).toBe(false);
+
+    // With no backend enabled the bot doesn't exist at all, so a DM "to" its id is just a DM to a
+    // nonexistent recipient — no assistant reply is ever triggered.
+    const blindDm = await disabledApp.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: disabledUser.cookie },
+      payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
+    });
+    expect(blindDm.statusCode).toBe(400);
+
+    const ollama = startMockOllama(["hi there"]);
+    cleanups.push(ollama.close);
+    const enabledApp = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const enabledUser = await newSession(enabledApp);
+
+    const enabledConfig = (
+      await enabledApp.server.inject({ method: "GET", url: "/api/config", headers: { cookie: enabledUser.cookie } })
+    ).json() as { networkConfig: { enableLLMChat: boolean; enableLLMStreaming: boolean } };
+    expect(enabledConfig.networkConfig.enableLLMChat).toBe(true);
+    expect(enabledConfig.networkConfig.enableLLMStreaming).toBe(true);
+
+    const enabledUsers = (
+      await enabledApp.server.inject({ method: "GET", url: "/api/users", headers: { cookie: enabledUser.cookie } })
+    ).json() as { id: string; type: string }[];
+    expect(enabledUsers.some((entry) => entry.id === BOT_ID && entry.type === "bot")).toBe(true);
+  });
+});
+
 describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
   const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000, maxContacts: 1000 };
 
@@ -4210,6 +4488,144 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     const epoch = currentEpoch(sealedMsg.ttlExpiresAt - MESH.ttlMs, 24 * 3_600_000);
     expect(sealedMsg.toTag).toBe(mailboxTag(bobCard.mailboxToken, epoch));
     expect(sealedMsg.toTag).not.toBe(mailboxTag(bobCard.kx, epoch));
+  });
+
+  describe("group/broadcast fan-out (POST /api/mesh/broadcast)", () => {
+    /** Broadcast one sealed message to several contacts in one call. */
+    function broadcast(app: LoamApp, cookie: string, toMeshIds: string[], body: string): Promise<InjectResponse> {
+      return app.server.inject({
+        method: "POST",
+        url: "/api/mesh/broadcast",
+        headers: { cookie },
+        payload: { toMeshIds, body },
+      });
+    }
+
+    it("404s /api/mesh/broadcast when mesh is disabled", async () => {
+      const app = await makeApp();
+      const user = await newSession(app);
+      const res = await broadcast(app, user.cookie, ["mesh.absent"], "hi");
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("seals an independent copy to each of 3 contacts, with distinct tags/ciphertext, and delivers to all", async () => {
+      // Bob, Carol, and Dave live on node B; Alice (the sender) is on node A, so their sealed copies
+      // are stored (not delivered in-process) until sync carries them — letting us inspect the
+      // per-recipient blobs before they're opened.
+      const nodeA = await makeApp({ sync: { enabled: true }, mesh: MESH });
+      const nodeB = await makeApp({ sync: { enabled: true }, mesh: MESH });
+      const alice = await adminOf(nodeA);
+      const bob = await adminOf(nodeB);
+      const carol = await newSession(nodeB);
+      const dave = await newSession(nodeB);
+
+      const [aUrl] = await Promise.all([listen(nodeA), listen(nodeB)]);
+      // B pulls from A (the courier direction: A holds the sealed blobs after sending).
+      expect((await setPeers(nodeB, bob.cookie, [aUrl])).statusCode).toBe(200);
+
+      const bobCard = await meshCard(nodeB, bob.cookie);
+      const carolCard = await meshCard(nodeB, carol.cookie);
+      const daveCard = await meshCard(nodeB, dave.cookie);
+      for (const card of [bobCard, carolCard, daveCard]) {
+        expect((await addContact(nodeA, alice.cookie, card)).statusCode).toBe(200);
+      }
+
+      const res = await broadcast(
+        nodeA,
+        alice.cookie,
+        [bobCard.meshId, carolCard.meshId, daveCard.meshId],
+        "assemble at noon",
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 3, skipped: [] });
+
+      // Node A stored 3 independently-sealed copies — one per recipient, each with its own routing
+      // tag (derived from that recipient's secret mailbox token) and its own ciphertext (fresh
+      // ephemeral key per seal), never a shared key across recipients.
+      const sealedRows = nodeA.store.loadMessages().filter((message) => message.type === "sealed") as {
+        toTag: string;
+        sealed: string;
+      }[];
+      expect(sealedRows).toHaveLength(3);
+      expect(new Set(sealedRows.map((row) => row.toTag)).size).toBe(3);
+      expect(new Set(sealedRows.map((row) => row.sealed)).size).toBe(3);
+
+      // Sync carries all 3 blobs to node B, which recognises each tag against its local recipient and
+      // decrypts+delivers independently.
+      await syncNow(nodeB, bob.cookie);
+
+      for (const recipient of [
+        { session: bob, card: bobCard },
+        { session: carol, card: carolCard },
+        { session: dave, card: daveCard },
+      ]) {
+        const contact = (await roster(nodeB, recipient.session.cookie)).find((entry) => entry.id.startsWith("mesh."));
+        expect(contact).toBeDefined();
+        expect(await dmBodies(nodeB, recipient.session.cookie, contact!.id)).toContain("assemble at noon");
+      }
+    });
+
+    it("reports a toMeshId that isn't a contact in `skipped`, without sending to it", async () => {
+      const app = await makeApp({ mesh: MESH });
+      const alice = await newSession(app);
+      const bob = await newSession(app);
+      const carol = await newSession(app);
+      const bobCard = await meshCard(app, bob.cookie);
+      const carolCard = await meshCard(app, carol.cookie);
+      // Alice adds Bob but never adds Carol.
+      expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
+
+      const res = await broadcast(app, alice.cookie, [bobCard.meshId, carolCard.meshId], "hi");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 1, skipped: [carolCard.meshId] });
+
+      expect((await roster(app, bob.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(true);
+      expect((await roster(app, carol.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+    });
+
+    it("silently drops a shadow-banned sender's broadcast (200, nothing delivered)", async () => {
+      const app = await makeApp({ mesh: MESH });
+      const admin = await newSession(app); // firstUser → admin (can moderate)
+      const spammer = await newSession(app);
+      const bob = await newSession(app);
+      const carol = await newSession(app);
+
+      const bobCard = await meshCard(app, bob.cookie);
+      const carolCard = await meshCard(app, carol.cookie);
+      expect((await addContact(app, spammer.cookie, bobCard)).statusCode).toBe(200);
+      expect((await addContact(app, spammer.cookie, carolCard)).statusCode).toBe(200);
+
+      await app.server.inject({
+        method: "PATCH",
+        url: `/api/moderation/users/${spammer.userId}`,
+        headers: { cookie: admin.cookie },
+        payload: { shadowBanned: true },
+      });
+
+      const res = await broadcast(app, spammer.cookie, [bobCard.meshId, carolCard.meshId], "spam spam spam");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 0, skipped: [] });
+
+      expect((await roster(app, bob.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+      expect((await roster(app, carol.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+    });
+
+    it("de-duplicates repeated toMeshIds so a contact is mailed only once", async () => {
+      const app = await makeApp({ mesh: MESH });
+      const alice = await newSession(app);
+      const bob = await newSession(app);
+      const bobCard = await meshCard(app, bob.cookie);
+      expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
+
+      const res = await broadcast(app, alice.cookie, [bobCard.meshId, bobCard.meshId, bobCard.meshId], "hi bob");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 1, skipped: [] });
+
+      const contact = (await roster(app, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+      expect(contact).toBeDefined();
+      const bodies = await dmBodies(app, bob.cookie, contact!.id);
+      expect(bodies.filter((entry) => entry === "hi bob")).toHaveLength(1);
+    });
   });
 });
 
@@ -4746,5 +5162,53 @@ describe("deploy hardening (docs/15)", () => {
       await app.server.inject({ method: "GET", url: "/api/admin/sync", headers: { cookie: admin.cookie } })
     ).json() as { peers: { url: string; status?: unknown }[] };
     expect(readded.peers.some((peer) => peer.url === "http://peer-a.invalid" && peer.status)).toBe(true);
+  });
+});
+
+describe("location sharing (docs/10)", () => {
+  it("rejects a shared location when the feature is off (default), accepts it when on", async () => {
+    const off = await makeApp();
+    const offUser = await newSession(off);
+    const rejected = await off.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: offUser.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "meet here", location: { label: "north gate" } },
+    });
+    expect(rejected.statusCode).toBe(400);
+
+    const on = await makeApp({ features: { enableLocationSharing: true } });
+    const onUser = await newSession(on);
+    const accepted = await on.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: onUser.cookie },
+      payload: {
+        type: "channelPost",
+        channelId: "general",
+        body: "",
+        location: { label: "north gate", lat: 51.5, lng: -0.12 },
+      },
+    });
+    expect(accepted.statusCode).toBe(201);
+    const stored = (accepted.json() as { message: { location?: { label?: string; lat?: number; lng?: number } } }).message;
+    expect(stored.location).toEqual({ label: "north gate", lat: 51.5, lng: -0.12 });
+
+    // Config advertises the flag to the client.
+    const cfg = (await on.server.inject({ method: "GET", url: "/api/config", headers: { cookie: onUser.cookie } }))
+      .json() as { networkConfig: { enableLocationSharing: boolean } };
+    expect(cfg.networkConfig.enableLocationSharing).toBe(true);
+  });
+
+  it("rejects a location with neither a label nor coordinates", async () => {
+    const app = await makeApp({ features: { enableLocationSharing: true } });
+    const user = await newSession(app);
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "x", location: { lat: 51.5 } },
+    });
+    expect(res.statusCode).toBe(400);
   });
 });

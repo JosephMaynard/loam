@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const uk: Catalog = {
   "composer.thinking": "Думає…",
   "toast.imageFallback": "📷 Зображення",
+  "toast.locationFallback": "📍 Місцезнаходження",
 
   "common.save": "Зберегти",
   "common.saving": "Збереження…",
@@ -45,6 +46,16 @@ export const uk: Catalog = {
   "composer.attachImage": "Долучити зображення",
   "composer.attachImageHint": "Долучити зображення (розмір змінюється на цьому пристрої перед завантаженням)",
   "composer.send": "Надіслати",
+
+  "composer.shareLocation": "Поділитися місцем",
+  "composer.shareLocationHint": "Поділіться місцем — підпис працює навіть без GPS",
+  "composer.locationLabel": "Підпис місця",
+  "composer.locationLabelPlaceholder": "напр., північні ворота",
+  "composer.locationLat": "Широта (від -90 до 90)",
+  "composer.locationLng": "Довгота (від -180 до 180)",
+
+  "location.openInMaps": "Відкрити в картах",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "Не вдалося завантажити учасників.",
   "members.inviteError": "Не вдалося запросити цю людину.",

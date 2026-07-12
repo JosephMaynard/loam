@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const my: Catalog = {
   "composer.thinking": "စဉ်းစားနေသည်…",
   "toast.imageFallback": "📷 ပုံ",
+  "toast.locationFallback": "📍 တည်နေရာ",
 
   "common.save": "သိမ်းရန်",
   "common.saving": "သိမ်းနေသည်…",
@@ -40,6 +41,16 @@ export const my: Catalog = {
   "composer.attachImage": "ပုံ ပူးတွဲရန်",
   "composer.attachImageHint": "ပုံ ပူးတွဲရန် (မတင်မီ ဤစက်တွင် အရွယ်ပြန်ချိန်ညှိသည်)",
   "composer.send": "ပို့ရန်",
+
+  "composer.shareLocation": "တည်နေရာ မျှဝေရန်",
+  "composer.shareLocationHint": "နေရာတစ်ခု မျှဝေပါ — GPS မရှိလည်း label က အလုပ်လုပ်သည်",
+  "composer.locationLabel": "တည်နေရာ label",
+  "composer.locationLabelPlaceholder": "ဥပမာ- မြောက်ဘက်တံခါး",
+  "composer.locationLat": "လတ္တီတွဒ် (-90 မှ 90)",
+  "composer.locationLng": "လောင်ဂျီတွဒ် (-180 မှ 180)",
+
+  "location.openInMaps": "မြေပုံတွင် ဖွင့်ရန်",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "အဖွဲ့ဝင်များ ဖွင့်၍မရပါ။",
   "members.inviteError": "ထိုသူကို ဖိတ်၍မရပါ။",
