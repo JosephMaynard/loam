@@ -26,10 +26,13 @@
 > can't carry the session header) is refused (401), forcing the client to fetch images through the tunnel
 > (`encryptedImageUrl` / the `useEncryptedImage` hook) and render them from a cached `blob:` object URL,
 > so image bytes are sealed on the wire like everything else. `optional`/`off` nodes still serve images
-> directly in clear (lighter). So in `required` mode the only plaintext metadata left on the wire is that
-> a `POST /api/transport/tunnel` happened, plus coarse ciphertext size/timing. (WS frames aren't
-> sequence-numbered: a replayed server→client frame is idempotent client-side — every event is upserted
-> by id.)
+> directly in clear (lighter). So in `required` mode a **post-handshake REST request** reveals only that
+> a `POST /api/transport/tunnel` happened, plus coarse ciphertext size/timing — its method, path/query,
+> and body are all sealed. Still observable (unavoidably): the **bootstrap** — `GET /api/config` and
+> `POST /api/transport/handshake` run before a session exists — and the **WebSocket upgrade**
+> `GET /ws?enc=<sid>`, which exposes the session id and that a WS connection opened (its frames are then
+> sealed). (WS frames aren't sequence-numbered: a replayed server→client frame is idempotent client-side
+> — every event is upserted by id.)
 
 
 ## The problem

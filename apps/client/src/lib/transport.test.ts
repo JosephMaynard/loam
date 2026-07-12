@@ -543,6 +543,47 @@ describe("transport", () => {
       expect(await res.json()).toEqual({ ok: true, sawPath: "/api/search?q=secret" });
     });
 
+    it("tunnels a mutation with its body sealed inside the envelope", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      let capturedInner: { m: string; p: string; body?: unknown } | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        expect(url).toBe("/api/transport/tunnel");
+        const wire = JSON.parse(init.body as string) as { enc: string };
+        const opened = openTransport(serverKey!, wire.enc, "POST /api/transport/tunnel");
+        const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string; body?: unknown } };
+        capturedInner = envelope.b;
+        const descriptor = JSON.stringify({ status: 201, contentType: "application/json", bodyB64: btoa(JSON.stringify({ id: "msg_1" })) });
+        return new Response(JSON.stringify({ enc: sealTransport(serverKey!, descriptor, "POST /api/transport/tunnel") }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const res = await encryptedFetch("POST", "/api/messages", { type: "channelPost", channelId: "general", body: "hi" });
+
+      // Method, path AND body all rode inside the sealed envelope — none on the wire path.
+      expect(capturedInner).toEqual({ m: "POST", p: "/api/messages", body: { type: "channelPost", channelId: "general", body: "hi" } });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: "msg_1" });
+    });
+
     it("surfaces a sealed non-descriptor tunnel reply as a 400 Response instead of crashing", async () => {
       const host = createTransportIdentity();
       window.location.hash = `#k=${host.publicKey}`;

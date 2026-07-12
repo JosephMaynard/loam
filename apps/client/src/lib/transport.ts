@@ -477,13 +477,17 @@ export function isTunnelActive(): boolean {
 /** Bounded cache of tunnelled image object URLs (`path → blob: URL`), so an avatar that appears in
  * dozens of rows is fetched once. Evicting (or resetting) revokes the URL to release the blob. */
 const imageObjectUrls = new Map<string, string>();
+/** In-flight fetches by path, so N rows requesting the same avatar on first paint share ONE tunnel
+ * fetch instead of racing N of them (each of which would create — and mostly leak — a blob URL). */
+const imageUrlInFlight = new Map<string, Promise<string>>();
 const IMAGE_URL_CACHE_MAX = 200;
 
 /**
  * Resolve an image path to a render-ready `src`. With the tunnel active (required mode) the raw
  * endpoint refuses a direct `<img>` GET, so the bytes are fetched through the tunnel (coming back
  * sealed) and handed back as a cached `blob:` object URL. Otherwise returns the plain same-origin URL
- * unchanged. On any failure falls back to the raw URL — a broken image beats a thrown render.
+ * unchanged. Concurrent callers for the same path share a single in-flight fetch. On any failure falls
+ * back to the raw URL (not cached, so a later render can retry) — a broken image beats a thrown render.
  */
 export async function encryptedImageUrl(path: string): Promise<string> {
   if (!isTunnelActive()) {
@@ -493,24 +497,36 @@ export async function encryptedImageUrl(path: string): Promise<string> {
   if (cached) {
     return cached;
   }
-  try {
-    const response = await encryptedFetch("GET", path);
-    if (!response.ok) {
-      return apiUrl(path);
-    }
-    const objectUrl = URL.createObjectURL(await response.blob());
-    if (imageObjectUrls.size >= IMAGE_URL_CACHE_MAX) {
-      const oldest = imageObjectUrls.keys().next().value;
-      if (oldest !== undefined) {
-        URL.revokeObjectURL(imageObjectUrls.get(oldest) as string);
-        imageObjectUrls.delete(oldest);
-      }
-    }
-    imageObjectUrls.set(path, objectUrl);
-    return objectUrl;
-  } catch {
-    return apiUrl(path);
+  const inFlight = imageUrlInFlight.get(path);
+  if (inFlight) {
+    return inFlight;
   }
+
+  const pending = (async () => {
+    try {
+      const response = await encryptedFetch("GET", path);
+      if (!response.ok) {
+        return apiUrl(path);
+      }
+      const objectUrl = URL.createObjectURL(await response.blob());
+      if (imageObjectUrls.size >= IMAGE_URL_CACHE_MAX) {
+        const oldest = imageObjectUrls.keys().next().value;
+        if (oldest !== undefined) {
+          URL.revokeObjectURL(imageObjectUrls.get(oldest) as string);
+          imageObjectUrls.delete(oldest);
+        }
+      }
+      imageObjectUrls.set(path, objectUrl);
+      return objectUrl;
+    } catch {
+      return apiUrl(path);
+    } finally {
+      imageUrlInFlight.delete(path);
+    }
+  })();
+
+  imageUrlInFlight.set(path, pending);
+  return pending;
 }
 
 /** Revoke every cached image object URL (on wipe / test reset) so blobs aren't leaked. */
@@ -519,6 +535,7 @@ export function clearImageObjectUrls(): void {
     URL.revokeObjectURL(url);
   }
   imageObjectUrls.clear();
+  imageUrlInFlight.clear();
 }
 
 /** Append the live session's `?enc=<sessionId>` to a WebSocket URL (docs/08), so the server knows to

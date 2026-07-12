@@ -3817,6 +3817,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       method: method as "GET",
       url: path,
       headers,
+      // Forward the real caller's address so the inner request's `request.ip` is the client's, not
+      // loopback — otherwise every tunnelled request would share one IP for the per-IP identity-mint
+      // budget and the claim/panic limiters (one client could exhaust them for everyone).
+      remoteAddress: request.ip,
       payload: hasBody ? JSON.stringify(payload?.body) : undefined,
     });
 
