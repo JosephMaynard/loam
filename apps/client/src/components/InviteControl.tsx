@@ -7,10 +7,15 @@ import { safeQrSvg } from "../lib/qr";
  * Sidebar invite affordance for greeters/admins: a collapsible panel rendering the node's join URL as
  * a QR (for someone already on the LAN) plus the URL text. WiFi credentials are native-only, so this
  * only surfaces the URL. Gated by the caller on `canGreet`.
+ *
+ * @param qrUrl - The URL to encode in the QR, if it should differ from the displayed `joinUrl` — e.g.
+ *   the caller's `joinQrUrl(joinUrl, transportPublicKey)` (docs/08), which appends a `#k=` fragment so
+ *   the QR carries the host's transport public key out-of-band while the displayed text stays plain.
+ *   Defaults to `joinUrl` when omitted.
  */
-export function InviteControl({ joinUrl }: { joinUrl?: string }) {
+export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: string }) {
   const [open, setOpen] = useState(false);
-  const qrSvg = useMemo(() => safeQrSvg(joinUrl, "#16271f"), [joinUrl]);
+  const qrSvg = useMemo(() => safeQrSvg(qrUrl ?? joinUrl, "#16271f"), [joinUrl, qrUrl]);
 
   if (!joinUrl) {
     return null;

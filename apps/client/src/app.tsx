@@ -1628,6 +1628,7 @@ function LoamApp() {
         onCreateChannel={createChannel}
         onlineUserIds={onlineUserIds}
         showMesh={!!config?.networkConfig.enableMesh}
+        transportPublicKey={config?.networkConfig.transportPublicKey}
         unreadByConversation={unreadByConversation}
         users={users}
       />
@@ -1760,6 +1761,7 @@ interface SidebarProps {
   onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
   onlineUserIds: ReadonlySet<string>;
   showMesh: boolean;
+  transportPublicKey?: string;
   unreadByConversation: Map<string, number>;
   users: User[];
 }
@@ -1786,11 +1788,15 @@ function Sidebar({
   onCreateChannel,
   onlineUserIds,
   showMesh,
+  transportPublicKey,
   unreadByConversation,
   users,
 }: SidebarProps) {
   const peers = users.filter((user) => user.id !== currentUser.id);
   const showPeople = canModerate(currentUser) || canGreet(currentUser);
+  // Encode the host's transport public key into the invite QR (docs/08) so a scanner learns it
+  // out-of-band → MITM-resistant handshake; the displayed URL text (inside InviteControl) stays plain.
+  const inviteQrUrl = joinUrl ? joinQrUrl(joinUrl, transportPublicKey) : undefined;
 
   return (
     <aside className="sidebar">
@@ -1860,7 +1866,7 @@ function Sidebar({
           <span className="nav-glyph">⌕</span>
           {t("sidebar.searchMessages")}
         </NavLink>
-        {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} /> : null}
+        {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} qrUrl={inviteQrUrl} /> : null}
         {showPeople ? (
           <NavLink active={false} href="/people">
             <span className="nav-glyph">☺</span>
