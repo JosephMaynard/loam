@@ -100,6 +100,69 @@ unavailable, so ship one):
 - ⚠️ **Metadata** (who talks to whom, timing, sizes) is still visible to the host and partially to the
   network. Note it honestly.
 
+## Node-to-node sync over the transport channel (BUILT)
+
+> **Status: BUILT & TESTED** (`feat/sync-transport-encryption`). The puller side of the transport
+> handshake now also lives **server-side**, so node-to-node sync (docs/11) rides the same encrypted
+> channel instead of plain HTTP.
+
+The transport hooks above were written for the browser client, but they don't care *who* the peer is —
+they decrypt any request bearing `x-loam-enc` + a sealed `{ enc }` body, and seal the response. So a
+LOAM node that **pulls** from another node can be a transport *client* to it. `apps/server/src/sync-transport.ts`
+is that client (pure `@loam/crypto`, no native deps), mirroring `apps/client/src/lib/transport.ts`:
+
+- `handshakeWithPeer(peerUrl, { expectedHostKey? })` — `transportClientHello()` → `POST
+  /api/transport/handshake` → validate with `TransportHandshakeResponseSchema` → `transportClientDerive`
+  → a `{ sessionId, key, hostPublicKey }` session. A supplied `expectedHostKey` (a pinned peer key) is
+  verified against the handshake's returned `hostPublicKey` and **fails closed** on mismatch.
+- `sealedFetch(session, peerUrl, path, { body?, headers?, reHandshake? })` — seals the request body as
+  `{ enc: sealTransport(key, JSON.stringify(body), aad) }` (a bodyless GET sends no envelope but still
+  asks for a sealed response), `aad = "${method} ${path}"`, header `x-loam-enc: sessionId`; unseals a
+  `x-loam-enc: 1` response. On a `401` or an undecryptable response it re-handshakes **once** and
+  retries — always safe because every sync request is a read-only query.
+
+**Framing note (important):** the inner sealed plaintext is the **raw JSON body**, exactly what the
+peer's `preValidation` hook does `JSON.parse(...)` on and hands to the route schema. There is **no
+`{ s, b }` sequence envelope** and **no per-request replay counter** — the peer doesn't check one
+(replay protection is still the unbuilt follow-up called out in the status banner), and wrapping the
+body would fail the peer's schema validation. If replay protection is added later it must land in the
+**shared hooks + both clients together**.
+
+`fetchPeerJson` (`apps/server/src/app.ts`, the single choke point for every peer request) decides per
+peer:
+
+1. Reuse a cached decision if fresh (a live session is cached ~11 h — just under the peer's 12 h
+   server-side TTL; a "this peer runs plaintext" verdict is cached only ~5 min so a peer that *enables*
+   transport is noticed quickly). The cache is cleared on any config PATCH and by the kill switch.
+2. Otherwise learn the peer's posture from its unauthenticated `/api/config`
+   (`networkConfig.transportEncryption` + `transportPublicKey`).
+3. `off` / no key / posture unreadable → the **unchanged plaintext path** (a genuinely `required` peer
+   whose `/api/config` we can't read just 401s the plaintext pull, surfacing as a normal sync failure —
+   never a silent wrong result).
+4. `optional` / `required` with a key → handshake + route the digest/messages request through
+   `sealedFetch`, with the `x-loam-sync-token` bearer secret now travelling **inside** the sealed
+   session. **Fail-closed:** a `required` peer (or any peer with a pinned key) that can't complete the
+   handshake fails the sync attempt rather than falling back to a plaintext pull that would 401 anyway;
+   an `optional` peer degrades to plaintext (it still serves the clear path).
+
+This closes a real gap: a peer running `transportEncryption: "required"` previously **401'd every
+plaintext sync pull** (its transport hook refuses any `/api/*` content request without a session), so it
+could not be synced *from* at all. It can now.
+
+### MITM disposition between nodes (honest scope)
+
+The peer's static transport key is learned from its `/api/config` **over plain HTTP** — that is *not*
+an out-of-band channel (unlike the browser's join-QR `#k=`). So by default (trust-on-first-use against
+the advertised key) node-to-node sync gets **passive-eavesdropper confidentiality + integrity + sync-
+token protection, but NOT active-MITM resistance** between nodes: a machine-in-the-middle could present
+its own key on `/api/config` and the handshake, then re-encrypt to the real peer.
+
+To get active-MITM resistance, an operator **pins** the peer's key: `SyncPeer.transportKey` (a
+base64url X25519 key, e.g. copied from the peer's join QR / host screen out-of-band). When set, the
+puller verifies the handshake's `hostPublicKey` against it and **refuses to sync on a mismatch**, and
+goes encrypted regardless of what `/api/config` claims. Unpinned = TOFU (the honest default; documented
+here and in docs/15 as the residual). This mirrors the browser's QR-key-vs-config-key trust rule.
+
 ## Alternative: get a real secure context (real TLS on the LAN)
 
 Only viable for **self-hosters with a domain**, *not* a mass-distributed app:

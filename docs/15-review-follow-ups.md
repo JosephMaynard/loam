@@ -53,6 +53,17 @@ ranked within each group. Each entry names the file and the concrete change.
    host-panel / NodeLinkControl); live re-handshake on a runtime mode flip.
 6. **On-device SQLCipher.** The Android DB is unencrypted at rest; needs a multiple-ciphers ABI-108
    android-arm64 prebuild (docs/01, docs/04).
+6a. **Node-to-node sync now rides the transport channel — but inter-node MITM is TOFU by default.**
+   **BUILT** (`feat/sync-transport-encryption`, `apps/server/src/sync-transport.ts` + `fetchPeerJson`):
+   a pulling node establishes a transport session with each peer and seals its digest/messages requests
+   (and the `x-loam-sync-token`), which also fixes the gap that a `required`-mode peer 401'd every
+   plaintext pull and so couldn't be synced from. **Residual:** the peer's static key is learned from
+   its `/api/config` over plain HTTP (not out-of-band like the browser's join QR), so this is passive-
+   eavesdropper + integrity + token protection, **not active-MITM resistance** between nodes unless the
+   operator **pins** the key via the new optional `SyncPeer.transportKey` (verified against the
+   handshake, fail-closed on mismatch). Unpinned = trust-on-first-use. Next: surface the pinned-key
+   field in the admin peers UI (config-schema support already landed) and, longer-term, per-peer signed
+   authors (item 1) for full peer authentication.
 
 ## Correctness / robustness
 

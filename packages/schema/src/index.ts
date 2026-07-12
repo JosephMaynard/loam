@@ -401,6 +401,19 @@ export type AccessConfig = z.infer<typeof AccessConfigSchema>;
 export const SyncPeerSchema = z.object({
   url: z.url({ protocol: /^https?$/ }),
   label: z.string().trim().min(1).max(80).optional(),
+  /**
+   * Optional pinned peer transport key (base64url X25519 public key, docs/08). When set, this node
+   * verifies the peer's handshake-returned static key against it and refuses to sync on a mismatch —
+   * the operator delivering it out-of-band (e.g. copied from the peer's join QR) is what upgrades
+   * inter-node sync from trust-on-first-use to active-MITM resistance. Unset = TOFU against the key the
+   * peer advertises over its (plain-HTTP) `/api/config`.
+   */
+  transportKey: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/, "must be base64url")
+    .min(1)
+    .max(64)
+    .optional(),
 });
 export type SyncPeer = z.infer<typeof SyncPeerSchema>;
 
