@@ -1,0 +1,272 @@
+import { createTransportIdentity, openTransport, sealTransport, transportServerAccept } from "@loam/crypto";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  apiUrl,
+  encryptedFetch,
+  ensureSession,
+  fingerprint,
+  getCachedHostPublicKey,
+  getHostKeyMismatch,
+  getSession,
+  openWsFrame,
+  resetTransportStateForTests,
+  SERVER_URL_KEY,
+  TransportNeedsQrError,
+  wsUrl,
+} from "./transport";
+
+/** Simulates the server side of a handshake for a given host identity: parses the client's hello,
+ * runs the real `transportServerAccept`, and returns the JSON body `/api/transport/handshake` sends. */
+function handshakeResponseBody(
+  hostSecretKey: string,
+  hostPublicKey: string,
+  requestBody: string,
+): { status: number; json: unknown } {
+  const { clientEphemeralPublic } = JSON.parse(requestBody) as { clientEphemeralPublic: string };
+  const accepted = transportServerAccept({ hostSecret: hostSecretKey, clientEphemeralPublic });
+  return {
+    status: 200,
+    json: { sessionId: "sess-1", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey },
+  };
+}
+
+describe("transport", () => {
+  beforeEach(() => {
+    resetTransportStateForTests();
+    localStorage.clear();
+    window.location.hash = "";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    window.location.hash = "";
+  });
+
+  describe("apiUrl", () => {
+    it("is server-relative with no configured server override", () => {
+      expect(apiUrl("/api/config")).toBe("/api/config");
+    });
+
+    it("prefixes a configured server origin override", () => {
+      localStorage.setItem(SERVER_URL_KEY, "http://192.168.1.5:3001");
+      expect(apiUrl("/api/config")).toBe("http://192.168.1.5:3001/api/config");
+    });
+  });
+
+  describe("encryptedFetch (off mode / no session)", () => {
+    it("is a byte-for-byte passthrough with no body", async () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const response = await encryptedFetch("GET", "/api/channels");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith("/api/channels", {
+        method: "GET",
+        credentials: "include",
+        headers: undefined,
+        signal: undefined,
+        body: undefined,
+      });
+      expect(await response.json()).toEqual({ ok: true });
+    });
+
+    it("is a byte-for-byte passthrough with a JSON body", async () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await encryptedFetch("POST", "/api/messages", { body: "hi" });
+
+      expect(fetchMock).toHaveBeenCalledWith("/api/messages", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        signal: undefined,
+        body: JSON.stringify({ body: "hi" }),
+      });
+    });
+  });
+
+  describe("ensureSession", () => {
+    it("off mode never establishes a session", async () => {
+      await ensureSession("off");
+      expect(getSession()).toBeUndefined();
+    });
+
+    it("throws TransportNeedsQrError in required mode with no host key available", async () => {
+      await expect(ensureSession("required")).rejects.toBeInstanceOf(TransportNeedsQrError);
+      expect(getSession()).toBeUndefined();
+    });
+
+    it("optional mode with no host key silently leaves no session (no throw)", async () => {
+      await expect(ensureSession("optional")).resolves.toBeUndefined();
+      expect(getSession()).toBeUndefined();
+    });
+
+    it("performs a real handshake against the given config host key and establishes a session", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+
+      const session = getSession();
+      expect(session).toBeDefined();
+      expect(session?.hostPublicKey).toBe(host.publicKey);
+      expect(session?.sessionId).toBe("sess-1");
+      expect(getHostKeyMismatch()).toBe(false);
+    });
+
+    it("prefers a QR-delivered (#k=) key over the config key and flags a mismatch when they disagree", async () => {
+      const host = createTransportIdentity();
+      const impostor = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        // The server side only knows about `host`'s keypair — the client trusts the QR key
+        // regardless, which is exactly the property under test.
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", impostor.publicKey);
+
+      expect(getHostKeyMismatch()).toBe(true);
+      expect(getSession()?.hostPublicKey).toBe(host.publicKey);
+      // The QR key is cached for this origin and the fragment is stripped from the visible URL.
+      expect(getCachedHostPublicKey()).toBe(host.publicKey);
+      expect(window.location.hash).toBe("");
+    });
+  });
+
+  describe("encryptedFetch (with a live session)", () => {
+    it("seals the request body as { enc } and unseals a sealed { enc } response", async () => {
+      const host = createTransportIdentity();
+      let sessionKeyOnServer: string | undefined;
+      let capturedRequestBody: unknown;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          sessionKeyOnServer = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({
+              sessionId: "sess-42",
+              hostEphemeralPublic: accepted.hostEphemeralPublic,
+              hostPublicKey: host.publicKey,
+            }),
+            { status: 200 },
+          );
+        }
+
+        // A content request: the wire body must be `{ enc }`, never the plaintext object.
+        const wireBody = JSON.parse(init.body as string) as { enc: string };
+        expect(wireBody.enc).toBeTypeOf("string");
+        capturedRequestBody = wireBody;
+
+        const aad = `${init.method} ${url}`;
+        const opened = openTransport(sessionKeyOnServer!, wireBody.enc, aad);
+        expect(opened).not.toBeNull();
+        expect(JSON.parse(opened!)).toEqual({ text: "hello" });
+
+        const sealedResponse = sealTransport(sessionKeyOnServer!, JSON.stringify({ id: "msg_1" }), aad);
+        return new Response(JSON.stringify({ enc: sealedResponse }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const response = await encryptedFetch("POST", "/api/messages", { text: "hello" });
+
+      expect(capturedRequestBody).toBeDefined();
+      expect(await response.json()).toEqual({ id: "msg_1" });
+    });
+  });
+
+  describe("wsUrl", () => {
+    it("passes the base URL through unchanged with no session", () => {
+      expect(wsUrl("ws://host/ws")).toBe("ws://host/ws");
+    });
+
+    it("appends ?enc=<sessionId> once a session is live", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+
+      expect(wsUrl("ws://host/ws")).toBe(`ws://host/ws?enc=${encodeURIComponent("sess-1")}`);
+      expect(wsUrl("ws://host/ws?foo=bar")).toBe(`ws://host/ws?foo=bar&enc=${encodeURIComponent("sess-1")}`);
+    });
+  });
+
+  describe("openWsFrame", () => {
+    it("passes raw string frames through unchanged with no session", () => {
+      expect(openWsFrame("plain frame")).toBe("plain frame");
+      expect(openWsFrame(42)).toBe("42");
+    });
+
+    it("round-trips a frame sealed under the live session key", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const key = getSession()?.key;
+      expect(key).toBeDefined();
+
+      const sealed = sealTransport(key!, JSON.stringify({ type: "presence" }), "ws");
+      expect(openWsFrame(sealed)).toBe(JSON.stringify({ type: "presence" }));
+    });
+
+    it("returns null on a decrypt failure (never for a session-less pass-through)", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      expect(openWsFrame("not a valid sealed frame")).toBeNull();
+    });
+  });
+
+  describe("fingerprint", () => {
+    it("is undefined with no session and no explicit key", () => {
+      expect(fingerprint()).toBeUndefined();
+    });
+
+    it("is defined for an explicit key, and defaults to the live session's host key", async () => {
+      const host = createTransportIdentity();
+      expect(fingerprint(host.publicKey)).toBeTypeOf("string");
+
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      expect(fingerprint()).toBe(fingerprint(host.publicKey));
+    });
+  });
+});
