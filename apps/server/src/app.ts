@@ -3948,10 +3948,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send(errorBody("Resume requires an encrypted session"));
     }
 
-    // Idempotent: a fresh-sequence retry after a lost response returns the cached result — never a second
-    // mint, never a rebind to a different identity.
+    // Idempotent: a fresh-sequence retry after a lost response returns the cached identity — never a
+    // second mint, never a rebind to a different identity. Re-stamp the response's bound sequence `s` to
+    // THIS request's sequence (docs/20 §9) so a retrying client's response-binding check passes — the
+    // user + token are identical, only the sequence it answers differs. `m`/`p` are constant.
     if (activeSession.authMode === "bound") {
-      return activeSession.resumeResult ?? reply.code(409).send(errorBody("Session already bound"));
+      if (!activeSession.resumeResult) {
+        return reply.code(409).send(errorBody("Session already bound"));
+      }
+      return { ...activeSession.resumeResult, s: transportRequestSeq.get(request) };
     }
 
     const body = request.body as { token?: unknown } | undefined;
