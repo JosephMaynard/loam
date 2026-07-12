@@ -5282,64 +5282,185 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
   });
 });
 
-describe("transport encryption WebSocket frames (docs/08)", () => {
-  it("seals outbound WS frames for a session-bound socket", async () => {
-    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
-    const user = await newSession(app);
-    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
-
-    const hello = transportClientHello();
-    const hs = TransportHandshakeResponseSchema.parse(
-      (
-        await app.server.inject({
-          method: "POST",
-          url: "/api/transport/handshake",
-          payload: { clientEphemeralPublic: hello.ephemeralPublic },
-        })
-      ).json(),
+describe("transport encryption WebSocket frames (docs/08 + docs/20 §7)", () => {
+  // Wire constants for the reflection-safe key-confirmation (docs/20 §7). Hardcoded here (not imported)
+  // so the test pins the on-the-wire AADs — a server-side rename must break these deliberately.
+  const WS_CHALLENGE_AAD = "loam.ws.challenge.v1";
+  const WS_PROOF_AAD = "loam.ws.proof.v1";
+  const wsFrameAad = (connectionId: string) => `loam.ws.frame.v1 ${connectionId}`;
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  type RawWebSocket = {
+    addEventListener: (event: string, listener: (event: unknown) => void) => void;
+    send: (data: string) => void;
+    close: () => void;
+  };
+  const openWs = (url: string, cookie?: string): RawWebSocket =>
+    new (WebSocket as unknown as new (url: string, opts?: unknown) => RawWebSocket)(
+      url,
+      cookie ? { headers: { cookie } } : undefined,
     );
-    const key = transportClientDerive({
-      clientEphemeralSecret: hello.ephemeralSecret,
-      hostPublic: hs.hostPublicKey,
-      hostEphemeralPublic: hs.hostEphemeralPublic,
+
+  /** Connect an encrypted WS, auto-answer the docs/20 §7 challenge, and collect decoded application
+   *  frames (the inner `f` of each `{ q, f }` connection-bound envelope) plus their sequences. */
+  async function connectConfirmed(
+    baseUrl: string,
+    sessionId: string,
+    key: string,
+    cookie?: string,
+  ): Promise<{ socket: RawWebSocket; connectionId(): string; payloads: string[]; seqs: number[]; raw: string[] }> {
+    const raw: string[] = [];
+    const payloads: string[] = [];
+    const seqs: number[] = [];
+    let connectionId = "";
+    const socket = openWs(`${baseUrl.replace("http", "ws")}/ws?enc=${sessionId}`, cookie);
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve());
+      socket.addEventListener("error", () => reject(new Error("ws failed to connect")));
     });
+    socket.addEventListener("message", (event) => {
+      const text = String((event as MessageEvent).data);
+      raw.push(text);
+      if (!connectionId) {
+        const challenge = openTransport(key, text, WS_CHALLENGE_AAD);
+        if (challenge) {
+          const c = JSON.parse(challenge) as { connectionId: string; nonce: string };
+          connectionId = c.connectionId;
+          socket.send(sealTransport(key, JSON.stringify({ type: "proof", connectionId: c.connectionId, nonce: c.nonce }), WS_PROOF_AAD));
+          return;
+        }
+      }
+      const frame = openTransport(key, text, wsFrameAad(connectionId));
+      if (frame) {
+        const env = JSON.parse(frame) as { q: number; f: string };
+        seqs.push(env.q);
+        payloads.push(env.f);
+      }
+    });
+    const deadline = Date.now() + 3_000;
+    while (!connectionId && Date.now() < deadline) {
+      await sleep(25);
+    }
+    return { socket, connectionId: () => connectionId, payloads, seqs, raw };
+  }
 
-    const frames: string[] = [];
-    const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
-      `${baseUrl.replace("http", "ws")}/ws?enc=${hs.sessionId}`,
-      { headers: { cookie: user.cookie } },
-    );
+  it("seals outbound WS frames, connection-bound, only after the client confirms the key", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1); // bind identity → WS uses session.userId
+
+    const client = await connectConfirmed(baseUrl, session.sessionId, session.key);
+    try {
+      expect(client.connectionId()).not.toBe(""); // the challenge was answered
+
+      // Post through the tunnel as the bound user; the broadcast should reach the confirmed socket.
+      await tunnelInner(app, session, 2, {
+        m: "POST",
+        p: "/api/messages",
+        body: { type: "channelPost", channelId: "general", body: "over-the-wire secret" },
+      });
+
+      const deadline = Date.now() + 3_000;
+      while (!client.payloads.some((f) => f.includes("over-the-wire secret")) && Date.now() < deadline) {
+        await sleep(25);
+      }
+    } finally {
+      client.socket.close();
+    }
+
+    expect(bound.currentUser.id).toMatch(/^user\./);
+    // No frame is plaintext...
+    for (const frame of client.raw) {
+      expect(frame).not.toContain("over-the-wire secret");
+    }
+    // ...but an application frame decrypts (connection-bound aad) to the broadcast event.
+    expect(client.payloads.some((value) => value.includes("over-the-wire secret"))).toBe(true);
+    // Frame sequences are monotonic per connection (docs/20 §7 replay window).
+    expect(client.seqs).toEqual([...client.seqs].sort((a, b) => a - b));
+  });
+
+  it("withholds all frames until the challenge is answered; a reflected challenge never confirms (docs/20 §7)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const session = await openTransport08(app);
+    await resumeIdentity(app, session, 1);
+
+    const raw: string[] = [];
+    let appFrames = 0;
+    const socket = openWs(`${baseUrl.replace("http", "ws")}/ws?enc=${session.sessionId}`);
     try {
       await new Promise<void>((resolve, reject) => {
         socket.addEventListener("open", () => resolve());
         socket.addEventListener("error", () => reject(new Error("ws failed to connect")));
       });
-      socket.addEventListener("message", (event) => frames.push(String((event as MessageEvent).data)));
-
-      // Trigger a broadcast to this socket: the user posts a public message.
-      await app.server.inject({
-        method: "POST",
-        url: "/api/messages",
-        headers: { cookie: user.cookie },
-        payload: { type: "channelPost", channelId: "general", body: "over-the-wire secret" },
+      socket.addEventListener("message", (event) => {
+        const text = String((event as MessageEvent).data);
+        raw.push(text);
+        // REFLECTION ATTACK: bounce the challenge ciphertext straight back as the "proof". A keyless
+        // attacker can only echo bytes; the server opens it under the proof aad → fails → never confirms.
+        socket.send(text);
+        // Any frame that opens under a frame aad would be an application frame leaking pre-confirmation.
+        // We can't know the connectionId (never revealed to a keyless attacker), but the challenge is the
+        // only thing that opens under the challenge aad — count anything that ISN'T the challenge.
+        if (!openTransport(session.key, text, WS_CHALLENGE_AAD)) {
+          appFrames += 1;
+        }
       });
 
-      const deadline = Date.now() + 3_000;
-      while (!frames.some((f) => openTransport(key, f, "ws")?.includes("over-the-wire secret")) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
+      // Give the reflection a moment, then trigger a broadcast: a confirmed socket would receive it.
+      await sleep(100);
+      await tunnelInner(app, session, 2, {
+        m: "POST",
+        p: "/api/messages",
+        body: { type: "channelPost", channelId: "general", body: "must-not-arrive" },
+      });
+      await sleep(300);
     } finally {
       socket.close();
     }
 
-    expect(frames.length).toBeGreaterThan(0);
-    // No frame is plaintext...
-    for (const frame of frames) {
-      expect(frame).not.toContain("over-the-wire secret");
+    // Exactly the challenge was ever sent; no application frame arrived (the socket was never admitted).
+    expect(raw.length).toBe(1);
+    expect(appFrames).toBe(0);
+    expect(raw.every((f) => !f.includes("must-not-arrive"))).toBe(true);
+  });
+
+  it("binds application frames to the connection: two sockets get distinct connection ids (docs/20 §7)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const session = await openTransport08(app);
+    await resumeIdentity(app, session, 1);
+
+    const a = await connectConfirmed(baseUrl, session.sessionId, session.key);
+    const b = await connectConfirmed(baseUrl, session.sessionId, session.key);
+    try {
+      expect(a.connectionId()).not.toBe("");
+      expect(b.connectionId()).not.toBe("");
+      // Same transport session, but a fresh, distinct connection id per socket — so a frame sealed for A
+      // cannot be opened under B's connection-bound aad (aad binding is already proven in the crypto
+      // suite; here we prove the SERVER issues a distinct id per connection).
+      expect(a.connectionId()).not.toBe(b.connectionId());
+
+      await tunnelInner(app, session, 2, {
+        m: "POST",
+        p: "/api/messages",
+        body: { type: "channelPost", channelId: "general", body: "fan-out" },
+      });
+      const deadline = Date.now() + 3_000;
+      while (
+        (!a.payloads.some((f) => f.includes("fan-out")) || !b.payloads.some((f) => f.includes("fan-out"))) &&
+        Date.now() < deadline
+      ) {
+        await sleep(25);
+      }
+      // A raw frame captured on A does not open under B's connection-bound aad.
+      const aFrame = a.raw.find((f) => openTransport(session.key, f, wsFrameAad(a.connectionId()))?.includes("fan-out"));
+      expect(aFrame).toBeDefined();
+      expect(openTransport(session.key, aFrame as string, wsFrameAad(b.connectionId()))).toBeNull();
+    } finally {
+      a.socket.close();
+      b.socket.close();
     }
-    // ...but a frame decrypts (aad "ws") to the broadcast event containing the message.
-    const decoded = frames.map((frame) => openTransport(key, frame, "ws")).filter((value): value is string => value !== null);
-    expect(decoded.some((value) => value.includes("over-the-wire secret"))).toBe(true);
   });
 });
 

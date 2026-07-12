@@ -82,7 +82,10 @@ type SocketClient = {
   readyState: number;
   send: (payload: string) => void;
   close: () => void;
-  on: (event: "close", listener: () => void) => void;
+  on: {
+    (event: "close", listener: () => void): void;
+    (event: "message", listener: (data: unknown) => void): void;
+  };
 };
 type SocketSession = {
   socket: SocketClient;
@@ -90,7 +93,25 @@ type SocketSession = {
   /** Transport session key (docs/08) when the client connected `/ws?enc=<sid>`; outbound frames are
    * then XChaCha20-Poly1305-sealed. Undefined = plaintext frames (transport off / no session). */
   transportKey?: string;
+  /** Fresh per-socket id (docs/20 §7). Application frames are sealed under an AAD that includes it, so
+   * a frame captured on one connection can't be replayed on a reconnected socket sharing the same
+   * transport session. Set only for an encrypted, key-confirmed socket. */
+  connectionId?: string;
+  /** Monotonic server→client frame sequence for this connection (docs/20 §7) — the client rejects a
+   * replayed/stale frame. Starts at 0; `wsSend` pre-increments. */
+  frameSeq?: number;
 };
+
+/** Direction-separated AADs for the reflection-safe WS key-confirmation (docs/20 §7): the challenge
+ * and the proof seal under DIFFERENT constants, so a keyless attacker can't reflect the server's
+ * challenge ciphertext back as a valid proof. Application frames bind to the connection id. */
+const WS_CHALLENGE_AAD = "loam.ws.challenge.v1";
+const WS_PROOF_AAD = "loam.ws.proof.v1";
+const WS_FRAME_AAD_PREFIX = "loam.ws.frame.v1";
+/** How long an encrypted socket has to answer the key-confirmation challenge before it's dropped. */
+const WS_CHALLENGE_TIMEOUT_MS = 10_000;
+/** Cap on simultaneously-unconfirmed encrypted sockets (anti-flood on the pre-auth path, docs/20 §7). */
+const WS_UNCONFIRMED_CAP = 128;
 
 type AppData = {
   users: User[];
@@ -841,6 +862,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     serverFactory: (handler) => createServer(handler),
   });
   const sockets = new Set<SocketSession>();
+  // Count of encrypted sockets that have connected but not yet passed the key-confirmation challenge
+  // (docs/20 §7) — capped so the pre-auth path can't be flooded. Decremented on confirm, timeout, or close.
+  let unconfirmedSocketCount = 0;
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
@@ -1374,9 +1398,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return session;
   }
 
-  /** The transport session key for a WebSocket connection, taken from the `?enc=<sid>` query (browsers
-   * can't set custom headers on a WS upgrade), or undefined. */
-  function wsTransportKey(url: string): string | undefined {
+  /** The live transport session for a WebSocket connection, taken from the `?enc=<sid>` query (browsers
+   * can't set custom headers on a WS upgrade), or undefined. The session carries the key AND its
+   * `authMode`/`userId`, so the WS can bind identity to a `bound` session (docs/20) rather than a cookie. */
+  function wsTransportSession(url: string): TransportSession | undefined {
     const query = url.split("?")[1];
     if (!query) {
       return undefined;
@@ -1389,7 +1414,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!session || session.expiresAt <= Date.now()) {
       return undefined;
     }
-    return session.key;
+    return session;
   }
 
   /** Whether this **external** request is a content route that, under `required` mode, is reachable
@@ -1882,11 +1907,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return !audience || audience.has(userId);
   }
 
-  /** Send one already-serialized frame to a socket, sealed under its transport session key when the
-   * client connected `/ws?enc=<sid>` (docs/08), else plaintext. Callers keep their own readyState +
-   * audience checks; the WS aad is a constant ("ws") since frames aren't route-scoped. */
+  /** Send one already-serialized frame to a socket. For an encrypted, key-confirmed socket the frame is
+   * sealed under a CONNECTION-BOUND aad (`loam.ws.frame.v1 <connectionId>`, docs/20 §7) and wrapped in a
+   * `{ q, f }` envelope carrying a monotonic per-connection sequence `q`, so the client rejects a frame
+   * replayed from another connection or re-sent on this one. A plaintext socket (transport off) sends the
+   * raw payload. Callers keep their own readyState + audience checks. */
   function wsSend(session: SocketSession, payload: string): void {
-    session.socket.send(session.transportKey ? sealTransport(session.transportKey, payload, "ws") : payload);
+    if (session.transportKey && session.connectionId) {
+      session.frameSeq = (session.frameSeq ?? 0) + 1;
+      const aad = `${WS_FRAME_AAD_PREFIX} ${session.connectionId}`;
+      session.socket.send(sealTransport(session.transportKey, JSON.stringify({ q: session.frameSeq, f: payload }), aad));
+      return;
+    }
+    session.socket.send(payload);
   }
 
   function broadcast(event: ClientEvent): void {
@@ -5389,10 +5422,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   });
 
   server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
-    const userId = getSessionUserIdFromRequest(request);
+    const mode = appConfig.security.transportEncryption;
+    const transportSession = mode === "off" ? undefined : wsTransportSession(request.url);
+    const transportKey = transportSession?.key;
+
+    // Identity: a `bound` transport session's userId is the WS identity (docs/20) — the session key is
+    // the credential, proven below by the key-confirmation challenge; the plaintext cookie is not used.
+    // For an anonymous session (optional/off) the cookie identity applies, as before.
+    const boundUserId =
+      transportSession?.authMode === "bound" && transportSession.userId ? transportSession.userId : undefined;
+    const userId = boundUserId ?? getSessionUserIdFromRequest(request);
 
     if (!userId) {
       connection.send(JSON.stringify({ type: "error", ...errorBody("Unauthenticated websocket") }));
+      connection.close();
+      return;
+    }
+
+    // Under `required` mode the socket must ride a `bound` transport session — an anonymous session (or
+    // none) can't reach the live feed, mirroring the tunnel-only content rule.
+    if (mode === "required" && !boundUserId) {
+      connection.send(JSON.stringify({ type: "error", ...errorBody("This node requires an encrypted session") }));
       connection.close();
       return;
     }
@@ -5408,22 +5458,91 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    // Transport encryption (docs/08): seal outbound frames when the client presented a session id via
-    // `/ws?enc=<sid>`, and refuse the connection under `required` mode without one.
-    const transportKey = appConfig.security.transportEncryption === "off" ? undefined : wsTransportKey(request.url);
-    if (appConfig.security.transportEncryption === "required" && !transportKey) {
-      connection.send(JSON.stringify({ type: "error", ...errorBody("This node requires an encrypted session") }));
+    // A plaintext socket (transport off, or an anonymous optional session with no key) is admitted
+    // directly — there is no session key to confirm. Its frames go out in the clear (documented).
+    if (!transportKey) {
+      const socketSession: SocketSession = { socket: connection, userId };
+      sockets.add(socketSession);
+      broadcastPresence();
+      connection.on("close", () => {
+        sockets.delete(socketSession);
+        broadcastPresence();
+      });
+      return;
+    }
+
+    // Encrypted socket: a visible session id is NOT proof of the key (docs/20 §7). Withhold everything
+    // — presence, events, admission to `sockets` — until the client answers a reflection-safe
+    // challenge. Cap the number of simultaneously-unconfirmed sockets so this pre-auth path can't be
+    // flooded, and time out a socket that never proves.
+    if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP) {
+      connection.send(JSON.stringify({ type: "error", ...errorBody("Too many pending connections; try again") }));
       connection.close();
       return;
     }
 
-    const socketSession: SocketSession = { socket: connection, userId, transportKey };
-    sockets.add(socketSession);
-    broadcastPresence();
+    const connectionId = randomUUID();
+    const nonce = randomBytes(32).toString("base64url");
+    let confirmed = false;
+    unconfirmedSocketCount += 1;
+
+    const timer = setTimeout(() => {
+      if (!confirmed) {
+        connection.close();
+      }
+    }, WS_CHALLENGE_TIMEOUT_MS);
+    // node:timers `unref` so a pending challenge never keeps the process alive in tests; guarded since
+    // the WS mock in unit tests may not return a real Timeout.
+    (timer as { unref?: () => void }).unref?.();
+
+    const socketSession: SocketSession = { socket: connection, userId, transportKey, connectionId, frameSeq: 0 };
+
+    connection.on("message", (raw: unknown) => {
+      if (confirmed) {
+        return; // the client has no reason to speak again; ignore late/extra frames
+      }
+      const text = typeof raw === "string" ? raw : Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+      const opened = openTransport(transportKey, text, WS_PROOF_AAD);
+      if (opened === null) {
+        return; // undecryptable under the proof aad — a reflected challenge lands here and is ignored
+      }
+      let proof: { type?: unknown; connectionId?: unknown; nonce?: unknown };
+      try {
+        proof = JSON.parse(opened) as typeof proof;
+      } catch {
+        return;
+      }
+      // The proof must echo THIS connection's id + nonce, sealed under the proof aad. A reflected
+      // challenge fails (wrong aad → openTransport null above); a stale/other-connection proof fails the
+      // constant-time nonce+id comparison.
+      const nonceOk =
+        typeof proof.nonce === "string" &&
+        Buffer.byteLength(proof.nonce) === Buffer.byteLength(nonce) &&
+        timingSafeEqual(Buffer.from(proof.nonce), Buffer.from(nonce));
+      if (proof.type !== "proof" || proof.connectionId !== connectionId || !nonceOk) {
+        return;
+      }
+
+      confirmed = true;
+      clearTimeout(timer);
+      unconfirmedSocketCount -= 1;
+      sockets.add(socketSession);
+      broadcastPresence();
+    });
+
     connection.on("close", () => {
+      clearTimeout(timer);
+      if (!confirmed) {
+        unconfirmedSocketCount -= 1;
+      }
       sockets.delete(socketSession);
       broadcastPresence();
     });
+
+    // Kick off the challenge. Sealed under the challenge aad; the client replies under the proof aad.
+    connection.send(
+      sealTransport(transportKey, JSON.stringify({ type: "challenge", connectionId, nonce }), WS_CHALLENGE_AAD),
+    );
   });
 
   server.setNotFoundHandler((request, reply) => {
