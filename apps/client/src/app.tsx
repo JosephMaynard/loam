@@ -47,6 +47,7 @@ import { UnreadBadge } from "./components/UnreadBadge";
 import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { dayKey, dayLabel } from "./lib/dates";
+import { compareCreatedAt, mergeMessagesInOrder } from "./lib/messages";
 import {
   deleteRecord,
   destroyDatabase,
@@ -170,10 +171,6 @@ function getOrCreateCurrentUser(): User {
 function rememberCurrentUser(user: User): void {
   localStorage.setItem(CURRENT_USER_KEY, user.id);
   localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
-}
-
-function compareCreatedAt(left: Message, right: Message): number {
-  return left.createdAt - right.createdAt;
 }
 
 /**
@@ -750,15 +747,10 @@ function LoamApp() {
   );
 
   const upsertMessages = useCallback((incomingMessages: Message[]) => {
-    setMessages((previous) => {
-      const next = new Map(previous.map((message) => [message.id, message]));
-
-      for (const message of incomingMessages) {
-        next.set(message.id, message);
-      }
-
-      return Array.from(next.values()).sort(compareCreatedAt);
-    });
+    // The history is always kept sorted, so merge in order (in-place update / splice) instead of
+    // rebuilding a Map and re-sorting the whole array on every incoming message. Same final ordering
+    // and dedupe-by-id semantics; still returns a new array so state updates are immutable.
+    setMessages((previous) => mergeMessagesInOrder(previous, incomingMessages));
     void putRecords("messages", incomingMessages);
   }, []);
 
