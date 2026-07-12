@@ -112,6 +112,9 @@ const WS_FRAME_AAD_PREFIX = "loam.ws.frame.v1";
 const WS_CHALLENGE_TIMEOUT_MS = 10_000;
 /** Cap on simultaneously-unconfirmed encrypted sockets (anti-flood on the pre-auth path, docs/20 §7). */
 const WS_UNCONFIRMED_CAP = 128;
+/** Tighter PER-IP cap on unconfirmed sockets, so a few LAN hosts can't exhaust the global pool and lock
+ * everyone out. A real client confirms in milliseconds, so it never holds more than one or two at once. */
+const WS_UNCONFIRMED_PER_IP_CAP = 8;
 
 type AppData = {
   users: User[];
@@ -862,9 +865,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     serverFactory: (handler) => createServer(handler),
   });
   const sockets = new Set<SocketSession>();
-  // Count of encrypted sockets that have connected but not yet passed the key-confirmation challenge
-  // (docs/20 §7) — capped so the pre-auth path can't be flooded. Decremented on confirm, timeout, or close.
+  // Encrypted sockets that have connected but not yet passed the key-confirmation challenge (docs/20 §7).
+  // `unconfirmedSocketCount` is the global cap; `unconfirmedByIp` is a tighter per-IP cap so a couple of
+  // LAN hosts can't hold the whole global pool and lock everyone else out (the pre-auth path is
+  // unauthenticated). `pendingSockets` lets revocation (ban/logout/kill-switch) reach a socket that is
+  // still mid-challenge — otherwise it exists only as closures and could confirm AFTER being revoked.
   let unconfirmedSocketCount = 0;
+  const unconfirmedByIp = new Map<string, number>();
+  const pendingSockets = new Set<{ userId: string; close: () => void }>();
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
@@ -1562,6 +1570,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         sockets.delete(socketSession);
       }
     }
+
+    // Also close any of this user's sockets still mid-challenge (docs/20 §7/§8) — otherwise a socket that
+    // completes its proof after the ban would slip into the live feed.
+    for (const pending of [...pendingSockets]) {
+      if (pending.userId === userId) {
+        pending.close();
+      }
+    }
   }
 
   /** Revoke a secure identity token (docs/20 §8) — for explicit logout / device wipe / rotation, where
@@ -1583,6 +1599,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         if (socketSession.userId === userId) {
           socketSession.socket.close();
           sockets.delete(socketSession);
+        }
+      }
+      // Close this identity's mid-challenge sockets too (docs/20 §7/§8), so none confirms after logout.
+      for (const pending of [...pendingSockets]) {
+        if (pending.userId === userId) {
+          pending.close();
         }
       }
     }
@@ -2658,6 +2680,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     sockets.clear();
+    // Close any sockets still mid key-confirmation (docs/20 §7) — they never entered `sockets`, so the
+    // loop above misses them; without this a socket could complete its proof after the wipe.
+    for (const pending of [...pendingSockets]) {
+      pending.close();
+    }
 
     data = { users: [], channels: [], messages: [] };
     loadData();
@@ -3736,11 +3763,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(401).send(errorBody("Transport session expired"));
     }
 
-    // In `required` mode content is reachable ONLY through the internal tunnel dispatch (which returned
-    // above) — so a DIRECT external hit on a content route is refused EVEN WITH a valid session id or
-    // cookie, making a captured credential inert (docs/20). Only bootstrap/health/handshake/resume/tunnel
-    // are directly reachable. Fires regardless of whether a session was presented.
-    if (mode === "required" && requiresTransportSession(request)) {
+    // Content is reachable ONLY through the internal tunnel dispatch (which returned above) — so a DIRECT
+    // external hit on a content route is refused, making a captured credential inert (docs/20). This fires
+    // when EITHER the node globally requires encryption OR the resolved session is `bound` — the secure
+    // rules key off session state, not just global mode (docs/20 §2), so a bound session on an `optional`
+    // node is still tunnel-only (never serving its content directly / by cookie). Bootstrap/health/
+    // handshake/resume/logout/tunnel stay directly reachable.
+    const boundSession = activeSession?.authMode === "bound";
+    if ((mode === "required" || boundSession) && requiresTransportSession(request)) {
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
     }
   });
@@ -3960,7 +3990,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const body = request.body as { token?: unknown } | undefined;
-    const presentedToken = typeof body?.token === "string" ? body.token : undefined;
+    // Treat an empty-string token as "no token" (mint), not "nonempty invalid" (401) — an empty string is
+    // never a real 256-bit token, so failing it closed would just 401-loop an odd client for no benefit.
+    const presentedToken = typeof body?.token === "string" && body.token.length > 0 ? body.token : undefined;
 
     let userId: string;
     let token: string;
@@ -5508,6 +5540,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const mode = appConfig.security.transportEncryption;
     const transportSession = mode === "off" ? undefined : wsTransportSession(request.url);
     const transportKey = transportSession?.key;
+    // The presented transport session id (used at confirm-time to detect a mid-challenge revocation:
+    // ban/logout/kill-switch/eviction deletes the session from `transportSessions`).
+    const sid = new URLSearchParams(request.url.split("?")[1] ?? "").get("enc") ?? "";
 
     // Identity: a `bound` transport session's userId is the WS identity (docs/20) — the session key is
     // the credential, proven below by the key-confirmation challenge; the plaintext cookie is not used.
@@ -5556,9 +5591,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     // Encrypted socket: a visible session id is NOT proof of the key (docs/20 §7). Withhold everything
     // — presence, events, admission to `sockets` — until the client answers a reflection-safe
-    // challenge. Cap the number of simultaneously-unconfirmed sockets so this pre-auth path can't be
-    // flooded, and time out a socket that never proves.
-    if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP) {
+    // challenge. Cap simultaneously-unconfirmed sockets both globally AND per-IP so this pre-auth path
+    // can't be flooded (a few LAN hosts mustn't lock everyone out), and time out a socket that never proves.
+    const ip = request.ip;
+    if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP || (unconfirmedByIp.get(ip) ?? 0) >= WS_UNCONFIRMED_PER_IP_CAP) {
       connection.send(JSON.stringify({ type: "error", ...errorBody("Too many pending connections; try again") }));
       connection.close();
       return;
@@ -5567,7 +5603,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const connectionId = randomUUID();
     const nonce = randomBytes(32).toString("base64url");
     let confirmed = false;
+    let settled = false; // guards the unconfirmed counters against a double decrement (confirm then close)
     unconfirmedSocketCount += 1;
+    unconfirmedByIp.set(ip, (unconfirmedByIp.get(ip) ?? 0) + 1);
+
+    /** Release the unconfirmed-socket reservation exactly once (on confirm, timeout, or close). */
+    function releaseUnconfirmed(): void {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      unconfirmedSocketCount -= 1;
+      const remaining = (unconfirmedByIp.get(ip) ?? 1) - 1;
+      if (remaining <= 0) {
+        unconfirmedByIp.delete(ip);
+      } else {
+        unconfirmedByIp.set(ip, remaining);
+      }
+    }
+
+    const socketSession: SocketSession = { socket: connection, userId, transportKey, connectionId, frameSeq: 0 };
+    // Register the mid-challenge socket so ban/logout/kill-switch can reach and close it — otherwise it
+    // exists only as closures and could complete its proof AFTER being revoked and slip into the feed.
+    const pending = { userId, close: () => connection.close() };
+    pendingSockets.add(pending);
 
     const timer = setTimeout(() => {
       if (!confirmed) {
@@ -5577,8 +5636,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // node:timers `unref` so a pending challenge never keeps the process alive in tests; guarded since
     // the WS mock in unit tests may not return a real Timeout.
     (timer as { unref?: () => void }).unref?.();
-
-    const socketSession: SocketSession = { socket: connection, userId, transportKey, connectionId, frameSeq: 0 };
 
     connection.on("message", (raw: unknown) => {
       if (confirmed) {
@@ -5606,18 +5663,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return;
       }
 
+      // Re-check revocation at CONFIRM time (docs/20 §8): a ban / logout / kill-switch (or an evicted
+      // transport session) may have landed during the up-to-10s challenge window. Ban is only checked at
+      // connect otherwise, and a revocation that fired mid-challenge must not be undone by a late proof.
+      const stillValid =
+        transportSessions.get(sid) === transportSession &&
+        !data.users.find((candidate) => candidate.id === userId)?.banned;
+      if (!stillValid) {
+        connection.close();
+        return;
+      }
+
       confirmed = true;
       clearTimeout(timer);
-      unconfirmedSocketCount -= 1;
+      releaseUnconfirmed();
+      pendingSockets.delete(pending);
       sockets.add(socketSession);
       broadcastPresence();
     });
 
     connection.on("close", () => {
       clearTimeout(timer);
-      if (!confirmed) {
-        unconfirmedSocketCount -= 1;
-      }
+      releaseUnconfirmed();
+      pendingSockets.delete(pending);
       sockets.delete(socketSession);
       broadcastPresence();
     });

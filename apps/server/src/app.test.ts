@@ -5462,6 +5462,50 @@ describe("transport encryption WebSocket frames (docs/08 + docs/20 §7)", () => 
       b.socket.close();
     }
   });
+
+  it("a ban closes a socket that is still mid-challenge (docs/20 §7/§8 revocation reaches pending sockets)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const adminS = await openTransport08(app);
+    const admin = await resumeIdentity(app, adminS, 1);
+    expect(admin.currentUser.isAdmin).toBe(true);
+    const memberS = await openTransport08(app);
+    const member = await resumeIdentity(app, memberS, 1);
+
+    // Open the member's WS but DELIBERATELY do NOT answer the challenge — it stays mid-confirmation.
+    let closed = false;
+    let received = 0;
+    const socket = openWs(`${baseUrl.replace("http", "ws")}/ws?enc=${memberS.sessionId}`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve());
+        socket.addEventListener("error", () => reject(new Error("ws failed to connect")));
+      });
+      socket.addEventListener("message", () => (received += 1)); // only the challenge should ever arrive
+      socket.addEventListener("close", () => (closed = true));
+      await sleep(50); // let the challenge arrive; we never answer it
+
+      // Admin bans the member while their socket is still unconfirmed.
+      const banned = await tunnelInner(app, adminS, 2, {
+        m: "PATCH",
+        p: `/api/moderation/users/${member.currentUser.id}`,
+        body: { banned: true },
+      });
+      expect(banned.status).toBe(200);
+
+      const deadline = Date.now() + 2_000;
+      while (!closed && Date.now() < deadline) {
+        await sleep(25);
+      }
+    } finally {
+      socket.close();
+    }
+
+    // The ban reached the mid-challenge socket and closed it — it never got a chance to confirm and be
+    // admitted post-ban. Only the challenge frame was ever delivered (no events).
+    expect(closed).toBe(true);
+    expect(received).toBe(1);
+  });
 });
 
 describe("transport auth-binding (docs/20)", () => {
@@ -5629,6 +5673,26 @@ describe("transport auth-binding (docs/20)", () => {
     expect(inner.status).toBe(200);
     const cfg = JSON.parse(inner.body.toString("utf8")) as { currentUser: { id: string } };
     expect(cfg.currentUser.id).toBe(bound.currentUser.id);
+
+    // NEGATIVE case (docs/20 §2): the SAME bound session hitting a content route DIRECTLY (sealed, not
+    // via the tunnel) is refused — the secure rules key off session `authMode`, not the node's global
+    // mode, so a bound session is tunnel-only even on an `optional` node.
+    const direct = await app.server.inject({
+      method: "GET",
+      url: "/api/users",
+      headers: { "x-loam-enc": session.sessionId },
+    });
+    expect(direct.statusCode).toBe(401);
+  });
+
+  it("empty-string resume token mints a fresh identity (treated as no token, not invalid)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    // `{ token: "" }` is not a real 256-bit token — the server treats it as "mint", not a 401.
+    const res = await resumeIdentity(app, session, 1, "");
+    expect(res.status).toBe(200);
+    expect(res.currentUser.id).toMatch(/^user\./);
+    expect(res.token.length).toBeGreaterThanOrEqual(43);
   });
 });
 
