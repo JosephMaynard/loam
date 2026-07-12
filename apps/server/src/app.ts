@@ -1208,6 +1208,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!routeUrl || !routeUrl.startsWith("/api/")) {
       return false;
     }
+    // Avatar/attachment IMAGE bytes are fetched by the browser as plain <img src> GETs, which can't
+    // carry the x-loam-enc header — and image bytes aren't sealed anyway (the onSend hook only wraps
+    // string payloads). Exempt them so a `required` node doesn't 401 every image; their bytes staying
+    // visible is the documented Layer-1 metadata exposure (docs/08), not a regression.
+    if (routeUrl === "/api/avatars/:fileName" || routeUrl === "/api/attachments/:fileName") {
+      return false;
+    }
     return (
       routeUrl !== "/api/config" && routeUrl !== "/api/transport/handshake" && routeUrl !== "/api/health"
     );
@@ -3397,10 +3404,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
     const key = transportKeyForRequest(request);
+    const presentedSessionId = request.headers["x-loam-enc"];
     if (key) {
       transportRequestKeys.set(request, key);
+    } else if (typeof presentedSessionId === "string" && presentedSessionId.length > 0) {
+      // The client presented a transport session that is unknown/expired (server restart or 12h TTL).
+      // Refuse with 401 in BOTH modes so its re-handshake path fires, rather than silently serving or
+      // accepting plaintext — which in `optional` mode would downgrade the wire while the client's UI
+      // still shows "encrypted" (docs/08).
+      return reply.code(401).send(errorBody("Transport session expired"));
     } else if (mode === "required" && requiresTransportSession(request)) {
-      // No valid transport session on a node that requires one — refuse, but keep bootstrap open so a
+      // No transport session at all on a node that requires one — refuse, but keep bootstrap open so a
       // fresh client can fetch config + handshake first.
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
     }

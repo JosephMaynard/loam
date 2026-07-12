@@ -1282,6 +1282,15 @@ function LoamApp() {
       return;
     }
 
+    // Wait until config has loaded before fetching conversation messages. The boot effect awaits
+    // ensureSession() before setConfig(), so `config` being set means the transport session (if any)
+    // is established — a deep-link/reload landing straight on a channel/DM must not fire this content
+    // request before the handshake, which would 401 under `required` mode or go out in plaintext under
+    // `optional` (docs/08). Once config arrives the effect re-runs.
+    if (!config) {
+      return;
+    }
+
     const path =
       activeConversation.kind === "channel"
         ? `/api/messages/${encodeURIComponent(activeConversation.id)}`
@@ -1318,7 +1327,7 @@ function LoamApp() {
     return () => {
       active = false;
     };
-  }, [activeConversation?.id, activeConversation?.kind, currentUser.id, reconcileConversationMessages, syncTick]);
+  }, [activeConversation?.id, activeConversation?.kind, config, currentUser.id, reconcileConversationMessages, syncTick]);
 
   useEffect(() => {
     if (!config?.currentUser.id) {

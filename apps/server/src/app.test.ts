@@ -4368,6 +4368,24 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     });
     expect(encodedBypass.statusCode).toBe(401);
 
+    // Image endpoints are EXEMPT (a browser <img> can't send the header) — a missing avatar 404s, it
+    // is not 401'd, so a `required` node doesn't break every image.
+    const avatar = await app.server.inject({
+      method: "GET",
+      url: "/api/avatars/avt_deadbeefdeadbeef.webp",
+      headers: { cookie: user.cookie },
+    });
+    expect(avatar.statusCode).not.toBe(401);
+
+    // A presented-but-unknown/expired transport session id is refused (both modes) so the client
+    // re-handshakes rather than the wire silently downgrading to plaintext.
+    const staleSession = await app.server.inject({
+      method: "GET",
+      url: "/api/users",
+      headers: { cookie: user.cookie, "x-loam-enc": "unknown-or-expired-session-id" },
+    });
+    expect(staleSession.statusCode).toBe(401);
+
     // With a session it works (and the response comes back sealed).
     const session = await openSession(app);
     const ok = await app.server.inject({
