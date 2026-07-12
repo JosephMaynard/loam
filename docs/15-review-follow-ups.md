@@ -39,8 +39,18 @@ ranked within each group. Each entry names the file and the concrete change.
    the cache (`purgeLocalData`, `apps/client/src/app.tsx`). Add an endpoint to invalidate the current
    session that the wipe calls, and guard `putRecords`/`putRecord` against writing after a wipe flag is set (a
    racing in-flight fetch can otherwise re-create the DB). Or document that device-wipe is cache-only.
-5. **Transport encryption (docs/08).** LOAM serves plain HTTP on the LAN by design — fine for a
-   trusted room, not an adversarial network. This is the largest remaining hostile-environment gap.
+5. ~~**Transport encryption (docs/08).**~~ **BUILT — Layer 1** (`feat/transport-encryption`):
+   QR-bootstrapped app-layer session encryption on `@loam/crypto` (X25519 handshake — host-static +
+   ephemeral, forward-secret; XChaCha20-Poly1305 framing). The server serves `POST
+   /api/transport/handshake`, transparently decrypts request bodies / encrypts responses (global
+   Fastify hooks) + seals WS frames, persists a host key (kill-switch-rotated), and enforces
+   `required` mode; the client `transport.ts` handshakes off the QR `#k=` key (MITM-resistant),
+   migrated all fetches + WS through it (off-mode = pure passthrough), with a fingerprint UX. Gated by
+   `security.transportEncryption` (`off` default), now the axis that distinguishes the profiles
+   (docs/09). **Layer-1 scope:** request/response BODIES + WS frames encrypted; GET paths/query
+   strings + image bytes stay visible metadata (a full tunnel + image encryption are v2). Follow-ups:
+   thread the `#k=` fragment through the remaining join-QR surfaces (InviteControl / Android
+   host-panel / NodeLinkControl); live re-handshake on a runtime mode flip.
 6. **On-device SQLCipher.** The Android DB is unencrypted at rest; needs a multiple-ciphers ABI-108
    android-arm64 prebuild (docs/01, docs/04).
 
