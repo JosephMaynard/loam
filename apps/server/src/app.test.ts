@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   currentEpoch,
@@ -5162,6 +5162,37 @@ describe("deploy hardening (docs/15)", () => {
       await app.server.inject({ method: "GET", url: "/api/admin/sync", headers: { cookie: admin.cookie } })
     ).json() as { peers: { url: string; status?: unknown }[] };
     expect(readded.peers.some((peer) => peer.url === "http://peer-a.invalid" && peer.status)).toBe(true);
+  });
+
+  it("prunes expired per-IP rate-limiter entries so the maps stay bounded (#9)", async () => {
+    // setupCode bootstrap so a claim attempt populates the claim limiter; minting a session
+    // populates the identity budget. Both key on the caller IP.
+    const app = await makeApp({ admin: { bootstrap: "setupCode" } });
+    await newSession(app);
+    const rejected = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/claim",
+      payload: { secret: "wrong" },
+    });
+    expect(rejected.statusCode).toBe(403);
+
+    const before = app.rateLimiterEntryCounts();
+    expect(before.identity).toBeGreaterThan(0);
+    expect(before.claim).toBeGreaterThan(0);
+
+    // Advance the clock past both windows (claim 5 min, identity 10 min), then prune. Expired entries
+    // must be dropped, not linger one-per-IP forever.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      app.pruneExpiredRateLimiters();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const after = app.rateLimiterEntryCounts();
+    expect(after.identity).toBe(0);
+    expect(after.claim).toBe(0);
   });
 });
 
