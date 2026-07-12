@@ -37,6 +37,7 @@ import { LocationProvider, useLocation } from "preact-iso";
 import type { ComponentChildren } from "preact";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 
+import { AddSyncPeerControl } from "./components/AddSyncPeerControl";
 import { Avatar } from "./components/Avatar";
 import { AvatarImageEditor } from "./components/AvatarImageEditor";
 import { ChannelMembersPanel } from "./components/ChannelMembersPanel";
@@ -4184,55 +4185,6 @@ function AdminView({
       ) : null}
       <AdminChannelsPanel currentUser={currentUser} onChannelUpsert={onChannelUpsert} />
     </section>
-  );
-}
-
-/** Compact add-a-peer form: URL (required, http/https) + optional label. */
-function AddSyncPeerControl({
-  disabled,
-  onAdd,
-}: {
-  disabled: boolean;
-  onAdd: (peer: { url: string; label?: string }) => void;
-}) {
-  const [url, setUrl] = useState("");
-  const [label, setLabel] = useState("");
-  const trimmedUrl = url.trim().replace(/\/+$/, "");
-  const validUrl = /^https?:\/\/.+/.test(trimmedUrl);
-
-  return (
-    <div className="sync-peer-add">
-      <label>
-        {t("admin.peerUrl")}
-        <input
-          disabled={disabled}
-          onInput={(event) => setUrl(event.currentTarget.value)}
-          placeholder="http://192.168.0.10:3000"
-          value={url}
-        />
-      </label>
-      <label>
-        {t("admin.peerLabel")}
-        <input
-          disabled={disabled}
-          maxLength={80}
-          onInput={(event) => setLabel(event.currentTarget.value)}
-          placeholder={t("admin.peerLabelPlaceholder")}
-          value={label}
-        />
-      </label>
-      <button
-        disabled={disabled || !validUrl}
-        onClick={() => {
-          onAdd({ url: trimmedUrl, ...(label.trim() ? { label: label.trim() } : {}) });
-          setUrl("");
-          setLabel("");
-        }}
-        type="button"
-      >
-        {t("admin.addPeer")}
-      </button>
-    </div>
   );
 }
 
