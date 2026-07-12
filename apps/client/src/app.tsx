@@ -58,6 +58,19 @@ import {
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import { renderMarkdown } from "./lib/markdown";
 import {
+  apiUrl,
+  encryptedFetch,
+  ensureSession,
+  fingerprint,
+  getHostKeyMismatch,
+  isSessionQrVerified,
+  joinQrUrl,
+  openWsFrame,
+  SERVER_URL_KEY,
+  TransportNeedsQrError,
+  wsUrl,
+} from "./lib/transport";
+import {
   LOCALE_LABELS,
   RTL_LOCALES,
   errorText,
@@ -89,7 +102,6 @@ type ReactionSummary = {
 const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
 const LAST_CONVERSATION_KEY = "loam.lastConversation";
-const SERVER_URL_KEY = "loam.serverUrl";
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 const REQUEST_TIMEOUT_MS = 10_000;
 const TOAST_DISMISS_MS = 4_000;
@@ -164,16 +176,42 @@ function compareCreatedAt(left: Message, right: Message): number {
   return left.createdAt - right.createdAt;
 }
 
-function apiUrl(path: string): string {
-  return `${localStorage.getItem(SERVER_URL_KEY) ?? ""}${path}`;
-}
-
+/**
+ * GET a JSON endpoint through the transport-encryption wrapper (a byte-for-byte passthrough when no
+ * session is active — see `encryptedFetch`). Used for every content endpoint; `/api/config` is
+ * deliberately NOT routed through this (see `fetchConfigJson`) — it must stay readable before any
+ * transport session exists and must never be re-encrypted on a later refetch.
+ */
 async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(apiUrl(path), {
+    const response = await encryptedFetch("GET", path, undefined, { signal: controller.signal });
+
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => undefined);
+      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
+    }
+
+    return response.json() as Promise<T>;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+/**
+ * GET `/api/config` as a plain, unencrypted fetch — the transport bootstrap path (docs/08). It
+ * identifies the session and advertises `transportEncryption`/`transportPublicKey`, so it must be
+ * readable before a transport session exists, and it is refetched on every reconnect/resync
+ * regardless of whether a session is later established, so it always bypasses `encryptedFetch`.
+ */
+async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(apiUrl("/api/config"), {
       credentials: "include",
       signal: controller.signal,
     });
@@ -183,7 +221,7 @@ async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promi
       throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
     }
 
-    return response.json() as Promise<T>;
+    return response.json() as Promise<Config>;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -441,13 +479,7 @@ async function requestUser(method: "POST" | "PATCH", path: string, body?: unknow
   const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(apiUrl(path), {
-      method,
-      credentials: "include",
-      headers: { "content-type": "application/json" },
-      signal: controller.signal,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const response = await encryptedFetch(method, path, body, { signal: controller.signal });
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
@@ -511,10 +543,17 @@ function LoamApp() {
   const [wiped, setWiped] = useState(false);
   // Whether the wipe screen reflects a node kill switch ("node") or just this browser ("device").
   const [wipeScope, setWipeScope] = useState<"node" | "device">("node");
+  // Set when this node requires transport encryption (docs/08) but no host public key is available
+  // from a scanned join QR — there is no safe way to talk to it, so the app renders a gate instead.
+  const [needsQr, setNeedsQr] = useState(false);
   // Bumped to force a full server re-sync: on WebSocket reconnect (missed events don't replay) and
   // on a failed boot fetch (retry with backoff instead of stranding the app offline).
   const [syncTick, setSyncTick] = useState(0);
   const syncFailuresRef = useRef(0);
+  // Latches once the initial IndexedDB hydration has run, so reconnects (which re-run the boot effect
+  // via `syncTick`) go straight to the network refetch instead of re-reading the whole cache and
+  // clobbering fresher in-memory state with the on-disk snapshot.
+  const hydratedRef = useRef(false);
   const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   // Who is connected right now (server presence events; empty when the node disables presence).
@@ -782,11 +821,12 @@ function LoamApp() {
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const response = await fetch(apiUrl(`/api/messages/${encodeURIComponent(messageId)}`), {
-          method: "DELETE",
-          credentials: "include",
-          signal: controller.signal,
-        });
+        const response = await encryptedFetch(
+          "DELETE",
+          `/api/messages/${encodeURIComponent(messageId)}`,
+          undefined,
+          { signal: controller.signal },
+        );
 
         if (!response.ok) {
           const payload: unknown = await response.json().catch(() => undefined);
@@ -818,13 +858,12 @@ function LoamApp() {
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const response = await fetch(apiUrl(`/api/messages/${encodeURIComponent(messageId)}`), {
-          method: "PATCH",
-          credentials: "include",
-          headers: { "content-type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({ body: trimmed }),
-        });
+        const response = await encryptedFetch(
+          "PATCH",
+          `/api/messages/${encodeURIComponent(messageId)}`,
+          { body: trimmed },
+          { signal: controller.signal },
+        );
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
@@ -861,13 +900,12 @@ function LoamApp() {
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const response = await fetch(apiUrl("/api/channels"), {
-          method: "POST",
-          credentials: "include",
-          headers: { "content-type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({ name: trimmed, ...(visibility === "private" ? { visibility } : {}) }),
-        });
+        const response = await encryptedFetch(
+          "POST",
+          "/api/channels",
+          { name: trimmed, ...(visibility === "private" ? { visibility } : {}) },
+          { signal: controller.signal },
+        );
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
@@ -908,7 +946,11 @@ function LoamApp() {
       // local purge below is the part that actually matters and must always run (docs/15 #4).
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      await fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal: controller.signal })
+      // Route through `encryptedFetch`, not a bare `fetch`: under `required` transport mode an
+      // unsealed POST is refused (401) and the session would never actually be revoked — the wipe
+      // would silently leave the server-side identity alive. `encryptedFetch` seals it under the
+      // active session (bodyless → empty envelope); still best-effort, so the local purge always runs.
+      await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })
         .catch(() => {
           // best effort — the local purge below still runs
         })
@@ -964,14 +1006,8 @@ function LoamApp() {
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const response = await fetch(apiUrl("/api/messages"), {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "content-type": "application/json",
-          },
+        const response = await encryptedFetch("POST", "/api/messages", request, {
           signal: controller.signal,
-          body: JSON.stringify(request),
         });
 
         if (!response.ok) {
@@ -1019,14 +1055,8 @@ function LoamApp() {
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const response = await fetch(apiUrl("/api/users/me"), {
-          method: "PATCH",
-          credentials: "include",
-          headers: {
-            "content-type": "application/json",
-          },
+        const response = await encryptedFetch("PATCH", "/api/users/me", request, {
           signal: controller.signal,
-          body: JSON.stringify(request),
         });
 
         if (!response.ok) {
@@ -1049,14 +1079,8 @@ function LoamApp() {
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const response = await fetch(apiUrl("/api/admin/claim"), {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "content-type": "application/json",
-          },
+        const response = await encryptedFetch("POST", "/api/admin/claim", { secret }, {
           signal: controller.signal,
-          body: JSON.stringify({ secret }),
         });
         const payload: unknown = await response.json().catch(() => undefined);
 
@@ -1094,18 +1118,17 @@ function LoamApp() {
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await fetch(apiUrl("/api/attachments"), {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
+      const response = await encryptedFetch(
+        "POST",
+        "/api/attachments",
+        {
           mimeType: prepared.blob.type || "image/png",
           data: btoa(binary),
           width: prepared.width,
           height: prepared.height,
-        }),
-      });
+        },
+        { signal: controller.signal },
+      );
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
@@ -1138,18 +1161,12 @@ function LoamApp() {
       }
 
       try {
-        const response = await fetch(apiUrl("/api/users/me/avatar-image"), {
-          method: "PUT",
-          credentials: "include",
-          headers: {
-            "content-type": "application/json",
-          },
-          signal: controller.signal,
-          body: JSON.stringify({
-            mimeType: blob.type || "image/png",
-            data: btoa(binary),
-          }),
-        });
+        const response = await encryptedFetch(
+          "PUT",
+          "/api/users/me/avatar-image",
+          { mimeType: blob.type || "image/png", data: btoa(binary) },
+          { signal: controller.signal },
+        );
 
         if (!response.ok) {
           throw new Error(`Avatar upload failed: ${response.status}`);
@@ -1221,42 +1238,85 @@ function LoamApp() {
 
   useEffect(() => {
     let active = true;
-
-    Promise.all([
-      getAllRecords<Channel>("channels"),
-      getAllRecords<User>("users"),
-      getAllRecords<Message>("messages"),
-      getAllRecords<ConversationReads>("sync"),
-    ])
-      .then(([cachedChannels, cachedUsers, cachedMessages, cachedSync]) => {
-        if (!active) {
-          return;
-        }
-
-        setChannels(cachedChannels);
-        upsertUsers([currentUser, ...cachedUsers]);
-        setMessages(cachedMessages.sort(compareCreatedAt));
-
-        const reads = cachedSync.find((record) => record.id === CONVERSATION_READS_KEY)?.reads;
-
-        if (reads) {
-          lastReadRef.current = reads;
-          setLastReadByConversation(reads);
-        }
-      })
-      .catch(() => undefined);
-
     let retryTimer: number | undefined;
 
-    // Config first: it identifies the session and says whether this user may read content at all.
-    // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
-    // participating user; approval flips `currentUser.pending`, which re-runs this effect.
-    fetchJson<Config>("/api/config")
-      .then(async (nextConfig) => {
+    void (async () => {
+      // Hydrate from IndexedDB once, on first mount, and AWAIT it before any network request or the
+      // WebSocket opens: a slow cache read that resolved *after* the network fetch would otherwise
+      // overwrite fresher server data with the stale on-disk snapshot. Reconnects (which re-run this
+      // effect via `syncTick`) skip re-hydration entirely — the network refetch below is the source
+      // of truth once we're live.
+      if (!hydratedRef.current) {
+        hydratedRef.current = true;
+
+        try {
+          const [cachedChannels, cachedUsers, cachedMessages, cachedSync] = await Promise.all([
+            getAllRecords<Channel>("channels"),
+            getAllRecords<User>("users"),
+            getAllRecords<Message>("messages"),
+            getAllRecords<ConversationReads>("sync"),
+          ]);
+
+          if (!active) {
+            return;
+          }
+
+          setChannels(cachedChannels);
+          upsertUsers([currentUser, ...cachedUsers]);
+          setMessages(cachedMessages.sort(compareCreatedAt));
+
+          const reads = cachedSync.find((record) => record.id === CONVERSATION_READS_KEY)?.reads;
+
+          if (reads) {
+            lastReadRef.current = reads;
+            setLastReadByConversation(reads);
+          }
+        } catch {
+          // Best effort — an unreadable cache just means we start from the network.
+        }
+
+        if (!active) {
+          return;
+        }
+      }
+
+      // Config first: it identifies the session and says whether this user may read content at all.
+      // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
+      // participating user; approval flips `currentUser.pending`, which re-runs this effect.
+      await fetchConfigJson()
+        .then(async (nextConfig) => {
         if (!active) {
           return;
         }
 
+        // Establish (or refresh) the transport session BEFORE any content request or WebSocket open
+        // (docs/08) — `config`/`currentUser` only get set once this resolves, so the WS-open effect
+        // (keyed on `config?.currentUser.id`) and the channels/users fetch below never race ahead of it.
+        try {
+          await ensureSession(nextConfig.networkConfig.transportEncryption, nextConfig.networkConfig.transportPublicKey);
+        } catch (sessionError) {
+          if (sessionError instanceof TransportNeedsQrError) {
+            // `required` mode with no host key available (no QR scanned, none cached): there is no
+            // safe way to talk to this node — gate the whole app instead of falling back to plaintext.
+            setNeedsQr(true);
+            return;
+          }
+
+          if (nextConfig.networkConfig.transportEncryption !== "optional") {
+            // `required` mode where a key WAS available but the handshake itself failed (e.g. the
+            // node is unreachable) — treat like any other boot failure (below) rather than silently
+            // degrading to an unencrypted session.
+            throw sessionError;
+          }
+
+          // `optional` mode: proceed without a session (plaintext) rather than stranding the user.
+        }
+
+        if (!active) {
+          return;
+        }
+
+        setNeedsQr(false);
         syncFailuresRef.current = 0;
         setError(undefined);
         setConfig(nextConfig);
@@ -1320,6 +1380,7 @@ function LoamApp() {
         syncFailuresRef.current += 1;
         retryTimer = window.setTimeout(() => setSyncTick((tick) => tick + 1), delay);
       });
+    })();
 
     return () => {
       active = false;
@@ -1332,6 +1393,15 @@ function LoamApp() {
 
   useEffect(() => {
     if (!activeConversation) {
+      return;
+    }
+
+    // Wait until config has loaded before fetching conversation messages. The boot effect awaits
+    // ensureSession() before setConfig(), so `config` being set means the transport session (if any)
+    // is established — a deep-link/reload landing straight on a channel/DM must not fire this content
+    // request before the handshake, which would 401 under `required` mode or go out in plaintext under
+    // `optional` (docs/08). Once config arrives the effect re-runs.
+    if (!config) {
       return;
     }
 
@@ -1371,7 +1441,7 @@ function LoamApp() {
     return () => {
       active = false;
     };
-  }, [activeConversation?.id, activeConversation?.kind, currentUser.id, reconcileConversationMessages, syncTick]);
+  }, [activeConversation?.id, activeConversation?.kind, config, currentUser.id, reconcileConversationMessages, syncTick]);
 
   useEffect(() => {
     if (!config?.currentUser.id) {
@@ -1397,18 +1467,40 @@ function LoamApp() {
       reconnectAttempts += 1;
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = undefined;
-        connectWebSocket();
+        void connectWebSocket();
       }, delay);
     }
 
-    function connectWebSocket(): void {
+    async function connectWebSocket(): Promise<void> {
       if (disposed) {
         return;
       }
 
       socketAttempt += 1;
       const attempt = socketAttempt;
-      const nextSocket = new WebSocket(socketUrl);
+
+      // A reconnect (anything past the first attempt) may follow the transport session having
+      // expired or been invalidated server-side (TTL, kill-switch key rotation, node restart) — the
+      // module-scoped session in transport.ts only ever gets refreshed by a REST call's own
+      // decrypt-failure/401 retry, which the WebSocket path never triggers. Without refreshing here,
+      // `wsUrl` would keep sending a dead `?enc=<sid>`: under `required` mode the server refuses the
+      // connection outright (an unrecoverable reconnect loop), and under `optional` mode the socket
+      // opens unsealed while the client still expects sealed frames, so every inbound frame fails to
+      // decrypt and is silently dropped (docs/08). Best-effort: on any failure, fall through and try
+      // to connect anyway — the existing reconnect loop already handles a connection that still can't
+      // succeed.
+      if (attempt > 1 && config) {
+        await ensureSession(
+          config.networkConfig.transportEncryption,
+          config.networkConfig.transportPublicKey,
+        ).catch(() => undefined);
+
+        if (disposed || attempt !== socketAttempt) {
+          return;
+        }
+      }
+
+      const nextSocket = new WebSocket(wsUrl(socketUrl));
       socket = nextSocket;
       setConnection("connecting");
 
@@ -1448,7 +1540,14 @@ function LoamApp() {
           return;
         }
 
-        const payload = parseSocketEvent(event.data);
+        const raw = openWsFrame(event.data);
+
+        if (raw === null) {
+          // A decrypt failure (or, off-mode, never) — drop the frame rather than crash the parser.
+          return;
+        }
+
+        const payload = parseSocketEvent(raw);
 
         if (!payload) {
           return;
@@ -1511,7 +1610,7 @@ function LoamApp() {
       };
     }
 
-    connectWebSocket();
+    void connectWebSocket();
 
     return () => {
       disposed = true;
@@ -1583,6 +1682,18 @@ function LoamApp() {
     updateLastRead((previous) => ({ ...previous, [key]: Date.now() }));
   }, [activeConversation?.id, activeConversation?.kind, messages.length, updateLastRead]);
 
+  if (needsQr) {
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <h1>{t("gate.needsQrTitle")}</h1>
+          <p>{t("gate.needsQrBody")}</p>
+        </div>
+      </main>
+    );
+  }
+
   if (wiped) {
     return (
       <main className="wiped-screen">
@@ -1653,6 +1764,7 @@ function LoamApp() {
         onCreateChannel={createChannel}
         onlineUserIds={onlineUserIds}
         showMesh={!!config?.networkConfig.enableMesh}
+        transportPublicKey={config?.networkConfig.transportPublicKey}
         unreadByConversation={unreadByConversation}
         users={users}
       />
@@ -1789,6 +1901,7 @@ interface SidebarProps {
   onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
   onlineUserIds: ReadonlySet<string>;
   showMesh: boolean;
+  transportPublicKey?: string;
   unreadByConversation: Map<string, number>;
   users: User[];
 }
@@ -1815,11 +1928,15 @@ function Sidebar({
   onCreateChannel,
   onlineUserIds,
   showMesh,
+  transportPublicKey,
   unreadByConversation,
   users,
 }: SidebarProps) {
   const peers = users.filter((user) => user.id !== currentUser.id);
   const showPeople = canModerate(currentUser) || canGreet(currentUser);
+  // Encode the host's transport public key into the invite QR (docs/08) so a scanner learns it
+  // out-of-band → MITM-resistant handshake; the displayed URL text (inside InviteControl) stays plain.
+  const inviteQrUrl = joinUrl ? joinQrUrl(joinUrl, transportPublicKey) : undefined;
 
   return (
     <aside className="sidebar">
@@ -1889,7 +2006,7 @@ function Sidebar({
           <span className="nav-glyph">⌕</span>
           {t("sidebar.searchMessages")}
         </NavLink>
-        {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} /> : null}
+        {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} qrUrl={inviteQrUrl} /> : null}
         {showPeople ? (
           <NavLink active={false} href="/people">
             <span className="nav-glyph">☺</span>
@@ -2350,9 +2467,11 @@ function ChannelMembersPanel({
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await fetch(
-        apiUrl(`/api/channels/${encodeURIComponent(channel.id)}/members/${encodeURIComponent(userId)}`),
-        { method: "DELETE", credentials: "include", signal: controller.signal },
+      const response = await encryptedFetch(
+        "DELETE",
+        `/api/channels/${encodeURIComponent(channel.id)}/members/${encodeURIComponent(userId)}`,
+        undefined,
+        { signal: controller.signal },
       );
 
       if (!response.ok) {
@@ -3796,12 +3915,8 @@ function MeshView() {
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await fetch(apiUrl("/api/mesh/contacts"), {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
+      const response = await encryptedFetch("POST", "/api/mesh/contacts", parsedBody, {
         signal: controller.signal,
-        body: JSON.stringify(parsedBody),
       });
       const payload: unknown = await response.json().catch(() => undefined);
 
@@ -3843,12 +3958,8 @@ function MeshView() {
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await fetch(apiUrl("/api/mesh/messages"), {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
+      const response = await encryptedFetch("POST", "/api/mesh/messages", { toMeshId, body }, {
         signal: controller.signal,
-        body: JSON.stringify({ toMeshId, body }),
       });
       const payload: unknown = await response.json().catch(() => undefined);
 
@@ -4042,7 +4153,16 @@ function SettingsView({
   const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
   const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
   const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
-  const qrSvg = useMemo(() => safeQrSvg(config?.joinUrl, "#203f34"), [config?.joinUrl]);
+  // Encode the host's transport public key into the join QR (docs/08) so a scanner learns it
+  // out-of-band → MITM-resistant handshake. The displayed URL text below stays plain.
+  const qrSvg = useMemo(
+    () =>
+      safeQrSvg(
+        config?.joinUrl ? joinQrUrl(config.joinUrl, config.networkConfig.transportPublicKey) : undefined,
+        "#203f34",
+      ),
+    [config?.joinUrl, config?.networkConfig.transportPublicKey],
+  );
   const previewUser: User = {
     ...currentUser,
     displayName,
@@ -4126,6 +4246,24 @@ function SettingsView({
           {/* Product name + version — the node's build, not this browser's cache. Deliberately no
               translatable label word so it stays i18n-neutral. */}
           <p className="node-version">LOAM v{config?.version ?? "…"}</p>
+          {/* Transport encryption (docs/08): only shown once a session is actually live — `fingerprint()`
+              returns undefined off-mode or before the handshake completes. A QR-verified session (the
+              host key came from a scanned join QR, out-of-band) is MITM-resistant; a session keyed only
+              from the server's advertised config key is not — an attacker on the LAN could have supplied
+              that key — so the two are surfaced distinctly rather than both reading as "Encrypted". */}
+          {fingerprint() ? (
+            <p className="transport-fingerprint">
+              {isSessionQrVerified()
+                ? t("settings.transportVerifiedLine", { fingerprint: fingerprint() ?? "" })
+                : t("settings.transportUnverifiedLine", { fingerprint: fingerprint() ?? "" })}
+            </p>
+          ) : null}
+          {fingerprint() && !isSessionQrVerified() ? (
+            <p className="form-note">{t("settings.transportUnverifiedHint")}</p>
+          ) : null}
+          {getHostKeyMismatch() ? (
+            <p className="form-error">{t("settings.transportKeyMismatch")}</p>
+          ) : null}
         </div>
         <div className="identity-panel">
           <Avatar avatar={previewUser.avatar} id={currentUser.id} />
@@ -4888,14 +5026,8 @@ function AdminView({
         sync: adminConfig.sync,
         mesh: adminConfig.mesh,
       };
-      const response = await fetch(apiUrl("/api/admin/config"), {
-        method: "PATCH",
-        credentials: "include",
-        headers: {
-          "content-type": "application/json",
-        },
+      const response = await encryptedFetch("PATCH", "/api/admin/config", update, {
         signal: controller.signal,
-        body: JSON.stringify(update),
       });
       const payload: unknown = await response.json().catch(() => undefined);
 
@@ -5005,14 +5137,8 @@ function AdminView({
       const body = adminConfig?.killSwitch.requireConfirmation
         ? { confirm: wipeConfirmText.trim() }
         : {};
-      const response = await fetch(apiUrl("/api/admin/kill-switch"), {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "content-type": "application/json",
-        },
+      const response = await encryptedFetch("POST", "/api/admin/kill-switch", body, {
         signal: controller.signal,
-        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -5741,9 +5867,7 @@ function SyncStatusPanel() {
     const timeout = window.setTimeout(() => controller.abort(), 60_000);
 
     try {
-      const response = await fetch(apiUrl("/api/admin/sync/run"), {
-        method: "POST",
-        credentials: "include",
+      const response = await encryptedFetch("POST", "/api/admin/sync/run", undefined, {
         signal: controller.signal,
       });
       const payload: unknown = await response.json().catch(() => undefined);
@@ -5815,13 +5939,7 @@ async function requestChannel(method: "POST" | "PATCH", path: string, body: unkn
   const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(apiUrl(path), {
-      method,
-      credentials: "include",
-      headers: { "content-type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify(body),
-    });
+    const response = await encryptedFetch(method, path, body, { signal: controller.signal });
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {

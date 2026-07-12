@@ -345,3 +345,111 @@ export function mailboxTag(mailboxToken: string, epoch: number): string {
 export function currentEpoch(nowMs: number, windowMs: number): number {
   return Math.floor(nowMs / windowMs);
 }
+
+// ---------------------------------------------------------------------------
+// Transport session encryption (docs/08) — QR-bootstrapped app-layer channel.
+// LOAM serves plain HTTP on the LAN (no secure context → no WebCrypto/TLS), so confidentiality is
+// an app-layer AEAD keyed by a handshake bootstrapped over the join QR. The QR carries the host's
+// static X25519 public key out-of-band, so trust is rooted in the physical code, not the network —
+// which is what stops an active MITM at join. Pure JS, runs in the insecure-context PWA.
+// ---------------------------------------------------------------------------
+
+const TRANSPORT_SEAL_INFO = "loam.transport.v1";
+// A fixed, visually-distinct set for the human-comparable fingerprint (poster-swap detection, NOT a
+// security boundary — MITM is already prevented by the QR-delivered key). Order/length are stable.
+const TRANSPORT_EMOJI = [
+  "🐙", "🦊", "🐬", "🦋", "🌵", "🍄", "🔥", "⚡", "🌙", "⭐", "🍀", "🎈", "🎸", "🚀", "⚓", "🧭",
+];
+
+/** A host's long-term transport identity: an X25519 static keypair. The public key travels in the
+ * join QR (out-of-band); the secret stays on the host (encrypted at rest, destroyed by the kill switch). */
+export interface TransportIdentity {
+  /** base64url X25519 public key — goes in the join QR. */
+  publicKey: string;
+  /** base64url X25519 secret key — never leaves the host. */
+  secretKey: string;
+}
+
+export function createTransportIdentity(): TransportIdentity {
+  const secret = x25519.utils.randomPrivateKey();
+  return { publicKey: b64urlEncode(x25519.getPublicKey(secret)), secretKey: b64urlEncode(secret) };
+}
+
+/** A short, human-comparable fingerprint (emoji) of a host public key — shown in the client + on the
+ * host screen so people can confirm they scanned the real host and spot a swapped QR poster. */
+export function transportFingerprint(publicKey: string): string {
+  const digest = sha256(b64urlDecode(publicKey));
+  let out = "";
+  for (let i = 0; i < 5; i += 1) {
+    out += TRANSPORT_EMOJI[digest[i] % TRANSPORT_EMOJI.length];
+  }
+  return out;
+}
+
+/** Client step 1: generate an ephemeral keypair for a handshake. The caller keeps the secret to
+ * derive the session key once the host replies. */
+export function transportClientHello(): { ephemeralPublic: string; ephemeralSecret: string } {
+  const secret = x25519.utils.randomPrivateKey();
+  return {
+    ephemeralPublic: b64urlEncode(x25519.getPublicKey(secret)),
+    ephemeralSecret: b64urlEncode(secret),
+  };
+}
+
+/** Server: accept a client hello against the host static secret. `es = DH(hostStatic, eClient)`
+ * authenticates the host (only the real host completes it); `ee = DH(eHost, eClient)` adds forward
+ * secrecy. Returns the session key + the host ephemeral public to send back. */
+export function transportServerAccept(input: {
+  hostSecret: string;
+  clientEphemeralPublic: string;
+}): { hostEphemeralPublic: string; sessionKey: string } {
+  const eClientPub = b64urlDecode(input.clientEphemeralPublic);
+  const eHostSecret = x25519.utils.randomPrivateKey();
+  const eHostPub = x25519.getPublicKey(eHostSecret);
+  const es = x25519.getSharedSecret(b64urlDecode(input.hostSecret), eClientPub);
+  const ee = x25519.getSharedSecret(eHostSecret, eClientPub);
+  const salt = concatBytes(eClientPub, eHostPub);
+  const key = hkdf(sha256, concatBytes(es, ee), salt, utf8.encode(TRANSPORT_SEAL_INFO), 32);
+  return { hostEphemeralPublic: b64urlEncode(eHostPub), sessionKey: b64urlEncode(key) };
+}
+
+/** Client step 2: derive the same session key from the host's reply. */
+export function transportClientDerive(input: {
+  clientEphemeralSecret: string;
+  hostPublic: string;
+  hostEphemeralPublic: string;
+}): string {
+  const eClientSecret = b64urlDecode(input.clientEphemeralSecret);
+  const eClientPub = x25519.getPublicKey(eClientSecret);
+  const eHostPub = b64urlDecode(input.hostEphemeralPublic);
+  const es = x25519.getSharedSecret(eClientSecret, b64urlDecode(input.hostPublic));
+  const ee = x25519.getSharedSecret(eClientSecret, eHostPub);
+  const salt = concatBytes(eClientPub, eHostPub);
+  const key = hkdf(sha256, concatBytes(es, ee), salt, utf8.encode(TRANSPORT_SEAL_INFO), 32);
+  return b64urlEncode(key);
+}
+
+/** Seal a plaintext frame under a session key. `aad` (bind e.g. method+path) is authenticated but not
+ * encrypted, so a carrier can't replay a frame to a different route. blob = base64url(nonce(24) ‖
+ * XChaCha20Poly1305(key, nonce, plaintext, aad)). */
+export function sealTransport(sessionKey: string, plaintext: string, aad: string): string {
+  const key = b64urlDecode(sessionKey);
+  const nonce = randomBytes(24);
+  const ciphertext = xchacha20poly1305(key, nonce, utf8.encode(aad)).encrypt(utf8.encode(plaintext));
+  return b64urlEncode(concatBytes(nonce, ciphertext));
+}
+
+/** Open a sealed frame; returns the plaintext, or `null` on ANY failure (wrong key, tampered blob, or
+ * an `aad` that differs from the sealed one). */
+export function openTransport(sessionKey: string, blob: string, aad: string): string | null {
+  try {
+    const raw = b64urlDecode(blob);
+    if (raw.length < 24 + 16) return null; // nonce(24) + AEAD tag(16) minimum
+    const nonce = raw.slice(0, 24);
+    const ciphertext = raw.slice(24);
+    const plaintext = xchacha20poly1305(b64urlDecode(sessionKey), nonce, utf8.encode(aad)).decrypt(ciphertext);
+    return utf8Decode.decode(plaintext);
+  } catch {
+    return null;
+  }
+}

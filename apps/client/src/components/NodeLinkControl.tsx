@@ -12,6 +12,8 @@ import { safeQrSvg } from "../lib/qr";
 export function NodeLinkControl({ joinUrl }: { joinUrl?: string }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Intentionally plain joinUrl, no `#k=` transport-key fragment (docs/08): this QR addresses a sync
+  // peer, not a person joining, and the fragment is meaningless (and potentially confusing) there.
   const qrSvg = useMemo(() => safeQrSvg(joinUrl, "#16271f"), [joinUrl]);
 
   if (!joinUrl) {

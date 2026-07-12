@@ -86,6 +86,10 @@ export const ar: Catalog = {
   "settings.joinEyebrow": "الوصول المحلي",
   "settings.joinTitle": "انضم إلى عقدة LOAM هذه",
   "settings.thisBrowser": "هذا المتصفح",
+  "settings.transportVerifiedLine": "🔒 مشفّر · تم التحقق · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 مشفّر (غير موثّق) · {fingerprint}",
+  "settings.transportUnverifiedHint": "امسح رمز الانضمام الخاص بهذه العقدة للتأكد من هويتها.",
+  "settings.transportKeyMismatch": "رمز الاستجابة السريعة الذي مسحته لا يطابق مفتاح هذه العقدة.",
   "settings.profileEyebrow": "الملف الشخصي",
   "settings.profileTitle": "الهوية المحلية",
   "settings.displayName": "الاسم المعروض",
@@ -426,6 +430,8 @@ export const ar: Catalog = {
   "gate.pendingBody":
     "بانتظار أن يسمح لك أحد على هذه العقدة بالدخول. تتحدّث هذه الشاشة فور الموافقة عليك.",
   "gate.connection": "الاتصال: {status}",
+  "gate.needsQrTitle": "امسح رمز الانضمام للاتصال بأمان",
+  "gate.needsQrBody": "امسح رمز انضمام هذه العقدة بجهازك للاتصال — لا توجد طريقة آمنة أخرى للاتصال.",
 
   "confirm.deleteMessage": "حذف هذه الرسالة؟ لا يمكن التراجع عن ذلك.",
 

@@ -84,6 +84,10 @@ export const uk: Catalog = {
   "settings.joinEyebrow": "Локальний доступ",
   "settings.joinTitle": "Приєднайтеся до цього вузла LOAM",
   "settings.thisBrowser": "Цей браузер",
+  "settings.transportVerifiedLine": "🔒 Зашифровано · перевірено · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 Зашифровано (не перевірено) · {fingerprint}",
+  "settings.transportUnverifiedHint": "Відскануйте QR-код приєднання цього вузла, щоб підтвердити його автентичність.",
+  "settings.transportKeyMismatch": "Відсканований QR-код не збігається з ключем цього вузла.",
   "settings.profileEyebrow": "Профіль",
   "settings.profileTitle": "Локальна особистість",
   "settings.displayName": "Показуване ім’я",
@@ -422,6 +426,8 @@ export const uk: Catalog = {
   "gate.pendingBody":
     "Очікуємо, поки хтось на цьому вузлі впустить вас. Цей екран оновиться щойно вас схвалять.",
   "gate.connection": "З’єднання: {status}",
+  "gate.needsQrTitle": "Відскануйте QR-код приєднання для безпечного підключення",
+  "gate.needsQrBody": "Відскануйте QR-код приєднання цього вузла своїм пристроєм, щоб підключитися — іншого безпечного способу немає.",
 
   "confirm.deleteMessage": "Видалити це повідомлення? Це не можна скасувати.",
 

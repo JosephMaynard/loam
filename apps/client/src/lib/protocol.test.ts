@@ -52,6 +52,7 @@ const networkConfig: NetworkConfig = {
   allowAdminClaim: false,
   joinPolicy: "open",
   securityProfile: "standard",
+  transportEncryption: "off",
   locale: "en",
 };
 

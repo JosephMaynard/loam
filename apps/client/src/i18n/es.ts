@@ -79,6 +79,10 @@ export const es: Catalog = {
   "settings.joinEyebrow": "Acceso local",
   "settings.joinTitle": "Únete a este nodo LOAM",
   "settings.thisBrowser": "Este navegador",
+  "settings.transportVerifiedLine": "🔒 Cifrado · verificado · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 Cifrado (no verificado) · {fingerprint}",
+  "settings.transportUnverifiedHint": "Escanea el código QR de invitación de este nodo para confirmar su identidad.",
+  "settings.transportKeyMismatch": "El código QR que escaneaste no coincide con la clave de este nodo.",
   "settings.profileEyebrow": "Perfil",
   "settings.profileTitle": "Identidad local",
   "settings.displayName": "Nombre visible",
@@ -412,6 +416,8 @@ export const es: Catalog = {
   "gate.pendingBody":
     "Esperando a que alguien de este nodo te deje entrar. Esta pantalla se actualiza en cuanto te aprueben.",
   "gate.connection": "Conexión: {status}",
+  "gate.needsQrTitle": "Escanea el QR de acceso para conectarte de forma segura",
+  "gate.needsQrBody": "Escanea el QR de acceso de este nodo con tu dispositivo para conectarte — no hay otra forma segura de hacerlo.",
 
   "confirm.deleteMessage": "¿Eliminar este mensaje? No se puede deshacer.",
 

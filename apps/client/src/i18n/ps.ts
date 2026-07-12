@@ -79,6 +79,10 @@ export const ps: Catalog = {
   "settings.joinEyebrow": "محلي لاسرسی",
   "settings.joinTitle": "دې LOAM نوډ سره یوځای شئ",
   "settings.thisBrowser": "دا براوزر",
+  "settings.transportVerifiedLine": "🔒 کوډ شوی · تایید شوی · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 کوډ شوی (نا تایید شوی) · {fingerprint}",
+  "settings.transportUnverifiedHint": "د دې نوډ پیژندنه تایید کولو لپاره د دې د یوځای کیدو QR سکین کړئ.",
+  "settings.transportKeyMismatch": "هغه QR چې تاسو سکین کړی د دې نوډ سره سمون نه خوري.",
   "settings.profileEyebrow": "پروفایل",
   "settings.profileTitle": "محلي هویت",
   "settings.displayName": "ښکاره نوم",
@@ -412,6 +416,8 @@ export const ps: Catalog = {
   "gate.pendingBody":
     "منتظر یاست چې پر دې نوډ څوک تاسو دننه پرېږدي. ستاسو له تصویب سره سم دا پرده سمدلاسه تازه کیږي.",
   "gate.connection": "اړیکه: {status}",
+  "gate.needsQrTitle": "د خوندي نښلولو لپاره د یوځای کیدو QR سکین کړئ",
+  "gate.needsQrBody": "د دې نوډ سره د خوندي نښلېدو لپاره، د خپل وسیلې سره د یوځای کیدو QR سکین کړئ — د نښلېدو بله خوندي لار نشته.",
 
   "confirm.deleteMessage": "دا پیغام ړنګ کړئ؟ دا بیرته نشي کیدی.",
 

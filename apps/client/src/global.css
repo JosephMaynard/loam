@@ -791,6 +791,12 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+.transport-fingerprint {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: var(--c-text-faint);
+}
+
 .qr-box {
   display: grid;
   place-items: center;

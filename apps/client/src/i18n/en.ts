@@ -104,6 +104,14 @@ export const en = {
   "settings.joinEyebrow": "Local access",
   "settings.joinTitle": "Join this LOAM node",
   "settings.thisBrowser": "This browser",
+  // Transport encryption (docs/08): fingerprint of the live session's host key, distinguishing a
+  // QR-verified session (MITM-resistant) from one keyed only from the server's advertised config key
+  // (not MITM-resistant — an attacker on the LAN could have supplied it), and a warning if the scanned
+  // QR key disagrees with the node's advertised key (a possible swapped join-QR poster).
+  "settings.transportVerifiedLine": "🔒 Encrypted · verified · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 Encrypted (unverified) · {fingerprint}",
+  "settings.transportUnverifiedHint": "Scan this node's join QR to confirm its identity.",
+  "settings.transportKeyMismatch": "The QR you scanned doesn't match this node's key.",
   "settings.profileEyebrow": "Profile",
   "settings.profileTitle": "Local identity",
   "settings.displayName": "Display name",
@@ -455,7 +463,7 @@ export const en = {
   "app.serverUnreachable": "Unable to reach the LOAM server.",
   "app.messagesLoadError": "Unable to load messages.",
 
-  // Full-screen gate states (wiped / disconnected / banned / pending).
+  // Full-screen gate states (wiped / disconnected / banned / pending / needs-QR).
   "gate.deviceWipedTitle": "Device wiped",
   "gate.deviceWipedBody": "This browser's local copy has been erased. Scan the join QR to reconnect.",
   "gate.disconnectedTitle": "Disconnected",
@@ -466,6 +474,10 @@ export const en = {
   "gate.pendingBody":
     "Waiting for someone on this node to let you in. This screen updates the moment you're approved.",
   "gate.connection": "Connection: {status}",
+  // Shown when this node requires transport encryption (docs/08) but no host key was ever delivered
+  // by a scanned join QR — there is no safe way to connect without one.
+  "gate.needsQrTitle": "Scan the join QR to connect securely",
+  "gate.needsQrBody": "Scan this node's join QR code with your device to connect — there's no other way to connect securely.",
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",

@@ -222,6 +222,15 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
   (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session
   cookie's `Secure` flag tracks the real request protocol (`x-forwarded-proto`/TLS), not `NODE_ENV`.
+- **Transport encryption** (docs/08, `security.transportEncryption` — `off` default / `optional` /
+  `required`): QR-bootstrapped app-layer session encryption over plain HTTP (no WebCrypto/TLS in the
+  insecure-context PWA, so it's `@loam/crypto`: X25519 handshake + XChaCha20-Poly1305). Host static
+  key in the join QR `#k=` fragment (MITM-resistant); `POST /api/transport/handshake` derives a
+  session; global `onRequest`/`preValidation`/`onSend` hooks transparently decrypt request bodies +
+  encrypt responses (aad `METHOD url`), and WS frames are sealed (aad `"ws"`) for `/ws?enc=<sid>`. The
+  client routes all fetches/WS through `apps/client/src/lib/transport.ts`; `off` is a pure passthrough.
+  Bodies + WS frames are encrypted; GET paths/queries + image bytes stay visible (Layer-1 scope). This
+  is the axis that now distinguishes the `open`/`standard`/`hardened` profiles.
 - **REST endpoints**: `GET /api/health` (liveness, mints no identity — the Android launcher probes
   this so it can't consume the `firstUser` admin grant), `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,

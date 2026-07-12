@@ -79,6 +79,10 @@ export const fr: Catalog = {
   "settings.joinEyebrow": "Accès local",
   "settings.joinTitle": "Rejoindre ce nœud LOAM",
   "settings.thisBrowser": "Ce navigateur",
+  "settings.transportVerifiedLine": "🔒 Chiffré · vérifié · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 Chiffré (non vérifié) · {fingerprint}",
+  "settings.transportUnverifiedHint": "Scannez le QR code d'invitation de ce nœud pour confirmer son identité.",
+  "settings.transportKeyMismatch": "Le QR code que vous avez scanné ne correspond pas à la clé de ce nœud.",
   "settings.profileEyebrow": "Profil",
   "settings.profileTitle": "Identité locale",
   "settings.displayName": "Nom affiché",
@@ -412,6 +416,8 @@ export const fr: Catalog = {
   "gate.pendingBody":
     "En attente que quelqu’un de ce nœud vous laisse entrer. Cet écran se met à jour dès que vous êtes approuvé.",
   "gate.connection": "Connexion : {status}",
+  "gate.needsQrTitle": "Scannez le QR d'accès pour vous connecter en toute sécurité",
+  "gate.needsQrBody": "Scannez le QR d'accès de ce nœud avec votre appareil pour vous connecter — il n'y a pas d'autre moyen sûr de le faire.",
 
   "confirm.deleteMessage": "Supprimer ce message ? Cette action est irréversible.",
 

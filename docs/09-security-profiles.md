@@ -5,12 +5,12 @@
 > truth (`SECURITY_PROFILE_PRESETS` + `securityProfilePreset()` in `@loam/schema`); the server forces
 > the bundled axes onto the effective config in `mergeConfig()` (`apps/server/src/app.ts`), and the
 > admin UI has a profile selector that locks the managed axes unless `custom`. **Bundled today:**
-> `access.joinPolicy`, `retention.messageTtlMs`, `killSwitch.enabled`. **Not built yet** (so still
-> *not* bundled): transport encryption / host-key delivery (08), E2EE (07), rotating join QR, at-rest
-> encryption toggle (it's env-driven via `LOAM_DB_KEY`, not profile-driven), identity mode (05).
-> Because transport encryption is the axis that would otherwise separate them, **`open` and `standard`
-> currently apply the same enforced settings**; `hardened` tightens all three (approval join, 1-hour
-> TTL, armed kill switch). The default is `custom` so a fresh node's raw axes are never silently
+> `access.joinPolicy`, `retention.messageTtlMs`, `killSwitch.enabled`, and now
+> **`security.transportEncryption`** (docs/08). **Not built yet** (so still *not* bundled): E2EE (07),
+> rotating join QR, at-rest encryption toggle (env-driven via `LOAM_DB_KEY`, not profile-driven),
+> identity mode (05). Transport encryption is now the axis that **actually distinguishes `open`
+> (`off`) from `standard` (`optional`)** — the gap this doc flagged is closed; `hardened` requires it
+> (plus approval join, 1-hour TTL, armed kill switch). The default is `custom` so a fresh node's raw axes are never silently
 > overridden, and `reconcileLegacyProfile()` demotes a legacy persisted preset to `custom` if its
 > stored axes diverge (so this change can't disarm a previously-armed kill switch). The rest of this
 > doc is the original briefing — the full vision the presets grow into as those axes land.
@@ -35,7 +35,7 @@ what keeps "make it all optional" from becoming "too complex."
 | Axis | Values | Doc |
 |------|--------|-----|
 | Admission | `open` (anyone connects) / `token` (QR invite required) | 08 |
-| Transport encryption (Layer 1) | `off` / `on` (QR-bootstrapped session encryption) | 08 |
+| Transport encryption (Layer 1) | `off` / `optional` / `required` (QR-bootstrapped session encryption — the shipped `security.transportEncryption` values) | 08 |
 | Host-key delivery (when encryption on) | `qr` (authenticated) / `tofu` (trust-on-first-use, weaker) | 08 |
 | E2EE (Layer 2) | `off` / `dmsAndPrivate` | 07 |
 | At-rest encryption | `off` / `on` | 01 |
@@ -49,7 +49,7 @@ what keeps "make it all optional" from becoming "too complex."
 | Axis | `open` (disaster relief) | `standard` (default) | `hardened` (high-risk) |
 |------|--------------------------|----------------------|------------------------|
 | Admission | open — anyone joins | token (QR invite) | token (QR invite) |
-| Transport encryption | off (or on+TOFU) | **on** (QR key) | **on** (QR key) |
+| Transport encryption | off (or `optional`+TOFU) | **`optional`** (QR key) | **`required`** (QR key) |
 | E2EE | off | off (host trusted) | **on** for DMs + private channels |
 | At-rest encryption | off | on | on |
 | Join QR | static (or none) | rotating | rotating, short interval |
@@ -100,10 +100,11 @@ branches on security settings:
 
 ```jsonc
 "security": {
-  "profile": "standard",           // "open" | "standard" | "hardened" | "custom"
+  "profile": "custom",             // "open" | "standard" | "hardened" | "custom" — "custom" is the
+                                    // shipped default (a fresh node never has an axis silently forced)
   // present only to override a profile, or when profile === "custom":
   "admission": "token",            // "open" | "token"
-  "transportEncryption": "on",     // "off" | "on"
+  "transportEncryption": "optional", // "off" | "optional" | "required" (shipped, docs/08)
   "transportKeyDelivery": "qr",    // "qr" | "tofu"
   "e2ee": "off",                   // "off" | "dmsAndPrivate"
   "atRestEncryption": "on",
@@ -123,6 +124,9 @@ paths (show rotating QR, key fingerprints, and admin controls on the host screen
 console-QR fallback for headless so that assumption isn't load-bearing.
 
 ## Decide
-- Profile names/defaults (proposed: `open` / `standard` / `hardened`, default `standard`).
+- Profile names/defaults (proposed: `open` / `standard` / `hardened`, default `standard`). **As shipped,
+  the actual default is `custom`** (see the status note at the top) so a fresh node's raw axes are never
+  silently overridden by a named preset; `standard` here was this doc's original proposed default, not
+  the implemented one.
 - Does `open` mean encryption fully off, or on-with-TOFU? (Access vs. passive-sniff protection.)
 - Is E2EE ever a default, or always opt-in even in `hardened`? (Recommend opt-in — it disables LLM/search.)

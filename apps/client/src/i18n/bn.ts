@@ -79,6 +79,10 @@ export const bn: Catalog = {
   "settings.joinEyebrow": "স্থানীয় অ্যাক্সেস",
   "settings.joinTitle": "এই LOAM নোডে যোগ দিন",
   "settings.thisBrowser": "এই ব্রাউজার",
+  "settings.transportVerifiedLine": "🔒 এনক্রিপ্টেড · যাচাইকৃত · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 এনক্রিপ্টেড (অযাচাইকৃত) · {fingerprint}",
+  "settings.transportUnverifiedHint": "এই নোডের পরিচয় নিশ্চিত করতে এর জয়েন QR স্ক্যান করুন।",
+  "settings.transportKeyMismatch": "আপনি যে QR স্ক্যান করেছেন তা এই নোডের কী-এর সাথে মেলে না।",
   "settings.profileEyebrow": "প্রোফাইল",
   "settings.profileTitle": "স্থানীয় পরিচয়",
   "settings.displayName": "প্রদর্শিত নাম",
@@ -412,6 +416,8 @@ export const bn: Catalog = {
   "gate.pendingBody":
     "এই নোডের কেউ আপনাকে ঢুকতে দেওয়ার অপেক্ষায়। অনুমোদিত হওয়া মাত্রই এই স্ক্রিন আপডেট হবে।",
   "gate.connection": "সংযোগ: {status}",
+  "gate.needsQrTitle": "নিরাপদে সংযোগ করতে যোগদান QR স্ক্যান করুন",
+  "gate.needsQrBody": "এই নোডের সাথে সংযোগ করতে আপনার ডিভাইস দিয়ে যোগদান QR স্ক্যান করুন — নিরাপদে সংযোগের অন্য কোনো উপায় নেই।",
 
   "confirm.deleteMessage": "এই বার্তা মুছবেন? এটি ফেরানো যাবে না।",
 

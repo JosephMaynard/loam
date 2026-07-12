@@ -103,6 +103,33 @@ export const LocaleSchema = z.enum([
 ]);
 export type Locale = z.infer<typeof LocaleSchema>;
 
+/**
+ * App-layer transport encryption mode (docs/08): `off` (plain HTTP, the pre-existing behaviour),
+ * `optional` (encrypt when the client did the QR handshake, but still serve unencrypted requests),
+ * or `required` (reject unencrypted requests to content endpoints — bootstrap endpoints stay open).
+ */
+export const TransportEncryptionSchema = z.enum(["off", "optional", "required"]);
+export type TransportEncryption = z.infer<typeof TransportEncryptionSchema>;
+
+/** `POST /api/transport/handshake` (docs/08): the client's ephemeral X25519 public key (base64url). */
+export const TransportHandshakeRequestSchema = z.object({
+  clientEphemeralPublic: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/, "must be base64url")
+    .min(1)
+    .max(64),
+});
+export type TransportHandshakeRequest = z.infer<typeof TransportHandshakeRequestSchema>;
+
+/** The handshake reply: a session id for subsequent `x-loam-enc` requests, the host ephemeral public
+ * (to finish deriving the key), and the host static public key (so the client can verify the QR). */
+export const TransportHandshakeResponseSchema = z.object({
+  sessionId: z.string().min(1).max(128),
+  hostEphemeralPublic: z.string().min(1).max(64),
+  hostPublicKey: z.string().min(1).max(64),
+});
+export type TransportHandshakeResponse = z.infer<typeof TransportHandshakeResponseSchema>;
+
 /** The already-enforced security axes a non-`custom` profile applies as one coherent bundle. */
 export type SecurityProfilePreset = {
   /** Who may join: everyone immediately (`open`) or a greeter/admin approves newcomers (`approval`). */
@@ -111,22 +138,23 @@ export type SecurityProfilePreset = {
   messageTtlMs: number | null;
   /** Whether the admin/panic kill switch is armed. */
   killSwitchEnabled: boolean;
+  /** App-layer transport encryption posture (docs/08). */
+  transportEncryption: TransportEncryption;
 };
 
 /**
  * The single source of truth mapping each named profile → the concrete config axes it forces, so
- * "pick a profile" stays testable as 3 whole configurations instead of 2ⁿ toggles (docs/09). Only
- * axes LOAM actually enforces today appear here; the axes that would otherwise separate `open` from
- * `standard` (transport encryption, invite tokens — docs/08) are not built yet, so those two apply
- * the same enforced settings for now and differ only in intent. `hardened` tightens all three.
+ * "pick a profile" stays testable as whole configurations instead of 2ⁿ toggles (docs/09). Transport
+ * encryption (docs/08) is now enforced too and is the axis that finally distinguishes `open` (off)
+ * from `standard` (optional); `hardened` requires it. `hardened` tightens every axis.
  */
 export const SECURITY_PROFILE_PRESETS: Record<
   Exclude<SecurityProfile, "custom">,
   SecurityProfilePreset
 > = {
-  open: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false },
-  standard: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false },
-  hardened: { joinPolicy: "approval", messageTtlMs: 3_600_000, killSwitchEnabled: true },
+  open: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false, transportEncryption: "off" },
+  standard: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false, transportEncryption: "optional" },
+  hardened: { joinPolicy: "approval", messageTtlMs: 3_600_000, killSwitchEnabled: true, transportEncryption: "required" },
 };
 
 /**
@@ -232,6 +260,12 @@ export const NetworkConfigSchema = z.object({
   joinPolicy: JoinPolicySchema,
   /** The node's active security posture, surfaced so the client can gate secure-only affordances. */
   securityProfile: SecurityProfileSchema,
+  /** App-layer transport-encryption posture (docs/08), so the client knows whether to handshake. */
+  transportEncryption: TransportEncryptionSchema,
+  /** The host's static X25519 public key (base64url) for the transport handshake, when transport
+   * encryption isn't `off`. The client prefers the QR-delivered key; this lets it show the fingerprint
+   * and detect a mismatch. Absent when transport encryption is off. */
+  transportPublicKey: z.string().min(1).max(64).optional(),
   /** Admin-selected UI language for the whole node; the client renders every label in it. */
   locale: LocaleSchema,
 });
@@ -332,6 +366,9 @@ export type KillSwitchConfig = z.infer<typeof KillSwitchConfigSchema>;
 
 export const SecurityConfigSchema = z.object({
   profile: SecurityProfileSchema,
+  /** App-layer transport encryption posture (docs/08). A named profile forces this; `custom` uses it
+   * as configured. Default `off` keeps existing plain-HTTP deployments unchanged. */
+  transportEncryption: TransportEncryptionSchema,
 });
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
 
