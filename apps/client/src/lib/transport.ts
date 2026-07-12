@@ -184,22 +184,31 @@ async function handshake(hostPublicKey: string): Promise<void> {
  * channel, config is not. When `required` and no QR key is available, throws `TransportNeedsQrError`.
  */
 export async function ensureSession(mode: TransportEncryption, configHostKey?: string): Promise<void> {
-  lastParams = { mode, hostKey: configHostKey };
+  const hashKey = consumeHashKey();
+  const qrKey = hashKey ?? getCachedHostPublicKey();
 
-  if (mode === "off") {
+  // A QR key pins this join to an encrypted, MITM-authenticated session. `/api/config` is
+  // unauthenticated, so its `transportEncryption` value is attacker-mutable — a network MITM could
+  // flip it to `off` to strip encryption while the user believes their scanned QR protected them.
+  // Presence of a QR key (freshly scanned `#k=` or one cached from a prior verified join) overrides
+  // the advertised mode: we treat the join as `required` and never fall back to plaintext once the
+  // operator has handed out a key out-of-band. `lastParams` stores the *effective* mode so a later
+  // `reHandshake` keeps the pin instead of degrading on reconnect.
+  const effectiveMode: TransportEncryption = qrKey ? "required" : mode;
+  lastParams = { mode: effectiveMode, hostKey: configHostKey };
+
+  if (effectiveMode === "off") {
     session = undefined;
     hostKeyMismatch = false;
     sessionQrVerified = false;
     return;
   }
 
-  const hashKey = consumeHashKey();
-  const qrKey = hashKey ?? getCachedHostPublicKey();
   hostKeyMismatch = !!qrKey && !!configHostKey && qrKey !== configHostKey;
-  const hostPublicKey = mode === "required" ? qrKey : (qrKey ?? configHostKey);
+  const hostPublicKey = effectiveMode === "required" ? qrKey : (qrKey ?? configHostKey);
 
   if (!hostPublicKey) {
-    if (mode === "required") {
+    if (effectiveMode === "required") {
       throw new TransportNeedsQrError();
     }
 

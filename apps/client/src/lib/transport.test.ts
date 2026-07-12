@@ -159,6 +159,31 @@ describe("transport", () => {
       expect(getHostKeyMismatch()).toBe(true);
     });
 
+    it("a QR key forces encryption even when config advertises \"off\" — defeats a MITM downgrade (docs/08)", async () => {
+      // `/api/config` is unauthenticated, so its `transportEncryption` value is attacker-mutable: a
+      // network MITM could flip it to "off" to strip encryption while the user believes their scanned
+      // QR protected them. A present QR key (freshly scanned OR cached from a prior verified join) must
+      // pin the join to an encrypted session regardless of the advertised mode.
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      // Freshly scanned QR (#k=) with a config that says "off": still handshakes, still encrypts.
+      window.location.hash = `#k=${host.publicKey}`;
+      await ensureSession("off", undefined);
+      expect(getSession()?.hostPublicKey).toBe(host.publicKey);
+      expect(getCachedHostPublicKey()).toBe(host.publicKey);
+
+      // A later boot/reconnect with no fragment but a cached key and an "off" config must not downgrade.
+      fetchMock.mockClear();
+      await ensureSession("off", undefined);
+      expect(fetchMock).toHaveBeenCalled();
+      expect(getSession()?.hostPublicKey).toBe(host.publicKey);
+    });
+
     it("prefers a QR-delivered (#k=) key over the config key and flags a mismatch when they disagree", async () => {
       const host = createTransportIdentity();
       const impostor = createTransportIdentity();
