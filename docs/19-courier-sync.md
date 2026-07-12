@@ -32,8 +32,15 @@ between two nodes). Everything below the transport is done and tested today:
 - **Sealed mesh mail** (docs/16) already **rides that same sync**: `buildSyncDigest()` advertises a
   `sealed` bucket — `{ id, toTag, ttlExpiresAt, hopLimit }`, metadata only, **no content** — when
   `mesh.enabled`. A puller fetches the blobs it wants and runs each through `acceptSealedFromPeer`,
-  which **delivers locally if it's for a local user, else relays it onward hop-decremented** (the
-  carry-forward). TTL/hop/cap bound it; delivery-acks (reusing the tombstone table) converge it.
+  which **delivers locally if it's for a local user, else stores it hop-decremented so it is re-offered
+  in this node's own digest** — the carry-forward is genuinely **multi-hop** (A→B→C→…), verified in the
+  code: each accepting node re-advertises the blob, so a chain of couriers ferries it arbitrarily far,
+  bounded by `hopLimit`, `ttlExpiresAt`, the `maxCarried` cap, and id-dedup/tombstones. **Caveat
+  (honest):** there are **no delivery-acks yet** ("no acks", per CLAUDE.md) — convergence is by TTL/hop
+  expiry alone, so after a blob is delivered at its destination, intermediate mules keep carrying it
+  (harmlessly — the recipient dedupes) until its TTL/hop runs out. Signed acks that prune delivered mail
+  early (reusing the tombstone table) are a clean v2; until then, courier deployments tune `hopLimit ≥
+  longest expected chain` and `TTL ≥ courier round-trip latency`.
 - **The bytes on the wire** can already be **encrypted end-to-end between nodes** (PR #84): the puller
   does the transport handshake with the peer and seals its sync requests; the sealed mail is sealed to
   its *recipient* regardless, so a courrier ferries blobs it **cannot read**.
@@ -163,6 +170,9 @@ Phases 1–3 are desktop/LAN-testable with no new crypto and no radios. Phase 4 
 - **Carry budget & prioritisation** when a mule is over its storage cap.
 - **Ring key management:** shared bearer token (simple, revocation-hard) vs. per-member keys (better,
   more UX). NFC helps either way.
-- **Does the current sealed-bucket sync already carry-forward across an arbitrary number of hops with
-  acks, or only one relay hop?** (Confirm `acceptSealedFromPeer` + ack semantics against multi-courier
-  chains before promising A→…→Z delivery.)
+- ~~**Does the sealed-bucket sync carry-forward across arbitrary hops?**~~ **RESOLVED (verified in
+  code):** yes — `acceptSealedFromPeer` stores a not-for-me blob at `hopLimit − 1` and it is re-offered
+  in that node's digest, so it ferries A→…→Z, bounded by hop/TTL/cap/dedup. **But no delivery-acks
+  exist yet**, so delivered mail is only pruned by TTL/hop expiry (redundant-but-harmless carrying until
+  then). Signed acks = the recommended v2. So the *open* question is really: **do we ship courier v1
+  without acks (tune hop/TTL generously) and add acks as a fast-follow, or build acks first?**
