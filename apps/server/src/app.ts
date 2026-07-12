@@ -3791,8 +3791,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const method = typeof payload?.m === "string" ? payload.m.toUpperCase() : undefined;
     const path = typeof payload?.p === "string" ? payload.p : undefined;
     // Restrict targets to real API routes; never tunnel the transport bootstrap itself (`/api/transport/*`
-    // → recursion / re-enters this handler) or the static app shell.
-    if (!method || !TUNNELLABLE_METHODS.has(method) || !path || !path.startsWith("/api/") || path.startsWith("/api/transport/")) {
+    // → recursion / re-enters this handler) or the static app shell, and reject `..` so a normalized path
+    // can't climb out of the `/api/` prefix the check just enforced.
+    if (
+      !method ||
+      !TUNNELLABLE_METHODS.has(method) ||
+      !path ||
+      !path.startsWith("/api/") ||
+      path.startsWith("/api/transport/") ||
+      path.includes("..")
+    ) {
       return reply.code(400).send(errorBody("Invalid tunnel target"));
     }
 

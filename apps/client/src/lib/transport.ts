@@ -438,12 +438,25 @@ async function tunnelFetch(
       throw new Error("Transport session expired");
     }
 
-    const descriptor = JSON.parse(opened) as { status: number; contentType: string; bodyB64: string };
+    let descriptor: { status?: unknown; contentType?: unknown; bodyB64?: unknown };
+    try {
+      descriptor = JSON.parse(opened) as typeof descriptor;
+    } catch {
+      throw new Error("Malformed tunnel response");
+    }
+    // The tunnel endpoint's own guards (bad target, missing session) reply with a sealed errorBody, NOT
+    // a `{ status, contentType, bodyB64 }` descriptor. Surface that as a readable 400 Response rather
+    // than crashing on `base64ToBytes(undefined)` — defence in depth (the client shouldn't trip those
+    // guards, but a Response beats a throw).
+    if (typeof descriptor.status !== "number" || typeof descriptor.bodyB64 !== "string") {
+      return new Response(opened, { status: 400, headers: { "content-type": "application/json" } });
+    }
+    const contentType = typeof descriptor.contentType === "string" ? descriptor.contentType : "application/octet-stream";
     // Rebuild a normal Response from the raw bytes (an ArrayBuffer is a valid BodyInit), so the caller's
     // `.json()` / `.blob()` work exactly as on a direct response — text and binary (images) alike.
     return new Response(base64ToBytes(descriptor.bodyB64), {
       status: descriptor.status,
-      headers: { "content-type": descriptor.contentType },
+      headers: { "content-type": contentType },
     });
   }
 

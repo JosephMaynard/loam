@@ -542,6 +542,36 @@ describe("transport", () => {
       expect(capturedInner).toEqual({ m: "GET", p: "/api/search?q=secret" });
       expect(await res.json()).toEqual({ ok: true, sawPath: "/api/search?q=secret" });
     });
+
+    it("surfaces a sealed non-descriptor tunnel reply as a 400 Response instead of crashing", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        // The tunnel endpoint's own guard reply: a sealed errorBody, NOT a { status, bodyB64 } descriptor.
+        const sealedError = sealTransport(serverKey!, JSON.stringify({ error: { message: "Invalid tunnel target" } }), "POST /api/transport/tunnel");
+        return new Response(JSON.stringify({ enc: sealedError }), { status: 200, headers: { "x-loam-enc": "1" } });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const res = await encryptedFetch("GET", "/api/whatever");
+      expect(res.status).toBe(400); // no throw; readable error Response
+      expect(await res.json()).toEqual({ error: { message: "Invalid tunnel target" } });
+    });
   });
 
   describe("encryptedImageUrl", () => {

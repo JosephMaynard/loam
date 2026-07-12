@@ -5118,7 +5118,7 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     const user = await newSession(app);
     const session = await openSession(app);
 
-    for (const [i, p] of ["/api/transport/handshake", "/api/transport/tunnel", "/", "/index.html"].entries()) {
+    for (const [i, p] of ["/api/transport/handshake", "/api/transport/tunnel", "/", "/index.html", "/api/../admin"].entries()) {
       const res = await tunnel(app, session, i + 1, user.cookie, { m: "GET", p });
       expect(res.statusCode).toBe(400);
     }
