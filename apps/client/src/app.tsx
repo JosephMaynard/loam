@@ -41,12 +41,12 @@ import loamMark from "./assets/loam.svg";
 import { Avatar } from "./components/Avatar";
 import { AvatarImageEditor } from "./components/AvatarImageEditor";
 import { InviteControl } from "./components/InviteControl";
-import { LocationCard } from "./components/LocationCard";
 import { MessageComposer } from "./components/MessageComposer";
+import { MessageItem } from "./components/MessageItem";
 import { NodeLinkControl } from "./components/NodeLinkControl";
 import { SearchResult } from "./components/SearchResult";
 import { UnreadBadge } from "./components/UnreadBadge";
-import { attachmentPath, prepareImageAttachment } from "./lib/attachments";
+import { prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { dayKey, dayLabel } from "./lib/dates";
 import {
@@ -60,7 +60,6 @@ import {
   reactionSummary,
   repliesFor,
   topLevelMessages,
-  type ReactionSummary,
 } from "./lib/messages";
 import {
   deleteRecord,
@@ -71,7 +70,7 @@ import {
   putRecords,
 } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
-import { renderMarkdownCached } from "./lib/markdown";
+import { bodyFor, displayTime } from "./lib/message-format";
 import { clamp } from "./lib/numbers";
 import {
   apiUrl,
@@ -90,8 +89,6 @@ import {
   LOCALE_LABELS,
   RTL_LOCALES,
   errorText,
-  getActiveLocale,
-  icuLocale,
   isLocaleLoaded,
   loadLocale,
   resolveLocale,
@@ -112,7 +109,6 @@ type Config = {
 const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
 const LAST_CONVERSATION_KEY = "loam.lastConversation";
-const QUICK_REACTIONS = ["👍", "❤️", "✅"];
 const REQUEST_TIMEOUT_MS = 10_000;
 const TOAST_DISMISS_MS = 4_000;
 // Single `sync`-store record holding the per-conversation last-read timestamps (ms). One row keeps
@@ -233,47 +229,6 @@ async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> 
 
 /** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
 const EMPTY_MESSAGES: Message[] = [];
-
-/**
- * Per-locale cache of the hours-and-minutes time formatter. Building an `Intl.DateTimeFormat` is
- * comparatively expensive and `displayTime` is called once per rendered message row (hundreds of
- * times per render, many times a second while an LLM reply streams), so the formatter is built once
- * per active locale and reused. Keyed on the resolved ICU locale string.
- */
-const timeFormatters = new Map<string, Intl.DateTimeFormat>();
-
-/**
- * Format a numeric timestamp into a localized hours-and-minutes time string.
- *
- * @param timestamp - Milliseconds since the UNIX epoch
- * @returns The time formatted as hours and minutes according to the current locale (e.g., "09:05")
- */
-function displayTime(timestamp: number): string {
-  // Node UI locale (via icuLocale), so times read in the same language as the rest of the chrome.
-  const locale = icuLocale(getActiveLocale());
-  let formatter = timeFormatters.get(locale);
-
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
-    timeFormatters.set(locale, formatter);
-  }
-
-  return formatter.format(timestamp);
-}
-
-/**
- * Get the display text for a message, substituting a streaming placeholder when appropriate.
- *
- * @param message - The message to extract text from; may be any Message variant.
- * @returns The message `body` if present and non-empty, the localized "thinking" placeholder when `body` is empty and `message.meta?.streaming` is true, or an empty string when no body is available.
- */
-function bodyFor(message: Message): string {
-  if (!("body" in message)) {
-    return "";
-  }
-
-  return message.body || (message.meta?.streaming ? t("composer.thinking") : "");
-}
 
 /**
  * Builds the route path for a conversation (channel or direct message).
@@ -2509,186 +2464,6 @@ function MessageList({
         <p className="empty-copy">{t("messageList.empty")}</p>
       )}
     </div>
-  );
-}
-
-interface MessageItemProps {
-  currentUser: User;
-  message: Message;
-  onDelete: (messageId: string) => void;
-  onEdit: (messageId: string, body: string) => Promise<boolean>;
-  onOpenThread?: (messageId: string) => void;
-  onReact: (messageId: string, reaction: string) => Promise<void>;
-  reactions: ReactionSummary[];
-  replyCount?: number;
-  usersById: Map<string, User>;
-}
-
-/**
- * Render a single chat message including avatar, author metadata, formatted body, reactions, and thread/reply controls.
- *
- * @param currentUser - The currently signed-in user (used to determine message ownership).
- * @param message - The message to render.
- * @param onOpenThread - Optional callback invoked with the message id to open its thread view.
- * @param onReact - Callback invoked with the message id and reaction string when a reaction or quick reaction is triggered.
- * @param reactions - Aggregated reaction summaries for this message (used to render reaction buttons and active state).
- * @param replyCount - Number of replies to this message; used to label the thread button.
- * @param usersById - Map of users keyed by id; used to resolve the message author (falls back to a generated ephemeral author when missing).
- * @returns A JSX element representing the message item.
- */
-function MessageItem({
-  currentUser,
-  message,
-  onDelete,
-  onEdit,
-  onOpenThread,
-  onReact,
-  reactions,
-  replyCount = 0,
-  usersById,
-}: MessageItemProps) {
-  const author = usersById.get(message.authorId) ?? {
-    id: message.authorId,
-    displayName: generateDisplayName(message.authorId),
-    type: "human",
-    isAdmin: false,
-    createdAt: message.createdAt,
-    ephemeral: true,
-  };
-  const isMine = message.authorId === currentUser.id;
-  const canEdit = isMine && !message.meta?.streaming && message.type !== "reaction";
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [savingEdit, setSavingEdit] = useState(false);
-  const messageClassName = ["message", isMine ? "mine" : undefined, message.meta?.streaming ? "streaming" : undefined]
-    .filter(Boolean)
-    .join(" ");
-
-  function startEditing(): void {
-    setDraft(bodyFor(message));
-    setEditing(true);
-  }
-
-  async function saveEdit(): Promise<void> {
-    setSavingEdit(true);
-    const ok = await onEdit(message.id, draft);
-    setSavingEdit(false);
-    if (ok) {
-      setEditing(false);
-    }
-  }
-
-  return (
-    <article className={messageClassName}>
-      <Avatar avatar={author.avatar} id={author.id} />
-      <div className="message-main">
-        <div className="message-meta">
-          <strong>{author.displayName}</strong>
-          <span>{displayTime(message.createdAt)}</span>
-          {message.editedAt ? <span className="edited-tag">{t("message.editedTag")}</span> : null}
-        </div>
-        {editing ? (
-          <form
-            className="message-edit"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void saveEdit();
-            }}
-          >
-            <textarea
-              aria-label={t("message.editAriaLabel")}
-              // eslint-disable-next-line jsx-a11y/no-autofocus
-              autoFocus
-              dir="auto"
-              disabled={savingEdit}
-              onInput={(event) => setDraft(event.currentTarget.value)}
-              rows={2}
-              value={draft}
-            />
-            <div className="message-edit-actions">
-              <button disabled={savingEdit || !draft.trim()} type="submit">
-                {savingEdit ? t("common.saving") : t("common.save")}
-              </button>
-              <button disabled={savingEdit} onClick={() => setEditing(false)} type="button">
-                {t("common.cancel")}
-              </button>
-            </div>
-          </form>
-        ) : (
-          <div
-            className="markdown-body"
-            dir="auto"
-            dangerouslySetInnerHTML={{
-              __html: renderMarkdownCached(message.id, bodyFor(message), message.editedAt),
-            }}
-          />
-        )}
-        {message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (
-          <div className="message-attachments">
-            {message.attachments.map((attachment) => (
-              <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
-                <img
-                  alt={t("message.attachedImageAlt")}
-                  className="message-attachment"
-                  height={attachment.height}
-                  loading="lazy"
-                  src={apiUrl(attachmentPath(attachment))}
-                  width={attachment.width}
-                />
-              </a>
-            ))}
-          </div>
-        ) : null}
-        {message.type !== "reaction" && message.type !== "sealed" && message.location ? (
-          <LocationCard location={message.location} />
-        ) : null}
-        <div className="message-actions">
-          {message.meta?.streaming ? <span className="streaming-pill">{t("message.streaming")}</span> : null}
-          {!message.meta?.streaming && reactions.map((reaction) => (
-            <button
-              className={reaction.active ? "reaction active" : "reaction"}
-              key={reaction.reaction}
-              onClick={() => void onReact(message.id, reaction.reaction).catch(() => {})}
-              type="button"
-            >
-              {reaction.reaction} {reaction.count}
-            </button>
-          ))}
-          {!message.meta?.streaming && QUICK_REACTIONS.filter(
-            (reaction) => !reactions.some((summary) => summary.reaction === reaction),
-          ).map((reaction) => (
-            <button
-              className="quick-reaction"
-              key={reaction}
-              onClick={() => void onReact(message.id, reaction).catch(() => {})}
-              type="button"
-            >
-              {reaction}
-            </button>
-          ))}
-          {onOpenThread && !message.meta?.streaming ? (
-            <button className="thread-button" onClick={() => onOpenThread(message.id)} type="button">
-              {replyCount ? t("message.replyCount", { n: replyCount }) : t("message.reply")}
-            </button>
-          ) : null}
-          {canEdit && !editing ? (
-            <button className="message-edit-button" onClick={startEditing} type="button">
-              {t("message.edit")}
-            </button>
-          ) : null}
-          {(isMine || currentUser.isAdmin) && !message.meta?.streaming ? (
-            <button
-              className="message-delete"
-              onClick={() => onDelete(message.id)}
-              title={isMine ? t("message.deleteOwnTitle") : t("message.deleteAdminTitle")}
-              type="button"
-            >
-              {t("common.delete")}
-            </button>
-          ) : null}
-        </div>
-      </div>
-    </article>
   );
 }
 
