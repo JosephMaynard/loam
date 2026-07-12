@@ -270,7 +270,18 @@ async function loadConfig(): Promise<Config> {
 
   if (isTunnelActive()) {
     // Bound: identity is the session key. Resume it over the sealed channel to get `currentUser`.
-    const { currentUser } = await resumeIdentity();
+    // `ensureSession` may have REUSED a live session (so a reconnect doesn't orphan the WS); if that
+    // reused session turns out to be dead server-side, resume fails — force a fresh handshake+rebind
+    // once and retry, so a stale reused session can't strand boot in an offline-retry loop.
+    let currentUser: unknown;
+    try {
+      ({ currentUser } = await resumeIdentity());
+    } catch (resumeError) {
+      if (!(await reestablishSession())) {
+        throw resumeError;
+      }
+      ({ currentUser } = await resumeIdentity());
+    }
     return {
       version: boot.version,
       joinUrl: boot.joinUrl,

@@ -183,6 +183,16 @@ describe("transport", () => {
       expect(getCachedHostPublicKey()).toBe(host.publicKey);
 
       // A later boot/reconnect with no fragment but a cached key and an "off" config must not downgrade.
+      // The live session (bound to the QR key) is REUSED rather than re-handshaked (docs/20 — a blind
+      // re-handshake would orphan a live WS), but it stays encrypted against the QR key: no downgrade.
+      fetchMock.mockClear();
+      await ensureSession("off", undefined);
+      expect(fetchMock).not.toHaveBeenCalled(); // reused, not re-handshaked
+      expect(getSession()?.hostPublicKey).toBe(host.publicKey); // still encrypted against the QR key
+
+      // With no live session, a cached QR key still forces a fresh encrypted handshake (no downgrade).
+      resetTransportStateForTests();
+      localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, host.publicKey);
       fetchMock.mockClear();
       await ensureSession("off", undefined);
       expect(fetchMock).toHaveBeenCalled();

@@ -223,6 +223,12 @@ async function handshake(hostPublicKey: string): Promise<void> {
  * when no QR key is available. When both a QR key and a config key are present and disagree, the QR
  * key is what gets used either way (see `getHostKeyMismatch`) — the QR is the out-of-band-authenticated
  * channel, config is not. When `required` and no QR key is available, throws `TransportNeedsQrError`.
+ *
+ * REUSES a live session bound to the same host key rather than re-handshaking (docs/20). This is called
+ * on every boot/reconnect resync; a blind re-handshake would mint a NEW session object and orphan a
+ * WebSocket already sealed under the current one — the socket would then decrypt every inbound frame
+ * against the wrong key and go silently deaf. If the reused session is actually dead, the REST/resume
+ * retry paths (`reHandshake`, and `loadConfig`'s resume recovery) force a fresh handshake to recover.
  */
 export async function ensureSession(mode: TransportEncryption, configHostKey?: string): Promise<void> {
   const hashKey = consumeHashKey();
@@ -255,6 +261,12 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
 
     session = undefined;
     sessionQrVerified = false;
+    return;
+  }
+
+  // Reuse a live session already bound to this host key — don't re-handshake and orphan a live WS (above).
+  if (session && session.hostPublicKey === hostPublicKey) {
+    sessionQrVerified = hostPublicKey === qrKey;
     return;
   }
 
