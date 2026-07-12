@@ -234,5 +234,29 @@ timing, sizes, bootstrap) observable; `anonymous`/optional sessions keep the wea
 
 ---
 
-*All blockers from both review rounds are now folded in. Pending a final reviewer confirmation that v3
-closes it, this is the implementation spec.*
+## 15. Post-implementation adversarial review (folded in)
+
+Two independent adversarial reviews (server + client) ran against the built branch. No auth bypass,
+impersonation, credential leak, or plaintext downgrade survived. The findings below were fixed:
+
+- **WS reconnect deafening (client, real, pre-existing from docs/08):** the boot effect and the WS
+  reconnect both re-handshaked, replacing the module-global session and orphaning a live socket (it then
+  decrypted frames under the wrong key and went silently deaf). Fix: `ensureSession` **reuses** a live
+  session bound to the same host key; `loadConfig` force-refreshes once if a reused session is dead.
+- **Revocation vs. mid-challenge sockets (server, §7/§8):** a socket in the ≤10s challenge window wasn't
+  in `sockets`, so ban/logout/kill-switch missed it and it could confirm post-revocation. Fix: a
+  `pendingSockets` registry that revocation also closes, plus a confirm-time re-check of ban + session
+  liveness.
+- **Unconfirmed-socket flood (server, §7):** the global cap was one pool a few LAN hosts could exhaust.
+  Fix: an added **per-IP** cap.
+- **Tunnel-only keyed off global mode (server, §2):** the direct-content refusal now also fires for a
+  `bound` session, so a bound session on an `optional` node is tunnel-only too (matches §2).
+- Minor: idempotent-resume re-stamps its bound sequence; concurrent client re-handshakes share one
+  in-flight op; empty-string resume token → mint; fail-closed image `""`→`undefined`.
+
+**Known residuals (accepted, non-blocking):** `TRANSPORT_SESSION_CAP` eviction can drop a live bound
+session under handshake-flood pressure (availability nuisance — the persisted token re-resumes the same
+identity); a banned/revoked user can still re-mint a *fresh anonymous* identity (the existing ephemeral
+model — clearing a cookie already does this today; no access to the old identity's private state).
+
+*Pending external implementation review (Sol) before merge; this is the implementation spec.*
