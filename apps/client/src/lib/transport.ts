@@ -108,6 +108,17 @@ export function getSession(): Session | undefined {
   return session;
 }
 
+/**
+ * The join URL to encode in a QR: appends the host's transport public key as a `#k=<b64url>` fragment
+ * (docs/08) so a scanner learns the key **out-of-band** — the physical QR, not the network — which is
+ * what makes the handshake MITM-resistant at join. The fragment is never sent to the server; the
+ * *displayed* URL text should stay the plain `joinUrl` (this is for the QR image only). Returns
+ * `joinUrl` unchanged when transport encryption is off / no key is available.
+ */
+export function joinQrUrl(joinUrl: string, transportPublicKey?: string): string {
+  return transportPublicKey ? `${joinUrl}/#k=${transportPublicKey}` : joinUrl;
+}
+
 /** Emoji fingerprint of a host public key (docs/08) — defaults to the live session's host key. */
 export function fingerprint(hostPublicKey?: string): string | undefined {
   const key = hostPublicKey ?? session?.hostPublicKey;

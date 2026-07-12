@@ -54,6 +54,7 @@ import {
   ensureSession,
   fingerprint,
   getHostKeyMismatch,
+  joinQrUrl,
   openWsFrame,
   SERVER_URL_KEY,
   TransportNeedsQrError,
@@ -3859,7 +3860,16 @@ function SettingsView({
   const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
   const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
   const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
-  const qrSvg = useMemo(() => safeQrSvg(config?.joinUrl, "#203f34"), [config?.joinUrl]);
+  // Encode the host's transport public key into the join QR (docs/08) so a scanner learns it
+  // out-of-band → MITM-resistant handshake. The displayed URL text below stays plain.
+  const qrSvg = useMemo(
+    () =>
+      safeQrSvg(
+        config?.joinUrl ? joinQrUrl(config.joinUrl, config.networkConfig.transportPublicKey) : undefined,
+        "#203f34",
+      ),
+    [config?.joinUrl, config?.networkConfig.transportPublicKey],
+  );
   const previewUser: User = {
     ...currentUser,
     displayName,
