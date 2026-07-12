@@ -450,6 +450,37 @@ describe("transport", () => {
       expect(contentCalls).toBe(1);
       expect(handshakeCalls).toBe(1);
     });
+
+    it("concurrent 401s share ONE in-flight re-handshake (docs/20 §5.6/§9 — no multi-identity mint)", async () => {
+      // Two parallel GETs both 401 on the same expired session. Without the in-flight guard each would
+      // handshake independently (two fresh sessions/identities); with it they share one re-handshake.
+      const host = createTransportIdentity();
+      let handshakeCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          handshakeCalls += 1;
+          return handshakeResponder(host)(url, init);
+        }
+        // Every content request 401s (unsealed → "transport expired"), so both fire their re-handshake.
+        return new Response(null, { status: 401 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      expect(handshakeCalls).toBe(1);
+
+      // Fire both concurrently: each 401s, each calls reHandshake — but they must coalesce into one.
+      const [a, b] = await Promise.all([
+        encryptedFetch("GET", "/api/channels"),
+        encryptedFetch("GET", "/api/users"),
+      ]);
+
+      expect(a.status).toBe(401);
+      expect(b.status).toBe(401);
+      // Exactly one shared re-handshake for the burst: initial + 1, never initial + 2.
+      expect(handshakeCalls).toBe(2);
+    });
   });
 
   describe("mutations always carry a sealed envelope, even with no logical body (docs/08)", () => {
