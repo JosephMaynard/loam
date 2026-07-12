@@ -1,5 +1,17 @@
 # 08 — Transport security on an off-grid LAN (no HTTPS)
 
+> **⚠️ SUPERSEDED IN PART BY docs/20 (transport auth-binding).** The status block below describes the
+> shipped #70/#75 foundation, but docs/20 fixes a **Critical** flaw in it and corrects three claims here:
+> (1) the tunnel no longer forwards the **cookie** for a `bound` session — identity is the un-sniffable
+> session key, resolved server-side via a trusted internal `x-loam-user` (the plaintext cookie is not a
+> credential for a bound/`required` session); (2) the cookie-free public bootstrap is now
+> **`GET /api/bootstrap`**, and `GET /api/config` is tunnel-only content for a bound session (it no
+> longer "runs before a session exists" on a `required` node); (3) the claim that "**WS frames aren't
+> sequence-numbered / a replayed frame is idempotent**" is **wrong and now fixed** — WS frames carry a
+> per-connection sequence + connection-bound AAD and are preceded by a reflection-safe key-confirmation
+> challenge (docs/20 §7). Read docs/20 for the authoritative auth model; the encryption/handshake/tunnel
+> mechanics below still hold.
+
 > **Status: Layer 1 (QR-bootstrapped session encryption) is BUILT AND SHIPPED end-to-end** — server,
 > crypto, and client are all done (`feat/transport-encryption`). `@loam/crypto` has the X25519
 > handshake (host-static + ephemeral, forward-secret) + XChaCha20-Poly1305 framing + emoji fingerprint.
