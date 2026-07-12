@@ -406,7 +406,7 @@ export const fr: Catalog = {
     "En attente que quelqu’un de ce nœud vous laisse entrer. Cet écran se met à jour dès que vous êtes approuvé.",
   "gate.connection": "Connexion : {status}",
   "gate.needsQrTitle": "Scannez le QR d'accès pour vous connecter en toute sécurité",
-  "gate.needsQrBody": "Ce nœud nécessite un QR d'accès scanné avant de se connecter.",
+  "gate.needsQrBody": "Scannez le QR d'accès de ce nœud avec votre appareil pour vous connecter — il n'y a pas d'autre moyen sûr de le faire.",
 
   "confirm.deleteMessage": "Supprimer ce message ? Cette action est irréversible.",
 

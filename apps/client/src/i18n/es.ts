@@ -406,7 +406,7 @@ export const es: Catalog = {
     "Esperando a que alguien de este nodo te deje entrar. Esta pantalla se actualiza en cuanto te aprueben.",
   "gate.connection": "Conexión: {status}",
   "gate.needsQrTitle": "Escanea el QR de acceso para conectarte de forma segura",
-  "gate.needsQrBody": "Este nodo requiere escanear el QR de acceso antes de conectarse.",
+  "gate.needsQrBody": "Escanea el QR de acceso de este nodo con tu dispositivo para conectarte — no hay otra forma segura de hacerlo.",
 
   "confirm.deleteMessage": "¿Eliminar este mensaje? No se puede deshacer.",
 

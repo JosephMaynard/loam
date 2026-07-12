@@ -406,7 +406,7 @@ export const tr: Catalog = {
     "Bu düğümdeki birinin sizi içeri almasını bekliyorsunuz. Onaylandığınız anda bu ekran güncellenir.",
   "gate.connection": "Bağlantı: {status}",
   "gate.needsQrTitle": "Güvenli bağlanmak için katılım QR kodunu tarayın",
-  "gate.needsQrBody": "Bu düğüm bağlanmadan önce taranmış bir katılım QR kodu gerektirir.",
+  "gate.needsQrBody": "Bağlanmak için bu düğümün katılım QR kodunu cihazınızla tarayın — güvenli başka bir yol yok.",
 
   "confirm.deleteMessage": "Bu mesaj silinsin mi? Bu geri alınamaz.",
 

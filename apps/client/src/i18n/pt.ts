@@ -406,7 +406,7 @@ export const pt: Catalog = {
     "Aguardando alguém deste nó deixar você entrar. Esta tela é atualizada assim que você for aprovado.",
   "gate.connection": "Conexão: {status}",
   "gate.needsQrTitle": "Escaneie o QR de acesso para se conectar com segurança",
-  "gate.needsQrBody": "Este nó requer que o QR de acesso seja escaneado antes de se conectar.",
+  "gate.needsQrBody": "Leia o QR de acesso deste nó com o seu dispositivo para se conectar — não há outra forma segura de fazer isso.",
 
   "confirm.deleteMessage": "Excluir esta mensagem? Isto não pode ser desfeito.",
 

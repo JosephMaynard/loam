@@ -463,7 +463,7 @@ export const en = {
   // Shown when this node requires transport encryption (docs/08) but no host key was ever delivered
   // by a scanned join QR — there is no safe way to connect without one.
   "gate.needsQrTitle": "Scan the join QR to connect securely",
-  "gate.needsQrBody": "This node requires a scanned join QR before it will connect.",
+  "gate.needsQrBody": "Scan this node's join QR code with your device to connect — there's no other way to connect securely.",
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",

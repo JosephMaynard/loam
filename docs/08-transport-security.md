@@ -1,14 +1,21 @@
 # 08 — Transport security on an off-grid LAN (no HTTPS)
 
-> **Status: Layer 1 (QR-bootstrapped session encryption) is BUILT — server + crypto done, client in
-> progress** (`feat/transport-encryption`). `@loam/crypto` has the X25519 handshake (host-static +
-> ephemeral, forward-secret) + XChaCha20-Poly1305 framing + emoji fingerprint. The server persists a
-> host transport keypair (rotated by the kill switch), serves `POST /api/transport/handshake`, and
-> transparently decrypts request bodies / encrypts responses (global Fastify hooks) + seals WS frames
-> for `/ws?enc=<sid>`. Gated by `security.transportEncryption` (`off` default / `optional` / `required`),
-> which is now the axis that distinguishes the `open`/`standard`/`hardened` profiles (the docs/09 gap).
-> **Layer-1 scope (documented below):** request/response BODIES + WS frames are encrypted; GET request
-> paths + query strings and image bytes remain visible metadata (the tunnel + image encryption are v2).
+> **Status: Layer 1 (QR-bootstrapped session encryption) is BUILT AND SHIPPED end-to-end** — server,
+> crypto, and client are all done (`feat/transport-encryption`). `@loam/crypto` has the X25519
+> handshake (host-static + ephemeral, forward-secret) + XChaCha20-Poly1305 framing + emoji fingerprint.
+> The server persists a host transport keypair (rotated by the kill switch), serves `POST
+> /api/transport/handshake`, and transparently decrypts request bodies / encrypts responses (global
+> Fastify hooks) + seals WS frames for `/ws?enc=<sid>`. The client routes every fetch and the WebSocket
+> through `apps/client/src/lib/transport.ts`, which does the QR-bootstrapped handshake, seals/opens
+> frames, and gates `required` mode behind a "scan the join QR" screen when no QR key is available.
+> Gated by `security.transportEncryption` (`off` default / `optional` / `required`), which is now the
+> axis that distinguishes the `open`/`standard`/`hardened` profiles (the docs/09 gap). `required` mode
+> is deployable today: a client with no QR-delivered host key simply cannot connect, so there is no
+> silent downgrade to plaintext. **Layer-1 scope (documented below):** request/response BODIES + WS
+> frames are encrypted; GET request paths + query strings and image bytes remain visible metadata (the
+> tunnel + image encryption are v2); per-request replay protection is also not yet built (a captured
+> ciphertext could be replayed verbatim within its session lifetime) — a documented follow-up, not a
+> regression from today's guarantees.
 
 
 ## The problem

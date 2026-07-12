@@ -406,7 +406,7 @@ export const sw: Catalog = {
     "Unasubiri mtu kwenye nodi hii akuruhusu kuingia. Skrini hii inasasishwa mara tu unapoidhinishwa.",
   "gate.connection": "Muunganisho: {status}",
   "gate.needsQrTitle": "Changanua QR ya kujiunga ili kuunganisha kwa usalama",
-  "gate.needsQrBody": "Nodi hii inahitaji QR ya kujiunga iliyochanganuliwa kabla ya kuunganisha.",
+  "gate.needsQrBody": "Changanua QR ya kujiunga ya nodi hii kwa kifaa chako ili kuunganisha — hakuna njia nyingine salama ya kuunganisha.",
 
   "confirm.deleteMessage": "Futa ujumbe huu? Hili haliwezi kutenduliwa.",
 

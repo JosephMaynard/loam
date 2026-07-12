@@ -35,7 +35,7 @@ what keeps "make it all optional" from becoming "too complex."
 | Axis | Values | Doc |
 |------|--------|-----|
 | Admission | `open` (anyone connects) / `token` (QR invite required) | 08 |
-| Transport encryption (Layer 1) | `off` / `on` (QR-bootstrapped session encryption) | 08 |
+| Transport encryption (Layer 1) | `off` / `optional` / `required` (QR-bootstrapped session encryption — the shipped `security.transportEncryption` values) | 08 |
 | Host-key delivery (when encryption on) | `qr` (authenticated) / `tofu` (trust-on-first-use, weaker) | 08 |
 | E2EE (Layer 2) | `off` / `dmsAndPrivate` | 07 |
 | At-rest encryption | `off` / `on` | 01 |
@@ -49,7 +49,7 @@ what keeps "make it all optional" from becoming "too complex."
 | Axis | `open` (disaster relief) | `standard` (default) | `hardened` (high-risk) |
 |------|--------------------------|----------------------|------------------------|
 | Admission | open — anyone joins | token (QR invite) | token (QR invite) |
-| Transport encryption | off (or on+TOFU) | **on** (QR key) | **on** (QR key) |
+| Transport encryption | off (or `optional`+TOFU) | **`optional`** (QR key) | **`required`** (QR key) |
 | E2EE | off | off (host trusted) | **on** for DMs + private channels |
 | At-rest encryption | off | on | on |
 | Join QR | static (or none) | rotating | rotating, short interval |
@@ -100,10 +100,11 @@ branches on security settings:
 
 ```jsonc
 "security": {
-  "profile": "standard",           // "open" | "standard" | "hardened" | "custom"
+  "profile": "custom",             // "open" | "standard" | "hardened" | "custom" — "custom" is the
+                                    // shipped default (a fresh node never has an axis silently forced)
   // present only to override a profile, or when profile === "custom":
   "admission": "token",            // "open" | "token"
-  "transportEncryption": "on",     // "off" | "on"
+  "transportEncryption": "optional", // "off" | "optional" | "required" (shipped, docs/08)
   "transportKeyDelivery": "qr",    // "qr" | "tofu"
   "e2ee": "off",                   // "off" | "dmsAndPrivate"
   "atRestEncryption": "on",
@@ -123,6 +124,9 @@ paths (show rotating QR, key fingerprints, and admin controls on the host screen
 console-QR fallback for headless so that assumption isn't load-bearing.
 
 ## Decide
-- Profile names/defaults (proposed: `open` / `standard` / `hardened`, default `standard`).
+- Profile names/defaults (proposed: `open` / `standard` / `hardened`, default `standard`). **As shipped,
+  the actual default is `custom`** (see the status note at the top) so a fresh node's raw axes are never
+  silently overridden by a named preset; `standard` here was this doc's original proposed default, not
+  the implemented one.
 - Does `open` mean encryption fully off, or on-with-TOFU? (Access vs. passive-sniff protection.)
 - Is E2EE ever a default, or always opt-in even in `hardened`? (Recommend opt-in — it disables LLM/search.)
