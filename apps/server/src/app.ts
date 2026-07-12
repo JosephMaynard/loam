@@ -866,6 +866,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // The resolved transport session for a request, so `preValidation` can run the anti-replay window
   // against the same session `onRequest` authenticated. WeakMap → GC'd with the request.
   const transportRequestSessions = new WeakMap<FastifyRequest, TransportSession>();
+  // Per-boot secret proving a request is an internal re-dispatch from the transport tunnel handler
+  // (`POST /api/transport/tunnel`, docs/08), not a real client socket. 256 bits of randomness compared
+  // in constant time — an external request can't forge it, so the transport-enforcement bypass it
+  // unlocks for internal requests is safe. Never leaves the process; regenerated every boot.
+  const internalTunnelToken = randomBytes(32).toString("base64url");
+
+  /** Whether a request is an internal tunnel re-dispatch (carries the valid per-boot internal token).
+   * Such requests skip transport enforcement (they run plaintext inside the process) and the global
+   * rate limiter (they're already bounded by the outer tunnel request that spawned them). */
+  function isInternalTunnelRequest(request: FastifyRequest): boolean {
+    const header = request.headers["x-loam-internal"];
+    if (typeof header !== "string" || header.length !== internalTunnelToken.length) {
+      return false;
+    }
+    try {
+      return timingSafeEqual(Buffer.from(header), Buffer.from(internalTunnelToken));
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Anti-replay check for a sealed REST request's per-session sequence number (docs/08). Accepts a
@@ -3544,6 +3564,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // ciphertext for message/DM/config CONTENT. GET request paths + query strings and image bytes remain
   // visible (metadata); that's the documented Layer-1 scope. All inert when the mode is `off`.
   server.addHook("onRequest", async (request, reply) => {
+    // An internal tunnel re-dispatch runs plaintext inside the process — never enforce/decrypt it
+    // (its response is sealed by the outer tunnel request instead). Checked before anything else so
+    // it holds in every mode.
+    if (isInternalTunnelRequest(request)) {
+      return;
+    }
     const mode = appConfig.security.transportEncryption;
     if (mode === "off") {
       return;
@@ -3654,6 +3680,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     global: true,
     max: 300,
     timeWindow: "1 minute",
+    // Internal tunnel re-dispatches are already bounded by the outer tunnel request that spawned them
+    // (and all share the loopback IP), so exempt them rather than double-counting / self-throttling.
+    allowList: (request) => isInternalTunnelRequest(request as FastifyRequest),
   });
   await server.register(fastifyWebsocket);
   await registerStaticFiles();
@@ -3737,6 +3766,70 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       };
     },
   );
+
+  // Methods the tunnel may re-dispatch — the full set the REST API uses. Validated so the cast to
+  // Fastify's inject method type is sound and no odd verb reaches `server.inject`.
+  const TUNNELLABLE_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
+
+  // Transport tunnel (docs/08, "v2"): the strongest metadata-hiding mode. Instead of each request
+  // going to its real path (leaking e.g. `/api/search?q=<plaintext>` or which channel is being read),
+  // the client sends every post-handshake request as an opaque `POST /api/transport/tunnel` whose
+  // sealed body is `{ m, p, body }` (method, real path+query, optional body). The server re-dispatches
+  // it INTERNALLY via `server.inject` (carrying the caller's own cookie + the unforgeable internal
+  // token, so authz is unchanged and the inner request skips transport enforcement) and returns the
+  // inner response as a `{ status, contentType, bodyB64 }` descriptor — which the outer request's
+  // `onSend` hook then seals, so status, headers, and body (base64 → binary images tunnel losslessly)
+  // are all ciphertext on the wire. Replay protection rides the same `{ s, b }` envelope as any sealed
+  // request (the `s` is checked in preValidation before this handler runs).
+  server.post("/api/transport/tunnel", async (request, reply) => {
+    // Only a request whose body was actually sealed (so preValidation resolved a session key) may
+    // tunnel — refuse a plaintext hit so the endpoint can never dispatch on an attacker-supplied path
+    // outside an authenticated session.
+    if (!transportRequestKeys.has(request)) {
+      return reply.code(400).send(errorBody("Tunnel requires an encrypted session"));
+    }
+
+    const payload = request.body as { m?: unknown; p?: unknown; body?: unknown } | undefined;
+    const method = typeof payload?.m === "string" ? payload.m.toUpperCase() : undefined;
+    const path = typeof payload?.p === "string" ? payload.p : undefined;
+    // Restrict targets to real API routes; never tunnel the transport bootstrap itself (`/api/transport/*`
+    // → recursion / re-enters this handler) or the static app shell.
+    if (!method || !TUNNELLABLE_METHODS.has(method) || !path || !path.startsWith("/api/") || path.startsWith("/api/transport/")) {
+      return reply.code(400).send(errorBody("Invalid tunnel target"));
+    }
+
+    const hasBody = payload?.body !== undefined;
+    const headers: Record<string, string> = { "x-loam-internal": internalTunnelToken };
+    if (typeof request.headers.cookie === "string") {
+      headers.cookie = request.headers.cookie;
+    }
+    if (hasBody) {
+      headers["content-type"] = "application/json";
+    }
+
+    const injected = await server.inject({
+      method: method as "GET",
+      url: path,
+      headers,
+      payload: hasBody ? JSON.stringify(payload?.body) : undefined,
+    });
+
+    // Forward a freshly-minted session cookie (identity bootstrap through the tunnel) on the OUTER
+    // response — the browser must see Set-Cookie in a real response header to store it. The cookie is
+    // an opaque session token; it's the same value it would set on a direct request.
+    const setCookie = injected.headers["set-cookie"];
+    if (setCookie !== undefined) {
+      reply.header("set-cookie", setCookie);
+    }
+
+    // The onSend transport hook seals THIS descriptor (a JSON string) under the tunnel route's aad, so
+    // the real status/content-type/body never appear in cleartext. Body is base64 for lossless binary.
+    return {
+      status: injected.statusCode,
+      contentType: injected.headers["content-type"] ?? "application/octet-stream",
+      bodyB64: injected.rawPayload.toString("base64"),
+    };
+  });
 
   server.get("/api/users", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));

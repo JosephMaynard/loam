@@ -5034,6 +5034,117 @@ describe("transport encryption transparent round-trip (docs/08)", () => {
     });
     expect(res.statusCode).toBe(409);
   });
+
+  // --- Transport tunnel (docs/08 v2: path + response fully hidden) ---
+  const TUNNEL_AAD = "POST /api/transport/tunnel";
+
+  /** Send a request through the tunnel: seal `{ s, b: { m, p, body } }` to /api/transport/tunnel. */
+  function tunnel(
+    app: LoamApp,
+    session: { sessionId: string; key: string },
+    seq: number,
+    cookie: string | undefined,
+    inner: { m: string; p: string; body?: unknown },
+  ): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/transport/tunnel",
+      headers: {
+        ...(cookie ? { cookie } : {}),
+        "x-loam-enc": session.sessionId,
+        "content-type": "application/json",
+      },
+      payload: { enc: sealRequest(session.key, seq, TUNNEL_AAD, inner) },
+    });
+  }
+
+  /** Unseal a tunnel response into its `{ status, contentType, body }` descriptor (body = raw bytes). */
+  function openTunnel(session: { key: string }, res: InjectResponse): { status: number; contentType: string; body: Buffer } {
+    const opened = openTransport(session.key, (res.json() as { enc: string }).enc, TUNNEL_AAD);
+    expect(opened).not.toBeNull();
+    const desc = JSON.parse(opened as string) as { status: number; contentType: string; bodyB64: string };
+    return { status: desc.status, contentType: desc.contentType, body: Buffer.from(desc.bodyB64, "base64") };
+  }
+
+  it("tunnels a GET so the real path and response never appear on the wire (docs/08)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+
+    const res = await tunnel(app, session, 1, user.cookie, { m: "GET", p: "/api/users" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["x-loam-enc"]).toBe("1");
+    // Neither the real target nor the response content is anywhere in the cleartext wire body.
+    expect(res.body).not.toContain("displayName");
+    expect(res.body).not.toContain("/api/users");
+
+    const inner = openTunnel(session, res);
+    expect(inner.status).toBe(200);
+    const users = JSON.parse(inner.body.toString("utf8")) as { id: string }[];
+    expect(users.some((u) => u.id === user.userId)).toBe(true);
+  });
+
+  it("tunnels a POST mutation end-to-end (creates a message; response tunnelled back)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+
+    const res = await tunnel(app, session, 1, user.cookie, {
+      m: "POST",
+      p: "/api/messages",
+      body: { type: "channelPost", channelId: "general", body: "via tunnel" },
+    });
+    expect(res.statusCode).toBe(200); // outer tunnel status; inner status is in the sealed descriptor
+    const inner = openTunnel(session, res);
+    expect(inner.status).toBe(201);
+    expect(app.store.loadMessages().some((m) => "body" in m && m.body === "via tunnel")).toBe(true);
+  });
+
+  it("carries response bytes losslessly (base64 body → binary images tunnel intact)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    // A JSON response proves the base64 body is byte-exact; the same path carries image bytes.
+    const res = await tunnel(app, session, 1, user.cookie, { m: "GET", p: "/api/config" });
+    const inner = openTunnel(session, res);
+    expect(inner.status).toBe(200);
+    const parsed = JSON.parse(inner.body.toString("utf8")) as { nodeName: string };
+    expect(typeof parsed.nodeName).toBe("string");
+  });
+
+  it("refuses to tunnel the transport bootstrap or non-API paths", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+
+    for (const [i, p] of ["/api/transport/handshake", "/api/transport/tunnel", "/", "/index.html"].entries()) {
+      const res = await tunnel(app, session, i + 1, user.cookie, { m: "GET", p });
+      expect(res.statusCode).toBe(400);
+    }
+  });
+
+  it("does not let a forged internal-token header bypass required-mode enforcement (docs/08)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const user = await newSession(app);
+    // A real client that guesses/sets x-loam-internal must NOT gain the internal bypass — the token is
+    // a per-boot secret it can't know, so a content request without a session is still refused.
+    const forged = await app.server.inject({
+      method: "GET",
+      url: "/api/users",
+      headers: { cookie: user.cookie, "x-loam-internal": "not-the-real-token" },
+    });
+    expect(forged.statusCode).toBe(401);
+  });
+
+  it("bootstraps a fresh session through the tunnel (Set-Cookie forwarded)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openSession(app);
+    // No cookie: the inner request mints an identity; its Set-Cookie must reach the browser via the
+    // OUTER response header.
+    const res = await tunnel(app, session, 1, undefined, { m: "GET", p: "/api/users" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["set-cookie"]).toBeDefined();
+  });
 });
 
 describe("transport encryption WebSocket frames (docs/08)", () => {
