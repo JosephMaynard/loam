@@ -45,6 +45,7 @@ import { NavLink } from "./components/NavLink";
 import { NodeLinkControl } from "./components/NodeLinkControl";
 import { SearchResult } from "./components/SearchResult";
 import { Sidebar } from "./components/Sidebar";
+import { fetchJson, parseUserList, requestChannel, REQUEST_TIMEOUT_MS } from "./lib/api";
 import { prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { dayKey, dayLabel } from "./lib/dates";
@@ -108,7 +109,6 @@ type Config = {
 const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
 const LAST_CONVERSATION_KEY = "loam.lastConversation";
-const REQUEST_TIMEOUT_MS = 10_000;
 const TOAST_DISMISS_MS = 4_000;
 // Single `sync`-store record holding the per-conversation last-read timestamps (ms). One row keeps
 // the write cheap; the map is `conversationKey` → last-read time.
@@ -173,30 +173,6 @@ function getOrCreateCurrentUser(): User {
 function rememberCurrentUser(user: User): void {
   localStorage.setItem(CURRENT_USER_KEY, user.id);
   localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
-}
-
-/**
- * GET a JSON endpoint through the transport-encryption wrapper (a byte-for-byte passthrough when no
- * session is active — see `encryptedFetch`). Used for every content endpoint; `/api/config` is
- * deliberately NOT routed through this (see `fetchConfigJson`) — it must stay readable before any
- * transport session exists and must never be re-encrypted on a later refetch.
- */
-async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await encryptedFetch("GET", path, undefined, { signal: controller.signal });
-
-    if (!response.ok) {
-      const payload: unknown = await response.json().catch(() => undefined);
-      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
-    }
-
-    return response.json() as Promise<T>;
-  } finally {
-    window.clearTimeout(timeout);
-  }
 }
 
 /**
@@ -3194,15 +3170,6 @@ function PeopleView({
 /**
  * Parse an array response into validated users, dropping any entries that fail the schema.
  */
-function parseUserList(payload: unknown): User[] {
-  return Array.isArray(payload)
-    ? payload.flatMap((item) => {
-        const parsed = UserSchema.safeParse(item);
-        return parsed.success ? [parsed.data] : [];
-      })
-    : [];
-}
-
 /**
  * Greeter queue: lists users awaiting approval (`GET /api/access/pending`) with Approve / Deny
  * actions. Pending users are hidden from the normal roster, so this panel fetches its own list and
@@ -4602,31 +4569,6 @@ function SyncStatusPanel() {
  * Sends an admin channel create/update request and returns the validated channel the server echoes
  * back. Throws with the server's error message (or a status fallback) on failure.
  */
-async function requestChannel(method: "POST" | "PATCH", path: string, body: unknown): Promise<Channel> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await encryptedFetch(method, path, body, { signal: controller.signal });
-    const payload: unknown = await response.json().catch(() => undefined);
-
-    if (!response.ok) {
-      const message = errorText(payload, t("common.requestFailed", { status: response.status }));
-      throw new Error(message);
-    }
-
-    const parsed = ChannelSchema.safeParse(payload);
-
-    if (!parsed.success) {
-      throw new Error(t("admin.channelUnrecognised"));
-    }
-
-    return parsed.data;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
 /**
  * Admin-only channel management: create public channels and rename/archive existing ones. Channels
  * are created public + discoverable (private channels need a membership model that does not exist
