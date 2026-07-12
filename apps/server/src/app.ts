@@ -1260,12 +1260,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return false;
     }
     const candidate = value as Partial<TransportIdentity>;
-    return (
-      typeof candidate.publicKey === "string" &&
-      BASE64URL_RE.test(candidate.publicKey) &&
-      typeof candidate.secretKey === "string" &&
-      BASE64URL_RE.test(candidate.secretKey)
-    );
+    // Each key must be well-formed base64url AND decode to exactly 32 bytes (the X25519 key length) — a
+    // truncated/corrupt persisted record that merely passes the charset check would otherwise slip
+    // through and only surface later inside the crypto at handshake time. Caught here → regenerated.
+    const isKey = (key: unknown): boolean =>
+      typeof key === "string" && BASE64URL_RE.test(key) && Buffer.from(key, "base64url").length === 32;
+    return isKey(candidate.publicKey) && isKey(candidate.secretKey);
   }
 
   /** Load the host's persisted transport keypair (docs/08), or mint + persist one on first boot.
@@ -3790,16 +3790,28 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const payload = request.body as { m?: unknown; p?: unknown; body?: unknown } | undefined;
     const method = typeof payload?.m === "string" ? payload.m.toUpperCase() : undefined;
     const path = typeof payload?.p === "string" ? payload.p : undefined;
-    // Restrict targets to real API routes; never tunnel the transport bootstrap itself (`/api/transport/*`
-    // → recursion / re-enters this handler) or the static app shell, and reject `..` so a normalized path
-    // can't climb out of the `/api/` prefix the check just enforced.
+    // The target check MUST match how Fastify routes the path, not the raw string. `server.inject`
+    // percent-decodes the path before routing, so a raw `startsWith`/`includes` check on `p` diverges
+    // from the routed path — e.g. `/api/transp%6frt/tunnel` decodes to `/api/transport/tunnel`
+    // (recursion into this handler) and `/api/%2e%2e/admin` decodes to a traversal, both slipping past a
+    // raw check. So: reject an encoded slash outright (`%2f` restructures segments and Fastify won't
+    // treat it as a separator — pure ambiguity, and LOAM's own API paths never contain one), then
+    // validate the fully-DECODED path. The raw `path` is what's handed to `inject` (routed identically).
+    let decodedPath: string | undefined;
+    if (path !== undefined && !/%2f/i.test(path)) {
+      try {
+        decodedPath = decodeURIComponent(path.split("?", 1)[0]);
+      } catch {
+        decodedPath = undefined; // malformed %-escape
+      }
+    }
     if (
       !method ||
       !TUNNELLABLE_METHODS.has(method) ||
-      !path ||
-      !path.startsWith("/api/") ||
-      path.startsWith("/api/transport/") ||
-      path.includes("..")
+      !decodedPath ||
+      !decodedPath.startsWith("/api/") ||
+      decodedPath.startsWith("/api/transport/") ||
+      decodedPath.includes("..")
     ) {
       return reply.code(400).send(errorBody("Invalid tunnel target"));
     }
