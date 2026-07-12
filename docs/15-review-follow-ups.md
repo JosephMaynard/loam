@@ -34,11 +34,11 @@ ranked within each group. Each entry names the file and the concrete change.
    (`/api/access/pending|approve|deny` — a non-moderator greeter no longer sees them). Member-list and
    roster tests cover it. (Known residual: `isAdmin` is still enumerable to everyone — lower
    sensitivity, pre-existing, left as-is.)
-4. **"Wipe this device" can't revoke the server session.** The identity is the HttpOnly
-   `loam_session` cookie, which JS can't clear, so a reload re-mints the same identity and re-hydrates
-   the cache (`purgeLocalData`, `apps/client/src/app.tsx`). Add an endpoint to invalidate the current
-   session that the wipe calls, and guard `putRecords`/`putRecord` against writing after a wipe flag is set (a
-   racing in-flight fetch can otherwise re-create the DB). Or document that device-wipe is cache-only.
+4. ~~**"Wipe this device" can't revoke the server session.**~~ **RESOLVED** (`feat/deploy-hardening`):
+   `POST /api/session/end` invalidates the caller's token server-side and clears the cookie
+   (`Max-Age=0`); `purgeLocalData` calls it on a device wipe, so a reload mints a fresh identity
+   instead of re-hydrating the wiped one. `markLocalStoreWiped()` latches the local store so a racing
+   in-flight fetch's `putRecords`/`putRecord` can't re-create the DB after the wipe. Server + client tests.
 5. ~~**Transport encryption (docs/08).**~~ **BUILT — Layer 1** (`feat/transport-encryption`):
    QR-bootstrapped app-layer session encryption on `@loam/crypto` (X25519 handshake — host-static +
    ephemeral, forward-secret; XChaCha20-Poly1305 framing). The server serves `POST
@@ -58,14 +58,21 @@ ranked within each group. Each entry names the file and the concrete change.
 
 7. **Unbounded tombstone growth on ephemeral-retention nodes.** The reaper adds a tombstone per
    reaped message forever (`tombstones` Set + DB table), so a long-lived high-traffic ephemeral node
-   grows without bound even when sync is off. Don't tombstone retention-reaped messages, skip
-   tombstoning entirely when `sync.enabled` is false, or age tombstones out beyond a horizon.
-8. **Switching bootstrap to `setupCode` via config PATCH is inert.** A code is only minted at boot /
-   kill-switch, never when a runtime PATCH transitions `admin.bootstrap` into `setupCode`, so the
-   claim flow is advertised but produces no code. Mint one on that transition.
-9. **Minor unbounded maps.** `attemptRateLimited` only prunes above 1000 entries (so >1000 distinct
-   source IPs grow past the cap); `peerSyncStatus` is never pruned when an admin removes a peer.
-   Bounded by LAN scale, but worth a periodic sweep.
+   grows without bound. **Note (do NOT gate tombstoning on `sync.enabled`):** an attempted fix that
+   skipped tombstoning while sync was off was reverted — `sync` is a runtime toggle, so a node that
+   deletes (e.g. a moderator delete) while sync is off and joins a mesh later would let a peer
+   **resurrect** the deleted message (moderation bypass; falsifies docs/11's unconditional guarantee).
+   The correct fix is a **horizon-based GC**: keep tombstoning unconditionally, stamp each tombstone,
+   and age entries out beyond a horizon longer than any realistic sync window. That needs a
+   `created_at` column on the `tombstones` table + a GC pass — a focused follow-up, not shipped here.
+8. ~~**Switching bootstrap to `setupCode` via config PATCH is inert.**~~ **RESOLVED**
+   (`feat/deploy-hardening`): a PATCH that transitions `admin.bootstrap` into `setupCode` now mints a
+   single-use code (only on the transition, so a code consumed by an earlier claim isn't re-minted),
+   flipping `allowAdminClaim` on. Test covers it.
+9. ~~**Minor unbounded maps.**~~ **PARTIALLY RESOLVED** (`feat/deploy-hardening`): `peerSyncStatus` is
+   now pruned to the active peer set on every config PATCH, so removing a peer drops its status.
+   `attemptRateLimited`'s opportunistic >1000 prune is left as-is — genuinely bounded by LAN scale
+   (a real >1000-distinct-active-IP case implies spoofing, which the LAN model already excludes).
 10. **QR capacity ceiling can drop the WiFi QR.** The encoder maxes at version 6 / ECC level **H**
     (58 bytes); a `LocalOnlyHotspot` SSID plus a longer/escaped passphrase can exceed it, silently
     degrading Step-1 to plain text (`packages/qr`). Support a lower ECC level (L/M ≈ doubles capacity)
@@ -73,10 +80,10 @@ ranked within each group. Each entry names the file and the concrete change.
 11. **Foreground-service wake lock has no timeout.** `LoamHostService.kt` acquires a
     `PARTIAL_WAKE_LOCK` with no bound; a `START_STICKY` restart after an OOM kill could pin the CPU
     indefinitely. Acquire with a bounded timeout and re-acquire, or add a hard cap.
-12. **Service worker is cache-first, not "network-first-ish" as documented.** Navigation/document
-    requests can serve a stale `index.html` after a deploy (`public/service-worker.js`). Use
-    network-first for navigations, keep hashed assets cache-first. (No cache-poisoning risk — it
-    already excludes `/api` and `/ws`.)
+12. ~~**Service worker is cache-first, not "network-first-ish" as documented.**~~ **RESOLVED**
+    (`feat/deploy-hardening`): navigations/document requests are now **network-first** (fall back to
+    the cached shell only when offline), immutable hashed assets stay cache-first; cache bumped to
+    `loam-poc-v2` so the stale-shell cache is evicted on activate.
 
 ## Dependencies
 

@@ -4473,3 +4473,130 @@ describe("transport encryption WebSocket frames (docs/08)", () => {
     expect(decoded.some((value) => value.includes("over-the-wire secret"))).toBe(true);
   });
 });
+
+describe("deploy hardening (docs/15)", () => {
+  it("ends the caller's session so the next request mints a fresh identity (#4)", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+
+    const end = await app.server.inject({
+      method: "POST",
+      url: "/api/session/end",
+      headers: { cookie: user.cookie },
+    });
+    expect(end.statusCode).toBe(200);
+    // The Set-Cookie clears the session cookie (Max-Age=0).
+    expect(String(end.headers["set-cookie"])).toContain("Max-Age=0");
+
+    // Reusing the now-invalidated cookie mints a brand-new identity rather than the wiped one.
+    const after = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: user.cookie } });
+    const newId = (after.json() as { currentUser: { id: string } }).currentUser.id;
+    expect(newId).not.toBe(user.userId);
+  });
+
+  it("session/end is a safe no-op on an absent/unknown cookie and never mints a session (#4)", async () => {
+    const app = await makeApp();
+    const usersBefore = app.store.loadUsers().length;
+
+    // No cookie at all.
+    const none = await app.server.inject({ method: "POST", url: "/api/session/end" });
+    expect(none.statusCode).toBe(200);
+    // An unknown token.
+    const unknown = await app.server.inject({
+      method: "POST",
+      url: "/api/session/end",
+      headers: { cookie: "loam_session=deadbeef" },
+    });
+    expect(unknown.statusCode).toBe(200);
+
+    // Crucially, ending a session must not itself create an identity.
+    expect(app.store.loadUsers().length).toBe(usersBefore);
+  });
+
+  it("mints a setup code when a PATCH switches bootstrap into setupCode, enabling claims (#8)", async () => {
+    const app = await makeApp(); // firstUser bootstrap: the first session becomes admin
+    const admin = await newSession(app);
+
+    const before = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { allowAdminClaim: boolean } };
+    expect(before.networkConfig.allowAdminClaim).toBe(false);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { admin: { bootstrap: "setupCode" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (
+      await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
+    ).json() as { networkConfig: { allowAdminClaim: boolean } };
+    expect(after.networkConfig.allowAdminClaim).toBe(true);
+    expect(app.getAdminSetupCode()).toBeTruthy(); // a usable single-use code was actually minted
+  });
+
+  it("clears the setup code when bootstrap switches away, re-minting a fresh one on switching back (#8)", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const setBootstrap = (bootstrap: string) =>
+      app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { admin: { bootstrap } },
+      });
+
+    await setBootstrap("setupCode");
+    const code1 = app.getAdminSetupCode();
+    expect(code1).toBeTruthy();
+
+    // Switching away invalidates the outstanding code immediately.
+    await setBootstrap("firstUser");
+    expect(app.getAdminSetupCode()).toBeUndefined();
+
+    // Switching back mints a FRESH code, not the abandoned one.
+    await setBootstrap("setupCode");
+    expect(app.getAdminSetupCode()).toBeTruthy();
+    expect(app.getAdminSetupCode()).not.toBe(code1);
+  });
+
+  it("prunes peerSyncStatus when a peer is removed via config PATCH (#9)", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://peer-a.invalid" }] } });
+    const admin = await newSession(app);
+
+    // Force a sync attempt so the peer gets a live status entry, then confirm it's reported.
+    await app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+    const before = (
+      await app.server.inject({ method: "GET", url: "/api/admin/sync", headers: { cookie: admin.cookie } })
+    ).json() as { peers: { url: string; status?: unknown }[] };
+    expect(before.peers.some((peer) => peer.url === "http://peer-a.invalid" && peer.status)).toBe(true);
+
+    // Remove the peer; its status must be pruned, not linger.
+    await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { sync: { peers: [] } },
+    });
+    const after = (
+      await app.server.inject({ method: "GET", url: "/api/admin/sync", headers: { cookie: admin.cookie } })
+    ).json() as { peers: { url: string }[] };
+    expect(after.peers.some((peer) => peer.url === "http://peer-a.invalid")).toBe(false);
+
+    // Re-adding the same peer creates a fresh status entry — the prune cleared the slot, it didn't
+    // just filter the report.
+    await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { sync: { peers: [{ url: "http://peer-a.invalid" }] } },
+    });
+    await app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+    const readded = (
+      await app.server.inject({ method: "GET", url: "/api/admin/sync", headers: { cookie: admin.cookie } })
+    ).json() as { peers: { url: string; status?: unknown }[] };
+    expect(readded.peers.some((peer) => peer.url === "http://peer-a.invalid" && peer.status)).toBe(true);
+  });
+});

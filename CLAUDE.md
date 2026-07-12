@@ -281,8 +281,9 @@ kill switch. See `docs/09-security-profiles.md`.
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
   `DOMPurify`, and hardens links (safe protocols only, `rel=noreferrer target=_blank`). Any new
   rendered-HTML path must go through this — never inject raw message HTML.
-- **PWA**: `public/service-worker.js` (cache `loam-poc-v1`) caches the app shell, network-first-ish
-  for other GETs, never touches `/api` or `/ws`. Registered only in PROD (`main.tsx`).
+- **PWA**: `public/service-worker.js` (cache `loam-poc-v2`) caches the app shell — **network-first for
+  navigations** (so a deploy isn't masked by a stale `index.html`), cache-first for immutable hashed
+  assets; never touches `/api` or `/ws`. Registered only in PROD (`main.tsx`).
 - **Avatar upload editor**: `AvatarImageEditor` in `app.tsx` — canvas crop/zoom/rotate with pointer
   gestures, re-encodes to webp/png under 128KB before upload.
 

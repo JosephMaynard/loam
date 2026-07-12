@@ -9,6 +9,23 @@ const DB_VERSION = 1;
 const STORE_NAMES: StoreName[] = ["channels", "messages", "sync", "users"];
 
 let databasePromise: Promise<IDBDatabase> | undefined;
+// Latched by markLocalStoreWiped() for the rest of this page load: once wiped, no read or write may
+// re-open (and thus re-create) the database. This closes the race where an in-flight fetch resolves
+// AFTER a device wipe and its putRecords() would otherwise rebuild the just-deleted DB (docs/15 #4).
+// A reload clears it (fresh module), which is the intended fresh start.
+let wiped = false;
+
+/** Latch this page load as wiped so no later read/write re-creates the just-deleted database — the
+ * app calls this from its device/node wipe flow, separately from destroyDatabase() (docs/15 #4). */
+export function markLocalStoreWiped(): void {
+  wiped = true;
+}
+
+/** Test-only: clear the wipe latch + cached connection so each test starts from a clean module. */
+export function resetLocalStoreForTests(): void {
+  wiped = false;
+  databasePromise = undefined;
+}
 
 function hasIndexedDb(): boolean {
   return typeof indexedDB !== "undefined";
@@ -32,6 +49,10 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 function openDatabase(): Promise<IDBDatabase> {
   if (!hasIndexedDb()) {
     return Promise.reject(new Error("IndexedDB is not available."));
+  }
+
+  if (wiped) {
+    return Promise.reject(new Error("Local database was wiped."));
   }
 
   if (!databasePromise) {
@@ -60,7 +81,7 @@ function openDatabase(): Promise<IDBDatabase> {
 }
 
 export async function getAllRecords<T>(storeName: StoreName): Promise<T[]> {
-  if (!hasIndexedDb()) {
+  if (!hasIndexedDb() || wiped) {
     return [];
   }
 
@@ -75,7 +96,7 @@ export async function putRecords<T extends StoredRecord>(
   storeName: StoreName,
   records: T[],
 ): Promise<void> {
-  if (!hasIndexedDb() || !records.length) {
+  if (!hasIndexedDb() || wiped || !records.length) {
     return;
   }
 
@@ -98,7 +119,7 @@ export async function putRecord<T extends StoredRecord>(
 }
 
 export async function deleteRecord(storeName: StoreName, id: string): Promise<void> {
-  if (!hasIndexedDb()) {
+  if (!hasIndexedDb() || wiped) {
     return;
   }
 
