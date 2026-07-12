@@ -18,6 +18,7 @@ import {
   sealTransport,
   transportServerAccept,
   verifyKxBinding,
+  verifyTransportKeypair,
   type MeshIdentity,
   type TransportIdentity,
 } from "@loam/crypto";
@@ -896,7 +897,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * proceed. Mutates `session.maxSeq`/`session.seen`.
    */
   function acceptTransportSeq(session: TransportSession, seq: number): boolean {
-    if (!Number.isInteger(seq) || seq < 1) {
+    // isSafeInteger, not isInteger: a value past 2^53 loses precision, so a key-holding client could
+    // otherwise submit an enormous sequence and poison its own replay window (docs/20 review #8). The
+    // client re-handshakes long before its counter approaches this, resetting the window.
+    if (!Number.isSafeInteger(seq) || seq < 1) {
       return false;
     }
 
@@ -1260,12 +1264,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return false;
     }
     const candidate = value as Partial<TransportIdentity>;
-    // Each key must be well-formed base64url AND decode to exactly 32 bytes (the X25519 key length) — a
-    // truncated/corrupt persisted record that merely passes the charset check would otherwise slip
-    // through and only surface later inside the crypto at handshake time. Caught here → regenerated.
-    const isKey = (key: unknown): boolean =>
-      typeof key === "string" && BASE64URL_RE.test(key) && Buffer.from(key, "base64url").length === 32;
-    return isKey(candidate.publicKey) && isKey(candidate.secretKey);
+    // Both fields must be well-formed base64url AND form a consistent keypair — the public key is
+    // exactly the one derived from the secret (docs/20 #7). A truncated/mismatched persisted record that
+    // merely passes the charset check would otherwise slip through and only surface later inside the
+    // crypto at handshake time; caught here it's regenerated. `verifyTransportKeypair` also enforces the
+    // 32-byte secret length and re-derives the (32-byte) public, so no separate length check is needed.
+    return (
+      typeof candidate.publicKey === "string" &&
+      typeof candidate.secretKey === "string" &&
+      BASE64URL_RE.test(candidate.publicKey) &&
+      BASE64URL_RE.test(candidate.secretKey) &&
+      verifyTransportKeypair(candidate.publicKey, candidate.secretKey)
+    );
   }
 
   /** Load the host's persisted transport keypair (docs/08), or mint + persist one on first boot.

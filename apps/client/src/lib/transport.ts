@@ -265,6 +265,10 @@ export interface EncryptedFetchInit {
  * branch). */
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
 
+/** Re-handshake once the per-session request sequence gets within this of the safe-integer ceiling, so
+ * the counter never loses precision (docs/20 #8). Vast headroom — this is never hit in a real session. */
+const SEQ_REHANDSHAKE_THRESHOLD = Number.MAX_SAFE_INTEGER - 1024;
+
 /**
  * The single REST entry point every call site uses instead of a bare `fetch(apiUrl(path), …)`. With
  * no live session (mode `off`, or `optional` with no key yet) this is a byte-for-byte pass-through —
@@ -307,6 +311,13 @@ async function attemptFetch(
       signal: init.signal,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+  }
+
+  // Re-handshake (resetting the per-session sequence to 0) well before the counter could approach the
+  // safe-integer ceiling, past which it would lose precision/monotonicity (docs/20 #8). Unreachable in
+  // practice — a 12h session cannot issue 2^53 requests — but correct, and near-free to check.
+  if (active.seq >= SEQ_REHANDSHAKE_THRESHOLD && !retried && (await reHandshake())) {
+    return attemptFetch(method, path, body, init, true);
   }
 
   // `required` mode (the hardened profile, always the case for a QR-pinned join) routes every request
