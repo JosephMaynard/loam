@@ -527,7 +527,11 @@ export function App() {
 function LoamApp() {
   const [currentUser, setCurrentUser] = useState(getOrCreateCurrentUser);
   const location = useLocation();
-  const routeState = parseRoute(location.path);
+  // Memoize so `routeState` (and the `activeConversation` derived from it) keeps a stable identity
+  // across unrelated re-renders (presence broadcasts, toasts, unread updates). Otherwise `parseRoute`
+  // returned a fresh object every render, defeating downstream memos keyed on `activeConversation`
+  // (notably `selectedMessages`, which then re-filtered + re-sorted the whole history each render).
+  const routeState = useMemo(() => parseRoute(location.path), [location.path]);
   const activeConversation = routeState.screen === "channels" ? routeState.conversation : undefined;
   const shellClassName = [
     "app-shell",
