@@ -206,6 +206,34 @@ describe("getAvatarColors", () => {
     expect(colors.tertiary).toMatch(/^#[0-9a-f]{6}$/i);
   });
 
+  it("keeps every seed's colour accessible on both surfaces across a broad sweep", () => {
+    // A single seed can pass by luck; the contrast fixup (`ensureContrast`) and its final ink/paper
+    // fallback have to hold for every derived colour. Sweep a wide, varied id sample and assert the
+    // invariant the renderer relies on: the light-surface colour clears 4.5:1 on the light surface,
+    // and the dark-surface colour clears it on the dark surface. A regression that stops the fixup
+    // loop early (or drops the fallback) would surface a seed here even if the single-seed test above
+    // still happened to pass.
+    const failures: string[] = [];
+
+    for (let index = 0; index < 600; index += 1) {
+      // Mix a few id shapes so hues/lightness span the whole derivation space, not one neighbourhood.
+      const id = `sweep.${index}.${(index * 2654435761) % 100000}.\u{1f331}${index.toString(36)}`;
+      const colors = getAvatarColors(id);
+      const lightContrast = contrastRatio(colors.lightMode, LIGHT_SURFACE);
+      const darkContrast = contrastRatio(colors.darkMode, DARK_SURFACE);
+
+      if (lightContrast < 4.5) {
+        failures.push(`${id}: lightMode ${colors.lightMode} on light surface = ${lightContrast.toFixed(2)}`);
+      }
+
+      if (darkContrast < 4.5) {
+        failures.push(`${id}: darkMode ${colors.darkMode} on dark surface = ${darkContrast.toFixed(2)}`);
+      }
+    }
+
+    expect(failures).toEqual([]);
+  });
+
   it("produces a wider spread of background colours than the old fixed palette", () => {
     const backgrounds = new Set(
       Array.from({ length: 64 }, (_, index) => getAvatarColors(`seed-${index}`).bg),
