@@ -4450,6 +4450,144 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
     expect(sealedMsg.toTag).toBe(mailboxTag(bobCard.mailboxToken, epoch));
     expect(sealedMsg.toTag).not.toBe(mailboxTag(bobCard.kx, epoch));
   });
+
+  describe("group/broadcast fan-out (POST /api/mesh/broadcast)", () => {
+    /** Broadcast one sealed message to several contacts in one call. */
+    function broadcast(app: LoamApp, cookie: string, toMeshIds: string[], body: string): Promise<InjectResponse> {
+      return app.server.inject({
+        method: "POST",
+        url: "/api/mesh/broadcast",
+        headers: { cookie },
+        payload: { toMeshIds, body },
+      });
+    }
+
+    it("404s /api/mesh/broadcast when mesh is disabled", async () => {
+      const app = await makeApp();
+      const user = await newSession(app);
+      const res = await broadcast(app, user.cookie, ["mesh.absent"], "hi");
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("seals an independent copy to each of 3 contacts, with distinct tags/ciphertext, and delivers to all", async () => {
+      // Bob, Carol, and Dave live on node B; Alice (the sender) is on node A, so their sealed copies
+      // are stored (not delivered in-process) until sync carries them — letting us inspect the
+      // per-recipient blobs before they're opened.
+      const nodeA = await makeApp({ sync: { enabled: true }, mesh: MESH });
+      const nodeB = await makeApp({ sync: { enabled: true }, mesh: MESH });
+      const alice = await adminOf(nodeA);
+      const bob = await adminOf(nodeB);
+      const carol = await newSession(nodeB);
+      const dave = await newSession(nodeB);
+
+      const [aUrl] = await Promise.all([listen(nodeA), listen(nodeB)]);
+      // B pulls from A (the courier direction: A holds the sealed blobs after sending).
+      expect((await setPeers(nodeB, bob.cookie, [aUrl])).statusCode).toBe(200);
+
+      const bobCard = await meshCard(nodeB, bob.cookie);
+      const carolCard = await meshCard(nodeB, carol.cookie);
+      const daveCard = await meshCard(nodeB, dave.cookie);
+      for (const card of [bobCard, carolCard, daveCard]) {
+        expect((await addContact(nodeA, alice.cookie, card)).statusCode).toBe(200);
+      }
+
+      const res = await broadcast(
+        nodeA,
+        alice.cookie,
+        [bobCard.meshId, carolCard.meshId, daveCard.meshId],
+        "assemble at noon",
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 3, skipped: [] });
+
+      // Node A stored 3 independently-sealed copies — one per recipient, each with its own routing
+      // tag (derived from that recipient's secret mailbox token) and its own ciphertext (fresh
+      // ephemeral key per seal), never a shared key across recipients.
+      const sealedRows = nodeA.store.loadMessages().filter((message) => message.type === "sealed") as {
+        toTag: string;
+        sealed: string;
+      }[];
+      expect(sealedRows).toHaveLength(3);
+      expect(new Set(sealedRows.map((row) => row.toTag)).size).toBe(3);
+      expect(new Set(sealedRows.map((row) => row.sealed)).size).toBe(3);
+
+      // Sync carries all 3 blobs to node B, which recognises each tag against its local recipient and
+      // decrypts+delivers independently.
+      await syncNow(nodeB, bob.cookie);
+
+      for (const recipient of [
+        { session: bob, card: bobCard },
+        { session: carol, card: carolCard },
+        { session: dave, card: daveCard },
+      ]) {
+        const contact = (await roster(nodeB, recipient.session.cookie)).find((entry) => entry.id.startsWith("mesh."));
+        expect(contact).toBeDefined();
+        expect(await dmBodies(nodeB, recipient.session.cookie, contact!.id)).toContain("assemble at noon");
+      }
+    });
+
+    it("reports a toMeshId that isn't a contact in `skipped`, without sending to it", async () => {
+      const app = await makeApp({ mesh: MESH });
+      const alice = await newSession(app);
+      const bob = await newSession(app);
+      const carol = await newSession(app);
+      const bobCard = await meshCard(app, bob.cookie);
+      const carolCard = await meshCard(app, carol.cookie);
+      // Alice adds Bob but never adds Carol.
+      expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
+
+      const res = await broadcast(app, alice.cookie, [bobCard.meshId, carolCard.meshId], "hi");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 1, skipped: [carolCard.meshId] });
+
+      expect((await roster(app, bob.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(true);
+      expect((await roster(app, carol.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+    });
+
+    it("silently drops a shadow-banned sender's broadcast (200, nothing delivered)", async () => {
+      const app = await makeApp({ mesh: MESH });
+      const admin = await newSession(app); // firstUser → admin (can moderate)
+      const spammer = await newSession(app);
+      const bob = await newSession(app);
+      const carol = await newSession(app);
+
+      const bobCard = await meshCard(app, bob.cookie);
+      const carolCard = await meshCard(app, carol.cookie);
+      expect((await addContact(app, spammer.cookie, bobCard)).statusCode).toBe(200);
+      expect((await addContact(app, spammer.cookie, carolCard)).statusCode).toBe(200);
+
+      await app.server.inject({
+        method: "PATCH",
+        url: `/api/moderation/users/${spammer.userId}`,
+        headers: { cookie: admin.cookie },
+        payload: { shadowBanned: true },
+      });
+
+      const res = await broadcast(app, spammer.cookie, [bobCard.meshId, carolCard.meshId], "spam spam spam");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 0, skipped: [] });
+
+      expect((await roster(app, bob.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+      expect((await roster(app, carol.cookie)).some((entry) => entry.id.startsWith("mesh."))).toBe(false);
+    });
+
+    it("de-duplicates repeated toMeshIds so a contact is mailed only once", async () => {
+      const app = await makeApp({ mesh: MESH });
+      const alice = await newSession(app);
+      const bob = await newSession(app);
+      const bobCard = await meshCard(app, bob.cookie);
+      expect((await addContact(app, alice.cookie, bobCard)).statusCode).toBe(200);
+
+      const res = await broadcast(app, alice.cookie, [bobCard.meshId, bobCard.meshId, bobCard.meshId], "hi bob");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sent: 1, skipped: [] });
+
+      const contact = (await roster(app, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+      expect(contact).toBeDefined();
+      const bodies = await dmBodies(app, bob.cookie, contact!.id);
+      expect(bodies.filter((entry) => entry === "hi bob")).toHaveLength(1);
+    });
+  });
 });
 
 describe("deploy hardening (docs/15)", () => {

@@ -31,6 +31,7 @@ import {
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
   MessageEditRequestSchema,
+  MeshBroadcastRequestSchema,
   MeshIdentityCardSchema,
   MeshSendRequestSchema,
   MessageSchema,
@@ -4265,6 +4266,73 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     return { ok: true };
   });
+
+  // Broadcast a sealed mailbox message (opportunistic-mesh group/broadcast fan-out — docs/16) to
+  // MULTIPLE contacts in one call. Each recipient is sealed independently via `sendSealed` — there is
+  // no shared key, so per-recipient confidentiality/unlinkability is identical to the single-send path
+  // above; this is purely a client-convenience batch. Same gating as `/api/mesh/messages`: 404 unless
+  // mesh is enabled, a shadow-banned sender's mail silently drops, and a `toMeshId` that isn't an
+  // already-added contact is reported back rather than 404ing the whole request (unlike the single-send
+  // route, since a mix of valid/invalid recipients in one call shouldn't fail the valid ones).
+  server.post(
+    "/api/mesh/broadcast",
+    // Same per-route cap as the single-send route — a broadcast still costs one request, but seals up
+    // to `MeshBroadcastRequestSchema`'s cap (50) worth of public-key crypto, so keep it tightly limited.
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      if (!appConfig.mesh.enabled) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const body = MeshBroadcastRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid mesh broadcast request"));
+      }
+
+      const sender = ensureMeshIdentity(currentUser.id);
+
+      if (!sender) {
+        return reply.code(400).send(errorBody("This user has no mesh identity"));
+      }
+
+      // A shadow-banned sender gets a normal-looking success, but nothing is sealed or sent — same
+      // silent-drop behaviour as the single-send route.
+      if (currentUser.shadowBanned) {
+        return { ok: true, sent: 0, skipped: [] };
+      }
+
+      const book = meshContacts.get(currentUser.id);
+      const toMeshIds = [...new Set(body.data.toMeshIds)]; // de-duplicate: never mail a contact twice
+
+      let sent = 0;
+      const skipped: string[] = [];
+      for (const toMeshId of toMeshIds) {
+        const contact = book?.get(toMeshId);
+        if (!contact) {
+          skipped.push(toMeshId);
+          continue;
+        }
+        // `sendSealed` enforces the same `mesh.maxCarried` storage bound as the single-send path; if
+        // the queue fills partway through, stop here and report what actually went out rather than
+        // silently dropping the remainder or throwing away the count of what succeeded.
+        const sendError = sendSealed(sender, contact, body.data.body);
+        if (sendError) {
+          break;
+        }
+        sent += 1;
+      }
+
+      return { ok: true, sent, skipped };
+    },
+  );
 
   server.get("/api/admin/sync", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
