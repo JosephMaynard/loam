@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 
 import fastifyRateLimit from "@fastify/rate-limit";
@@ -667,6 +667,17 @@ function makeSessionUserId(): string {
 
 function makeSessionToken(): string {
   return randomUUID();
+}
+
+/** A fresh 256-bit secure identity token (docs/20) — high-entropy, so a fast hash (not scrypt) is the
+ * right at-rest protection. */
+function makeIdentityToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+/** SHA-256 of an identity token, base64url — what's stored/looked-up, never the bearer value. */
+function hashIdentityToken(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
 }
 
 function makeAdminSetupCode(): string {
@@ -3808,6 +3819,66 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       };
     },
   );
+
+  // Sealed identity resume + session binding (docs/20). A DIRECT sealed endpoint (not tunnelled) so the
+  // outer TransportSession is reachable while there's no user yet. It requires a live transport session
+  // (onRequest resolves it; preValidation decrypts + replay-checks the sealed `{ s, b }` body into the
+  // `{ token? }` payload), and binds identity to that SESSION — so the un-sniffable session key becomes
+  // the credential. It NEVER accepts a legacy cookie token. The `{ currentUser, token }` response is
+  // sealed by onSend, so the secure token only ever crosses the wire encrypted.
+  server.post("/api/session/resume", async (request, reply) => {
+    const activeSession = transportRequestSessions.get(request);
+    if (!activeSession) {
+      // Reachable only with a live, sealed session (its body was decrypted). A plaintext hit is refused.
+      return reply.code(400).send(errorBody("Resume requires an encrypted session"));
+    }
+
+    // Idempotent: a fresh-sequence retry after a lost response returns the cached result — never a second
+    // mint, never a rebind to a different identity.
+    if (activeSession.authMode === "bound") {
+      return activeSession.resumeResult ?? reply.code(409).send(errorBody("Session already bound"));
+    }
+
+    const body = request.body as { token?: unknown } | undefined;
+    const presentedToken = typeof body?.token === "string" ? body.token : undefined;
+
+    let userId: string;
+    let token: string;
+    let tokenHash: string;
+    if (presentedToken !== undefined) {
+      tokenHash = hashIdentityToken(presentedToken);
+      const resumed = identityTokens.get(tokenHash);
+      if (!resumed) {
+        // A non-empty but unknown/revoked token is an explicit auth failure — NEVER silently mint (that
+        // would let a client launder a stolen-then-revoked token into a fresh working identity).
+        return reply.code(401).send(errorBody("Invalid identity token"));
+      }
+      userId = resumed;
+      token = presentedToken;
+    } else {
+      // First contact on this device: mint a new anonymous identity + a fresh secure token (the per-IP
+      // identity-mint budget bounds it, exactly like a cookie mint).
+      if (!consumeIdentityBudget(request.ip)) {
+        throw new IdentityLimitError();
+      }
+      userId = makeSessionUserId();
+      token = makeIdentityToken();
+      tokenHash = hashIdentityToken(token);
+      identityTokens.set(tokenHash, userId);
+      store.putIdentityToken(tokenHash, userId, Date.now());
+    }
+
+    const currentUser = ensureSessionUser(userId);
+    // Bind identity to this transport session — `authMode:"bound"` is what activates the secure rules
+    // (content only via the tunnel, no cookie, WS key-confirmation) for this session, independent of the
+    // node's global mode.
+    activeSession.authMode = "bound";
+    activeSession.userId = userId;
+    activeSession.identityTokenHash = tokenHash;
+    const result = { currentUser: rolesVisibleUser(currentUser), token };
+    activeSession.resumeResult = result;
+    return result;
+  });
 
   // Methods the tunnel may re-dispatch — the full set the REST API uses. Validated so the cast to
   // Fastify's inject method type is sound and no odd verb reaches `server.inject`.
