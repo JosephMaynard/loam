@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const es: Catalog = {
   "composer.thinking": "Pensando…",
   "toast.imageFallback": "📷 Imagen",
+  "toast.locationFallback": "📍 Ubicación",
 
   "common.save": "Guardar",
   "common.saving": "Guardando…",
@@ -40,6 +41,16 @@ export const es: Catalog = {
   "composer.attachImage": "Adjuntar una imagen",
   "composer.attachImageHint": "Adjuntar una imagen (se redimensiona en este dispositivo antes de subirla)",
   "composer.send": "Enviar",
+
+  "composer.shareLocation": "Compartir ubicación",
+  "composer.shareLocationHint": "Comparte un lugar — una etiqueta funciona incluso sin GPS",
+  "composer.locationLabel": "Etiqueta de ubicación",
+  "composer.locationLabelPlaceholder": "p. ej. la puerta norte",
+  "composer.locationLat": "Latitud (-90 a 90)",
+  "composer.locationLng": "Longitud (-180 a 180)",
+
+  "location.openInMaps": "Abrir en mapas",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "No se pudieron cargar los miembros.",
   "members.inviteError": "No se pudo invitar a esa persona.",

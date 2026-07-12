@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const sw: Catalog = {
   "composer.thinking": "Inafikiri…",
   "toast.imageFallback": "📷 Picha",
+  "toast.locationFallback": "📍 Mahali",
 
   "common.save": "Hifadhi",
   "common.saving": "Inahifadhi…",
@@ -40,6 +41,16 @@ export const sw: Catalog = {
   "composer.attachImage": "Ambatisha picha",
   "composer.attachImageHint": "Ambatisha picha (hupunguzwa ukubwa kwenye kifaa hiki kabla ya kupakia)",
   "composer.send": "Tuma",
+
+  "composer.shareLocation": "Shiriki mahali",
+  "composer.shareLocationHint": "Shiriki mahali — lebo hufanya kazi hata bila GPS",
+  "composer.locationLabel": "Lebo ya mahali",
+  "composer.locationLabelPlaceholder": "mf. lango la kaskazini",
+  "composer.locationLat": "Latitudo (-90 hadi 90)",
+  "composer.locationLng": "Longitudo (-180 hadi 180)",
+
+  "location.openInMaps": "Fungua kwenye ramani",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "Imeshindwa kupakia wanachama.",
   "members.inviteError": "Imeshindwa kumualika mtu huyo.",

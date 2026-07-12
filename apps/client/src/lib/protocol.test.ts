@@ -41,6 +41,7 @@ const networkConfig: NetworkConfig = {
   enableReactions: true,
   enableMarkdown: true,
   enableAttachments: true,
+  enableLocationSharing: false,
   enablePresence: true,
   enableMesh: false,
   enableLLMChat: false,

@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const tr: Catalog = {
   "composer.thinking": "Düşünüyor…",
   "toast.imageFallback": "📷 Görsel",
+  "toast.locationFallback": "📍 Konum",
 
   "common.save": "Kaydet",
   "common.saving": "Kaydediliyor…",
@@ -40,6 +41,16 @@ export const tr: Catalog = {
   "composer.attachImage": "Görsel ekle",
   "composer.attachImageHint": "Görsel ekle (yüklemeden önce bu cihazda yeniden boyutlandırılır)",
   "composer.send": "Gönder",
+
+  "composer.shareLocation": "Konum paylaş",
+  "composer.shareLocationHint": "Bir yer paylaşın — GPS olmadan da bir etiket işe yarar",
+  "composer.locationLabel": "Konum etiketi",
+  "composer.locationLabelPlaceholder": "ör. kuzey kapı",
+  "composer.locationLat": "Enlem (-90 ile 90 arası)",
+  "composer.locationLng": "Boylam (-180 ile 180 arası)",
+
+  "location.openInMaps": "Haritalarda aç",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "Üyeler yüklenemedi.",
   "members.inviteError": "Bu kişi davet edilemedi.",

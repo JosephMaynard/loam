@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const ar: Catalog = {
   "composer.thinking": "يفكّر…",
   "toast.imageFallback": "📷 صورة",
+  "toast.locationFallback": "📍 الموقع",
 
   "common.save": "حفظ",
   "common.saving": "جارٍ الحفظ…",
@@ -47,6 +48,16 @@ export const ar: Catalog = {
   "composer.attachImage": "إرفاق صورة",
   "composer.attachImageHint": "إرفاق صورة (يُعاد تحجيمها على هذا الجهاز قبل الرفع)",
   "composer.send": "إرسال",
+
+  "composer.shareLocation": "مشاركة الموقع",
+  "composer.shareLocationHint": "شارك مكانًا — تعمل التسمية حتى بدون GPS",
+  "composer.locationLabel": "تسمية الموقع",
+  "composer.locationLabelPlaceholder": "مثال: البوابة الشمالية",
+  "composer.locationLat": "خط العرض (-90 إلى 90)",
+  "composer.locationLng": "خط الطول (-180 إلى 180)",
+
+  "location.openInMaps": "فتح في الخرائط",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "تعذّر تحميل الأعضاء.",
   "members.inviteError": "تعذّرت دعوة هذا الشخص.",

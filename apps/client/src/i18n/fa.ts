@@ -4,6 +4,7 @@ import type { Catalog } from "./en";
 export const fa: Catalog = {
   "composer.thinking": "در حال فکر کردن…",
   "toast.imageFallback": "📷 تصویر",
+  "toast.locationFallback": "📍 مکان",
 
   "common.save": "ذخیره",
   "common.saving": "در حال ذخیره…",
@@ -40,6 +41,16 @@ export const fa: Catalog = {
   "composer.attachImage": "پیوست تصویر",
   "composer.attachImageHint": "پیوست تصویر (پیش از بارگذاری روی این دستگاه تغییر اندازه می‌یابد)",
   "composer.send": "ارسال",
+
+  "composer.shareLocation": "اشتراک‌گذاری مکان",
+  "composer.shareLocationHint": "مکانی را به اشتراک بگذارید — برچسب حتی بدون GPS هم کار می‌کند",
+  "composer.locationLabel": "برچسب مکان",
+  "composer.locationLabelPlaceholder": "مثلاً دروازه شمالی",
+  "composer.locationLat": "عرض جغرافیایی (-90 تا 90)",
+  "composer.locationLng": "طول جغرافیایی (-180 تا 180)",
+
+  "location.openInMaps": "باز کردن در نقشه‌ها",
+  "location.coordinates": "{lat}, {lng}",
 
   "members.loadError": "بارگیری اعضا ممکن نشد.",
   "members.inviteError": "دعوت آن شخص ممکن نشد.",
