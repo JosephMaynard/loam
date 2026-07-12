@@ -59,6 +59,15 @@ let session: Session | undefined;
  */
 let hostKeyMismatch = false;
 
+/**
+ * Whether the live session's host key came from the QR (this boot's `#k=` fragment, or a previously
+ * cached key for this origin) rather than only from the server's advertised `transportPublicKey`.
+ * The QR is out-of-band-authenticated (MITM-resistant); the config-advertised key is delivered over
+ * the same plain-HTTP channel it's meant to protect, so trusting it alone gives no MITM resistance —
+ * Settings uses this to distinguish "verified" from merely "encrypted" in the UI.
+ */
+let sessionQrVerified = false;
+
 /** The mode/host-key an `ensureSession` call last used, so a decrypt-failure/401 retry can
  * transparently re-handshake without the caller re-supplying context. */
 let lastParams: { mode: TransportEncryption; hostKey?: string } | undefined;
@@ -100,6 +109,14 @@ export function getCachedHostPublicKey(): string | undefined {
 /** Whether the QR-delivered key and the node's advertised config key disagree (see `hostKeyMismatch`). */
 export function getHostKeyMismatch(): boolean {
   return hostKeyMismatch;
+}
+
+/**
+ * Whether the live session's host key is QR-verified (see `sessionQrVerified`) — `false` when there is
+ * no live session, or when the session was established using only the server-advertised config key.
+ */
+export function isSessionQrVerified(): boolean {
+  return !!session && sessionQrVerified;
 }
 
 /** The live transport session, if any (`undefined` when transport encryption is `off`, or `optional`
@@ -169,6 +186,7 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   if (mode === "off") {
     session = undefined;
     hostKeyMismatch = false;
+    sessionQrVerified = false;
     return;
   }
 
@@ -183,10 +201,12 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
     }
 
     session = undefined;
+    sessionQrVerified = false;
     return;
   }
 
   await handshake(hostPublicKey);
+  sessionQrVerified = hostPublicKey === qrKey;
 }
 
 /** Re-run the last `ensureSession` call's mode/host key after a session apparently expired
@@ -196,7 +216,8 @@ async function reHandshake(): Promise<boolean> {
     return false;
   }
 
-  const hostPublicKey = getCachedHostPublicKey() ?? lastParams.hostKey;
+  const cachedKey = getCachedHostPublicKey();
+  const hostPublicKey = cachedKey ?? lastParams.hostKey;
 
   if (!hostPublicKey) {
     return false;
@@ -204,6 +225,7 @@ async function reHandshake(): Promise<boolean> {
 
   try {
     await handshake(hostPublicKey);
+    sessionQrVerified = hostPublicKey === cachedKey;
     return true;
   } catch {
     return false;
@@ -323,5 +345,6 @@ export function openWsFrame(raw: unknown): string | null {
 export function resetTransportStateForTests(): void {
   session = undefined;
   hostKeyMismatch = false;
+  sessionQrVerified = false;
   lastParams = undefined;
 }

@@ -54,6 +54,7 @@ import {
   ensureSession,
   fingerprint,
   getHostKeyMismatch,
+  isSessionQrVerified,
   joinQrUrl,
   openWsFrame,
   SERVER_URL_KEY,
@@ -3969,11 +3970,19 @@ function SettingsView({
               translatable label word so it stays i18n-neutral. */}
           <p className="node-version">LOAM v{config?.version ?? "…"}</p>
           {/* Transport encryption (docs/08): only shown once a session is actually live — `fingerprint()`
-              returns undefined off-mode or before the handshake completes. */}
+              returns undefined off-mode or before the handshake completes. A QR-verified session (the
+              host key came from a scanned join QR, out-of-band) is MITM-resistant; a session keyed only
+              from the server's advertised config key is not — an attacker on the LAN could have supplied
+              that key — so the two are surfaced distinctly rather than both reading as "Encrypted". */}
           {fingerprint() ? (
             <p className="transport-fingerprint">
-              {t("settings.transportEncryptedLine", { fingerprint: fingerprint() ?? "" })}
+              {isSessionQrVerified()
+                ? t("settings.transportVerifiedLine", { fingerprint: fingerprint() ?? "" })
+                : t("settings.transportUnverifiedLine", { fingerprint: fingerprint() ?? "" })}
             </p>
+          ) : null}
+          {fingerprint() && !isSessionQrVerified() ? (
+            <p className="form-note">{t("settings.transportUnverifiedHint")}</p>
           ) : null}
           {getHostKeyMismatch() ? (
             <p className="form-error">{t("settings.transportKeyMismatch")}</p>

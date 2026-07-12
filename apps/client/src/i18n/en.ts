@@ -90,9 +90,13 @@ export const en = {
   "settings.joinEyebrow": "Local access",
   "settings.joinTitle": "Join this LOAM node",
   "settings.thisBrowser": "This browser",
-  // Transport encryption (docs/08): fingerprint of the live session's host key, and a warning if the
-  // scanned QR key disagrees with the node's advertised key (a possible swapped join-QR poster).
-  "settings.transportEncryptedLine": "🔒 Encrypted · {fingerprint}",
+  // Transport encryption (docs/08): fingerprint of the live session's host key, distinguishing a
+  // QR-verified session (MITM-resistant) from one keyed only from the server's advertised config key
+  // (not MITM-resistant — an attacker on the LAN could have supplied it), and a warning if the scanned
+  // QR key disagrees with the node's advertised key (a possible swapped join-QR poster).
+  "settings.transportVerifiedLine": "🔒 Encrypted · verified · {fingerprint}",
+  "settings.transportUnverifiedLine": "🔒 Encrypted (unverified) · {fingerprint}",
+  "settings.transportUnverifiedHint": "Scan this node's join QR to confirm its identity.",
   "settings.transportKeyMismatch": "The QR you scanned doesn't match this node's key.",
   "settings.profileEyebrow": "Profile",
   "settings.profileTitle": "Local identity",
