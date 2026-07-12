@@ -16,6 +16,15 @@ export type SessionRecord = {
   userId: string;
 };
 
+/** A persisted secure transport-identity token (docs/20). The bearer token is stored **hashed**
+ * (`tokenHash`), never in the clear; it maps to the anonymous user it authenticates. Separate from
+ * `SessionRecord` (the legacy cookie namespace) — the two must never mix. */
+export type IdentityTokenRecord = {
+  tokenHash: string;
+  userId: string;
+  createdAt: number;
+};
+
 /**
  * Which SQLite backend to open.
  *
@@ -118,6 +127,11 @@ export interface LoamStore {
   deleteMessage(messageId: string): void;
   putSession(token: string, userId: string): void;
   deleteSession(token: string): void;
+  /** Secure transport-identity tokens (docs/20), separate from the cookie `sessions` namespace. */
+  loadIdentityTokens(): IdentityTokenRecord[];
+  putIdentityToken(tokenHash: string, userId: string, createdAt: number): void;
+  deleteIdentityToken(tokenHash: string): void;
+  deleteIdentityTokensForUser(userId: string): void;
   getConfigValue(key: string): string | undefined;
   setConfigValue(key: string, value: string): void;
   /**
@@ -262,6 +276,11 @@ function buildStore(db: SqliteConnection): LoamStore {
       data TEXT NOT NULL,
       PRIMARY KEY (owner_user_id, mesh_id)
     );
+    CREATE TABLE IF NOT EXISTS transport_identity_tokens (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT 0
+    );
   `);
   migrateTombstonesCreatedAt(db);
 
@@ -285,6 +304,11 @@ function buildStore(db: SqliteConnection): LoamStore {
     "INSERT INTO sessions (token, user_id) VALUES (?, ?) ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id",
   );
   const deleteSessionStmt = db.prepare("DELETE FROM sessions WHERE token = ?");
+  const putIdentityTokenStmt = db.prepare(
+    "INSERT INTO transport_identity_tokens (token_hash, user_id, created_at) VALUES (?, ?, ?) ON CONFLICT(token_hash) DO UPDATE SET user_id = excluded.user_id, created_at = excluded.created_at",
+  );
+  const deleteIdentityTokenStmt = db.prepare("DELETE FROM transport_identity_tokens WHERE token_hash = ?");
+  const deleteIdentityTokensForUserStmt = db.prepare("DELETE FROM transport_identity_tokens WHERE user_id = ?");
   const setConfigStmt = db.prepare(
     "INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   );
@@ -334,6 +358,25 @@ function buildStore(db: SqliteConnection): LoamStore {
         .prepare("SELECT token, user_id FROM sessions ORDER BY rowid")
         .all()
         .map((row) => ({ token: row.token as string, userId: row.user_id as string }));
+    },
+    loadIdentityTokens() {
+      return db
+        .prepare("SELECT token_hash, user_id, created_at FROM transport_identity_tokens ORDER BY rowid")
+        .all()
+        .map((row) => ({
+          tokenHash: row.token_hash as string,
+          userId: row.user_id as string,
+          createdAt: row.created_at as number,
+        }));
+    },
+    putIdentityToken(tokenHash, userId, createdAt) {
+      putIdentityTokenStmt.run(tokenHash, userId, createdAt);
+    },
+    deleteIdentityToken(tokenHash) {
+      deleteIdentityTokenStmt.run(tokenHash);
+    },
+    deleteIdentityTokensForUser(userId) {
+      deleteIdentityTokensForUserStmt.run(userId);
     },
     upsertUser(user) {
       upsertUserStmt.run(user.id, JSON.stringify(user));
@@ -418,6 +461,7 @@ function buildStore(db: SqliteConnection): LoamStore {
         db.exec("DELETE FROM tombstones");
         db.exec("DELETE FROM mesh_identities");
         db.exec("DELETE FROM mesh_contacts");
+        db.exec("DELETE FROM transport_identity_tokens");
       });
     },
     close() {

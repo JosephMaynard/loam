@@ -849,8 +849,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     expiresAt: number;
     maxSeq: number;
     seen: Set<number>;
+    // Identity binding (docs/20). A session starts `anonymous` (handshake is unauthenticated); a sealed
+    // `/api/session/resume` promotes it to `bound` and records the user it authenticates + the hash of
+    // the identity token that bound it. A `bound` session is what makes the secure rules apply (content
+    // only via the tunnel, no cookie, WS key-confirmation) — independent of the node's global mode.
+    // `resumeResult` caches the sealed resume payload so a fresh-sequence retry is idempotent.
+    authMode: "anonymous" | "bound";
+    userId?: string;
+    identityTokenHash?: string;
+    resumeResult?: { currentUser: unknown; token: string };
   }
   const transportSessions = new Map<string, TransportSession>();
+  // Secure identity tokens (docs/20): tokenHash → userId, mirrored in memory from the DAL. SEPARATE from
+  // the cookie `sessions` map — a cookie token is NEVER a valid identity token, and vice versa.
+  const identityTokens = new Map<string, string>();
   const TRANSPORT_SESSION_TTL_MS = 12 * 3_600_000;
   // How far a sealed request's sequence number may lag `maxSeq` and still be accepted — i.e. how much
   // reordering/concurrency the replay window tolerates. Browsers open only a handful of concurrent
@@ -1359,7 +1371,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // bytes come back sealed). This function is only consulted in `required` mode, so `optional`/`off`
     // nodes still serve images directly in clear (the lighter, documented behaviour).
     return (
-      routeUrl !== "/api/config" && routeUrl !== "/api/transport/handshake" && routeUrl !== "/api/health"
+      routeUrl !== "/api/config" &&
+      routeUrl !== "/api/bootstrap" &&
+      routeUrl !== "/api/transport/handshake" &&
+      routeUrl !== "/api/health"
     );
   }
 
@@ -2420,6 +2435,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     for (const session of store.loadSessions()) {
       sessions.set(session.token, session.userId);
+    }
+
+    identityTokens.clear();
+    for (const record of store.loadIdentityTokens()) {
+      identityTokens.set(record.tokenHash, record.userId);
     }
 
     if (!data.channels.length) {
@@ -3700,6 +3720,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // throwaway loopback session, leaving the real operator (and the kill switch) locked out.
   server.get("/api/health", async () => ({ ok: true }));
 
+  // Public, cookie-free bootstrap (docs/20). Returns ONLY public data — node name, version, connection
+  // details, and the network config (which advertises the transport mode + host public key). Mints NO
+  // identity and sets NO cookie, so a `required`/bound client can learn how to connect before it has a
+  // session, and no bearer credential is ever established over plaintext. The client fetches this FIRST,
+  // with `credentials: "omit"`. Unlike `/api/config`, it never returns `currentUser`.
+  server.get("/api/bootstrap", async () => ({
+    nodeName: appConfig.node.name,
+    version: options.version ?? "dev",
+    joinUrl: `http://${joinHost}:${clientPort}`,
+    websocketPath: "/ws",
+    networkConfig: currentNetworkConfig(),
+  }));
+
   server.get("/api/config", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
@@ -3766,6 +3799,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         expiresAt: Date.now() + TRANSPORT_SESSION_TTL_MS,
         maxSeq: 0,
         seen: new Set(),
+        authMode: "anonymous",
       });
       return {
         sessionId,
