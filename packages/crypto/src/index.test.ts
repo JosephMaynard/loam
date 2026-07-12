@@ -222,7 +222,11 @@ describe("transport session (docs/08)", () => {
     const other = handshake();
     const blob = sealTransport(clientKey, "secret", "aad");
     expect(openTransport(other.clientKey, blob, "aad")).toBeNull(); // wrong key
-    expect(openTransport(clientKey, blob.slice(0, -2) + "AA", "aad")).toBeNull(); // tampered
+    // Flip the FIRST base64url char, not the last: every bit of char 0 maps to the first nonce byte,
+    // so the tamper always changes the decoded bytes. (Tampering the last char was ~1/64k-flaky — its
+    // trailing bits can be unused base64 padding, or already equal to the replacement.)
+    const tampered = (blob[0] === "A" ? "B" : "A") + blob.slice(1);
+    expect(openTransport(clientKey, tampered, "aad")).toBeNull(); // tampered
     expect(openTransport(clientKey, "!!!not-base64!!!", "aad")).toBeNull(); // malformed
   });
 
