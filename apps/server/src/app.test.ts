@@ -3043,6 +3043,43 @@ describe("node-to-node sync", () => {
     await runSync(puller, pullerAdmin.cookie);
     expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("keep me (edited)");
   });
+
+  it("horizon GC: a tombstone blocks re-import within the horizon, but is prunable past it (docs/15 #7)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const doomedId = await post(source, sourceAdmin.cookie, "general", "delete me locally, horizon test");
+    const sourceUrl = await listenApp(source);
+
+    // A tiny horizon (test-only override) so the GC boundary can be exercised without waiting days.
+    const puller = await makeApp(
+      { sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } },
+      { tombstoneHorizonMs: 50 },
+    );
+    const pullerAdmin = await newSession(puller);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("delete me locally, horizon test");
+
+    await puller.server.inject({
+      method: "DELETE",
+      url: `/api/messages/${doomedId}`,
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    expect(puller.store.loadTombstones()).toContain(doomedId);
+
+    // Still within the horizon: the reaper leaves the tombstone alone, and sync must not resurrect it.
+    puller.reapExpiredMessages();
+    expect(puller.store.loadTombstones()).toContain(doomedId);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).not.toContain("delete me locally, horizon test");
+
+    // Past the horizon: the reaper GCs the tombstone, and a subsequent pull can hand the message
+    // back — the accepted DTN limitation for a peer that was offline longer than the horizon.
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    puller.reapExpiredMessages();
+    expect(puller.store.loadTombstones()).not.toContain(doomedId);
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await generalBodies(puller, pullerAdmin.cookie)).toContain("delete me locally, horizon test");
+  });
 });
 
 describe("attachment + sync review hardening", () => {

@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import type { Channel, Message, User } from "@loam/schema";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -185,6 +186,56 @@ describe("openStore", () => {
 
     expect(store.isEmpty()).toBe(true);
     expect(store.getConfigValue("security.profile")).toBe("standard");
+  });
+
+  it("round-trips tombstones and prunes only those older than the cutoff", () => {
+    store.addTombstone("msg_recent");
+    store.addTombstone("msg_also_recent");
+
+    expect(store.loadTombstones().sort()).toEqual(["msg_also_recent", "msg_recent"]);
+
+    // A cutoff in the past prunes nothing — both tombstones were just stamped with "now".
+    const nothingPruned = store.pruneTombstonesOlderThan(Date.now() - 60_000);
+    expect(nothingPruned).toEqual([]);
+    expect(store.loadTombstones().sort()).toEqual(["msg_also_recent", "msg_recent"]);
+
+    // A cutoff in the future prunes everything — simulates a tombstone that has aged past the
+    // horizon without needing to wait or mock the clock.
+    const pruned = store.pruneTombstonesOlderThan(Date.now() + 60_000);
+    expect(pruned.sort()).toEqual(["msg_also_recent", "msg_recent"]);
+    expect(store.loadTombstones()).toEqual([]);
+  });
+
+  it("migrates a pre-horizon-GC tombstones table by backfilling created_at", () => {
+    // Simulate a database created before the `created_at` column existed: open a fresh file-backed
+    // store, drop its `tombstones` table and re-create the bare-bones (pre-migration) shape, write a
+    // tombstone the old way, then reopen through `openStore` (which runs the migration) and confirm
+    // the row is usable — present, and not immediately prunable.
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-db-migration-test-"));
+    const dbPath = join(dataDir, "loam.db");
+
+    try {
+      const initial = openStore(dbPath);
+      initial.close();
+
+      const raw = new DatabaseSync(dbPath);
+      raw.exec("DROP TABLE tombstones");
+      raw.exec("CREATE TABLE tombstones (message_id TEXT PRIMARY KEY)");
+      raw.prepare("INSERT INTO tombstones (message_id) VALUES (?)").run("msg_legacy");
+      raw.close();
+
+      const reopened = openStore(dbPath);
+      try {
+        expect(reopened.loadTombstones()).toEqual(["msg_legacy"]);
+        // Backfilled to "now", so it must not already be prunable with a past cutoff.
+        expect(reopened.pruneTombstonesOlderThan(Date.now() - 60_000)).toEqual([]);
+        expect(reopened.loadTombstones()).toEqual(["msg_legacy"]);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -178,6 +178,13 @@ export type AppOptions = {
   maxNewIdentitiesPerWindow?: number;
   /** Sliding window (ms) for `maxNewIdentitiesPerWindow`. Defaults to 10 minutes. */
   identityWindowMs?: number;
+  /**
+   * How long (ms) a tombstone blocks re-import before the reaper GCs it (docs/15 #7). Defaults to
+   * 30 days — deliberately generous, longer than any realistic sync/courier window. Overridable
+   * only so tests can exercise the GC without waiting; production deployments should leave it at
+   * the default.
+   */
+  tombstoneHorizonMs?: number;
   logger?: boolean;
 };
 
@@ -215,6 +222,13 @@ const sessionCookieMaxAge = 60 * 60 * 24 * 365;
 const defaultChannelCreatedAt = 1_704_067_200_000;
 const claimAttemptLimit = 5;
 const claimAttemptWindowMs = 5 * 60_000;
+// Default for `AppOptions.tombstoneHorizonMs` (docs/15 #7): how long a tombstone blocks re-import
+// before it's GC'd. Deliberately generous — far longer than any realistic sync/courier interval —
+// so within the horizon a deleted message can never resurface from a peer or a mesh carrier; only
+// a peer offline longer than this window can hand it back, an accepted DTN limitation (not gated
+// on `sync.enabled`: a delete made while sync is off must still stick once a peer/mesh link
+// appears later, or moderation is bypassable).
+const defaultTombstoneHorizonMs = 30 * 24 * 60 * 60 * 1000;
 
 const defaultChannels: Channel[] = [
   {
@@ -795,6 +809,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const identityMintCounters = new Map<string, { count: number; resetAt: number }>();
   const maxNewIdentitiesPerWindow = options.maxNewIdentitiesPerWindow ?? 60;
   const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
+  const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
   // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
   // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
   // restart loses (and uploads abandoned past the grace period) are swept by
@@ -2300,8 +2315,31 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     server.log.info(`Mesh reaper dropped ${ids.size} expired sealed message(s)`);
   }
 
+  /**
+   * Horizon GC for the `tombstones` table (docs/15 #7): a tombstone is added forever on every
+   * delete (so sync/mesh never re-hands a locally deleted message back), which would otherwise
+   * grow without bound on a long-lived node. Pruning is unconditional — not gated on
+   * `sync.enabled` — because a delete made while sync is off must still block re-import once sync
+   * or a mesh link comes on later; gating it reintroduces a moderation bypass. Runs on every
+   * reaper tick, so a tombstone is only ever vulnerable to resurrection once its peer has been
+   * unreachable for longer than the horizon.
+   */
+  function pruneTombstonesHorizon(): void {
+    const cutoff = Date.now() - tombstoneHorizonMs;
+    const pruned = store.pruneTombstonesOlderThan(cutoff);
+
+    for (const id of pruned) {
+      tombstones.delete(id);
+    }
+
+    if (pruned.length) {
+      server.log.info(`Tombstone GC pruned ${pruned.length} entr${pruned.length === 1 ? "y" : "ies"} past the horizon`);
+    }
+  }
+
   function reapExpiredMessages(): void {
     reapExpiredSealed();
+    pruneTombstonesHorizon();
 
     const ttl = appConfig.retention.messageTtlMs;
 

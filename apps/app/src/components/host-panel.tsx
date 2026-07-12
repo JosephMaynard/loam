@@ -69,7 +69,8 @@ export function HostPanel({ state }: { state: HostState }) {
         </ThemedText>
         {wifi ? (
           <>
-            <QRCode value={wifi} />
+            {/* Level M: an SSID + escaped passphrase can exceed level H's version-6 ceiling (docs/15 #10). */}
+            <QRCode value={wifi} ecLevel="M" />
             <ThemedText type="code" style={styles.manual}>
               {state.hotspot?.ssid} · {state.hotspot?.password}
             </ThemedText>
