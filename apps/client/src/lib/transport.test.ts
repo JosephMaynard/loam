@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   apiUrl,
+  clearStoredIdentityToken,
   encryptedFetch,
   encryptedImageUrl,
   ensureSession,
@@ -10,8 +11,10 @@ import {
   getCachedHostPublicKey,
   getHostKeyMismatch,
   getSession,
+  handleWsFrame,
   isTunnelActive,
-  openWsFrame,
+  logoutSecureIdentity,
+  resumeIdentity,
   resetTransportStateForTests,
   SERVER_URL_KEY,
   TransportNeedsQrError,
@@ -521,8 +524,12 @@ describe("transport", () => {
         const opened = openTransport(serverKey!, wire.enc, "POST /api/transport/tunnel");
         const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string; body?: unknown } };
         capturedInner = envelope.b;
-        // Reply with a sealed { status, contentType, bodyB64 } descriptor (standard base64, as the server sends).
+        // Reply with a sealed { s, m, p, status, contentType, bodyB64 } descriptor (standard base64, as
+        // the server sends). The s/m/p bind the response to the request (docs/20 §9); the client verifies.
         const descriptor = JSON.stringify({
+          s: envelope.s,
+          m: envelope.b.m,
+          p: envelope.b.p,
           status: 200,
           contentType: "application/json",
           bodyB64: btoa(JSON.stringify({ ok: true, sawPath: envelope.b.p })),
@@ -567,7 +574,14 @@ describe("transport", () => {
         const opened = openTransport(serverKey!, wire.enc, "POST /api/transport/tunnel");
         const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string; body?: unknown } };
         capturedInner = envelope.b;
-        const descriptor = JSON.stringify({ status: 201, contentType: "application/json", bodyB64: btoa(JSON.stringify({ id: "msg_1" })) });
+        const descriptor = JSON.stringify({
+          s: envelope.s,
+          m: envelope.b.m,
+          p: envelope.b.p,
+          status: 201,
+          contentType: "application/json",
+          bodyB64: btoa(JSON.stringify({ id: "msg_1" })),
+        });
         return new Response(JSON.stringify({ enc: sealTransport(serverKey!, descriptor, "POST /api/transport/tunnel") }), {
           status: 200,
           headers: { "x-loam-enc": "1" },
@@ -615,6 +629,148 @@ describe("transport", () => {
     });
   });
 
+  describe("resumeIdentity (docs/20 sealed identity binding)", () => {
+    const RESUME_AAD = "POST /api/session/resume";
+
+    /** A mock node that handshakes and answers `/api/session/resume`. `resume(token)` returns what the
+     *  server should reply with, given the token the client presented (undefined = first-contact mint). */
+    function mockNode(
+      host: ReturnType<typeof createTransportIdentity>,
+      resume: (token: string | undefined, serverKey: string, seq: number) => Response,
+    ) {
+      let serverKey: string | undefined;
+      return vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        expect(url).toBe("/api/session/resume");
+        const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+        const envelope = JSON.parse(opened!) as { s: number; b: { token?: string } };
+        return resume(envelope.b.token, serverKey!, envelope.s);
+      });
+    }
+
+    function sealedReply(serverKey: string, body: unknown, status = 200): Response {
+      return new Response(JSON.stringify({ enc: sealTransport(serverKey, JSON.stringify(body), RESUME_AAD) }), {
+        status,
+        headers: { "x-loam-enc": "1" },
+      });
+    }
+
+    it("mints a fresh identity, stores the token, and returns currentUser (credentials omitted)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let sawCredentials: RequestCredentials | undefined;
+      const fetchMock = vi.fn(mockNode(host, (token, key, seq) => {
+        expect(token).toBeUndefined(); // first contact: no stored token
+        return sealedReply(key, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "user.aaaa" }, token: "tok-aaaa" });
+      }));
+      // Wrap to capture credentials on the resume call.
+      const wrapped = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/session/resume") sawCredentials = init.credentials;
+        return fetchMock(url, init);
+      });
+      vi.stubGlobal("fetch", wrapped);
+
+      await ensureSession("required", host.publicKey);
+      const { currentUser } = await resumeIdentity();
+      expect(currentUser).toEqual({ id: "user.aaaa" });
+      expect(sawCredentials).toBe("omit"); // the cookie is never sent on a bound resume
+      // The stored token is presented on a subsequent resume.
+      expect(getSession()?.bound).toBe(true);
+    });
+
+    it("rejects a response whose s/m/p don't match the request (response binding, docs/20 §9)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const fetchMock = mockNode(host, (_token, key, seq) =>
+        // Wrong sequence echoed back — a cross-fed reply. The client must refuse it.
+        sealedReply(key, { s: seq + 99, m: "POST", p: "/api/session/resume", currentUser: { id: "x" }, token: "t" }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await expect(resumeIdentity()).rejects.toThrow(/did not match/);
+    });
+
+    it("clears a rejected stored token and mints fresh exactly once", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      // Seed a stored token for this origin so the first resume presents it.
+      localStorage.setItem(`loam.identityToken.${window.location.origin}`, "stale-token");
+      const presented: (string | undefined)[] = [];
+      const fetchMock = mockNode(host, (token, key, seq) => {
+        presented.push(token);
+        if (token !== undefined) {
+          // The stale token is rejected with a SEALED 401 (from the handler, after decrypt).
+          return sealedReply(key, { error: { message: "Invalid identity token" } }, 401);
+        }
+        return sealedReply(key, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "user.new" }, token: "fresh" });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const { currentUser } = await resumeIdentity();
+      expect(presented).toEqual(["stale-token", undefined]); // tried stale, then minted fresh
+      expect(currentUser).toEqual({ id: "user.new" });
+    });
+
+    it("logoutSecureIdentity revokes server-side and clears the local token", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      let logoutHits = 0;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/session/resume") {
+          const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+          const seq = (JSON.parse(opened!) as { s: number }).s;
+          return sealedReply(serverKey!, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+        }
+        expect(url).toBe("/api/session/logout");
+        expect(init.credentials).toBe("omit");
+        logoutHits += 1;
+        return new Response(JSON.stringify({ enc: sealTransport(serverKey!, JSON.stringify({ ok: true }), "POST /api/session/logout") }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity();
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBe("tok");
+
+      await logoutSecureIdentity();
+      expect(logoutHits).toBe(1);
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
+    });
+
+    it("clearStoredIdentityToken drops the per-origin token", async () => {
+      localStorage.setItem(`loam.identityToken.${window.location.origin}`, "tok");
+      clearStoredIdentityToken();
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
+    });
+  });
+
   describe("encryptedImageUrl", () => {
     it("is a raw same-origin passthrough when not tunnelling (no session)", async () => {
       expect(isTunnelActive()).toBe(false);
@@ -633,6 +789,47 @@ describe("transport", () => {
       expect(isTunnelActive()).toBe(false);
       await ensureSession("required", host.publicKey);
       expect(isTunnelActive()).toBe(true);
+    });
+
+    it("FAILS CLOSED under the tunnel: a failed image fetch returns '' — never the raw plaintext URL (docs/20)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        // The tunnelled image GET fails at the server (e.g. transport session expired) — a sealed 404-ish
+        // descriptor with a non-ok status, so the tunnel returns a non-ok Response.
+        const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, "POST /api/transport/tunnel");
+        const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string } };
+        const descriptor = JSON.stringify({
+          s: envelope.s,
+          m: envelope.b.m,
+          p: envelope.b.p,
+          status: 404,
+          contentType: "application/json",
+          bodyB64: btoa(JSON.stringify({ error: { message: "gone" } })),
+        });
+        return new Response(JSON.stringify({ enc: sealTransport(serverKey!, descriptor, "POST /api/transport/tunnel") }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      expect(isTunnelActive()).toBe(true);
+      // The image can't be fetched → empty src, NOT a downgraded direct GET to the plaintext URL.
+      expect(await encryptedImageUrl("/api/avatars/x.webp")).toBe("");
     });
   });
 
@@ -656,38 +853,65 @@ describe("transport", () => {
     });
   });
 
-  describe("openWsFrame", () => {
-    it("passes raw string frames through unchanged with no session", () => {
-      expect(openWsFrame("plain frame")).toBe("plain frame");
-      expect(openWsFrame(42)).toBe("42");
-    });
+  describe("handleWsFrame (docs/20 §7 key-confirmation + connection binding)", () => {
+    const WS_CHALLENGE_AAD = "loam.ws.challenge.v1";
+    const WS_PROOF_AAD = "loam.ws.proof.v1";
+    const wsFrameAad = (connectionId: string) => `loam.ws.frame.v1 ${connectionId}`;
 
-    it("round-trips a frame sealed under the live session key", async () => {
+    async function liveSession(): Promise<string> {
       const host = createTransportIdentity();
       const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
         const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
         return new Response(JSON.stringify(json), { status });
       });
       vi.stubGlobal("fetch", fetchMock);
-
       await ensureSession("optional", host.publicKey);
       const key = getSession()?.key;
       expect(key).toBeDefined();
+      // A new socket resets the per-connection challenge state.
+      wsUrl("ws://host/ws");
+      return key as string;
+    }
 
-      const sealed = sealTransport(key!, JSON.stringify({ type: "presence" }), "ws");
-      expect(openWsFrame(sealed)).toBe(JSON.stringify({ type: "presence" }));
+    it("passes raw string frames through unchanged with no session", () => {
+      expect(handleWsFrame("plain frame")).toEqual({ payload: "plain frame" });
+      expect(handleWsFrame(42)).toEqual({ payload: "42" });
     });
 
-    it("returns null on a decrypt failure (never for a session-less pass-through)", async () => {
-      const host = createTransportIdentity();
-      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
-        return new Response(JSON.stringify(json), { status });
-      });
-      vi.stubGlobal("fetch", fetchMock);
+    it("answers the challenge with a proof under the separate proof aad, then decodes app frames", async () => {
+      const key = await liveSession();
+      const connectionId = "conn-abc";
+      const nonce = "nonce-xyz";
 
-      await ensureSession("optional", host.publicKey);
-      expect(openWsFrame("not a valid sealed frame")).toBeNull();
+      // The server's challenge (sealed under the challenge aad).
+      const challenge = sealTransport(key, JSON.stringify({ type: "challenge", connectionId, nonce }), WS_CHALLENGE_AAD);
+      const answered = handleWsFrame(challenge);
+      expect(answered.proof).toBeDefined();
+      expect(answered.payload).toBeUndefined();
+      // The proof opens under the PROOF aad (not the challenge aad — direction separation) and echoes it.
+      const proofPlain = openTransport(key, answered.proof as string, WS_PROOF_AAD);
+      expect(JSON.parse(proofPlain as string)).toEqual({ type: "proof", connectionId, nonce });
+
+      // A connection-bound application frame `{ q, f }` now decodes to its inner payload.
+      const frame = sealTransport(key, JSON.stringify({ q: 1, f: JSON.stringify({ type: "presence" }) }), wsFrameAad(connectionId));
+      expect(handleWsFrame(frame)).toEqual({ payload: JSON.stringify({ type: "presence" }) });
+
+      // A replayed (non-advancing) sequence is dropped.
+      expect(handleWsFrame(frame)).toEqual({});
+    });
+
+    it("ignores frames before the challenge is answered and rejects a wrong-connection frame", async () => {
+      const key = await liveSession();
+      // An application frame arriving before any challenge (wrong aad for the pre-confirm state) is ignored.
+      const stray = sealTransport(key, JSON.stringify({ q: 1, f: "x" }), wsFrameAad("conn-1"));
+      expect(handleWsFrame(stray)).toEqual({});
+      expect(handleWsFrame("garbage")).toEqual({});
+
+      // Answer a challenge for conn-1, then a frame sealed for a DIFFERENT connection id won't open.
+      const challenge = sealTransport(key, JSON.stringify({ type: "challenge", connectionId: "conn-1", nonce: "n" }), WS_CHALLENGE_AAD);
+      expect(handleWsFrame(challenge).proof).toBeDefined();
+      const otherConn = sealTransport(key, JSON.stringify({ q: 1, f: "y" }), wsFrameAad("conn-2"));
+      expect(handleWsFrame(otherConn)).toEqual({});
     });
   });
 

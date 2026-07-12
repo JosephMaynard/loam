@@ -52,9 +52,45 @@ interface Session {
   key: string;
   hostPublicKey: string;
   seq: number;
+  /** Whether this session has completed a sealed identity resume (docs/20) — its identity is the
+   * session key, not a cookie, so every request omits credentials and reaches content via the tunnel. */
+  bound: boolean;
+  /** The current WS connection's id, learned from the server's key-confirmation challenge (docs/20 §7);
+   * `undefined` before a challenge is answered on this connection. Reset per new socket by `wsUrl`. */
+  wsConnectionId?: string;
+  /** Highest accepted server→client WS frame sequence for the current connection (docs/20 §7 replay
+   * window) — a frame at or below this is a replay and dropped. */
+  wsServerSeq: number;
 }
 
 let session: Session | undefined;
+
+/** Where the per-origin secure identity token (docs/20) is cached. Namespaced per server origin like the
+ * host key, so switching nodes never cross-presents one node's token to another. It's a bearer secret at
+ * rest (same trust level as the host-key cache); the network threat model is what this defends — device
+ * compromise is covered by the encrypted-at-rest DB + wipe, not by hiding this from same-origin JS. */
+const IDENTITY_TOKEN_STORAGE_PREFIX = "loam.identityToken.";
+
+/** The stored secure identity token for the current origin, if any. */
+function storedIdentityToken(): string | undefined {
+  return localStorage.getItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin()) ?? undefined;
+}
+
+function storeIdentityToken(token: string): void {
+  localStorage.setItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin(), token);
+}
+
+/** Drop the stored identity token (invalid/revoked token, or explicit logout/wipe). */
+export function clearStoredIdentityToken(): void {
+  localStorage.removeItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin());
+}
+
+/** Credentials mode for a fetch on the live session: a `bound`/required session NEVER sends the cookie
+ * (docs/20 — the cookie is not its credential; the un-sniffable session key is), so it omits it. An
+ * anonymous optional session keeps cookie auth. */
+function sessionCredentials(): RequestCredentials {
+  return lastParams?.mode === "required" ? "omit" : "include";
+}
 
 /**
  * Set when the QR-delivered key (this boot's `#k=` hash, or a previously cached one for this origin)
@@ -152,7 +188,8 @@ async function handshake(hostPublicKey: string): Promise<void> {
   const hello = transportClientHello();
   const response = await fetch(apiUrl("/api/transport/handshake"), {
     method: "POST",
-    credentials: "include",
+    // The handshake is anonymous bootstrap; a bound/required client omits the cookie here too (docs/20).
+    credentials: sessionCredentials(),
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ clientEphemeralPublic: hello.ephemeralPublic }),
   });
@@ -173,7 +210,7 @@ async function handshake(hostPublicKey: string): Promise<void> {
     hostEphemeralPublic: parsed.data.hostEphemeralPublic,
   });
 
-  session = { sessionId: parsed.data.sessionId, key, hostPublicKey, seq: 0 };
+  session = { sessionId: parsed.data.sessionId, key, hostPublicKey, seq: 0, bound: false, wsServerSeq: 0 };
 }
 
 /**
@@ -244,10 +281,108 @@ async function reHandshake(): Promise<boolean> {
   try {
     await handshake(hostPublicKey);
     sessionQrVerified = hostPublicKey === cachedKey;
+    // A fresh transport session starts `anonymous` server-side; a bound/required client must re-bind
+    // its identity before content or the WebSocket will work again (docs/20). Re-resume with the stored
+    // token — silently (a lost identity just re-mints), so the caller's retry proceeds on a bound session.
+    if (lastParams.mode === "required" && session) {
+      try {
+        await resumeAttempt(session, storedIdentityToken(), {}, false);
+      } catch {
+        return false;
+      }
+    }
     return true;
   } catch {
     return false;
   }
+}
+
+/** Path + direction-separated AAD for the sealed identity resume (docs/20 §5). */
+const RESUME_PATH = "/api/session/resume";
+const RESUME_AAD = "POST /api/session/resume";
+
+/**
+ * Bind this transport session to a persistent secure identity (docs/20). Seals `{ token? }` to the
+ * DIRECT `/api/session/resume` endpoint (credentials omitted — the cookie is never a bound credential),
+ * verifies the sealed reply is bound to the exact request it answers (`s/m/p`, §9), stores the returned
+ * 256-bit token per origin, and marks the session `bound`. With no stored token the server mints a fresh
+ * identity; a stored-but-rejected token is cleared and a fresh identity minted once. Returns the
+ * authenticated `currentUser`. Requires a live transport session (call after `ensureSession`).
+ */
+export async function resumeIdentity(init: EncryptedFetchInit = {}): Promise<{ currentUser: unknown }> {
+  const active = session;
+  if (!active) {
+    throw new Error("Cannot resume an identity without a transport session");
+  }
+  return resumeAttempt(active, storedIdentityToken(), init, false);
+}
+
+async function resumeAttempt(
+  active: Session,
+  token: string | undefined,
+  init: EncryptedFetchInit,
+  retriedFreshMint: boolean,
+): Promise<{ currentUser: unknown }> {
+  const seq = ++active.seq;
+  const envelope = JSON.stringify(token === undefined ? { s: seq, b: {} } : { s: seq, b: { token } });
+  const response = await fetch(apiUrl(RESUME_PATH), {
+    method: "POST",
+    credentials: "omit",
+    headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
+    signal: init.signal,
+    body: JSON.stringify({ enc: sealTransport(active.key, envelope, RESUME_AAD) }),
+  });
+
+  const sealedReply = response.headers.get("x-loam-enc") === "1";
+
+  // A SEALED 401 came from the resume handler AFTER decrypting our body → the token itself was rejected
+  // (unknown/revoked). Clear it and mint a brand-new identity exactly once, rather than stranding the
+  // client on a dead token. An UNSEALED 401 is `onRequest` refusing an expired transport session — let
+  // that propagate so the caller re-handshakes.
+  if (response.status === 401 && sealedReply) {
+    if (token !== undefined && !retriedFreshMint) {
+      clearStoredIdentityToken();
+      return resumeAttempt(active, undefined, init, true);
+    }
+    throw new Error("Identity resume rejected");
+  }
+
+  if (!sealedReply) {
+    throw new Error(`Identity resume failed: ${response.status}`);
+  }
+
+  const payload: unknown = await response.json().catch(() => undefined);
+  const enc = payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
+  const opened = typeof enc === "string" ? openTransport(active.key, enc, RESUME_AAD) : null;
+  if (opened === null) {
+    throw new Error("Identity resume response could not be decrypted");
+  }
+
+  let result: { s?: unknown; m?: unknown; p?: unknown; currentUser?: unknown; token?: unknown };
+  try {
+    result = JSON.parse(opened) as typeof result;
+  } catch {
+    throw new Error("Malformed identity resume response");
+  }
+
+  // Response binding (docs/20 §9): the resume reply carries the secret token and is sealed under a
+  // CONSTANT aad, so confirm it answers the exact { s, m, p } we sent before trusting/storing the token —
+  // an attacker can't cross-feed a different sealed resume reply.
+  if (result.s !== seq || result.m !== "POST" || result.p !== RESUME_PATH) {
+    throw new Error("Identity resume response did not match the request");
+  }
+
+  if (typeof result.token === "string") {
+    storeIdentityToken(result.token);
+  }
+  active.bound = true;
+  return { currentUser: result.currentUser };
+}
+
+/** Re-establish the transport session (handshake + re-bind if required) for the WS reconnect path, where
+ * an expired session id would otherwise loop. Best-effort — returns `false` on any failure. */
+export async function reestablishSession(): Promise<boolean> {
+  return reHandshake();
 }
 
 /** The `aad` bound into a REST frame: exactly `${METHOD} ${path}` — `path` is the same path+query
@@ -351,7 +486,7 @@ async function attemptFetch(
 
   const response = await fetch(apiUrl(path), {
     method,
-    credentials: "include",
+    credentials: sessionCredentials(),
     headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
     signal: init.signal,
     body: requestBody,
@@ -423,13 +558,14 @@ async function tunnelFetch(
 ): Promise<Response> {
   const aad = restAad("POST", TUNNEL_PATH);
   const inner = body === undefined ? { m: method, p: path } : { m: method, p: path, body };
+  const seq = ++active.seq;
   const requestBody = JSON.stringify({
-    enc: sealTransport(active.key, JSON.stringify({ s: ++active.seq, b: inner }), aad),
+    enc: sealTransport(active.key, JSON.stringify({ s: seq, b: inner }), aad),
   });
 
   const response = await fetch(apiUrl(TUNNEL_PATH), {
     method: "POST",
-    credentials: "include",
+    credentials: sessionCredentials(),
     headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
     signal: init.signal,
     body: requestBody,
@@ -449,7 +585,7 @@ async function tunnelFetch(
       throw new Error("Transport session expired");
     }
 
-    let descriptor: { status?: unknown; contentType?: unknown; bodyB64?: unknown };
+    let descriptor: { s?: unknown; m?: unknown; p?: unknown; status?: unknown; contentType?: unknown; bodyB64?: unknown };
     try {
       descriptor = JSON.parse(opened) as typeof descriptor;
     } catch {
@@ -461,6 +597,13 @@ async function tunnelFetch(
     // guards, but a Response beats a throw).
     if (typeof descriptor.status !== "number" || typeof descriptor.bodyB64 !== "string") {
       return new Response(opened, { status: 400, headers: { "content-type": "application/json" } });
+    }
+    // Response binding (docs/20 §9): the tunnel seals EVERY response under the same constant aad, so a
+    // valid descriptor alone doesn't prove it answers THIS request. Confirm it echoes the exact
+    // { s, m, p } we sent before using the body — else an attacker could cross-feed one in-flight
+    // tunnel response as another's. A mismatch is fatal (never a silent wrong render).
+    if (descriptor.s !== seq || descriptor.m !== method || descriptor.p !== path) {
+      throw new Error("Tunnel response did not match the request");
     }
     const contentType = typeof descriptor.contentType === "string" ? descriptor.contentType : "application/octet-stream";
     // Rebuild a normal Response from the raw bytes (an ArrayBuffer is a valid BodyInit), so the caller's
@@ -497,8 +640,12 @@ const IMAGE_URL_CACHE_MAX = 200;
  * Resolve an image path to a render-ready `src`. With the tunnel active (required mode) the raw
  * endpoint refuses a direct `<img>` GET, so the bytes are fetched through the tunnel (coming back
  * sealed) and handed back as a cached `blob:` object URL. Otherwise returns the plain same-origin URL
- * unchanged. Concurrent callers for the same path share a single in-flight fetch. On any failure falls
- * back to the raw URL (not cached, so a later render can retry) — a broken image beats a thrown render.
+ * unchanged. Concurrent callers for the same path share a single in-flight fetch.
+ *
+ * FAILS CLOSED (docs/20 §11): when the tunnel is active and the fetch fails, it returns an empty string
+ * — NEVER the raw `apiUrl(path)`. Falling back to the raw URL would make the browser issue a direct,
+ * UNENCRYPTED `<img>` GET on a `required` node (leaking which avatar/attachment is being viewed, and
+ * relying on plaintext bytes), defeating the tunnel. A missing image beats a downgraded one.
  */
 export async function encryptedImageUrl(path: string): Promise<string> {
   if (!isTunnelActive()) {
@@ -517,7 +664,7 @@ export async function encryptedImageUrl(path: string): Promise<string> {
     try {
       const response = await encryptedFetch("GET", path);
       if (!response.ok) {
-        return apiUrl(path);
+        return ""; // fail closed — no direct, unencrypted fallback GET
       }
       const objectUrl = URL.createObjectURL(await response.blob());
       if (imageObjectUrls.size >= IMAGE_URL_CACHE_MAX) {
@@ -530,7 +677,7 @@ export async function encryptedImageUrl(path: string): Promise<string> {
       imageObjectUrls.set(path, objectUrl);
       return objectUrl;
     } catch {
-      return apiUrl(path);
+      return ""; // fail closed
     } finally {
       imageUrlInFlight.delete(path);
     }
@@ -550,22 +697,116 @@ export function clearImageObjectUrls(): void {
 }
 
 /** Append the live session's `?enc=<sessionId>` to a WebSocket URL (docs/08), so the server knows to
- * seal inbound frames; unchanged when no session is active. */
+ * seal inbound frames; unchanged when no session is active. Also RESETS the per-connection
+ * key-confirmation state (docs/20 §7): every new socket gets a fresh challenge with a fresh connection
+ * id, so `handleWsFrame` must forget the previous connection's id + sequence. */
 export function wsUrl(base: string): string {
+  if (session) {
+    session.wsConnectionId = undefined;
+    session.wsServerSeq = 0;
+  }
   return session ? `${base}${base.includes("?") ? "&" : "?"}enc=${encodeURIComponent(session.sessionId)}` : base;
 }
 
+/** Direction-separated AADs for the reflection-safe WS key-confirmation (docs/20 §7). */
+const WS_CHALLENGE_AAD = "loam.ws.challenge.v1";
+const WS_PROOF_AAD = "loam.ws.proof.v1";
+function wsFrameAad(connectionId: string): string {
+  return `loam.ws.frame.v1 ${connectionId}`;
+}
+
 /**
- * Decrypt one inbound WebSocket frame when a session is live (`aad` is the constant `"ws"` — WS
- * frames aren't route-scoped); otherwise passes the raw frame through unchanged. Returns `null` only
- * on an actual decrypt failure — never for an inert (no-session) pass-through.
+ * Handle one inbound WebSocket frame (docs/20 §7). Returns exactly one of:
+ *  - `{ proof }`  — a sealed key-confirmation proof the caller must send straight back over the socket
+ *                   (the reply to the server's challenge). Until this is sent the socket receives nothing.
+ *  - `{ payload }`— a decoded application-frame payload (a `ClientEvent` JSON string) to process.
+ *  - `{}`         — ignore (undecryptable, malformed, replayed/out-of-order, or a pre-confirmation frame).
+ * With no live session (transport off) the raw frame passes straight through as `{ payload }`.
  */
-export function openWsFrame(raw: unknown): string | null {
-  if (!session) {
-    return typeof raw === "string" ? raw : String(raw);
+export function handleWsFrame(raw: unknown): { proof?: string; payload?: string } {
+  const active = session;
+  if (!active) {
+    return { payload: typeof raw === "string" ? raw : String(raw) };
+  }
+  const text = String(raw);
+
+  // Not yet confirmed on this connection: the only thing we accept is the server's challenge, sealed
+  // under the challenge aad. Anything else (including a reflected app frame) fails to open and is ignored.
+  if (active.wsConnectionId === undefined) {
+    const opened = openTransport(active.key, text, WS_CHALLENGE_AAD);
+    if (opened === null) {
+      return {};
+    }
+    let challenge: { type?: unknown; connectionId?: unknown; nonce?: unknown };
+    try {
+      challenge = JSON.parse(opened) as typeof challenge;
+    } catch {
+      return {};
+    }
+    if (challenge.type !== "challenge" || typeof challenge.connectionId !== "string" || typeof challenge.nonce !== "string") {
+      return {};
+    }
+    active.wsConnectionId = challenge.connectionId;
+    active.wsServerSeq = 0;
+    // Answer under the SEPARATE proof aad — a keyless attacker can only reflect the challenge bytes,
+    // which won't open under this aad server-side, so reflection can never confirm.
+    const proof = sealTransport(
+      active.key,
+      JSON.stringify({ type: "proof", connectionId: challenge.connectionId, nonce: challenge.nonce }),
+      WS_PROOF_AAD,
+    );
+    return { proof };
   }
 
-  return openTransport(session.key, String(raw), "ws");
+  // Confirmed: an application frame is `{ q, f }` sealed under the connection-bound aad. Reject a frame
+  // whose sequence doesn't advance (a replay, or one captured on another connection — different aad).
+  const opened = openTransport(active.key, text, wsFrameAad(active.wsConnectionId));
+  if (opened === null) {
+    return {};
+  }
+  let envelope: { q?: unknown; f?: unknown };
+  try {
+    envelope = JSON.parse(opened) as typeof envelope;
+  } catch {
+    return {};
+  }
+  if (typeof envelope.q !== "number" || typeof envelope.f !== "string" || envelope.q <= active.wsServerSeq) {
+    return {};
+  }
+  active.wsServerSeq = envelope.q;
+  return { payload: envelope.f };
+}
+
+/** Path + AAD for the sealed logout / device-wipe revocation (docs/20 §8). */
+const LOGOUT_PATH = "/api/session/logout";
+const LOGOUT_AAD = "POST /api/session/logout";
+
+/**
+ * Revoke this device's secure identity SERVER-SIDE (docs/20 §8) before a local wipe/logout clears
+ * storage — so the token can't be resumed afterwards even if a copy leaked. Sent as a DIRECT sealed
+ * request (like resume; it operates on the outer bound session, so it must NOT be tunnelled). Best
+ * effort: the local token is dropped regardless of the server's reply.
+ */
+export async function logoutSecureIdentity(init: EncryptedFetchInit = {}): Promise<void> {
+  const active = session;
+  try {
+    if (active?.bound) {
+      await fetch(apiUrl(LOGOUT_PATH), {
+        method: "POST",
+        credentials: "omit",
+        headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
+        signal: init.signal,
+        body: JSON.stringify({ enc: sealTransport(active.key, JSON.stringify({ s: ++active.seq, b: {} }), LOGOUT_AAD) }),
+      });
+    }
+  } catch {
+    // Best effort — a failed revoke still clears the local token below (the network is the threat model).
+  } finally {
+    clearStoredIdentityToken();
+    if (active) {
+      active.bound = false;
+    }
+  }
 }
 
 /** Test-only: reset all module state between tests. Never called from app code. */

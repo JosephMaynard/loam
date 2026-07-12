@@ -75,13 +75,18 @@ import { bodyFor, displayTime } from "./lib/message-format";
 import { clamp } from "./lib/numbers";
 import {
   apiUrl,
+  clearStoredIdentityToken,
   encryptedFetch,
   ensureSession,
   fingerprint,
   getHostKeyMismatch,
+  handleWsFrame,
   isSessionQrVerified,
+  isTunnelActive,
   joinQrUrl,
-  openWsFrame,
+  logoutSecureIdentity,
+  reestablishSession,
+  resumeIdentity,
   SERVER_URL_KEY,
   TransportNeedsQrError,
   wsUrl,
@@ -176,11 +181,46 @@ function rememberCurrentUser(user: User): void {
   localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
 }
 
+/** The public, cookie-free bootstrap (docs/20): everything `/api/config` returns EXCEPT `currentUser`.
+ * A `required`/bound client reads this FIRST — before it has an identity — to learn the transport mode
+ * + host key, then handshakes and resumes a sealed identity. */
+type Bootstrap = {
+  version?: string;
+  joinUrl: string;
+  websocketPath: string;
+  networkConfig: NetworkConfig;
+};
+
 /**
- * GET `/api/config` as a plain, unencrypted fetch — the transport bootstrap path (docs/08). It
- * identifies the session and advertises `transportEncryption`/`transportPublicKey`, so it must be
- * readable before a transport session exists, and it is refetched on every reconnect/resync
- * regardless of whether a session is later established, so it always bypasses `encryptedFetch`.
+ * GET `/api/bootstrap` as a public, cookie-free fetch (docs/20) — mints no identity, sets no cookie, and
+ * advertises `transportEncryption`/`transportPublicKey`, so a client can learn how to connect before it
+ * has a session. Read FIRST on every boot/reconnect, always bypassing `encryptedFetch`.
+ */
+async function fetchBootstrapJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Bootstrap> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(apiUrl("/api/bootstrap"), {
+      credentials: "omit",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => undefined);
+      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
+    }
+
+    return response.json() as Promise<Bootstrap>;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+/**
+ * GET `/api/config` for the ANONYMOUS (cookie) path — optional/off nodes, where identity is the session
+ * cookie and `/api/config` is directly readable and returns `currentUser`. A bound/required client never
+ * uses this (its `/api/config` is tunnel-only content and its identity comes from the sealed resume).
  */
 async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> {
   const controller = new AbortController();
@@ -201,6 +241,47 @@ async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> 
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+/**
+ * The full boot/reconnect sequence (docs/20): read the public bootstrap, establish the transport
+ * session, then resolve identity — a `bound` (required / QR-pinned) client resumes a sealed identity
+ * (its `currentUser` comes back over the encrypted channel, never a cookie); an anonymous optional/off
+ * client falls back to the cookie `/api/config`. Returns the assembled `Config`. Throws
+ * `TransportNeedsQrError` when `required` and no host key is available (the caller renders the QR gate).
+ */
+async function loadConfig(): Promise<Config> {
+  const boot = await fetchBootstrapJson();
+  const mode = boot.networkConfig.transportEncryption;
+
+  try {
+    await ensureSession(mode, boot.networkConfig.transportPublicKey);
+  } catch (sessionError) {
+    if (sessionError instanceof TransportNeedsQrError) {
+      throw sessionError; // caller renders the "scan the join QR" gate
+    }
+    if (mode !== "optional") {
+      // `required` where a key WAS available but the handshake failed (node unreachable) — surface it
+      // rather than silently degrading to plaintext.
+      throw sessionError;
+    }
+    // `optional`: proceed without a session (plaintext) rather than stranding the user.
+  }
+
+  if (isTunnelActive()) {
+    // Bound: identity is the session key. Resume it over the sealed channel to get `currentUser`.
+    const { currentUser } = await resumeIdentity();
+    return {
+      version: boot.version,
+      joinUrl: boot.joinUrl,
+      websocketPath: boot.websocketPath,
+      networkConfig: boot.networkConfig,
+      currentUser: currentUser as User,
+    };
+  }
+
+  // Anonymous (optional/off): the cookie identity + `/api/config` bootstrap, unchanged.
+  return fetchConfigJson();
 }
 
 /** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
@@ -739,10 +820,12 @@ function LoamApp() {
       // local purge below is the part that actually matters and must always run (docs/15 #4).
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      // Route through `encryptedFetch`, not a bare `fetch`: under `required` transport mode an
-      // unsealed POST is refused (401) and the session would never actually be revoked — the wipe
-      // would silently leave the server-side identity alive. `encryptedFetch` seals it under the
-      // active session (bodyless → empty envelope); still best-effort, so the local purge always runs.
+      // Revoke a BOUND secure identity server-side FIRST (docs/20 §8) — delete its token + sessions +
+      // sockets — before the local store is purged, so the token can't be resumed even if a copy leaked.
+      // Then drop the cookie session too (a bound session has no cookie credential, but an anonymous one
+      // does): via `encryptedFetch`, not a bare `fetch`, so under `required` mode the sealed request
+      // isn't refused (401). Both best-effort — the local purge below always runs regardless.
+      await logoutSecureIdentity({ signal: controller.signal }).catch(() => undefined);
       await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })
         .catch(() => {
           // best effort — the local purge below still runs
@@ -753,6 +836,10 @@ function LoamApp() {
     setChannels([]);
     setUsers([]);
     setConfig(undefined);
+    // Drop the secure identity token (docs/20) BEFORE removing SERVER_URL_KEY — the token is namespaced
+    // by the configured origin, so clearing it must happen while that origin is still resolvable. After a
+    // wipe the token is dead server-side regardless; this stops a reload from resuming a stale one.
+    clearStoredIdentityToken();
     localStorage.removeItem(CURRENT_USER_KEY);
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
@@ -1073,38 +1160,15 @@ function LoamApp() {
         }
       }
 
-      // Config first: it identifies the session and says whether this user may read content at all.
+      // Bootstrap → transport session → identity (docs/20). `loadConfig` reads the public cookie-free
+      // bootstrap, establishes the transport session, then resumes a sealed identity for a bound/required
+      // client (or falls back to the cookie `/api/config` for an anonymous optional/off one) — all BEFORE
+      // `config`/`currentUser` are set, so the WS-open effect (keyed on `config?.currentUser.id`) and the
+      // channels/users fetch below never race ahead of the handshake+resume.
       // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
       // participating user; approval flips `currentUser.pending`, which re-runs this effect.
-      await fetchConfigJson()
+      await loadConfig()
         .then(async (nextConfig) => {
-        if (!active) {
-          return;
-        }
-
-        // Establish (or refresh) the transport session BEFORE any content request or WebSocket open
-        // (docs/08) — `config`/`currentUser` only get set once this resolves, so the WS-open effect
-        // (keyed on `config?.currentUser.id`) and the channels/users fetch below never race ahead of it.
-        try {
-          await ensureSession(nextConfig.networkConfig.transportEncryption, nextConfig.networkConfig.transportPublicKey);
-        } catch (sessionError) {
-          if (sessionError instanceof TransportNeedsQrError) {
-            // `required` mode with no host key available (no QR scanned, none cached): there is no
-            // safe way to talk to this node — gate the whole app instead of falling back to plaintext.
-            setNeedsQr(true);
-            return;
-          }
-
-          if (nextConfig.networkConfig.transportEncryption !== "optional") {
-            // `required` mode where a key WAS available but the handshake itself failed (e.g. the
-            // node is unreachable) — treat like any other boot failure (below) rather than silently
-            // degrading to an unencrypted session.
-            throw sessionError;
-          }
-
-          // `optional` mode: proceed without a session (plaintext) rather than stranding the user.
-        }
-
         if (!active) {
           return;
         }
@@ -1162,6 +1226,14 @@ function LoamApp() {
       })
       .catch((nextError: unknown) => {
         if (!active) {
+          return;
+        }
+
+        if (nextError instanceof TransportNeedsQrError) {
+          // `required` mode with no host key available (no QR scanned, none cached): there is no safe
+          // way to talk to this node — gate the whole app instead of falling back to plaintext. Not an
+          // error to retry: the user must scan the join QR.
+          setNeedsQr(true);
           return;
         }
 
@@ -1283,10 +1355,11 @@ function LoamApp() {
       // to connect anyway — the existing reconnect loop already handles a connection that still can't
       // succeed.
       if (attempt > 1 && config) {
-        await ensureSession(
-          config.networkConfig.transportEncryption,
-          config.networkConfig.transportPublicKey,
-        ).catch(() => undefined);
+        // `reestablishSession` re-handshakes AND re-binds the identity when required (docs/20) — a fresh
+        // transport session starts anonymous server-side, so under `required` mode the WS would be
+        // refused until the identity is resumed again. Best-effort: on failure, fall through and try to
+        // connect anyway — the reconnect loop handles a connection that still can't succeed.
+        await reestablishSession().catch(() => undefined);
 
         if (disposed || attempt !== socketAttempt) {
           return;
@@ -1333,14 +1406,21 @@ function LoamApp() {
           return;
         }
 
-        const raw = openWsFrame(event.data);
+        const frame = handleWsFrame(event.data);
 
-        if (raw === null) {
-          // A decrypt failure (or, off-mode, never) — drop the frame rather than crash the parser.
+        if (frame.proof !== undefined) {
+          // The server's reflection-safe key-confirmation challenge (docs/20 §7) — answer it. Until the
+          // proof is sent the server withholds all events; nothing else to do with this frame.
+          nextSocket.send(frame.proof);
           return;
         }
 
-        const payload = parseSocketEvent(raw);
+        if (frame.payload === undefined) {
+          // Undecryptable / replayed / pre-confirmation — drop it rather than crash the parser.
+          return;
+        }
+
+        const payload = parseSocketEvent(frame.payload);
 
         if (!payload) {
           return;
