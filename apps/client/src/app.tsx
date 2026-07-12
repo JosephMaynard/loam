@@ -47,6 +47,7 @@ import { UnreadBadge } from "./components/UnreadBadge";
 import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { dayKey, dayLabel } from "./lib/dates";
+import { compareCreatedAt, mergeMessagesInOrder } from "./lib/messages";
 import {
   deleteRecord,
   destroyDatabase,
@@ -56,7 +57,7 @@ import {
   putRecords,
 } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
-import { renderMarkdown } from "./lib/markdown";
+import { renderMarkdownCached } from "./lib/markdown";
 import {
   apiUrl,
   encryptedFetch,
@@ -170,10 +171,6 @@ function getOrCreateCurrentUser(): User {
 function rememberCurrentUser(user: User): void {
   localStorage.setItem(CURRENT_USER_KEY, user.id);
   localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
-}
-
-function compareCreatedAt(left: Message, right: Message): number {
-  return left.createdAt - right.createdAt;
 }
 
 /**
@@ -364,6 +361,14 @@ function groupReactionsByTarget(messages: Message[]): Map<string, Message[]> {
 }
 
 /**
+ * Per-locale cache of the hours-and-minutes time formatter. Building an `Intl.DateTimeFormat` is
+ * comparatively expensive and `displayTime` is called once per rendered message row (hundreds of
+ * times per render, many times a second while an LLM reply streams), so the formatter is built once
+ * per active locale and reused. Keyed on the resolved ICU locale string.
+ */
+const timeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/**
  * Format a numeric timestamp into a localized hours-and-minutes time string.
  *
  * @param timestamp - Milliseconds since the UNIX epoch
@@ -371,10 +376,15 @@ function groupReactionsByTarget(messages: Message[]): Map<string, Message[]> {
  */
 function displayTime(timestamp: number): string {
   // Node UI locale (via icuLocale), so times read in the same language as the rest of the chrome.
-  return new Intl.DateTimeFormat(icuLocale(getActiveLocale()), {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(timestamp);
+  const locale = icuLocale(getActiveLocale());
+  let formatter = timeFormatters.get(locale);
+
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
+    timeFormatters.set(locale, formatter);
+  }
+
+  return formatter.format(timestamp);
 }
 
 /**
@@ -517,7 +527,11 @@ export function App() {
 function LoamApp() {
   const [currentUser, setCurrentUser] = useState(getOrCreateCurrentUser);
   const location = useLocation();
-  const routeState = parseRoute(location.path);
+  // Memoize so `routeState` (and the `activeConversation` derived from it) keeps a stable identity
+  // across unrelated re-renders (presence broadcasts, toasts, unread updates). Otherwise `parseRoute`
+  // returned a fresh object every render, defeating downstream memos keyed on `activeConversation`
+  // (notably `selectedMessages`, which then re-filtered + re-sorted the whole history each render).
+  const routeState = useMemo(() => parseRoute(location.path), [location.path]);
   const activeConversation = routeState.screen === "channels" ? routeState.conversation : undefined;
   const shellClassName = [
     "app-shell",
@@ -737,15 +751,10 @@ function LoamApp() {
   );
 
   const upsertMessages = useCallback((incomingMessages: Message[]) => {
-    setMessages((previous) => {
-      const next = new Map(previous.map((message) => [message.id, message]));
-
-      for (const message of incomingMessages) {
-        next.set(message.id, message);
-      }
-
-      return Array.from(next.values()).sort(compareCreatedAt);
-    });
+    // The history is always kept sorted, so merge in order (in-place update / splice) instead of
+    // rebuilding a Map and re-sorting the whole array on every incoming message. Same final ordering
+    // and dedupe-by-id semantics; still returns a new array so state updates are immutable.
+    setMessages((previous) => mergeMessagesInOrder(previous, incomingMessages));
     void putRecords("messages", incomingMessages);
   }, []);
 
@@ -2756,7 +2765,9 @@ function MessageItem({
           <div
             className="markdown-body"
             dir="auto"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyFor(message)) }}
+            dangerouslySetInnerHTML={{
+              __html: renderMarkdownCached(message.id, bodyFor(message), message.editedAt),
+            }}
           />
         )}
         {message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (

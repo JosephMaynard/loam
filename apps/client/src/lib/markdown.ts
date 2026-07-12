@@ -62,3 +62,45 @@ export function renderMarkdown(markdown: string): string {
 
   return template.innerHTML;
 }
+
+/**
+ * Bounded cache of sanitized message HTML, keyed on `(id, editedAt, body)`. The whole `messages`
+ * array is replaced on every socket event / stream delta, so without a cache every visible message
+ * is re-run through snarkdown + DOMPurify on each delta. The body is part of the key so a streaming
+ * message (same id, growing body) always re-renders, while every other visible row hits the cache.
+ * FIFO eviction (delete-oldest) keeps it from growing without bound.
+ */
+const markdownCache = new Map<string, string>();
+const MARKDOWN_CACHE_LIMIT = 500;
+
+/**
+ * Cached wrapper around {@link renderMarkdown} for message bodies. Returns byte-identical HTML to a
+ * direct `renderMarkdown(body)` call; the cache is invalidated whenever the body or `editedAt`
+ * changes (a distinct key), so edits and streaming updates never show stale HTML.
+ *
+ * @param id - The message id (stable identity for the row).
+ * @param body - The text to render (already resolved, e.g. via `bodyFor`).
+ * @param editedAt - The message's edit timestamp, if any; part of the cache key.
+ * @returns Sanitized, link-hardened HTML.
+ */
+export function renderMarkdownCached(id: string, body: string, editedAt?: number): string {
+  const key = `${id}\n${editedAt ?? ""}\n${body}`;
+  const cached = markdownCache.get(key);
+
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const html = renderMarkdown(body);
+  markdownCache.set(key, html);
+
+  if (markdownCache.size > MARKDOWN_CACHE_LIMIT) {
+    const oldest = markdownCache.keys().next().value;
+
+    if (oldest !== undefined) {
+      markdownCache.delete(oldest);
+    }
+  }
+
+  return html;
+}

@@ -10,6 +10,45 @@ function intlLocale(): string {
   return icuLocale(getActiveLocale());
 }
 
+/**
+ * Per-locale caches for the divider formatters. `dayLabel` runs for every day separator in the
+ * history and both `Intl` constructors are comparatively expensive, so each formatter is built once
+ * per locale and reused. The absolute-date formatter is additionally keyed on whether the year is
+ * shown, since that toggles a formatter option.
+ */
+const relativeFormatters = new Map<string, Intl.RelativeTimeFormat>();
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The cached "Today"/"Yesterday" relative formatter for a locale, built on first use. */
+function relativeFormatter(locale: string): Intl.RelativeTimeFormat {
+  let formatter = relativeFormatters.get(locale);
+
+  if (!formatter) {
+    formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+    relativeFormatters.set(locale, formatter);
+  }
+
+  return formatter;
+}
+
+/** The cached absolute-day formatter for a locale, with the year shown only when `withYear`. */
+function dateFormatter(locale: string, withYear: boolean): Intl.DateTimeFormat {
+  const key = `${locale}|${withYear ? "y" : ""}`;
+  let formatter = dateFormatters.get(key);
+
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      ...(withYear ? { year: "numeric" } : {}),
+    });
+    dateFormatters.set(key, formatter);
+  }
+
+  return formatter;
+}
+
 /** A stable key identifying the local calendar day of a timestamp (e.g. "2026-7-6"). */
 export function dayKey(timestamp: number): string {
   const date = new Date(timestamp);
@@ -29,7 +68,7 @@ export function dayLabel(timestamp: number, now = Date.now()): string {
   // "Today"/"Yesterday" via Intl.RelativeTimeFormat, in the node's UI language so the divider matches
   // the rest of the localized chrome (not the viewer's browser language).
   const locale = intlLocale();
-  const relative = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+  const relative = relativeFormatter(locale);
 
   if (key === dayKey(now)) {
     return capitalize(relative.format(0, "day"), locale);
@@ -45,12 +84,7 @@ export function dayLabel(timestamp: number, now = Date.now()): string {
 
   const date = new Date(timestamp);
   const sameYear = date.getFullYear() === new Date(now).getFullYear();
-  return new Intl.DateTimeFormat(locale, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    ...(sameYear ? {} : { year: "numeric" }),
-  }).format(date);
+  return dateFormatter(locale, !sameYear).format(date);
 }
 
 /** Uppercase the first character, so a divider reads "Today" not "today" at the start of a row.

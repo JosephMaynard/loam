@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
+import { getActiveLocale, setActiveLocale } from "../i18n";
 import { dayKey, dayLabel } from "./dates";
 
 // A fixed reference "now": 2026-07-06 14:30 local time.
@@ -30,5 +31,28 @@ describe("dayLabel", () => {
 
     const otherYear = dayLabel(new Date(2025, 11, 31).getTime(), NOW);
     expect(otherYear).toContain("2025");
+  });
+
+  // The per-locale formatter cache must key on the active locale, not memoize the first one it saw:
+  // switching languages has to produce that language's strings, and repeat calls stay consistent.
+  describe("per-locale formatter cache", () => {
+    afterEach(() => setActiveLocale("en"));
+
+    it("renders relative and absolute labels in the active locale, stable across repeated calls", () => {
+      expect(getActiveLocale()).toBe("en");
+      expect(dayLabel(new Date(2026, 6, 6, 1, 0).getTime(), NOW)).toBe("Today");
+
+      setActiveLocale("es");
+      const todayEs = dayLabel(new Date(2026, 6, 6, 1, 0).getTime(), NOW);
+      const yesterdayEs = dayLabel(new Date(2026, 6, 5, 23, 0).getTime(), NOW);
+      expect(todayEs).toBe("Hoy");
+      expect(yesterdayEs).toBe("Ayer");
+      // Repeat call hits the cache and returns the same locale-correct string.
+      expect(dayLabel(new Date(2026, 6, 6, 1, 0).getTime(), NOW)).toBe(todayEs);
+
+      // Switching back still yields English (the cache is keyed on locale, not sticky).
+      setActiveLocale("en");
+      expect(dayLabel(new Date(2026, 6, 6, 1, 0).getTime(), NOW)).toBe("Today");
+    });
   });
 });
