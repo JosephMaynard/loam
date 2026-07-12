@@ -195,6 +195,117 @@ describe("transport", () => {
     });
   });
 
+  describe("re-handshake retry on a stale session", () => {
+    /** A fresh handshake responder bound to a host identity — used both for the initial
+     * `ensureSession` and for the transparent re-handshake `attemptFetch` triggers. */
+    function handshakeResponder(host: ReturnType<typeof createTransportIdentity>) {
+      return async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      };
+    }
+
+    it("re-handshakes exactly once on a 401 for an established session, then retries and succeeds", async () => {
+      const host = createTransportIdentity();
+      let contentCalls = 0;
+      let handshakeCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          handshakeCalls += 1;
+          return handshakeResponder(host)(url, init);
+        }
+
+        contentCalls += 1;
+
+        if (contentCalls === 1) {
+          // The session the server knew about has expired: reject the first content request.
+          return new Response(null, { status: 401 });
+        }
+
+        // Retry after the transparent re-handshake succeeds — a real session is live again, so seal a
+        // real response the same way the server would.
+        const session = getSession();
+        expect(session).toBeDefined();
+        const aad = `${init.method} ${url}`;
+        const opened = JSON.parse(init.body as string) as { enc: string };
+        expect(openTransport(session!.key, opened.enc, aad)).not.toBeNull();
+        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), aad);
+        return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      expect(handshakeCalls).toBe(1);
+
+      const response = await encryptedFetch("POST", "/api/messages", { text: "hi" });
+
+      // Exactly one retry: two content attempts, and exactly one *additional* handshake (the
+      // transparent re-handshake), never more.
+      expect(contentCalls).toBe(2);
+      expect(handshakeCalls).toBe(2);
+      expect(await response.json()).toEqual({ ok: true });
+      expect(getSession()).toBeDefined();
+    });
+
+    it("gives up after one retry — does not loop on a session that keeps failing", async () => {
+      const host = createTransportIdentity();
+      let contentCalls = 0;
+      let handshakeCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          handshakeCalls += 1;
+          return handshakeResponder(host)(url, init);
+        }
+
+        contentCalls += 1;
+        // Every content request 401s, however many times it's retried.
+        return new Response(null, { status: 401 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      expect(handshakeCalls).toBe(1);
+
+      const response = await encryptedFetch("GET", "/api/channels");
+
+      // Exactly one retry: two content attempts, one re-handshake — never an infinite loop.
+      expect(contentCalls).toBe(2);
+      expect(handshakeCalls).toBe(2);
+      expect(response.status).toBe(401);
+    });
+
+    it("gives up after one retry when the response claims encryption but fails to decrypt twice", async () => {
+      const host = createTransportIdentity();
+      let contentCalls = 0;
+      let handshakeCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          handshakeCalls += 1;
+          return handshakeResponder(host)(url, init);
+        }
+
+        contentCalls += 1;
+        // Claims to be sealed (`x-loam-enc: "1"`) but the payload can't be opened under any session
+        // key the client holds — e.g. a server that rotated its own session state unexpectedly.
+        return new Response(JSON.stringify({ enc: "not-a-real-sealed-payload" }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+
+      await expect(encryptedFetch("GET", "/api/channels")).rejects.toThrow("Transport session expired");
+
+      expect(contentCalls).toBe(2);
+      expect(handshakeCalls).toBe(2);
+    });
+  });
+
   describe("wsUrl", () => {
     it("passes the base URL through unchanged with no session", () => {
       expect(wsUrl("ws://host/ws")).toBe("ws://host/ws");
