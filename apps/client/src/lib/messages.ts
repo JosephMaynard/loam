@@ -3,6 +3,14 @@
  * `createdAt`; these functions preserve that invariant while merging incoming messages cheaply.
  */
 import type { Message } from "@loam/schema";
+import type { Conversation } from "./protocol";
+
+/** Aggregated reaction bucket for one emoji on a target message: its count and whether the current user reacted. */
+export type ReactionSummary = {
+  reaction: string;
+  count: number;
+  active: boolean;
+};
 
 /** Ascending sort comparator by creation time — the canonical order of the message history. */
 export function compareCreatedAt(left: Message, right: Message): number {
@@ -112,4 +120,200 @@ export function mergeMessagesInOrder(previous: Message[], incoming: Message[]): 
   }
 
   return result;
+}
+
+/**
+ * Whether a message belongs to a conversation (channel or DM) from `currentUserId`'s perspective.
+ *
+ * @param message - The message to test.
+ * @param conversation - The conversation scope (channel or DM).
+ * @param currentUserId - The signed-in user's id (used to resolve DM direction).
+ * @returns `true` when the message is in scope for the conversation.
+ */
+export function isConversationMessage(
+  message: Message,
+  conversation: Conversation,
+  currentUserId: string,
+): boolean {
+  if (conversation.kind === "channel") {
+    return (
+      (message.type === "channelPost" || message.type === "channelReply") &&
+      message.channelId === conversation.id
+    );
+  }
+
+  return (
+    message.type === "dm" &&
+    ((message.authorId === currentUserId && message.recipientUserId === conversation.id) ||
+      (message.authorId === conversation.id && message.recipientUserId === currentUserId))
+  );
+}
+
+/**
+ * All messages belonging to a conversation — its posts/replies (or DMs) plus any reactions targeting
+ * those messages — sorted ascending by `createdAt`.
+ *
+ * @param allMessages - The full message history.
+ * @param conversation - The conversation scope (channel or DM).
+ * @param currentUserId - The signed-in user's id (used to resolve DM direction).
+ * @returns The in-scope messages and their reactions, sorted by creation time.
+ */
+export function conversationMessages(
+  allMessages: Message[],
+  conversation: Conversation,
+  currentUserId: string,
+): Message[] {
+  const messages = allMessages.filter((message) =>
+    isConversationMessage(message, conversation, currentUserId),
+  );
+  const ids = new Set(messages.map((message) => message.id));
+  const reactions = allMessages.filter(
+    (message) => message.type === "reaction" && ids.has(message.targetMessageId),
+  );
+  return [...messages, ...reactions].sort(compareCreatedAt);
+}
+
+/**
+ * The top-level (non-reply) messages of a conversation — channel posts for a channel, DMs for a DM —
+ * sorted ascending by `createdAt`.
+ *
+ * @param messages - Messages already scoped to the conversation.
+ * @param conversation - The conversation scope (channel or DM).
+ * @returns The top-level messages, sorted by creation time.
+ */
+export function topLevelMessages(messages: Message[], conversation: Conversation): Message[] {
+  return messages
+    .filter((message) => {
+      if (conversation.kind === "channel") {
+        return message.type === "channelPost";
+      }
+
+      return message.type === "dm";
+    })
+    .sort(compareCreatedAt);
+}
+
+/**
+ * The replies to a given parent message — channel replies with a matching `parentMessageId` — sorted
+ * ascending by `createdAt`.
+ *
+ * @param messages - Messages to scan (the whole conversation, or an already-grouped per-parent slice).
+ * @param parentMessageId - The parent message id to match.
+ * @returns The matching replies, sorted by creation time.
+ */
+export function repliesFor(messages: Message[], parentMessageId: string): Message[] {
+  return messages
+    .filter((message) => message.type === "channelReply" && message.parentMessageId === parentMessageId)
+    .sort(compareCreatedAt);
+}
+
+/**
+ * Aggregate the reactions targeting a message into per-emoji buckets, sorted by count descending then
+ * emoji locale order.
+ *
+ * @param messages - Messages to scan (the whole conversation, or an already-grouped per-target slice).
+ * @param targetMessageId - The target message id to aggregate reactions for.
+ * @param currentUserId - The signed-in user's id (marks a bucket `active` when they reacted).
+ * @returns One `ReactionSummary` per distinct emoji, sorted by count desc then reaction.
+ */
+export function reactionSummary(
+  messages: Message[],
+  targetMessageId: string,
+  currentUserId: string,
+): ReactionSummary[] {
+  const counts = new Map<string, { count: number; active: boolean }>();
+
+  for (const message of messages) {
+    if (message.type !== "reaction" || message.targetMessageId !== targetMessageId) {
+      continue;
+    }
+
+    const current = counts.get(message.reaction) ?? { count: 0, active: false };
+    current.count += 1;
+    current.active = current.active || message.authorId === currentUserId;
+    counts.set(message.reaction, current);
+  }
+
+  return Array.from(counts.entries())
+    .map(([reaction, value]) => ({ reaction, ...value }))
+    .sort((left, right) => right.count - left.count || left.reaction.localeCompare(right.reaction));
+}
+
+/**
+ * Groups channel replies by parent message id so a conversation render can look up a message's
+ * replies in O(1) instead of every message rescanning the full conversation with `repliesFor`.
+ * Pass the resulting per-parent slice back through `repliesFor` (its filter becomes a no-op on an
+ * already-grouped slice) to keep the exact same sort order and output.
+ *
+ * @param messages - All messages in the current conversation scope.
+ * @returns A map from parent message id to its (unsorted) reply messages.
+ */
+export function groupRepliesByParent(messages: Message[]): Map<string, Message[]> {
+  const grouped = new Map<string, Message[]>();
+
+  for (const message of messages) {
+    if (message.type !== "channelReply") {
+      continue;
+    }
+
+    const existing = grouped.get(message.parentMessageId);
+
+    if (existing) {
+      existing.push(message);
+    } else {
+      grouped.set(message.parentMessageId, [message]);
+    }
+  }
+
+  return grouped;
+}
+
+/**
+ * Groups reaction messages by target message id so a conversation render can look up a message's
+ * reactions in O(1) instead of every message rescanning the full conversation with
+ * `reactionSummary`. Pass the resulting per-target slice back through `reactionSummary` (its filter
+ * becomes a no-op on an already-grouped slice) to keep the exact same aggregation and sort order.
+ *
+ * @param messages - All messages in the current conversation scope.
+ * @returns A map from target message id to its reaction messages.
+ */
+export function groupReactionsByTarget(messages: Message[]): Map<string, Message[]> {
+  const grouped = new Map<string, Message[]>();
+
+  for (const message of messages) {
+    if (message.type !== "reaction") {
+      continue;
+    }
+
+    const existing = grouped.get(message.targetMessageId);
+
+    if (existing) {
+      existing.push(message);
+    } else {
+      grouped.set(message.targetMessageId, [message]);
+    }
+  }
+
+  return grouped;
+}
+
+/**
+ * The conversation key a message belongs to from `currentUserId`'s perspective. Reactions have no
+ * conversation of their own, so they return `undefined` (they never drive unread/toasts).
+ *
+ * @param message - The message to classify.
+ * @param currentUserId - The signed-in user's id (used to resolve the DM peer).
+ * @returns The `channel:<id>` / `dm:<peerId>` key, or `undefined` for reactions.
+ */
+export function messageConversationKey(message: Message, currentUserId: string): string | undefined {
+  if (message.type === "channelPost" || message.type === "channelReply") {
+    return `channel:${message.channelId}`;
+  }
+
+  if (message.type === "dm") {
+    const peer = message.authorId === currentUserId ? message.recipientUserId : message.authorId;
+    return `dm:${peer}`;
+  }
+
+  return undefined;
 }

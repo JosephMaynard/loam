@@ -47,7 +47,19 @@ import { UnreadBadge } from "./components/UnreadBadge";
 import { ATTACHMENT_MAX_COUNT, attachmentPath, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { dayKey, dayLabel } from "./lib/dates";
-import { compareCreatedAt, mergeMessagesInOrder } from "./lib/messages";
+import {
+  compareCreatedAt,
+  conversationMessages,
+  groupReactionsByTarget,
+  groupRepliesByParent,
+  isConversationMessage,
+  mergeMessagesInOrder,
+  messageConversationKey,
+  reactionSummary,
+  repliesFor,
+  topLevelMessages,
+  type ReactionSummary,
+} from "./lib/messages";
 import {
   deleteRecord,
   destroyDatabase,
@@ -92,12 +104,6 @@ type Config = {
   websocketPath: string;
   currentUser: User;
   networkConfig: NetworkConfig;
-};
-
-type ReactionSummary = {
-  reaction: string;
-  count: number;
-  active: boolean;
 };
 
 const CURRENT_USER_KEY = "loam.currentUserId";
@@ -224,141 +230,8 @@ async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> 
   }
 }
 
-function isConversationMessage(
-  message: Message,
-  conversation: Conversation,
-  currentUserId: string,
-): boolean {
-  if (conversation.kind === "channel") {
-    return (
-      (message.type === "channelPost" || message.type === "channelReply") &&
-      message.channelId === conversation.id
-    );
-  }
-
-  return (
-    message.type === "dm" &&
-    ((message.authorId === currentUserId && message.recipientUserId === conversation.id) ||
-      (message.authorId === conversation.id && message.recipientUserId === currentUserId))
-  );
-}
-
-function conversationMessages(
-  allMessages: Message[],
-  conversation: Conversation,
-  currentUserId: string,
-): Message[] {
-  const messages = allMessages.filter((message) =>
-    isConversationMessage(message, conversation, currentUserId),
-  );
-  const ids = new Set(messages.map((message) => message.id));
-  const reactions = allMessages.filter(
-    (message) => message.type === "reaction" && ids.has(message.targetMessageId),
-  );
-  return [...messages, ...reactions].sort(compareCreatedAt);
-}
-
-function topLevelMessages(messages: Message[], conversation: Conversation): Message[] {
-  return messages
-    .filter((message) => {
-      if (conversation.kind === "channel") {
-        return message.type === "channelPost";
-      }
-
-      return message.type === "dm";
-    })
-    .sort(compareCreatedAt);
-}
-
-function repliesFor(messages: Message[], parentMessageId: string): Message[] {
-  return messages
-    .filter((message) => message.type === "channelReply" && message.parentMessageId === parentMessageId)
-    .sort(compareCreatedAt);
-}
-
-function reactionSummary(
-  messages: Message[],
-  targetMessageId: string,
-  currentUserId: string,
-): ReactionSummary[] {
-  const counts = new Map<string, { count: number; active: boolean }>();
-
-  for (const message of messages) {
-    if (message.type !== "reaction" || message.targetMessageId !== targetMessageId) {
-      continue;
-    }
-
-    const current = counts.get(message.reaction) ?? { count: 0, active: false };
-    current.count += 1;
-    current.active = current.active || message.authorId === currentUserId;
-    counts.set(message.reaction, current);
-  }
-
-  return Array.from(counts.entries())
-    .map(([reaction, value]) => ({ reaction, ...value }))
-    .sort((left, right) => right.count - left.count || left.reaction.localeCompare(right.reaction));
-}
-
 /** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
 const EMPTY_MESSAGES: Message[] = [];
-
-/**
- * Groups channel replies by parent message id so a conversation render can look up a message's
- * replies in O(1) instead of every message rescanning the full conversation with `repliesFor`.
- * Pass the resulting per-parent slice back through `repliesFor` (its filter becomes a no-op on an
- * already-grouped slice) to keep the exact same sort order and output.
- *
- * @param messages - All messages in the current conversation scope.
- * @returns A map from parent message id to its (unsorted) reply messages.
- */
-function groupRepliesByParent(messages: Message[]): Map<string, Message[]> {
-  const grouped = new Map<string, Message[]>();
-
-  for (const message of messages) {
-    if (message.type !== "channelReply") {
-      continue;
-    }
-
-    const existing = grouped.get(message.parentMessageId);
-
-    if (existing) {
-      existing.push(message);
-    } else {
-      grouped.set(message.parentMessageId, [message]);
-    }
-  }
-
-  return grouped;
-}
-
-/**
- * Groups reaction messages by target message id so a conversation render can look up a message's
- * reactions in O(1) instead of every message rescanning the full conversation with
- * `reactionSummary`. Pass the resulting per-target slice back through `reactionSummary` (its filter
- * becomes a no-op on an already-grouped slice) to keep the exact same aggregation and sort order.
- *
- * @param messages - All messages in the current conversation scope.
- * @returns A map from target message id to its reaction messages.
- */
-function groupReactionsByTarget(messages: Message[]): Map<string, Message[]> {
-  const grouped = new Map<string, Message[]>();
-
-  for (const message of messages) {
-    if (message.type !== "reaction") {
-      continue;
-    }
-
-    const existing = grouped.get(message.targetMessageId);
-
-    if (existing) {
-      existing.push(message);
-    } else {
-      grouped.set(message.targetMessageId, [message]);
-    }
-  }
-
-  return grouped;
-}
 
 /**
  * Per-locale cache of the hours-and-minutes time formatter. Building an `Intl.DateTimeFormat` is
@@ -431,27 +304,6 @@ function backRouteForThread(conversation: Conversation): string {
  */
 function conversationKey(conversation: Conversation): string {
   return `${conversation.kind}:${conversation.id}`;
-}
-
-/**
- * The conversation key a message belongs to from `currentUserId`'s perspective. Reactions have no
- * conversation of their own, so they return `undefined` (they never drive unread/toasts).
- *
- * @param message - The message to classify.
- * @param currentUserId - The signed-in user's id (used to resolve the DM peer).
- * @returns The `channel:<id>` / `dm:<peerId>` key, or `undefined` for reactions.
- */
-function messageConversationKey(message: Message, currentUserId: string): string | undefined {
-  if (message.type === "channelPost" || message.type === "channelReply") {
-    return `channel:${message.channelId}`;
-  }
-
-  if (message.type === "dm") {
-    const peer = message.authorId === currentUserId ? message.recipientUserId : message.authorId;
-    return `dm:${peer}`;
-  }
-
-  return undefined;
 }
 
 /**
