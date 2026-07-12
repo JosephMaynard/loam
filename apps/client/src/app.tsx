@@ -550,6 +550,10 @@ function LoamApp() {
   // on a failed boot fetch (retry with backoff instead of stranding the app offline).
   const [syncTick, setSyncTick] = useState(0);
   const syncFailuresRef = useRef(0);
+  // Latches once the initial IndexedDB hydration has run, so reconnects (which re-run the boot effect
+  // via `syncTick`) go straight to the network refetch instead of re-reading the whole cache and
+  // clobbering fresher in-memory state with the on-disk snapshot.
+  const hydratedRef = useRef(false);
   const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   // Who is connected right now (server presence events; empty when the node disables presence).
@@ -1234,38 +1238,53 @@ function LoamApp() {
 
   useEffect(() => {
     let active = true;
+    let retryTimer: number | undefined;
 
-    Promise.all([
-      getAllRecords<Channel>("channels"),
-      getAllRecords<User>("users"),
-      getAllRecords<Message>("messages"),
-      getAllRecords<ConversationReads>("sync"),
-    ])
-      .then(([cachedChannels, cachedUsers, cachedMessages, cachedSync]) => {
+    void (async () => {
+      // Hydrate from IndexedDB once, on first mount, and AWAIT it before any network request or the
+      // WebSocket opens: a slow cache read that resolved *after* the network fetch would otherwise
+      // overwrite fresher server data with the stale on-disk snapshot. Reconnects (which re-run this
+      // effect via `syncTick`) skip re-hydration entirely — the network refetch below is the source
+      // of truth once we're live.
+      if (!hydratedRef.current) {
+        hydratedRef.current = true;
+
+        try {
+          const [cachedChannels, cachedUsers, cachedMessages, cachedSync] = await Promise.all([
+            getAllRecords<Channel>("channels"),
+            getAllRecords<User>("users"),
+            getAllRecords<Message>("messages"),
+            getAllRecords<ConversationReads>("sync"),
+          ]);
+
+          if (!active) {
+            return;
+          }
+
+          setChannels(cachedChannels);
+          upsertUsers([currentUser, ...cachedUsers]);
+          setMessages(cachedMessages.sort(compareCreatedAt));
+
+          const reads = cachedSync.find((record) => record.id === CONVERSATION_READS_KEY)?.reads;
+
+          if (reads) {
+            lastReadRef.current = reads;
+            setLastReadByConversation(reads);
+          }
+        } catch {
+          // Best effort — an unreadable cache just means we start from the network.
+        }
+
         if (!active) {
           return;
         }
+      }
 
-        setChannels(cachedChannels);
-        upsertUsers([currentUser, ...cachedUsers]);
-        setMessages(cachedMessages.sort(compareCreatedAt));
-
-        const reads = cachedSync.find((record) => record.id === CONVERSATION_READS_KEY)?.reads;
-
-        if (reads) {
-          lastReadRef.current = reads;
-          setLastReadByConversation(reads);
-        }
-      })
-      .catch(() => undefined);
-
-    let retryTimer: number | undefined;
-
-    // Config first: it identifies the session and says whether this user may read content at all.
-    // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
-    // participating user; approval flips `currentUser.pending`, which re-runs this effect.
-    fetchConfigJson()
-      .then(async (nextConfig) => {
+      // Config first: it identifies the session and says whether this user may read content at all.
+      // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
+      // participating user; approval flips `currentUser.pending`, which re-runs this effect.
+      await fetchConfigJson()
+        .then(async (nextConfig) => {
         if (!active) {
           return;
         }
@@ -1361,6 +1380,7 @@ function LoamApp() {
         syncFailuresRef.current += 1;
         retryTimer = window.setTimeout(() => setSyncTick((tick) => tick + 1), delay);
       });
+    })();
 
     return () => {
       active = false;
