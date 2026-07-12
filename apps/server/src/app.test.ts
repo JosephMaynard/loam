@@ -4239,6 +4239,32 @@ describe("deploy hardening (docs/15)", () => {
       await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })
     ).json() as { networkConfig: { allowAdminClaim: boolean } };
     expect(after.networkConfig.allowAdminClaim).toBe(true);
+    expect(app.getAdminSetupCode()).toBeTruthy(); // a usable single-use code was actually minted
+  });
+
+  it("clears the setup code when bootstrap switches away, re-minting a fresh one on switching back (#8)", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const setBootstrap = (bootstrap: string) =>
+      app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { admin: { bootstrap } },
+      });
+
+    await setBootstrap("setupCode");
+    const code1 = app.getAdminSetupCode();
+    expect(code1).toBeTruthy();
+
+    // Switching away invalidates the outstanding code immediately.
+    await setBootstrap("firstUser");
+    expect(app.getAdminSetupCode()).toBeUndefined();
+
+    // Switching back mints a FRESH code, not the abandoned one.
+    await setBootstrap("setupCode");
+    expect(app.getAdminSetupCode()).toBeTruthy();
+    expect(app.getAdminSetupCode()).not.toBe(code1);
   });
 
   it("prunes peerSyncStatus when a peer is removed via config PATCH (#9)", async () => {
@@ -4263,5 +4289,19 @@ describe("deploy hardening (docs/15)", () => {
       await app.server.inject({ method: "GET", url: "/api/admin/sync", headers: { cookie: admin.cookie } })
     ).json() as { peers: { url: string }[] };
     expect(after.peers.some((peer) => peer.url === "http://peer-a.invalid")).toBe(false);
+
+    // Re-adding the same peer creates a fresh status entry — the prune cleared the slot, it didn't
+    // just filter the report.
+    await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { sync: { peers: [{ url: "http://peer-a.invalid" }] } },
+    });
+    await app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+    const readded = (
+      await app.server.inject({ method: "GET", url: "/api/admin/sync", headers: { cookie: admin.cookie } })
+    ).json() as { peers: { url: string; status?: unknown }[] };
+    expect(readded.peers.some((peer) => peer.url === "http://peer-a.invalid" && peer.status)).toBe(true);
   });
 });

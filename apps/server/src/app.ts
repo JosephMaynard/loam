@@ -196,8 +196,13 @@ class IdentityLimitError extends Error {
 export type LoamApp = {
   server: FastifyInstance;
   store: LoamStore;
-  /** One-time admin claim code, present when bootstrap is `setupCode` and no admin exists yet. */
+  /** One-time admin claim code, present when bootstrap is `setupCode` and no admin exists yet. A
+   * boot-time snapshot; use `getAdminSetupCode()` to read the value after it's re-minted/cleared at
+   * runtime. */
   adminSetupCode?: string;
+  /** The live one-time admin claim code (re-minted/cleared at runtime by the kill switch or a config
+   * PATCH entering/leaving setupCode bootstrap) — survives the test wrapper's object spread. */
+  getAdminSetupCode(): string | undefined;
   /** Delete messages older than the configured retention TTL now (also runs on a timer). */
   reapExpiredMessages(): void;
   /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
@@ -4522,6 +4527,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const switchedToSetupCode = next.admin.bootstrap === "setupCode" && appConfig.admin.bootstrap !== "setupCode";
+    const switchedAwayFromSetupCode =
+      appConfig.admin.bootstrap === "setupCode" && next.admin.bootstrap !== "setupCode";
     appConfig = next;
     store.setConfigValue("config", JSON.stringify(appConfig));
     // Drop live sync-status for peers an admin just removed, so peerSyncStatus can't accrete entries
@@ -4540,6 +4547,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (switchedToSetupCode && adminSetupCode === undefined) {
       adminSetupCode = makeAdminSetupCode();
       server.log.info(`Admin setup code (single use): ${adminSetupCode}`);
+    } else if (switchedAwayFromSetupCode) {
+      // Leaving setupCode invalidates the outstanding code immediately, so a later switch back mints a
+      // fresh one (and a code minted for a now-abandoned mode can't be claimed later).
+      adminSetupCode = undefined;
     }
     ensureBotUser();
     // Enabling mesh mints + publishes identity keys for existing local users so they're reachable.
@@ -4666,7 +4677,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     get store() {
       return store;
     },
+    // Boot-time snapshot (kept for existing callers). The code is also (re)minted/cleared at runtime
+    // (kill switch, a config PATCH entering/leaving setupCode), so read the LIVE value via
+    // getAdminSetupCode() — a method survives the test wrapper's `{ ...app }` spread, a getter wouldn't.
     adminSetupCode,
+    getAdminSetupCode: () => adminSetupCode,
     reapExpiredMessages,
     reapOrphanedAttachments,
     async close() {

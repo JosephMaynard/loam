@@ -839,9 +839,15 @@ function LoamApp() {
     // can't clear) survives and a reload re-hydrates the wiped identity. A node kill switch already
     // invalidated every session server-side, so only the device scope needs this (docs/15 #4).
     if (scope === "device") {
-      await fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include" }).catch(() => {
-        // best effort — the local purge below still runs
-      });
+      // Bound it with the standard timeout so a hung/unreachable server can't stall the wipe — the
+      // local purge below is the part that actually matters and must always run (docs/15 #4).
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      await fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal: controller.signal })
+        .catch(() => {
+          // best effort — the local purge below still runs
+        })
+        .finally(() => window.clearTimeout(timeout));
     }
     setMessages([]);
     setChannels([]);

@@ -43,7 +43,14 @@ self.addEventListener("fetch", (event) => {
 
           return response;
         })
-        .catch(() => caches.match(request).then((cached) => cached || caches.match("/channels"))),
+        .catch(() =>
+          caches
+            .match(request)
+            .then((cached) => cached || caches.match("/channels"))
+            // Guarantee respondWith always receives a Response: offline with neither the request nor
+            // the /channels shell cached would otherwise resolve to undefined.
+            .then((cached) => cached || Response.error()),
+        ),
     );
     return;
   }
