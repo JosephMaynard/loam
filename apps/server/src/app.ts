@@ -892,7 +892,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     authMode: "anonymous" | "bound";
     userId?: string;
     identityTokenHash?: string;
-    resumeResult?: { currentUser: unknown; token: string };
+    resumeResult?: { s?: number; m: string; p: string; currentUser: unknown; token: string };
   }
   const transportSessions = new Map<string, TransportSession>();
   // Secure identity tokens (docs/20): tokenHash → userId, mirrored in memory from the DAL. SEPARATE from
@@ -914,6 +914,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // The resolved transport session for a request, so `preValidation` can run the anti-replay window
   // against the same session `onRequest` authenticated. WeakMap → GC'd with the request.
   const transportRequestSessions = new WeakMap<FastifyRequest, TransportSession>();
+  // The sealed request's authenticated sequence number `s` (docs/20 §9), stashed in preValidation so the
+  // tunnel + resume handlers can BIND it into their sealed response descriptor — the client verifies the
+  // response answers the exact `{ s, m, p }` it sent, defeating a cross-fed response under the tunnel's
+  // constant AAD. WeakMap → GC'd with the request.
+  const transportRequestSeq = new WeakMap<FastifyRequest, number>();
   // Per-boot secret proving a request is an internal re-dispatch from the transport tunnel handler
   // (`POST /api/transport/tunnel`, docs/08), not a real client socket. 256 bits of randomness compared
   // in constant time — an external request can't forge it, so the transport-enforcement bypass it
@@ -1437,6 +1442,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       routeUrl !== "/api/health" &&
       routeUrl !== "/api/transport/handshake" &&
       routeUrl !== "/api/session/resume" &&
+      routeUrl !== "/api/session/logout" &&
       routeUrl !== "/api/transport/tunnel"
     );
   }
@@ -1540,12 +1546,47 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    // Tear down any BOUND transport sessions for this user (docs/20) so a banned user's live sealed
+    // session stops working at once. The identity TOKEN is deliberately KEPT (like the cookie session
+    // mapping above): a reconnect re-binds to the SAME banned identity, so the ban stays pinned rather
+    // than being shed by a fresh handshake+resume.
+    for (const [sid, session] of [...transportSessions]) {
+      if (session.userId === userId) {
+        transportSessions.delete(sid);
+      }
+    }
+
     for (const socketSession of [...sockets]) {
       if (socketSession.userId === userId) {
         socketSession.socket.close();
         sockets.delete(socketSession);
       }
     }
+  }
+
+  /** Revoke a secure identity token (docs/20 §8) — for explicit logout / device wipe / rotation, where
+   * the user is discarding the identity itself (unlike a ban, which keeps the token pinned). Deletes the
+   * token row (memory + store), drops every transport session it bound, and closes that identity's
+   * sockets. Returns the userId the token authenticated, or undefined if it was already gone. */
+  function revokeIdentityToken(tokenHash: string): string | undefined {
+    const userId = identityTokens.get(tokenHash);
+    identityTokens.delete(tokenHash);
+    store.deleteIdentityToken(tokenHash);
+
+    for (const [sid, session] of [...transportSessions]) {
+      if (session.identityTokenHash === tokenHash) {
+        transportSessions.delete(sid);
+      }
+    }
+    if (userId) {
+      for (const socketSession of [...sockets]) {
+        if (socketSession.userId === userId) {
+          socketSession.socket.close();
+          sockets.delete(socketSession);
+        }
+      }
+    }
+    return userId;
   }
 
   /**
@@ -2604,6 +2645,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     await rm(attachmentsDir, { recursive: true, force: true });
     attachmentOwners.clear();
     sessions.clear();
+    // Drop every secure identity token (docs/20): the DB rows are gone (wipeAll / encrypted file delete),
+    // so clear the in-memory mirror too — no wiped identity can be resumed after an emergency reset.
+    identityTokens.clear();
     claimAttempts.clear();
     panicAttempts.clear();
 
@@ -3731,6 +3775,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // a captured-and-replayed request (docs/08).
         return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
       }
+      transportRequestSeq.set(request, envelope.s);
       request.body = envelope.b;
       return;
     }
@@ -3945,9 +3990,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     activeSession.authMode = "bound";
     activeSession.userId = userId;
     activeSession.identityTokenHash = tokenHash;
-    const result = { currentUser: rolesVisibleUser(currentUser), token };
+    // Bind the response to the request it answers (docs/20 §9). Resume's aad is the same for every resume
+    // request, and the response carries the secret token, so the client MUST confirm this reply is for
+    // the exact `{ s, m, p }` it sent before storing the token.
+    const result = {
+      s: transportRequestSeq.get(request),
+      m: "POST",
+      p: "/api/session/resume",
+      currentUser: rolesVisibleUser(currentUser),
+      token,
+    };
     activeSession.resumeResult = result;
     return result;
+  });
+
+  // Sealed logout / device-wipe revocation (docs/20 §8). A DIRECT sealed endpoint (like resume) so it can
+  // reach the outer bound session. Revokes THIS device's secure identity token — deletes its row, drops
+  // the transport sessions it bound, and closes its sockets — so a later resume with the same token fails
+  // (401) and the identity can't be rehydrated. The client calls this BEFORE wiping its local IndexedDB.
+  server.post("/api/session/logout", async (request, reply) => {
+    const activeSession = transportRequestSessions.get(request);
+    if (!activeSession) {
+      return reply.code(400).send(errorBody("Logout requires an encrypted session"));
+    }
+    // Only a bound session has a secure token to revoke; a cookie session logs out via /api/session/end.
+    if (activeSession.authMode === "bound" && activeSession.identityTokenHash) {
+      revokeIdentityToken(activeSession.identityTokenHash);
+    }
+    return { ok: true };
   });
 
   // Methods the tunnel may re-dispatch — the full set the REST API uses. Validated so the cast to
@@ -4032,17 +4102,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       payload: hasBody ? JSON.stringify(payload?.body) : undefined,
     });
 
-    // Forward a freshly-minted session cookie (identity bootstrap through the tunnel) on the OUTER
-    // response — the browser must see Set-Cookie in a real response header to store it. The cookie is
-    // an opaque session token; it's the same value it would set on a direct request.
+    // Forward a freshly-minted session cookie on the OUTER response for an ANONYMOUS optional-mode tunnel
+    // (identity bootstrap through the tunnel) — the browser must see Set-Cookie to store it. A bound
+    // session's inner request mints no cookie (identity came via `x-loam-user`), so there's nothing to
+    // forward there.
     const setCookie = injected.headers["set-cookie"];
     if (setCookie !== undefined) {
       reply.header("set-cookie", setCookie);
     }
 
-    // The onSend transport hook seals THIS descriptor (a JSON string) under the tunnel route's aad, so
-    // the real status/content-type/body never appear in cleartext. Body is base64 for lossless binary.
+    // The onSend transport hook seals THIS descriptor (a JSON string) under the tunnel route's CONSTANT
+    // aad, so the real status/content-type/body never appear in cleartext. Because the aad is the same
+    // for every tunnel request, we BIND the response to the exact request it answers (docs/20 §9): the
+    // authenticated sequence `s`, method `m`, and path `p` the client sealed. The client verifies these
+    // before using the body — so an attacker can't cross-feed one in-flight response as another's. Body
+    // is base64 for lossless binary.
     return {
+      s: transportRequestSeq.get(request),
+      m: method,
+      p: path,
       status: injected.statusCode,
       contentType: injected.headers["content-type"] ?? "application/octet-stream",
       bodyB64: injected.rawPayload.toString("base64"),

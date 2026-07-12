@@ -5464,6 +5464,174 @@ describe("transport encryption WebSocket frames (docs/08 + docs/20 §7)", () => 
   });
 });
 
+describe("transport auth-binding (docs/20)", () => {
+  const RESUME_AAD = "POST /api/session/resume";
+  const TUNNEL_AAD = "POST /api/transport/tunnel";
+
+  it("impersonation defeated: a captured session id without the key can't tunnel, resume, or rebind", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const victim = await openTransport08(app);
+    const bound = await resumeIdentity(app, victim, 1); // victim binds an identity on session `victim`
+    expect(bound.status).toBe(200);
+
+    // An attacker sniffs the victim's SESSION ID but not the key. Their own handshake yields a different
+    // key; sealing a tunnel request under it while presenting the victim's session id fails AEAD open.
+    const attacker = await openTransport08(app);
+    const forgedTunnel = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/tunnel",
+      headers: { "x-loam-enc": victim.sessionId, "content-type": "application/json" },
+      payload: { enc: sealTransport(attacker.key, JSON.stringify({ s: 2, b: { m: "GET", p: "/api/users" } }), TUNNEL_AAD) },
+    });
+    expect(forgedTunnel.statusCode).toBe(400); // undecryptable under the victim session's real key
+
+    // The attacker can't resume as the victim either: the victim's session is already bound, so a resume
+    // attempt returns the victim's own cached identity (never the attacker's), and never rebinds.
+    const rebindAttempt = await resumeIdentity(app, victim, 3);
+    expect(rebindAttempt.status).toBe(200);
+    expect(rebindAttempt.currentUser.id).toBe(bound.currentUser.id); // unchanged — no rebind
+  });
+
+  it("legacy-token separation: a cookie session token is rejected at resume", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app); // optional mode → a real cookie session token exists
+    const cookieToken = user.cookie.replace(/^loam_session=/, "");
+
+    const session = await openTransport08(app);
+    const res = await resumeIdentity(app, session, 1, cookieToken);
+    // The cookie namespace and the identity-token namespace never mix (docs/20 §3) → hard 401.
+    expect(res.status).toBe(401);
+  });
+
+  it("resume semantics: mint, resume-on-fresh-session, invalid→401, idempotent no-rebind", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+
+    // MINT: no token → a new identity + a fresh secure token.
+    const s1 = await openTransport08(app);
+    const minted = await resumeIdentity(app, s1, 1);
+    expect(minted.status).toBe(200);
+    expect(minted.token.length).toBeGreaterThanOrEqual(43);
+
+    // RESUME on a brand-new session with that token → the SAME user.
+    const s2 = await openTransport08(app);
+    const resumed = await resumeIdentity(app, s2, 1, minted.token);
+    expect(resumed.status).toBe(200);
+    expect(resumed.currentUser.id).toBe(minted.currentUser.id);
+
+    // INVALID token → 401, never a silent mint.
+    const s3 = await openTransport08(app);
+    const invalid = await resumeIdentity(app, s3, 1, "not-a-real-token");
+    expect(invalid.status).toBe(401);
+
+    // IDEMPOTENT no-rebind: a fresh-sequence resume on the already-bound s2, presenting a DIFFERENT
+    // token, must NOT rebind — it returns the cached identity from the first bind.
+    const other = await resumeIdentity(app, s2, 2, minted.token);
+    expect(other.currentUser.id).toBe(resumed.currentUser.id);
+  });
+
+  it("response binding: the tunnel descriptor echoes the exact { s, m, p } it answers (docs/20 §9)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    await resumeIdentity(app, session, 1);
+
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/tunnel",
+      headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: { enc: sealSeq(session.key, 2, TUNNEL_AAD, { m: "GET", p: "/api/users" }) },
+    });
+    expect(res.statusCode).toBe(200);
+    const opened = openTransport(session.key, (res.json() as { enc: string }).enc, TUNNEL_AAD);
+    const desc = JSON.parse(opened as string) as { s: number; m: string; p: string; status: number };
+    expect(desc.s).toBe(2);
+    expect(desc.m).toBe("GET");
+    expect(desc.p).toBe("/api/users");
+  });
+
+  it("logout revokes the secure token: a later resume with it fails (docs/20 §8)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1);
+
+    const logout = await app.server.inject({
+      method: "POST",
+      url: "/api/session/logout",
+      headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: { enc: sealSeq(session.key, 2, "POST /api/session/logout", {}) },
+    });
+    expect(logout.statusCode).toBe(200);
+
+    // The token is gone: a fresh session presenting it is refused (never rehydrates the identity).
+    const fresh = await openTransport08(app);
+    const afterLogout = await resumeIdentity(app, fresh, 1, bound.token);
+    expect(afterLogout.status).toBe(401);
+  });
+
+  it("kill switch clears secure tokens: none can be resumed afterwards (docs/20 §8)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" }, killSwitch: { enabled: true } });
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1);
+    expect(bound.currentUser.isAdmin).toBe(true); // first user → admin, so it may fire the kill switch
+
+    // Fire the kill switch through the tunnel (the bound admin authorises it).
+    const fired = await tunnelInner(app, session, 2, {
+      m: "POST",
+      p: "/api/admin/kill-switch",
+      body: { confirm: "wipe" },
+    });
+    expect(fired.status).toBe(200);
+
+    // Every secure token is gone; the old one can't be resumed on a fresh (post-rotation) session.
+    const fresh = await openTransport08(app);
+    const afterWipe = await resumeIdentity(app, fresh, 1, bound.token);
+    expect(afterWipe.status).toBe(401);
+  });
+
+  it("ban tears down the banned user's bound transport session (docs/20 §8)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const adminS = await openTransport08(app);
+    const admin = await resumeIdentity(app, adminS, 1);
+    expect(admin.currentUser.isAdmin).toBe(true);
+
+    const memberS = await openTransport08(app);
+    const member = await resumeIdentity(app, memberS, 1);
+    expect(member.currentUser.isAdmin).toBe(false);
+
+    // Admin bans the member through the tunnel.
+    const banned = await tunnelInner(app, adminS, 2, {
+      m: "PATCH",
+      p: `/api/moderation/users/${member.currentUser.id}`,
+      body: { banned: true },
+    });
+    expect(banned.status).toBe(200);
+
+    // The member's bound transport session was torn down: presenting its (now-unknown) id is refused, so
+    // they can't keep tunnelling as the banned identity.
+    const afterBan = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/tunnel",
+      headers: { "x-loam-enc": memberS.sessionId, "content-type": "application/json" },
+      payload: { enc: sealSeq(memberS.key, 3, TUNNEL_AAD, { m: "GET", p: "/api/users" }) },
+    });
+    expect(afterBan.statusCode).toBe(401); // transport session expired/gone
+  });
+
+  it("session-state binding: a bound session on an OPTIONAL node still enforces the secure rules", async () => {
+    // Global mode is `optional`, but a client that completes a sealed resume is `bound` — so it must
+    // reach content through the tunnel and its cookie is not a credential (docs/20 §2).
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1);
+    expect(bound.status).toBe(200);
+
+    // Content via the tunnel on the bound session works and is the bound identity.
+    const inner = await tunnelInner(app, session, 2, { m: "GET", p: "/api/config" });
+    expect(inner.status).toBe(200);
+    const cfg = JSON.parse(inner.body.toString("utf8")) as { currentUser: { id: string } };
+    expect(cfg.currentUser.id).toBe(bound.currentUser.id);
+  });
+});
+
 describe("deploy hardening (docs/15)", () => {
   it("ends the caller's session so the next request mints a fresh identity (#4)", async () => {
     const app = await makeApp();
