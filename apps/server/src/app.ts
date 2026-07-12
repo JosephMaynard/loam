@@ -76,6 +76,13 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
 import { importLegacyJsonData, openStore, type LoamStore, type StoreDriver } from "./db.js";
+import {
+  fetchPeerTransportPosture,
+  handshakeWithPeer,
+  sealedFetch,
+  type PeerTransportPosture,
+  type PeerTransportSession,
+} from "./sync-transport.js";
 
 type SocketClient = {
   OPEN: number;
@@ -1029,6 +1036,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     imported: number;
   };
   const peerSyncStatus = new Map<string, PeerSyncStatus>();
+  // Cached per-peer transport decision (docs/08), keyed by peer URL, so the 5s sync tick reuses one
+  // encrypted session (or a settled "this peer runs plaintext" verdict) instead of re-probing every
+  // round. A live session is held ~just under the peer's 12h server-side TTL (and re-established on a
+  // 401 / decrypt failure); a plaintext verdict is held only briefly so a peer that *enables* transport
+  // is picked up within minutes. RAM-only; a restart re-probes lazily.
+  const peerTransportSessions = new Map<
+    string,
+    { transport: PeerTransportSession | "plaintext"; expiresAt: number }
+  >();
+  const PEER_TRANSPORT_SESSION_TTL_MS = 11 * 3_600_000;
+  const PEER_PLAINTEXT_RECHECK_MS = 5 * 60_000;
   let syncRunning = false;
   let lastSyncLoopAt = 0;
   // Bumped by every kill-switch wipe. A sync round captures it before its first await and abandons
@@ -2737,6 +2755,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // captured session key survives the wipe (docs/08). loadData reloaded whatever was persisted
     // (the old key on an unencrypted wipe), so rotate explicitly to guarantee a fresh one on both paths.
     rotateTransportIdentity();
+    // Drop cached puller-side sessions to peers too — RAM hygiene during an emergency wipe (docs/08).
+    peerTransportSessions.clear();
 
     if (appConfig.admin.bootstrap === "setupCode") {
       adminSetupCode = makeAdminSetupCode();
@@ -3049,25 +3069,114 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // inside this; anything larger is not a LOAM peer talking in good faith.
   const maxPeerJsonBytes = 8 * 1024 * 1024;
 
-  /** GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. */
+  /** The shared sync-token header (if configured), presented so a token-guarded peer will serve us and
+   * harmless when the peer runs open. Under transport encryption this rides INSIDE the sealed session. */
+  function peerSyncHeaders(): Record<string, string> {
+    return appConfig.sync.token ? { "x-loam-sync-token": appConfig.sync.token } : {};
+  }
+
+  /** Handshake a fresh transport session against a peer (honouring any operator-pinned key) and cache
+   * it. The pinned key comes from the peer's own sync-config entry (`SyncPeer.transportKey`). */
+  async function handshakePeerAndCache(peerUrl: string): Promise<PeerTransportSession> {
+    const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
+    const session = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
+    peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
+    return session;
+  }
+
+  /** Record (briefly) that a peer is talked to in the clear, so an off-mode peer isn't re-probed via
+   * `/api/config` on every 5s tick — but is re-checked often enough to notice it enabling transport. */
+  function cachePlaintext(peerUrl: string): "plaintext" {
+    peerTransportSessions.set(peerUrl, { transport: "plaintext", expiresAt: Date.now() + PEER_PLAINTEXT_RECHECK_MS });
+    return "plaintext";
+  }
+
+  /**
+   * Resolve how to talk to a peer (docs/08): reuse a cached decision, else read the peer's advertised
+   * posture from its `/api/config` and handshake if it wants encryption. Returns a live transport
+   * session, or `"plaintext"` for the unchanged clear path.
+   *
+   * A peer's own sync-config entry may **pin** its transport key (`SyncPeer.transportKey`), which both
+   * upgrades the channel to active-MITM resistance and means we go encrypted regardless of what the
+   * (plain-HTTP, attacker-mutable) `/api/config` claims — a pinned peer that fails the handshake **fails
+   * closed** (the error propagates, so the sync round records it, rather than a silent plaintext pull).
+   * Unpinned: a peer advertising `required` also fails closed on a handshake failure; an `optional`
+   * peer degrades to plaintext (it still serves the clear path); and a peer we can't read a posture from
+   * at all (older peer, or `/api/config` unreachable/non-2xx) falls back to plaintext exactly as before
+   * transport encryption existed — if it truly required transport the plaintext pull just 401s and the
+   * round records a normal failure, never a silent wrong result.
+   */
+  async function resolvePeerTransport(peerUrl: string): Promise<PeerTransportSession | "plaintext"> {
+    const cached = peerTransportSessions.get(peerUrl);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.transport;
+    }
+    peerTransportSessions.delete(peerUrl);
+
+    const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
+
+    // A pinned key is held out-of-band, so we can (and must) go encrypted without trusting `/api/config`.
+    if (pinnedKey) {
+      return await handshakePeerAndCache(peerUrl);
+    }
+
+    let posture: PeerTransportPosture;
+    try {
+      posture = await fetchPeerTransportPosture(peerUrl);
+    } catch {
+      // Couldn't learn the posture (older peer without the field, or an unreachable/erroring
+      // `/api/config`) → preserve the legacy plaintext path.
+      return cachePlaintext(peerUrl);
+    }
+
+    if (posture.mode === "off" || !posture.publicKey) {
+      return cachePlaintext(peerUrl);
+    }
+
+    try {
+      return await handshakePeerAndCache(peerUrl);
+    } catch (error) {
+      if (posture.mode === "required") {
+        throw error;
+      }
+      return cachePlaintext(peerUrl);
+    }
+  }
+
+  /**
+   * GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. Transparently
+   * routes through the peer's transport session when it advertises encryption (docs/08) — so the sync
+   * digest/messages requests AND the `x-loam-sync-token` bearer secret travel sealed — and stays a
+   * plain HTTP request against a peer running transport `off`.
+   */
   async function fetchPeerJson<T>(
     peerUrl: string,
     path: string,
     schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
     body?: unknown,
   ): Promise<T> {
+    const transport = await resolvePeerTransport(peerUrl);
+    const raw =
+      transport === "plaintext"
+        ? await fetchPeerText(peerUrl, path, body)
+        : await sealedFetchPeerText(transport, peerUrl, path, body);
+
+    const parsed = schema.safeParse(JSON.parse(raw));
+    if (!parsed.success) {
+      throw new Error("Peer sent an invalid payload");
+    }
+    return parsed.data;
+  }
+
+  /** Plain-HTTP peer request (transport `off`): the pre-encryption path, unchanged. */
+  async function fetchPeerText(peerUrl: string, path: string, body?: unknown): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
 
     try {
-      // Present the shared mesh token (if configured) so a token-guarded peer will serve us; harmless
-      // when the peer runs open.
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...peerSyncHeaders() };
       if (body !== undefined) {
         headers["content-type"] = "application/json";
-      }
-      if (appConfig.sync.token) {
-        headers["x-loam-sync-token"] = appConfig.sync.token;
       }
 
       const response = await fetch(`${peerUrl.replace(/\/+$/, "")}${path}`, {
@@ -3081,17 +3190,37 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         throw new Error(`Peer answered ${response.status}`);
       }
 
-      const raw = await readPeerBody(response, maxPeerJsonBytes);
-      const parsed = schema.safeParse(JSON.parse(raw.toString("utf8")));
-
-      if (!parsed.success) {
-        throw new Error("Peer sent an invalid payload");
-      }
-
-      return parsed.data;
+      return (await readPeerBody(response, maxPeerJsonBytes)).toString("utf8");
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  /** Sealed peer request over a live transport session, with a one-shot re-handshake on expiry. */
+  async function sealedFetchPeerText(
+    session: PeerTransportSession,
+    peerUrl: string,
+    path: string,
+    body?: unknown,
+  ): Promise<string> {
+    const response = await sealedFetch(session, peerUrl, path, {
+      body,
+      headers: peerSyncHeaders(),
+      maxBytes: maxPeerJsonBytes,
+      reHandshake: async () => {
+        try {
+          return await handshakePeerAndCache(peerUrl);
+        } catch {
+          peerTransportSessions.delete(peerUrl);
+          return undefined;
+        }
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Peer answered ${response.status}`);
+    }
+    return response.text;
   }
 
   /**
@@ -5496,6 +5625,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         peerSyncStatus.delete(url);
       }
     }
+    // Drop every cached puller-side transport session (docs/08): a peer's URL, pinned transportKey, or
+    // the sync token may have just changed, so an entry established under the old config could be stale
+    // or pinned to a now-wrong key. They re-handshake lazily on the next sync tick.
+    peerTransportSessions.clear();
     // Switching INTO setupCode bootstrap at runtime must mint a code — otherwise the claim flow is
     // enabled but no code was ever generated, so `allowAdminClaim` stays false and no one can claim
     // (docs/15 #8). Only on the transition (not every PATCH while already in setupCode), so a code
