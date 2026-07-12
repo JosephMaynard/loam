@@ -186,7 +186,7 @@ export const en = {
   "admin.flagReactions": "Reactions",
   "admin.flagMarkdown": "Markdown rendering",
   "admin.flagAttachments": "Image attachments",
-  "admin.flagPresence": "Online presence (reveals who is connected — off for high-risk use)",
+  "admin.flagPresence": "Online presence (reveals who is connected — off for privacy-sensitive settings)",
   // Admin view — identity-permission labels.
   "admin.identityDisplayName": "Users can edit their display name",
   "admin.identityAvatarEdit": "Users can edit their avatar",
@@ -195,24 +195,24 @@ export const en = {
   // Admin view — security profile titles + summaries.
   "admin.profileOpenTitle": "Open",
   "admin.profileOpenSummary":
-    "Anyone joins and posts immediately. Messages are kept and the kill switch is off — maximum access, for disaster-relief style use.",
+    "Anyone joins and posts immediately. Messages are kept and Emergency Reset is off — maximum access, for disaster-relief style use.",
   "admin.profileStandardTitle": "Standard",
   "admin.profileStandardSummary":
-    "Anyone with the join link participates; messages are kept and the kill switch is off. (Same enforced settings as Open until transport encryption lands.)",
+    "Anyone with the join link participates; messages are kept and Emergency Reset is off. (Same enforced settings as Open until transport encryption lands.)",
   "admin.profileHardenedTitle": "Hardened",
   "admin.profileHardenedSummary":
-    "New joiners must be approved, messages expire after 1 hour, and the kill switch is armed. For high-risk use.",
+    "New joiners must be approved, messages expire after 1 hour, and Emergency Reset is enabled. For privacy-sensitive settings.",
   "admin.profileCustomTitle": "Custom",
   "admin.profileCustomSummary":
-    "Set who can join, message retention, and the kill switch individually in the sections below.",
+    "Set who can join, message retention, and Emergency Reset individually in the sections below.",
   // Admin view — errors + shell.
   "admin.configInvalid": "Received an invalid config payload from the server.",
   "admin.configLoadError": "Unable to load the node config.",
   "admin.configUpdateFailed": "Config update failed: {status}",
   "admin.configUnrecognised": "The server accepted the update but returned an unrecognised config payload.",
   "admin.configSaveError": "Unable to save the node config.",
-  "admin.killSwitchFailed": "Kill switch failed: {status}",
-  "admin.killSwitchError": "Unable to trigger the kill switch.",
+  "admin.killSwitchFailed": "Emergency Reset failed: {status}",
+  "admin.killSwitchError": "Unable to trigger the Emergency Reset.",
   "admin.eyebrow": "Admin",
   "admin.notAuthorizedNote":
     "This area is for node administrators. Claim admin access from the settings page if this node allows it.",
@@ -225,7 +225,7 @@ export const en = {
   "admin.step1Body": "set a Network name below so joiners recognise where they are.",
   "admin.step2Title": "Choose a posture",
   "admin.step2Body":
-    "pick a Security profile (Open for relief, Hardened for high-risk), or Custom to tune each control.",
+    "pick a Security profile (Open for relief, Hardened for privacy-sensitive settings), or Custom to tune each control.",
   "admin.step3Title": "Invite people",
   "admin.step3Body":
     "share the join QR from the sidebar; under an Approval policy, greeters let newcomers in from People & moderation.",
@@ -251,7 +251,7 @@ export const en = {
   "admin.joinOpen": "Open — anyone with the link joins",
   "admin.joinApproval": "Approval — a greeter or admin lets people in",
   "admin.axesManaged":
-    "Access, retention, and the kill switch are managed by the {profile} profile. Switch to {custom} to edit them individually.",
+    "Access, retention, and Emergency Reset are managed by the {profile} profile. Switch to {custom} to edit them individually.",
   // Admin view — features + identity panels.
   "admin.featuresEyebrow": "Features",
   "admin.messagingHeading": "Messaging",
@@ -273,18 +273,18 @@ export const en = {
   "admin.retentionHeading": "Message retention",
   "admin.retentionLabel": "Delete messages after (minutes; blank = keep forever)",
   "admin.retentionNote":
-    "Expired messages are deleted from the node and from connected clients (checked every 30 seconds). The proactive companion to the kill switch below.",
-  // Admin view — kill switch panel.
+    "Expired messages are deleted from the node and from connected clients (checked every 30 seconds). The proactive companion to Emergency Reset below.",
+  // Admin view — Emergency Reset panel.
   "admin.safetyEyebrow": "Safety",
-  "admin.killSwitchHeading": "Kill switch",
-  "admin.killSwitchEnable": "Enable the kill switch (instant wipe of all node data)",
-  "admin.killSwitchRequireConfirm": "Require typed confirmation before firing",
+  "admin.killSwitchHeading": "Emergency Reset",
+  "admin.killSwitchEnable": "Enable Emergency Reset (instant wipe of all node data)",
+  "admin.killSwitchRequireConfirm": "Require typed confirmation before triggering",
   "admin.panicToken":
-    "Panic token (optional, min 16 chars; enables unauthenticated POST /api/panic; leave blank to keep the current one)",
+    "Remote reset token (optional, min 16 chars; enables unauthenticated POST /api/panic; leave blank to keep the current one)",
   "admin.killSwitchWarning":
-    "Firing the kill switch permanently deletes all messages, users, sessions, and avatars on this node and remotely purges every connected client. Node settings survive.",
+    "Triggering Emergency Reset permanently deletes all messages, users, sessions, and avatars on this node and remotely purges every connected client. Node settings survive.",
   "admin.killSwitchConfirmBefore": "Type",
-  "admin.killSwitchConfirmAfter": "to arm the button",
+  "admin.killSwitchConfirmAfter": "to unlock the button",
   "admin.wipeNow": "Wipe this node now",
   // Admin view — sync panel.
   "admin.syncHeading": "Node-to-node sync",
@@ -517,7 +517,7 @@ export const en = {
   "error.invalid_channel_update": "Invalid channel update request",
   "error.invalid_config_update": "Invalid config update request",
   "error.invalid_config_values": "Invalid config values",
-  "error.invalid_kill_switch": "Invalid kill-switch request",
+  "error.invalid_kill_switch": "Invalid Emergency Reset request",
   "error.invalid_member_request": "Invalid member request",
   "error.invalid_transfer_request": "Invalid transfer request",
   "error.invalid_message_edit": "Invalid message edit request",
@@ -550,7 +550,7 @@ export const en = {
   "error.user_removed": "That user has been removed from this node",
   "error.not_channel_member": "That user is not a member of this channel",
   "error.owner_not_removable": "The channel owner cannot be removed from their own channel",
-  "error.kill_switch_disabled": "The kill switch is not enabled on this LOAM node",
+  "error.kill_switch_disabled": "Emergency Reset is not enabled on this LOAM node",
   "error.passphrase_required": "The passphrase bootstrap strategy requires a passphrase",
   "error.message_streaming": "This message is still being written",
   "error.session_invalid": "This session is no longer valid",
