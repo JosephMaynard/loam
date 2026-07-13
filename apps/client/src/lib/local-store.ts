@@ -7,24 +7,68 @@ type StoredRecord = {
 const DB_NAME = "loam-poc";
 const DB_VERSION = 1;
 const STORE_NAMES: StoreName[] = ["channels", "messages", "sync", "users"];
+// PERSISTENT wipe-pending flag (docs/20). A wipe whose IndexedDB deletion is DEFERRED (another tab still
+// holds the DB → `deleteDatabase` blocks) leaves this set in localStorage, so it SURVIVES a reload — unlike
+// the in-memory latch, which would reset and let the pending-deletion DB rehydrate. While set, the store
+// stays latched (no hydration) and the deletion is retried on boot; it's cleared only once deletion succeeds.
+const WIPE_PENDING_KEY = "loam.wipePending";
 
 let databasePromise: Promise<IDBDatabase> | undefined;
-// Latched by markLocalStoreWiped() for the rest of this page load: once wiped, no read or write may
-// re-open (and thus re-create) the database. This closes the race where an in-flight fetch resolves
-// AFTER a device wipe and its putRecords() would otherwise rebuild the just-deleted DB (docs/15 #4).
-// A reload clears it (fresh module), which is the intended fresh start.
-let wiped = false;
 
-/** Latch this page load as wiped so no later read/write re-creates the just-deleted database — the
- * app calls this from its device/node wipe flow, separately from destroyDatabase() (docs/15 #4). */
-export function markLocalStoreWiped(): void {
-  wiped = true;
+function readWipePending(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(WIPE_PENDING_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
-/** Test-only: clear the wipe latch + cached connection so each test starts from a clean module. */
+// Latched by markLocalStoreWiped(): once wiped, no read or write may re-open (and thus re-create) the
+// database, closing the race where an in-flight fetch resolves AFTER a wipe and rebuilds the just-deleted
+// DB (docs/15 #4). Initialised from the PERSISTENT flag so a reload during a deferred wipe stays latched
+// (docs/20) rather than rehydrating the DB that's still pending deletion.
+let wiped = readWipePending();
+
+function clearWipePending(): void {
+  try {
+    localStorage.removeItem(WIPE_PENDING_KEY);
+  } catch {
+    // ignore — a missing/blocked localStorage just means the flag was never persistable
+  }
+}
+
+/** Latch this page load as wiped so no later read/write re-creates the just-deleted database, AND persist
+ * that intent (docs/20) so a reload before the deletion finishes doesn't rehydrate the DB. The app calls
+ * this from its device/node wipe flow, separately from destroyDatabase() (docs/15 #4). */
+export function markLocalStoreWiped(): void {
+  wiped = true;
+  try {
+    localStorage.setItem(WIPE_PENDING_KEY, "1");
+  } catch {
+    // ignore — the in-memory latch above still holds for this page load
+  }
+}
+
+/**
+ * Boot recovery (docs/20): if a prior wipe left the DB pending deletion (its `deleteDatabase` was deferred
+ * by another open tab), keep the store latched (no hydration) and RETRY the deletion — which succeeds once
+ * the other tab has closed, clearing the persistent flag. Best-effort; a still-blocked retry just leaves
+ * the flag set for the next boot. Call once at startup.
+ */
+export async function recoverPendingWipe(): Promise<void> {
+  if (!readWipePending()) {
+    return;
+  }
+  wiped = true; // never hydrate a DB that's pending deletion
+  await destroyDatabase().catch(() => undefined);
+}
+
+/** Test-only: clear the wipe latch (memory + persistent flag) + cached connection so each test starts from
+ * a clean module. */
 export function resetLocalStoreForTests(): void {
   wiped = false;
   databasePromise = undefined;
+  clearWipePending();
 }
 
 function hasIndexedDb(): boolean {
@@ -69,7 +113,19 @@ function openDatabase(): Promise<IDBDatabase> {
         }
       };
 
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        const database = request.result;
+        // Close this connection the moment ANOTHER tab tries to delete/upgrade the DB (docs/20): a device
+        // wipe in a sibling tab fires `deleteDatabase`, which blocks while this tab holds a connection.
+        // Reacting to `versionchange` by closing lets that deletion proceed instead of hanging. We also
+        // latch `wiped` so this tab won't re-open + rehydrate the DB the other tab is erasing.
+        database.onversionchange = () => {
+          wiped = true;
+          database.close();
+          databasePromise = undefined;
+        };
+        resolve(database);
+      };
       request.onerror = () => {
         databasePromise = undefined;
         reject(request.error);
@@ -135,6 +191,7 @@ export async function deleteRecord(storeName: StoreName, id: string): Promise<vo
  */
 export async function destroyDatabase(): Promise<void> {
   if (!hasIndexedDb()) {
+    clearWipePending(); // nothing to delete → the wipe is complete, not pending
     return;
   }
 
@@ -150,7 +207,10 @@ export async function destroyDatabase(): Promise<void> {
     request.onerror = () => reject(request.error);
     // Another tab still holds a connection: the browser defers the deletion until it closes
     // (that tab purges itself too on the wipe event). Surface it so callers know the wipe is
-    // deferred rather than complete.
+    // deferred rather than complete — the PERSISTENT flag stays set so a reload retries (docs/20).
     request.onblocked = () => reject(new Error("Database deletion deferred: another tab holds a connection."));
   });
+
+  // Only reached when deleteDatabase actually RESOLVED — the DB is gone, so the wipe is no longer pending.
+  clearWipePending();
 }

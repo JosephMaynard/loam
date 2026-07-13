@@ -2,6 +2,7 @@ import { useMemo } from "preact/hooks";
 
 import { generateAvatar } from "../lib/avatar";
 import type { AvatarMode } from "../lib/avatar";
+import { useEncryptedImage } from "../lib/use-encrypted-image";
 import type { UserAvatar } from "@loam/schema";
 
 export interface AvatarProps {
@@ -39,6 +40,7 @@ function avatarImagePath(avatar: UserAvatar): string | undefined {
  */
 export function Avatar({ id, avatar: userAvatar, className, mode = "face", label }: AvatarProps) {
   const imagePath = userAvatar ? avatarImagePath(userAvatar) : undefined;
+  const imageSrc = useEncryptedImage(imagePath);
   const avatarSeed = userAvatar?.seed ?? id;
   const avatarMode = userAvatar?.mode ?? mode;
   const avatar = useMemo(
@@ -51,7 +53,7 @@ export function Avatar({ id, avatar: userAvatar, className, mode = "face", label
 
   return imagePath ? (
     <span aria-hidden="true" className={wrapperClassName}>
-      <img alt="" src={imagePath} />
+      <img alt="" src={imageSrc} />
     </span>
   ) : (
     <span

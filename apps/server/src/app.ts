@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 
 import fastifyRateLimit from "@fastify/rate-limit";
@@ -18,6 +18,7 @@ import {
   sealTransport,
   transportServerAccept,
   verifyKxBinding,
+  verifyTransportKeypair,
   type MeshIdentity,
   type TransportIdentity,
 } from "@loam/crypto";
@@ -81,7 +82,10 @@ type SocketClient = {
   readyState: number;
   send: (payload: string) => void;
   close: () => void;
-  on: (event: "close", listener: () => void) => void;
+  on: {
+    (event: "close", listener: () => void): void;
+    (event: "message", listener: (data: unknown) => void): void;
+  };
 };
 type SocketSession = {
   socket: SocketClient;
@@ -89,7 +93,31 @@ type SocketSession = {
   /** Transport session key (docs/08) when the client connected `/ws?enc=<sid>`; outbound frames are
    * then XChaCha20-Poly1305-sealed. Undefined = plaintext frames (transport off / no session). */
   transportKey?: string;
+  /** Fresh per-socket id (docs/20 §7). Application frames are sealed under an AAD that includes it, so
+   * a frame captured on one connection can't be replayed on a reconnected socket sharing the same
+   * transport session. Set only for an encrypted, key-confirmed socket. */
+  connectionId?: string;
+  /** Monotonic server→client frame sequence for this connection (docs/20 §7) — the client rejects a
+   * replayed/stale frame. Starts at 0; `wsSend` pre-increments. */
+  frameSeq?: number;
+  /** The transport session id this (encrypted) socket rides, so it can be torn down when that session is
+   * evicted/pruned (docs/20 §7 — a confirmed socket must not outlive its session key). */
+  transportSessionId?: string;
 };
+
+/** Direction-separated AADs for the reflection-safe WS key-confirmation (docs/20 §7): the challenge
+ * and the proof seal under DIFFERENT constants, so a keyless attacker can't reflect the server's
+ * challenge ciphertext back as a valid proof. Application frames bind to the connection id. */
+const WS_CHALLENGE_AAD = "loam.ws.challenge.v1";
+const WS_PROOF_AAD = "loam.ws.proof.v1";
+const WS_FRAME_AAD_PREFIX = "loam.ws.frame.v1";
+/** How long an encrypted socket has to answer the key-confirmation challenge before it's dropped. */
+const WS_CHALLENGE_TIMEOUT_MS = 10_000;
+/** Cap on simultaneously-unconfirmed encrypted sockets (anti-flood on the pre-auth path, docs/20 §7). */
+const WS_UNCONFIRMED_CAP = 128;
+/** Tighter PER-IP cap on unconfirmed sockets, so a few LAN hosts can't exhaust the global pool and lock
+ * everyone out. A real client confirms in milliseconds, so it never holds more than one or two at once. */
+const WS_UNCONFIRMED_PER_IP_CAP = 8;
 
 type AppData = {
   users: User[];
@@ -673,6 +701,17 @@ function makeSessionToken(): string {
   return randomUUID();
 }
 
+/** A fresh 256-bit secure identity token (docs/20) — high-entropy, so a fast hash (not scrypt) is the
+ * right at-rest protection. */
+function makeIdentityToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+/** SHA-256 of an identity token, base64url — what's stored/looked-up, never the bearer value. */
+function hashIdentityToken(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
+}
+
 function makeAdminSetupCode(): string {
   return randomUUID().replaceAll("-", "").slice(0, 12);
 }
@@ -834,6 +873,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     serverFactory: (handler) => createServer(handler),
   });
   const sockets = new Set<SocketSession>();
+  // Encrypted sockets that have connected but not yet passed the key-confirmation challenge (docs/20 §7).
+  // `unconfirmedSocketCount` is the global cap; `unconfirmedByIp` is a tighter per-IP cap so a couple of
+  // LAN hosts can't hold the whole global pool and lock everyone else out (the pre-auth path is
+  // unauthenticated). `pendingSockets` lets revocation (ban/logout/kill-switch) reach a socket that is
+  // still mid-challenge — otherwise it exists only as closures and could confirm AFTER being revoked.
+  let unconfirmedSocketCount = 0;
+  const unconfirmedByIp = new Map<string, number>();
+  const pendingSockets = new Set<{ userId: string; close: () => void }>();
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
@@ -841,10 +888,38 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // config table (encrypted at rest when the DB is), rotated by the kill switch. Its public key goes
   // in the join QR + NetworkConfig.
   let transportIdentity: TransportIdentity | undefined;
-  // Live transport sessions: sessionId → derived key + expiry. In-memory only; cleared by the kill
-  // switch. Ephemeral handshakes mean a lost entry just forces a re-handshake.
-  const transportSessions = new Map<string, { key: string; expiresAt: number }>();
+  // Live transport sessions: sessionId → derived key + expiry + anti-replay window. In-memory only;
+  // cleared by the kill switch. Ephemeral handshakes mean a lost entry just forces a re-handshake.
+  // `maxSeq`/`seen` implement a DTLS-style sliding replay window (docs/08): every sealed REST request
+  // carries a per-session monotonically increasing sequence number inside its authenticated envelope,
+  // and a captured ciphertext replayed within the session's 12h life is rejected because its sequence
+  // was already spent. `seen` holds only the sequence numbers still inside the window (pruned as it
+  // advances), so it stays bounded regardless of how long the session lives.
+  interface TransportSession {
+    key: string;
+    expiresAt: number;
+    maxSeq: number;
+    seen: Set<number>;
+    // Identity binding (docs/20). A session starts `anonymous` (handshake is unauthenticated); a sealed
+    // `/api/session/resume` promotes it to `bound` and records the user it authenticates + the hash of
+    // the identity token that bound it. A `bound` session is what makes the secure rules apply (content
+    // only via the tunnel, no cookie, WS key-confirmation) — independent of the node's global mode.
+    // `resumeResult` caches the sealed resume payload so a fresh-sequence retry is idempotent.
+    authMode: "anonymous" | "bound";
+    userId?: string;
+    identityTokenHash?: string;
+    resumeResult?: { s?: number; m: string; p: string; currentUser: unknown; token: string };
+  }
+  const transportSessions = new Map<string, TransportSession>();
+  // Secure identity tokens (docs/20): tokenHash → userId, mirrored in memory from the DAL. SEPARATE from
+  // the cookie `sessions` map — a cookie token is NEVER a valid identity token, and vice versa.
+  const identityTokens = new Map<string, string>();
   const TRANSPORT_SESSION_TTL_MS = 12 * 3_600_000;
+  // How far a sealed request's sequence number may lag `maxSeq` and still be accepted — i.e. how much
+  // reordering/concurrency the replay window tolerates. Browsers open only a handful of concurrent
+  // connections per origin, so real reordering is tiny; this is generous headroom. A sequence at or
+  // below `maxSeq - WINDOW` is refused as too old (indistinguishable from a replay of an evicted entry).
+  const TRANSPORT_REPLAY_WINDOW = 1_024;
   // Hard cap on live sessions: the handshake endpoint is deliberately unauthenticated (it's the
   // bootstrap step before any session exists), so without a real bound a flood of handshakes from many
   // IPs could grow this map without limit even though each IP is individually rate-limited.
@@ -852,6 +927,85 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Per-request session key, resolved once in onRequest and reused to decrypt the body (preValidation)
   // and encrypt the response (onSend). WeakMap so it's GC'd with the request — no manual cleanup.
   const transportRequestKeys = new WeakMap<FastifyRequest, string>();
+  // The resolved transport session for a request, so `preValidation` can run the anti-replay window
+  // against the same session `onRequest` authenticated. WeakMap → GC'd with the request.
+  const transportRequestSessions = new WeakMap<FastifyRequest, TransportSession>();
+  // The sealed request's authenticated sequence number `s` (docs/20 §9), stashed in preValidation so the
+  // tunnel + resume handlers can BIND it into their sealed response descriptor — the client verifies the
+  // response answers the exact `{ s, m, p }` it sent, defeating a cross-fed response under the tunnel's
+  // constant AAD. WeakMap → GC'd with the request.
+  const transportRequestSeq = new WeakMap<FastifyRequest, number>();
+  // Per-boot secret proving a request is an internal re-dispatch from the transport tunnel handler
+  // (`POST /api/transport/tunnel`, docs/08), not a real client socket. 256 bits of randomness compared
+  // in constant time — an external request can't forge it, so the transport-enforcement bypass it
+  // unlocks for internal requests is safe. Never leaves the process; regenerated every boot.
+  const internalTunnelToken = randomBytes(32).toString("base64url");
+
+  /** Whether a request is an internal tunnel re-dispatch (carries the valid per-boot internal token).
+   * Such requests skip transport enforcement (they run plaintext inside the process) and the global
+   * rate limiter (they're already bounded by the outer tunnel request that spawned them). */
+  function isInternalTunnelRequest(request: FastifyRequest): boolean {
+    const header = request.headers["x-loam-internal"];
+    if (typeof header !== "string" || header.length !== internalTunnelToken.length) {
+      return false;
+    }
+    try {
+      return timingSafeEqual(Buffer.from(header), Buffer.from(internalTunnelToken));
+    } catch {
+      return false;
+    }
+  }
+
+  /** The bound identity carried by a genuine internal tunnel re-dispatch, or `undefined`. The tunnel
+   * handler sets `x-loam-user` to the tunnelling **bound** session's userId; we trust it ONLY when the
+   * request also carries the unforgeable internal token (external `x-loam-user` is stripped in
+   * `onRequest`, but gating on the token here is the real guarantee — a client can't produce it). This
+   * is how a `bound` session (docs/20 §2) authenticates content: the un-sniffable session key is the
+   * credential, resolved server-side to `session.userId`, never a cookie. An anonymous optional-mode
+   * tunnel carries no `x-loam-user`, so this returns `undefined` and the caller falls back to cookie. */
+  function tunnelBoundUserId(request: FastifyRequest): string | undefined {
+    if (!isInternalTunnelRequest(request)) {
+      return undefined;
+    }
+    const bound = request.headers["x-loam-user"];
+    return typeof bound === "string" && bound.length > 0 ? bound : undefined;
+  }
+
+  /**
+   * Anti-replay check for a sealed REST request's per-session sequence number (docs/08). Accepts a
+   * sequence exactly once, tolerating up to `TRANSPORT_REPLAY_WINDOW` of reordering/concurrency:
+   * a higher-than-seen sequence advances the window (and prunes entries that fall out of it); a
+   * sequence still inside the window is accepted only if unseen; anything at/below the window floor,
+   * a duplicate, or a non-positive/non-integer value is rejected. Returns `true` iff the request may
+   * proceed. Mutates `session.maxSeq`/`session.seen`.
+   */
+  function acceptTransportSeq(session: TransportSession, seq: number): boolean {
+    // isSafeInteger, not isInteger: a value past 2^53 loses precision, so a key-holding client could
+    // otherwise submit an enormous sequence and poison its own replay window (docs/20 review #8). The
+    // client re-handshakes long before its counter approaches this, resetting the window.
+    if (!Number.isSafeInteger(seq) || seq < 1) {
+      return false;
+    }
+
+    if (seq > session.maxSeq) {
+      session.maxSeq = seq;
+      session.seen.add(seq);
+      const floor = seq - TRANSPORT_REPLAY_WINDOW;
+      for (const previous of session.seen) {
+        if (previous <= floor) {
+          session.seen.delete(previous);
+        }
+      }
+      return true;
+    }
+
+    if (seq <= session.maxSeq - TRANSPORT_REPLAY_WINDOW || session.seen.has(seq)) {
+      return false;
+    }
+
+    session.seen.add(seq);
+    return true;
+  }
   // Per-IP new-identity budget (RAM-only): bounds how many fresh anonymous users one address can mint
   // per window, so a client discarding its cookie can't grow the user table without limit. Pruned on
   // the reaper timer. On a LAN each device gets its own IP, so this reads as per-device.
@@ -1001,6 +1155,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string {
+    // A bound session's identity arrives via the internal tunnel (docs/20 §10) — trusted over any
+    // cookie, and it mints nothing (the identity already exists from resume). Checked first so a
+    // stale/forwarded cookie can never shadow the session-key-proven identity.
+    const boundUserId = tunnelBoundUserId(request);
+    if (boundUserId) {
+      return boundUserId;
+    }
+
     const cookieToken = readCookie(request.headers.cookie, sessionCookieName);
     const cookieUserId = cookieToken ? sessions.get(cookieToken) : undefined;
 
@@ -1034,6 +1196,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   function getSessionUserIdFromRequest(request: FastifyRequest): string | undefined {
+    const boundUserId = tunnelBoundUserId(request);
+    if (boundUserId) {
+      return boundUserId;
+    }
     const cookieToken = readCookie(request.headers.cookie, sessionCookieName);
     return cookieToken ? sessions.get(cookieToken) : undefined;
   }
@@ -1193,11 +1359,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return false;
     }
     const candidate = value as Partial<TransportIdentity>;
+    // Both fields must be well-formed base64url AND form a consistent keypair — the public key is
+    // exactly the one derived from the secret (docs/20 #7). A truncated/mismatched persisted record that
+    // merely passes the charset check would otherwise slip through and only surface later inside the
+    // crypto at handshake time; caught here it's regenerated. `verifyTransportKeypair` also enforces the
+    // 32-byte secret length and re-derives the (32-byte) public, so no separate length check is needed.
     return (
       typeof candidate.publicKey === "string" &&
-      BASE64URL_RE.test(candidate.publicKey) &&
       typeof candidate.secretKey === "string" &&
-      BASE64URL_RE.test(candidate.secretKey)
+      BASE64URL_RE.test(candidate.publicKey) &&
+      BASE64URL_RE.test(candidate.secretKey) &&
+      verifyTransportKeypair(candidate.publicKey, candidate.secretKey)
     );
   }
 
@@ -1235,7 +1407,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /** The transport session key a request presented via a valid, unexpired `x-loam-enc` header (the
    * session id), or undefined. */
-  function transportKeyForRequest(request: FastifyRequest): string | undefined {
+  function transportSessionForRequest(request: FastifyRequest): TransportSession | undefined {
     const sid = request.headers["x-loam-enc"];
     if (typeof sid !== "string" || sid.length === 0) {
       return undefined;
@@ -1244,12 +1416,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!session || session.expiresAt <= Date.now()) {
       return undefined;
     }
-    return session.key;
+    return session;
   }
 
-  /** The transport session key for a WebSocket connection, taken from the `?enc=<sid>` query (browsers
-   * can't set custom headers on a WS upgrade), or undefined. */
-  function wsTransportKey(url: string): string | undefined {
+  /** The live transport session for a WebSocket connection, taken from the `?enc=<sid>` query (browsers
+   * can't set custom headers on a WS upgrade), or undefined. The session carries the key AND its
+   * `authMode`/`userId`, so the WS can bind identity to a `bound` session (docs/20) rather than a cookie. */
+  function wsTransportSession(url: string): TransportSession | undefined {
     const query = url.split("?")[1];
     if (!query) {
       return undefined;
@@ -1262,29 +1435,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!session || session.expiresAt <= Date.now()) {
       return undefined;
     }
-    return session.key;
+    return session;
   }
 
-  /** Whether this request must present a transport session under `required` mode. Matched on the
-   * RESOLVED route pattern (`routeOptions.url`), NOT the raw request URL — Fastify percent-decodes the
-   * path before routing, so string-matching the raw URL let `/%61pi/users` (→ `/api/users`) slip past
-   * enforcement and be served in cleartext. Only non-bootstrap `/api/` content routes need a session;
-   * the static app shell, `/ws` (enforced separately via `?enc=`), unmatched 404s, and the
-   * handshake/config/health bootstrap endpoints are all exempt. */
+  /** Whether this **external** request is a content route that, under `required` mode, is reachable
+   * ONLY through the internal tunnel dispatch (docs/20) — so a direct hit is refused (401) and a
+   * captured session id / cookie is inert. Matched on the RESOLVED route pattern (`routeOptions.url`),
+   * NOT the raw request URL — Fastify percent-decodes the path before routing, so string-matching the
+   * raw URL let `/%61pi/users` (→ `/api/users`) slip past enforcement. The only DIRECTLY reachable
+   * `/api/` routes in required mode are the public bootstrap, health, the handshake, the sealed resume,
+   * the sealed logout, the DIRECT cookie-clear (`/api/session/end` — unauthenticated + side-effect-only,
+   * it mints nothing and only clears the caller's own presented cookie, so a device wipe can revoke a
+   * legacy cookie that a bound session's `credentials:"omit"` requests never send, docs/20 #3), and the
+   * tunnel endpoint itself; everything else — including `/api/config`, which now returns `currentUser`
+   * only for a bound session over the tunnel — is content. (Internal tunnel dispatches never reach this —
+   * they return at the top of `onRequest`; the static shell + `/ws` are handled separately.) */
   function requiresTransportSession(request: FastifyRequest): boolean {
     const routeUrl = request.routeOptions?.url;
     if (!routeUrl || !routeUrl.startsWith("/api/")) {
       return false;
     }
-    // Avatar/attachment IMAGE bytes are fetched by the browser as plain <img src> GETs, which can't
-    // carry the x-loam-enc header — and image bytes aren't sealed anyway (the onSend hook only wraps
-    // string payloads). Exempt them so a `required` node doesn't 401 every image; their bytes staying
-    // visible is the documented Layer-1 metadata exposure (docs/08), not a regression.
-    if (routeUrl === "/api/avatars/:fileName" || routeUrl === "/api/attachments/:fileName") {
-      return false;
-    }
     return (
-      routeUrl !== "/api/config" && routeUrl !== "/api/transport/handshake" && routeUrl !== "/api/health"
+      routeUrl !== "/api/bootstrap" &&
+      routeUrl !== "/api/health" &&
+      routeUrl !== "/api/transport/handshake" &&
+      routeUrl !== "/api/session/resume" &&
+      routeUrl !== "/api/session/logout" &&
+      routeUrl !== "/api/session/end" &&
+      routeUrl !== "/api/transport/tunnel"
     );
   }
 
@@ -1387,12 +1565,76 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    // Tear down any BOUND transport sessions for this user (docs/20) so a banned user's live sealed
+    // session stops working at once. The identity TOKEN is deliberately KEPT (like the cookie session
+    // mapping above): a reconnect re-binds to the SAME banned identity, so the ban stays pinned rather
+    // than being shed by a fresh handshake+resume.
+    for (const [sid, session] of [...transportSessions]) {
+      if (session.userId === userId) {
+        transportSessions.delete(sid);
+      }
+    }
+
     for (const socketSession of [...sockets]) {
       if (socketSession.userId === userId) {
         socketSession.socket.close();
         sockets.delete(socketSession);
       }
     }
+
+    // Also close any of this user's sockets still mid-challenge (docs/20 §7/§8) — otherwise a socket that
+    // completes its proof after the ban would slip into the live feed.
+    for (const pending of [...pendingSockets]) {
+      if (pending.userId === userId) {
+        pending.close();
+      }
+    }
+  }
+
+  /** Close CONFIRMED sockets (those in the live `sockets` set) riding a transport session that is being
+   * pruned/evicted (docs/20 §7), so a socket can't keep receiving frames after its session key is gone. The
+   * per-socket expiry timer covers natural expiry; this covers an ABRUPT removal (cap eviction) before that
+   * timer fires. A socket still MID-CHALLENGE for that session isn't in `sockets` yet, but it can't slip
+   * through: the confirm-time `stillValid` check re-reads `transportSessions.get(sid)`, which no longer
+   * matches the evicted session, so its late proof is refused. */
+  function closeSocketsForTransportSession(sid: string): void {
+    for (const socketSession of [...sockets]) {
+      if (socketSession.transportSessionId === sid) {
+        socketSession.socket.close();
+        sockets.delete(socketSession);
+      }
+    }
+  }
+
+  /** Revoke a secure identity token (docs/20 §8) — for explicit logout / device wipe / rotation, where
+   * the user is discarding the identity itself (unlike a ban, which keeps the token pinned). Deletes the
+   * token row (memory + store), drops every transport session it bound, and closes that identity's
+   * sockets. Returns the userId the token authenticated, or undefined if it was already gone. */
+  function revokeIdentityToken(tokenHash: string): string | undefined {
+    const userId = identityTokens.get(tokenHash);
+    identityTokens.delete(tokenHash);
+    store.deleteIdentityToken(tokenHash);
+
+    for (const [sid, session] of [...transportSessions]) {
+      if (session.identityTokenHash === tokenHash) {
+        transportSessions.delete(sid);
+      }
+    }
+    if (userId) {
+      for (const socketSession of [...sockets]) {
+        if (socketSession.userId === userId) {
+          socketSession.socket.close();
+          sockets.delete(socketSession);
+        }
+      }
+      // Close this identity's mid-challenge sockets too (docs/20 §7/§8), so none confirms after logout.
+      for (const pending of [...pendingSockets]) {
+        if (pending.userId === userId) {
+          pending.close();
+        }
+      }
+    }
+    return userId;
   }
 
   /**
@@ -1754,11 +1996,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return !audience || audience.has(userId);
   }
 
-  /** Send one already-serialized frame to a socket, sealed under its transport session key when the
-   * client connected `/ws?enc=<sid>` (docs/08), else plaintext. Callers keep their own readyState +
-   * audience checks; the WS aad is a constant ("ws") since frames aren't route-scoped. */
+  /** Send one already-serialized frame to a socket. For an encrypted, key-confirmed socket the frame is
+   * sealed under a CONNECTION-BOUND aad (`loam.ws.frame.v1 <connectionId>`, docs/20 §7) and wrapped in a
+   * `{ q, f }` envelope carrying a monotonic per-connection sequence `q`, so the client rejects a frame
+   * replayed from another connection or re-sent on this one. A plaintext socket (transport off) sends the
+   * raw payload. Callers keep their own readyState + audience checks. */
   function wsSend(session: SocketSession, payload: string): void {
-    session.socket.send(session.transportKey ? sealTransport(session.transportKey, payload, "ws") : payload);
+    if (session.transportKey && session.connectionId) {
+      session.frameSeq = (session.frameSeq ?? 0) + 1;
+      const aad = `${WS_FRAME_AAD_PREFIX} ${session.connectionId}`;
+      session.socket.send(sealTransport(session.transportKey, JSON.stringify({ q: session.frameSeq, f: payload }), aad));
+      return;
+    }
+    session.socket.send(payload);
   }
 
   function broadcast(event: ClientEvent): void {
@@ -2347,6 +2597,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       sessions.set(session.token, session.userId);
     }
 
+    identityTokens.clear();
+    for (const record of store.loadIdentityTokens()) {
+      identityTokens.set(record.tokenHash, record.userId);
+    }
+
     if (!data.channels.length) {
       data.channels = defaultChannels.map((channel) => ({ ...channel }));
       store.transaction(() => {
@@ -2457,6 +2712,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     await rm(attachmentsDir, { recursive: true, force: true });
     attachmentOwners.clear();
     sessions.clear();
+    // Drop every secure identity token (docs/20): the DB rows are gone (wipeAll / encrypted file delete),
+    // so clear the in-memory mirror too — no wiped identity can be resumed after an emergency reset.
+    identityTokens.clear();
     claimAttempts.clear();
     panicAttempts.clear();
 
@@ -2467,6 +2725,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     sockets.clear();
+    // Close any sockets still mid key-confirmation (docs/20 §7) — they never entered `sockets`, so the
+    // loop above misses them; without this a socket could complete its proof after the wipe.
+    for (const pending of [...pendingSockets]) {
+      pending.close();
+    }
 
     data = { users: [], channels: [], messages: [] };
     loadData();
@@ -3512,23 +3775,43 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // ciphertext for message/DM/config CONTENT. GET request paths + query strings and image bytes remain
   // visible (metadata); that's the documented Layer-1 scope. All inert when the mode is `off`.
   server.addHook("onRequest", async (request, reply) => {
+    // An internal tunnel re-dispatch runs plaintext inside the process — never enforce/decrypt it
+    // (its response is sealed by the outer tunnel request instead). Checked before anything else so
+    // it holds in every mode.
+    if (isInternalTunnelRequest(request)) {
+      return; // trusted internal re-dispatch — its x-loam-internal/x-loam-user headers are legitimate
+    }
+    // This request is EXTERNAL: strip the trusted internal headers so a client can never forge identity
+    // or the tunnel bypass (docs/20 — defence in depth; the resolver already gates x-loam-user on the
+    // internal token, but these must never reach a handler on an external request).
+    delete request.headers["x-loam-internal"];
+    delete request.headers["x-loam-user"];
+
     const mode = appConfig.security.transportEncryption;
     if (mode === "off") {
       return;
     }
-    const key = transportKeyForRequest(request);
+    const activeSession = transportSessionForRequest(request);
     const presentedSessionId = request.headers["x-loam-enc"];
-    if (key) {
-      transportRequestKeys.set(request, key);
+    if (activeSession) {
+      transportRequestKeys.set(request, activeSession.key);
+      transportRequestSessions.set(request, activeSession);
     } else if (typeof presentedSessionId === "string" && presentedSessionId.length > 0) {
       // The client presented a transport session that is unknown/expired (server restart or 12h TTL).
       // Refuse with 401 in BOTH modes so its re-handshake path fires, rather than silently serving or
       // accepting plaintext — which in `optional` mode would downgrade the wire while the client's UI
       // still shows "encrypted" (docs/08).
       return reply.code(401).send(errorBody("Transport session expired"));
-    } else if (mode === "required" && requiresTransportSession(request)) {
-      // No transport session at all on a node that requires one — refuse, but keep bootstrap open so a
-      // fresh client can fetch config + handshake first.
+    }
+
+    // Content is reachable ONLY through the internal tunnel dispatch (which returned above) — so a DIRECT
+    // external hit on a content route is refused, making a captured credential inert (docs/20). This fires
+    // when EITHER the node globally requires encryption OR the resolved session is `bound` — the secure
+    // rules key off session state, not just global mode (docs/20 §2), so a bound session on an `optional`
+    // node is still tunnel-only (never serving its content directly / by cookie). Bootstrap/health/
+    // handshake/resume/logout/tunnel stay directly reachable.
+    const boundSession = activeSession?.authMode === "bound";
+    if ((mode === "required" || boundSession) && requiresTransportSession(request)) {
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
     }
   });
@@ -3545,11 +3828,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (opened === null) {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
+      // The sealed plaintext is a `{ s: <seq>, b?: <body> }` envelope (docs/08): `s` is a per-session
+      // monotonic sequence for replay protection, `b` the actual request body (omitted for a bodyless
+      // mutation). `s` lives INSIDE the AEAD, so it's authenticated — an attacker can't renumber a
+      // replay to dodge the window without breaking the tag.
+      let envelope: { s?: unknown; b?: unknown };
       try {
-        request.body = opened.length ? JSON.parse(opened) : undefined;
+        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown };
       } catch {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
+      const activeSession = transportRequestSessions.get(request);
+      if (!activeSession || typeof envelope.s !== "number" || !acceptTransportSeq(activeSession, envelope.s)) {
+        // Replayed, reordered beyond the window, or a missing/garbage sequence — refuse before the
+        // handler runs. 409 (not 401) so a legitimate client doesn't mistake it for an expired session
+        // and silently re-handshake+retry: a real client never reuses a sequence, so this fires only on
+        // a captured-and-replayed request (docs/08).
+        return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
+      }
+      transportRequestSeq.set(request, envelope.s);
+      request.body = envelope.b;
       return;
     }
     // A GET/HEAD may legitimately carry no body at all (response-only sealing) — nothing to enforce.
@@ -3607,6 +3905,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     global: true,
     max: 300,
     timeWindow: "1 minute",
+    // Internal tunnel re-dispatches are already bounded by the outer tunnel request that spawned them
+    // (and all share the loopback IP), so exempt them rather than double-counting / self-throttling.
+    allowList: (request) => isInternalTunnelRequest(request as FastifyRequest),
   });
   await server.register(fastifyWebsocket);
   await registerStaticFiles();
@@ -3615,6 +3916,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // WebView. Polling /api/config here would consume the one-time `firstUser` admin grant with a
   // throwaway loopback session, leaving the real operator (and the kill switch) locked out.
   server.get("/api/health", async () => ({ ok: true }));
+
+  // Public, cookie-free bootstrap (docs/20). Returns ONLY public data — node name, version, connection
+  // details, and the network config (which advertises the transport mode + host public key). Mints NO
+  // identity and sets NO cookie, so a `required`/bound client can learn how to connect before it has a
+  // session, and no bearer credential is ever established over plaintext. The client fetches this FIRST,
+  // with `credentials: "omit"`. Unlike `/api/config`, it never returns `currentUser`.
+  server.get("/api/bootstrap", async () => ({
+    nodeName: appConfig.node.name,
+    version: options.version ?? "dev",
+    joinUrl: `http://${joinHost}:${clientPort}`,
+    websocketPath: "/ws",
+    networkConfig: currentNetworkConfig(),
+  }));
 
   server.get("/api/config", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
@@ -3666,6 +3980,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       for (const [id, existingSession] of transportSessions) {
         if (existingSession.expiresAt <= now) {
           transportSessions.delete(id);
+          closeSocketsForTransportSession(id);
         }
       }
       while (transportSessions.size >= TRANSPORT_SESSION_CAP) {
@@ -3674,12 +3989,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           break;
         }
         transportSessions.delete(oldest);
+        closeSocketsForTransportSession(oldest);
       }
 
       const sessionId = randomUUID();
       transportSessions.set(sessionId, {
         key: accepted.sessionKey,
         expiresAt: Date.now() + TRANSPORT_SESSION_TTL_MS,
+        maxSeq: 0,
+        seen: new Set(),
+        authMode: "anonymous",
       });
       return {
         sessionId,
@@ -3688,6 +4007,211 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       };
     },
   );
+
+  // Sealed identity resume + session binding (docs/20). A DIRECT sealed endpoint (not tunnelled) so the
+  // outer TransportSession is reachable while there's no user yet. It requires a live transport session
+  // (onRequest resolves it; preValidation decrypts + replay-checks the sealed `{ s, b }` body into the
+  // `{ token? }` payload), and binds identity to that SESSION — so the un-sniffable session key becomes
+  // the credential. It NEVER accepts a legacy cookie token. The `{ currentUser, token }` response is
+  // sealed by onSend, so the secure token only ever crosses the wire encrypted.
+  server.post("/api/session/resume", async (request, reply) => {
+    const activeSession = transportRequestSessions.get(request);
+    if (!activeSession) {
+      // Reachable only with a live, sealed session (its body was decrypted). A plaintext hit is refused.
+      return reply.code(400).send(errorBody("Resume requires an encrypted session"));
+    }
+
+    // Idempotent: a fresh-sequence retry after a lost response returns the cached identity — never a
+    // second mint, never a rebind to a different identity. Re-stamp the response's bound sequence `s` to
+    // THIS request's sequence (docs/20 §9) so a retrying client's response-binding check passes — the
+    // user + token are identical, only the sequence it answers differs. `m`/`p` are constant.
+    if (activeSession.authMode === "bound") {
+      if (!activeSession.resumeResult) {
+        return reply.code(409).send(errorBody("Session already bound"));
+      }
+      return { ...activeSession.resumeResult, s: transportRequestSeq.get(request) };
+    }
+
+    const body = request.body as { token?: unknown } | undefined;
+    const rawToken = body?.token;
+    // A `token` that is present but not a string ({token:123}, {token:{}}, …) is a malformed request — a
+    // hard 400, not a silent mint (which would fragment an incompatible client's identity, docs/20 review).
+    if (rawToken !== undefined && typeof rawToken !== "string") {
+      return reply.code(400).send(errorBody("Invalid identity token"));
+    }
+    // Absent or empty-string → mint (an empty string is never a real 256-bit token); a non-empty string →
+    // resume. Empty is treated as "no token" rather than "nonempty invalid" so an odd client isn't 401-looped.
+    const presentedToken = typeof rawToken === "string" && rawToken.length > 0 ? rawToken : undefined;
+
+    let userId: string;
+    let token: string;
+    let tokenHash: string;
+    if (presentedToken !== undefined) {
+      tokenHash = hashIdentityToken(presentedToken);
+      const resumed = identityTokens.get(tokenHash);
+      if (!resumed) {
+        // A non-empty but unknown/revoked token is an explicit auth failure — NEVER silently mint (that
+        // would let a client launder a stolen-then-revoked token into a fresh working identity).
+        return reply.code(401).send(errorBody("Invalid identity token"));
+      }
+      userId = resumed;
+      token = presentedToken;
+    } else {
+      // First contact on this device: mint a new anonymous identity + a fresh secure token (the per-IP
+      // identity-mint budget bounds it, exactly like a cookie mint).
+      if (!consumeIdentityBudget(request.ip)) {
+        throw new IdentityLimitError();
+      }
+      userId = makeSessionUserId();
+      token = makeIdentityToken();
+      tokenHash = hashIdentityToken(token);
+      identityTokens.set(tokenHash, userId);
+      store.putIdentityToken(tokenHash, userId, Date.now());
+    }
+
+    const currentUser = ensureSessionUser(userId);
+    // Bind identity to this transport session — `authMode:"bound"` is what activates the secure rules
+    // (content only via the tunnel, no cookie, WS key-confirmation) for this session, independent of the
+    // node's global mode.
+    activeSession.authMode = "bound";
+    activeSession.userId = userId;
+    activeSession.identityTokenHash = tokenHash;
+    // Bind the response to the request it answers (docs/20 §9). Resume's aad is the same for every resume
+    // request, and the response carries the secret token, so the client MUST confirm this reply is for
+    // the exact `{ s, m, p }` it sent before storing the token.
+    const result = {
+      s: transportRequestSeq.get(request),
+      m: "POST",
+      p: "/api/session/resume",
+      currentUser: rolesVisibleUser(currentUser),
+      token,
+    };
+    activeSession.resumeResult = result;
+    return result;
+  });
+
+  // Sealed logout / device-wipe revocation (docs/20 §8). A DIRECT sealed endpoint (like resume) so it can
+  // reach the outer bound session. Revokes THIS device's secure identity token — deletes its row, drops
+  // the transport sessions it bound, and closes its sockets — so a later resume with the same token fails
+  // (401) and the identity can't be rehydrated. The client calls this BEFORE wiping its local IndexedDB.
+  server.post("/api/session/logout", async (request, reply) => {
+    const activeSession = transportRequestSessions.get(request);
+    if (!activeSession) {
+      return reply.code(400).send(errorBody("Logout requires an encrypted session"));
+    }
+    // Only a bound session has a secure token to revoke; a cookie session logs out via /api/session/end.
+    if (activeSession.authMode === "bound" && activeSession.identityTokenHash) {
+      revokeIdentityToken(activeSession.identityTokenHash);
+    }
+    return { ok: true };
+  });
+
+  // Methods the tunnel may re-dispatch — the full set the REST API uses. Validated so the cast to
+  // Fastify's inject method type is sound and no odd verb reaches `server.inject`.
+  const TUNNELLABLE_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
+
+  // Transport tunnel (docs/08, "v2"): the strongest metadata-hiding mode. Instead of each request
+  // going to its real path (leaking e.g. `/api/search?q=<plaintext>` or which channel is being read),
+  // the client sends every post-handshake request as an opaque `POST /api/transport/tunnel` whose
+  // sealed body is `{ m, p, body }` (method, real path+query, optional body). The server re-dispatches
+  // it INTERNALLY via `server.inject` (carrying the caller's own cookie + the unforgeable internal
+  // token, so authz is unchanged and the inner request skips transport enforcement) and returns the
+  // inner response as a `{ status, contentType, bodyB64 }` descriptor — which the outer request's
+  // `onSend` hook then seals, so status, headers, and body (base64 → binary images tunnel losslessly)
+  // are all ciphertext on the wire. Replay protection rides the same `{ s, b }` envelope as any sealed
+  // request (the `s` is checked in preValidation before this handler runs).
+  server.post("/api/transport/tunnel", async (request, reply) => {
+    // Only a request whose body was actually sealed (so preValidation resolved a session key) may
+    // tunnel — refuse a plaintext hit so the endpoint can never dispatch on an attacker-supplied path
+    // outside an authenticated session.
+    if (!transportRequestKeys.has(request)) {
+      return reply.code(400).send(errorBody("Tunnel requires an encrypted session"));
+    }
+
+    const payload = request.body as { m?: unknown; p?: unknown; body?: unknown } | undefined;
+    const method = typeof payload?.m === "string" ? payload.m.toUpperCase() : undefined;
+    const path = typeof payload?.p === "string" ? payload.p : undefined;
+    // The target check MUST match how Fastify routes the path, not the raw string. `server.inject`
+    // percent-decodes the path before routing, so a raw `startsWith`/`includes` check on `p` diverges
+    // from the routed path — e.g. `/api/transp%6frt/tunnel` decodes to `/api/transport/tunnel`
+    // (recursion into this handler) and `/api/%2e%2e/admin` decodes to a traversal, both slipping past a
+    // raw check. So: reject an encoded slash outright (`%2f` restructures segments and Fastify won't
+    // treat it as a separator — pure ambiguity, and LOAM's own API paths never contain one), then
+    // validate the fully-DECODED path. The raw `path` is what's handed to `inject` (routed identically).
+    let decodedPath: string | undefined;
+    if (path !== undefined && !/%2f/i.test(path)) {
+      try {
+        decodedPath = decodeURIComponent(path.split("?", 1)[0]);
+      } catch {
+        decodedPath = undefined; // malformed %-escape
+      }
+    }
+    if (
+      !method ||
+      !TUNNELLABLE_METHODS.has(method) ||
+      !decodedPath ||
+      !decodedPath.startsWith("/api/") ||
+      decodedPath.startsWith("/api/transport/") ||
+      decodedPath.includes("..")
+    ) {
+      return reply.code(400).send(errorBody("Invalid tunnel target"));
+    }
+
+    const hasBody = payload?.body !== undefined;
+    const headers: Record<string, string> = { "x-loam-internal": internalTunnelToken };
+    // Identity for the inner request depends on how this session authenticated (docs/20 §2):
+    //  • bound  → carry `x-loam-user` (the session-key-proven identity); NEVER forward a cookie — a
+    //    bound session's cookie is not a credential, so a sniffed one is inert.
+    //  • anonymous → optional/off best-effort cookie-auth: forward the cookie as before. Under
+    //    `required` mode an anonymous session may not tunnel content at all — it must resume first,
+    //    else a captured cookie tunnelled through an attacker's own session would impersonate.
+    const tunnelSession = transportRequestSessions.get(request);
+    if (tunnelSession?.authMode === "bound" && tunnelSession.userId) {
+      headers["x-loam-user"] = tunnelSession.userId;
+    } else if (appConfig.security.transportEncryption === "required") {
+      return reply.code(401).send(errorBody("Resume an identity before tunnelling content"));
+    } else if (typeof request.headers.cookie === "string") {
+      headers.cookie = request.headers.cookie;
+    }
+    if (hasBody) {
+      headers["content-type"] = "application/json";
+    }
+
+    const injected = await server.inject({
+      method: method as "GET",
+      url: path,
+      headers,
+      // Forward the real caller's address so the inner request's `request.ip` is the client's, not
+      // loopback — otherwise every tunnelled request would share one IP for the per-IP identity-mint
+      // budget and the claim/panic limiters (one client could exhaust them for everyone).
+      remoteAddress: request.ip,
+      payload: hasBody ? JSON.stringify(payload?.body) : undefined,
+    });
+
+    // Forward a freshly-minted session cookie on the OUTER response for an ANONYMOUS optional-mode tunnel
+    // (identity bootstrap through the tunnel) — the browser must see Set-Cookie to store it. A bound
+    // session's inner request mints no cookie (identity came via `x-loam-user`), so there's nothing to
+    // forward there.
+    const setCookie = injected.headers["set-cookie"];
+    if (setCookie !== undefined) {
+      reply.header("set-cookie", setCookie);
+    }
+
+    // The onSend transport hook seals THIS descriptor (a JSON string) under the tunnel route's CONSTANT
+    // aad, so the real status/content-type/body never appear in cleartext. Because the aad is the same
+    // for every tunnel request, we BIND the response to the exact request it answers (docs/20 §9): the
+    // authenticated sequence `s`, method `m`, and path `p` the client sealed. The client verifies these
+    // before using the body — so an attacker can't cross-feed one in-flight response as another's. Body
+    // is base64 for lossless binary.
+    return {
+      s: transportRequestSeq.get(request),
+      m: method,
+      p: path,
+      status: injected.statusCode,
+      contentType: injected.headers["content-type"] ?? "application/octet-stream",
+      bodyB64: injected.rawPayload.toString("base64"),
+    };
+  });
 
   server.get("/api/users", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
@@ -5062,10 +5586,45 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   });
 
   server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
-    const userId = getSessionUserIdFromRequest(request);
+    const mode = appConfig.security.transportEncryption;
+    const transportSession = mode === "off" ? undefined : wsTransportSession(request.url);
+    const transportKey = transportSession?.key;
+    // The presented transport session id (used at confirm-time to detect a mid-challenge revocation:
+    // ban/logout/kill-switch/eviction deletes the session from `transportSessions`).
+    const wsParams = new URLSearchParams(request.url.split("?")[1] ?? "");
+    const encPresent = wsParams.has("enc");
+    const sid = wsParams.get("enc") ?? "";
+
+    // FAIL CLOSED on a presented-but-unresolved session (docs/20). Distinguish "no `?enc=` at all" (fine —
+    // a plaintext socket on off/optional) from "`?enc=` was supplied but doesn't resolve to a live
+    // session": the latter is REFUSED in EVERY mode — INCLUDING `off` (`transportSession` is always
+    // undefined there). A legitimate plaintext client never sends `?enc=`, so only a stale key-pinned
+    // client would; refusing it stops that client from silently downgrading to a plaintext cookie socket
+    // (wrong-user attribution + cleartext) after the node was switched to `off` or its session expired. We
+    // key on parameter PRESENCE (`has`), so even a bare `?enc=` (empty value) fails closed.
+    if (encPresent && !transportSession) {
+      connection.send(JSON.stringify({ type: "error", ...errorBody("Transport session expired") }));
+      connection.close();
+      return;
+    }
+
+    // Identity: a `bound` transport session's userId is the WS identity (docs/20) — the session key is
+    // the credential, proven below by the key-confirmation challenge; the plaintext cookie is not used.
+    // For an anonymous session (optional/off) the cookie identity applies, as before.
+    const boundUserId =
+      transportSession?.authMode === "bound" && transportSession.userId ? transportSession.userId : undefined;
+    const userId = boundUserId ?? getSessionUserIdFromRequest(request);
 
     if (!userId) {
       connection.send(JSON.stringify({ type: "error", ...errorBody("Unauthenticated websocket") }));
+      connection.close();
+      return;
+    }
+
+    // Under `required` mode the socket must ride a `bound` transport session — an anonymous session (or
+    // none) can't reach the live feed, mirroring the tunnel-only content rule.
+    if (mode === "required" && !boundUserId) {
+      connection.send(JSON.stringify({ type: "error", ...errorBody("This node requires an encrypted session") }));
       connection.close();
       return;
     }
@@ -5081,22 +5640,142 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    // Transport encryption (docs/08): seal outbound frames when the client presented a session id via
-    // `/ws?enc=<sid>`, and refuse the connection under `required` mode without one.
-    const transportKey = appConfig.security.transportEncryption === "off" ? undefined : wsTransportKey(request.url);
-    if (appConfig.security.transportEncryption === "required" && !transportKey) {
-      connection.send(JSON.stringify({ type: "error", ...errorBody("This node requires an encrypted session") }));
+    // A plaintext socket (transport off, or an anonymous optional session with no key) is admitted
+    // directly — there is no session key to confirm. Its frames go out in the clear (documented).
+    if (!transportKey) {
+      const socketSession: SocketSession = { socket: connection, userId };
+      sockets.add(socketSession);
+      broadcastPresence();
+      connection.on("close", () => {
+        sockets.delete(socketSession);
+        broadcastPresence();
+      });
+      return;
+    }
+
+    // Encrypted socket: a visible session id is NOT proof of the key (docs/20 §7). Withhold everything
+    // — presence, events, admission to `sockets` — until the client answers a reflection-safe
+    // challenge. Cap simultaneously-unconfirmed sockets both globally AND per-IP so this pre-auth path
+    // can't be flooded (a few LAN hosts mustn't lock everyone out), and time out a socket that never proves.
+    const ip = request.ip;
+    if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP || (unconfirmedByIp.get(ip) ?? 0) >= WS_UNCONFIRMED_PER_IP_CAP) {
+      connection.send(JSON.stringify({ type: "error", ...errorBody("Too many pending connections; try again") }));
       connection.close();
       return;
     }
 
-    const socketSession: SocketSession = { socket: connection, userId, transportKey };
-    sockets.add(socketSession);
-    broadcastPresence();
+    const connectionId = randomUUID();
+    const nonce = randomBytes(32).toString("base64url");
+    let confirmed = false;
+    let settled = false; // guards the unconfirmed counters against a double decrement (confirm then close)
+    unconfirmedSocketCount += 1;
+    unconfirmedByIp.set(ip, (unconfirmedByIp.get(ip) ?? 0) + 1);
+
+    /** Release the unconfirmed-socket reservation exactly once (on confirm, timeout, or close). */
+    function releaseUnconfirmed(): void {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      unconfirmedSocketCount -= 1;
+      const remaining = (unconfirmedByIp.get(ip) ?? 1) - 1;
+      if (remaining <= 0) {
+        unconfirmedByIp.delete(ip);
+      } else {
+        unconfirmedByIp.set(ip, remaining);
+      }
+    }
+
+    const socketSession: SocketSession = {
+      socket: connection,
+      userId,
+      transportKey,
+      connectionId,
+      frameSeq: 0,
+      transportSessionId: sid,
+    };
+    // Closes the socket when its transport session reaches `expiresAt`, so a confirmed socket can't keep
+    // receiving frames past the session key's lifetime (docs/20 §7). Set on confirm, cleared on close.
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    // Register the mid-challenge socket so ban/logout/kill-switch can reach and close it — otherwise it
+    // exists only as closures and could complete its proof AFTER being revoked and slip into the feed.
+    const pending = { userId, close: () => connection.close() };
+    pendingSockets.add(pending);
+
+    const timer = setTimeout(() => {
+      if (!confirmed) {
+        connection.close();
+      }
+    }, WS_CHALLENGE_TIMEOUT_MS);
+    // node:timers `unref` so a pending challenge never keeps the process alive in tests; guarded since
+    // the WS mock in unit tests may not return a real Timeout.
+    (timer as { unref?: () => void }).unref?.();
+
+    connection.on("message", (raw: unknown) => {
+      if (confirmed) {
+        return; // the client has no reason to speak again; ignore late/extra frames
+      }
+      const text = typeof raw === "string" ? raw : Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+      const opened = openTransport(transportKey, text, WS_PROOF_AAD);
+      if (opened === null) {
+        return; // undecryptable under the proof aad — a reflected challenge lands here and is ignored
+      }
+      let proof: { type?: unknown; connectionId?: unknown; nonce?: unknown };
+      try {
+        proof = JSON.parse(opened) as typeof proof;
+      } catch {
+        return;
+      }
+      // The proof must echo THIS connection's id + nonce, sealed under the proof aad. A reflected
+      // challenge fails (wrong aad → openTransport null above); a stale/other-connection proof fails the
+      // constant-time nonce+id comparison.
+      const nonceOk =
+        typeof proof.nonce === "string" &&
+        Buffer.byteLength(proof.nonce) === Buffer.byteLength(nonce) &&
+        timingSafeEqual(Buffer.from(proof.nonce), Buffer.from(nonce));
+      if (proof.type !== "proof" || proof.connectionId !== connectionId || !nonceOk) {
+        return;
+      }
+
+      // Re-check revocation AND expiry at CONFIRM time (docs/20 §8): a ban / logout / kill-switch (or an
+      // evicted transport session) may have landed during the up-to-10s challenge window, and the session
+      // may have crossed `expiresAt` in that window. Ban is only checked at connect otherwise, and a
+      // revocation/expiry that fired mid-challenge must not be undone by a late proof.
+      const stillValid =
+        transportSessions.get(sid) === transportSession &&
+        transportSession.expiresAt > Date.now() &&
+        !data.users.find((candidate) => candidate.id === userId)?.banned;
+      if (!stillValid) {
+        connection.close();
+        return;
+      }
+
+      confirmed = true;
+      clearTimeout(timer);
+      releaseUnconfirmed();
+      pendingSockets.delete(pending);
+      sockets.add(socketSession);
+      // Bound the socket's life to its session key's expiry (docs/20 §7).
+      expiryTimer = setTimeout(() => connection.close(), Math.max(0, transportSession.expiresAt - Date.now()));
+      (expiryTimer as { unref?: () => void }).unref?.();
+      broadcastPresence();
+    });
+
     connection.on("close", () => {
+      clearTimeout(timer);
+      if (expiryTimer) {
+        clearTimeout(expiryTimer);
+      }
+      releaseUnconfirmed();
+      pendingSockets.delete(pending);
       sockets.delete(socketSession);
       broadcastPresence();
     });
+
+    // Kick off the challenge. Sealed under the challenge aad; the client replies under the proof aad.
+    connection.send(
+      sealTransport(transportKey, JSON.stringify({ type: "challenge", connectionId, nonce }), WS_CHALLENGE_AAD),
+    );
   });
 
   server.setNotFoundHandler((request, reply) => {

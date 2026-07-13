@@ -3,11 +3,10 @@ import { generateDisplayName } from "@loam/display-name";
 import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
-import { attachmentPath } from "../lib/attachments";
 import { renderMarkdownCached } from "../lib/markdown";
 import { bodyFor, displayTime } from "../lib/message-format";
 import type { ReactionSummary } from "../lib/messages";
-import { apiUrl } from "../lib/transport";
+import { AttachmentImage } from "./AttachmentImage";
 import { Avatar } from "./Avatar";
 import { LocationCard } from "./LocationCard";
 
@@ -127,16 +126,7 @@ export function MessageItem({
         {message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (
           <div className="message-attachments">
             {message.attachments.map((attachment) => (
-              <a href={apiUrl(attachmentPath(attachment))} key={attachment.id} rel="noreferrer" target="_blank">
-                <img
-                  alt={t("message.attachedImageAlt")}
-                  className="message-attachment"
-                  height={attachment.height}
-                  loading="lazy"
-                  src={apiUrl(attachmentPath(attachment))}
-                  width={attachment.width}
-                />
-              </a>
+              <AttachmentImage attachment={attachment} alt={t("message.attachedImageAlt")} key={attachment.id} />
             ))}
           </div>
         ) : null}

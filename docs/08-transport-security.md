@@ -1,5 +1,17 @@
 # 08 — Transport security on an off-grid LAN (no HTTPS)
 
+> **⚠️ SUPERSEDED IN PART BY docs/20 (transport auth-binding).** The status block below describes the
+> shipped #70/#75 foundation, but docs/20 fixes a **Critical** flaw in it and corrects three claims here:
+> (1) the tunnel no longer forwards the **cookie** for a `bound` session — identity is the un-sniffable
+> session key, resolved server-side via a trusted internal `x-loam-user` (the plaintext cookie is not a
+> credential for a bound/`required` session); (2) the cookie-free public bootstrap is now
+> **`GET /api/bootstrap`**, and `GET /api/config` is tunnel-only content for a bound session (it no
+> longer "runs before a session exists" on a `required` node); (3) the claim that "**WS frames aren't
+> sequence-numbered / a replayed frame is idempotent**" is **wrong and now fixed** — WS frames carry a
+> per-connection sequence + connection-bound AAD and are preceded by a reflection-safe key-confirmation
+> challenge (docs/20 §7). Read docs/20 for the authoritative auth model; the encryption/handshake/tunnel
+> mechanics below still hold.
+
 > **Status: Layer 1 (QR-bootstrapped session encryption) is BUILT AND SHIPPED end-to-end** — server,
 > crypto, and client are all done (`feat/transport-encryption`). `@loam/crypto` has the X25519
 > handshake (host-static + ephemeral, forward-secret) + XChaCha20-Poly1305 framing + emoji fingerprint.
@@ -11,11 +23,28 @@
 > Gated by `security.transportEncryption` (`off` default / `optional` / `required`), which is now the
 > axis that distinguishes the `open`/`standard`/`hardened` profiles (the docs/09 gap). `required` mode
 > is deployable today: a client with no QR-delivered host key simply cannot connect, so there is no
-> silent downgrade to plaintext. **Layer-1 scope (documented below):** request/response BODIES + WS
-> frames are encrypted; GET request paths + query strings and image bytes remain visible metadata (the
-> tunnel + image encryption are v2); per-request replay protection is also not yet built (a captured
-> ciphertext could be replayed verbatim within its session lifetime) — a documented follow-up, not a
-> regression from today's guarantees.
+> silent downgrade to plaintext. **Anti-replay is now built:** every sealed REST request carries a
+> per-session monotonic sequence number *inside* its authenticated envelope, and the server enforces a
+> DTLS-style sliding window (`TRANSPORT_REPLAY_WINDOW`), so a captured ciphertext replayed within the
+> session's lifetime is refused (409) before its handler runs — a duplicate/out-of-window sequence is
+> rejected while modest reordering/concurrency is tolerated. **Path-hiding tunnel is now built:** in
+> `required` mode the client sends every post-handshake request as an opaque `POST /api/transport/tunnel`
+> whose sealed body is `{ m, p, body }`; the server re-dispatches it internally (`server.inject`, with
+> the caller's cookie + an unforgeable per-boot internal token) and seals the `{ status, contentType,
+> bodyB64 }` response back — so the real method, path/query (a search term, which channel is read), and
+> response body are all ciphertext; only `POST /api/transport/tunnel` is on the wire. `optional` mode
+> keeps the lighter per-route body sealing (path visible). **Image encryption is now built too:** in
+> `required` mode the avatar/attachment routes are no longer exempt — a direct `<img src>` GET (which
+> can't carry the session header) is refused (401), forcing the client to fetch images through the tunnel
+> (`encryptedImageUrl` / the `useEncryptedImage` hook) and render them from a cached `blob:` object URL,
+> so image bytes are sealed on the wire like everything else. `optional`/`off` nodes still serve images
+> directly in clear (lighter). So in `required` mode a **post-handshake REST request** reveals only that
+> a `POST /api/transport/tunnel` happened, plus coarse ciphertext size/timing — its method, path/query,
+> and body are all sealed. Still observable (unavoidably): the **bootstrap** — `GET /api/config` and
+> `POST /api/transport/handshake` run before a session exists — and the **WebSocket upgrade**
+> `GET /ws?enc=<sid>`, which exposes the session id and that a WS connection opened (its frames are then
+> sealed). (WS frames aren't sequence-numbered: a replayed server→client frame is idempotent client-side
+> — every event is upserted by id.)
 
 
 ## The problem

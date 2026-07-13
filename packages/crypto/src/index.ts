@@ -375,6 +375,22 @@ export function createTransportIdentity(): TransportIdentity {
   return { publicKey: b64urlEncode(x25519.getPublicKey(secret)), secretKey: b64urlEncode(secret) };
 }
 
+/** Verify a persisted X25519 transport keypair is internally consistent — the public key is exactly the
+ * one derived from the secret, and the secret is a valid 32-byte scalar. Guards against a corrupt or
+ * mismatched stored record before it is trusted for a handshake (docs/20 #7). Returns false on any
+ * decode/derive error rather than throwing. */
+export function verifyTransportKeypair(publicKey: string, secretKey: string): boolean {
+  try {
+    const secret = b64urlDecode(secretKey);
+    if (secret.length !== 32) {
+      return false;
+    }
+    return b64urlEncode(x25519.getPublicKey(secret)) === publicKey;
+  } catch {
+    return false;
+  }
+}
+
 /** A short, human-comparable fingerprint (emoji) of a host public key — shown in the client + on the
  * host screen so people can confirm they scanned the real host and spot a swapped QR poster. */
 export function transportFingerprint(publicKey: string): string {

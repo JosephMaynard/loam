@@ -8,6 +8,7 @@ import {
   mailboxTag,
   currentEpoch,
   createTransportIdentity,
+  verifyTransportKeypair,
   transportFingerprint,
   transportClientHello,
   transportServerAccept,
@@ -237,5 +238,16 @@ describe("transport session (docs/08)", () => {
     expect([...transportFingerprint(a.publicKey)].length).toBe(5);
     // Extremely unlikely to collide; guards against a constant/empty implementation.
     expect(transportFingerprint(a.publicKey)).not.toBe(transportFingerprint(b.publicKey));
+  });
+});
+
+describe("verifyTransportKeypair (docs/20 #7)", () => {
+  it("accepts a genuine keypair and rejects mismatched / malformed records", () => {
+    const id = createTransportIdentity();
+    const other = createTransportIdentity();
+    expect(verifyTransportKeypair(id.publicKey, id.secretKey)).toBe(true);
+    expect(verifyTransportKeypair(other.publicKey, id.secretKey)).toBe(false); // public ≠ derived
+    expect(verifyTransportKeypair(id.publicKey, "AAAA")).toBe(false); // wrong-length secret
+    expect(verifyTransportKeypair(id.publicKey, "!!!not-base64!!!")).toBe(false); // malformed
   });
 });

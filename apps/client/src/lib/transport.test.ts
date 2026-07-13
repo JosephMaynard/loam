@@ -3,14 +3,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   apiUrl,
+  clearStoredIdentityToken,
   encryptedFetch,
+  encryptedImageUrl,
   ensureSession,
   fingerprint,
   getCachedHostPublicKey,
   getHostKeyMismatch,
   getSession,
-  openWsFrame,
+  handleWsFrame,
+  isTunnelActive,
+  logoutSecureIdentity,
+  resumeIdentity,
   resetTransportStateForTests,
+  setMintSuppressed,
+  snapshotForWipe,
+  wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
   wsUrl,
@@ -52,6 +60,15 @@ describe("transport", () => {
     it("prefixes a configured server origin override", () => {
       localStorage.setItem(SERVER_URL_KEY, "http://192.168.1.5:3001");
       expect(apiUrl("/api/config")).toBe("http://192.168.1.5:3001/api/config");
+    });
+
+    it("falls back to the captured server-origin snapshot after the override is removed mid-wipe (docs/20 round-5 H1)", () => {
+      localStorage.setItem(SERVER_URL_KEY, "http://192.168.1.9:3001");
+      snapshotForWipe(); // capture token + origin before announcing the wipe to other tabs
+      // A sibling tab (or this wipe's own local purge) removes the stored origin — the in-flight server
+      // credential cleanup must still target the right node via the snapshot, not fall back to relative.
+      localStorage.removeItem(SERVER_URL_KEY);
+      expect(apiUrl("/api/session/end")).toBe("http://192.168.1.9:3001/api/session/end");
     });
   });
 
@@ -178,6 +195,16 @@ describe("transport", () => {
       expect(getCachedHostPublicKey()).toBe(host.publicKey);
 
       // A later boot/reconnect with no fragment but a cached key and an "off" config must not downgrade.
+      // The live session (bound to the QR key) is REUSED rather than re-handshaked (docs/20 — a blind
+      // re-handshake would orphan a live WS), but it stays encrypted against the QR key: no downgrade.
+      fetchMock.mockClear();
+      await ensureSession("off", undefined);
+      expect(fetchMock).not.toHaveBeenCalled(); // reused, not re-handshaked
+      expect(getSession()?.hostPublicKey).toBe(host.publicKey); // still encrypted against the QR key
+
+      // With no live session, a cached QR key still forces a fresh encrypted handshake (no downgrade).
+      resetTransportStateForTests();
+      localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, host.publicKey);
       fetchMock.mockClear();
       await ensureSession("off", undefined);
       expect(fetchMock).toHaveBeenCalled();
@@ -239,7 +266,9 @@ describe("transport", () => {
         const aad = `${init.method} ${url}`;
         const opened = openTransport(sessionKeyOnServer!, wireBody.enc, aad);
         expect(opened).not.toBeNull();
-        expect(JSON.parse(opened!)).toEqual({ text: "hello" });
+        // The sealed plaintext is the `{ s, b }` anti-replay envelope: sequence 1 (first request on a
+        // fresh session) carrying the body under `b`.
+        expect(JSON.parse(opened!)).toEqual({ s: 1, b: { text: "hello" } });
 
         const sealedResponse = sealTransport(sessionKeyOnServer!, JSON.stringify({ id: "msg_1" }), aad);
         return new Response(JSON.stringify({ enc: sealedResponse }), {
@@ -255,6 +284,39 @@ describe("transport", () => {
       expect(capturedRequestBody).toBeDefined();
       expect(await response.json()).toEqual({ id: "msg_1" });
     });
+
+    it("assigns a strictly increasing per-session sequence to each sealed request (anti-replay)", async () => {
+      const host = createTransportIdentity();
+      let serverKey: string | undefined;
+      const seqs: number[] = [];
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        const wire = JSON.parse(init.body as string) as { enc: string };
+        const opened = openTransport(serverKey!, wire.enc, `${init.method} ${url}`);
+        seqs.push((JSON.parse(opened!) as { s: number }).s);
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      await encryptedFetch("POST", "/api/messages", { n: 1 });
+      await encryptedFetch("POST", "/api/messages", { n: 2 });
+      await encryptedFetch("DELETE", "/api/messages/x");
+
+      expect(seqs).toEqual([1, 2, 3]);
+    });
   });
 
   describe("re-handshake retry on a stale session", () => {
@@ -267,7 +329,7 @@ describe("transport", () => {
       };
     }
 
-    it("re-handshakes exactly once on a 401 for an established session, then retries and succeeds", async () => {
+    it("re-handshakes exactly once on a 401 for a SAFE request, then retries and succeeds", async () => {
       const host = createTransportIdentity();
       let contentCalls = 0;
       let handshakeCalls = 0;
@@ -289,10 +351,7 @@ describe("transport", () => {
         // real response the same way the server would.
         const session = getSession();
         expect(session).toBeDefined();
-        const aad = `${init.method} ${url}`;
-        const opened = JSON.parse(init.body as string) as { enc: string };
-        expect(openTransport(session!.key, opened.enc, aad)).not.toBeNull();
-        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), aad);
+        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}`);
         return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
       });
       vi.stubGlobal("fetch", fetchMock);
@@ -300,7 +359,7 @@ describe("transport", () => {
       await ensureSession("optional", host.publicKey);
       expect(handshakeCalls).toBe(1);
 
-      const response = await encryptedFetch("POST", "/api/messages", { text: "hi" });
+      const response = await encryptedFetch("GET", "/api/channels");
 
       // Exactly one retry: two content attempts, and exactly one *additional* handshake (the
       // transparent re-handshake), never more.
@@ -308,6 +367,30 @@ describe("transport", () => {
       expect(handshakeCalls).toBe(2);
       expect(await response.json()).toEqual({ ok: true });
       expect(getSession()).toBeDefined();
+    });
+
+    it("does NOT retry a MUTATION on an unsealed outer 401 — never replays it (docs/20 H4)", async () => {
+      // The outer 401 status is outside the AEAD: a network middleman could forge it on a POST the server
+      // actually processed, stripping x-loam-enc. Auto-retrying would REPLAY the mutation (duplicate
+      // message / repeated admin op). So a mutating method surfaces the 401 unretried.
+      const host = createTransportIdentity();
+      let contentCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          return handshakeResponder(host)(url, init);
+        }
+        contentCalls += 1;
+        return new Response(null, { status: 401 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      const response = await encryptedFetch("POST", "/api/messages", { text: "hi" });
+
+      // The POST was sent exactly once and the 401 surfaced — no re-handshake-and-replay.
+      expect(contentCalls).toBe(1);
+      expect(response.status).toBe(401);
     });
 
     it("gives up after one retry — does not loop on a session that keeps failing", async () => {
@@ -400,6 +483,37 @@ describe("transport", () => {
       expect(contentCalls).toBe(1);
       expect(handshakeCalls).toBe(1);
     });
+
+    it("concurrent 401s share ONE in-flight re-handshake (docs/20 §5.6/§9 — no multi-identity mint)", async () => {
+      // Two parallel GETs both 401 on the same expired session. Without the in-flight guard each would
+      // handshake independently (two fresh sessions/identities); with it they share one re-handshake.
+      const host = createTransportIdentity();
+      let handshakeCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          handshakeCalls += 1;
+          return handshakeResponder(host)(url, init);
+        }
+        // Every content request 401s (unsealed → "transport expired"), so both fire their re-handshake.
+        return new Response(null, { status: 401 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      expect(handshakeCalls).toBe(1);
+
+      // Fire both concurrently: each 401s, each calls reHandshake — but they must coalesce into one.
+      const [a, b] = await Promise.all([
+        encryptedFetch("GET", "/api/channels"),
+        encryptedFetch("GET", "/api/users"),
+      ]);
+
+      expect(a.status).toBe(401);
+      expect(b.status).toBe(401);
+      // Exactly one shared re-handshake for the burst: initial + 1, never initial + 2.
+      expect(handshakeCalls).toBe(2);
+    });
   });
 
   describe("mutations always carry a sealed envelope, even with no logical body (docs/08)", () => {
@@ -429,7 +543,8 @@ describe("transport", () => {
 
       const session = getSession();
       const opened = openTransport(session!.key, wire.enc, "POST /api/admin/sync/run");
-      expect(opened).toBe("");
+      // A bodyless mutation still seals the `{ s }` anti-replay envelope (sequence only, no `b`).
+      expect(JSON.parse(opened!)).toEqual({ s: 1 });
     });
 
     it("keeps a bodyless GET a pure passthrough under a live session (no envelope needed)", async () => {
@@ -454,6 +569,652 @@ describe("transport", () => {
     });
   });
 
+  describe("metadata-hiding tunnel (required mode, docs/08)", () => {
+    it("routes every request through /api/transport/tunnel so the real path never hits the wire", async () => {
+      const host = createTransportIdentity();
+      // A QR key forces `required` mode → the tunnel.
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      let tunnelHits = 0;
+      let capturedInner: { m: string; p: string; body?: unknown } | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        // Anything else MUST be the opaque tunnel endpoint — never the real path.
+        expect(url).toBe("/api/transport/tunnel");
+        tunnelHits += 1;
+        const wire = JSON.parse(init.body as string) as { enc: string };
+        const opened = openTransport(serverKey!, wire.enc, "POST /api/transport/tunnel");
+        const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string; body?: unknown } };
+        capturedInner = envelope.b;
+        // Reply with a sealed { s, m, p, status, contentType, bodyB64 } descriptor (standard base64, as
+        // the server sends). The s/m/p bind the response to the request (docs/20 §9); the client verifies.
+        const descriptor = JSON.stringify({
+          s: envelope.s,
+          m: envelope.b.m,
+          p: envelope.b.p,
+          status: 200,
+          contentType: "application/json",
+          bodyB64: btoa(JSON.stringify({ ok: true, sawPath: envelope.b.p })),
+        });
+        return new Response(
+          JSON.stringify({ enc: sealTransport(serverKey!, descriptor, "POST /api/transport/tunnel") }),
+          { status: 200, headers: { "x-loam-enc": "1" } },
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      // A sensitive query string — the whole point of the tunnel is that `q=secret` never appears.
+      const res = await encryptedFetch("GET", "/api/search?q=secret");
+
+      expect(tunnelHits).toBe(1);
+      expect(capturedInner).toEqual({ m: "GET", p: "/api/search?q=secret" });
+      expect(await res.json()).toEqual({ ok: true, sawPath: "/api/search?q=secret" });
+    });
+
+    it("tunnels a mutation with its body sealed inside the envelope", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      let capturedInner: { m: string; p: string; body?: unknown } | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        expect(url).toBe("/api/transport/tunnel");
+        const wire = JSON.parse(init.body as string) as { enc: string };
+        const opened = openTransport(serverKey!, wire.enc, "POST /api/transport/tunnel");
+        const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string; body?: unknown } };
+        capturedInner = envelope.b;
+        const descriptor = JSON.stringify({
+          s: envelope.s,
+          m: envelope.b.m,
+          p: envelope.b.p,
+          status: 201,
+          contentType: "application/json",
+          bodyB64: btoa(JSON.stringify({ id: "msg_1" })),
+        });
+        return new Response(JSON.stringify({ enc: sealTransport(serverKey!, descriptor, "POST /api/transport/tunnel") }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const res = await encryptedFetch("POST", "/api/messages", { type: "channelPost", channelId: "general", body: "hi" });
+
+      // Method, path AND body all rode inside the sealed envelope — none on the wire path.
+      expect(capturedInner).toEqual({ m: "POST", p: "/api/messages", body: { type: "channelPost", channelId: "general", body: "hi" } });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: "msg_1" });
+    });
+
+    it("surfaces a sealed non-descriptor tunnel reply as a 400 Response instead of crashing", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string })
+              .clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        // The tunnel endpoint's own guard reply: a sealed errorBody, NOT a { status, bodyB64 } descriptor.
+        const sealedError = sealTransport(serverKey!, JSON.stringify({ error: { message: "Invalid tunnel target" } }), "POST /api/transport/tunnel");
+        return new Response(JSON.stringify({ enc: sealedError }), { status: 200, headers: { "x-loam-enc": "1" } });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const res = await encryptedFetch("GET", "/api/whatever");
+      expect(res.status).toBe(400); // no throw; readable error Response
+      expect(await res.json()).toEqual({ error: { message: "Invalid tunnel target" } });
+    });
+  });
+
+  describe("resumeIdentity (docs/20 sealed identity binding)", () => {
+    const RESUME_AAD = "POST /api/session/resume";
+
+    /** A mock node that handshakes and answers `/api/session/resume`. `resume(token)` returns what the
+     *  server should reply with, given the token the client presented (undefined = first-contact mint). */
+    function mockNode(
+      host: ReturnType<typeof createTransportIdentity>,
+      resume: (token: string | undefined, serverKey: string, seq: number) => Response,
+    ) {
+      let serverKey: string | undefined;
+      return vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        expect(url).toBe("/api/session/resume");
+        const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+        const envelope = JSON.parse(opened!) as { s: number; b: { token?: string } };
+        return resume(envelope.b.token, serverKey!, envelope.s);
+      });
+    }
+
+    function sealedReply(serverKey: string, body: unknown, status = 200): Response {
+      return new Response(JSON.stringify({ enc: sealTransport(serverKey, JSON.stringify(body), RESUME_AAD) }), {
+        status,
+        headers: { "x-loam-enc": "1" },
+      });
+    }
+
+    it("mints a fresh identity, stores the token, and returns currentUser (credentials omitted)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let sawCredentials: RequestCredentials | undefined;
+      const fetchMock = vi.fn(mockNode(host, (token, key, seq) => {
+        expect(token).toBeUndefined(); // first contact: no stored token
+        return sealedReply(key, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "user.aaaa" }, token: "tok-aaaa" });
+      }));
+      // Wrap to capture credentials on the resume call.
+      const wrapped = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/session/resume") sawCredentials = init.credentials;
+        return fetchMock(url, init);
+      });
+      vi.stubGlobal("fetch", wrapped);
+
+      await ensureSession("required", host.publicKey);
+      const { currentUser } = await resumeIdentity();
+      expect(currentUser).toEqual({ id: "user.aaaa" });
+      expect(sawCredentials).toBe("omit"); // the cookie is never sent on a bound resume
+      // The stored token is presented on a subsequent resume.
+      expect(getSession()?.bound).toBe(true);
+    });
+
+    it("rejects a response whose s/m/p don't match the request (response binding, docs/20 §9)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const fetchMock = mockNode(host, (_token, key, seq) =>
+        // Wrong sequence echoed back — a cross-fed reply. The client must refuse it.
+        sealedReply(key, { s: seq + 99, m: "POST", p: "/api/session/resume", currentUser: { id: "x" }, token: "t" }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await expect(resumeIdentity()).rejects.toThrow(/did not match/);
+    });
+
+    it("recovers the SAME identity when a first-resume response is lost — same-session retry (docs/20 H2)", async () => {
+      // The server processed the mint (making a first user admin) and bound the session, but the response
+      // was lost. A same-session retry hits the server's idempotent cached result and recovers the SAME
+      // admin identity + token — instead of re-handshaking and minting a second, non-admin user.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let resumeCalls = 0;
+      const fetchMock = mockNode(host, (_token, key, seq) => {
+        resumeCalls += 1;
+        if (resumeCalls === 1) {
+          throw new TypeError("network lost after the server bound the session");
+        }
+        return sealedReply(key, {
+          s: seq,
+          m: "POST",
+          p: "/api/session/resume",
+          currentUser: { id: "user.admin", isAdmin: true },
+          token: "admin-tok",
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await expect(resumeIdentity()).rejects.toThrow(); // first attempt: response lost
+      const { currentUser } = await resumeIdentity(); // same-session retry recovers the cached identity
+      expect((currentUser as { id: string; isAdmin: boolean }).id).toBe("user.admin");
+      expect((currentUser as { isAdmin: boolean }).isAdmin).toBe(true);
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBe("admin-tok");
+      expect(resumeCalls).toBe(2); // no third mint
+    });
+
+    it("clears a rejected stored token and mints fresh exactly once", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      // Seed a stored token for this origin so the first resume presents it.
+      localStorage.setItem(`loam.identityToken.${window.location.origin}`, "stale-token");
+      const presented: (string | undefined)[] = [];
+      const fetchMock = mockNode(host, (token, key, seq) => {
+        presented.push(token);
+        if (token !== undefined) {
+          // The stale token is rejected with a SEALED 401 (from the handler, after decrypt).
+          return sealedReply(key, { error: { message: "Invalid identity token" } }, 401);
+        }
+        return sealedReply(key, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "user.new" }, token: "fresh" });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      const { currentUser } = await resumeIdentity();
+      expect(presented).toEqual(["stale-token", undefined]); // tried stale, then minted fresh
+      expect(currentUser).toEqual({ id: "user.new" });
+    });
+
+    it("logoutSecureIdentity revokes server-side and clears the local token", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      let logoutHits = 0;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/session/resume") {
+          const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+          const seq = (JSON.parse(opened!) as { s: number }).s;
+          return sealedReply(serverKey!, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+        }
+        expect(url).toBe("/api/session/logout");
+        expect(init.credentials).toBe("omit");
+        logoutHits += 1;
+        return new Response(JSON.stringify({ enc: sealTransport(serverKey!, JSON.stringify({ ok: true }), "POST /api/session/logout") }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity();
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBe("tok");
+
+      const handled = await logoutSecureIdentity();
+      expect(handled).toBe(true); // it handled a bound identity → caller must NOT also call session/end
+      expect(logoutHits).toBe(1);
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
+    });
+
+    it("logoutSecureIdentity returns false and sends nothing for a purely anonymous session (docs/20 H3)", async () => {
+      // No QR pin, no stored token → an anonymous optional session. There's no secure identity to revoke,
+      // so it must report `false` (the caller then clears the cookie via session/end) and never POST logout.
+      const host = createTransportIdentity();
+      let logoutHits = 0;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+        if (url === "/api/session/logout") logoutHits += 1;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey); // anonymous (no QR) → not bound
+      const handled = await logoutSecureIdentity();
+      expect(handled).toBe(false);
+      expect(logoutHits).toBe(0);
+    });
+
+    /** A mock node that handshakes, resumes (mint), and drives `/api/session/logout` via `logout(hit)` —
+     *  `hit` is the 1-based logout attempt number, so a test can make the first fail and a retry succeed. */
+    function logoutMockNode(
+      host: ReturnType<typeof createTransportIdentity>,
+      logout: (hit: number, key: string) => Response,
+    ) {
+      let serverKey: string | undefined;
+      let logoutHits = 0;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/session/resume") {
+          const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+          const seq = (JSON.parse(opened!) as { s: number }).s;
+          return sealedReply(serverKey!, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+        }
+        logoutHits += 1;
+        return logout(logoutHits, serverKey!);
+      });
+      return { fetchMock, logoutHits: () => logoutHits };
+    }
+
+    it("logoutSecureIdentity retries once over a revived session but returns FALSE when it never confirms (docs/20 H3)", async () => {
+      // A bound client whose transport session died: every logout POST is refused UNSEALED (onRequest 401),
+      // so nothing is revoked. The outcome-driven logout must (a) RETRY once over a re-established session,
+      // and (b) still report `false` — not a precondition-based `true` — so the wipe falls back to the cookie.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const node = logoutMockNode(host, () => new Response(null, { status: 401 })); // always unsealed 401
+      vi.stubGlobal("fetch", node.fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity();
+      const confirmed = await logoutSecureIdentity();
+      expect(confirmed).toBe(false); // never confirmed → caller must still clear the cookie
+      expect(node.logoutHits()).toBe(2); // first attempt + one retry after the re-establish
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull(); // token cleared locally
+    });
+
+    it("logoutSecureIdentity confirms TRUE when the retry over a revived session succeeds (docs/20 H3)", async () => {
+      // The first logout fails unsealed (dead session); after re-establishing, the retry gets a sealed
+      // { ok:true } → revocation confirmed (informational; the cookie clear runs unconditionally anyway).
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const node = logoutMockNode(host, (hit, key) =>
+        hit === 1
+          ? new Response(null, { status: 401 })
+          : new Response(JSON.stringify({ enc: sealTransport(key, JSON.stringify({ ok: true }), "POST /api/session/logout") }), {
+              status: 200,
+              headers: { "x-loam-enc": "1" },
+            }),
+      );
+      vi.stubGlobal("fetch", node.fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity();
+      const confirmed = await logoutSecureIdentity();
+      expect(confirmed).toBe(true); // the retry landed
+      expect(node.logoutHits()).toBe(2);
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
+    });
+
+    it("wipeServerCredentials still clears the cookie when the secure-logout re-handshake HANGS (docs/20 #3/H)", async () => {
+      // Sol's failure mode: a stale logout 401s quickly, recovery re-handshakes, and that handshake is
+      // blackholed (never resolves, ignores the abort signal). `wipeServerCredentials` must still hit the
+      // deadline, proceed to the cookie-clear, and SETTLE — so the caller's local purge always runs.
+      vi.useFakeTimers();
+      try {
+        const host = createTransportIdentity();
+        window.location.hash = `#k=${host.publicKey}`;
+        let serverKey: string | undefined;
+        let handshakes = 0;
+        let sessionEndCalled = false;
+        const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+          if (url === "/api/transport/handshake") {
+            handshakes += 1;
+            if (handshakes >= 2) {
+              return new Promise<Response>(() => {}); // the RECOVERY handshake hangs forever
+            }
+            const accepted = transportServerAccept({
+              hostSecret: host.secretKey,
+              clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+            });
+            serverKey = accepted.sessionKey;
+            return new Response(
+              JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+              { status: 200 },
+            );
+          }
+          if (url === "/api/session/resume") {
+            const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+            const seq = (JSON.parse(opened!) as { s: number }).s;
+            return sealedReply(serverKey!, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+          }
+          if (url === "/api/session/logout") {
+            return new Response(null, { status: 401 }); // unsealed → triggers the hanging recovery handshake
+          }
+          if (url === "/api/session/end") {
+            // The cookie-clear that MUST still run — a bare, direct POST with the cookie (credentials:include).
+            expect(init.method).toBe("POST");
+            expect(init.credentials).toBe("include");
+            sessionEndCalled = true;
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+          throw new Error(`Unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal("fetch", fetchMock);
+
+        await ensureSession("required", host.publicKey);
+        await resumeIdentity();
+
+        const wipe = wipeServerCredentials(1_000);
+        await vi.advanceTimersByTimeAsync(1_000); // trip the logout deadline; the cookie-clear then runs
+        await wipe;
+
+        expect(sessionEndCalled).toBe(true); // the cookie-clear proceeded despite the hung logout
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("uses the pre-erasure token snapshot for stale-session revocation after local storage is cleared (docs/20 #3 H1)", async () => {
+      // The wipe erases local storage FIRST, but the server revocation must still recover a dead bound
+      // session by re-establishing with the token. The snapshot (captured before erasure) is what makes
+      // that possible even though localStorage is already empty.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const tokenKey = `loam.identityToken.${window.location.origin}`;
+      let serverKey: string | undefined;
+      const resumeTokens: (string | undefined)[] = [];
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/session/resume") {
+          const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+          const env = JSON.parse(opened!) as { s: number; b: { token?: string } };
+          resumeTokens.push(env.b.token);
+          return sealedReply(serverKey!, { s: env.s, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+        }
+        if (url === "/api/session/logout") {
+          return new Response(null, { status: 401 }); // dead session → triggers recovery re-establish
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 }); // session/end
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity(); // mint → resumeTokens: [undefined]; token "tok" stored
+      expect(localStorage.getItem(tokenKey)).toBe("tok");
+
+      // Model the wipe order: snapshot BEFORE clearing local storage, then clear it, then revoke.
+      snapshotForWipe();
+      clearStoredIdentityToken();
+      expect(localStorage.getItem(tokenKey)).toBeNull();
+      await wipeServerCredentials(1_000);
+
+      // The recovery re-establish presented the SNAPSHOT token (not undefined) — so revocation could run
+      // despite local storage being empty. Without the snapshot it would mint (suppressed) and skip recovery.
+      expect(resumeTokens).toContain("tok");
+    });
+
+    it("setMintSuppressed blocks a fresh mint during a wipe (docs/20 H3 — no orphan)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      setMintSuppressed(true);
+      try {
+        // A resume with no stored token would MINT — suppressed during a wipe, so it throws instead.
+        await expect(resumeIdentity()).rejects.toThrow(/suppressed/);
+      } finally {
+        setMintSuppressed(false);
+      }
+    });
+
+    it("does NOT persist a token while a wipe is in progress — no credential repopulation (docs/20 CR#2)", async () => {
+      // An in-flight resume that lands mid-wipe (mint suppressed) must not re-write the identity token the
+      // wipe just cleared. Here a resume with the stored token succeeds and the server returns a NEW token,
+      // but `storeIdentityToken` is gated, so localStorage is not repopulated.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const key = `loam.identityToken.${window.location.origin}`;
+      localStorage.setItem(key, "stored-token");
+      const fetchMock = mockNode(host, (_token, serverKey, seq) =>
+        sealedReply(serverKey, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "new-token" }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      setMintSuppressed(true);
+      try {
+        await resumeIdentity(); // resumes with "stored-token"; server returns "new-token"
+      } finally {
+        setMintSuppressed(false);
+      }
+      // The new token was NOT written — the credential the wipe cleared can't be repopulated mid-wipe.
+      expect(localStorage.getItem(key)).toBe("stored-token");
+    });
+
+    it("resumeIdentity refuses to bind over a non-QR-verified (optional) session (docs/20 L8)", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      // Optional mode with NO QR pin → effective mode stays "optional"; the secret token must not be sent.
+      await ensureSession("optional", host.publicKey);
+      await expect(resumeIdentity()).rejects.toThrow(/non-QR-verified/);
+    });
+
+    it("drops a stale non-QR session when a later required join has no QR key, so it can't be resumed over (docs/20 #8)", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      // 1) A live optional (config-key, NOT QR-verified) session exists.
+      await ensureSession("optional", host.publicKey);
+      expect(getSession()).toBeDefined();
+
+      // 2) A later `required` join with NO QR key available must throw AND drop that stale session — so a
+      //    subsequent resume can't seal the secret token over the un-QR-verified key (`lastParams.mode` is
+      //    now "required", which the old caller-convention guard would have wrongly allowed).
+      await expect(ensureSession("required", undefined)).rejects.toThrow(TransportNeedsQrError);
+      expect(getSession()).toBeUndefined();
+      await expect(resumeIdentity()).rejects.toThrow(); // no session to bind over
+    });
+
+    it("clearStoredIdentityToken drops the per-origin token", async () => {
+      localStorage.setItem(`loam.identityToken.${window.location.origin}`, "tok");
+      clearStoredIdentityToken();
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
+    });
+  });
+
+  describe("encryptedImageUrl", () => {
+    it("is a raw same-origin passthrough when not tunnelling (no session)", async () => {
+      expect(isTunnelActive()).toBe(false);
+      expect(await encryptedImageUrl("/api/avatars/x.webp")).toBe("/api/avatars/x.webp");
+    });
+
+    it("reports the tunnel active only once a required-mode session exists", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      expect(isTunnelActive()).toBe(false);
+      await ensureSession("required", host.publicKey);
+      expect(isTunnelActive()).toBe(true);
+    });
+
+    it("FAILS CLOSED under the tunnel: a failed image fetch returns '' — never the raw plaintext URL (docs/20)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        // The tunnelled image GET fails at the server (e.g. transport session expired) — a sealed 404-ish
+        // descriptor with a non-ok status, so the tunnel returns a non-ok Response.
+        const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, "POST /api/transport/tunnel");
+        const envelope = JSON.parse(opened!) as { s: number; b: { m: string; p: string } };
+        const descriptor = JSON.stringify({
+          s: envelope.s,
+          m: envelope.b.m,
+          p: envelope.b.p,
+          status: 404,
+          contentType: "application/json",
+          bodyB64: btoa(JSON.stringify({ error: { message: "gone" } })),
+        });
+        return new Response(JSON.stringify({ enc: sealTransport(serverKey!, descriptor, "POST /api/transport/tunnel") }), {
+          status: 200,
+          headers: { "x-loam-enc": "1" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      expect(isTunnelActive()).toBe(true);
+      // The image can't be fetched → empty src, NOT a downgraded direct GET to the plaintext URL.
+      expect(await encryptedImageUrl("/api/avatars/x.webp")).toBe("");
+    });
+  });
+
   describe("wsUrl", () => {
     it("passes the base URL through unchanged with no session", () => {
       expect(wsUrl("ws://host/ws")).toBe("ws://host/ws");
@@ -474,38 +1235,65 @@ describe("transport", () => {
     });
   });
 
-  describe("openWsFrame", () => {
-    it("passes raw string frames through unchanged with no session", () => {
-      expect(openWsFrame("plain frame")).toBe("plain frame");
-      expect(openWsFrame(42)).toBe("42");
-    });
+  describe("handleWsFrame (docs/20 §7 key-confirmation + connection binding)", () => {
+    const WS_CHALLENGE_AAD = "loam.ws.challenge.v1";
+    const WS_PROOF_AAD = "loam.ws.proof.v1";
+    const wsFrameAad = (connectionId: string) => `loam.ws.frame.v1 ${connectionId}`;
 
-    it("round-trips a frame sealed under the live session key", async () => {
+    async function liveSession(): Promise<string> {
       const host = createTransportIdentity();
       const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
         const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
         return new Response(JSON.stringify(json), { status });
       });
       vi.stubGlobal("fetch", fetchMock);
-
       await ensureSession("optional", host.publicKey);
       const key = getSession()?.key;
       expect(key).toBeDefined();
+      // A new socket resets the per-connection challenge state.
+      wsUrl("ws://host/ws");
+      return key as string;
+    }
 
-      const sealed = sealTransport(key!, JSON.stringify({ type: "presence" }), "ws");
-      expect(openWsFrame(sealed)).toBe(JSON.stringify({ type: "presence" }));
+    it("passes raw string frames through unchanged with no session", () => {
+      expect(handleWsFrame("plain frame")).toEqual({ payload: "plain frame" });
+      expect(handleWsFrame(42)).toEqual({ payload: "42" });
     });
 
-    it("returns null on a decrypt failure (never for a session-less pass-through)", async () => {
-      const host = createTransportIdentity();
-      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
-        return new Response(JSON.stringify(json), { status });
-      });
-      vi.stubGlobal("fetch", fetchMock);
+    it("answers the challenge with a proof under the separate proof aad, then decodes app frames", async () => {
+      const key = await liveSession();
+      const connectionId = "conn-abc";
+      const nonce = "nonce-xyz";
 
-      await ensureSession("optional", host.publicKey);
-      expect(openWsFrame("not a valid sealed frame")).toBeNull();
+      // The server's challenge (sealed under the challenge aad).
+      const challenge = sealTransport(key, JSON.stringify({ type: "challenge", connectionId, nonce }), WS_CHALLENGE_AAD);
+      const answered = handleWsFrame(challenge);
+      expect(answered.proof).toBeDefined();
+      expect(answered.payload).toBeUndefined();
+      // The proof opens under the PROOF aad (not the challenge aad — direction separation) and echoes it.
+      const proofPlain = openTransport(key, answered.proof as string, WS_PROOF_AAD);
+      expect(JSON.parse(proofPlain as string)).toEqual({ type: "proof", connectionId, nonce });
+
+      // A connection-bound application frame `{ q, f }` now decodes to its inner payload.
+      const frame = sealTransport(key, JSON.stringify({ q: 1, f: JSON.stringify({ type: "presence" }) }), wsFrameAad(connectionId));
+      expect(handleWsFrame(frame)).toEqual({ payload: JSON.stringify({ type: "presence" }) });
+
+      // A replayed (non-advancing) sequence is dropped.
+      expect(handleWsFrame(frame)).toEqual({});
+    });
+
+    it("ignores frames before the challenge is answered and rejects a wrong-connection frame", async () => {
+      const key = await liveSession();
+      // An application frame arriving before any challenge (wrong aad for the pre-confirm state) is ignored.
+      const stray = sealTransport(key, JSON.stringify({ q: 1, f: "x" }), wsFrameAad("conn-1"));
+      expect(handleWsFrame(stray)).toEqual({});
+      expect(handleWsFrame("garbage")).toEqual({});
+
+      // Answer a challenge for conn-1, then a frame sealed for a DIFFERENT connection id won't open.
+      const challenge = sealTransport(key, JSON.stringify({ type: "challenge", connectionId: "conn-1", nonce: "n" }), WS_CHALLENGE_AAD);
+      expect(handleWsFrame(challenge).proof).toBeDefined();
+      const otherConn = sealTransport(key, JSON.stringify({ q: 1, f: "y" }), wsFrameAad("conn-2"));
+      expect(handleWsFrame(otherConn)).toEqual({});
     });
   });
 

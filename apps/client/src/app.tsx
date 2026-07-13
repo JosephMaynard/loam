@@ -71,19 +71,33 @@ import {
   putRecords,
 } from "./lib/local-store";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
+import {
+  announceWipe,
+  clearWipeTombstone,
+  isWipeTombstoned,
+  listenForRemoteWipe,
+  setWipeTombstone,
+} from "./lib/wipe";
 import { bodyFor, displayTime } from "./lib/message-format";
 import { clamp } from "./lib/numbers";
 import {
   apiUrl,
+  clearStoredIdentityToken,
   encryptedFetch,
   ensureSession,
   fingerprint,
   getHostKeyMismatch,
+  handleWsFrame,
   isSessionQrVerified,
+  isTunnelActive,
   joinQrUrl,
-  openWsFrame,
+  reestablishSession,
+  resumeIdentity,
   SERVER_URL_KEY,
+  setMintSuppressed,
+  snapshotForWipe,
   TransportNeedsQrError,
+  wipeServerCredentials,
   wsUrl,
 } from "./lib/transport";
 import {
@@ -176,11 +190,46 @@ function rememberCurrentUser(user: User): void {
   localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
 }
 
+/** The public, cookie-free bootstrap (docs/20): everything `/api/config` returns EXCEPT `currentUser`.
+ * A `required`/bound client reads this FIRST — before it has an identity — to learn the transport mode
+ * + host key, then handshakes and resumes a sealed identity. */
+type Bootstrap = {
+  version?: string;
+  joinUrl: string;
+  websocketPath: string;
+  networkConfig: NetworkConfig;
+};
+
 /**
- * GET `/api/config` as a plain, unencrypted fetch — the transport bootstrap path (docs/08). It
- * identifies the session and advertises `transportEncryption`/`transportPublicKey`, so it must be
- * readable before a transport session exists, and it is refetched on every reconnect/resync
- * regardless of whether a session is later established, so it always bypasses `encryptedFetch`.
+ * GET `/api/bootstrap` as a public, cookie-free fetch (docs/20) — mints no identity, sets no cookie, and
+ * advertises `transportEncryption`/`transportPublicKey`, so a client can learn how to connect before it
+ * has a session. Read FIRST on every boot/reconnect, always bypassing `encryptedFetch`.
+ */
+async function fetchBootstrapJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Bootstrap> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(apiUrl("/api/bootstrap"), {
+      credentials: "omit",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => undefined);
+      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
+    }
+
+    return response.json() as Promise<Bootstrap>;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+/**
+ * GET `/api/config` for the ANONYMOUS (cookie) path — optional/off nodes, where identity is the session
+ * cookie and `/api/config` is directly readable and returns `currentUser`. A bound/required client never
+ * uses this (its `/api/config` is tunnel-only content and its identity comes from the sealed resume).
  */
 async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> {
   const controller = new AbortController();
@@ -201,6 +250,71 @@ async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> 
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+/**
+ * The full boot/reconnect sequence (docs/20): read the public bootstrap, establish the transport
+ * session, then resolve identity — a `bound` (required / QR-pinned) client resumes a sealed identity
+ * (its `currentUser` comes back over the encrypted channel, never a cookie); an anonymous optional/off
+ * client falls back to the cookie `/api/config`. Returns the assembled `Config`. Throws
+ * `TransportNeedsQrError` when `required` and no host key is available (the caller renders the QR gate).
+ */
+async function loadConfig(): Promise<Config> {
+  const boot = await fetchBootstrapJson();
+  const mode = boot.networkConfig.transportEncryption;
+
+  try {
+    await ensureSession(mode, boot.networkConfig.transportPublicKey);
+  } catch (sessionError) {
+    if (sessionError instanceof TransportNeedsQrError) {
+      throw sessionError; // caller renders the "scan the join QR" gate
+    }
+    if (mode !== "optional") {
+      // `required` where a key WAS available but the handshake failed (node unreachable) — surface it
+      // rather than silently degrading to plaintext.
+      throw sessionError;
+    }
+    // `optional`: proceed without a session (plaintext) rather than stranding the user.
+  }
+
+  if (isTunnelActive()) {
+    // Bound: identity is the session key. Resume it over the sealed channel to get `currentUser`.
+    // `ensureSession` may have REUSED a live session (so a reconnect doesn't orphan the WS); if that
+    // reused session turns out to be dead server-side, resume fails — force a fresh handshake+rebind
+    // once and retry, so a stale reused session can't strand boot in an offline-retry loop.
+    let currentUser: unknown;
+    try {
+      ({ currentUser } = await resumeIdentity());
+    } catch (resumeError) {
+      // A lost/ambiguous response may have left the session BOUND server-side already — critically for the
+      // first user, whose mint made them admin and cached the only copy of their token in the response
+      // that was lost (docs/20 H2). Retry on the SAME session FIRST: it hits the server's idempotent cached
+      // result and recovers the SAME identity + token, instead of re-handshaking and minting a second,
+      // non-admin user (which would strand the sole administrator). Only if the same-session retry ALSO
+      // fails is the session genuinely dead → then re-handshake+rebind and resume.
+      try {
+        ({ currentUser } = await resumeIdentity());
+      } catch {
+        if (!(await reestablishSession())) {
+          throw resumeError;
+        }
+        ({ currentUser } = await resumeIdentity());
+      }
+    }
+    return {
+      version: boot.version,
+      joinUrl: boot.joinUrl,
+      websocketPath: boot.websocketPath,
+      networkConfig: boot.networkConfig,
+      // Validate the resumed identity at the boundary like every other server payload — the sealed resume
+      // reply is decrypted JSON, so `currentUser` is `unknown` until checked. A malformed user throws here
+      // and boot surfaces it, rather than casting untrusted data into app state.
+      currentUser: UserSchema.parse(currentUser),
+    };
+  }
+
+  // Anonymous (optional/off): the cookie identity + `/api/config` bootstrap, unchanged.
+  return fetchConfigJson();
 }
 
 /** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
@@ -338,9 +452,29 @@ function LoamApp() {
   const [config, setConfig] = useState<Config>();
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string>();
-  const [wiped, setWiped] = useState(false);
-  // Whether the wipe screen reflects a node kill switch ("node") or just this browser ("device").
-  const [wipeScope, setWipeScope] = useState<"node" | "device">("node");
+  // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). Read
+  // it before the transport layer consumes the fragment. When a wipe tombstone is outstanding, a rejoin is
+  // the only thing that lifts the boot gate.
+  const rejoinQrPresent = /^#k=[A-Za-z0-9_-]+$/.test(window.location.hash);
+  // Whether THIS load is a verified-rejoin attempt of a tombstoned device (a scanned QR while the tombstone
+  // is still set). Captured once at mount, before the transport layer consumes the `#k=` fragment. The
+  // tombstone is lifted only AFTER the QR handshake actually succeeds (docs/20 round-5 H2) — not merely
+  // because a syntactically-valid `#k=` is present (a stale/invalid QR, or a crash, must not remove the gate).
+  const bootRejoinAttempt = useRef(rejoinQrPresent && isWipeTombstoned());
+  // BOOT GATE (docs/20 round-4 H2): if a prior device wipe's durable tombstone is still set, do NOT
+  // auto-render/reconnect the normal app (a surviving HttpOnly cookie could otherwise rehydrate the wiped
+  // identity). Reuse the "Device wiped, scan the join QR" screen; a scanned QR lets boot PROCEED, and a
+  // successful handshake there is what clears the tombstone.
+  const [wiped, setWiped] = useState(() => isWipeTombstoned() && !rejoinQrPresent);
+  // True while local data is being erased, BEFORE the completed "wiped" screen (docs/20). The completed
+  // screen must never claim the local copy is erased until it actually is — so we show a truthful
+  // "Wiping…" state during the erase, and flip to `wiped` only once local deletion has finished.
+  const [wipeInProgress, setWipeInProgress] = useState(false);
+  // Whether the wipe screen reflects a node kill switch ("node") or just this browser ("device"). A boot
+  // tombstone is always a device wipe.
+  const [wipeScope, setWipeScope] = useState<"node" | "device">(() =>
+    isWipeTombstoned() && !rejoinQrPresent ? "device" : "node",
+  );
   // Set when this node requires transport encryption (docs/08) but no host public key is available
   // from a scanned join QR — there is no safe way to talk to it, so the app renders a gate instead.
   const [needsQr, setNeedsQr] = useState(false);
@@ -722,46 +856,61 @@ function LoamApp() {
     [location, upsertChannels],
   );
 
-  const purgeLocalData = useCallback(async (scope: "node" | "device" = "node") => {
-    // Wipe: drop everything this browser knows, then show a neutral end screen. `scope` only
-    // changes the copy — a node kill switch reads "node unavailable", a local device wipe says so
-    // honestly (the node is still up). Best-effort on every step — nothing here may block another.
+  const purgeLocalData = useCallback(async (scope: "node" | "device" = "node", opts: { remote?: boolean } = {}) => {
+    // Wipe ordering matters (docs/20): ERASE LOCAL STATE FIRST — before any (up-to-20s, blackhole-able)
+    // server-cleanup wait — and only show the completed "erased" screen once local deletion has actually
+    // finished. Otherwise the UI would claim the browser copy is gone while the DB + credentials linger
+    // behind a hung network call, and closing the app during that window would leave everything intact.
+    // Until then we show a truthful "Wiping…" state. `scope` only changes the completed-screen copy.
+    // `opts.remote` = this wipe was announced by ANOTHER tab; we tear down locally but don't re-announce or
+    // re-run the server-side revocation (the initiating tab owns that).
     setWipeScope(scope);
-    setWiped(true);
-    // Latch the local store so any in-flight fetch that resolves after this can't rebuild the DB we
-    // are about to delete (docs/15 #4).
-    markLocalStoreWiped();
-    // A device wipe must also drop the server session, or the HttpOnly identity cookie (which JS
-    // can't clear) survives and a reload re-hydrates the wiped identity. A node kill switch already
-    // invalidated every session server-side, so only the device scope needs this (docs/15 #4).
+    setWipeInProgress(true);
     if (scope === "device") {
-      // Bound it with the standard timeout so a hung/unreachable server can't stall the wipe — the
-      // local purge below is the part that actually matters and must always run (docs/15 #4).
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      // Route through `encryptedFetch`, not a bare `fetch`: under `required` transport mode an
-      // unsealed POST is refused (401) and the session would never actually be revoked — the wipe
-      // would silently leave the server-side identity alive. `encryptedFetch` seals it under the
-      // active session (bodyless → empty envelope); still best-effort, so the local purge always runs.
-      await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })
-        .catch(() => {
-          // best effort — the local purge below still runs
-        })
-        .finally(() => window.clearTimeout(timeout));
+      if (!opts.remote) {
+        // Capture the token + server-origin snapshots for the server revocation BEFORE anything that can
+        // reach a sibling tab (docs/20 round-5/round-6 H1). BOTH `setWipeTombstone()` and `announceWipe()`
+        // are cross-tab signals now — writing the tombstone fires a `storage` event that a sibling's
+        // `listenForRemoteWipe` acts on, clearing the shared token before we'd snapshot it. So snapshot
+        // FIRST, then raise the tombstone, then broadcast.
+        snapshotForWipe();
+      }
+      setWipeTombstone(); // durable "do not auto-reconnect" (docs/20 round-4 H2)
+      if (!opts.remote) {
+        // Announce to every OTHER tab so they tear down too (round-4 Medium). Skipped on a remote wipe to
+        // avoid a broadcast loop.
+        announceWipe();
+      }
     }
+    // Latch BOTH persistence stores against repopulation by in-flight work that resolves during the wipe
+    // (docs/20): `markLocalStoreWiped` blocks any later IndexedDB write, and `setMintSuppressed` blocks a
+    // late `storeIdentityToken`/mint — so a resume or channels-fetch that lands mid-wipe can't rebuild the
+    // DB or re-write the credential we're erasing.
+    markLocalStoreWiped();
+    setMintSuppressed(true);
+
+    // ---- Local erasure FIRST (all local, no network — fast + bounded). ----
     setMessages([]);
     setChannels([]);
     setUsers([]);
     setConfig(undefined);
+    // Drop the secure identity token (docs/20) BEFORE removing SERVER_URL_KEY — the token is namespaced
+    // by the configured origin, so clearing it must happen while that origin is still resolvable. (The
+    // server revocation below authenticates on the in-memory transport session + the browser cookie, which
+    // both survive local-storage erasure, so clearing the token here doesn't weaken it.)
+    clearStoredIdentityToken();
     localStorage.removeItem(CURRENT_USER_KEY);
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
-    localStorage.removeItem(SERVER_URL_KEY);
 
+    // Delete the DB. If deletion is DEFERRED (another tab holds a connection) it throws, but that's not a
+    // failure to hide: `markLocalStoreWiped` persisted a durable flag, so the store stays un-hydratable now
+    // AND across reloads, and the deletion is retried on boot until it lands (docs/20). So the local copy is
+    // already inaccessible + pending deletion regardless — no reason to strand the UI on "Wiping…".
     try {
       await destroyDatabase();
     } catch {
-      // best effort
+      // deferred/failed — the durable flag keeps it latched + retries on the next load
     }
 
     if ("serviceWorker" in navigator) {
@@ -773,7 +922,39 @@ function LoamApp() {
       const cacheKeys = await caches.keys().catch(() => []);
       await Promise.all(cacheKeys.map((key) => caches.delete(key).catch(() => false)));
     }
+
+    // Local data is now inaccessible (latched) and deleted-or-pending-deletion → show the completed screen.
+    // If the user closes the app from here, the durable flag ensures nothing rehydrates on next launch.
+    setWiped(true);
+
+    // ---- Server cleanup LAST (best-effort, deadline-bounded — cannot delay or falsify the local wipe). ----
+    // A device wipe drops the server-side credentials: the bound secure token (via the sealed logout on the
+    // still-in-memory transport session) AND the legacy HttpOnly cookie (bare `session/end`). Only the
+    // INITIATING tab does this (a remote tab's initiator owns it), and only it removes the shared
+    // SERVER_URL_KEY — a remote tab removing it could redirect the initiator's in-flight revocation calls to
+    // the wrong origin (docs/20 round-5 H1). The tombstone is NOT lifted here: `session/end` is unsealed and
+    // forgeable, so it's no security confirmation (round-5 H2) — the tombstone stays until a VERIFIED rejoin.
+    if (scope === "device" && !opts.remote) {
+      await wipeServerCredentials(REQUEST_TIMEOUT_MS);
+      localStorage.removeItem(SERVER_URL_KEY);
+    }
   }, []);
+
+  // Tear THIS tab down if another tab initiates a device wipe (docs/20 round-4 Medium / round-5 Medium): the
+  // initiating tab announces over a BroadcastChannel AND raises the durable tombstone (a `storage` event) —
+  // `listenForRemoteWipe` covers both. We run a local-only purge (no re-announce, no server revocation).
+  useEffect(() => {
+    const onRemote = (): void => void purgeLocalData("device", { remote: true });
+    const unsubscribe = listenForRemoteWipe(onRemote);
+    // Re-check on install: a wipe may have landed between this tab's first render and this effect running
+    // (the one-shot BroadcastChannel message would be missed). If we're tombstoned now but didn't already
+    // gate at render, tear down (docs/20 round-5 Medium).
+    if (isWipeTombstoned() && !wiped && !bootRejoinAttempt.current) {
+      onRemote();
+    }
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `wiped` read once at install for the mount race
+  }, [purgeLocalData]);
 
   const applyStreamEvent = useCallback((event: StreamEvent) => {
     if (event.type !== "delta") {
@@ -1030,6 +1211,12 @@ function LoamApp() {
   }, [locale]);
 
   useEffect(() => {
+    // BOOT GATE (docs/20 round-4 H2): an outstanding wipe tombstone (shown via `wiped`) must block the
+    // normal boot — no hydration, no config fetch, no auto-reconnect — until the user explicitly rejoins.
+    if (wiped) {
+      return;
+    }
+
     let active = true;
     let retryTimer: number | undefined;
 
@@ -1073,38 +1260,15 @@ function LoamApp() {
         }
       }
 
-      // Config first: it identifies the session and says whether this user may read content at all.
+      // Bootstrap → transport session → identity (docs/20). `loadConfig` reads the public cookie-free
+      // bootstrap, establishes the transport session, then resumes a sealed identity for a bound/required
+      // client (or falls back to the cookie `/api/config` for an anonymous optional/off one) — all BEFORE
+      // `config`/`currentUser` are set, so the WS-open effect (keyed on `config?.currentUser.id`) and the
+      // channels/users fetch below never race ahead of the handshake+resume.
       // Banned/pending sessions get 403 from the content endpoints, so those are only fetched for a
       // participating user; approval flips `currentUser.pending`, which re-runs this effect.
-      await fetchConfigJson()
+      await loadConfig()
         .then(async (nextConfig) => {
-        if (!active) {
-          return;
-        }
-
-        // Establish (or refresh) the transport session BEFORE any content request or WebSocket open
-        // (docs/08) — `config`/`currentUser` only get set once this resolves, so the WS-open effect
-        // (keyed on `config?.currentUser.id`) and the channels/users fetch below never race ahead of it.
-        try {
-          await ensureSession(nextConfig.networkConfig.transportEncryption, nextConfig.networkConfig.transportPublicKey);
-        } catch (sessionError) {
-          if (sessionError instanceof TransportNeedsQrError) {
-            // `required` mode with no host key available (no QR scanned, none cached): there is no
-            // safe way to talk to this node — gate the whole app instead of falling back to plaintext.
-            setNeedsQr(true);
-            return;
-          }
-
-          if (nextConfig.networkConfig.transportEncryption !== "optional") {
-            // `required` mode where a key WAS available but the handshake itself failed (e.g. the
-            // node is unreachable) — treat like any other boot failure (below) rather than silently
-            // degrading to an unencrypted session.
-            throw sessionError;
-          }
-
-          // `optional` mode: proceed without a session (plaintext) rather than stranding the user.
-        }
-
         if (!active) {
           return;
         }
@@ -1112,6 +1276,15 @@ function LoamApp() {
         setNeedsQr(false);
         syncFailuresRef.current = 0;
         setError(undefined);
+        // A VERIFIED rejoin (docs/20 round-5 H2): `loadConfig` succeeded, so the QR-pinned handshake/resume
+        // actually completed — only NOW is it safe to lift the wipe tombstone (and best-effort clear the old
+        // cookie). A syntactically-valid `#k=` alone never clears it, so a stale/invalid QR or a crash leaves
+        // the boot gate intact.
+        if (bootRejoinAttempt.current) {
+          bootRejoinAttempt.current = false;
+          clearWipeTombstone();
+          void fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include" }).catch(() => undefined);
+        }
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
         setCurrentUser(nextConfig.currentUser);
@@ -1165,6 +1338,14 @@ function LoamApp() {
           return;
         }
 
+        if (nextError instanceof TransportNeedsQrError) {
+          // `required` mode with no host key available (no QR scanned, none cached): there is no safe
+          // way to talk to this node — gate the whole app instead of falling back to plaintext. Not an
+          // error to retry: the user must scan the join QR.
+          setNeedsQr(true);
+          return;
+        }
+
         setError(nextError instanceof Error ? nextError.message : t("app.serverUnreachable"));
         setConnection("offline");
         // Retry with backoff — a one-shot boot fetch would strand the app offline forever when the
@@ -1182,7 +1363,7 @@ function LoamApp() {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [currentUser.id, currentUser.banned, currentUser.pending, removeChannel, syncTick, upsertUsers]);
+  }, [currentUser.id, currentUser.banned, currentUser.pending, removeChannel, syncTick, upsertUsers, wiped]);
 
   useEffect(() => {
     if (!activeConversation) {
@@ -1283,10 +1464,11 @@ function LoamApp() {
       // to connect anyway — the existing reconnect loop already handles a connection that still can't
       // succeed.
       if (attempt > 1 && config) {
-        await ensureSession(
-          config.networkConfig.transportEncryption,
-          config.networkConfig.transportPublicKey,
-        ).catch(() => undefined);
+        // `reestablishSession` re-handshakes AND re-binds the identity when required (docs/20) — a fresh
+        // transport session starts anonymous server-side, so under `required` mode the WS would be
+        // refused until the identity is resumed again. Best-effort: on failure, fall through and try to
+        // connect anyway — the reconnect loop handles a connection that still can't succeed.
+        await reestablishSession().catch(() => undefined);
 
         if (disposed || attempt !== socketAttempt) {
           return;
@@ -1333,14 +1515,21 @@ function LoamApp() {
           return;
         }
 
-        const raw = openWsFrame(event.data);
+        const frame = handleWsFrame(event.data);
 
-        if (raw === null) {
-          // A decrypt failure (or, off-mode, never) — drop the frame rather than crash the parser.
+        if (frame.proof !== undefined) {
+          // The server's reflection-safe key-confirmation challenge (docs/20 §7) — answer it. Until the
+          // proof is sent the server withholds all events; nothing else to do with this frame.
+          nextSocket.send(frame.proof);
           return;
         }
 
-        const payload = parseSocketEvent(raw);
+        if (frame.payload === undefined) {
+          // Undecryptable / replayed / pre-confirmation — drop it rather than crash the parser.
+          return;
+        }
+
+        const payload = parseSocketEvent(frame.payload);
 
         if (!payload) {
           return;
@@ -1482,6 +1671,19 @@ function LoamApp() {
           <p className="brand-title">LOAM</p>
           <h1>{t("gate.needsQrTitle")}</h1>
           <p>{t("gate.needsQrBody")}</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (wipeInProgress && !wiped) {
+    // Local data is still being erased — show a TRUTHFUL "Wiping…" state, never the completed screen,
+    // until local deletion has finished (docs/20).
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <h1>{t("settings.wiping")}</h1>
         </div>
       </main>
     );
