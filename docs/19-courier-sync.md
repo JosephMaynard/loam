@@ -63,8 +63,10 @@ accept courier syncs *and* (on Android) opportunistically auto-sync — whatever
 ## What courier mode reuses vs. what's new
 
 **Reused, unchanged:** the whole delivery layer above — public sync, the sealed digest bucket, the
-carry-forward relay, TTL/hop/cap/dedup, tombstone-ack convergence, and (optionally) #84's per-hop
-transport encryption.
+carry-forward relay, the TTL/hop/cap ceilings, id-based dedup, delete-state tombstones (so a deleted
+message can't be re-imported), and (optionally) #84's per-hop transport encryption. Note convergence
+today is **dedup + TTL/hop expiry**, not delivery acks — signed acks that prune *delivered* mail early
+(reusing the tombstone table) are the v2 above, not something courier mode inherits.
 
 **New, and small:**
 1. **Ad-hoc, one-shot sync.** Today sync runs on a timer against *pre-configured* `sync.peers`. A
@@ -89,13 +91,14 @@ transport encryption.
    (`sync.token`, optionally a pinned transport key — #84) via QR or NFC tap. For a **ring**, everyone
    shares one token/key set, so any member's device can courier for any node.
 2. **At node A:** connect to A's network (its hotspot), open "Sync now", pick A. One mutual sync:
-   - pull A's public updates + A's offered `sealed` bag (minus what the courier already holds/acked);
+   - pull A's public updates + A's offered `sealed` bag (minus what the courier already holds, by id-dedup);
    - the courier **keeps** sealed mail not for its own users, hop-decremented, to carry;
    - let A pull the courier's bag → A delivers what's for A's users, keeps the rest.
 3. **Walk to node B** (out of A's range). Idle: nothing runs.
 4. **At node B:** same mutual sync. A's mail the courier carried now lands at B; B's mail loads onto the
    courier for the trip back. Recipients who are never physically near each other still converge over
-   several courier hops. TTL/hop caps stop infinite carry; acks stop re-delivery.
+   several courier hops. TTL/hop caps stop infinite carry; id-dedup stops re-import at the recipient
+   (signed acks that would prune delivered mail earlier are the v2 — see Bounds & convergence).
 
 A courier is just a normal LOAM node whose *only* transport is "a human presses sync". It can also be a
 node with **no local users of its own** — a pure mule (a spare phone) that only ferries.
@@ -133,8 +136,10 @@ node with **no local users of its own** — a pure mule (a spare phone) that onl
 ## Bounds & convergence (mostly existing)
 
 Storage on a long-uncontacted mule is bounded by the mesh cap + per-blob TTL; a blob past `ttlExpiresAt`
-is reaped regardless of `mesh.enabled`. Loops/duplicates are stopped by id-dedup + hop-decrement +
-delivery-ack tombstones. Courier mode inherits all of this; the only new knob worth considering is a
+is reaped regardless of `mesh.enabled`. Loops/duplicates are stopped by id-dedup + hop-decrement + TTL
+expiry (delete-state tombstones additionally stop a *deleted* message being re-imported; delivery-ack
+pruning of *delivered* mail is the v2, not built). Courier mode inherits all of this; the only new knob
+worth considering is a
 **per-courier carry budget** (how much a mule will hold) and whether a courier prioritises by TTL when
 over budget.
 
