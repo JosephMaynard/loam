@@ -864,14 +864,18 @@ function LoamApp() {
     setWipeScope(scope);
     setWipeInProgress(true);
     if (scope === "device") {
+      if (!opts.remote) {
+        // Capture the token + server-origin snapshots for the server revocation BEFORE anything that can
+        // reach a sibling tab (docs/20 round-5/round-6 H1). BOTH `setWipeTombstone()` and `announceWipe()`
+        // are cross-tab signals now — writing the tombstone fires a `storage` event that a sibling's
+        // `listenForRemoteWipe` acts on, clearing the shared token before we'd snapshot it. So snapshot
+        // FIRST, then raise the tombstone, then broadcast.
+        snapshotForWipe();
+      }
       setWipeTombstone(); // durable "do not auto-reconnect" (docs/20 round-4 H2)
       if (!opts.remote) {
-        // Capture the token + server-origin snapshots for the server revocation BEFORE announcing (docs/20
-        // round-5 H1): a sibling tab receiving the announce clears both from shared localStorage, so
-        // snapshotting after would lose them and the revocation could hit the wrong origin / no token.
-        snapshotForWipe();
-        // Then announce to every OTHER tab so they tear down too (round-4 Medium). Skipped on a remote wipe
-        // to avoid a broadcast loop.
+        // Announce to every OTHER tab so they tear down too (round-4 Medium). Skipped on a remote wipe to
+        // avoid a broadcast loop.
         announceWipe();
       }
     }
