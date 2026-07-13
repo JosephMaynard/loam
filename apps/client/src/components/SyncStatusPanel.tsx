@@ -91,7 +91,15 @@ export function SyncStatusPanel() {
   return (
     <div className="sync-status">
       <div className="panel-heading">
-        <p className="eyebrow">{t("admin.syncStatusEyebrow")}</p>
+        <p className="eyebrow">
+          {t("admin.syncStatusEyebrow")}
+          {report.enabled ? (
+            <>
+              {" · "}
+              {t("admin.syncEvery", { seconds: Math.round(report.intervalMs / 1000) })}
+            </>
+          ) : null}
+        </p>
         <div className="moderation-actions">
           <button className="ghost-button" disabled={running} onClick={() => setReloadKey((key) => key + 1)} type="button">
             {t("common.refresh")}

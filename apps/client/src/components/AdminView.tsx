@@ -39,6 +39,7 @@ function featureFlagLabels(): [keyof FeatureFlags, string][] {
     ["enableMarkdown", t("admin.flagMarkdown")],
     ["enableAttachments", t("admin.flagAttachments")],
     ["enablePresence", t("admin.flagPresence")],
+    ["enableLocationSharing", t("admin.flagLocationSharing")],
   ];
 }
 
