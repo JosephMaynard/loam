@@ -43,7 +43,7 @@ between two nodes). Everything below the transport is done and tested today:
   longest expected chain` and `TTL ≥ courier round-trip latency`.
 - **The bytes on the wire** can already be **encrypted end-to-end between nodes** (PR #84): the puller
   does the transport handshake with the peer and seals its sync requests; the sealed mail is sealed to
-  its *recipient* regardless, so a courrier ferries blobs it **cannot read**.
+  its *recipient* regardless, so a courier ferries blobs it **cannot read**.
 
 So the "carry a bag of messages the mule can't read, and converge without duplicates or loops" problem
 — the genuinely hard part — **is already solved.** Courier mode does not add crypto or a new relay. It
