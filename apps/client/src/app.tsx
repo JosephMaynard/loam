@@ -441,6 +441,10 @@ function LoamApp() {
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string>();
   const [wiped, setWiped] = useState(false);
+  // True while local data is being erased, BEFORE the completed "wiped" screen (docs/20). The completed
+  // screen must never claim the local copy is erased until it actually is — so we show a truthful
+  // "Wiping…" state during the erase, and flip to `wiped` only once local deletion has finished.
+  const [wipeInProgress, setWipeInProgress] = useState(false);
   // Whether the wipe screen reflects a node kill switch ("node") or just this browser ("device").
   const [wipeScope, setWipeScope] = useState<"node" | "device">("node");
   // Set when this node requires transport encryption (docs/08) but no host public key is available
@@ -825,37 +829,30 @@ function LoamApp() {
   );
 
   const purgeLocalData = useCallback(async (scope: "node" | "device" = "node") => {
-    // Wipe: drop everything this browser knows, then show a neutral end screen. `scope` only
-    // changes the copy — a node kill switch reads "node unavailable", a local device wipe says so
-    // honestly (the node is still up). Best-effort on every step — nothing here may block another.
+    // Wipe ordering matters (docs/20): ERASE LOCAL STATE FIRST — before any (up-to-20s, blackhole-able)
+    // server-cleanup wait — and only show the completed "erased" screen once local deletion has actually
+    // finished. Otherwise the UI would claim the browser copy is gone while the DB + credentials linger
+    // behind a hung network call, and closing the app during that window would leave everything intact.
+    // Until then we show a truthful "Wiping…" state. `scope` only changes the completed-screen copy.
     setWipeScope(scope);
-    setWiped(true);
-    // Latch the local store so any in-flight fetch that resolves after this can't rebuild the DB we
+    setWipeInProgress(true);
+    // Latch the local store so any in-flight fetch that resolves during the wipe can't rebuild the DB we
     // are about to delete (docs/15 #4).
     markLocalStoreWiped();
-    // A device wipe must also drop the server session, or the HttpOnly identity cookie (which JS
-    // can't clear) survives and a reload re-hydrates the wiped identity. A node kill switch already
-    // invalidated every session server-side, so only the device scope needs this (docs/15 #4).
-    if (scope === "device") {
-      // Clear this device's SERVER-side credentials (docs/20 #3): the bound secure token AND any legacy
-      // `loam_session` cookie, as two independent deadline-bounded steps with minting suppressed. This
-      // ALWAYS settles even if the network blackholes a step (the secure logout re-handshakes internally,
-      // and those fetches ignore an abort signal — so it races a real deadline), so the local purge below
-      // always runs. See `wipeServerCredentials`.
-      await wipeServerCredentials(REQUEST_TIMEOUT_MS);
-    }
+
+    // ---- Local erasure FIRST (all local, no network — fast + bounded). ----
     setMessages([]);
     setChannels([]);
     setUsers([]);
     setConfig(undefined);
     // Drop the secure identity token (docs/20) BEFORE removing SERVER_URL_KEY — the token is namespaced
-    // by the configured origin, so clearing it must happen while that origin is still resolvable. After a
-    // wipe the token is dead server-side regardless; this stops a reload from resuming a stale one.
+    // by the configured origin, so clearing it must happen while that origin is still resolvable. (The
+    // server revocation below authenticates on the in-memory transport session + the browser cookie, which
+    // both survive local-storage erasure, so clearing the token here doesn't weaken it.)
     clearStoredIdentityToken();
     localStorage.removeItem(CURRENT_USER_KEY);
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
-    localStorage.removeItem(SERVER_URL_KEY);
 
     try {
       await destroyDatabase();
@@ -872,6 +869,21 @@ function LoamApp() {
       const cacheKeys = await caches.keys().catch(() => []);
       await Promise.all(cacheKeys.map((key) => caches.delete(key).catch(() => false)));
     }
+
+    // Local data is now actually gone → show the completed screen. If the user closes the app from here,
+    // nothing persistent remains.
+    setWiped(true);
+
+    // ---- Server cleanup LAST (best-effort, deadline-bounded — cannot delay or falsify the local wipe). ----
+    // A device wipe drops the server-side credentials: the bound secure token (via the sealed logout on the
+    // still-in-memory transport session) AND the legacy HttpOnly cookie (which JS can't clear, so a bare
+    // `session/end` carrying it). A node kill switch already invalidated every session server-side, so only
+    // the device scope needs this (docs/15 #4). `wipeServerCredentials` always settles even under a network
+    // blackhole (it races a real deadline), and it uses `apiUrl`, so remove the server-origin override after.
+    if (scope === "device") {
+      await wipeServerCredentials(REQUEST_TIMEOUT_MS);
+    }
+    localStorage.removeItem(SERVER_URL_KEY);
   }, []);
 
   const applyStreamEvent = useCallback((event: StreamEvent) => {
@@ -1574,6 +1586,19 @@ function LoamApp() {
           <p className="brand-title">LOAM</p>
           <h1>{t("gate.needsQrTitle")}</h1>
           <p>{t("gate.needsQrBody")}</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (wipeInProgress && !wiped) {
+    // Local data is still being erased — show a TRUTHFUL "Wiping…" state, never the completed screen,
+    // until local deletion has finished (docs/20).
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <h1>{t("settings.wiping")}</h1>
         </div>
       </main>
     );

@@ -887,10 +887,10 @@ async function attemptSecureLogout(init: EncryptedFetchInit): Promise<boolean> {
  *     revocation actually lands rather than being skipped on the strength of a stale local `bound` flag.
  *  3. Clear the local token regardless (a wiped device must not retain it).
  *
- * Minting is expected to be suppressed by the caller (`setMintSuppressed`) for the whole wipe, so the
- * re-establish in step 2 can't mint a fresh orphan if the stored token is already dead. Returns `true`
- * ONLY when revocation was CONFIRMED — the caller uses that to decide whether the cookie `session/end`
- * fallback is still needed (an unconfirmed revoke, or a purely anonymous session, still needs it).
+ * Minting is expected to be suppressed (`setMintSuppressed`) for the whole wipe, so the re-establish in
+ * step 2 can't mint a fresh orphan if the stored token is already dead. Returns `true` ONLY when
+ * revocation was CONFIRMED (informational — `wipeServerCredentials` clears the legacy cookie
+ * UNCONDITIONALLY regardless, since the two credentials are independent).
  */
 export async function logoutSecureIdentity(init: EncryptedFetchInit = {}): Promise<boolean> {
   let revoked = false;

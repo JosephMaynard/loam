@@ -931,7 +931,7 @@ describe("transport", () => {
 
     it("logoutSecureIdentity confirms TRUE when the retry over a revived session succeeds (docs/20 H3)", async () => {
       // The first logout fails unsealed (dead session); after re-establishing, the retry gets a sealed
-      // { ok:true } → revocation confirmed. The caller then skips the cookie fallback.
+      // { ok:true } → revocation confirmed (informational; the cookie clear runs unconditionally anyway).
       const host = createTransportIdentity();
       window.location.hash = `#k=${host.publicKey}`;
       const node = logoutMockNode(host, (hit, key) =>
