@@ -88,8 +88,9 @@ today is **dedup + TTL/hop expiry**, not delivery acks — signed acks that prun
 ## The courier flow (concrete)
 
 1. **Enrol** (once per node the courier serves): the courier learns the node's address + trust material
-   (`sync.token`, optionally a pinned transport key — #84) via QR or NFC tap. For a **ring**, everyone
-   shares one token/key set, so any member's device can courier for any node.
+   (`sync.token`, optionally a pinned transport key — #84) via QR or NFC tap. A **ring** shares this trust
+   material among members; the shared-vs-per-member trade-off (and revocation) is in *Trust, keys, and
+   rings* below.
 2. **At node A:** connect to A's network (its hotspot), open "Sync now", pick A. One mutual sync:
    - pull A's public updates + A's offered `sealed` bag (minus what the courier already holds, by id-dedup);
    - the courier **keeps** sealed mail not for its own users, hop-decremented, to carry;
@@ -106,8 +107,16 @@ node with **no local users of its own** — a pure mule (a spare phone) that onl
 ## Trust, keys, and rings
 
 - **Access** is the existing `sync.token` bearer (docs/11) — a courier must present it to sync with a
-  guarded node. A **ring** = a shared token (or, better, #84 **pinned per-peer transport keys** for
-  active-MITM resistance) distributed among members out-of-band (QR/NFC at a founding meet-up).
+  guarded node. A **ring** distributes trust material among members out-of-band (QR/NFC at a founding
+  meet-up), and can use either model:
+  - **Shared** — one `sync.token` (or one set of #84 pinned per-peer keys) for the whole ring. Simplest,
+    and what v1 supports today (`sync.token` is a single shared bearer secret). Cost: **revoking one
+    member means re-keying every node** — there's no way to drop a single courier.
+  - **Per-member** — each courier enrolled with its own credential; a node accepts a set. Revoking one
+    courier becomes a local change on each node, at the cost of a small enrolment/revocation surface
+    (add/remove a courier id) that doesn't exist yet. **This is the open design item** for rings whose
+    membership churns; v1 ships the shared model and treats per-member credentials as a fast-follow.
+  #84 **pinned per-peer transport keys** add active-MITM resistance on top of either model.
 - **Confidentiality of carried mail** does not depend on courier trust at all: sealed mail is sealed to
   its recipient (docs/16), so a courier — even a hostile or coerced one — ferries ciphertext it can't
   read, addressed by a `toTag` it can't resolve to a person without the recipient's secret token.
