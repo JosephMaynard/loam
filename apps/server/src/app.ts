@@ -3106,16 +3106,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * Resolve how to talk to a peer (docs/08): reuse a cached decision, else read the peer's advertised
-   * posture from its `/api/config` and handshake if it wants encryption. Returns a live transport
+   * posture from its `/api/bootstrap` and handshake if it wants encryption. Returns a live transport
    * session, or `"plaintext"` for the unchanged clear path.
    *
    * A peer's own sync-config entry may **pin** its transport key (`SyncPeer.transportKey`), which both
    * upgrades the channel to active-MITM resistance and means we go encrypted regardless of what the
-   * (plain-HTTP, attacker-mutable) `/api/config` claims — a pinned peer that fails the handshake **fails
+   * (plain-HTTP, attacker-mutable) `/api/bootstrap` claims — a pinned peer that fails the handshake **fails
    * closed** (the error propagates, so the sync round records it, rather than a silent plaintext pull).
    * Unpinned: a peer advertising `required` also fails closed on a handshake failure; an `optional`
    * peer degrades to plaintext (it still serves the clear path); and a peer we can't read a posture from
-   * at all (older peer, or `/api/config` unreachable/non-2xx) falls back to plaintext exactly as before
+   * at all (older peer, or `/api/bootstrap` unreachable/non-2xx) falls back to plaintext exactly as before
    * transport encryption existed — if it truly required transport the plaintext pull just 401s and the
    * round records a normal failure, never a silent wrong result.
    */
@@ -3138,7 +3138,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       posture = await fetchPeerTransportPosture(peerUrl);
     } catch {
       // Couldn't learn the posture (older peer without the field, or an unreachable/erroring
-      // `/api/config`) → preserve the legacy plaintext path.
+      // `/api/bootstrap`) → preserve the legacy plaintext path.
       return cachePlaintext(peerUrl);
     }
 
@@ -3159,8 +3159,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   /**
    * GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. Transparently
    * routes through the peer's transport session when it advertises encryption (docs/08) — so the sync
-   * digest/messages requests AND the `x-loam-sync-token` bearer secret travel sealed — and stays a
-   * plain HTTP request against a peer running transport `off`.
+   * digest/messages request+response DATA travels sealed (the `x-loam-sync-token` bearer header does NOT
+   * — it rides plaintext, gating public-data-only reads; see docs/08) — and stays a plain HTTP request
+   * against a peer running transport `off`.
    */
   async function fetchPeerJson<T>(
     peerUrl: string,

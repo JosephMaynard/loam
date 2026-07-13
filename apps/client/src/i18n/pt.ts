@@ -155,7 +155,7 @@ export const pt: Catalog = {
   "admin.flagMarkdown": "Renderização de Markdown",
   "admin.flagAttachments": "Imagens anexadas",
   "admin.flagPresence": "Presença on-line (revela quem está conectado — desative em contextos sensíveis à privacidade)",
-  "admin.flagLocationSharing": "Partilha de localização (opcional; permite anexar a localização às mensagens)",
+  "admin.flagLocationSharing": "Compartilhamento de localização (opcional; permite anexar a localização às mensagens)",
   "admin.identityDisplayName": "Usuários podem editar o nome de exibição",
   "admin.identityAvatarEdit": "Usuários podem editar o avatar",
   "admin.identityAvatarUpload": "Usuários podem enviar imagens de avatar",

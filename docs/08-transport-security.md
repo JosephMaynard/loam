@@ -202,17 +202,20 @@ rushed onto the reviewed transport hooks.
 ### MITM disposition between nodes (honest scope)
 
 The peer's static transport key is learned from its `/api/bootstrap` **over plain HTTP** — that is *not*
-an out-of-band channel (unlike the browser's join-QR `#k=`). So by default (trust-on-first-use against
-the advertised key) node-to-node sync gets **passive-eavesdropper confidentiality + integrity for the
-sync data, but NOT active-MITM resistance** between nodes, and (as noted above) **not** confidentiality
-for the `x-loam-sync-token` header. A machine-in-the-middle could present its own key on `/api/bootstrap`
-and the handshake, then re-encrypt to the real peer.
+an out-of-band channel (unlike the browser's join-QR `#k=`). Unpinned, this is **unauthenticated key
+discovery**, not true trust-on-first-use: the key is taken from the peer's advertisement on *each*
+resolve and is **not** persisted or pinned across session expiry, so there is no first-seen key to detect
+a later swap against. So by default node-to-node sync gets **passive-eavesdropper confidentiality +
+integrity for the sync data, but NOT active-MITM resistance** between nodes, and (as noted above) **not**
+confidentiality for the `x-loam-sync-token` header. A machine-in-the-middle could present its own key on
+`/api/bootstrap` and the handshake, then re-encrypt to the real peer.
 
 To get active-MITM resistance, an operator **pins** the peer's key: `SyncPeer.transportKey` (a
 base64url X25519 key, e.g. copied from the peer's join QR / host screen out-of-band). When set, the
 puller verifies the handshake's `hostPublicKey` against it and **refuses to sync on a mismatch**, and
-goes encrypted regardless of what `/api/bootstrap` claims. Unpinned = TOFU (the honest default; documented
-here and in docs/15 as the residual). This mirrors the browser's QR-key-vs-config-key trust rule.
+goes encrypted regardless of what `/api/bootstrap` claims. Unpinned = unauthenticated key discovery (the
+honest default; documented here and in docs/15 as the residual). This mirrors the browser's
+QR-key-vs-config-key trust rule.
 
 ## Alternative: get a real secure context (real TLS on the LAN)
 

@@ -54,12 +54,22 @@ export function AdminChannelsPanel({
           return;
         }
 
-        const list = Array.isArray(payload)
-          ? payload.flatMap((item) => {
-              const parsed = ChannelSchema.safeParse(item);
-              return parsed.success ? [parsed.data] : [];
-            })
-          : [];
+        // Validate the WHOLE list, don't silently drop invalid entries: a channel that fails the schema
+        // is contract drift the admin should see (a dropped row reads as "the channel is gone"), so
+        // surface the error and leave the list un-loaded rather than showing a quietly-truncated set.
+        const list: Channel[] = [];
+        if (!Array.isArray(payload)) {
+          setListError(t("admin.channelsLoadError"));
+          return;
+        }
+        for (const item of payload) {
+          const parsed = ChannelSchema.safeParse(item);
+          if (!parsed.success) {
+            setListError(t("admin.channelsLoadError"));
+            return;
+          }
+          list.push(parsed.data);
+        }
         setAdminChannels(list);
         setLoaded(true);
       })

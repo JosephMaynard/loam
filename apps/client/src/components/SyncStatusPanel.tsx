@@ -23,6 +23,9 @@ export function SyncStatusPanel() {
 
   useEffect(() => {
     let active = true;
+    // Clear a prior error as the (re)load starts, so a transient failure that succeeds on retry doesn't
+    // leave a stale error banner alongside fresh data.
+    setError(undefined);
 
     fetchJson<unknown>("/api/admin/sync")
       .then((payload) => {
@@ -38,6 +41,7 @@ export function SyncStatusPanel() {
           return;
         }
 
+        setError(undefined);
         setReport(parsed);
       })
       .catch((loadError: unknown) => {
@@ -85,7 +89,19 @@ export function SyncStatusPanel() {
   }
 
   if (!report?.peers.length) {
-    return error ? <p className="form-error">{error}</p> : null;
+    // Keep a retry affordance in the error/empty state: a transient load failure shouldn't force a full
+    // page reload to recover — the refresh button re-runs the fetch effect (via `reloadKey`).
+    if (!error) {
+      return null;
+    }
+    return (
+      <div className="sync-status">
+        <p className="form-error">{error}</p>
+        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
+          {t("common.refresh")}
+        </button>
+      </div>
+    );
   }
 
   return (

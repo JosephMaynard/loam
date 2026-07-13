@@ -405,8 +405,8 @@ export const SyncPeerSchema = z.object({
    * Optional pinned peer transport key (base64url X25519 public key, docs/08). When set, this node
    * verifies the peer's handshake-returned static key against it and refuses to sync on a mismatch —
    * the operator delivering it out-of-band (e.g. copied from the peer's join QR) is what upgrades
-   * inter-node sync from trust-on-first-use to active-MITM resistance. Unset = TOFU against the key the
-   * peer advertises over its (plain-HTTP) `/api/config`.
+   * inter-node sync to active-MITM resistance. Unset = unauthenticated key discovery against the key the
+   * peer advertises over its (plain-HTTP) `/api/bootstrap` (not pinned/remembered — see docs/08).
    */
   transportKey: z
     .string()

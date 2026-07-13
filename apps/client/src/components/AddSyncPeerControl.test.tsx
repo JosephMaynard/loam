@@ -1,7 +1,7 @@
 import type { VNode } from "preact";
 import { render } from "preact";
 import { act } from "preact/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { AddSyncPeerControl } from "./AddSyncPeerControl";
 

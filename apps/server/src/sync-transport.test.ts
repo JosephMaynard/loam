@@ -219,6 +219,29 @@ describe("sync transport encryption — REQUIRED peer", () => {
     expect(replay.status).toBe(409);
   });
 
+  it("(b3) rejects an UNSEALED 2xx response rather than importing it as sync data (downgrade guard)", async () => {
+    const peerDir = makeDataDir();
+    await seedPublicMessage(peerDir, "downgrade guard");
+    writeConfig(peerDir, requiredPeerConfig());
+    const peer = await buildOn(peerDir);
+    const peerUrl = await listen(peer);
+
+    const session = await handshakeWithPeer(peerUrl);
+
+    // A fetch that answers 200 with plaintext and NO `x-loam-enc: 1` — a downgrade (or an active MITM
+    // returning attacker-chosen data). Over a live sealed session a genuine peer ALWAYS seals its reply,
+    // so `sealedFetch` must refuse this rather than hand the plaintext back to be imported.
+    const downgradeFetch: typeof fetch = async () =>
+      new Response(JSON.stringify({ messages: [{ id: "poison" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    await expect(
+      sealedFetch(session, peerUrl, "/api/sync/digest", { fetchImpl: downgradeFetch }),
+    ).rejects.toThrow(/unauthenticated|unsealed/i);
+  });
+
   it("(d) the puller re-handshakes once on a 401 and reuses one session across calls", async () => {
     const peerDir = makeDataDir();
     const seededId = await seedPublicMessage(peerDir, "cache and re-handshake");

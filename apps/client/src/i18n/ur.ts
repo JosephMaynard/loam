@@ -282,7 +282,7 @@ export const ur: Catalog = {
   "admin.syncFailed": "سِنک ناکام: {status}",
   "admin.syncRunError": "سِنک نہیں چل سکا۔",
   "admin.syncStatusEyebrow": "حالت (محفوظ ہم مرتبہ)",
-  "admin.syncEvery": "ہر {seconds} سیکنڈ میں خودکار مطابقت",
+  "admin.syncEvery": "ہر {seconds} سیکنڈ میں خودکار سِنک",
   "admin.syncing": "سِنک ہو رہا ہے…",
   "admin.syncNow": "ابھی سِنک کریں",
   "admin.peerError": "خرابی: {error}",

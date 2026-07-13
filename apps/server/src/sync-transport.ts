@@ -69,7 +69,11 @@ async function httpText(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const onAbort = () => controller.abort();
-  outerSignal?.addEventListener("abort", onAbort);
+  if (outerSignal?.aborted) {
+    controller.abort(); // already aborted before we started — don't even open the request
+  } else {
+    outerSignal?.addEventListener("abort", onAbort);
+  }
 
   try {
     const response = await fetchImpl(url, { ...init, signal: controller.signal });
@@ -302,6 +306,12 @@ async function attemptSealed(
   const hasBody = options.body !== undefined;
   const method = hasBody ? "POST" : "GET";
   const aad = `${method} ${path}`;
+  // Snapshot the session id + key for the whole attempt: `refreshSession` mutates the shared `session`
+  // object in place, so a concurrent re-handshake must not swap the key/id out from under an in-flight
+  // request (which would seal under one key and try to open under another). The sequence still advances
+  // on the live `session` (the peer's replay window tolerates concurrent sequences).
+  const sessionId = session.sessionId;
+  const key = session.key;
 
   // GET with no body: no envelope, but signal we want a sealed response. Anything with a body is sealed
   // as the `{ s, b }` anti-replay envelope (docs/08) — `s` a per-session monotonic sequence the peer
@@ -309,14 +319,12 @@ async function attemptSealed(
   // sealed body, so a bodied request is always sealed. `s` is computed per attempt, so the retry path
   // (after a re-handshake reset `seq` to 0) sends a fresh in-window sequence on the new session.
   const sealedBody = hasBody
-    ? JSON.stringify({
-        enc: sealTransport(session.key, JSON.stringify({ s: ++session.seq, b: options.body }), aad),
-      })
+    ? JSON.stringify({ enc: sealTransport(key, JSON.stringify({ s: ++session.seq, b: options.body }), aad) })
     : undefined;
 
   const headers: Record<string, string> = {
     ...options.headers,
-    "x-loam-enc": session.sessionId,
+    "x-loam-enc": sessionId,
   };
   if (sealedBody !== undefined) {
     headers["content-type"] = "application/json";
@@ -339,7 +347,7 @@ async function attemptSealed(
     } catch {
       enc = undefined;
     }
-    const opened = typeof enc === "string" ? openTransport(session.key, enc, aad) : null;
+    const opened = typeof enc === "string" ? openTransport(key, enc, aad) : null;
 
     if (opened === null) {
       // The peer's handler ran and sealed a reply we can't open (session key changed between request
@@ -357,6 +365,14 @@ async function attemptSealed(
   // session id) — nothing was applied, so retrying after a fresh handshake is safe.
   if (response.status === 401 && !retried && (await refreshSession(session, options))) {
     return attemptSealed(session, peerUrl, path, options, true);
+  }
+
+  // Fail closed on an UNSEALED 2xx: once we've sent a sealed request over a live session, a genuine peer
+  // ALWAYS seals its content reply (`x-loam-enc: 1`). An unsealed success is a downgrade — an active MITM
+  // (or a misconfigured peer) returning attacker-chosen plaintext — and must never be accepted as sync
+  // data to import. Only the 401 above (a pre-handler session refusal) is a legitimate unsealed response.
+  if (response.ok) {
+    throw new Error("Peer returned an unauthenticated (unsealed) transport response");
   }
 
   return { status: response.status, ok: response.ok, text: response.text };
