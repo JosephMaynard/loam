@@ -838,14 +838,12 @@ function LoamApp() {
     // can't clear) survives and a reload re-hydrates the wiped identity. A node kill switch already
     // invalidated every session server-side, so only the device scope needs this (docs/15 #4).
     if (scope === "device") {
-      // Bound it with the standard timeout so a hung/unreachable server can't stall the wipe — the
-      // local purge below is the part that actually matters and must always run (docs/15 #4).
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       // Suppress new-identity minting for the WHOLE wipe (docs/20 H3): the identity is being discarded,
       // so no re-handshake the revocation triggers may mint a fresh orphan.
       setMintSuppressed(true);
-      // The wipe clears TWO independent credentials (docs/20 #3):
+      // The wipe clears TWO independent credentials (docs/20 #3), each with its OWN timeout/abort so one
+      // can't cancel the other — the secure logout now re-establishes + retries, so a slow/hung logout
+      // must NOT abort the unconditional cookie-clear that follows it:
       //  1. The BOUND secure identity token — via the sealed, outcome-driven logout (re-establishes if the
       //     session died, revokes the token + sessions + sockets, confirms the sealed reply). It uses
       //     `credentials:"omit"`, so it does NOT touch any legacy cookie.
@@ -855,15 +853,19 @@ function LoamApp() {
       //     not cause us to skip clearing the cookie (which could otherwise rehydrate the identity on an
       //     optional/off node). `session/end` is directly reachable in every mode and mints nothing, so
       //     this is orphan-safe and works under `required` (no tunnel/rebind needed).
-      await logoutSecureIdentity({ signal: controller.signal }).catch(() => undefined);
-      await fetch(apiUrl("/api/session/end"), {
-        method: "POST",
-        credentials: "include",
-        signal: controller.signal,
-      }).catch(() => {
-        // best effort — the local purge below still runs
-      });
-      window.clearTimeout(timeout);
+      const withTimeout = async (run: (signal: AbortSignal) => Promise<unknown>): Promise<void> => {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        try {
+          await run(controller.signal);
+        } catch {
+          // best effort — the local purge below always runs regardless
+        } finally {
+          window.clearTimeout(timeout);
+        }
+      };
+      await withTimeout((signal) => logoutSecureIdentity({ signal }));
+      await withTimeout((signal) => fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal }));
     }
     setMessages([]);
     setChannels([]);
