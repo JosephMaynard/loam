@@ -42,7 +42,11 @@ export function useEncryptedImage(path: string | undefined): string | undefined 
     return () => {
       active = false;
     };
-  }, [path]);
+    // `isTunnelActive()` is a dep, not just `path`: when the node's transport mode flips live (an admin
+    // toggling `transportEncryption` → `configUpdated` re-renders the tree), the tunnel activation changes
+    // for the SAME path, and the image must be re-resolved (direct URL ⇄ tunnelled `blob:`) — keying only on
+    // `path` would leave a stale, possibly-401ing src.
+  }, [path, isTunnelActive()]);
 
   return src;
 }

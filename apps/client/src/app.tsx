@@ -306,7 +306,10 @@ async function loadConfig(): Promise<Config> {
       joinUrl: boot.joinUrl,
       websocketPath: boot.websocketPath,
       networkConfig: boot.networkConfig,
-      currentUser: currentUser as User,
+      // Validate the resumed identity at the boundary like every other server payload — the sealed resume
+      // reply is decrypted JSON, so `currentUser` is `unknown` until checked. A malformed user throws here
+      // and boot surfaces it, rather than casting untrusted data into app state.
+      currentUser: UserSchema.parse(currentUser),
     };
   }
 
