@@ -87,6 +87,7 @@ import {
   reestablishSession,
   resumeIdentity,
   SERVER_URL_KEY,
+  setMintSuppressed,
   TransportNeedsQrError,
   wipeServerCredentials,
   wsUrl,
@@ -836,9 +837,12 @@ function LoamApp() {
     // Until then we show a truthful "Wiping…" state. `scope` only changes the completed-screen copy.
     setWipeScope(scope);
     setWipeInProgress(true);
-    // Latch the local store so any in-flight fetch that resolves during the wipe can't rebuild the DB we
-    // are about to delete (docs/15 #4).
+    // Latch BOTH persistence stores against repopulation by in-flight work that resolves during the wipe
+    // (docs/20): `markLocalStoreWiped` blocks any later IndexedDB write, and `setMintSuppressed` blocks a
+    // late `storeIdentityToken`/mint — so a resume or channels-fetch that lands mid-wipe can't rebuild the
+    // DB or re-write the credential we're erasing.
     markLocalStoreWiped();
+    setMintSuppressed(true);
 
     // ---- Local erasure FIRST (all local, no network — fast + bounded). ----
     setMessages([]);
@@ -854,10 +858,14 @@ function LoamApp() {
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
 
+    // Deleting the DB is the persistence-critical step — track whether it actually succeeded (it REJECTS
+    // when another tab still holds a connection, or on error). If it didn't, we must NOT claim the local
+    // copy is erased: stay in the "Wiping…" state so the UI never lies about persistent data still present.
+    let localErased = true;
     try {
       await destroyDatabase();
     } catch {
-      // best effort
+      localErased = false; // deferred/failed — the database may still hold data
     }
 
     if ("serviceWorker" in navigator) {
@@ -870,9 +878,12 @@ function LoamApp() {
       await Promise.all(cacheKeys.map((key) => caches.delete(key).catch(() => false)));
     }
 
-    // Local data is now actually gone → show the completed screen. If the user closes the app from here,
-    // nothing persistent remains.
-    setWiped(true);
+    // Show the completed screen ONLY when local deletion actually succeeded (otherwise the incomplete
+    // "Wiping…" state persists — truthful). If the user closes the app once "erased" shows, nothing
+    // persistent remains.
+    if (localErased) {
+      setWiped(true);
+    }
 
     // ---- Server cleanup LAST (best-effort, deadline-bounded — cannot delay or falsify the local wipe). ----
     // A device wipe drops the server-side credentials: the bound secure token (via the sealed logout on the

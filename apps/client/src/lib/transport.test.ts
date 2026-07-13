@@ -1030,6 +1030,30 @@ describe("transport", () => {
       }
     });
 
+    it("does NOT persist a token while a wipe is in progress — no credential repopulation (docs/20 CR#2)", async () => {
+      // An in-flight resume that lands mid-wipe (mint suppressed) must not re-write the identity token the
+      // wipe just cleared. Here a resume with the stored token succeeds and the server returns a NEW token,
+      // but `storeIdentityToken` is gated, so localStorage is not repopulated.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const key = `loam.identityToken.${window.location.origin}`;
+      localStorage.setItem(key, "stored-token");
+      const fetchMock = mockNode(host, (_token, serverKey, seq) =>
+        sealedReply(serverKey, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "new-token" }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      setMintSuppressed(true);
+      try {
+        await resumeIdentity(); // resumes with "stored-token"; server returns "new-token"
+      } finally {
+        setMintSuppressed(false);
+      }
+      // The new token was NOT written — the credential the wipe cleared can't be repopulated mid-wipe.
+      expect(localStorage.getItem(key)).toBe("stored-token");
+    });
+
     it("resumeIdentity refuses to bind over a non-QR-verified (optional) session (docs/20 L8)", async () => {
       const host = createTransportIdentity();
       const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {

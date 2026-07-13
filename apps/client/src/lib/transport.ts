@@ -77,6 +77,12 @@ function storedIdentityToken(): string | undefined {
 }
 
 function storeIdentityToken(token: string): void {
+  // Never persist a token while a wipe is in progress (docs/20): an in-flight resume that resolves AFTER
+  // the wipe cleared local storage would otherwise re-write the credential we just erased. `mintSuppressed`
+  // is set for the whole wipe, so this closes that repopulation race for the identity token.
+  if (mintSuppressed) {
+    return;
+  }
   localStorage.setItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin(), token);
 }
 
