@@ -56,5 +56,18 @@ describe("wipe coordinator", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(received).toBe(0);
     });
+
+    it("fires on the durable tombstone `storage` event (fallback for a missed BroadcastChannel, round-5 Medium)", () => {
+      let received = 0;
+      const unsubscribe = listenForRemoteWipe(() => {
+        received += 1;
+      });
+      // A sibling tab raising the tombstone fires a `storage` event in this one.
+      window.dispatchEvent(new StorageEvent("storage", { key: "loam.wipeTombstone", newValue: "1" }));
+      // An unrelated key must not trigger it.
+      window.dispatchEvent(new StorageEvent("storage", { key: "loam.somethingElse", newValue: "1" }));
+      unsubscribe();
+      expect(received).toBe(1);
+    });
   });
 });

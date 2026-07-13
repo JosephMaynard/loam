@@ -95,7 +95,7 @@ import {
   resumeIdentity,
   SERVER_URL_KEY,
   setMintSuppressed,
-  snapshotIdentityTokenForWipe,
+  snapshotForWipe,
   TransportNeedsQrError,
   wipeServerCredentials,
   wsUrl,
@@ -453,10 +453,15 @@ function LoamApp() {
   // it before the transport layer consumes the fragment. When a wipe tombstone is outstanding, a rejoin is
   // the only thing that lifts the boot gate.
   const rejoinQrPresent = /^#k=[A-Za-z0-9_-]+$/.test(window.location.hash);
-  // BOOT GATE (docs/20 round-4 H2): if a prior device wipe's durable tombstone is still set — its
-  // server-side cookie cleanup never confirmed — do NOT auto-render/reconnect the normal app (the surviving
-  // HttpOnly cookie could otherwise rehydrate the wiped identity). Reuse the "Device wiped, scan the join QR"
-  // screen; a scanned QR is the explicit rejoin that clears it (effect below).
+  // Whether THIS load is a verified-rejoin attempt of a tombstoned device (a scanned QR while the tombstone
+  // is still set). Captured once at mount, before the transport layer consumes the `#k=` fragment. The
+  // tombstone is lifted only AFTER the QR handshake actually succeeds (docs/20 round-5 H2) — not merely
+  // because a syntactically-valid `#k=` is present (a stale/invalid QR, or a crash, must not remove the gate).
+  const bootRejoinAttempt = useRef(rejoinQrPresent && isWipeTombstoned());
+  // BOOT GATE (docs/20 round-4 H2): if a prior device wipe's durable tombstone is still set, do NOT
+  // auto-render/reconnect the normal app (a surviving HttpOnly cookie could otherwise rehydrate the wiped
+  // identity). Reuse the "Device wiped, scan the join QR" screen; a scanned QR lets boot PROCEED, and a
+  // successful handshake there is what clears the tombstone.
   const [wiped, setWiped] = useState(() => isWipeTombstoned() && !rejoinQrPresent);
   // True while local data is being erased, BEFORE the completed "wiped" screen (docs/20). The completed
   // screen must never claim the local copy is erased until it actually is — so we show a truthful
@@ -859,12 +864,14 @@ function LoamApp() {
     setWipeScope(scope);
     setWipeInProgress(true);
     if (scope === "device") {
-      // Durable "do not auto-reconnect" tombstone (docs/20 round-4 H2) — survives reloads, so a wipe whose
-      // server-side cookie cleanup can't confirm still gates boot until it does (or the user rejoins). And
-      // announce the wipe to every OTHER tab so they tear down too (round-4 Medium) — not on a remote wipe,
-      // to avoid a broadcast loop.
-      setWipeTombstone();
+      setWipeTombstone(); // durable "do not auto-reconnect" (docs/20 round-4 H2)
       if (!opts.remote) {
+        // Capture the token + server-origin snapshots for the server revocation BEFORE announcing (docs/20
+        // round-5 H1): a sibling tab receiving the announce clears both from shared localStorage, so
+        // snapshotting after would lose them and the revocation could hit the wrong origin / no token.
+        snapshotForWipe();
+        // Then announce to every OTHER tab so they tear down too (round-4 Medium). Skipped on a remote wipe
+        // to avoid a broadcast loop.
         announceWipe();
       }
     }
@@ -874,12 +881,6 @@ function LoamApp() {
     // DB or re-write the credential we're erasing.
     markLocalStoreWiped();
     setMintSuppressed(true);
-    // Snapshot the identity token in memory BEFORE local erasure clears it (docs/20 #3 H1) — the server
-    // revocation below still needs it to re-establish + retry if the bound session has died. Mint
-    // suppression keeps the snapshot from being written back.
-    if (scope === "device" && !opts.remote) {
-      snapshotIdentityTokenForWipe();
-    }
 
     // ---- Local erasure FIRST (all local, no network — fast + bounded). ----
     setMessages([]);
@@ -921,42 +922,32 @@ function LoamApp() {
 
     // ---- Server cleanup LAST (best-effort, deadline-bounded — cannot delay or falsify the local wipe). ----
     // A device wipe drops the server-side credentials: the bound secure token (via the sealed logout on the
-    // still-in-memory transport session) AND the legacy HttpOnly cookie (which JS can't clear, so a bare
-    // `session/end` carrying it). A node kill switch already invalidated every session server-side, so only
-    // the device scope needs this (docs/15 #4). `wipeServerCredentials` always settles even under a network
-    // blackhole (it races a real deadline), and it uses `apiUrl`, so remove the server-origin override after.
-    // Only the INITIATING tab runs the server-side revocation (a remote tab's initiator owns it).
+    // still-in-memory transport session) AND the legacy HttpOnly cookie (bare `session/end`). Only the
+    // INITIATING tab does this (a remote tab's initiator owns it), and only it removes the shared
+    // SERVER_URL_KEY — a remote tab removing it could redirect the initiator's in-flight revocation calls to
+    // the wrong origin (docs/20 round-5 H1). The tombstone is NOT lifted here: `session/end` is unsealed and
+    // forgeable, so it's no security confirmation (round-5 H2) — the tombstone stays until a VERIFIED rejoin.
     if (scope === "device" && !opts.remote) {
-      const { cookieCleared } = await wipeServerCredentials(REQUEST_TIMEOUT_MS);
-      // Lift the durable tombstone ONLY when the legacy cookie cleanup CONFIRMED (docs/20 round-4 H2): a
-      // blackholed `session/end` leaves the HttpOnly cookie alive, which could rehydrate the wiped identity
-      // on reload — so the tombstone (and the boot rejoin-gate) must persist until it's confirmed or the
-      // user explicitly rejoins.
-      if (cookieCleared) {
-        clearWipeTombstone();
-      }
+      await wipeServerCredentials(REQUEST_TIMEOUT_MS);
+      localStorage.removeItem(SERVER_URL_KEY);
     }
-    localStorage.removeItem(SERVER_URL_KEY);
   }, []);
 
-  // Tear THIS tab down if another tab initiates a device wipe (docs/20 round-4 Medium): the initiating tab
-  // announces over a BroadcastChannel; we run a local-only purge (no re-announce, no server revocation).
-  useEffect(
-    () => listenForRemoteWipe(() => void purgeLocalData("device", { remote: true })),
-    [purgeLocalData],
-  );
-
-  // Explicit rejoin (docs/20 round-4 H2): a device arriving with a freshly-scanned join QR while a wipe
-  // tombstone is outstanding lifts the tombstone AND clears the legacy cookie (a bare `session/end`), so the
-  // old identity can't rehydrate — then boot proceeds normally. `rejoinQrPresent` is captured at first
-  // render, before the transport layer consumes the `#k=` fragment.
+  // Tear THIS tab down if another tab initiates a device wipe (docs/20 round-4 Medium / round-5 Medium): the
+  // initiating tab announces over a BroadcastChannel AND raises the durable tombstone (a `storage` event) —
+  // `listenForRemoteWipe` covers both. We run a local-only purge (no re-announce, no server revocation).
   useEffect(() => {
-    if (rejoinQrPresent && isWipeTombstoned()) {
-      clearWipeTombstone();
-      void fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include" }).catch(() => undefined);
+    const onRemote = (): void => void purgeLocalData("device", { remote: true });
+    const unsubscribe = listenForRemoteWipe(onRemote);
+    // Re-check on install: a wipe may have landed between this tab's first render and this effect running
+    // (the one-shot BroadcastChannel message would be missed). If we're tombstoned now but didn't already
+    // gate at render, tear down (docs/20 round-5 Medium).
+    if (isWipeTombstoned() && !wiped && !bootRejoinAttempt.current) {
+      onRemote();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once at mount with the first-render QR state
-  }, []);
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `wiped` read once at install for the mount race
+  }, [purgeLocalData]);
 
   const applyStreamEvent = useCallback((event: StreamEvent) => {
     if (event.type !== "delta") {
@@ -1278,6 +1269,15 @@ function LoamApp() {
         setNeedsQr(false);
         syncFailuresRef.current = 0;
         setError(undefined);
+        // A VERIFIED rejoin (docs/20 round-5 H2): `loadConfig` succeeded, so the QR-pinned handshake/resume
+        // actually completed — only NOW is it safe to lift the wipe tombstone (and best-effort clear the old
+        // cookie). A syntactically-valid `#k=` alone never clears it, so a stale/invalid QR or a crash leaves
+        // the boot gate intact.
+        if (bootRejoinAttempt.current) {
+          bootRejoinAttempt.current = false;
+          clearWipeTombstone();
+          void fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include" }).catch(() => undefined);
+        }
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
         setCurrentUser(nextConfig.currentUser);

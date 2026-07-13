@@ -17,7 +17,7 @@ import {
   resumeIdentity,
   resetTransportStateForTests,
   setMintSuppressed,
-  snapshotIdentityTokenForWipe,
+  snapshotForWipe,
   wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
@@ -60,6 +60,15 @@ describe("transport", () => {
     it("prefixes a configured server origin override", () => {
       localStorage.setItem(SERVER_URL_KEY, "http://192.168.1.5:3001");
       expect(apiUrl("/api/config")).toBe("http://192.168.1.5:3001/api/config");
+    });
+
+    it("falls back to the captured server-origin snapshot after the override is removed mid-wipe (docs/20 round-5 H1)", () => {
+      localStorage.setItem(SERVER_URL_KEY, "http://192.168.1.9:3001");
+      snapshotForWipe(); // capture token + origin before announcing the wipe to other tabs
+      // A sibling tab (or this wipe's own local purge) removes the stored origin — the in-flight server
+      // credential cleanup must still target the right node via the snapshot, not fall back to relative.
+      localStorage.removeItem(SERVER_URL_KEY);
+      expect(apiUrl("/api/session/end")).toBe("http://192.168.1.9:3001/api/session/end");
     });
   });
 
@@ -1051,7 +1060,7 @@ describe("transport", () => {
       expect(localStorage.getItem(tokenKey)).toBe("tok");
 
       // Model the wipe order: snapshot BEFORE clearing local storage, then clear it, then revoke.
-      snapshotIdentityTokenForWipe();
+      snapshotForWipe();
       clearStoredIdentityToken();
       expect(localStorage.getItem(tokenKey)).toBeNull();
       await wipeServerCredentials(1_000);

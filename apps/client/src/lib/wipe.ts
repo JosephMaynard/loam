@@ -65,23 +65,43 @@ export function announceWipe(): void {
 }
 
 /**
- * Subscribe to wipe announcements from OTHER tabs; `onWipe` runs when any tab initiates a wipe, so this
- * tab can tear down its own copy. Returns an unsubscribe function. No-op (returns a no-op) where
- * BroadcastChannel is unavailable.
+ * Subscribe to wipe announcements from OTHER tabs; `onWipe` runs when any tab initiates a wipe, so this tab
+ * can tear down its own copy. Returns an unsubscribe function. Listens on TWO channels for reliability
+ * (docs/20 round-5 Medium): a fast BroadcastChannel message AND the `storage` event fired when the durable
+ * `loam.wipeTombstone` flag is written — the latter is delivered even where BroadcastChannel is unavailable
+ * or a tab wasn't yet listening when the one-shot message was posted.
  */
 export function listenForRemoteWipe(onWipe: () => void): () => void {
-  if (typeof BroadcastChannel === "undefined") {
-    return () => undefined;
+  const cleanups: (() => void)[] = [];
+
+  if (typeof BroadcastChannel !== "undefined") {
+    const channel = new BroadcastChannel(WIPE_CHANNEL_NAME);
+    const handler = (event: MessageEvent): void => {
+      if ((event.data as { type?: unknown } | null)?.type === "wipe") {
+        onWipe();
+      }
+    };
+    channel.addEventListener("message", handler);
+    cleanups.push(() => {
+      channel.removeEventListener("message", handler);
+      channel.close();
+    });
   }
-  const channel = new BroadcastChannel(WIPE_CHANNEL_NAME);
-  const handler = (event: MessageEvent): void => {
-    if ((event.data as { type?: unknown } | null)?.type === "wipe") {
-      onWipe();
-    }
-  };
-  channel.addEventListener("message", handler);
+
+  if (typeof window !== "undefined") {
+    const onStorage = (event: StorageEvent): void => {
+      // Fires in OTHER tabs when this origin's localStorage changes. A newly-raised tombstone = a wipe.
+      if (event.key === WIPE_TOMBSTONE_KEY && event.newValue === "1") {
+        onWipe();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    cleanups.push(() => window.removeEventListener("storage", onStorage));
+  }
+
   return () => {
-    channel.removeEventListener("message", handler);
-    channel.close();
+    for (const cleanup of cleanups) {
+      cleanup();
+    }
   };
 }

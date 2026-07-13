@@ -269,3 +269,37 @@ identity); a banned/revoked user can still re-mint a *fresh anonymous* identity 
 model — clearing a cookie already does this today; no access to the old identity's private state).
 
 *Pending external implementation review (Sol) before merge; this is the implementation spec.*
+
+## 16. Device-wipe lifecycle hardening (external review, folded in)
+
+External review (Sol) then focused on the **device-wipe lifecycle** — the surface that decommissions a
+device's local + server credentials — which proved deceptively deep across the reload / multi-tab /
+blackholed-network dimensions. The findings below were fixed:
+
+- **Unbounded recovery await (client):** `wipeServerCredentials`'s stale-session recovery could await a
+  blackholed re-handshake forever. Fix: a per-step `withDeadline` (Promise.race against a real timeout),
+  so the local wipe always proceeds.
+- **Cookie residual after a bound wipe (client, §3):** revoking only the bound token left the legacy
+  HttpOnly cookie alive. Fix: the wipe also fires a bare, unconditional `POST /api/session/end` carrying
+  (and clearing) that cookie.
+- **Ordering / durability (client):** the "completed" screen could show before local deletion finished,
+  and a blackholed server cleanup could be silently forgotten on reload. Fix: **local erasure first** with
+  a truthful "Wiping…" state, a **durable `loam.wipePending`** flag driving IndexedDB deletion recovery at
+  boot, and a **durable `loam.wipeTombstone`** that gates boot ("scan the join QR to rejoin") until a
+  wipe's server cleanup is superseded by a **verified** rejoin.
+- **Snapshot-vs-announce race (client, round-5 H1):** capturing the identity-token / server-origin
+  snapshots *after* announcing the wipe let a sibling tab clear shared localStorage first, so the
+  initiating tab's revocation could lose the token or target the wrong origin. Fix: `snapshotForWipe()`
+  (token **and** origin) runs **before** `announceWipe()`; `apiUrl` prefers the origin snapshot during a
+  wipe; only the initiating tab removes `SERVER_URL_KEY`.
+- **Tombstone lifted without a trustworthy rejoin (client, round-5 H2):** the gate was cleared on mere
+  `#k=` presence, or on an *unsealed* (forgeable) `session/end` 200. Fix: the tombstone is lifted **only
+  after `loadConfig` succeeds** on a QR-pinned handshake — a stale/invalid QR or a crash leaves the gate
+  intact.
+- **Lossy cross-tab propagation (client, round-5 Medium):** a one-shot BroadcastChannel message is missed
+  by a tab that wasn't yet listening (or a browser without BroadcastChannel), and `versionchange` closed
+  the DB without tearing down React. Fix: `listenForRemoteWipe` **also** listens for the durable
+  tombstone's `storage` event, and the cross-tab effect **re-checks** the tombstone on install.
+
+These are lifecycle-robustness fixes, not auth-protocol changes — the §1–§14 auth-binding guarantees are
+unchanged.

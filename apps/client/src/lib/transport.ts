@@ -24,9 +24,13 @@ const HOST_KEY_STORAGE_PREFIX = "loam.transportHostKey.";
 
 /** Build an absolute request URL for a server-relative API path (e.g. `/api/messages`), honouring an
  * optional configured server origin override. The single place that knows how to reach the server —
- * used for both `fetch` calls and non-fetch resource URLs (`<img src>`, `<a href>`). */
+ * used for both `fetch` calls and non-fetch resource URLs (`<img src>`, `<a href>`). During a wipe it
+ * falls back to the captured origin snapshot: a sibling tab may have already removed the shared
+ * `SERVER_URL_KEY`, and the initiating tab's revocation calls must still reach the RIGHT origin (docs/20
+ * round-5 H1) — a wrong-origin logout/`session/end` would be useless or redirected. */
 export function apiUrl(path: string): string {
-  return `${localStorage.getItem(SERVER_URL_KEY) ?? ""}${path}`;
+  const base = wipeServerUrlSnapshot ?? localStorage.getItem(SERVER_URL_KEY) ?? "";
+  return `${base}${path}`;
 }
 
 /**
@@ -76,11 +80,18 @@ const IDENTITY_TOKEN_STORAGE_PREFIX = "loam.identityToken.";
  * re-establish + retry if the bound session died. `storedIdentityToken()` falls back to this during the
  * wipe, and `storeIdentityToken` is gated by `mintSuppressed` so the snapshot can't be written back. */
 let wipeTokenSnapshot: string | undefined;
+/** In-memory snapshot of the configured server origin, captured alongside the token so the wipe's server
+ * revocation reaches the right origin even if a sibling tab has already removed `SERVER_URL_KEY` from the
+ * shared localStorage (docs/20 round-5 H1). `apiUrl` prefers it while set. */
+let wipeServerUrlSnapshot: string | undefined;
 
-/** Capture the current stored token into the in-memory wipe snapshot BEFORE local erasure clears it, so
- * `wipeServerCredentials`'s stale-session recovery can still present it (docs/20 #3 / round-4 H1). */
-export function snapshotIdentityTokenForWipe(): void {
+/** Capture the token AND the server-origin override into in-memory wipe snapshots BEFORE local erasure (or
+ * any cross-tab announce) clears them from shared localStorage, so `wipeServerCredentials`'s stale-session
+ * recovery can still present the token and reach the right origin (docs/20 #3 H1 / round-5 H1). MUST be
+ * called before `announceWipe()` — a sibling tab receiving the announce clears both from localStorage. */
+export function snapshotForWipe(): void {
   wipeTokenSnapshot = localStorage.getItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin()) ?? undefined;
+  wipeServerUrlSnapshot = localStorage.getItem(SERVER_URL_KEY) ?? undefined;
 }
 
 /** The stored secure identity token for the current origin, if any — or the in-memory wipe snapshot while
@@ -965,26 +976,25 @@ async function withDeadline<T>(op: (signal: AbortSignal) => Promise<T>, timeoutM
  * blackholes a step — so the caller's local purge always proceeds. The two steps are separate credentials
  * (§3): the sealed logout omits the cookie; the bare `session/end` sends and clears it.
  *
- * Returns whether the LEGACY COOKIE cleanup was CONFIRMED (a `session/end` that actually completed within
- * the deadline). The wipe coordinator uses this to decide the durable "don't auto-reconnect" tombstone: a
- * blackholed cookie clear leaves the HttpOnly cookie alive, so the tombstone must persist until it's
- * confirmed (or the user rejoins) — otherwise that cookie could rehydrate the wiped identity on a reload
- * (docs/20 round-4 H2).
+ * Best-effort: the `session/end` reply is UNSEALED, so an active LAN attacker could forge a 200 while the
+ * real request is blocked — meaning we must NOT treat it as a security confirmation (docs/20 round-5 H2).
+ * The durable wipe tombstone is therefore NOT lifted here; it stays until a VERIFIED explicit rejoin (a
+ * QR-pinned handshake that actually succeeds).
  */
-export async function wipeServerCredentials(timeoutMs: number): Promise<{ cookieCleared: boolean }> {
+export async function wipeServerCredentials(timeoutMs: number): Promise<void> {
   setMintSuppressed(true);
   try {
     // The logout (and its stale-session re-establish/retry) reads `storedIdentityToken()`, which falls back
     // to the pre-erasure snapshot (docs/20 #3 H1) — so revocation still works even though local storage was
     // already cleared. Mint suppression keeps that snapshot from being written back.
     await withDeadline((signal) => logoutSecureIdentity({ signal }), timeoutMs);
-    const cookieResponse = await withDeadline(
+    await withDeadline(
       (signal) => fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal }),
       timeoutMs,
     );
-    return { cookieCleared: cookieResponse?.ok === true };
   } finally {
     wipeTokenSnapshot = undefined;
+    wipeServerUrlSnapshot = undefined;
   }
 }
 
@@ -997,5 +1007,6 @@ export function resetTransportStateForTests(): void {
   reHandshakeInFlight = undefined;
   mintSuppressed = false;
   wipeTokenSnapshot = undefined;
+  wipeServerUrlSnapshot = undefined;
   clearImageObjectUrls();
 }
