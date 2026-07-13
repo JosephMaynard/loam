@@ -3098,7 +3098,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /** Record (briefly) that a peer is talked to in the clear, so an off-mode peer isn't re-probed via
-   * `/api/config` on every 5s tick — but is re-checked often enough to notice it enabling transport. */
+   * `/api/bootstrap` on every 5s tick — but is re-checked often enough to notice it enabling transport. */
   function cachePlaintext(peerUrl: string): "plaintext" {
     peerTransportSessions.set(peerUrl, { transport: "plaintext", expiresAt: Date.now() + PEER_PLAINTEXT_RECHECK_MS });
     return "plaintext";

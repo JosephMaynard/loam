@@ -370,8 +370,13 @@ async function attemptSealed(
   // Fail closed on an UNSEALED 2xx: once we've sent a sealed request over a live session, a genuine peer
   // ALWAYS seals its content reply (`x-loam-enc: 1`). An unsealed success is a downgrade — an active MITM
   // (or a misconfigured peer) returning attacker-chosen plaintext — and must never be accepted as sync
-  // data to import. Only the 401 above (a pre-handler session refusal) is a legitimate unsealed response.
+  // data to import. Re-handshake + retry ONCE (as the 401 / undecryptable branches do — a stale session on
+  // our side is the benign case that recovers); if the retry is STILL an unsealed 2xx, throw rather than
+  // importing it. Only the 401 above (a pre-handler session refusal) is a legitimate unsealed response.
   if (response.ok) {
+    if (!retried && (await refreshSession(session, options))) {
+      return attemptSealed(session, peerUrl, path, options, true);
+    }
     throw new Error("Peer returned an unauthenticated (unsealed) transport response");
   }
 
