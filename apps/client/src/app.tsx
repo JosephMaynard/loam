@@ -88,6 +88,7 @@ import {
   resumeIdentity,
   SERVER_URL_KEY,
   setMintSuppressed,
+  snapshotIdentityTokenForWipe,
   TransportNeedsQrError,
   wipeServerCredentials,
   wsUrl,
@@ -843,6 +844,12 @@ function LoamApp() {
     // DB or re-write the credential we're erasing.
     markLocalStoreWiped();
     setMintSuppressed(true);
+    // Snapshot the identity token in memory BEFORE local erasure clears it (docs/20 #3 H1) — the server
+    // revocation below still needs it to re-establish + retry if the bound session has died. Mint
+    // suppression keeps the snapshot from being written back.
+    if (scope === "device") {
+      snapshotIdentityTokenForWipe();
+    }
 
     // ---- Local erasure FIRST (all local, no network — fast + bounded). ----
     setMessages([]);

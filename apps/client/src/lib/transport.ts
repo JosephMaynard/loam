@@ -71,9 +71,22 @@ let session: Session | undefined;
  * compromise is covered by the encrypted-at-rest DB + wipe, not by hiding this from same-origin JS. */
 const IDENTITY_TOKEN_STORAGE_PREFIX = "loam.identityToken.";
 
-/** The stored secure identity token for the current origin, if any. */
+/** An in-memory snapshot of the identity token, captured before a wipe clears it from localStorage
+ * (docs/20 #3): the wipe erases local state FIRST, but the server-side revocation still needs the token to
+ * re-establish + retry if the bound session died. `storedIdentityToken()` falls back to this during the
+ * wipe, and `storeIdentityToken` is gated by `mintSuppressed` so the snapshot can't be written back. */
+let wipeTokenSnapshot: string | undefined;
+
+/** Capture the current stored token into the in-memory wipe snapshot BEFORE local erasure clears it, so
+ * `wipeServerCredentials`'s stale-session recovery can still present it (docs/20 #3 / round-4 H1). */
+export function snapshotIdentityTokenForWipe(): void {
+  wipeTokenSnapshot = localStorage.getItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin()) ?? undefined;
+}
+
+/** The stored secure identity token for the current origin, if any — or the in-memory wipe snapshot while
+ * a wipe is clearing/has cleared localStorage. */
 function storedIdentityToken(): string | undefined {
-  return localStorage.getItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin()) ?? undefined;
+  return wipeTokenSnapshot ?? localStorage.getItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin()) ?? undefined;
 }
 
 function storeIdentityToken(token: string): void {
@@ -954,11 +967,18 @@ async function withDeadline(op: (signal: AbortSignal) => Promise<unknown>, timeo
  */
 export async function wipeServerCredentials(timeoutMs: number): Promise<void> {
   setMintSuppressed(true);
-  await withDeadline((signal) => logoutSecureIdentity({ signal }), timeoutMs);
-  await withDeadline(
-    (signal) => fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal }),
-    timeoutMs,
-  );
+  try {
+    // The logout (and its stale-session re-establish/retry) reads `storedIdentityToken()`, which falls back
+    // to the pre-erasure snapshot (docs/20 #3 H1) — so revocation still works even though local storage was
+    // already cleared. Mint suppression keeps that snapshot from being written back.
+    await withDeadline((signal) => logoutSecureIdentity({ signal }), timeoutMs);
+    await withDeadline(
+      (signal) => fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal }),
+      timeoutMs,
+    );
+  } finally {
+    wipeTokenSnapshot = undefined;
+  }
 }
 
 /** Test-only: reset all module state between tests. Never called from app code. */
@@ -969,5 +989,6 @@ export function resetTransportStateForTests(): void {
   lastParams = undefined;
   reHandshakeInFlight = undefined;
   mintSuppressed = false;
+  wipeTokenSnapshot = undefined;
   clearImageObjectUrls();
 }

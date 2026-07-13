@@ -17,6 +17,7 @@ import {
   resumeIdentity,
   resetTransportStateForTests,
   setMintSuppressed,
+  snapshotIdentityTokenForWipe,
   wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
@@ -1009,6 +1010,55 @@ describe("transport", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("uses the pre-erasure token snapshot for stale-session revocation after local storage is cleared (docs/20 #3 H1)", async () => {
+      // The wipe erases local storage FIRST, but the server revocation must still recover a dead bound
+      // session by re-establishing with the token. The snapshot (captured before erasure) is what makes
+      // that possible even though localStorage is already empty.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const tokenKey = `loam.identityToken.${window.location.origin}`;
+      let serverKey: string | undefined;
+      const resumeTokens: (string | undefined)[] = [];
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/session/resume") {
+          const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+          const env = JSON.parse(opened!) as { s: number; b: { token?: string } };
+          resumeTokens.push(env.b.token);
+          return sealedReply(serverKey!, { s: env.s, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+        }
+        if (url === "/api/session/logout") {
+          return new Response(null, { status: 401 }); // dead session → triggers recovery re-establish
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 }); // session/end
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity(); // mint → resumeTokens: [undefined]; token "tok" stored
+      expect(localStorage.getItem(tokenKey)).toBe("tok");
+
+      // Model the wipe order: snapshot BEFORE clearing local storage, then clear it, then revoke.
+      snapshotIdentityTokenForWipe();
+      clearStoredIdentityToken();
+      expect(localStorage.getItem(tokenKey)).toBeNull();
+      await wipeServerCredentials(1_000);
+
+      // The recovery re-establish presented the SNAPSHOT token (not undefined) — so revocation could run
+      // despite local storage being empty. Without the snapshot it would mint (suppressed) and skip recovery.
+      expect(resumeTokens).toContain("tok");
     });
 
     it("setMintSuppressed blocks a fresh mint during a wipe (docs/20 H3 — no orphan)", async () => {
