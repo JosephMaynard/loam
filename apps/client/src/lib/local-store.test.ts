@@ -8,6 +8,7 @@ import {
   markLocalStoreWiped,
   putRecord,
   putRecords,
+  recoverPendingWipe,
   resetLocalStoreForTests,
 } from "./local-store";
 
@@ -91,5 +92,34 @@ describe("local-store", () => {
     // After a reload (latch cleared) the late writes never persisted — only the pre-wipe record.
     resetLocalStoreForTests();
     expect((await getAllRecords<Channel>("channels")).map((channel) => channel.id)).toEqual(["general"]);
+  });
+
+  describe("durable wipe-pending flag (docs/20 — survives reload)", () => {
+    const WIPE_PENDING_KEY = "loam.wipePending";
+
+    it("markLocalStoreWiped persists the flag; destroyDatabase clears it once deletion succeeds", async () => {
+      await putRecord<Channel>("channels", { id: "c1", name: "One" });
+      markLocalStoreWiped();
+      expect(localStorage.getItem(WIPE_PENDING_KEY)).toBe("1"); // persisted, so a reload can't rehydrate
+      await destroyDatabase(); // single connection in the test → succeeds
+      expect(localStorage.getItem(WIPE_PENDING_KEY)).toBeNull(); // cleared only on actual deletion
+    });
+
+    it("recoverPendingWipe latches the store and completes the pending deletion, clearing the flag", async () => {
+      // A prior wipe set the durable flag (still pending). Boot recovery must latch the store (so nothing
+      // hydrates) and finish the deletion, clearing the flag once it lands.
+      await putRecord<Channel>("channels", { id: "c1", name: "One" });
+      markLocalStoreWiped(); // persists the flag + latch, as the wipe flow does
+      expect(localStorage.getItem(WIPE_PENDING_KEY)).toBe("1");
+
+      await recoverPendingWipe(); // closes the connection, deletes the DB, clears the flag
+      expect(localStorage.getItem(WIPE_PENDING_KEY)).toBeNull();
+      expect(await getAllRecords<Channel>("channels")).toEqual([]); // gone + latched
+    });
+
+    it("recoverPendingWipe is a no-op when no wipe is pending", async () => {
+      await recoverPendingWipe();
+      expect(localStorage.getItem(WIPE_PENDING_KEY)).toBeNull();
+    });
   });
 });

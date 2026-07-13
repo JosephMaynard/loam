@@ -858,14 +858,14 @@ function LoamApp() {
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
 
-    // Deleting the DB is the persistence-critical step — track whether it actually succeeded (it REJECTS
-    // when another tab still holds a connection, or on error). If it didn't, we must NOT claim the local
-    // copy is erased: stay in the "Wiping…" state so the UI never lies about persistent data still present.
-    let localErased = true;
+    // Delete the DB. If deletion is DEFERRED (another tab holds a connection) it throws, but that's not a
+    // failure to hide: `markLocalStoreWiped` persisted a durable flag, so the store stays un-hydratable now
+    // AND across reloads, and the deletion is retried on boot until it lands (docs/20). So the local copy is
+    // already inaccessible + pending deletion regardless — no reason to strand the UI on "Wiping…".
     try {
       await destroyDatabase();
     } catch {
-      localErased = false; // deferred/failed — the database may still hold data
+      // deferred/failed — the durable flag keeps it latched + retries on the next load
     }
 
     if ("serviceWorker" in navigator) {
@@ -878,12 +878,9 @@ function LoamApp() {
       await Promise.all(cacheKeys.map((key) => caches.delete(key).catch(() => false)));
     }
 
-    // Show the completed screen ONLY when local deletion actually succeeded (otherwise the incomplete
-    // "Wiping…" state persists — truthful). If the user closes the app once "erased" shows, nothing
-    // persistent remains.
-    if (localErased) {
-      setWiped(true);
-    }
+    // Local data is now inaccessible (latched) and deleted-or-pending-deletion → show the completed screen.
+    // If the user closes the app from here, the durable flag ensures nothing rehydrates on next launch.
+    setWiped(true);
 
     // ---- Server cleanup LAST (best-effort, deadline-bounded — cannot delay or falsify the local wipe). ----
     // A device wipe drops the server-side credentials: the bound secure token (via the sealed logout on the
