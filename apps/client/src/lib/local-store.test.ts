@@ -122,4 +122,22 @@ describe("local-store", () => {
       expect(localStorage.getItem(WIPE_PENDING_KEY)).toBeNull();
     });
   });
+
+  describe("cross-tab (docs/20 round-4 Medium)", () => {
+    it("closes its connection on versionchange so a sibling tab's deletion is NOT blocked", async () => {
+      await putRecord<Channel>("channels", { id: "c1", name: "One" }); // opens a connection (with onversionchange)
+
+      // A "sibling tab" deletes the DB directly (bypassing local-store). Without the versionchange handler
+      // this would block on our still-open connection; with it, our connection closes and the deletion lands.
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.deleteDatabase("loam-poc");
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error("blocked — the versionchange handler did not close the connection"));
+      });
+
+      // Our store latched itself in the versionchange handler → it won't rehydrate the DB the sibling erased.
+      expect(await getAllRecords<Channel>("channels")).toEqual([]);
+    });
+  });
 });

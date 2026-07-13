@@ -940,17 +940,17 @@ export async function logoutSecureIdentity(init: EncryptedFetchInit = {}): Promi
  * running in the background, which is fine during a wipe (the page is torn down). `op`'s errors are
  * swallowed (best effort); the abort still fires to cancel whatever fetch IS wired to the signal.
  */
-async function withDeadline(op: (signal: AbortSignal) => Promise<unknown>, timeoutMs: number): Promise<void> {
+async function withDeadline<T>(op: (signal: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T | undefined> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<void>((resolve) => {
+  const deadline = new Promise<undefined>((resolve) => {
     timer = setTimeout(() => {
       controller.abort();
-      resolve();
+      resolve(undefined);
     }, timeoutMs);
   });
   try {
-    await Promise.race([op(controller.signal).catch(() => undefined), deadline]);
+    return await Promise.race([op(controller.signal).catch(() => undefined), deadline]);
   } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -964,18 +964,25 @@ async function withDeadline(op: (signal: AbortSignal) => Promise<unknown>, timeo
  * minting suppressed throughout. Crucially it always SETTLES (within ~2×`timeoutMs`) even if the network
  * blackholes a step — so the caller's local purge always proceeds. The two steps are separate credentials
  * (§3): the sealed logout omits the cookie; the bare `session/end` sends and clears it.
+ *
+ * Returns whether the LEGACY COOKIE cleanup was CONFIRMED (a `session/end` that actually completed within
+ * the deadline). The wipe coordinator uses this to decide the durable "don't auto-reconnect" tombstone: a
+ * blackholed cookie clear leaves the HttpOnly cookie alive, so the tombstone must persist until it's
+ * confirmed (or the user rejoins) — otherwise that cookie could rehydrate the wiped identity on a reload
+ * (docs/20 round-4 H2).
  */
-export async function wipeServerCredentials(timeoutMs: number): Promise<void> {
+export async function wipeServerCredentials(timeoutMs: number): Promise<{ cookieCleared: boolean }> {
   setMintSuppressed(true);
   try {
     // The logout (and its stale-session re-establish/retry) reads `storedIdentityToken()`, which falls back
     // to the pre-erasure snapshot (docs/20 #3 H1) — so revocation still works even though local storage was
     // already cleared. Mint suppression keeps that snapshot from being written back.
     await withDeadline((signal) => logoutSecureIdentity({ signal }), timeoutMs);
-    await withDeadline(
+    const cookieResponse = await withDeadline(
       (signal) => fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal }),
       timeoutMs,
     );
+    return { cookieCleared: cookieResponse?.ok === true };
   } finally {
     wipeTokenSnapshot = undefined;
   }

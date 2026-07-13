@@ -113,7 +113,19 @@ function openDatabase(): Promise<IDBDatabase> {
         }
       };
 
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        const database = request.result;
+        // Close this connection the moment ANOTHER tab tries to delete/upgrade the DB (docs/20): a device
+        // wipe in a sibling tab fires `deleteDatabase`, which blocks while this tab holds a connection.
+        // Reacting to `versionchange` by closing lets that deletion proceed instead of hanging. We also
+        // latch `wiped` so this tab won't re-open + rehydrate the DB the other tab is erasing.
+        database.onversionchange = () => {
+          wiped = true;
+          database.close();
+          databasePromise = undefined;
+        };
+        resolve(database);
+      };
       request.onerror = () => {
         databasePromise = undefined;
         reject(request.error);
