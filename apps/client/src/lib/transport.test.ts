@@ -987,9 +987,14 @@ describe("transport", () => {
           if (url === "/api/session/logout") {
             return new Response(null, { status: 401 }); // unsealed → triggers the hanging recovery handshake
           }
-          // /api/session/end — the cookie-clear that MUST still run.
-          sessionEndCalled = true;
-          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          if (url === "/api/session/end") {
+            // The cookie-clear that MUST still run — a bare, direct POST with the cookie (credentials:include).
+            expect(init.method).toBe("POST");
+            expect(init.credentials).toBe("include");
+            sessionEndCalled = true;
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+          throw new Error(`Unexpected fetch: ${url}`);
         });
         vi.stubGlobal("fetch", fetchMock);
 
