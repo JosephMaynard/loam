@@ -880,13 +880,14 @@ describe("transport", () => {
       expect(logoutHits).toBe(0);
     });
 
-    it("logoutSecureIdentity returns FALSE when revocation can't be confirmed (dead session, docs/20 H3)", async () => {
-      // A bound client whose transport session died: the logout POST is refused UNSEALED (onRequest 401),
-      // so nothing is revoked. The outcome-driven logout must report `false` (not a precondition-based
-      // `true`), so the wipe still falls back to clearing the cookie.
-      const host = createTransportIdentity();
-      window.location.hash = `#k=${host.publicKey}`;
+    /** A mock node that handshakes, resumes (mint), and drives `/api/session/logout` via `logout(hit)` —
+     *  `hit` is the 1-based logout attempt number, so a test can make the first fail and a retry succeed. */
+    function logoutMockNode(
+      host: ReturnType<typeof createTransportIdentity>,
+      logout: (hit: number, key: string) => Response,
+    ) {
       let serverKey: string | undefined;
+      let logoutHits = 0;
       const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
         if (url === "/api/transport/handshake") {
           const accepted = transportServerAccept({
@@ -904,16 +905,50 @@ describe("transport", () => {
           const seq = (JSON.parse(opened!) as { s: number }).s;
           return sealedReply(serverKey!, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
         }
-        // Every logout is refused UNSEALED — the session is (simulated) dead, so nothing is revoked.
-        return new Response(null, { status: 401 });
+        logoutHits += 1;
+        return logout(logoutHits, serverKey!);
       });
-      vi.stubGlobal("fetch", fetchMock);
+      return { fetchMock, logoutHits: () => logoutHits };
+    }
+
+    it("logoutSecureIdentity retries once over a revived session but returns FALSE when it never confirms (docs/20 H3)", async () => {
+      // A bound client whose transport session died: every logout POST is refused UNSEALED (onRequest 401),
+      // so nothing is revoked. The outcome-driven logout must (a) RETRY once over a re-established session,
+      // and (b) still report `false` — not a precondition-based `true` — so the wipe falls back to the cookie.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const node = logoutMockNode(host, () => new Response(null, { status: 401 })); // always unsealed 401
+      vi.stubGlobal("fetch", node.fetchMock);
 
       await ensureSession("required", host.publicKey);
       await resumeIdentity();
       const confirmed = await logoutSecureIdentity();
       expect(confirmed).toBe(false); // never confirmed → caller must still clear the cookie
+      expect(node.logoutHits()).toBe(2); // first attempt + one retry after the re-establish
       expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull(); // token cleared locally
+    });
+
+    it("logoutSecureIdentity confirms TRUE when the retry over a revived session succeeds (docs/20 H3)", async () => {
+      // The first logout fails unsealed (dead session); after re-establishing, the retry gets a sealed
+      // { ok:true } → revocation confirmed. The caller then skips the cookie fallback.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const node = logoutMockNode(host, (hit, key) =>
+        hit === 1
+          ? new Response(null, { status: 401 })
+          : new Response(JSON.stringify({ enc: sealTransport(key, JSON.stringify({ ok: true }), "POST /api/session/logout") }), {
+              status: 200,
+              headers: { "x-loam-enc": "1" },
+            }),
+      );
+      vi.stubGlobal("fetch", node.fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity();
+      const confirmed = await logoutSecureIdentity();
+      expect(confirmed).toBe(true); // the retry landed
+      expect(node.logoutHits()).toBe(2);
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
     });
 
     it("setMintSuppressed blocks a fresh mint during a wipe (docs/20 H3 — no orphan)", async () => {
