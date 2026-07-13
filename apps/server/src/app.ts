@@ -1583,9 +1583,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
-  /** Close any confirmed sockets riding a transport session that is being pruned/evicted (docs/20 §7), so
-   * a socket can't keep receiving frames after its session key is gone. The per-socket expiry timer covers
-   * natural expiry; this covers an ABRUPT removal (cap eviction) before that timer fires. */
+  /** Close CONFIRMED sockets (those in the live `sockets` set) riding a transport session that is being
+   * pruned/evicted (docs/20 §7), so a socket can't keep receiving frames after its session key is gone. The
+   * per-socket expiry timer covers natural expiry; this covers an ABRUPT removal (cap eviction) before that
+   * timer fires. A socket still MID-CHALLENGE for that session isn't in `sockets` yet, but it can't slip
+   * through: the confirm-time `stillValid` check re-reads `transportSessions.get(sid)`, which no longer
+   * matches the evicted session, so its late proof is refused. */
   function closeSocketsForTransportSession(sid: string): void {
     for (const socketSession of [...sockets]) {
       if (socketSession.transportSessionId === sid) {

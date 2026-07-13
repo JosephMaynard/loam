@@ -87,6 +87,7 @@ import {
   logoutSecureIdentity,
   reestablishSession,
   resumeIdentity,
+  setMintSuppressed,
   SERVER_URL_KEY,
   TransportNeedsQrError,
   wsUrl,
@@ -841,13 +842,15 @@ function LoamApp() {
       // local purge below is the part that actually matters and must always run (docs/15 #4).
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      // Revoke a BOUND secure identity server-side FIRST (docs/20 §8/H3) — its ordered protocol
-      // re-establishes a bound session if needed, revokes the token + sessions + sockets, and verifies the
+      // Suppress new-identity minting for the WHOLE wipe (docs/20 H3): the identity is being discarded,
+      // so no re-handshake triggered below (revoking, or the cookie fallback) may mint a fresh orphan.
+      setMintSuppressed(true);
+      // Revoke a BOUND secure identity server-side FIRST — its outcome-driven protocol re-establishes a
+      // bound session if the current one died, revokes the token + sessions + sockets, and CONFIRMS the
       // sealed reply — before the local store is purged, so the token can't be resumed even if a copy
-      // leaked. It returns whether it handled a secure identity: if it did, we must NOT also call the
-      // cookie `session/end`, because a bound session has no cookie credential and that call would
-      // auto-re-handshake and mint a fresh ORPHAN identity. Only a purely anonymous session needs the
-      // cookie cleared.
+      // leaked. It returns whether revocation was CONFIRMED. Only if it was NOT (an anonymous session with
+      // a cookie, or a revoke we couldn't confirm) do we fall back to the cookie `session/end` — which is
+      // now orphan-safe because minting is suppressed.
       const revokedSecure = await logoutSecureIdentity({ signal: controller.signal }).catch(() => false);
       if (!revokedSecure) {
         await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })

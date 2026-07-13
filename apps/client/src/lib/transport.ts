@@ -100,6 +100,19 @@ function sessionCredentials(): RequestCredentials {
 let hostKeyMismatch = false;
 
 /**
+ * Set for the duration of a device wipe (docs/20 H3): while true, `resumeAttempt` REFUSES to mint a new
+ * identity (it throws instead). The wipe revokes the existing identity and clears local state; any
+ * re-handshake it triggers along the way (revoking a token over a revived session, or the cookie
+ * `session/end` fallback) must NOT silently mint a fresh orphan identity to replace the one being wiped.
+ */
+let mintSuppressed = false;
+
+/** Enter/leave the wipe window where new-identity minting is suppressed (docs/20 H3). */
+export function setMintSuppressed(value: boolean): void {
+  mintSuppressed = value;
+}
+
+/**
  * Whether the live session's host key came from the QR (this boot's `#k=` fragment, or a previously
  * cached key for this origin) rather than only from the server's advertised `transportPublicKey`.
  * The QR is out-of-band-authenticated (MITM-resistant); the config-advertised key is delivered over
@@ -359,6 +372,11 @@ async function resumeAttempt(
   init: EncryptedFetchInit,
   retriedFreshMint: boolean,
 ): Promise<{ currentUser: unknown }> {
+  // A resume with no token asks the server to MINT a fresh identity. During a wipe that must never happen
+  // (docs/20 H3) — the identity is being discarded, not replaced — so refuse rather than spawn an orphan.
+  if (token === undefined && mintSuppressed) {
+    throw new Error("Identity minting is suppressed (wipe in progress)");
+  }
   const seq = ++active.seq;
   const envelope = JSON.stringify(token === undefined ? { s: seq, b: {} } : { s: seq, b: { token } });
   const response = await fetch(apiUrl(RESUME_PATH), {
@@ -821,62 +839,72 @@ export function handleWsFrame(raw: unknown): { proof?: string; payload?: string 
 const LOGOUT_PATH = "/api/session/logout";
 const LOGOUT_AAD = "POST /api/session/logout";
 
+/** One logout attempt on the CURRENT session. Returns `true` ONLY when a sealed `{ ok:true }` reply is
+ * decrypted — the actual, outcome-based confirmation the server revoked the token. An unsealed reply (a
+ * dead-session 401) or a decrypt/parse failure returns `false`. Callers wrap this in an ordered wipe. */
+async function attemptSecureLogout(init: EncryptedFetchInit): Promise<boolean> {
+  const active = session;
+  if (!active?.bound) {
+    return false;
+  }
+  const seq = ++active.seq;
+  const response = await fetch(apiUrl(LOGOUT_PATH), {
+    method: "POST",
+    credentials: "omit",
+    headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
+    signal: init.signal,
+    body: JSON.stringify({ enc: sealTransport(active.key, JSON.stringify({ s: seq, b: {} }), LOGOUT_AAD) }),
+  });
+  if (response.headers.get("x-loam-enc") !== "1") {
+    return false; // unsealed → onRequest refused it (dead session); nothing was revoked
+  }
+  const payload: unknown = await response.json().catch(() => undefined);
+  const enc = payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
+  const opened = typeof enc === "string" ? openTransport(active.key, enc, LOGOUT_AAD) : null;
+  if (opened === null) {
+    return false;
+  }
+  try {
+    return (JSON.parse(opened) as { ok?: unknown }).ok === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Revoke this device's secure identity SERVER-SIDE (docs/20 §8 / H3) before a local wipe/logout clears
- * storage — an ORDERED protocol so the revocation actually lands and no orphan identity is minted:
+ * storage. OUTCOME-driven, so it can't leave the token silently unrevoked:
  *
- *  1. If we hold a stored token but the live session isn't `bound` (it expired), **re-establish + rebind
- *     first** — a logout sent over a dead session would revoke nothing.
- *  2. Send the DIRECT sealed logout (it operates on the outer bound session, so it must NOT be tunnelled)
- *     and **verify the sealed `{ ok:true }` reply** — that's the confirmation the server revoked the token.
+ *  1. Try the sealed logout on the current session; a `true` return means the server confirmed revocation.
+ *  2. If that didn't confirm (the transport session had died — e.g. expired/evicted while the client still
+ *     believed it was bound), **re-establish + rebind with the stored token and retry once**, so the
+ *     revocation actually lands rather than being skipped on the strength of a stale local `bound` flag.
  *  3. Clear the local token regardless (a wiped device must not retain it).
  *
- * Returns `true` when it handled a secure (bound) identity — the caller then MUST NOT fall back to the
- * cookie `session/end` path, which would auto-re-handshake and mint a fresh orphan identity. Returns
- * `false` for a purely anonymous session (no secure identity to revoke; the caller clears the cookie).
+ * Minting is expected to be suppressed by the caller (`setMintSuppressed`) for the whole wipe, so the
+ * re-establish in step 2 can't mint a fresh orphan if the stored token is already dead. Returns `true`
+ * ONLY when revocation was CONFIRMED — the caller uses that to decide whether the cookie `session/end`
+ * fallback is still needed (an unconfirmed revoke, or a purely anonymous session, still needs it).
  */
 export async function logoutSecureIdentity(init: EncryptedFetchInit = {}): Promise<boolean> {
-  // Step 1: revive a bound session if the token outlived its session, so the revocation can reach the server.
-  if (storedIdentityToken() && !session?.bound) {
-    await reHandshake().catch(() => false);
-  }
-
-  const active = session;
-  const hadSecureIdentity = !!storedIdentityToken() || !!active?.bound;
-
+  let revoked = false;
   try {
-    if (active?.bound) {
-      const seq = ++active.seq;
-      const response = await fetch(apiUrl(LOGOUT_PATH), {
-        method: "POST",
-        credentials: "omit",
-        headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
-        signal: init.signal,
-        body: JSON.stringify({ enc: sealTransport(active.key, JSON.stringify({ s: seq, b: {} }), LOGOUT_AAD) }),
-      });
-      // Step 2: confirm a SEALED reply — an unsealed 401 means the request never reached the handler (so
-      // nothing was revoked). We still clear locally below either way (a wiped device can't keep the
-      // token), but verifying tells us the server-side revocation actually happened.
-      if (response.headers.get("x-loam-enc") === "1") {
-        const payload: unknown = await response.json().catch(() => undefined);
-        const enc = payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
-        // Decrypt-check the reply under the logout aad; a null/garbage result just means "unconfirmed".
-        if (typeof enc === "string") {
-          openTransport(active.key, enc, LOGOUT_AAD);
-        }
+    revoked = await attemptSecureLogout(init);
+    if (!revoked && storedIdentityToken()) {
+      // The current session may be dead — revive a fresh bound session with the stored token, then retry.
+      if (await reHandshake()) {
+        revoked = await attemptSecureLogout(init);
       }
     }
   } catch {
-    // Best effort — a failed revoke still clears the local token below (the network is the threat model).
+    // Best effort — the local clear below still runs (the network is the threat model).
   } finally {
-    // Step 3: local clear, always.
     clearStoredIdentityToken();
     if (session) {
       session.bound = false;
     }
   }
-
-  return hadSecureIdentity;
+  return revoked;
 }
 
 /** Test-only: reset all module state between tests. Never called from app code. */
@@ -886,5 +914,6 @@ export function resetTransportStateForTests(): void {
   sessionQrVerified = false;
   lastParams = undefined;
   reHandshakeInFlight = undefined;
+  mintSuppressed = false;
   clearImageObjectUrls();
 }

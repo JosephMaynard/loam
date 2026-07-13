@@ -16,6 +16,7 @@ import {
   logoutSecureIdentity,
   resumeIdentity,
   resetTransportStateForTests,
+  setMintSuppressed,
   SERVER_URL_KEY,
   TransportNeedsQrError,
   wsUrl,
@@ -877,6 +878,61 @@ describe("transport", () => {
       const handled = await logoutSecureIdentity();
       expect(handled).toBe(false);
       expect(logoutHits).toBe(0);
+    });
+
+    it("logoutSecureIdentity returns FALSE when revocation can't be confirmed (dead session, docs/20 H3)", async () => {
+      // A bound client whose transport session died: the logout POST is refused UNSEALED (onRequest 401),
+      // so nothing is revoked. The outcome-driven logout must report `false` (not a precondition-based
+      // `true`), so the wipe still falls back to clearing the cookie.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let serverKey: string | undefined;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const accepted = transportServerAccept({
+            hostSecret: host.secretKey,
+            clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+          });
+          serverKey = accepted.sessionKey;
+          return new Response(
+            JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/session/resume") {
+          const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+          const seq = (JSON.parse(opened!) as { s: number }).s;
+          return sealedReply(serverKey!, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+        }
+        // Every logout is refused UNSEALED — the session is (simulated) dead, so nothing is revoked.
+        return new Response(null, { status: 401 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await resumeIdentity();
+      const confirmed = await logoutSecureIdentity();
+      expect(confirmed).toBe(false); // never confirmed → caller must still clear the cookie
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull(); // token cleared locally
+    });
+
+    it("setMintSuppressed blocks a fresh mint during a wipe (docs/20 H3 — no orphan)", async () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      setMintSuppressed(true);
+      try {
+        // A resume with no stored token would MINT — suppressed during a wipe, so it throws instead.
+        await expect(resumeIdentity()).rejects.toThrow(/suppressed/);
+      } finally {
+        setMintSuppressed(false);
+      }
     });
 
     it("resumeIdentity refuses to bind over a non-QR-verified (optional) session (docs/20 L8)", async () => {
