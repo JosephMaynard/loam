@@ -5568,16 +5568,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const transportKey = transportSession?.key;
     // The presented transport session id (used at confirm-time to detect a mid-challenge revocation:
     // ban/logout/kill-switch/eviction deletes the session from `transportSessions`).
-    const sid = new URLSearchParams(request.url.split("?")[1] ?? "").get("enc") ?? "";
+    const wsParams = new URLSearchParams(request.url.split("?")[1] ?? "");
+    const encPresent = wsParams.has("enc");
+    const sid = wsParams.get("enc") ?? "";
 
-    // FAIL CLOSED on a presented-but-invalid session (docs/20). Distinguish "no `?enc=` requested" (fine
-    // — a plaintext socket on off/optional) from "`?enc=` supplied but it doesn't resolve to a live
-    // session" (expired/unknown): the latter is REFUSED in every mode, mirroring the REST `onRequest`
-    // "Transport session expired" 401. Without this, a QR-bound client whose session expired would keep
-    // its stale `?enc=`, `wsTransportSession` would return undefined, and the socket would silently
-    // downgrade to a plaintext cookie socket — attributing the connection to a possibly-different cookie
-    // user and sending its events over the LAN in the clear.
-    if (mode !== "off" && sid.length > 0 && !transportSession) {
+    // FAIL CLOSED on a presented-but-unresolved session (docs/20). Distinguish "no `?enc=` at all" (fine —
+    // a plaintext socket on off/optional) from "`?enc=` was supplied but doesn't resolve to a live
+    // session": the latter is REFUSED in EVERY mode — INCLUDING `off` (`transportSession` is always
+    // undefined there). A legitimate plaintext client never sends `?enc=`, so only a stale key-pinned
+    // client would; refusing it stops that client from silently downgrading to a plaintext cookie socket
+    // (wrong-user attribution + cleartext) after the node was switched to `off` or its session expired. We
+    // key on parameter PRESENCE (`has`), so even a bare `?enc=` (empty value) fails closed.
+    if (encPresent && !transportSession) {
       connection.send(JSON.stringify({ type: "error", ...errorBody("Transport session expired") }));
       connection.close();
       return;

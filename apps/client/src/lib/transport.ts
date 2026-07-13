@@ -269,6 +269,10 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
 
   if (!hostPublicKey) {
     if (effectiveMode === "required") {
+      // No QR key on a required join — DROP any existing (possibly `optional`/config-key, non-QR-verified)
+      // session so a later `resumeIdentity` can't bind a secret token over it (docs/20 #8), then gate the app.
+      session = undefined;
+      sessionQrVerified = false;
       throw new TransportNeedsQrError();
     }
 
@@ -357,10 +361,12 @@ export async function resumeIdentity(init: EncryptedFetchInit = {}): Promise<{ c
     throw new Error("Cannot resume an identity without a transport session");
   }
   // Enforce the docs/20 §3 invariant HERE, not just by caller convention: the long-lived token is only
-  // ever created/sent over an effectively-`required` (QR-pinned) session. Over an `optional` non-QR
-  // session the host key may be the config-advertised one (which a network middleman can substitute), so
-  // sealing a secret token to it could expose it — refuse rather than trust the caller to have checked.
-  if (lastParams?.mode !== "required") {
+  // ever sent over a session whose host key came from the QR (out-of-band-authenticated). Key this on the
+  // ACTUAL session's `sessionQrVerified`, NOT `lastParams.mode` — a prior `optional`/config-key session
+  // can still be live after a later `ensureSession("required")` that threw for want of a QR key (which
+  // sets `lastParams.mode="required"` before it throws), and resuming over THAT unverified session would
+  // seal the secret token to a possibly-MITM-substituted key.
+  if (!sessionQrVerified) {
     throw new Error("Refusing to bind a secure identity over a non-QR-verified session");
   }
   return resumeAttempt(active, storedIdentityToken(), init, false);

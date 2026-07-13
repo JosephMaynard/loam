@@ -983,6 +983,26 @@ describe("transport", () => {
       await expect(resumeIdentity()).rejects.toThrow(/non-QR-verified/);
     });
 
+    it("drops a stale non-QR session when a later required join has no QR key, so it can't be resumed over (docs/20 #8)", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      // 1) A live optional (config-key, NOT QR-verified) session exists.
+      await ensureSession("optional", host.publicKey);
+      expect(getSession()).toBeDefined();
+
+      // 2) A later `required` join with NO QR key available must throw AND drop that stale session — so a
+      //    subsequent resume can't seal the secret token over the un-QR-verified key (`lastParams.mode` is
+      //    now "required", which the old caller-convention guard would have wrongly allowed).
+      await expect(ensureSession("required", undefined)).rejects.toThrow(TransportNeedsQrError);
+      expect(getSession()).toBeUndefined();
+      await expect(resumeIdentity()).rejects.toThrow(); // no session to bind over
+    });
+
     it("clearStoredIdentityToken drops the per-origin token", async () => {
       localStorage.setItem(`loam.identityToken.${window.location.origin}`, "tok");
       clearStoredIdentityToken();

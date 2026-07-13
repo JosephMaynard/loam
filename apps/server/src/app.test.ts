@@ -5551,6 +5551,88 @@ describe("transport encryption WebSocket frames (docs/08 + docs/20 §7)", () => 
     expect(closed).toBe(true); // refused, not admitted
     expect(appFrames).toBe(0); // never received the broadcast in the clear
   });
+
+  it("closes a confirmed socket when its transport session is evicted (docs/20 §7/M5)", async () => {
+    // A confirmed socket must not outlive its session key. Drive the session cap low, confirm a socket,
+    // then open enough fresh handshakes to evict its (oldest) session — the socket should be closed.
+    const app = await makeApp(
+      { security: { profile: "custom", transportEncryption: "required" } },
+      { transportSessionCap: 2 },
+    );
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const session = await openTransport08(app);
+    await resumeIdentity(app, session, 1);
+
+    const client = await connectConfirmed(baseUrl, session.sessionId, session.key);
+    let closed = false;
+    client.socket.addEventListener("close", () => (closed = true));
+    try {
+      expect(client.connectionId()).not.toBe(""); // confirmed and admitted
+
+      // Each new handshake prunes+evicts; with cap 2 the socket's (oldest) session is evicted quickly.
+      for (let i = 0; i < 4; i += 1) {
+        await openTransport08(app);
+      }
+      const deadline = Date.now() + 2_000;
+      while (!closed && Date.now() < deadline) {
+        await sleep(25);
+      }
+    } finally {
+      client.socket.close();
+    }
+
+    expect(closed).toBe(true); // the confirmed socket was torn down with its evicted session
+  });
+
+  it("fails closed on a presented enc even on an OFF node, and on a bare ?enc= (docs/20 #1)", async () => {
+    // A node switched to `off` still must refuse a stale key-pinned client's `?enc=` rather than admit a
+    // plaintext downgrade; and a bare `?enc=` (present but empty) is refused too (keyed on param presence).
+    const app = await makeApp(); // default: transport encryption OFF
+    const user = await newSession(app); // a cookie identity for the legitimate plaintext socket
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+
+    async function expectRefused(query: string): Promise<void> {
+      let closed = false;
+      let admitted = 0;
+      const socket = openWs(`${baseUrl.replace("http", "ws")}/ws${query}`);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.addEventListener("open", () => resolve());
+          socket.addEventListener("error", () => reject(new Error("ws failed to connect")));
+        });
+        socket.addEventListener("message", (event) => {
+          if (!String((event as MessageEvent).data).includes("expired")) admitted += 1;
+        });
+        socket.addEventListener("close", () => (closed = true));
+        const deadline = Date.now() + 1_500;
+        while (!closed && Date.now() < deadline) {
+          await sleep(25);
+        }
+      } finally {
+        socket.close();
+      }
+      expect(closed).toBe(true);
+      expect(admitted).toBe(0);
+    }
+
+    await expectRefused("?enc=stale-session-id"); // off node + presented enc → refused
+    await expectRefused("?enc="); // bare, empty enc → refused (param presence, not value length)
+
+    // Sanity: a plaintext client with a cookie identity and NO ?enc= is still admitted on an off node.
+    const plain = openWs(`${baseUrl.replace("http", "ws")}/ws`, user.cookie);
+    let plainClosed = false;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        plain.addEventListener("open", () => resolve());
+        plain.addEventListener("error", () => reject(new Error("ws failed to connect")));
+      });
+      plain.addEventListener("close", () => (plainClosed = true));
+      await sleep(100);
+    } finally {
+      plain.close();
+    }
+    expect(plainClosed).toBe(false); // admitted (not refused) — legitimate off-node plaintext socket
+  });
 });
 
 describe("transport auth-binding (docs/20)", () => {
