@@ -843,21 +843,26 @@ function LoamApp() {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       // Suppress new-identity minting for the WHOLE wipe (docs/20 H3): the identity is being discarded,
-      // so no re-handshake triggered below (revoking, or the cookie fallback) may mint a fresh orphan.
+      // so no re-handshake the revocation triggers may mint a fresh orphan.
       setMintSuppressed(true);
-      // Revoke a BOUND secure identity server-side FIRST — its outcome-driven protocol re-establishes a
-      // bound session if the current one died, revokes the token + sessions + sockets, and CONFIRMS the
-      // sealed reply — before the local store is purged, so the token can't be resumed even if a copy
-      // leaked. It returns whether revocation was CONFIRMED. Only if it was NOT (an anonymous session with
-      // a cookie, or a revoke we couldn't confirm) do we fall back to the cookie `session/end` — which is
-      // now orphan-safe because minting is suppressed.
-      const revokedSecure = await logoutSecureIdentity({ signal: controller.signal }).catch(() => false);
-      if (!revokedSecure) {
-        await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })
-          .catch(() => {
-            // best effort — the local purge below still runs
-          });
-      }
+      // The wipe clears TWO independent credentials (docs/20 #3):
+      //  1. The BOUND secure identity token — via the sealed, outcome-driven logout (re-establishes if the
+      //     session died, revokes the token + sessions + sockets, confirms the sealed reply). It uses
+      //     `credentials:"omit"`, so it does NOT touch any legacy cookie.
+      //  2. Any legacy `loam_session` cookie — via a DIRECT, bare `session/end` (credentials:"include"), so
+      //     the cookie is actually SENT and its server-side row cleared. Done UNCONDITIONALLY and
+      //     independently of (1): a bound client can hold both credentials, and the confirmed logout must
+      //     not cause us to skip clearing the cookie (which could otherwise rehydrate the identity on an
+      //     optional/off node). `session/end` is directly reachable in every mode and mints nothing, so
+      //     this is orphan-safe and works under `required` (no tunnel/rebind needed).
+      await logoutSecureIdentity({ signal: controller.signal }).catch(() => undefined);
+      await fetch(apiUrl("/api/session/end"), {
+        method: "POST",
+        credentials: "include",
+        signal: controller.signal,
+      }).catch(() => {
+        // best effort — the local purge below still runs
+      });
       window.clearTimeout(timeout);
     }
     setMessages([]);

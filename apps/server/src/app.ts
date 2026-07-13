@@ -1439,10 +1439,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * NOT the raw request URL — Fastify percent-decodes the path before routing, so string-matching the
    * raw URL let `/%61pi/users` (→ `/api/users`) slip past enforcement. The only DIRECTLY reachable
    * `/api/` routes in required mode are the public bootstrap, health, the handshake, the sealed resume,
-   * and the tunnel endpoint itself; everything else — including `/api/config`, which now returns
-   * `currentUser` only for a bound session over the tunnel — is content. (Internal tunnel dispatches
-   * never reach this — they return at the top of `onRequest`; the static shell + `/ws` are handled
-   * separately.) */
+   * the sealed logout, the DIRECT cookie-clear (`/api/session/end` — unauthenticated + side-effect-only,
+   * it mints nothing and only clears the caller's own presented cookie, so a device wipe can revoke a
+   * legacy cookie that a bound session's `credentials:"omit"` requests never send, docs/20 #3), and the
+   * tunnel endpoint itself; everything else — including `/api/config`, which now returns `currentUser`
+   * only for a bound session over the tunnel — is content. (Internal tunnel dispatches never reach this —
+   * they return at the top of `onRequest`; the static shell + `/ws` are handled separately.) */
   function requiresTransportSession(request: FastifyRequest): boolean {
     const routeUrl = request.routeOptions?.url;
     if (!routeUrl || !routeUrl.startsWith("/api/")) {
@@ -1454,6 +1456,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       routeUrl !== "/api/transport/handshake" &&
       routeUrl !== "/api/session/resume" &&
       routeUrl !== "/api/session/logout" &&
+      routeUrl !== "/api/session/end" &&
       routeUrl !== "/api/transport/tunnel"
     );
   }

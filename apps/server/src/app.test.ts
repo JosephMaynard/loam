@@ -5738,6 +5738,37 @@ describe("transport auth-binding (docs/20)", () => {
     expect(afterLogout.status).toBe(401);
   });
 
+  it("device wipe clears a LEGACY COOKIE independently of the secure token, even in required mode (docs/20 #3)", async () => {
+    // A browser can hold BOTH a bound secure identity AND a legacy `loam_session` cookie. The sealed logout
+    // uses `credentials:"omit"`, so it revokes only the token — the cookie must be cleared independently via
+    // the DIRECT `session/end`, which is reachable in required mode and clears the presented cookie's
+    // server-side row (otherwise the cookie could rehydrate the wiped identity on an optional/off node).
+    const app = await makeApp(); // off by default → firstUser admin + a mintable cookie
+    const admin = await newSession(app);
+    const cookieToken = admin.cookie.replace(/^loam_session=/, "");
+    expect(app.store.loadSessions().some((s) => s.token === cookieToken)).toBe(true);
+
+    // Switch the node to `required` (the mode where the cookie couldn't be cleared before).
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { profile: "custom", transportEncryption: "required" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    // A bare, direct `session/end` carrying the cookie is REACHABLE in required mode (not tunnel-only) and
+    // clears the cookie — both the Set-Cookie deletion header and the server-side session row.
+    const end = await app.server.inject({
+      method: "POST",
+      url: "/api/session/end",
+      headers: { cookie: admin.cookie },
+    });
+    expect(end.statusCode).toBe(200);
+    expect(String(end.headers["set-cookie"])).toContain("Max-Age=0");
+    expect(app.store.loadSessions().some((s) => s.token === cookieToken)).toBe(false); // row gone
+  });
+
   it("kill switch clears secure tokens: none can be resumed afterwards (docs/20 §8)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" }, killSwitch: { enabled: true } });
     const session = await openTransport08(app);
