@@ -152,9 +152,17 @@ client → server   AAD "loam.ws.proof.v1"        { type:"proof",     connection
 
 - **Revoke a secure token** (delete its `tokenHash` row) **+ its bound sessions + its sockets** on:
   explicit **logout / device wipe** (revoke server-side **before** deleting IndexedDB — also closes
-  docs/15 #4 for this credential), **ban/deny**, **kill switch**, or **explicit rotation**.
+  docs/15 #4 for this credential), **kill switch**, or **explicit rotation**.
+- **Ban / deny** is deliberately DIFFERENT: it tears down the identity's **bound sessions + sockets**
+  (immediate cutoff) but **KEEPS the token pinned** — exactly mirroring how a banned identity's cookie
+  session mapping is retained. This is a considered choice: revoking the token would let the banned device
+  **re-mint a fresh (unbanned) identity** on its next resume, whereas keeping it pinned means a reconnect
+  re-binds to the *same* banned identity (participation + WS admission both refuse it), so the ban **stays
+  pinned** rather than being shed by a re-handshake. (On a LAN a determined user can still clear local
+  storage and re-mint — the accepted ephemeral-identity residual, §12 — but casual reconnects stay banned.)
 - **transport-session eviction/expiry:** the token survives (persisted); the next handshake+resume
-  rebinds. Eviction drops only the session, not the identity.
+  rebinds. Eviction drops only the session, not the identity — and any confirmed WS socket riding an
+  evicted/expired session is closed (§7).
 - **switching origins:** tokens are namespaced per origin (client + server) — never cross-presented.
 - **Mode changes** need no special handling (§6, clean break): a `bound` session keeps its secure rules;
   an `optional`/`off` node simply doesn't *require* binding. No legacy state to preserve or migrate.
@@ -229,7 +237,8 @@ timing, sizes, bootstrap) observable; `anonymous`/optional sessions keep the wea
   connection B (reconnect under the same transport session).
 - **First-user admin:** on a fresh node the first user to bind via the secure channel becomes admin
   (normal `firstUser` bootstrap) — no reclaim code involved.
-- **Lifecycle:** logout / wipe / ban / kill-switch revoke the token + its bound sessions + sockets.
+- **Lifecycle:** logout / wipe / kill-switch revoke the token + its bound sessions + sockets; **ban/deny
+  tears down the sessions + sockets but KEEPS the token pinned** (§8) so the ban follows the identity.
 - **optional/off unchanged:** existing cookie-auth tests pass.
 
 ---

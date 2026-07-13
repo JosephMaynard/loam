@@ -100,6 +100,9 @@ type SocketSession = {
   /** Monotonic server→client frame sequence for this connection (docs/20 §7) — the client rejects a
    * replayed/stale frame. Starts at 0; `wsSend` pre-increments. */
   frameSeq?: number;
+  /** The transport session id this (encrypted) socket rides, so it can be torn down when that session is
+   * evicted/pruned (docs/20 §7 — a confirmed socket must not outlive its session key). */
+  transportSessionId?: string;
 };
 
 /** Direction-separated AADs for the reflection-safe WS key-confirmation (docs/20 §7): the challenge
@@ -1576,6 +1579,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     for (const pending of [...pendingSockets]) {
       if (pending.userId === userId) {
         pending.close();
+      }
+    }
+  }
+
+  /** Close any confirmed sockets riding a transport session that is being pruned/evicted (docs/20 §7), so
+   * a socket can't keep receiving frames after its session key is gone. The per-socket expiry timer covers
+   * natural expiry; this covers an ABRUPT removal (cap eviction) before that timer fires. */
+  function closeSocketsForTransportSession(sid: string): void {
+    for (const socketSession of [...sockets]) {
+      if (socketSession.transportSessionId === sid) {
+        socketSession.socket.close();
+        sockets.delete(socketSession);
       }
     }
   }
@@ -3939,6 +3954,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       for (const [id, existingSession] of transportSessions) {
         if (existingSession.expiresAt <= now) {
           transportSessions.delete(id);
+          closeSocketsForTransportSession(id);
         }
       }
       while (transportSessions.size >= TRANSPORT_SESSION_CAP) {
@@ -3947,6 +3963,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           break;
         }
         transportSessions.delete(oldest);
+        closeSocketsForTransportSession(oldest);
       }
 
       const sessionId = randomUUID();
@@ -3990,9 +4007,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const body = request.body as { token?: unknown } | undefined;
-    // Treat an empty-string token as "no token" (mint), not "nonempty invalid" (401) — an empty string is
-    // never a real 256-bit token, so failing it closed would just 401-loop an odd client for no benefit.
-    const presentedToken = typeof body?.token === "string" && body.token.length > 0 ? body.token : undefined;
+    const rawToken = body?.token;
+    // A `token` that is present but not a string ({token:123}, {token:{}}, …) is a malformed request — a
+    // hard 400, not a silent mint (which would fragment an incompatible client's identity, docs/20 review).
+    if (rawToken !== undefined && typeof rawToken !== "string") {
+      return reply.code(400).send(errorBody("Invalid identity token"));
+    }
+    // Absent or empty-string → mint (an empty string is never a real 256-bit token); a non-empty string →
+    // resume. Empty is treated as "no token" rather than "nonempty invalid" so an odd client isn't 401-looped.
+    const presentedToken = typeof rawToken === "string" && rawToken.length > 0 ? rawToken : undefined;
 
     let userId: string;
     let token: string;
@@ -5544,6 +5567,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // ban/logout/kill-switch/eviction deletes the session from `transportSessions`).
     const sid = new URLSearchParams(request.url.split("?")[1] ?? "").get("enc") ?? "";
 
+    // FAIL CLOSED on a presented-but-invalid session (docs/20). Distinguish "no `?enc=` requested" (fine
+    // — a plaintext socket on off/optional) from "`?enc=` supplied but it doesn't resolve to a live
+    // session" (expired/unknown): the latter is REFUSED in every mode, mirroring the REST `onRequest`
+    // "Transport session expired" 401. Without this, a QR-bound client whose session expired would keep
+    // its stale `?enc=`, `wsTransportSession` would return undefined, and the socket would silently
+    // downgrade to a plaintext cookie socket — attributing the connection to a possibly-different cookie
+    // user and sending its events over the LAN in the clear.
+    if (mode !== "off" && sid.length > 0 && !transportSession) {
+      connection.send(JSON.stringify({ type: "error", ...errorBody("Transport session expired") }));
+      connection.close();
+      return;
+    }
+
     // Identity: a `bound` transport session's userId is the WS identity (docs/20) — the session key is
     // the credential, proven below by the key-confirmation challenge; the plaintext cookie is not used.
     // For an anonymous session (optional/off) the cookie identity applies, as before.
@@ -5622,7 +5658,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    const socketSession: SocketSession = { socket: connection, userId, transportKey, connectionId, frameSeq: 0 };
+    const socketSession: SocketSession = {
+      socket: connection,
+      userId,
+      transportKey,
+      connectionId,
+      frameSeq: 0,
+      transportSessionId: sid,
+    };
+    // Closes the socket when its transport session reaches `expiresAt`, so a confirmed socket can't keep
+    // receiving frames past the session key's lifetime (docs/20 §7). Set on confirm, cleared on close.
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     // Register the mid-challenge socket so ban/logout/kill-switch can reach and close it — otherwise it
     // exists only as closures and could complete its proof AFTER being revoked and slip into the feed.
     const pending = { userId, close: () => connection.close() };
@@ -5663,11 +5709,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return;
       }
 
-      // Re-check revocation at CONFIRM time (docs/20 §8): a ban / logout / kill-switch (or an evicted
-      // transport session) may have landed during the up-to-10s challenge window. Ban is only checked at
-      // connect otherwise, and a revocation that fired mid-challenge must not be undone by a late proof.
+      // Re-check revocation AND expiry at CONFIRM time (docs/20 §8): a ban / logout / kill-switch (or an
+      // evicted transport session) may have landed during the up-to-10s challenge window, and the session
+      // may have crossed `expiresAt` in that window. Ban is only checked at connect otherwise, and a
+      // revocation/expiry that fired mid-challenge must not be undone by a late proof.
       const stillValid =
         transportSessions.get(sid) === transportSession &&
+        transportSession.expiresAt > Date.now() &&
         !data.users.find((candidate) => candidate.id === userId)?.banned;
       if (!stillValid) {
         connection.close();
@@ -5679,11 +5727,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       releaseUnconfirmed();
       pendingSockets.delete(pending);
       sockets.add(socketSession);
+      // Bound the socket's life to its session key's expiry (docs/20 §7).
+      expiryTimer = setTimeout(() => connection.close(), Math.max(0, transportSession.expiresAt - Date.now()));
+      (expiryTimer as { unref?: () => void }).unref?.();
       broadcastPresence();
     });
 
     connection.on("close", () => {
       clearTimeout(timer);
+      if (expiryTimer) {
+        clearTimeout(expiryTimer);
+      }
       releaseUnconfirmed();
       pendingSockets.delete(pending);
       sockets.delete(socketSession);

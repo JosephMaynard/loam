@@ -5506,6 +5506,51 @@ describe("transport encryption WebSocket frames (docs/08 + docs/20 §7)", () => 
     expect(closed).toBe(true);
     expect(received).toBe(1);
   });
+
+  it("rejects a WebSocket presenting an unknown/expired enc — no silent plaintext downgrade (docs/20 H1)", async () => {
+    // A stale QR-bound client keeps its `?enc=`; if it no longer resolves, the socket must be REFUSED, not
+    // downgraded to a plaintext cookie socket (which would attribute the connection to a cookie user and
+    // send events in the clear). Optional mode is the exposed case (required would refuse anyway).
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app); // a cookie identity exists — the tempting fallback
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+
+    let closed = false;
+    let sawExpired = false;
+    let appFrames = 0;
+    const socket = openWs(`${baseUrl.replace("http", "ws")}/ws?enc=nonexistent-session-id`, user.cookie);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve());
+        socket.addEventListener("error", () => reject(new Error("ws failed to connect")));
+      });
+      socket.addEventListener("message", (event) => {
+        const text = String((event as MessageEvent).data);
+        if (text.includes("expired")) sawExpired = true;
+        else appFrames += 1;
+      });
+      socket.addEventListener("close", () => (closed = true));
+
+      // Trigger a broadcast: a wrongly-admitted plaintext socket would receive this in the clear.
+      await sleep(50);
+      await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: user.cookie },
+        payload: { type: "channelPost", channelId: "general", body: "must-not-leak" },
+      });
+      const deadline = Date.now() + 2_000;
+      while (!closed && Date.now() < deadline) {
+        await sleep(25);
+      }
+    } finally {
+      socket.close();
+    }
+
+    expect(sawExpired).toBe(true); // told to re-handshake
+    expect(closed).toBe(true); // refused, not admitted
+    expect(appFrames).toBe(0); // never received the broadcast in the clear
+  });
 });
 
 describe("transport auth-binding (docs/20)", () => {
@@ -5693,6 +5738,22 @@ describe("transport auth-binding (docs/20)", () => {
     expect(res.status).toBe(200);
     expect(res.currentUser.id).toMatch(/^user\./);
     expect(res.token.length).toBeGreaterThanOrEqual(43);
+  });
+
+  it("rejects a malformed (non-string) resume token with 400, not a silent mint (docs/20 L7)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/session/resume",
+      headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: { enc: sealSeq(session.key, 1, "POST /api/session/resume", { token: 123 }) },
+    });
+    expect(res.statusCode).toBe(400);
+    // The session was NOT bound — a subsequent well-formed resume still mints (not the idempotent path).
+    const after = await resumeIdentity(app, session, 2);
+    expect(after.status).toBe(200);
+    expect(after.currentUser.id).toMatch(/^user\./);
   });
 });
 

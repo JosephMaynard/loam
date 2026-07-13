@@ -317,7 +317,7 @@ describe("transport", () => {
       };
     }
 
-    it("re-handshakes exactly once on a 401 for an established session, then retries and succeeds", async () => {
+    it("re-handshakes exactly once on a 401 for a SAFE request, then retries and succeeds", async () => {
       const host = createTransportIdentity();
       let contentCalls = 0;
       let handshakeCalls = 0;
@@ -339,10 +339,7 @@ describe("transport", () => {
         // real response the same way the server would.
         const session = getSession();
         expect(session).toBeDefined();
-        const aad = `${init.method} ${url}`;
-        const opened = JSON.parse(init.body as string) as { enc: string };
-        expect(openTransport(session!.key, opened.enc, aad)).not.toBeNull();
-        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), aad);
+        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}`);
         return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
       });
       vi.stubGlobal("fetch", fetchMock);
@@ -350,7 +347,7 @@ describe("transport", () => {
       await ensureSession("optional", host.publicKey);
       expect(handshakeCalls).toBe(1);
 
-      const response = await encryptedFetch("POST", "/api/messages", { text: "hi" });
+      const response = await encryptedFetch("GET", "/api/channels");
 
       // Exactly one retry: two content attempts, and exactly one *additional* handshake (the
       // transparent re-handshake), never more.
@@ -358,6 +355,30 @@ describe("transport", () => {
       expect(handshakeCalls).toBe(2);
       expect(await response.json()).toEqual({ ok: true });
       expect(getSession()).toBeDefined();
+    });
+
+    it("does NOT retry a MUTATION on an unsealed outer 401 — never replays it (docs/20 H4)", async () => {
+      // The outer 401 status is outside the AEAD: a network middleman could forge it on a POST the server
+      // actually processed, stripping x-loam-enc. Auto-retrying would REPLAY the mutation (duplicate
+      // message / repeated admin op). So a mutating method surfaces the 401 unretried.
+      const host = createTransportIdentity();
+      let contentCalls = 0;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          return handshakeResponder(host)(url, init);
+        }
+        contentCalls += 1;
+        return new Response(null, { status: 401 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      const response = await encryptedFetch("POST", "/api/messages", { text: "hi" });
+
+      // The POST was sent exactly once and the 401 surfaced — no re-handshake-and-replay.
+      expect(contentCalls).toBe(1);
+      expect(response.status).toBe(401);
     });
 
     it("gives up after one retry — does not loop on a session that keeps failing", async () => {
@@ -742,6 +763,37 @@ describe("transport", () => {
       await expect(resumeIdentity()).rejects.toThrow(/did not match/);
     });
 
+    it("recovers the SAME identity when a first-resume response is lost — same-session retry (docs/20 H2)", async () => {
+      // The server processed the mint (making a first user admin) and bound the session, but the response
+      // was lost. A same-session retry hits the server's idempotent cached result and recovers the SAME
+      // admin identity + token — instead of re-handshaking and minting a second, non-admin user.
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      let resumeCalls = 0;
+      const fetchMock = mockNode(host, (_token, key, seq) => {
+        resumeCalls += 1;
+        if (resumeCalls === 1) {
+          throw new TypeError("network lost after the server bound the session");
+        }
+        return sealedReply(key, {
+          s: seq,
+          m: "POST",
+          p: "/api/session/resume",
+          currentUser: { id: "user.admin", isAdmin: true },
+          token: "admin-tok",
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("required", host.publicKey);
+      await expect(resumeIdentity()).rejects.toThrow(); // first attempt: response lost
+      const { currentUser } = await resumeIdentity(); // same-session retry recovers the cached identity
+      expect((currentUser as { id: string; isAdmin: boolean }).id).toBe("user.admin");
+      expect((currentUser as { isAdmin: boolean }).isAdmin).toBe(true);
+      expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBe("admin-tok");
+      expect(resumeCalls).toBe(2); // no third mint
+    });
+
     it("clears a rejected stored token and mints fresh exactly once", async () => {
       const host = createTransportIdentity();
       window.location.hash = `#k=${host.publicKey}`;
@@ -800,9 +852,44 @@ describe("transport", () => {
       await resumeIdentity();
       expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBe("tok");
 
-      await logoutSecureIdentity();
+      const handled = await logoutSecureIdentity();
+      expect(handled).toBe(true); // it handled a bound identity → caller must NOT also call session/end
       expect(logoutHits).toBe(1);
       expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
+    });
+
+    it("logoutSecureIdentity returns false and sends nothing for a purely anonymous session (docs/20 H3)", async () => {
+      // No QR pin, no stored token → an anonymous optional session. There's no secure identity to revoke,
+      // so it must report `false` (the caller then clears the cookie via session/end) and never POST logout.
+      const host = createTransportIdentity();
+      let logoutHits = 0;
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+        if (url === "/api/session/logout") logoutHits += 1;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey); // anonymous (no QR) → not bound
+      const handled = await logoutSecureIdentity();
+      expect(handled).toBe(false);
+      expect(logoutHits).toBe(0);
+    });
+
+    it("resumeIdentity refuses to bind over a non-QR-verified (optional) session (docs/20 L8)", async () => {
+      const host = createTransportIdentity();
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+        return new Response(JSON.stringify(json), { status });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      // Optional mode with NO QR pin → effective mode stays "optional"; the secret token must not be sent.
+      await ensureSession("optional", host.publicKey);
+      await expect(resumeIdentity()).rejects.toThrow(/non-QR-verified/);
     });
 
     it("clearStoredIdentityToken drops the per-origin token", async () => {

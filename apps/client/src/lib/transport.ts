@@ -343,6 +343,13 @@ export async function resumeIdentity(init: EncryptedFetchInit = {}): Promise<{ c
   if (!active) {
     throw new Error("Cannot resume an identity without a transport session");
   }
+  // Enforce the docs/20 §3 invariant HERE, not just by caller convention: the long-lived token is only
+  // ever created/sent over an effectively-`required` (QR-pinned) session. Over an `optional` non-QR
+  // session the host key may be the config-advertised one (which a network middleman can substitute), so
+  // sealing a secret token to it could expose it — refuse rather than trust the caller to have checked.
+  if (lastParams?.mode !== "required") {
+    throw new Error("Refusing to bind a secure identity over a non-QR-verified session");
+  }
   return resumeAttempt(active, storedIdentityToken(), init, false);
 }
 
@@ -542,10 +549,12 @@ async function attemptFetch(
     return new Response(opened, { status: response.status, statusText: response.statusText });
   }
 
-  // A 401 means the server refused the request in `onRequest`, BEFORE any route handler ran (no
-  // session presented, or an unknown/expired one) — nothing was applied server-side, so retrying is
-  // safe regardless of method.
-  if (response.status === 401 && !retried && (await reHandshake())) {
+  // A 401 USUALLY means the server refused the request in `onRequest`, BEFORE any handler ran (expired
+  // session) — safe to retry. But the outer status is OUTSIDE the AEAD: a network middleman could forge a
+  // 401 on a request the server actually PROCESSED, stripping `x-loam-enc` so we think the handler never
+  // ran. Retrying then would REPLAY the mutation (duplicate message / repeated admin op, docs/20 H4). So
+  // only auto-retry SAFE (GET/HEAD) methods here; a mutation surfaces the 401 to the caller unretried.
+  if (response.status === 401 && isSafe && !retried && (await reHandshake())) {
     return attemptFetch(method, path, body, init, true);
   }
 
@@ -643,7 +652,9 @@ async function tunnelFetch(
     });
   }
 
-  if (response.status === 401 && !retried && (await reHandshake())) {
+  // Only auto-retry SAFE methods on an unsealed outer 401 (docs/20 H4): the status is outside the AEAD, so
+  // a middleman could forge it on an already-processed request and a retry would replay the mutation.
+  if (response.status === 401 && isSafe && !retried && (await reHandshake())) {
     return attemptFetch(method, path, body, init, true);
   }
 
@@ -811,31 +822,61 @@ const LOGOUT_PATH = "/api/session/logout";
 const LOGOUT_AAD = "POST /api/session/logout";
 
 /**
- * Revoke this device's secure identity SERVER-SIDE (docs/20 §8) before a local wipe/logout clears
- * storage — so the token can't be resumed afterwards even if a copy leaked. Sent as a DIRECT sealed
- * request (like resume; it operates on the outer bound session, so it must NOT be tunnelled). Best
- * effort: the local token is dropped regardless of the server's reply.
+ * Revoke this device's secure identity SERVER-SIDE (docs/20 §8 / H3) before a local wipe/logout clears
+ * storage — an ORDERED protocol so the revocation actually lands and no orphan identity is minted:
+ *
+ *  1. If we hold a stored token but the live session isn't `bound` (it expired), **re-establish + rebind
+ *     first** — a logout sent over a dead session would revoke nothing.
+ *  2. Send the DIRECT sealed logout (it operates on the outer bound session, so it must NOT be tunnelled)
+ *     and **verify the sealed `{ ok:true }` reply** — that's the confirmation the server revoked the token.
+ *  3. Clear the local token regardless (a wiped device must not retain it).
+ *
+ * Returns `true` when it handled a secure (bound) identity — the caller then MUST NOT fall back to the
+ * cookie `session/end` path, which would auto-re-handshake and mint a fresh orphan identity. Returns
+ * `false` for a purely anonymous session (no secure identity to revoke; the caller clears the cookie).
  */
-export async function logoutSecureIdentity(init: EncryptedFetchInit = {}): Promise<void> {
+export async function logoutSecureIdentity(init: EncryptedFetchInit = {}): Promise<boolean> {
+  // Step 1: revive a bound session if the token outlived its session, so the revocation can reach the server.
+  if (storedIdentityToken() && !session?.bound) {
+    await reHandshake().catch(() => false);
+  }
+
   const active = session;
+  const hadSecureIdentity = !!storedIdentityToken() || !!active?.bound;
+
   try {
     if (active?.bound) {
-      await fetch(apiUrl(LOGOUT_PATH), {
+      const seq = ++active.seq;
+      const response = await fetch(apiUrl(LOGOUT_PATH), {
         method: "POST",
         credentials: "omit",
         headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
         signal: init.signal,
-        body: JSON.stringify({ enc: sealTransport(active.key, JSON.stringify({ s: ++active.seq, b: {} }), LOGOUT_AAD) }),
+        body: JSON.stringify({ enc: sealTransport(active.key, JSON.stringify({ s: seq, b: {} }), LOGOUT_AAD) }),
       });
+      // Step 2: confirm a SEALED reply — an unsealed 401 means the request never reached the handler (so
+      // nothing was revoked). We still clear locally below either way (a wiped device can't keep the
+      // token), but verifying tells us the server-side revocation actually happened.
+      if (response.headers.get("x-loam-enc") === "1") {
+        const payload: unknown = await response.json().catch(() => undefined);
+        const enc = payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
+        // Decrypt-check the reply under the logout aad; a null/garbage result just means "unconfirmed".
+        if (typeof enc === "string") {
+          openTransport(active.key, enc, LOGOUT_AAD);
+        }
+      }
     }
   } catch {
     // Best effort — a failed revoke still clears the local token below (the network is the threat model).
   } finally {
+    // Step 3: local clear, always.
     clearStoredIdentityToken();
-    if (active) {
-      active.bound = false;
+    if (session) {
+      session.bound = false;
     }
   }
+
+  return hadSecureIdentity;
 }
 
 /** Test-only: reset all module state between tests. Never called from app code. */

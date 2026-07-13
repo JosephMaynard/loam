@@ -277,10 +277,20 @@ async function loadConfig(): Promise<Config> {
     try {
       ({ currentUser } = await resumeIdentity());
     } catch (resumeError) {
-      if (!(await reestablishSession())) {
-        throw resumeError;
+      // A lost/ambiguous response may have left the session BOUND server-side already — critically for the
+      // first user, whose mint made them admin and cached the only copy of their token in the response
+      // that was lost (docs/20 H2). Retry on the SAME session FIRST: it hits the server's idempotent cached
+      // result and recovers the SAME identity + token, instead of re-handshaking and minting a second,
+      // non-admin user (which would strand the sole administrator). Only if the same-session retry ALSO
+      // fails is the session genuinely dead → then re-handshake+rebind and resume.
+      try {
+        ({ currentUser } = await resumeIdentity());
+      } catch {
+        if (!(await reestablishSession())) {
+          throw resumeError;
+        }
+        ({ currentUser } = await resumeIdentity());
       }
-      ({ currentUser } = await resumeIdentity());
     }
     return {
       version: boot.version,
@@ -831,17 +841,21 @@ function LoamApp() {
       // local purge below is the part that actually matters and must always run (docs/15 #4).
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      // Revoke a BOUND secure identity server-side FIRST (docs/20 §8) — delete its token + sessions +
-      // sockets — before the local store is purged, so the token can't be resumed even if a copy leaked.
-      // Then drop the cookie session too (a bound session has no cookie credential, but an anonymous one
-      // does): via `encryptedFetch`, not a bare `fetch`, so under `required` mode the sealed request
-      // isn't refused (401). Both best-effort — the local purge below always runs regardless.
-      await logoutSecureIdentity({ signal: controller.signal }).catch(() => undefined);
-      await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })
-        .catch(() => {
-          // best effort — the local purge below still runs
-        })
-        .finally(() => window.clearTimeout(timeout));
+      // Revoke a BOUND secure identity server-side FIRST (docs/20 §8/H3) — its ordered protocol
+      // re-establishes a bound session if needed, revokes the token + sessions + sockets, and verifies the
+      // sealed reply — before the local store is purged, so the token can't be resumed even if a copy
+      // leaked. It returns whether it handled a secure identity: if it did, we must NOT also call the
+      // cookie `session/end`, because a bound session has no cookie credential and that call would
+      // auto-re-handshake and mint a fresh ORPHAN identity. Only a purely anonymous session needs the
+      // cookie cleared.
+      const revokedSecure = await logoutSecureIdentity({ signal: controller.signal }).catch(() => false);
+      if (!revokedSecure) {
+        await encryptedFetch("POST", "/api/session/end", undefined, { signal: controller.signal })
+          .catch(() => {
+            // best effort — the local purge below still runs
+          });
+      }
+      window.clearTimeout(timeout);
     }
     setMessages([]);
     setChannels([]);
