@@ -84,12 +84,11 @@ import {
   isSessionQrVerified,
   isTunnelActive,
   joinQrUrl,
-  logoutSecureIdentity,
   reestablishSession,
   resumeIdentity,
-  setMintSuppressed,
   SERVER_URL_KEY,
   TransportNeedsQrError,
+  wipeServerCredentials,
   wsUrl,
 } from "./lib/transport";
 import {
@@ -838,34 +837,12 @@ function LoamApp() {
     // can't clear) survives and a reload re-hydrates the wiped identity. A node kill switch already
     // invalidated every session server-side, so only the device scope needs this (docs/15 #4).
     if (scope === "device") {
-      // Suppress new-identity minting for the WHOLE wipe (docs/20 H3): the identity is being discarded,
-      // so no re-handshake the revocation triggers may mint a fresh orphan.
-      setMintSuppressed(true);
-      // The wipe clears TWO independent credentials (docs/20 #3), each with its OWN timeout/abort so one
-      // can't cancel the other — the secure logout now re-establishes + retries, so a slow/hung logout
-      // must NOT abort the unconditional cookie-clear that follows it:
-      //  1. The BOUND secure identity token — via the sealed, outcome-driven logout (re-establishes if the
-      //     session died, revokes the token + sessions + sockets, confirms the sealed reply). It uses
-      //     `credentials:"omit"`, so it does NOT touch any legacy cookie.
-      //  2. Any legacy `loam_session` cookie — via a DIRECT, bare `session/end` (credentials:"include"), so
-      //     the cookie is actually SENT and its server-side row cleared. Done UNCONDITIONALLY and
-      //     independently of (1): a bound client can hold both credentials, and the confirmed logout must
-      //     not cause us to skip clearing the cookie (which could otherwise rehydrate the identity on an
-      //     optional/off node). `session/end` is directly reachable in every mode and mints nothing, so
-      //     this is orphan-safe and works under `required` (no tunnel/rebind needed).
-      const withTimeout = async (run: (signal: AbortSignal) => Promise<unknown>): Promise<void> => {
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-        try {
-          await run(controller.signal);
-        } catch {
-          // best effort — the local purge below always runs regardless
-        } finally {
-          window.clearTimeout(timeout);
-        }
-      };
-      await withTimeout((signal) => logoutSecureIdentity({ signal }));
-      await withTimeout((signal) => fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal }));
+      // Clear this device's SERVER-side credentials (docs/20 #3): the bound secure token AND any legacy
+      // `loam_session` cookie, as two independent deadline-bounded steps with minting suppressed. This
+      // ALWAYS settles even if the network blackholes a step (the secure logout re-handshakes internally,
+      // and those fetches ignore an abort signal — so it races a real deadline), so the local purge below
+      // always runs. See `wipeServerCredentials`.
+      await wipeServerCredentials(REQUEST_TIMEOUT_MS);
     }
     setMessages([]);
     setChannels([]);

@@ -913,6 +913,48 @@ export async function logoutSecureIdentity(init: EncryptedFetchInit = {}): Promi
   return revoked;
 }
 
+/**
+ * Run `op` under a REAL deadline (docs/20). Resolves within `timeoutMs` EVEN IF `op` never settles: `op`'s
+ * internal fetches may ignore the abort signal (the logout recovery chain re-handshakes, and those
+ * handshake/resume fetches aren't wired to it), so a network blackhole could hang the promise forever.
+ * We therefore RACE `op` against a timer rather than trusting the abort to end it — a hung `op` keeps
+ * running in the background, which is fine during a wipe (the page is torn down). `op`'s errors are
+ * swallowed (best effort); the abort still fires to cancel whatever fetch IS wired to the signal.
+ */
+async function withDeadline(op: (signal: AbortSignal) => Promise<unknown>, timeoutMs: number): Promise<void> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve();
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([op(controller.signal).catch(() => undefined), deadline]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * Clear this device's SERVER-side credentials for a wipe (docs/20 #3): revoke the bound secure identity
+ * token AND clear any legacy `loam_session` cookie, as two INDEPENDENT, each-deadline-bounded steps with
+ * minting suppressed throughout. Crucially it always SETTLES (within ~2×`timeoutMs`) even if the network
+ * blackholes a step — so the caller's local purge always proceeds. The two steps are separate credentials
+ * (§3): the sealed logout omits the cookie; the bare `session/end` sends and clears it.
+ */
+export async function wipeServerCredentials(timeoutMs: number): Promise<void> {
+  setMintSuppressed(true);
+  await withDeadline((signal) => logoutSecureIdentity({ signal }), timeoutMs);
+  await withDeadline(
+    (signal) => fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include", signal }),
+    timeoutMs,
+  );
+}
+
 /** Test-only: reset all module state between tests. Never called from app code. */
 export function resetTransportStateForTests(): void {
   session = undefined;

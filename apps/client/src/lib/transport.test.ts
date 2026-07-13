@@ -17,6 +17,7 @@ import {
   resumeIdentity,
   resetTransportStateForTests,
   setMintSuppressed,
+  wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
   wsUrl,
@@ -949,6 +950,60 @@ describe("transport", () => {
       expect(confirmed).toBe(true); // the retry landed
       expect(node.logoutHits()).toBe(2);
       expect(localStorage.getItem(`loam.identityToken.${window.location.origin}`)).toBeNull();
+    });
+
+    it("wipeServerCredentials still clears the cookie when the secure-logout re-handshake HANGS (docs/20 #3/H)", async () => {
+      // Sol's failure mode: a stale logout 401s quickly, recovery re-handshakes, and that handshake is
+      // blackholed (never resolves, ignores the abort signal). `wipeServerCredentials` must still hit the
+      // deadline, proceed to the cookie-clear, and SETTLE — so the caller's local purge always runs.
+      vi.useFakeTimers();
+      try {
+        const host = createTransportIdentity();
+        window.location.hash = `#k=${host.publicKey}`;
+        let serverKey: string | undefined;
+        let handshakes = 0;
+        let sessionEndCalled = false;
+        const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+          if (url === "/api/transport/handshake") {
+            handshakes += 1;
+            if (handshakes >= 2) {
+              return new Promise<Response>(() => {}); // the RECOVERY handshake hangs forever
+            }
+            const accepted = transportServerAccept({
+              hostSecret: host.secretKey,
+              clientEphemeralPublic: (JSON.parse(init.body as string) as { clientEphemeralPublic: string }).clientEphemeralPublic,
+            });
+            serverKey = accepted.sessionKey;
+            return new Response(
+              JSON.stringify({ sessionId: "s", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey }),
+              { status: 200 },
+            );
+          }
+          if (url === "/api/session/resume") {
+            const opened = openTransport(serverKey!, (JSON.parse(init.body as string) as { enc: string }).enc, RESUME_AAD);
+            const seq = (JSON.parse(opened!) as { s: number }).s;
+            return sealedReply(serverKey!, { s: seq, m: "POST", p: "/api/session/resume", currentUser: { id: "u" }, token: "tok" });
+          }
+          if (url === "/api/session/logout") {
+            return new Response(null, { status: 401 }); // unsealed → triggers the hanging recovery handshake
+          }
+          // /api/session/end — the cookie-clear that MUST still run.
+          sessionEndCalled = true;
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        });
+        vi.stubGlobal("fetch", fetchMock);
+
+        await ensureSession("required", host.publicKey);
+        await resumeIdentity();
+
+        const wipe = wipeServerCredentials(1_000);
+        await vi.advanceTimersByTimeAsync(1_000); // trip the logout deadline; the cookie-clear then runs
+        await wipe;
+
+        expect(sessionEndCalled).toBe(true); // the cookie-clear proceeded despite the hung logout
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("setMintSuppressed blocks a fresh mint during a wipe (docs/20 H3 — no orphan)", async () => {
