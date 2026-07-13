@@ -180,13 +180,43 @@ describe("sync transport encryption — REQUIRED peer", () => {
     expect(tamperResponse.status).toBe(400);
 
     // A bogus/expired session id is refused (401) when no re-handshake is offered.
-    const bogus = { sessionId: "not-a-real-session", key: session.key, hostPublicKey: session.hostPublicKey };
+    const bogus = { sessionId: "not-a-real-session", key: session.key, hostPublicKey: session.hostPublicKey, seq: 0 };
     const refused = await sealedFetch(bogus, peerUrl, "/api/sync/digest");
     expect(refused.ok).toBe(false);
     expect(refused.status).toBe(401);
 
     // A pinned key that doesn't match the peer's advertised key fails the handshake closed.
     await expect(handshakeWithPeer(peerUrl, { expectedHostKey: "aGVsbG8td29ybGQ" })).rejects.toThrow();
+  });
+
+  it("(b2) a replayed sealed sync request is refused by the peer's {s,b} replay window (409)", async () => {
+    const peerDir = makeDataDir();
+    const seededId = await seedPublicMessage(peerDir, "replay protection");
+    writeConfig(peerDir, requiredPeerConfig());
+    const peer = await buildOn(peerDir);
+    const peerUrl = await listen(peer);
+
+    const session = await handshakeWithPeer(peerUrl);
+
+    // Hand-seal a valid messages request with sequence 1 and send it directly. The first delivery is
+    // accepted (fresh sequence advances the window); byte-for-byte replaying the SAME sealed envelope
+    // reuses sequence 1, which the peer's sliding replay window rejects with 409 (docs/08) — proving the
+    // {s,b} anti-replay envelope reconciled with the transport-hardening merge actually protects sync.
+    const aad = "POST /api/sync/messages";
+    const sealed = JSON.stringify({
+      enc: sealTransport(session.key, JSON.stringify({ s: 1, b: { ids: [seededId] } }), aad),
+    });
+    const send = () =>
+      fetch(`${peerUrl}/api/sync/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-loam-enc": session.sessionId },
+        body: sealed,
+      });
+
+    const first = await send();
+    expect(first.status).toBe(200);
+    const replay = await send();
+    expect(replay.status).toBe(409);
   });
 
   it("(d) the puller re-handshakes once on a 401 and reuses one session across calls", async () => {
@@ -216,7 +246,7 @@ describe("sync transport encryption — REQUIRED peer", () => {
 
     // Simulate an expired session (unknown id): the peer answers 401, so `sealedFetch` re-handshakes
     // exactly once via the callback and retries — the retry succeeds and decrypts the digest.
-    const stale = { sessionId: "expired-session-id", key: session.key, hostPublicKey: session.hostPublicKey };
+    const stale = { sessionId: "expired-session-id", key: session.key, hostPublicKey: session.hostPublicKey, seq: 0 };
     let reHandshakeCalls = 0;
     const retried = await sealedFetch(stale, peerUrl, "/api/sync/digest", {
       fetchImpl: countingFetch,

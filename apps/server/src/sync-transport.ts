@@ -7,15 +7,15 @@
  * bearing `x-loam-enc` + a sealed `{ enc }` body and seal the response back the same way.
  *
  * Framing matches the peer's Fastify hooks exactly (verified against `apps/server/src/app.ts`):
- *   - the sealed request body is `{ enc: sealTransport(key, <raw-json-body-or-empty>, aad) }`;
- *   - the inner plaintext is the RAW JSON body (`JSON.stringify(body)`), NOT a `{ s, b }` envelope —
- *     the peer's `preValidation` hook does `request.body = JSON.parse(opened)` and hands that straight
- *     to the route schema, so any wrapper would fail validation. There is no per-request replay
- *     counter in the peer today (docs/08 lists it as an unbuilt follow-up), so none is sent here;
- *     **⚠️ RECONCILE WITH `feat/transport-hardening` (#75, held for security review):** that branch
- *     adds a `{ s, b }` anti-replay envelope to the peer hooks. When it merges, this `sealedFetch`
- *     MUST switch to sealing `{ s: <per-session seq>, b: body }` too (and reset seq on re-handshake),
- *     or a #75-hardened peer will 409 every sealed sync pull. Update both together;
+ *   - the sealed request body is `{ enc: sealTransport(key, <sealed-plaintext>, aad) }`;
+ *   - the inner plaintext of a BODIED request is the anti-replay envelope `{ s: <per-session seq>, b:
+ *     <body> }` (docs/08): `s` is a per-session monotonic sequence (starts at 1, resets on
+ *     re-handshake), authenticated inside the AEAD, and the peer's `preValidation` runs it through the
+ *     `TRANSPORT_REPLAY_WINDOW` sliding window — a 409 rejects a replayed/out-of-window sequence. The
+ *     peer sets `request.body = envelope.b` before schema validation. A missing `s` 409s, so the
+ *     envelope is mandatory once #75's hardening merged (which it now has, on master);
+ *   - a bodyless GET sends NO envelope — the peer skips replay enforcement for GET/HEAD (nothing to
+ *     seal/replay) and only asks that the response be sealed;
  *   - `aad` is `${method} ${path}` (method is GET when there's no body, else POST), matching the
  *     peer's `${request.method} ${request.url}` (sync paths carry no query string, so path === url);
  *   - a sealed response is signalled by `x-loam-enc: 1` and unsealed with the same `aad`.
@@ -34,6 +34,10 @@ export interface PeerTransportSession {
   key: string;
   /** The peer's static X25519 public key the session was derived against (for pinning / diagnostics). */
   hostPublicKey: string;
+  /** Per-session monotonic request sequence for the `{ s, b }` anti-replay envelope (docs/08). Starts at
+   * 0; `attemptSealed` pre-increments so the first bodied request sends `s: 1`. Reset to 0 on a
+   * re-handshake (a fresh session id starts a fresh replay window on the peer). */
+  seq: number;
 }
 
 /** A peer's advertised transport posture, read from its unauthenticated `/api/config`. */
@@ -135,11 +139,13 @@ export interface PostureOptions {
 }
 
 /**
- * Fetch a peer's transport posture from its unauthenticated `/api/config` (the bootstrap endpoint —
- * open even under `required` mode). This tells the puller whether to handshake and which static key to
- * derive against. The key is learned over plain HTTP, so this is trust-on-first-use, not out-of-band:
- * it defeats a passive eavesdropper but NOT an active MITM between nodes unless the operator pins the
- * key in the sync-peer config (`SyncPeer.transportKey`). Throws on a non-2xx / unreachable peer.
+ * Fetch a peer's transport posture from its unauthenticated `/api/bootstrap` (the public, cookie-free
+ * bootstrap — open even under `required` mode, where `/api/config` is now session-gated content behind
+ * the tunnel since the docs/20 auth-binding change). It carries the same `networkConfig`, so it tells
+ * the puller whether to handshake and which static key to derive against. The key is learned over plain
+ * HTTP, so this is trust-on-first-use, not out-of-band: it defeats a passive eavesdropper but NOT an
+ * active MITM between nodes unless the operator pins the key in the sync-peer config
+ * (`SyncPeer.transportKey`). Throws on a non-2xx / unreachable peer.
  */
 export async function fetchPeerTransportPosture(
   peerUrl: string,
@@ -148,7 +154,7 @@ export async function fetchPeerTransportPosture(
   const fetchImpl = options.fetchImpl ?? fetch;
   const response = await httpText(
     fetchImpl,
-    `${normalizeBase(peerUrl)}/api/config`,
+    `${normalizeBase(peerUrl)}/api/bootstrap`,
     { method: "GET" },
     options.maxBytes ?? DEFAULT_MAX_BYTES,
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -156,14 +162,14 @@ export async function fetchPeerTransportPosture(
   );
 
   if (!response.ok) {
-    throw new Error(`Peer /api/config answered ${response.status}`);
+    throw new Error(`Peer /api/bootstrap answered ${response.status}`);
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(response.text);
   } catch {
-    throw new Error("Peer /api/config returned invalid JSON");
+    throw new Error("Peer /api/bootstrap returned invalid JSON");
   }
   return readTransportPosture(parsed);
 }
@@ -235,7 +241,7 @@ export async function handshakeWithPeer(
     hostEphemeralPublic: parsed.data.hostEphemeralPublic,
   });
 
-  return { sessionId: parsed.data.sessionId, key, hostPublicKey: parsed.data.hostPublicKey };
+  return { sessionId: parsed.data.sessionId, key, hostPublicKey: parsed.data.hostPublicKey, seq: 0 };
 }
 
 export interface SealedFetchOptions {
@@ -297,10 +303,15 @@ async function attemptSealed(
   const method = hasBody ? "POST" : "GET";
   const aad = `${method} ${path}`;
 
-  // GET with no body: no envelope, but signal we want a sealed response. Any other method (or a bodied
-  // GET) is always sealed — the peer refuses a non-GET under a live session that lacks a sealed body.
+  // GET with no body: no envelope, but signal we want a sealed response. Anything with a body is sealed
+  // as the `{ s, b }` anti-replay envelope (docs/08) — `s` a per-session monotonic sequence the peer
+  // checks against its replay window (a bare body would 409). The peer refuses a non-GET that lacks a
+  // sealed body, so a bodied request is always sealed. `s` is computed per attempt, so the retry path
+  // (after a re-handshake reset `seq` to 0) sends a fresh in-window sequence on the new session.
   const sealedBody = hasBody
-    ? JSON.stringify({ enc: sealTransport(session.key, JSON.stringify(options.body), aad) })
+    ? JSON.stringify({
+        enc: sealTransport(session.key, JSON.stringify({ s: ++session.seq, b: options.body }), aad),
+      })
     : undefined;
 
   const headers: Record<string, string> = {
@@ -364,5 +375,7 @@ async function refreshSession(session: PeerTransportSession, options: SealedFetc
   session.sessionId = next.sessionId;
   session.key = next.key;
   session.hostPublicKey = next.hostPublicKey;
+  // Fresh session id → fresh replay window on the peer, so restart the sequence (next.seq is 0).
+  session.seq = next.seq;
   return true;
 }

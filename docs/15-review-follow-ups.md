@@ -55,15 +55,22 @@ ranked within each group. Each entry names the file and the concrete change.
    android-arm64 prebuild (docs/01, docs/04).
 6a. **Node-to-node sync now rides the transport channel — but inter-node MITM is TOFU by default.**
    **BUILT** (`feat/sync-transport-encryption`, `apps/server/src/sync-transport.ts` + `fetchPeerJson`):
-   a pulling node establishes a transport session with each peer and seals its digest/messages requests
-   (and the `x-loam-sync-token`), which also fixes the gap that a `required`-mode peer 401'd every
-   plaintext pull and so couldn't be synced from. **Residual:** the peer's static key is learned from
-   its `/api/config` over plain HTTP (not out-of-band like the browser's join QR), so this is passive-
-   eavesdropper + integrity + token protection, **not active-MITM resistance** between nodes unless the
-   operator **pins** the key via the new optional `SyncPeer.transportKey` (verified against the
-   handshake, fail-closed on mismatch). Unpinned = trust-on-first-use. Next: surface the pinned-key
-   field in the admin peers UI (config-schema support already landed) and, longer-term, per-peer signed
-   authors (item 1) for full peer authentication.
+   a pulling node establishes a transport session with each peer and seals its digest/messages request
+   **data** with the `{ s, b }` anti-replay envelope (reconciled with the transport-hardening merge, so a
+   `required` peer's replay window is satisfied), which also fixes the gap that a `required`-mode peer
+   401'd every plaintext pull and so couldn't be synced from. Because auth-binding made user content
+   tunnel-only, the two sync routes are reached via a **direct sealed request** (`DIRECT_SEALED_SYNC_ROUTES`
+   in `app.ts`) — still sealed, just exempt from the identity tunnel — and peer posture is read from the
+   public `/api/bootstrap` (not the now-session-gated `/api/config`). **Residuals:** (a) the peer's static
+   key is learned over plain HTTP (not out-of-band like the browser's join QR), so this is
+   passive-eavesdropper confidentiality + integrity, **not active-MITM resistance** between nodes unless
+   the operator **pins** the key via the optional `SyncPeer.transportKey` (verified against the handshake,
+   fail-closed on mismatch); unpinned = trust-on-first-use. (b) the **`x-loam-sync-token` bearer header is
+   NOT sealed** — it rides as a plaintext header, so a passive eavesdropper can read it; it gates
+   public-data-only reads (nothing a public node doesn't already serve), so low severity. Next: seal the
+   token into the envelope so it, too, is confidential; surface the pinned-key field in the admin peers UI
+   (config-schema support already landed); longer-term, per-peer signed authors (item 1) for full peer
+   authentication.
 
 ## Correctness / robustness
 

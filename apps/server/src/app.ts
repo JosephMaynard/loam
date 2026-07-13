@@ -1485,6 +1485,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * The node-to-node sync content routes. Under `required` mode (or a bound session) user-facing content
+   * is tunnel-only (`/api/transport/tunnel`), but these two are reachable via a DIRECT sealed request
+   * instead: sync is authenticated by the shared `sync.token` (docs/11) — a node credential, not a user
+   * identity, so there is nothing to bind or carry over `x-loam-user`, and the tunnel would neither
+   * forward the token nor admit an unbound session (docs/20 §2). They still MUST be sealed in `required`
+   * mode (a plaintext hit with no resolved transport session falls through to the 401 in `onRequest`), so
+   * inter-node sync is encrypted end-to-end; they are only exempt from the tunnel/bound requirement, not
+   * from encryption. Both carry public data only (DMs/private channels/shadow-banned authors never
+   * export). See `sync-transport.ts` (the puller half).
+   */
+  const DIRECT_SEALED_SYNC_ROUTES = new Set(["/api/sync/digest", "/api/sync/messages"]);
+
+  /**
    * Apply validated user update fields to an existing user object.
    *
    * @param user - The existing user object to update (mutated in-place)
@@ -3941,6 +3954,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // handshake/resume/logout/tunnel stay directly reachable.
     const boundSession = activeSession?.authMode === "bound";
     if ((mode === "required" || boundSession) && requiresTransportSession(request)) {
+      // Node-to-node sync is reachable via a DIRECT sealed request rather than the identity tunnel: it is
+      // sync-token-authed public data with no user identity to bind (docs/08/11/20 — see
+      // `DIRECT_SEALED_SYNC_ROUTES`). It still must be sealed — a sync route reached WITHOUT a resolved
+      // transport session has no `activeSession` here and falls through to the 401, so plaintext sync is
+      // still refused in `required` mode.
+      if (activeSession && DIRECT_SEALED_SYNC_ROUTES.has(request.routeOptions?.url ?? "")) {
+        return;
+      }
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
     }
   });
