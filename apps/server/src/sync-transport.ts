@@ -254,9 +254,8 @@ export interface SealedFetchOptions {
   /**
    * The node sync token (`sync.token`), when set. Carried INSIDE the sealed `{ s, b, tok }` envelope —
    * never as a wire header — so a bearer credential can't be read off the wire, and so a request that
-   * presents it proves possession of the session key (docs/08). When a token is present the request is
-   * always a sealed POST (even a digest that has no body), so the peer can decrypt the envelope; without
-   * one, a bodyless request stays a GET (nothing to seal — the response is still sealed).
+   * presents it proves possession of the session key (docs/08). Added to the envelope as `tok` when set;
+   * every sealed request is a POST regardless (see the module header), so a token always rides sealed.
    */
   syncToken?: string;
   /** Extra headers merged onto the sealed request. */
@@ -285,9 +284,10 @@ export interface SealedResponse {
 /**
  * Send ONE request to a peer through a live transport session, sealed end-to-end. Mirrors the browser
  * client's `attemptFetch` sealed path:
- *   - GET (no body) sends no envelope but still asks the peer to seal its response (`x-loam-enc: <sid>`);
- *   - anything with a body seals `{ enc: sealTransport(key, JSON.stringify(body), aad) }`;
- *   - a `x-loam-enc: 1` response is unsealed with the same `aad`.
+ *   - always a POST sealing `{ enc: sealTransport(key, JSON.stringify({ s, b?, tok? }), `POST ${path}`) }`
+ *     (see the module header — carrying `{ s }` even for a bodyless digest lets the response be seq-bound);
+ *   - a `x-loam-enc: 1` response is unsealed under `POST ${path}#${s}`; an early-hook non-2xx (e.g. a 429
+ *     from the rate limiter, sealed before the sequence is assigned) is unsealed under the base aad.
  *
  * On a 401 (peer refused the session in `onRequest`, before any handler ran) or a response we can't
  * decrypt (the session key changed under us), it re-handshakes ONCE via `options.reHandshake` and
@@ -367,6 +367,19 @@ async function attemptSealed(
       enc = undefined;
     }
     const opened = typeof enc === "string" ? openTransport(key, enc, responseAad) : null;
+
+    // An EARLY-hook response — e.g. a 429 from the rate limiter, which runs in `onRequest` BEFORE
+    // preValidation assigns the sequence — is sealed under the BASE aad (`${method} ${path}`), not
+    // `#${seq}`, so it won't open above. Try the base aad, but ONLY accept it as a NON-2xx: an early error
+    // carries no sync data to cross-feed, whereas a 2xx MUST be sequence-bound (a base-aad 2xx is a
+    // replay/downgrade — left to fail below). Without this a legitimate 429 would surface as a spurious
+    // "session expired" and churn a re-handshake (docs/08 / Sol round-3 P2).
+    if (opened === null && !response.ok && typeof enc === "string") {
+      const early = openTransport(key, enc, `${method} ${path}`);
+      if (early !== null) {
+        return { status: response.status, ok: false, text: early };
+      }
+    }
 
     if (opened === null) {
       // The peer's handler ran and sealed a reply we can't open (session key changed between request

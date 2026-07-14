@@ -914,29 +914,35 @@ describe("message authorization", () => {
 });
 
 describe("config robustness", () => {
-  it("boots with defaults when the config file is malformed JSON", async () => {
+  it("ABORTS startup when the config file is malformed JSON (never falls back to defaults)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
     writeFileSync(join(dataDir, "config.json"), "{ this is not json");
-    const app = await buildApp({ dataDir, logger: false });
-    cleanups.push(async () => {
-      await app.close();
-      rmSync(dataDir, { recursive: true, force: true });
-    });
-
-    const first = await newSession(app);
-    expect(first.isAdmin).toBe(true);
+    // A present-but-invalid config must fail closed: silently starting from defaults could downgrade an
+    // intended `required` posture to `off` (docs/08). The operator must fix or remove the file.
+    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
   });
 
-  it("boots when the persisted config row is malformed", async () => {
+  it("ABORTS startup when the persisted config row is malformed", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
     const initialApp = await buildApp({ dataDir, logger: false });
-    cleanups.push(() => initialApp.close());
     initialApp.store.setConfigValue("config", "{ broken");
+    await initialApp.close();
 
-    const reopened = await reopenApp(initialApp, dataDir);
-    const session = await newSession(reopened);
-    expect(session.isAdmin).toBe(true);
+    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
+  });
+
+  it("ABORTS rather than silently serving `off` when a required-mode config has an invalid field", async () => {
+    // The exact footgun: a `required` node whose `sync.token` is under the 16-char minimum invalidates the
+    // whole document. It must NOT boot advertising `off` — it must refuse to start.
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    writeFileSync(
+      join(dataDir, "config.json"),
+      JSON.stringify({ security: { transportEncryption: "required" }, sync: { enabled: true, token: "short" } }),
+    );
+    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
   });
 
   it("rejects update secrets shorter than their configured minimums", async () => {

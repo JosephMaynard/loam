@@ -1086,22 +1086,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   let store = openLoamStore();
 
   /**
-   * Parse one config layer, tolerating malformed JSON and invalid shapes: both are logged and
-   * ignored rather than aborting startup.
+   * Parse one PRESENT config layer, **aborting startup** if it's malformed or invalid. Silently ignoring
+   * it and continuing from defaults is dangerous: a typo'd `security.transportEncryption: "required"` node
+   * (e.g. a `sync.token` under the 16-char minimum invalidating the whole document) would fall back to the
+   * `off` default and serve plaintext while the operator believes it's hardened. Fail closed instead — the
+   * caller only invokes this when a config source actually exists (an absent file is a normal fresh boot).
    */
-  function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate | undefined {
+  function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate {
+    let json: unknown;
     try {
-      const parsed = LoamConfigUpdateSchema.safeParse(JSON.parse(raw));
-
-      if (parsed.success) {
-        return parsed.data;
-      }
+      json = JSON.parse(raw);
     } catch {
-      // Malformed JSON — fall through to the shared warning below.
+      throw new Error(`Invalid configuration in ${source}: not valid JSON. Fix or remove it; refusing to start from defaults.`);
     }
 
-    server.log.warn(`Ignoring invalid config from ${source}`);
-    return undefined;
+    const parsed = LoamConfigUpdateSchema.safeParse(json);
+    if (parsed.success) {
+      return parsed.data;
+    }
+
+    const detail = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`Invalid configuration in ${source}: ${detail}. Fix it; refusing to start from defaults.`);
   }
 
   /**
@@ -1113,21 +1120,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     try {
       const raw = await readFile(configPath, "utf8");
+      // A present-but-invalid config.json throws here (fail closed); an ABSENT file is ENOENT → a normal
+      // fresh boot from defaults, handled by the catch below.
       const fileUpdate = parseConfigUpdate(raw, configPath);
 
-      if (fileUpdate) {
-        // Same reconciliation as the persisted path: a hand-authored config.json that pins a preset
-        // profile *and* sets an explicit kill switch / approval / TTL keeps those explicit settings
-        // (effective profile → custom) rather than letting the preset silently override them. The
-        // file is the operator's own source, so we don't rewrite it — just resolve it in memory.
-        const { update: reconciled, changed } = reconcileLegacyProfile(fileUpdate);
-        if (changed) {
-          server.log.warn(
-            `${configPath} pins a security profile but also sets explicit access/retention/kill-switch values; keeping the explicit settings (effective profile: custom).`,
-          );
-        }
-        config = mergeConfig(config, reconciled);
+      // Same reconciliation as the persisted path: a hand-authored config.json that pins a preset
+      // profile *and* sets an explicit kill switch / approval / TTL keeps those explicit settings
+      // (effective profile → custom) rather than letting the preset silently override them. The
+      // file is the operator's own source, so we don't rewrite it — just resolve it in memory.
+      const { update: reconciled, changed } = reconcileLegacyProfile(fileUpdate);
+      if (changed) {
+        server.log.warn(
+          `${configPath} pins a security profile but also sets explicit access/retention/kill-switch values; keeping the explicit settings (effective profile: custom).`,
+        );
       }
+      config = mergeConfig(config, reconciled);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
@@ -1139,17 +1146,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (stored) {
       const storedUpdate = parseConfigUpdate(stored, "the persisted config table");
 
-      if (storedUpdate) {
-        // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
-        // preserve an explicitly-armed kill switch / approval / TTL by demoting the profile to custom.
-        const { update: reconciled, changed } = reconcileLegacyProfile(storedUpdate);
-        config = mergeConfig(config, reconciled);
-        if (changed) {
-          server.log.warn(
-            "Security profile is now authoritative; kept explicit access/retention/kill-switch settings by switching this node's profile to 'custom'.",
-          );
-          store.setConfigValue("config", JSON.stringify(config));
-        }
+      // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
+      // preserve an explicitly-armed kill switch / approval / TTL by demoting the profile to custom.
+      const { update: reconciled, changed } = reconcileLegacyProfile(storedUpdate);
+      config = mergeConfig(config, reconciled);
+      if (changed) {
+        server.log.warn(
+          "Security profile is now authoritative; kept explicit access/retention/kill-switch settings by switching this node's profile to 'custom'.",
+        );
+        store.setConfigValue("config", JSON.stringify(config));
       }
     }
 

@@ -371,6 +371,37 @@ describe("sync transport encryption — REQUIRED peer", () => {
     ).rejects.toThrow();
   });
 
+  it("(b7) a rate-limited digest surfaces as a clean 429, not 'session expired' + re-handshake churn", async () => {
+    const peerDir = makeDataDir();
+    await seedPublicMessage(peerDir, "rate limit");
+    writeConfig(peerDir, requiredPeerConfig());
+    const peer = await buildOn(peerDir);
+    const peerUrl = await listen(peer);
+    const session = await handshakeWithPeer(peerUrl);
+
+    let reHandshakes = 0;
+    const reHandshake = async () => {
+      reHandshakes += 1;
+      return handshakeWithPeer(peerUrl);
+    };
+
+    // The digest route is limited to 60/min. Fire past it; the request that trips the limiter gets a 429
+    // sealed under the BASE aad (the limiter runs in `onRequest`, before the sequence is assigned). It must
+    // surface as a clean 429 — not a decryption failure that reports "session expired" and churns a
+    // re-handshake (docs/08 / Sol round-3 P2).
+    let sawRateLimit = false;
+    for (let i = 0; i < 65; i += 1) {
+      const res = await sealedFetch(session, peerUrl, "/api/sync/digest", { reHandshake });
+      if (res.status === 429) {
+        sawRateLimit = true;
+        break;
+      }
+      expect(res.ok).toBe(true);
+    }
+    expect(sawRateLimit).toBe(true);
+    expect(reHandshakes).toBe(0);
+  });
+
   it("(d) the puller re-handshakes once on a 401 and reuses one session across calls", async () => {
     const peerDir = makeDataDir();
     const seededId = await seedPublicMessage(peerDir, "cache and re-handshake");
