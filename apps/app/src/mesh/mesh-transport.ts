@@ -115,13 +115,16 @@ export class MeshTransport {
     const attempt = this.doStart(advert);
     this.startInFlight = attempt;
     // Clear the field only if it STILL points at this attempt: a stop() (which nulls it) + a newer start()
-    // may have replaced it while this one was pending, and this attempt's finally must not erase the newer
-    // one (which would let a third caller start concurrently and double-register) (P1).
-    void attempt.finally(() => {
+    // may have replaced it while this one was pending, and this attempt must not erase the newer one (which
+    // would let a third caller start concurrently and double-register) (P1). Use `then(clear, clear)` (not a
+    // detached `finally`): the derived promise is FULFILLED in both branches, so a rejected `doStart` can't
+    // surface as an unhandled rejection on this side channel. The caller still gets `attempt` to handle.
+    const clear = (): void => {
       if (this.startInFlight === attempt) {
         this.startInFlight = null;
       }
-    });
+    };
+    void attempt.then(clear, clear);
     return attempt;
   }
 

@@ -57,10 +57,17 @@ internal class MeshWifiAwareController(
     fun onError(message: String)
   }
 
-  // A monotonic lifecycle generation: `stop()` bumps it, so a late `onAttached` (attach is async) from a
-  // superseded/stopped start is detected and discarded instead of resurrecting the radios (P1-4).
+  // ONE lock serializes the whole lifecycle — `start`, the async `onAttached` (generation check AND the
+  // session/socket/publish/subscribe setup, atomically), `updateAdvert`, and `stop`'s teardown — so
+  // `stop()` can't interleave between `onAttached`'s guard check and its resource publication and resurrect
+  // a session/socket/executor after teardown (P1). The generation is the secondary guard inside the lock.
+  private val lifecycleLock = Any()
   @Volatile private var generation = 0
   @Volatile private var starting = false
+  // "A publish() is in flight but onPublishStarted hasn't returned the handle yet." Without this, an
+  // advert refresh in that window sees `publishSession == null` and publishes AGAIN, orphaning sessions.
+  private var publishing = false
+  private var pendingAdvert: MeshAdvert? = null
 
   private val executor = Executors.newCachedThreadPool()
   // Hard cap on concurrent inbound transfers. `ServerSocket` accepts on local interfaces, so without this
@@ -91,7 +98,7 @@ internal class MeshWifiAwareController(
 
   /** Attach, start the responder socket, then publish + subscribe. Best-effort; errors surface via the
    * listener and leave the module in a BLE-only state. */
-  fun start(advert: MeshAdvert) {
+  fun start(advert: MeshAdvert) = synchronized(lifecycleLock) {
     // Already attached → just refresh the advertised have-mail flag (P1-2). Without this, the launcher's
     // 30s advert refresh would attach a NEW session + responder socket + accept loop every time, while
     // stop() only tracks the latest — leaking sessions/sockets/threads.
@@ -113,26 +120,32 @@ internal class MeshWifiAwareController(
     try {
       manager.attach(object : AttachCallback() {
         override fun onAttached(newSession: WifiAwareSession) {
-          // attach is async: if stop() (or a superseding start) ran meanwhile, `generation` advanced —
-          // discard this now-orphan session instead of resurrecting the radios after teardown (P1-4).
-          if (gen != generation) {
-            try {
-              newSession.close()
-            } catch (_: Throwable) {
+          // Hold the SAME lifecycle lock across the generation check AND the whole resource setup, so a
+          // stop() can't slip in between (advancing the generation + shutting the executor down) and leave
+          // this callback publishing a session/socket onto a torn-down controller (P1). stop() either ran
+          // before us (generation advanced → discard) or waits behind us (tears our resources back down).
+          synchronized(lifecycleLock) {
+            if (gen != generation) {
+              try {
+                newSession.close()
+              } catch (_: Throwable) {
+              }
+              return
             }
-            return
+            session = newSession
+            starting = false
+            startResponderSocket()
+            publish(newSession, advert)
+            subscribe(newSession)
           }
-          session = newSession
-          starting = false
-          startResponderSocket()
-          publish(newSession, advert)
-          subscribe(newSession)
         }
 
         override fun onAttachFailed() {
-          starting = false
-          if (gen == generation) {
-            listener.onError("Wi-Fi Aware attach failed")
+          synchronized(lifecycleLock) {
+            starting = false
+            if (gen == generation) {
+              listener.onError("Wi-Fi Aware attach failed")
+            }
           }
         }
       }, null)
@@ -149,10 +162,17 @@ internal class MeshWifiAwareController(
    * (`PublishDiscoverySession.updatePublish`, API 26+) — closing and asynchronously re-publishing lets two
    * overlapping refreshes each create a session where only the last `onPublishStarted` handle is tracked,
    * leaking the others (P1). Only publish afresh if there is no live publish yet. */
-  fun updateAdvert(advert: MeshAdvert) {
+  fun updateAdvert(advert: MeshAdvert): Unit = synchronized(lifecycleLock) {
     val existing = publishSession
     if (existing != null) {
-      existing.updatePublish(buildPublishConfig(advert))
+      existing.updatePublish(buildPublishConfig(advert)) // update the ACTIVE publish in place (API 26+)
+      return
+    }
+    if (publishing) {
+      // A first publish() is in flight but onPublishStarted hasn't returned the handle yet — do NOT
+      // publish again (that would orphan sessions, P1). Stash the latest advert; onPublishStarted applies
+      // it in place once the handle arrives.
+      pendingAdvert = advert
       return
     }
     val active = session ?: return
@@ -166,9 +186,16 @@ internal class MeshWifiAwareController(
       .build()
 
   private fun publish(session: WifiAwareSession, advert: MeshAdvert) {
+    publishing = true
     session.publish(buildPublishConfig(advert), object : DiscoverySessionCallback() {
       override fun onPublishStarted(discoverySession: android.net.wifi.aware.PublishDiscoverySession) {
-        publishSession = discoverySession
+        synchronized(lifecycleLock) {
+          publishing = false
+          publishSession = discoverySession
+          // Apply any advert refresh that arrived while this first publish was in flight (P1).
+          pendingAdvert?.let { discoverySession.updatePublish(buildPublishConfig(it)) }
+          pendingAdvert = null
+        }
       }
 
       override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
@@ -390,10 +417,14 @@ internal class MeshWifiAwareController(
     }
   }
 
-  fun stop() {
-    // Bump the generation FIRST so any in-flight attach's late `onAttached` is discarded (P1-4).
+  fun stop(): Unit = synchronized(lifecycleLock) {
+    // Under the SAME lock as onAttached's setup, so teardown is atomic vs a concurrent attach callback: a
+    // late onAttached either already advanced past its guard (and set up under this lock, so we tear its
+    // resources down here) or hasn't run yet (it sees the bumped generation and discards its session) (P1).
     generation++
     starting = false
+    publishing = false
+    pendingAdvert = null
     try {
       publishSession?.close()
       subscribeSession?.close()
