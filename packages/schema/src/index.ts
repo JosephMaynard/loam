@@ -782,7 +782,10 @@ export const SyncAttachmentResponseSchema = z.object({
   data: z
     .string()
     .max(349_528)
-    .regex(/^[A-Za-z0-9+/]*={0,2}$/, "must be base64"),
+    .regex(
+      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
+      "must be standard base64",
+    ),
   mimeType: z.string().min(1).max(100),
 });
 export type SyncAttachmentResponse = z.infer<typeof SyncAttachmentResponseSchema>;
