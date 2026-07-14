@@ -87,6 +87,43 @@ async function seedPublicMessage(dataDir: string, body: string): Promise<string>
   }
 }
 
+/** Post one public `general` message carrying a 1×1 PNG attachment on a temporarily-opened `off`-mode
+ * node, returning the message id + the URL its attachment is served at. */
+async function seedPublicMessageWithAttachment(dataDir: string): Promise<{ messageId: string; attachmentUrl: string }> {
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  writeConfig(dataDir, {});
+  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
+  try {
+    const cfg = await app.server.inject({ method: "GET", url: "/api/config" });
+    const cookie = sessionCookie(cfg.headers["set-cookie"]);
+    const up = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie },
+      payload: { mimeType: "image/png", data: tinyPng, width: 1, height: 1 },
+    });
+    if (up.statusCode !== 201) {
+      throw new Error(`seed attachment upload failed: ${up.statusCode} ${up.body}`);
+    }
+    const attachment = up.json() as { id: string; mimeType: string };
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+    if (res.statusCode !== 201) {
+      throw new Error(`seed attachment post failed: ${res.statusCode} ${res.body}`);
+    }
+    return {
+      messageId: (res.json() as { message: { id: string } }).message.id,
+      attachmentUrl: `/api/attachments/${attachment.id}.png`,
+    };
+  } finally {
+    await app.close();
+  }
+}
+
 /** An admin session on a node (firstUser bootstrap → the first session is admin). */
 async function adminSession(app: LoamApp): Promise<string> {
   const res = await app.server.inject({ method: "GET", url: "/api/config" });
@@ -242,6 +279,43 @@ describe("sync transport encryption — REQUIRED peer", () => {
     ).rejects.toThrow(/unauthenticated|unsealed/i);
   });
 
+  it("(b4) authorizes a token-gated peer via the token SEALED in the envelope, never a wire header", async () => {
+    const peerDir = makeDataDir();
+    const seededId = await seedPublicMessage(peerDir, "sealed token");
+    writeConfig(peerDir, {
+      security: { transportEncryption: "required" },
+      sync: { enabled: true, peers: [], token: "s3cr3t-sync-token" },
+    });
+    const peer = await buildOn(peerDir);
+    const peerUrl = await listen(peer);
+
+    const session = await handshakeWithPeer(peerUrl);
+
+    // No token → the peer 404s (token required, none presented). A bodyless, tokenless digest is a GET
+    // whose sealed reply is a 404.
+    const noToken = await sealedFetch(session, peerUrl, "/api/sync/digest");
+    expect(noToken.status).toBe(404);
+
+    // With the token: it must ride INSIDE the sealed envelope, never as an `x-loam-sync-token` wire header
+    // (that's the whole point — a bearer credential an observer must not be able to read).
+    let sawTokenHeader = false;
+    const spyFetch: typeof fetch = (input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.has("x-loam-sync-token")) {
+        sawTokenHeader = true;
+      }
+      return fetch(input, init);
+    };
+    const withToken = await sealedFetch(session, peerUrl, "/api/sync/digest", {
+      syncToken: "s3cr3t-sync-token",
+      fetchImpl: spyFetch,
+    });
+    expect(sawTokenHeader).toBe(false);
+    expect(withToken.ok).toBe(true);
+    const digest = SyncDigestSchema.parse(JSON.parse(withToken.text));
+    expect(digest.messages.some((entry) => entry.id === seededId)).toBe(true);
+  });
+
   it("(d) the puller re-handshakes once on a 401 and reuses one session across calls", async () => {
     const peerDir = makeDataDir();
     const seededId = await seedPublicMessage(peerDir, "cache and re-handshake");
@@ -283,6 +357,31 @@ describe("sync transport encryption — REQUIRED peer", () => {
     expect(retried.ok).toBe(true);
     const digest = SyncDigestSchema.parse(JSON.parse(retried.text));
     expect(digest.messages.some((entry) => entry.id === seededId)).toBe(true);
+  });
+
+  it("(e) copies a public message's attachment across a REQUIRED peer via the sealed sync-attachment route", async () => {
+    const peerDir = makeDataDir();
+    const { messageId, attachmentUrl } = await seedPublicMessageWithAttachment(peerDir);
+    writeConfig(peerDir, requiredPeerConfig());
+    const peer = await buildOn(peerDir);
+    const peerUrl = await listen(peer);
+
+    // The tunnel-only binary route is 401 to a peer with no session — the reason a plain-fetch copy failed.
+    expect((await fetch(`${peerUrl}${attachmentUrl}`)).status).toBe(401);
+
+    const pullerDir = makeDataDir();
+    writeConfig(pullerDir, { sync: { enabled: true, peers: [{ url: peerUrl }], intervalMs: 3_600_000 } });
+    const puller = await buildOn(pullerDir);
+    const cookie = await adminSession(puller);
+
+    expect(await runSync(puller, cookie)).toBeUndefined();
+    expect(hasMessage(puller, messageId)).toBe(true);
+
+    // The attachment binary crossed too: the puller (off-mode) now serves it from its own store, which it
+    // could only do if the base64-over-sealed-transport `/api/sync/attachment` fetch succeeded.
+    const served = await puller.server.inject({ method: "GET", url: attachmentUrl });
+    expect(served.statusCode).toBe(200);
+    expect(served.rawPayload.length).toBeGreaterThan(0);
   });
 });
 
@@ -366,6 +465,81 @@ describe("sync transport encryption — puller-side session cache (integration)"
 
     expect(await runSync(puller, cookie)).toBeUndefined();
     expect(handshakeCount).toBe(2);
+    expect(hasMessage(puller, id2)).toBe(true);
+  });
+
+  it("(d2) keeps a continuous replay sequence after a POST-leg re-handshake (token peer → digest is a POST)", async () => {
+    // Same proxy indirection as (d), but the peer requires a sync token — so the token rides sealed and the
+    // digest is a POST. When the peer restarts, the re-handshake now happens ON A POST leg, whose retry
+    // consumes sequence 1. Regression guard for the split-session bug: before the fix the cache kept a
+    // detached object at sequence 0, so the NEXT round's POST reused sequence 1 and the peer 409'd it.
+    let backend = "";
+    const proxy = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        void (async () => {
+          try {
+            const method = req.method ?? "GET";
+            const bodyless = method === "GET" || method === "HEAD";
+            const headers: Record<string, string> = {};
+            for (const [name, value] of Object.entries(req.headers)) {
+              if (typeof value === "string" && name !== "host" && name !== "content-length" && name !== "connection") {
+                headers[name] = value;
+              }
+            }
+            const upstream = await fetch(`${backend}${req.url ?? ""}`, {
+              method,
+              headers,
+              body: bodyless ? undefined : Buffer.concat(chunks),
+            });
+            const outHeaders: Record<string, string> = {};
+            const contentType = upstream.headers.get("content-type");
+            const enc = upstream.headers.get("x-loam-enc");
+            if (contentType) outHeaders["content-type"] = contentType;
+            if (enc) outHeaders["x-loam-enc"] = enc;
+            res.writeHead(upstream.status, outHeaders);
+            res.end(Buffer.from(await upstream.arrayBuffer()));
+          } catch {
+            res.writeHead(502);
+            res.end("proxy error");
+          }
+        })();
+      });
+    });
+    const proxyUrl = await new Promise<string>((resolve) => {
+      proxy.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(proxy.address() as AddressInfo).port}`));
+    });
+    cleanups.push(() => new Promise<void>((resolve) => proxy.close(() => resolve())));
+
+    const token = "shared-sync-token";
+    const peerConfig = { security: { transportEncryption: "required" }, sync: { enabled: true, peers: [], token } };
+    const peerDir = makeDataDir();
+    const id1 = await seedPublicMessage(peerDir, "first");
+    writeConfig(peerDir, peerConfig);
+    const peer = await buildOn(peerDir);
+    backend = await listen(peer);
+
+    const pullerDir = makeDataDir();
+    writeConfig(pullerDir, { sync: { enabled: true, peers: [{ url: proxyUrl }], intervalMs: 3_600_000, token } });
+    const puller = await buildOn(pullerDir);
+    const cookie = await adminSession(puller);
+
+    expect(await runSync(puller, cookie)).toBeUndefined();
+    expect(hasMessage(puller, id1)).toBe(true);
+
+    // Restart the peer → its RAM sessions clear, so the next round's POST digest 401s and re-handshakes.
+    await peer.close();
+    const id2 = await seedPublicMessage(peerDir, "second");
+    writeConfig(peerDir, peerConfig);
+    const peer2 = await buildOn(peerDir);
+    backend = await listen(peer2);
+
+    // The post-restart round re-handshakes on the POST DIGEST leg (sequence 1), then fetches id2 with a
+    // MESSAGES POST on the same session. Before the fix the cache held a detached object, so the messages
+    // POST reused sequence 1 and the peer 409'd it — id2 would silently never import. With one shared
+    // session object the sequence continues and id2 arrives.
+    expect(await runSync(puller, cookie)).toBeUndefined();
     expect(hasMessage(puller, id2)).toBe(true);
   });
 });

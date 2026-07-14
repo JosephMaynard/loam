@@ -767,6 +767,21 @@ export const SyncMessagesRequestSchema = z.object({
 });
 export type SyncMessagesRequest = z.infer<typeof SyncMessagesRequestSchema>;
 
+/** `POST /api/sync/attachment` — request one public-message attachment's bytes by file name. Served as
+ * base64 JSON (not a raw binary GET) so it can ride the sealed transport channel: `onSend` seals string
+ * payloads, and the tunnel-only `/api/attachments/:fileName` binary route is unreachable to a peer. */
+export const SyncAttachmentRequestSchema = z.object({
+  fileName: z.string().min(1).max(128),
+});
+export type SyncAttachmentRequest = z.infer<typeof SyncAttachmentRequestSchema>;
+
+export const SyncAttachmentResponseSchema = z.object({
+  /** The attachment bytes, base64-encoded. */
+  data: z.string().max(2 * 1024 * 1024),
+  mimeType: z.string().min(1).max(100),
+});
+export type SyncAttachmentResponse = z.infer<typeof SyncAttachmentResponseSchema>;
+
 export const SyncMessagesResponseSchema = z.object({
   messages: z.array(MessageSchema),
   /** Profiles for the message authors, so names/avatars resolve on the pulling node. */

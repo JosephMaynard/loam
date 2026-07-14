@@ -150,14 +150,15 @@ is that client (pure `@loam/crypto`, no native deps), mirroring `apps/client/src
   `x-loam-enc: 1` response. On a `401` or an undecryptable response it re-handshakes **once** and
   retries — always safe because every sync request is a read-only query.
 
-**Framing note (important):** the inner sealed plaintext of a bodied request is the **`{ s, b }`
-anti-replay envelope** — `s` a per-session monotonic sequence (starts at 1, resets on re-handshake), `b`
-the actual body — matching the browser client after the transport-hardening merge. The peer's
-`preValidation` runs `s` through its `TRANSPORT_REPLAY_WINDOW` sliding window (a replayed/out-of-window
-sequence gets a **409**) and sets `request.body = envelope.b` before schema validation. `s` lives inside
-the AEAD, so it can't be renumbered without breaking the tag. (This reconciles the earlier "raw body, no
-replay counter" framing: once #75 landed, a bare body would 409 — the envelope is mandatory. A bodyless
-GET carries no `s`; the peer skips replay enforcement for GET/HEAD.)
+**Framing note (important):** the inner sealed plaintext of a sealed request is the **`{ s, b?, tok? }`
+envelope** — `s` a per-session monotonic sequence (starts at 1, resets on re-handshake), `b` the route
+body, `tok` the `sync.token` bearer credential. The peer's `preValidation` runs `s` through its
+`TRANSPORT_REPLAY_WINDOW` sliding window (a replayed/out-of-window sequence gets a **409**), stashes `tok`
+for `syncPeerAuthorized`, and sets `request.body = envelope.b` before schema validation. `s` (and `tok`)
+live inside the AEAD, so they can't be renumbered/read without breaking the tag. A request is a sealed
+POST whenever it has a body **or** a token — so even a bodyless digest becomes a sealed POST when a token
+is configured (which also proves session-key possession); with neither it stays a bodyless GET that
+carries no `s` and the peer skips replay enforcement for GET/HEAD, sealing only the response.
 
 **Tunnel-only gate reconcile:** under `required` mode the peer makes user-facing content *tunnel-only*
 (`/api/transport/tunnel`, identity-bound). Sync is different — it is authenticated by the shared
@@ -181,23 +182,26 @@ peer:
 3. `off` / no key / posture unreadable → the **unchanged plaintext path** (a genuinely `required` peer
    whose `/api/bootstrap` we can't read just 401s the plaintext pull, surfacing as a normal sync failure —
    never a silent wrong result).
-4. `optional` / `required` with a key → handshake + route the digest/messages request through
-   `sealedFetch`, so the **sync data** (the digest and message bodies, both ways) is sealed on the wire.
-   **Fail-closed:** a `required` peer (or any peer with a pinned key) that can't complete the handshake
-   fails the sync attempt rather than falling back to a plaintext pull that would 401 anyway; an
-   `optional` peer degrades to plaintext (it still serves the clear path).
+4. `optional` / `required` with a key → handshake + route the digest/messages/attachment requests through
+   `sealedFetch`, so the **sync data AND the `sync.token`** are sealed on the wire (the token rides inside
+   the `{ s, b, tok }` envelope, never a header). **Fail-closed:** a `required` peer (or any peer with a
+   pinned key) that can't complete the handshake fails the sync attempt rather than falling back to a
+   plaintext pull that would 401 anyway; an `optional` peer degrades to plaintext (it still serves the
+   clear path). An UNSEALED 2xx over a live session is refused (a downgrade), never imported.
 
 This closes a real gap: a peer running `transportEncryption: "required"` previously **401'd every
 plaintext sync pull** (its transport hook refuses any `/api/*` content request without a session), so it
 could not be synced *from* at all. It can now.
 
-**Not sealed — the `x-loam-sync-token` header (honest scope):** the bearer token authenticating the pull
-travels as a normal HTTP header on the (encrypted-session) request, **not** inside the AEAD — so a passive
-eavesdropper on the LAN between nodes can read it, exactly as before this change. It gates **public-data-only**
-reads (DMs / private channels / shadow-banned authors never export), so a captured token grants nothing an
-attacker couldn't already read from a public node; it is not a user credential. Sealing the token into the
-envelope (so it, too, is confidential on the wire) is a documented follow-up (docs/15), deliberately not
-rushed onto the reviewed transport hooks.
+**Attachments** ride the same sealed channel: a peer fetches a public message's image bytes as base64
+JSON from `POST /api/sync/attachment` (a string payload `onSend` can seal), **not** the tunnel-only binary
+`/api/attachments/:fileName` (which a peer's sessionless GET would 401, dropping every attachment on a
+required peer). Only attachments on syncable (public) messages are served.
+
+**Token confidentiality (honest scope):** over a **sealed** channel (`optional`/`required` peer) the
+`sync.token` is confidential + authenticated — it never leaves the AEAD. Over the **plaintext** path
+(an `off`-mode peer) it still rides as an `x-loam-sync-token` header, since there is no encrypted channel
+to carry it — but there the whole sync is plaintext anyway, and the token gates public-data-only reads.
 
 ### MITM disposition between nodes (honest scope)
 
@@ -206,9 +210,9 @@ an out-of-band channel (unlike the browser's join-QR `#k=`). Unpinned, this is *
 discovery**, not true trust-on-first-use: the key is taken from the peer's advertisement on *each*
 resolve and is **not** persisted or pinned across session expiry, so there is no first-seen key to detect
 a later swap against. So by default node-to-node sync gets **passive-eavesdropper confidentiality +
-integrity for the sync data, but NOT active-MITM resistance** between nodes, and (as noted above) **not**
-confidentiality for the `x-loam-sync-token` header. A machine-in-the-middle could present its own key on
-`/api/bootstrap` and the handshake, then re-encrypt to the real peer.
+integrity for the sync data and the token, but NOT active-MITM resistance** between nodes: a
+machine-in-the-middle could present its own key on `/api/bootstrap` and the handshake, then re-encrypt to
+the real peer (and so read the token it terminates). Pinning the peer key closes that.
 
 To get active-MITM resistance, an operator **pins** the peer's key: `SyncPeer.transportKey` (a
 base64url X25519 key, e.g. copied from the peer's join QR / host screen out-of-band). When set, the

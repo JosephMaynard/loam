@@ -45,6 +45,8 @@ import {
   PanicRequestSchema,
   RolesUpdateRequestSchema,
   securityProfilePreset,
+  SyncAttachmentRequestSchema,
+  SyncAttachmentResponseSchema,
   SyncDigestSchema,
   SyncMessagesRequestSchema,
   SyncMessagesResponseSchema,
@@ -942,6 +944,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // response answers the exact `{ s, m, p }` it sent, defeating a cross-fed response under the tunnel's
   // constant AAD. WeakMap → GC'd with the request.
   const transportRequestSeq = new WeakMap<FastifyRequest, number>();
+  // The node sync token a sealed request carried INSIDE its `{ s, b, tok }` envelope (docs/08) — the
+  // authenticated, confidential channel for the `sync.token` bearer credential (never a wire header for a
+  // sealed peer). `syncPeerAuthorized` reads it from here for a sealed request, falling back to the header
+  // only on the plaintext path. WeakMap → GC'd with the request.
+  const transportRequestSyncToken = new WeakMap<FastifyRequest, string>();
   // Per-boot secret proving a request is an internal re-dispatch from the transport tunnel handler
   // (`POST /api/transport/tunnel`, docs/08), not a real client socket. 256 bits of randomness compared
   // in constant time — an external request can't forge it, so the transport-enforcement bypass it
@@ -1495,7 +1502,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * from encryption. Both carry public data only (DMs/private channels/shadow-banned authors never
    * export). See `sync-transport.ts` (the puller half).
    */
-  const DIRECT_SEALED_SYNC_ROUTES = new Set(["/api/sync/digest", "/api/sync/messages"]);
+  const DIRECT_SEALED_SYNC_ROUTES = new Set([
+    "/api/sync/digest",
+    "/api/sync/messages",
+    "/api/sync/attachment",
+  ]);
 
   /**
    * Apply validated user update fields to an existing user object.
@@ -3092,9 +3103,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * it. The pinned key comes from the peer's own sync-config entry (`SyncPeer.transportKey`). */
   async function handshakePeerAndCache(peerUrl: string): Promise<PeerTransportSession> {
     const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
-    const session = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
-    peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
-    return session;
+    const fresh = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
+    const expiresAt = Date.now() + PEER_TRANSPORT_SESSION_TTL_MS;
+    // Re-handshake reuses the SAME session object the cache (and any in-flight request that holds a
+    // reference via `refreshSession`) already points at, mutating it in place rather than caching a fresh
+    // object. Otherwise the replay sequence splits across two objects: the retried request advances `seq`
+    // on the object it holds while the cache keeps a detached copy at 0, so the NEXT POST reuses sequence 1
+    // and the peer 409s it (docs/08). One object → one monotonic sequence.
+    const existing = peerTransportSessions.get(peerUrl)?.transport;
+    if (existing && existing !== "plaintext") {
+      existing.sessionId = fresh.sessionId;
+      existing.key = fresh.key;
+      existing.hostPublicKey = fresh.hostPublicKey;
+      existing.seq = 0;
+      peerTransportSessions.set(peerUrl, { transport: existing, expiresAt });
+      return existing;
+    }
+    peerTransportSessions.set(peerUrl, { transport: fresh, expiresAt });
+    return fresh;
   }
 
   /** Record (briefly) that a peer is talked to in the clear, so an off-mode peer isn't re-probed via
@@ -3219,7 +3245,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   ): Promise<string> {
     const response = await sealedFetch(session, peerUrl, path, {
       body,
-      headers: peerSyncHeaders(),
+      // Seal the sync token INSIDE the envelope rather than presenting it as a wire header (docs/08) — so a
+      // node-membership bearer credential is never readable on the wire and the request proves key
+      // possession. A present token also makes a bodyless digest a sealed POST.
+      syncToken: appConfig.sync.token,
       maxBytes: maxPeerJsonBytes,
       reHandshake: async () => {
         try {
@@ -3299,21 +3328,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10_000);
-        const response = await fetch(
-          `${peerUrl.replace(/\/+$/, "")}/api/attachments/${attachmentFileName(attachment)}`,
-          { signal: controller.signal },
-        ).finally(() => clearTimeout(timeout));
+        // Fetch through the transport-aware peer client (docs/08) — `/api/sync/attachment` returns the
+        // bytes as base64 JSON, so a REQUIRED peer serves them sealed (a plain binary GET on the
+        // tunnel-only `/api/attachments/:fileName` would 401, leaving the message with a permanently
+        // missing image). `fetchPeerJson` handles the sealed/plaintext choice + the sealed sync token.
+        const result = await fetchPeerJson(
+          peerUrl,
+          "/api/sync/attachment",
+          SyncAttachmentResponseSchema,
+          { fileName: attachmentFileName(attachment) },
+        );
 
-        if (!response.ok) {
-          continue;
-        }
+        const bytes = Buffer.from(result.data, "base64");
 
-        // Bounded read: the cap applies while streaming, not after buffering the whole body.
-        const bytes = await readPeerBody(response, attachmentMaxBytes);
-
-        if (!bytes.length || !avatarImageHasExpectedSignature(bytes, attachment.mimeType)) {
+        if (
+          bytes.length > attachmentMaxBytes ||
+          !bytes.length ||
+          !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
+        ) {
           continue;
         }
 
@@ -3332,8 +3364,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           return;
         }
       } catch {
-        // Message still imports; the image 404s until a later sync round retries... it won't —
-        // acceptable v1 tradeoff, the text is the payload that matters off-grid.
+        // Best-effort at import time: the fetch genuinely failed (peer unreachable, attachment gone, or a
+        // transient error). The message still imports; the image stays absent (the puller only re-requests
+        // messages it lacks, so an imported message's attachment isn't retried) — acceptable off-grid,
+        // where the text is the payload that matters. The required-mode 401 that dropped EVERY attachment
+        // is the case this path now fixes.
       }
     }
   }
@@ -3983,9 +4018,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // monotonic sequence for replay protection, `b` the actual request body (omitted for a bodyless
       // mutation). `s` lives INSIDE the AEAD, so it's authenticated — an attacker can't renumber a
       // replay to dodge the window without breaking the tag.
-      let envelope: { s?: unknown; b?: unknown };
+      let envelope: { s?: unknown; b?: unknown; tok?: unknown };
       try {
-        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown };
+        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown; tok?: unknown };
       } catch {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
@@ -3998,6 +4033,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
       }
       transportRequestSeq.set(request, envelope.s);
+      // A sealed node-to-node sync request carries the `sync.token` INSIDE the envelope (docs/08) — stash it
+      // (authenticated by the AEAD) for `syncPeerAuthorized`, which prefers it over any wire header.
+      if (typeof envelope.tok === "string") {
+        transportRequestSyncToken.set(request, envelope.tok);
+      }
       request.body = envelope.b;
       return;
     }
@@ -5095,8 +5135,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return true;
     }
 
+    // Prefer the token the peer sealed INSIDE its `{ s, b, tok }` envelope (authenticated + confidential,
+    // docs/08); fall back to the plaintext `x-loam-sync-token` header only for a plaintext (`off`-mode)
+    // peer that has no sealed channel to carry it.
+    const sealedToken = transportRequestSyncToken.get(request);
     const header = request.headers["x-loam-sync-token"];
-    const provided = Array.isArray(header) ? header[0] : header;
+    const provided = sealedToken ?? (Array.isArray(header) ? header[0] : header);
     if (typeof provided !== "string") {
       return false;
     }
@@ -5106,17 +5150,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return a.length === b.length && timingSafeEqual(a, b);
   }
 
-  server.get(
-    "/api/sync/digest",
-    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
-    async (request, reply) => {
+  // GET for a plaintext (`off`-mode) peer; POST for a sealed peer, which carries the `{ s, b, tok }`
+  // envelope so the sync token is sealed and the request proves session-key possession (docs/08). The
+  // handler ignores the (empty) POST body — it's the sealed envelope that matters.
+  server.route({
+    method: ["GET", "POST"],
+    url: "/api/sync/digest",
+    config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    handler: async (request, reply) => {
       if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
       }
 
       return buildSyncDigest();
     },
-  );
+  });
 
   server.post(
     "/api/sync/messages",
@@ -5140,6 +5188,54 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // shadowBanned), and an import strips authority regardless.
       const users = data.users.filter((user) => authorIds.has(user.id)).map(publicUser);
       return { messages, users };
+    },
+  );
+
+  // A peer fetches a public-message attachment's bytes as base64 JSON here (docs/08) rather than the
+  // tunnel-only binary `/api/attachments/:fileName`, so it rides the sealed transport channel (`onSend`
+  // seals string payloads; a raw binary GET can't be app-sealed and is 401'd in required mode). Only
+  // attachments on SYNCABLE (public, non-shadow-banned) messages are served — the same scope as the
+  // messages export — so DM / private-channel attachments never cross.
+  server.post(
+    "/api/sync/attachment",
+    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const body = SyncAttachmentRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid sync request"));
+      }
+
+      const attachment = parseAttachmentFileName(body.data.fileName);
+      if (!attachment) {
+        return reply.code(404).send(errorBody("Attachment does not exist"));
+      }
+
+      // Serve only if a SYNCABLE (public) message actually references it — mirrors the messages export
+      // scope so a peer can't pull a DM / private-channel attachment by guessing its file name.
+      const owningMessage = data.messages.find(
+        (message) =>
+          isSyncableMessage(message) &&
+          message.type !== "reaction" &&
+          message.type !== "sealed" &&
+          !!message.attachments?.some((entry) => entry.id === attachment.id),
+      );
+      if (!owningMessage) {
+        return reply.code(404).send(errorBody("Attachment does not exist"));
+      }
+
+      try {
+        const bytes = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
+        return { data: bytes.toString("base64"), mimeType: attachment.mimeType };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return reply.code(404).send(errorBody("Attachment does not exist"));
+        }
+        throw error;
+      }
     },
   );
 

@@ -8,17 +8,19 @@
  *
  * Framing matches the peer's Fastify hooks exactly (verified against `apps/server/src/app.ts`):
  *   - the sealed request body is `{ enc: sealTransport(key, <sealed-plaintext>, aad) }`;
- *   - the inner plaintext of a BODIED request is the anti-replay envelope `{ s: <per-session seq>, b:
- *     <body> }` (docs/08): `s` is a per-session monotonic sequence (starts at 1, resets on
- *     re-handshake), authenticated inside the AEAD, and the peer's `preValidation` runs it through the
- *     `TRANSPORT_REPLAY_WINDOW` sliding window — a 409 rejects a replayed/out-of-window sequence. The
- *     peer sets `request.body = envelope.b` before schema validation. A missing `s` 409s, so the
- *     envelope is mandatory once #75's hardening merged (which it now has, on master);
- *   - a bodyless GET sends NO envelope — the peer skips replay enforcement for GET/HEAD (nothing to
- *     seal/replay) and only asks that the response be sealed;
- *   - `aad` is `${method} ${path}` (method is GET when there's no body, else POST), matching the
- *     peer's `${request.method} ${request.url}` (sync paths carry no query string, so path === url);
- *   - a sealed response is signalled by `x-loam-enc: 1` and unsealed with the same `aad`.
+ *   - the inner plaintext of a sealed request is the envelope `{ s, b?, tok? }` (docs/08): `s` a
+ *     per-session monotonic sequence (starts at 1, resets on re-handshake) the peer runs through its
+ *     `TRANSPORT_REPLAY_WINDOW` sliding window (a replayed/out-of-window `s` → 409); `b` the route body,
+ *     which the peer assigns to `request.body` before schema validation; `tok` the `sync.token` bearer
+ *     credential, carried INSIDE the AEAD (never a wire header) so it is confidential + authenticated and
+ *     the request proves session-key possession. A missing `s` 409s, so the envelope is mandatory;
+ *   - a request is a sealed POST whenever it has a body OR a token (so even a bodyless digest becomes a
+ *     sealed POST when a token is present); with neither it stays a bodyless GET that sends no envelope —
+ *     the peer skips replay enforcement for GET/HEAD and only seals the RESPONSE;
+ *   - `aad` is `${method} ${path}`, matching the peer's `${request.method} ${request.url}` (sync paths
+ *     carry no query string, so path === url);
+ *   - a sealed response is signalled by `x-loam-enc: 1` and unsealed with the same `aad`; an UNSEALED 2xx
+ *     over a live session is refused (a downgrade), retrying once after a re-handshake before throwing.
  *
  * Pure `@loam/crypto` (X25519 handshake + XChaCha20-Poly1305), no native deps.
  */
@@ -249,9 +251,17 @@ export async function handshakeWithPeer(
 }
 
 export interface SealedFetchOptions {
-  /** JSON-serializable request body. Undefined → a bodyless GET; defined → a POST. */
+  /** JSON-serializable request body. Undefined → no route body; defined → a route body. */
   body?: unknown;
-  /** Extra headers merged onto the sealed request (e.g. `x-loam-sync-token`). */
+  /**
+   * The node sync token (`sync.token`), when set. Carried INSIDE the sealed `{ s, b, tok }` envelope —
+   * never as a wire header — so a bearer credential can't be read off the wire, and so a request that
+   * presents it proves possession of the session key (docs/08). When a token is present the request is
+   * always a sealed POST (even a digest that has no body), so the peer can decrypt the envelope; without
+   * one, a bodyless request stays a GET (nothing to seal — the response is still sealed).
+   */
+  syncToken?: string;
+  /** Extra headers merged onto the sealed request. */
   headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
   maxBytes?: number;
@@ -304,7 +314,12 @@ async function attemptSealed(
 ): Promise<SealedResponse> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const hasBody = options.body !== undefined;
-  const method = hasBody ? "POST" : "GET";
+  // A request is sealed (a POST carrying the `{ s, b, tok }` envelope) whenever it has a body OR a token
+  // to carry: sealing the token requires an envelope, so even a bodyless digest becomes a sealed POST when
+  // a token is present (which also proves session-key possession). With neither, a bodyless request stays
+  // a GET — nothing to seal (the peer still seals the RESPONSE).
+  const sealed = hasBody || options.syncToken !== undefined;
+  const method = sealed ? "POST" : "GET";
   const aad = `${method} ${path}`;
   // Snapshot the session id + key for the whole attempt: `refreshSession` mutates the shared `session`
   // object in place, so a concurrent re-handshake must not swap the key/id out from under an in-flight
@@ -313,13 +328,23 @@ async function attemptSealed(
   const sessionId = session.sessionId;
   const key = session.key;
 
-  // GET with no body: no envelope, but signal we want a sealed response. Anything with a body is sealed
-  // as the `{ s, b }` anti-replay envelope (docs/08) — `s` a per-session monotonic sequence the peer
-  // checks against its replay window (a bare body would 409). The peer refuses a non-GET that lacks a
-  // sealed body, so a bodied request is always sealed. `s` is computed per attempt, so the retry path
-  // (after a re-handshake reset `seq` to 0) sends a fresh in-window sequence on the new session.
-  const sealedBody = hasBody
-    ? JSON.stringify({ enc: sealTransport(key, JSON.stringify({ s: ++session.seq, b: options.body }), aad) })
+  // The sealed plaintext is the `{ s, b, tok }` anti-replay envelope (docs/08): `s` a per-session monotonic
+  // sequence the peer checks against its replay window (a bare body would 409); `b` the route body (omitted
+  // for a bodyless digest); `tok` the node sync token, carried inside the AEAD rather than on a wire header.
+  // `s` is computed per attempt, so the retry path (after a re-handshake reset `seq` to 0) sends a fresh
+  // in-window sequence on the new session.
+  const sealedBody = sealed
+    ? JSON.stringify({
+        enc: sealTransport(
+          key,
+          JSON.stringify({
+            s: ++session.seq,
+            ...(hasBody ? { b: options.body } : {}),
+            ...(options.syncToken !== undefined ? { tok: options.syncToken } : {}),
+          }),
+          aad,
+        ),
+      })
     : undefined;
 
   const headers: Record<string, string> = {
