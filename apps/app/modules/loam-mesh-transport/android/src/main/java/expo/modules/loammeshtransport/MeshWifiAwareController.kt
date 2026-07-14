@@ -578,9 +578,10 @@ internal class MeshWifiAwareController(
     teardown(shutdownExecutor = true)
   }
 
-  /** Recover from a dead PARENT Wi-Fi Aware session (its `onAwareSessionTerminated`, API 33+, or the pre-33
-   * repeated-discovery-failure fallback). Unlike [stop], this does NOT shut the executor down — the
-   * controller stays alive and simply reattaches on the next `start()` tick (session is cleared to null,
+  /** Recover from a dead PARENT Wi-Fi Aware session (its `onAwareSessionTerminated` on API 33+, or the
+   * cross-version `ACTION_WIFI_AWARE_STATE_CHANGED` receiver). Unlike [stop], this does NOT shut the executor
+   * down — the controller stays alive and simply reattaches on the next `start()` tick (session is cleared to
+   * null,
    * so `start()` takes the fresh-attach path) (P1). */
   private fun resetForReattach(): Unit = synchronized(lifecycleLock) {
     teardown(shutdownExecutor = false)
