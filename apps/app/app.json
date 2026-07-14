@@ -25,6 +25,7 @@
     },
     "plugins": [
       "expo-router",
+      "llama.rn",
       [
         "expo-splash-screen",
         {
