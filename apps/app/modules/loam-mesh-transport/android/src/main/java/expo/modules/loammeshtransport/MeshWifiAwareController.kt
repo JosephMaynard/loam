@@ -187,14 +187,48 @@ internal class MeshWifiAwareController(
 
   private fun publish(session: WifiAwareSession, advert: MeshAdvert) {
     publishing = true
+    // Bind this publish attempt to the current lifecycle generation, so its async callbacks (which may
+    // arrive after a stop()/re-start) can tell whether they're still current (P1).
+    val gen = generation
     session.publish(buildPublishConfig(advert), object : DiscoverySessionCallback() {
       override fun onPublishStarted(discoverySession: android.net.wifi.aware.PublishDiscoverySession) {
         synchronized(lifecycleLock) {
+          // A stop() (or superseding start) landed while this publish was in flight — this success is STALE:
+          // close the discovery session instead of repopulating publishSession onto a torn-down controller.
+          if (gen != generation) {
+            try {
+              discoverySession.close()
+            } catch (_: Throwable) {
+            }
+            return
+          }
           publishing = false
           publishSession = discoverySession
           // Apply any advert refresh that arrived while this first publish was in flight (P1).
           pendingAdvert?.let { discoverySession.updatePublish(buildPublishConfig(it)) }
           pendingAdvert = null
+        }
+      }
+
+      override fun onSessionConfigFailed() {
+        synchronized(lifecycleLock) {
+          // The initial publish FAILED. Clear `publishing` so a later updateAdvert can retry, instead of
+          // wedging forever (every refresh only overwriting pendingAdvert, never re-publishing) (P1).
+          if (gen == generation) {
+            publishing = false
+            listener.onError("Wi-Fi Aware publish failed")
+          }
+        }
+      }
+
+      override fun onSessionTerminated() {
+        synchronized(lifecycleLock) {
+          // The publish session ended on its own — drop the stale handle + clear `publishing` so the next
+          // updateAdvert re-publishes rather than calling updatePublish on a dead session (P1).
+          if (gen == generation) {
+            publishSession = null
+            publishing = false
+          }
         }
       }
 

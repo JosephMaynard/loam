@@ -138,8 +138,8 @@ function withArmOnlyReactNativeArchitectures(config) {
  * Declare the mesh-transport hardware (BLE + Wi-Fi Aware) as OPTIONAL features so Google Play does not
  * filter out devices that lack them (many phones have no Wi-Fi Aware) — the app degrades gracefully
  * (BLE-only, or no mesh at all). Also stamp `usesPermissionFlags="neverForLocation"` on BLUETOOTH_SCAN
- * so scanning for LOAM beacons doesn't drag in the location-permission story where the OS allows it (we
- * never derive location from BLE).
+ * and NEARBY_WIFI_DEVICES so BLE-beacon scanning + Wi-Fi Aware discovery don't drag in the location-
+ * permission story (we never derive location from either) — required for a mesh-only startup on API 33+.
  */
 function withMeshManifest(config) {
   return withAndroidManifest(config, (cfg) => {
@@ -156,12 +156,17 @@ function withMeshManifest(config) {
       }
     }
 
-    // Add the neverForLocation flag to the BLUETOOTH_SCAN permission (added by withPermissions above).
-    const scan = (manifest["uses-permission"] ?? []).find(
-      (permission) => permission.$?.["android:name"] === "android.permission.BLUETOOTH_SCAN",
-    );
-    if (scan) {
-      scan.$["android:usesPermissionFlags"] = "neverForLocation";
+    // Stamp `neverForLocation` on BOTH BLUETOOTH_SCAN and NEARBY_WIFI_DEVICES — we never derive physical
+    // location from BLE scanning or Wi-Fi Aware. Critically for NEARBY_WIFI_DEVICES (API 33+): without this
+    // flag Android *also* requires ACCESS_FINE_LOCATION to be granted, so a fresh MESH-ONLY startup (which
+    // requests only NEARBY_WIFI_DEVICES) would fail unless the hotspot flow had separately granted location
+    // first (P1). The hotspot keeps its own ACCESS_FINE_LOCATION declaration, so this is additive.
+    const perms = manifest["uses-permission"] ?? [];
+    for (const name of ["android.permission.BLUETOOTH_SCAN", "android.permission.NEARBY_WIFI_DEVICES"]) {
+      const entry = perms.find((permission) => permission.$?.["android:name"] === name);
+      if (entry) {
+        entry.$["android:usesPermissionFlags"] = "neverForLocation";
+      }
     }
     return cfg;
   });
