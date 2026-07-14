@@ -152,15 +152,19 @@ is that client (pure `@loam/crypto`, no native deps), mirroring `apps/client/src
   response. On a `401` or an undecryptable/unsealed response it re-handshakes **once** and retries — always
   safe because every sync request is a read-only query.
 
-**Framing note (important):** the inner sealed plaintext of a sealed request is the **`{ s, b?, tok? }`
-envelope** — `s` a per-session monotonic sequence (starts at 1, resets on re-handshake), `b` the route
-body, `tok` the `sync.token` bearer credential. The peer's `preValidation` runs `s` through its
-`TRANSPORT_REPLAY_WINDOW` sliding window (a replayed/out-of-window sequence gets a **409**), stashes `tok`
-for `syncPeerAuthorized`, and sets `request.body = envelope.b` before schema validation. `s` (and `tok`)
-live inside the AEAD, so they can't be renumbered/read without breaking the tag. A request is a sealed
-POST whenever it has a body **or** a token — so even a bodyless digest becomes a sealed POST when a token
-is configured (which also proves session-key possession); with neither it stays a bodyless GET that
-carries no `s` and the peer skips replay enforcement for GET/HEAD, sealing only the response.
+**Framing note (important):** every sealed sync request is a **POST** whose inner sealed plaintext is the
+**`{ s, b?, tok? }` envelope** — `s` a per-session monotonic sequence (starts at 1, resets on
+re-handshake), `b` the route body (omitted for a bodyless digest), `tok` the `sync.token` bearer
+credential. The peer's `preValidation` runs `s` through its `TRANSPORT_REPLAY_WINDOW` sliding window (a
+replayed/out-of-window sequence gets a **409**), stashes `tok` for `syncPeerAuthorized`, and sets
+`request.body = envelope.b` before schema validation. `s` (and `tok`) live inside the AEAD, so they can't
+be renumbered/read without breaking the tag. Even a tokenless digest is a POST carrying just `{ s }` — so
+the **response** can be bound to it: the peer seals its reply under `${method} ${url}#${s}` (the request
+sequence), and the puller opens it with the exact `s` it sent, so a captured response can't be **replayed
+or cross-fed** to another request on the same route (the tunnel binds its responses `{s,m,p}` the same
+way). An `off`-mode peer's plaintext digest stays a GET (nothing to seal). **Encrypted sessions authorize
+ONLY via the sealed `tok`** — the `x-loam-sync-token` header is honoured solely on the plaintext path, so
+a captured token can't authorize an attacker's own encrypted session by being attached as a header.
 
 **Tunnel-only gate reconcile:** under `required` mode the peer makes user-facing content *tunnel-only*
 (`/api/transport/tunnel`, identity-bound). Sync is different — it is authenticated by the shared
@@ -195,10 +199,13 @@ This closes a real gap: a peer running `transportEncryption: "required"` previou
 plaintext sync pull** (its transport hook refuses any `/api/*` content request without a session), so it
 could not be synced *from* at all. It can now.
 
-**Attachments** ride the same sealed channel: a peer fetches a public message's image bytes as base64
+**Attachments** are fetched over the channel the peer supports: from an **encrypted** peer as base64
 JSON from `POST /api/sync/attachment` (a string payload `onSend` can seal), **not** the tunnel-only binary
 `/api/attachments/:fileName` (which a peer's sessionless GET would 401, dropping every attachment on a
-required peer). Only attachments on syncable (public) messages are served.
+required peer). A **plaintext** (`off`-mode) peer keeps using the legacy public binary GET
+`/api/attachments/:fileName` — preserving back-compat with older / off-mode peers that predate the
+sync-attachment route (an older *encrypted* peer without it must be upgraded). Only attachments on
+syncable (public) messages are served.
 
 **Token confidentiality (honest scope):** over a **sealed** channel (`optional`/`required` peer) the
 `sync.token` is confidential + authenticated — it never leaves the AEAD. Over the **plaintext** path

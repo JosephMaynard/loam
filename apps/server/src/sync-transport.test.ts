@@ -288,11 +288,10 @@ describe("sync transport encryption — REQUIRED peer", () => {
     });
     const peer = await buildOn(peerDir);
     const peerUrl = await listen(peer);
-
     const session = await handshakeWithPeer(peerUrl);
 
-    // No token → the peer 404s (token required, none presented). A bodyless, tokenless digest is a GET
-    // whose sealed reply is a 404.
+    // No token → the peer 404s (token required, none presented) — a tokenless digest is a sealed POST
+    // carrying just `{ s }`, whose sealed reply is a 404.
     const noToken = await sealedFetch(session, peerUrl, "/api/sync/digest");
     expect(noToken.status).toBe(404);
 
@@ -314,6 +313,62 @@ describe("sync transport encryption — REQUIRED peer", () => {
     expect(withToken.ok).toBe(true);
     const digest = SyncDigestSchema.parse(JSON.parse(withToken.text));
     expect(digest.messages.some((entry) => entry.id === seededId)).toBe(true);
+  });
+
+  it("(b5) ignores a plaintext x-loam-sync-token header on an ENCRYPTED session (must be sealed)", async () => {
+    const peerDir = makeDataDir();
+    await seedPublicMessage(peerDir, "header ignored");
+    writeConfig(peerDir, {
+      security: { transportEncryption: "required" },
+      sync: { enabled: true, peers: [], token: "header-ignored-token" },
+    });
+    const peer = await buildOn(peerDir);
+    const peerUrl = await listen(peer);
+    const session = await handshakeWithPeer(peerUrl);
+
+    // Hand-seal a digest request with NO `tok` in the envelope but attach the CORRECT token as a wire
+    // header. A sealed session must authenticate only via the sealed token, so the header is ignored → 404.
+    const sealed = JSON.stringify({
+      enc: sealTransport(session.key, JSON.stringify({ s: 1 }), "POST /api/sync/digest"),
+    });
+    const res = await fetch(`${peerUrl}/api/sync/digest`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-loam-enc": session.sessionId,
+        "x-loam-sync-token": "header-ignored-token",
+      },
+      body: sealed,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("(b6) rejects a response bound to a DIFFERENT request sequence (no cross-feed / replay)", async () => {
+    const peerDir = makeDataDir();
+    await seedPublicMessage(peerDir, "response binding");
+    writeConfig(peerDir, requiredPeerConfig());
+    const peer = await buildOn(peerDir);
+    const peerUrl = await listen(peer);
+    const session = await handshakeWithPeer(peerUrl);
+
+    // Capture the genuine sealed response to the first request (sequence 1).
+    let captured = "";
+    const captureFetch: typeof fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      captured = await response.clone().text();
+      return response;
+    };
+    const first = await sealedFetch(session, peerUrl, "/api/sync/digest", { fetchImpl: captureFetch });
+    expect(first.ok).toBe(true);
+
+    // A second request advances to sequence 2, but the peer "replays" the sequence-1 response. It was
+    // sealed under `POST /api/sync/digest#1`, so opening it under `#2` fails and `sealedFetch` rejects it
+    // rather than accepting a stale/cross-fed response (docs/08 / Sol round-2 #1).
+    const replayFetch: typeof fetch = async () =>
+      new Response(captured, { status: 200, headers: { "content-type": "application/json", "x-loam-enc": "1" } });
+    await expect(
+      sealedFetch(session, peerUrl, "/api/sync/digest", { fetchImpl: replayFetch }),
+    ).rejects.toThrow();
   });
 
   it("(d) the puller re-handshakes once on a 401 and reuses one session across calls", async () => {

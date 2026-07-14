@@ -7,20 +7,18 @@
  * bearing `x-loam-enc` + a sealed `{ enc }` body and seal the response back the same way.
  *
  * Framing matches the peer's Fastify hooks exactly (verified against `apps/server/src/app.ts`):
- *   - the sealed request body is `{ enc: sealTransport(key, <sealed-plaintext>, aad) }`;
- *   - the inner plaintext of a sealed request is the envelope `{ s, b?, tok? }` (docs/08): `s` a
- *     per-session monotonic sequence (starts at 1, resets on re-handshake) the peer runs through its
- *     `TRANSPORT_REPLAY_WINDOW` sliding window (a replayed/out-of-window `s` → 409); `b` the route body,
- *     which the peer assigns to `request.body` before schema validation; `tok` the `sync.token` bearer
- *     credential, carried INSIDE the AEAD (never a wire header) so it is confidential + authenticated and
- *     the request proves session-key possession. A missing `s` 409s, so the envelope is mandatory;
- *   - a request is a sealed POST whenever it has a body OR a token (so even a bodyless digest becomes a
- *     sealed POST when a token is present); with neither it stays a bodyless GET that sends no envelope —
- *     the peer skips replay enforcement for GET/HEAD and only seals the RESPONSE;
- *   - `aad` is `${method} ${path}`, matching the peer's `${request.method} ${request.url}` (sync paths
- *     carry no query string, so path === url);
- *   - a sealed response is signalled by `x-loam-enc: 1` and unsealed with the same `aad`; an UNSEALED 2xx
- *     over a live session is refused (a downgrade), retrying once after a re-handshake before throwing.
+ *   - every sealed request is a POST `{ enc: sealTransport(key, <envelope>, `POST ${path}`) }` whose
+ *     inner plaintext is `{ s, b?, tok? }` (docs/08): `s` a per-session monotonic sequence (starts at 1,
+ *     resets on re-handshake) the peer runs through its `TRANSPORT_REPLAY_WINDOW` sliding window (a
+ *     replayed/out-of-window `s` → 409); `b` the route body (omitted for a bodyless digest), assigned to
+ *     `request.body` before schema validation; `tok` the `sync.token` bearer credential, carried INSIDE
+ *     the AEAD (never a wire header) so it is confidential + authenticated and the request proves
+ *     session-key possession. Always a POST-with-`{ s }` (even a tokenless digest) so the RESPONSE can be
+ *     bound to `s` — see below;
+ *   - the response is `{ enc }` signalled by `x-loam-enc: 1`, sealed by the peer under `POST ${path}#${s}`
+ *     — the request's sequence — so a captured response can't be replayed or cross-fed to another request
+ *     on the same route; the puller opens it with the exact `s` it sent. An UNSEALED 2xx over a live
+ *     session is refused (a downgrade), retrying once after a re-handshake before throwing.
  *
  * Pure `@loam/crypto` (X25519 handshake + XChaCha20-Poly1305), no native deps.
  */
@@ -314,46 +312,42 @@ async function attemptSealed(
 ): Promise<SealedResponse> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const hasBody = options.body !== undefined;
-  // A request is sealed (a POST carrying the `{ s, b, tok }` envelope) whenever it has a body OR a token
-  // to carry: sealing the token requires an envelope, so even a bodyless digest becomes a sealed POST when
-  // a token is present (which also proves session-key possession). With neither, a bodyless request stays
-  // a GET — nothing to seal (the peer still seals the RESPONSE).
-  const sealed = hasBody || options.syncToken !== undefined;
-  const method = sealed ? "POST" : "GET";
-  const aad = `${method} ${path}`;
+  // Every sealed sync request is a POST carrying at least `{ s }` — so the RESPONSE can be bound to that
+  // authenticated sequence (docs/08 / Sol round-2 #1): a genuine peer seals its reply under `${method}
+  // ${path}#${s}`, so a captured response for one request can't be cross-fed to (or replayed against) a
+  // later request on the same route. `b` (route body) and `tok` (the sync token, inside the AEAD, never a
+  // header) are added when present.
+  const method = "POST";
+  const requestAad = `${method} ${path}`;
   // Snapshot the session id + key for the whole attempt: `refreshSession` mutates the shared `session`
   // object in place, so a concurrent re-handshake must not swap the key/id out from under an in-flight
   // request (which would seal under one key and try to open under another). The sequence still advances
   // on the live `session` (the peer's replay window tolerates concurrent sequences).
   const sessionId = session.sessionId;
   const key = session.key;
-
-  // The sealed plaintext is the `{ s, b, tok }` anti-replay envelope (docs/08): `s` a per-session monotonic
-  // sequence the peer checks against its replay window (a bare body would 409); `b` the route body (omitted
-  // for a bodyless digest); `tok` the node sync token, carried inside the AEAD rather than on a wire header.
   // `s` is computed per attempt, so the retry path (after a re-handshake reset `seq` to 0) sends a fresh
   // in-window sequence on the new session.
-  const sealedBody = sealed
-    ? JSON.stringify({
-        enc: sealTransport(
-          key,
-          JSON.stringify({
-            s: ++session.seq,
-            ...(hasBody ? { b: options.body } : {}),
-            ...(options.syncToken !== undefined ? { tok: options.syncToken } : {}),
-          }),
-          aad,
-        ),
-      })
-    : undefined;
+  const seq = ++session.seq;
+  const sealedBody = JSON.stringify({
+    enc: sealTransport(
+      key,
+      JSON.stringify({
+        s: seq,
+        ...(hasBody ? { b: options.body } : {}),
+        ...(options.syncToken !== undefined ? { tok: options.syncToken } : {}),
+      }),
+      requestAad,
+    ),
+  });
+  // Open the response under the seq-bound aad — a peer's reply for a DIFFERENT sequence (a replay or a
+  // cross-fed capture) won't verify against `#${seq}` and is rejected.
+  const responseAad = `${method} ${path}#${seq}`;
 
   const headers: Record<string, string> = {
     ...options.headers,
     "x-loam-enc": sessionId,
+    "content-type": "application/json",
   };
-  if (sealedBody !== undefined) {
-    headers["content-type"] = "application/json";
-  }
 
   const response = await httpText(
     fetchImpl,
@@ -372,11 +366,12 @@ async function attemptSealed(
     } catch {
       enc = undefined;
     }
-    const opened = typeof enc === "string" ? openTransport(key, enc, aad) : null;
+    const opened = typeof enc === "string" ? openTransport(key, enc, responseAad) : null;
 
     if (opened === null) {
       // The peer's handler ran and sealed a reply we can't open (session key changed between request
-      // and response). Retrying is safe — sync requests are read-only — so re-handshake once.
+      // and response, OR the seq-bound aad didn't match — a replayed/cross-fed response). Retrying is
+      // safe — sync requests are read-only — so re-handshake once.
       if (!retried && (await refreshSession(session, options))) {
         return attemptSealed(session, peerUrl, path, options, true);
       }

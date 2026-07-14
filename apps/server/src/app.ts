@@ -3103,24 +3103,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * it. The pinned key comes from the peer's own sync-config entry (`SyncPeer.transportKey`). */
   async function handshakePeerAndCache(peerUrl: string): Promise<PeerTransportSession> {
     const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
+    const session = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
+    peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
+    return session;
+  }
+
+  /** Re-handshake and fold the fresh session INTO the caller's existing `session` object (then re-cache
+   * that same object), so a request holding it and the cache share ONE object + ONE monotonic replay
+   * sequence. Crucially it mutates the SPECIFIC object passed in — not one rediscovered via the mutable
+   * cache map, which a concurrent config PATCH / kill switch could have cleared, leaving a re-handshake to
+   * cache a fresh object while the in-flight request advanced a detached one → the sequence-split 409
+   * (docs/08 / Sol round-2 #3). */
+  async function rehandshakePeerInto(
+    session: PeerTransportSession,
+    peerUrl: string,
+  ): Promise<PeerTransportSession> {
+    const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
     const fresh = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
-    const expiresAt = Date.now() + PEER_TRANSPORT_SESSION_TTL_MS;
-    // Re-handshake reuses the SAME session object the cache (and any in-flight request that holds a
-    // reference via `refreshSession`) already points at, mutating it in place rather than caching a fresh
-    // object. Otherwise the replay sequence splits across two objects: the retried request advances `seq`
-    // on the object it holds while the cache keeps a detached copy at 0, so the NEXT POST reuses sequence 1
-    // and the peer 409s it (docs/08). One object → one monotonic sequence.
-    const existing = peerTransportSessions.get(peerUrl)?.transport;
-    if (existing && existing !== "plaintext") {
-      existing.sessionId = fresh.sessionId;
-      existing.key = fresh.key;
-      existing.hostPublicKey = fresh.hostPublicKey;
-      existing.seq = 0;
-      peerTransportSessions.set(peerUrl, { transport: existing, expiresAt });
-      return existing;
-    }
-    peerTransportSessions.set(peerUrl, { transport: fresh, expiresAt });
-    return fresh;
+    session.sessionId = fresh.sessionId;
+    session.key = fresh.key;
+    session.hostPublicKey = fresh.hostPublicKey;
+    session.seq = 0;
+    peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
+    return session;
   }
 
   /** Record (briefly) that a peer is talked to in the clear, so an off-mode peer isn't re-probed via
@@ -3252,7 +3257,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       maxBytes: maxPeerJsonBytes,
       reHandshake: async () => {
         try {
-          return await handshakePeerAndCache(peerUrl);
+          // Fold the fresh session into THIS request's `session` object (and re-cache it) so the cache and
+          // the in-flight request never diverge into two replay counters, even if the map was cleared.
+          return await rehandshakePeerInto(session, peerUrl);
         } catch {
           peerTransportSessions.delete(peerUrl);
           return undefined;
@@ -3311,6 +3318,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
+  /**
+   * Fetch a peer's attachment bytes over the channel that peer actually supports (Sol round-2 #4):
+   *  - an ENCRYPTED peer (`optional`/`required`) serves them sealed as base64 JSON from
+   *    `/api/sync/attachment` — the tunnel-only binary `/api/attachments/:fileName` would 401 without a
+   *    session, which is why a plain-fetch copy silently dropped every attachment on a required peer;
+   *  - a PLAINTEXT (`off`-mode) peer uses the **legacy public binary GET** `/api/attachments/:fileName`,
+   *    preserving back-compat with older / off-mode peers that predate the sync-attachment route (whose
+   *    attachments would otherwise disappear permanently). An older *encrypted* peer without the new route
+   *    can't be served this way (documented: it must be upgraded).
+   * Throws on any failure; the caller treats a throw as "image absent, message still imports".
+   */
+  async function fetchPeerAttachmentBytes(peerUrl: string, attachment: MessageAttachment): Promise<Buffer> {
+    const fileName = attachmentFileName(attachment);
+    const transport = await resolvePeerTransport(peerUrl);
+
+    if (transport === "plaintext") {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      try {
+        const response = await fetch(`${peerUrl.replace(/\/+$/, "")}/api/attachments/${fileName}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`Peer answered ${response.status}`);
+        }
+        return await readPeerBody(response, attachmentMaxBytes);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    const result = await fetchPeerJson(peerUrl, "/api/sync/attachment", SyncAttachmentResponseSchema, { fileName });
+    return Buffer.from(result.data, "base64");
+  }
+
   /** Best-effort copy of an imported message's attachment files from the peer that has them. */
   async function importPeerAttachments(peerUrl: string, message: Message, generation: number): Promise<void> {
     if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
@@ -3328,18 +3370,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       try {
-        // Fetch through the transport-aware peer client (docs/08) — `/api/sync/attachment` returns the
-        // bytes as base64 JSON, so a REQUIRED peer serves them sealed (a plain binary GET on the
-        // tunnel-only `/api/attachments/:fileName` would 401, leaving the message with a permanently
-        // missing image). `fetchPeerJson` handles the sealed/plaintext choice + the sealed sync token.
-        const result = await fetchPeerJson(
-          peerUrl,
-          "/api/sync/attachment",
-          SyncAttachmentResponseSchema,
-          { fileName: attachmentFileName(attachment) },
-        );
-
-        const bytes = Buffer.from(result.data, "base64");
+        const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment);
 
         if (
           bytes.length > attachmentMaxBytes ||
@@ -4061,7 +4092,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!key || typeof payload !== "string") {
       return payload;
     }
-    const sealed = sealTransport(key, payload, `${request.method} ${request.url}`);
+    // Bind a node-to-node sync RESPONSE to the request's authenticated sequence (docs/08 / Sol round-2 #1):
+    // sealing under `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a
+    // different request on the same route (the puller opens with the exact seq it sent). Scoped to the
+    // direct-sealed sync routes — the browser's own direct/tunnel paths are unchanged. (`transportRequestSeq`
+    // is always set for a sync request, since every sealed sync request now carries a `{ s }` envelope.)
+    const seq = transportRequestSeq.get(request);
+    const routeUrl = request.routeOptions?.url;
+    const responseAad =
+      seq !== undefined && routeUrl !== undefined && DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)
+        ? `${request.method} ${request.url}#${seq}`
+        : `${request.method} ${request.url}`;
+    const sealed = sealTransport(key, payload, responseAad);
     reply.header("content-type", "application/json; charset=utf-8");
     reply.header("x-loam-enc", "1");
     return JSON.stringify({ enc: sealed });
@@ -5135,12 +5177,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return true;
     }
 
-    // Prefer the token the peer sealed INSIDE its `{ s, b, tok }` envelope (authenticated + confidential,
-    // docs/08); fall back to the plaintext `x-loam-sync-token` header only for a plaintext (`off`-mode)
-    // peer that has no sealed channel to carry it.
-    const sealedToken = transportRequestSyncToken.get(request);
+    // An ENCRYPTED request (one that resolved a transport key) must authenticate ONLY via the token sealed
+    // inside its `{ s, b, tok }` envelope — never a plaintext `x-loam-sync-token` header. Accepting the
+    // header on a sealed session would let a captured token authorize an attacker's own encrypted session
+    // by simply attaching it as a header, defeating the whole point of sealing it. The header is honoured
+    // only on the plaintext (`off`-mode) path, which has no sealed channel to carry the token (docs/08).
+    const encrypted = transportRequestKeys.has(request);
     const header = request.headers["x-loam-sync-token"];
-    const provided = sealedToken ?? (Array.isArray(header) ? header[0] : header);
+    const provided = encrypted
+      ? transportRequestSyncToken.get(request)
+      : Array.isArray(header)
+        ? header[0]
+        : header;
     if (typeof provided !== "string") {
       return false;
     }
