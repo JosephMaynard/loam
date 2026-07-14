@@ -404,13 +404,18 @@ internal class MeshWifiAwareController(
    */
   private fun startResponderSocket() {
     try {
-      // NOTE (P1-5, partial): `ServerSocket(0)` binds all local interfaces, so on a device also running the
-      // hotspot a LAN client that found the port could connect here. Binding to the Aware interface alone
-      // needs the responder restructured around the per-peer Aware `Network` lifecycle (tied to the
-      // still-unverified port-exchange scaffold — see `sendBlob`'s doc caveat), so it's a device-iteration
-      // follow-up. The admission cap below + the per-connection deadline in `receiveOne` bound the DoS
-      // impact meanwhile (≤ MAX_CONCURRENT_TRANSFERS slots, each ≤ TRANSFER_TIMEOUT_MS), and every accepted
-      // blob is still validated server-side (sealed relay) before anything is delivered.
+      // NOTE (P1-5 + port-exchange, DEVICE-ITERATION): the bulk-transfer data path is a marked scaffold, not
+      // yet a working end-to-end link. Two pieces are deferred together because neither can be built or
+      // verified without two Wi-Fi Aware radios (docs/17): (1) `ServerSocket(0)` binds all local interfaces —
+      // on a device also running the hotspot a LAN client that found the port could connect here; binding to
+      // the Aware interface alone needs the responder restructured around the per-peer Aware `Network`
+      // lifecycle. (2) The responder's `listenPort` must really be exchanged over the discovery message
+      // channel (`DiscoverySession.sendMessage`/`onMessageReceived`) and the peer's port validated before a
+      // transfer — today `sendBlob` leans on `WifiAwareNetworkInfo.port` with a `listenPort` fallback (see its
+      // doc caveat). Both are the same restructure and land in the 2-phone device-iteration pass. Meanwhile
+      // the admission cap below + the per-connection deadline in `receiveOne` bound the DoS impact
+      // (≤ MAX_CONCURRENT_TRANSFERS slots, each ≤ TRANSFER_TIMEOUT_MS), and every accepted blob is still
+      // validated server-side (sealed relay) before anything is delivered. Feature is default-off.
       val socket = ServerSocket(0)
       serverSocket = socket
       listenPort = socket.localPort
@@ -512,13 +517,21 @@ internal class MeshWifiAwareController(
 
     val done = java.util.concurrent.CountDownLatch(1)
     var failure: Throwable? = null
+    val started = java.util.concurrent.atomic.AtomicBoolean(false)
 
     val callback = object : ConnectivityManager.NetworkCallback() {
-      override fun onAvailable(network: Network) {
+      // The peer's WifiAwareNetworkInfo (its IPv6 address + port) is delivered through
+      // onCapabilitiesChanged, NOT onAvailable — at onAvailable time getNetworkCapabilities(network) can
+      // still lack the transportInfo. So we start the transfer here, from the caps the framework hands us,
+      // rather than re-reading them. onCapabilitiesChanged can fire more than once, so `started` guards a
+      // single dispatch.
+      override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+        val info = caps.transportInfo as? WifiAwareNetworkInfo ?: return
+        if (!started.compareAndSet(false, true)) return
         try {
           executor.execute {
             try {
-              writeOverNetwork(network, connectivity, bytes)
+              writeOverNetwork(network, info, bytes)
             } catch (error: Throwable) {
               failure = error
             } finally {
@@ -553,10 +566,7 @@ internal class MeshWifiAwareController(
     }
   }
 
-  private fun writeOverNetwork(network: Network, connectivity: ConnectivityManager, bytes: ByteArray) {
-    val caps = connectivity.getNetworkCapabilities(network)
-    val info = caps?.transportInfo as? WifiAwareNetworkInfo
-      ?: throw IOException("No Wi-Fi Aware peer address on the data path")
+  private fun writeOverNetwork(network: Network, info: WifiAwareNetworkInfo, bytes: ByteArray) {
     val peerAddress = info.peerIpv6Addr ?: throw IOException("No peer IPv6 address")
     // See the doc-comment caveat: the port must really be exchanged over the discovery channel. We use
     // the responder's advertised port convention here.
