@@ -68,6 +68,9 @@ internal class MeshWifiAwareController(
   // advert refresh in that window sees `publishSession == null` and publishes AGAIN, orphaning sessions.
   private var publishing = false
   private var pendingAdvert: MeshAdvert? = null
+  // Same for subscribe: without it a config-fail / termination would leave discovery permanently dead
+  // (nothing re-subscribes) — the recurring start() re-subscribes when both are clear (P1).
+  private var subscribing = false
 
   private val executor = Executors.newCachedThreadPool()
   // Hard cap on concurrent inbound transfers. `ServerSocket` accepts on local interfaces, so without this
@@ -99,11 +102,13 @@ internal class MeshWifiAwareController(
   /** Attach, start the responder socket, then publish + subscribe. Best-effort; errors surface via the
    * listener and leave the module in a BLE-only state. */
   fun start(advert: MeshAdvert) = synchronized(lifecycleLock) {
-    // Already attached → just refresh the advertised have-mail flag (P1-2). Without this, the launcher's
-    // 30s advert refresh would attach a NEW session + responder socket + accept loop every time, while
-    // stop() only tracks the latest — leaking sessions/sockets/threads.
-    if (session != null) {
+    // Already attached → refresh the advert (P1-2; a re-attach every 30s would leak
+    // sessions/sockets/threads) AND re-subscribe if discovery died, so a failed/terminated subscribe
+    // self-heals on the recurring tick instead of leaving this node permanently unable to discover peers (P1).
+    val active = session
+    if (active != null) {
       updateAdvert(advert)
+      ensureSubscribed(active)
       return
     }
     if (starting) {
@@ -213,9 +218,12 @@ internal class MeshWifiAwareController(
       override fun onSessionConfigFailed() {
         synchronized(lifecycleLock) {
           // The initial publish FAILED. Clear `publishing` so a later updateAdvert can retry, instead of
-          // wedging forever (every refresh only overwriting pendingAdvert, never re-publishing) (P1).
+          // wedging forever (every refresh only overwriting pendingAdvert, never re-publishing) (P1). Also
+          // drop the stashed pendingAdvert: it's now stale, and a fresh retry publishes the CURRENT advert —
+          // otherwise a later success could apply this old value and briefly revert the payload (P2).
           if (gen == generation) {
             publishing = false
+            pendingAdvert = null
             listener.onError("Wi-Fi Aware publish failed")
           }
         }
@@ -223,11 +231,13 @@ internal class MeshWifiAwareController(
 
       override fun onSessionTerminated() {
         synchronized(lifecycleLock) {
-          // The publish session ended on its own — drop the stale handle + clear `publishing` so the next
-          // updateAdvert re-publishes rather than calling updatePublish on a dead session (P1).
+          // The publish session ended on its own — drop the stale handle + pending advert + clear
+          // `publishing` so the next updateAdvert re-publishes the current advert rather than calling
+          // updatePublish on a dead session or replaying a stale pending value (P1/P2).
           if (gen == generation) {
             publishSession = null
             publishing = false
+            pendingAdvert = null
           }
         }
       }
@@ -240,13 +250,55 @@ internal class MeshWifiAwareController(
     }, null)
   }
 
+  /** Re-subscribe if discovery isn't live — called from the recurring start() so a failed/terminated
+   * subscribe self-heals on the next 30s tick (P1). Caller holds the lifecycle lock. */
+  private fun ensureSubscribed(session: WifiAwareSession) {
+    if (subscribeSession == null && !subscribing) {
+      subscribe(session)
+    }
+  }
+
   private fun subscribe(session: WifiAwareSession) {
+    subscribing = true
+    val gen = generation
     val config = SubscribeConfig.Builder()
       .setServiceName(MeshConstants.WIFI_AWARE_SERVICE_NAME)
       .build()
     session.subscribe(config, object : DiscoverySessionCallback() {
       override fun onSubscribeStarted(discoverySession: android.net.wifi.aware.SubscribeDiscoverySession) {
-        subscribeSession = discoverySession
+        synchronized(lifecycleLock) {
+          // Stale success after a stop()/re-start — close it rather than repopulate onto a torn-down node.
+          if (gen != generation) {
+            try {
+              discoverySession.close()
+            } catch (_: Throwable) {
+            }
+            return
+          }
+          subscribing = false
+          subscribeSession = discoverySession
+        }
+      }
+
+      override fun onSessionConfigFailed() {
+        synchronized(lifecycleLock) {
+          // Discovery couldn't start. Clear `subscribing` so the recurring start()'s ensureSubscribed
+          // re-subscribes — otherwise this node would never discover peers (P1).
+          if (gen == generation) {
+            subscribing = false
+            listener.onError("Wi-Fi Aware subscribe failed")
+          }
+        }
+      }
+
+      override fun onSessionTerminated() {
+        synchronized(lifecycleLock) {
+          // The subscribe session ended — drop the dead handle so the next start() re-subscribes (P1).
+          if (gen == generation) {
+            subscribeSession = null
+            subscribing = false
+          }
+        }
       }
 
       override fun onServiceDiscovered(
@@ -458,6 +510,7 @@ internal class MeshWifiAwareController(
     generation++
     starting = false
     publishing = false
+    subscribing = false
     pendingAdvert = null
     try {
       publishSession?.close()
