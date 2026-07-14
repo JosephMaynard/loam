@@ -91,8 +91,10 @@ class LoamMeshTransportModule : Module() {
     }
 
     Function("startDiscovery") {
-      val context = safeContext() ?: return@Function
-      ensureBle(context).startDiscovery()
+      val context = safeContext()
+      if (context != null) {
+        ensureBle(context).startDiscovery()
+      }
     }
 
     Function("stopDiscovery") {
