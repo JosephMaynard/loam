@@ -776,8 +776,13 @@ export const SyncAttachmentRequestSchema = z.object({
 export type SyncAttachmentRequest = z.infer<typeof SyncAttachmentRequestSchema>;
 
 export const SyncAttachmentResponseSchema = z.object({
-  /** The attachment bytes, base64-encoded. */
-  data: z.string().max(2 * 1024 * 1024),
+  /** The attachment bytes, standard base64. Capped at the base64 length of the 256 KiB attachment limit
+   * (`ceil(262144 / 3) * 4 = 349528` chars) and constrained to the base64 alphabet so a malformed or
+   * oversized payload is rejected at the boundary. */
+  data: z
+    .string()
+    .max(349_528)
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/, "must be base64"),
   mimeType: z.string().min(1).max(100),
 });
 export type SyncAttachmentResponse = z.infer<typeof SyncAttachmentResponseSchema>;

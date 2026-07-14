@@ -144,11 +144,13 @@ is that client (pure `@loam/crypto`, no native deps), mirroring `apps/client/src
   /api/transport/handshake` → validate with `TransportHandshakeResponseSchema` → `transportClientDerive`
   → a `{ sessionId, key, hostPublicKey }` session. A supplied `expectedHostKey` (a pinned peer key) is
   verified against the handshake's returned `hostPublicKey` and **fails closed** on mismatch.
-- `sealedFetch(session, peerUrl, path, { body?, headers?, reHandshake? })` — seals a bodied request as
-  `{ enc: sealTransport(key, JSON.stringify({ s, b: body }), aad) }` (a bodyless GET sends no envelope but
-  still asks for a sealed response), `aad = "${method} ${path}"`, header `x-loam-enc: sessionId`; unseals a
-  `x-loam-enc: 1` response. On a `401` or an undecryptable response it re-handshakes **once** and
-  retries — always safe because every sync request is a read-only query.
+- `sealedFetch(session, peerUrl, path, { body?, syncToken?, headers?, reHandshake? })` — seals a request
+  as `{ enc: sealTransport(key, JSON.stringify({ s, b?, tok? }), aad) }`. A request with a body **or** a
+  `syncToken` is a sealed POST (so a `syncToken` forces a sealed POST even with no body — carrying the token
+  and proving key possession); with neither it's a bodyless GET that sends no envelope but still asks for a
+  sealed response. `aad = "${method} ${path}"`, header `x-loam-enc: sessionId`; unseals a `x-loam-enc: 1`
+  response. On a `401` or an undecryptable/unsealed response it re-handshakes **once** and retries — always
+  safe because every sync request is a read-only query.
 
 **Framing note (important):** the inner sealed plaintext of a sealed request is the **`{ s, b?, tok? }`
 envelope** — `s` a per-session monotonic sequence (starts at 1, resets on re-handshake), `b` the route
