@@ -28,6 +28,14 @@ class LoamHostService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent == null) {
+      // A spurious/redelivered start with no real command (e.g. the system resurrecting the service
+      // after the process was killed) — there's no RN/Node process behind it, so don't hold a
+      // notification + wake lock for a server that isn't there.
+      releaseWakeLock()
+      stopSelf()
+      return START_NOT_STICKY
+    }
     try {
       startForegroundNotification()
       acquireWakeLock()
@@ -35,8 +43,19 @@ class LoamHostService : Service() {
       Log.w(TAG, "Failed to enter the foreground host state", error)
       stopSelf()
     }
-    // START_STICKY: if Android kills us under memory pressure, restart the service when it can.
-    return START_STICKY
+    // START_NOT_STICKY: the embedded Node server lives in the RN process, not this service. If
+    // Android kills the process under memory pressure, the service must not be independently
+    // resurrected into a "hosting" state with no server behind it — the app restarts it (via
+    // `start()`) once the process (and Node) is actually back up.
+    return START_NOT_STICKY
+  }
+
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    // The user swiped the app away — stop hosting rather than keep the notification + wake lock
+    // alive for a process that's going away.
+    releaseWakeLock()
+    stopSelf()
+    super.onTaskRemoved(rootIntent)
   }
 
   override fun onDestroy() {
@@ -97,7 +116,10 @@ class LoamHostService : Service() {
     wakeLock =
       power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "loam:host").apply {
         setReferenceCounted(false)
-        acquire()
+        // Bounded: a timeout backstop means a leaked lock can't drain the battery forever. Active
+        // hosting re-acquires it on the next onStartCommand (e.g. `start()` is called again), so this
+        // is just a ceiling, not an expected session length.
+        acquire(WAKE_LOCK_TIMEOUT_MS)
       }
   }
 
@@ -114,6 +136,9 @@ class LoamHostService : Service() {
     private const val TAG = "LoamHostService"
     private const val CHANNEL_ID = "loam-host"
     private const val NOTIFICATION_ID = 4201
+    // Backstop for the partial wake lock: bounds a leak to this long instead of forever. Active
+    // hosting re-acquires it on the next start, so 12h comfortably outlasts any real gap between starts.
+    private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
 
     /** Start the foreground host service (best-effort; safe to call repeatedly). */
     fun start(context: Context) {

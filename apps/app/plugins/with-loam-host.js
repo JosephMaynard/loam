@@ -14,6 +14,9 @@
 //      modules/loam-hotspot). LocalOnlyHotspot is location-gated, so ACCESS_FINE_LOCATION is
 //      mandatory; NEARBY_WIFI_DEVICES covers API 33+, and CHANGE/ACCESS_WIFI_STATE are needed to
 //      start and read the hotspot. The runtime grant is requested from JS before starting.
+//      ACCESS_FINE_LOCATION is capped with `android:maxSdkVersion="32"` — on API 33+ NEARBY_WIFI_DEVICES
+//      (declared `neverForLocation` by withMeshManifest below) covers Wi-Fi/hotspot/Aware instead, so
+//      fine location is only ever requested on API ≤32.
 
 const { withAndroidManifest, withAppBuildGradle, withGradleProperties, AndroidConfig } = require("expo/config-plugins");
 
@@ -172,12 +175,33 @@ function withMeshManifest(config) {
   });
 }
 
+/**
+ * Cap ACCESS_FINE_LOCATION at `android:maxSdkVersion="32"` so it is not requested on API 33+, where
+ * NEARBY_WIFI_DEVICES (declared `neverForLocation` by withMeshManifest) already covers Wi-Fi/hotspot/
+ * Aware. The host UI's "location is never requested" claim is only true on modern devices if this is
+ * set — mirrors withMeshManifest's find-the-entry-and-stamp-an-attribute pattern.
+ */
+function withFineLocationMaxSdk(config) {
+  return withAndroidManifest(config, (cfg) => {
+    const manifest = cfg.modResults.manifest;
+    const perms = manifest["uses-permission"] ?? [];
+    const entry = perms.find(
+      (permission) => permission.$?.["android:name"] === "android.permission.ACCESS_FINE_LOCATION",
+    );
+    if (entry) {
+      entry.$["android:maxSdkVersion"] = "32";
+    }
+    return cfg;
+  });
+}
+
 module.exports = function withLoamHost(config) {
   config = withCleartextTraffic(config);
   config = withArmOnlyAbiFilters(config);
   config = withArmOnlyReactNativeArchitectures(config);
   // Merge (de-duped) the hotspot + foreground-service + mesh-transport permissions into the manifest.
   config = AndroidConfig.Permissions.withPermissions(config, [...HOTSPOT_PERMISSIONS, ...MESH_PERMISSIONS]);
+  config = withFineLocationMaxSdk(config);
   config = withMeshManifest(config);
   config = withHostService(config);
   return config;

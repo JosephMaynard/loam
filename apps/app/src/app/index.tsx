@@ -58,6 +58,11 @@ function isLoamUrl(url: string | undefined): boolean {
 type HostStatus = 'starting' | 'ready' | 'error';
 type StatusPayload = { status?: HostStatus; message?: string };
 type HostInfoPayload = { port?: number; addresses?: string[] };
+// The subset of GET /api/bootstrap this screen reads (docs/20 — cookie-free, mints no session, so
+// it's safe to poll from the host's own WebView client before any identity exists).
+type BootstrapPayload = {
+  networkConfig?: { transportEncryption?: string; transportPublicKey?: string };
+};
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
 // and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
@@ -83,6 +88,11 @@ export default function HostScreen() {
   // The host's real network addresses, reported by the launcher (loam-hostinfo). Used to build the
   // Step-2 join QR from the actual hotspot IP instead of a hardcoded guess.
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
+  // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
+  // ready. Empty when transport encryption is off (or the fetch hasn't resolved yet) — plain URLs,
+  // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
+  // the join QR carry the key a `required`-mode handshake needs (docs/08).
+  const [transportKeyFragment, setTransportKeyFragment] = useState('');
   // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
   const [keepAwake, setKeepAwake] = useState(false);
   // Optional kiosk mode — pin the app (Android screen pinning) so a passer-by can't wander off into
@@ -178,6 +188,34 @@ export default function HostScreen() {
     };
   }, []);
 
+  // Once the host is ready, learn its transport-encryption posture from the cookie-free bootstrap
+  // endpoint (never /api/config — that mints a session and would steal the one-time `firstUser` admin
+  // grant from the operator). The key is stable for the life of the boot, so this fires once per
+  // "become ready" transition, not on a poll.
+  useEffect(() => {
+    if (Platform.OS !== 'android' || status !== 'ready') {
+      return;
+    }
+    let cancelled = false;
+    fetch(`${LOAM_URL}/api/bootstrap`, { credentials: 'omit' })
+      .then((response) => (response.ok ? (response.json() as Promise<BootstrapPayload>) : null))
+      .then((payload) => {
+        if (cancelled || !payload) {
+          return;
+        }
+        const { transportEncryption, transportPublicKey } = payload.networkConfig ?? {};
+        if (transportEncryption && transportEncryption !== 'off' && typeof transportPublicKey === 'string' && transportPublicKey.length > 0) {
+          setTransportKeyFragment(`#k=${transportPublicKey}`);
+        }
+      })
+      .catch(() => {
+        // Best-effort: the host still loads over a plain URL, same as transport encryption being off.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [status]);
+
   // Ask the launcher for fresh addresses whenever the Share overlay opens — that's when the hotspot
   // starts and its AP interface (and address) appears.
   useEffect(() => {
@@ -237,7 +275,7 @@ export default function HostScreen() {
         </ThemedView>
         <WebView
           ref={webViewRef}
-          source={{ uri: LOAM_URL }}
+          source={{ uri: `${LOAM_URL}${transportKeyFragment}` }}
           style={styles.flex}
           // The LOAM client relies on the loam_session cookie, localStorage/IndexedDB, and a
           // WebSocket — enable all of them, and allow the cleartext localhost origin.
@@ -277,7 +315,7 @@ export default function HostScreen() {
         <HostShareOverlay
           visible={shareOpen}
           onClose={() => setShareOpen(false)}
-          serverUrl={hotspotJoinUrl(hostAddresses)}
+          serverUrl={`${hotspotJoinUrl(hostAddresses)}${transportKeyFragment}`}
           addresses={hostAddresses}
           keepAwake={keepAwake}
           onKeepAwakeChange={setKeepAwake}
