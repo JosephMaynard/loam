@@ -53,6 +53,23 @@ ranked within each group. Each entry names the file and the concrete change.
    host-panel / NodeLinkControl); live re-handshake on a runtime mode flip.
 6. **On-device SQLCipher.** The Android DB is unencrypted at rest; needs a multiple-ciphers ABI-108
    android-arm64 prebuild (docs/01, docs/04).
+6a. **Node-to-node sync now rides the transport channel — but inter-node MITM is TOFU by default.**
+   **BUILT** (`feat/sync-transport-encryption`, `apps/server/src/sync-transport.ts` + `fetchPeerJson`):
+   a pulling node establishes a transport session with each peer and seals its digest/messages/attachment
+   requests with the `{ s, b, tok }` envelope (reconciled with the transport-hardening merge, so a
+   `required` peer's replay window is satisfied), which also fixes the gap that a `required`-mode peer
+   401'd every plaintext pull and so couldn't be synced from. Because auth-binding made user content
+   tunnel-only, the sync routes are reached via a **direct sealed request** (`DIRECT_SEALED_SYNC_ROUTES`
+   in `app.ts`) — still sealed, just exempt from the identity tunnel — and peer posture is read from the
+   public `/api/bootstrap` (not the now-session-gated `/api/config`). The `sync.token` rides sealed INSIDE
+   the envelope (never a wire header) over an encrypted channel, and attachments cross via
+   `POST /api/sync/attachment` (base64 JSON, sealable) rather than the tunnel-only binary route. **Residual:**
+   the peer's static key is learned over plain HTTP (not out-of-band like the browser's join QR), so this is
+   passive-eavesdropper confidentiality + integrity, **not active-MITM resistance** between nodes unless the
+   operator **pins** the key via the optional `SyncPeer.transportKey` (verified against the handshake,
+   fail-closed on mismatch); unpinned = unauthenticated key discovery. Next: surface the pinned-key field in
+   the admin peers UI (config-schema support already landed); longer-term, per-peer signed authors (item 1)
+   for full peer authentication.
 
 ## Correctness / robustness
 

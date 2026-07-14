@@ -45,6 +45,8 @@ import {
   PanicRequestSchema,
   RolesUpdateRequestSchema,
   securityProfilePreset,
+  SyncAttachmentRequestSchema,
+  SyncAttachmentResponseSchema,
   SyncDigestSchema,
   SyncMessagesRequestSchema,
   SyncMessagesResponseSchema,
@@ -76,6 +78,13 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
 import { importLegacyJsonData, openStore, type LoamStore, type StoreDriver } from "./db.js";
+import {
+  fetchPeerTransportPosture,
+  handshakeWithPeer,
+  sealedFetch,
+  type PeerTransportPosture,
+  type PeerTransportSession,
+} from "./sync-transport.js";
 
 type SocketClient = {
   OPEN: number;
@@ -935,6 +944,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // response answers the exact `{ s, m, p }` it sent, defeating a cross-fed response under the tunnel's
   // constant AAD. WeakMap → GC'd with the request.
   const transportRequestSeq = new WeakMap<FastifyRequest, number>();
+  // The node sync token a sealed request carried INSIDE its `{ s, b, tok }` envelope (docs/08) — the
+  // authenticated, confidential channel for the `sync.token` bearer credential (never a wire header for a
+  // sealed peer). `syncPeerAuthorized` reads it from here for a sealed request, falling back to the header
+  // only on the plaintext path. WeakMap → GC'd with the request.
+  const transportRequestSyncToken = new WeakMap<FastifyRequest, string>();
   // Per-boot secret proving a request is an internal re-dispatch from the transport tunnel handler
   // (`POST /api/transport/tunnel`, docs/08), not a real client socket. 256 bits of randomness compared
   // in constant time — an external request can't forge it, so the transport-enforcement bypass it
@@ -1029,6 +1043,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     imported: number;
   };
   const peerSyncStatus = new Map<string, PeerSyncStatus>();
+  // Cached per-peer transport decision (docs/08), keyed by peer URL, so the 5s sync tick reuses one
+  // encrypted session (or a settled "this peer runs plaintext" verdict) instead of re-probing every
+  // round. A live session is held ~just under the peer's 12h server-side TTL (and re-established on a
+  // 401 / decrypt failure); a plaintext verdict is held only briefly so a peer that *enables* transport
+  // is picked up within minutes. RAM-only; a restart re-probes lazily.
+  const peerTransportSessions = new Map<
+    string,
+    { transport: PeerTransportSession | "plaintext"; expiresAt: number }
+  >();
+  const PEER_TRANSPORT_SESSION_TTL_MS = 11 * 3_600_000;
+  const PEER_PLAINTEXT_RECHECK_MS = 5 * 60_000;
   let syncRunning = false;
   let lastSyncLoopAt = 0;
   // Bumped by every kill-switch wipe. A sync round captures it before its first await and abandons
@@ -1061,22 +1086,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   let store = openLoamStore();
 
   /**
-   * Parse one config layer, tolerating malformed JSON and invalid shapes: both are logged and
-   * ignored rather than aborting startup.
+   * Parse one PRESENT config layer, **aborting startup** if it's malformed or invalid. Silently ignoring
+   * it and continuing from defaults is dangerous: a typo'd `security.transportEncryption: "required"` node
+   * (e.g. a `sync.token` under the 16-char minimum invalidating the whole document) would fall back to the
+   * `off` default and serve plaintext while the operator believes it's hardened. Fail closed instead — the
+   * caller only invokes this when a config source actually exists (an absent file is a normal fresh boot).
    */
-  function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate | undefined {
+  function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate {
+    let json: unknown;
     try {
-      const parsed = LoamConfigUpdateSchema.safeParse(JSON.parse(raw));
-
-      if (parsed.success) {
-        return parsed.data;
-      }
+      json = JSON.parse(raw);
     } catch {
-      // Malformed JSON — fall through to the shared warning below.
+      throw new Error(`Invalid configuration in ${source}: not valid JSON. Fix or remove it; refusing to start from defaults.`);
     }
 
-    server.log.warn(`Ignoring invalid config from ${source}`);
-    return undefined;
+    const parsed = LoamConfigUpdateSchema.safeParse(json);
+    if (parsed.success) {
+      return parsed.data;
+    }
+
+    const detail = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`Invalid configuration in ${source}: ${detail}. Fix it; refusing to start from defaults.`);
   }
 
   /**
@@ -1088,21 +1120,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     try {
       const raw = await readFile(configPath, "utf8");
+      // A present-but-invalid config.json throws here (fail closed); an ABSENT file is ENOENT → a normal
+      // fresh boot from defaults, handled by the catch below.
       const fileUpdate = parseConfigUpdate(raw, configPath);
 
-      if (fileUpdate) {
-        // Same reconciliation as the persisted path: a hand-authored config.json that pins a preset
-        // profile *and* sets an explicit kill switch / approval / TTL keeps those explicit settings
-        // (effective profile → custom) rather than letting the preset silently override them. The
-        // file is the operator's own source, so we don't rewrite it — just resolve it in memory.
-        const { update: reconciled, changed } = reconcileLegacyProfile(fileUpdate);
-        if (changed) {
-          server.log.warn(
-            `${configPath} pins a security profile but also sets explicit access/retention/kill-switch values; keeping the explicit settings (effective profile: custom).`,
-          );
-        }
-        config = mergeConfig(config, reconciled);
+      // Same reconciliation as the persisted path: a hand-authored config.json that pins a preset
+      // profile *and* sets an explicit kill switch / approval / TTL keeps those explicit settings
+      // (effective profile → custom) rather than letting the preset silently override them. The
+      // file is the operator's own source, so we don't rewrite it — just resolve it in memory.
+      const { update: reconciled, changed } = reconcileLegacyProfile(fileUpdate);
+      if (changed) {
+        server.log.warn(
+          `${configPath} pins a security profile but also sets explicit access/retention/kill-switch values; keeping the explicit settings (effective profile: custom).`,
+        );
       }
+      config = mergeConfig(config, reconciled);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
@@ -1111,20 +1143,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const stored = store.getConfigValue("config");
 
-    if (stored) {
+    // `!== undefined` (not truthiness): a PRESENT empty string is a corrupt row that must fail closed
+    // through `parseConfigUpdate` (JSON.parse("") throws → abort), not be silently skipped to defaults. An
+    // absent key returns `undefined` → a normal fresh boot.
+    if (stored !== undefined) {
       const storedUpdate = parseConfigUpdate(stored, "the persisted config table");
 
-      if (storedUpdate) {
-        // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
-        // preserve an explicitly-armed kill switch / approval / TTL by demoting the profile to custom.
-        const { update: reconciled, changed } = reconcileLegacyProfile(storedUpdate);
-        config = mergeConfig(config, reconciled);
-        if (changed) {
-          server.log.warn(
-            "Security profile is now authoritative; kept explicit access/retention/kill-switch settings by switching this node's profile to 'custom'.",
-          );
-          store.setConfigValue("config", JSON.stringify(config));
-        }
+      // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
+      // preserve an explicitly-armed kill switch / approval / TTL by demoting the profile to custom.
+      const { update: reconciled, changed } = reconcileLegacyProfile(storedUpdate);
+      config = mergeConfig(config, reconciled);
+      if (changed) {
+        server.log.warn(
+          "Security profile is now authoritative; kept explicit access/retention/kill-switch settings by switching this node's profile to 'custom'.",
+        );
+        store.setConfigValue("config", JSON.stringify(config));
       }
     }
 
@@ -1465,6 +1498,23 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       routeUrl !== "/api/transport/tunnel"
     );
   }
+
+  /**
+   * The node-to-node sync content routes. Under `required` mode (or a bound session) user-facing content
+   * is tunnel-only (`/api/transport/tunnel`), but these two are reachable via a DIRECT sealed request
+   * instead: sync is authenticated by the shared `sync.token` (docs/11) — a node credential, not a user
+   * identity, so there is nothing to bind or carry over `x-loam-user`, and the tunnel would neither
+   * forward the token nor admit an unbound session (docs/20 §2). They still MUST be sealed in `required`
+   * mode (a plaintext hit with no resolved transport session falls through to the 401 in `onRequest`), so
+   * inter-node sync is encrypted end-to-end; they are only exempt from the tunnel/bound requirement, not
+   * from encryption. Both carry public data only (DMs/private channels/shadow-banned authors never
+   * export). See `sync-transport.ts` (the puller half).
+   */
+  const DIRECT_SEALED_SYNC_ROUTES = new Set([
+    "/api/sync/digest",
+    "/api/sync/messages",
+    "/api/sync/attachment",
+  ]);
 
   /**
    * Apply validated user update fields to an existing user object.
@@ -2737,6 +2787,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // captured session key survives the wipe (docs/08). loadData reloaded whatever was persisted
     // (the old key on an unencrypted wipe), so rotate explicitly to guarantee a fresh one on both paths.
     rotateTransportIdentity();
+    // Drop cached puller-side sessions to peers too — RAM hygiene during an emergency wipe (docs/08).
+    peerTransportSessions.clear();
 
     if (appConfig.admin.bootstrap === "setupCode") {
       adminSetupCode = makeAdminSetupCode();
@@ -3049,25 +3101,135 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // inside this; anything larger is not a LOAM peer talking in good faith.
   const maxPeerJsonBytes = 8 * 1024 * 1024;
 
-  /** GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. */
+  /** The shared sync-token header (if configured), presented so a token-guarded peer will serve us and
+   * harmless when the peer runs open. Under transport encryption this rides INSIDE the sealed session. */
+  function peerSyncHeaders(): Record<string, string> {
+    return appConfig.sync.token ? { "x-loam-sync-token": appConfig.sync.token } : {};
+  }
+
+  /** Handshake a fresh transport session against a peer (honouring any operator-pinned key) and cache
+   * it. The pinned key comes from the peer's own sync-config entry (`SyncPeer.transportKey`). */
+  async function handshakePeerAndCache(peerUrl: string): Promise<PeerTransportSession> {
+    const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
+    const session = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
+    peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
+    return session;
+  }
+
+  /** Re-handshake and fold the fresh session INTO the caller's existing `session` object (then re-cache
+   * that same object), so a request holding it and the cache share ONE object + ONE monotonic replay
+   * sequence. Crucially it mutates the SPECIFIC object passed in — not one rediscovered via the mutable
+   * cache map, which a concurrent config PATCH / kill switch could have cleared, leaving a re-handshake to
+   * cache a fresh object while the in-flight request advanced a detached one → the sequence-split 409
+   * (docs/08 / Sol round-2 #3). */
+  async function rehandshakePeerInto(
+    session: PeerTransportSession,
+    peerUrl: string,
+  ): Promise<PeerTransportSession> {
+    const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
+    const fresh = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
+    session.sessionId = fresh.sessionId;
+    session.key = fresh.key;
+    session.hostPublicKey = fresh.hostPublicKey;
+    session.seq = 0;
+    peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
+    return session;
+  }
+
+  /** Record (briefly) that a peer is talked to in the clear, so an off-mode peer isn't re-probed via
+   * `/api/bootstrap` on every 5s tick — but is re-checked often enough to notice it enabling transport. */
+  function cachePlaintext(peerUrl: string): "plaintext" {
+    peerTransportSessions.set(peerUrl, { transport: "plaintext", expiresAt: Date.now() + PEER_PLAINTEXT_RECHECK_MS });
+    return "plaintext";
+  }
+
+  /**
+   * Resolve how to talk to a peer (docs/08): reuse a cached decision, else read the peer's advertised
+   * posture from its `/api/bootstrap` and handshake if it wants encryption. Returns a live transport
+   * session, or `"plaintext"` for the unchanged clear path.
+   *
+   * A peer's own sync-config entry may **pin** its transport key (`SyncPeer.transportKey`), which both
+   * upgrades the channel to active-MITM resistance and means we go encrypted regardless of what the
+   * (plain-HTTP, attacker-mutable) `/api/bootstrap` claims — a pinned peer that fails the handshake **fails
+   * closed** (the error propagates, so the sync round records it, rather than a silent plaintext pull).
+   * Unpinned: a peer advertising `required` also fails closed on a handshake failure; an `optional`
+   * peer degrades to plaintext (it still serves the clear path); and a peer we can't read a posture from
+   * at all (older peer, or `/api/bootstrap` unreachable/non-2xx) falls back to plaintext exactly as before
+   * transport encryption existed — if it truly required transport the plaintext pull just 401s and the
+   * round records a normal failure, never a silent wrong result.
+   */
+  async function resolvePeerTransport(peerUrl: string): Promise<PeerTransportSession | "plaintext"> {
+    const cached = peerTransportSessions.get(peerUrl);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.transport;
+    }
+    peerTransportSessions.delete(peerUrl);
+
+    const pinnedKey = appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
+
+    // A pinned key is held out-of-band, so we can (and must) go encrypted without trusting `/api/config`.
+    if (pinnedKey) {
+      return await handshakePeerAndCache(peerUrl);
+    }
+
+    let posture: PeerTransportPosture;
+    try {
+      posture = await fetchPeerTransportPosture(peerUrl);
+    } catch {
+      // Couldn't learn the posture (older peer without the field, or an unreachable/erroring
+      // `/api/bootstrap`) → preserve the legacy plaintext path.
+      return cachePlaintext(peerUrl);
+    }
+
+    if (posture.mode === "off" || !posture.publicKey) {
+      return cachePlaintext(peerUrl);
+    }
+
+    try {
+      return await handshakePeerAndCache(peerUrl);
+    } catch (error) {
+      if (posture.mode === "required") {
+        throw error;
+      }
+      return cachePlaintext(peerUrl);
+    }
+  }
+
+  /**
+   * GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. Transparently
+   * routes through the peer's transport session when it advertises encryption (docs/08) — so the sync
+   * digest/messages request+response DATA travels sealed (the `x-loam-sync-token` bearer header does NOT
+   * — it rides plaintext, gating public-data-only reads; see docs/08) — and stays a plain HTTP request
+   * against a peer running transport `off`.
+   */
   async function fetchPeerJson<T>(
     peerUrl: string,
     path: string,
     schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
     body?: unknown,
   ): Promise<T> {
+    const transport = await resolvePeerTransport(peerUrl);
+    const raw =
+      transport === "plaintext"
+        ? await fetchPeerText(peerUrl, path, body)
+        : await sealedFetchPeerText(transport, peerUrl, path, body);
+
+    const parsed = schema.safeParse(JSON.parse(raw));
+    if (!parsed.success) {
+      throw new Error("Peer sent an invalid payload");
+    }
+    return parsed.data;
+  }
+
+  /** Plain-HTTP peer request (transport `off`): the pre-encryption path, unchanged. */
+  async function fetchPeerText(peerUrl: string, path: string, body?: unknown): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
 
     try {
-      // Present the shared mesh token (if configured) so a token-guarded peer will serve us; harmless
-      // when the peer runs open.
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...peerSyncHeaders() };
       if (body !== undefined) {
         headers["content-type"] = "application/json";
-      }
-      if (appConfig.sync.token) {
-        headers["x-loam-sync-token"] = appConfig.sync.token;
       }
 
       const response = await fetch(`${peerUrl.replace(/\/+$/, "")}${path}`, {
@@ -3081,17 +3243,42 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         throw new Error(`Peer answered ${response.status}`);
       }
 
-      const raw = await readPeerBody(response, maxPeerJsonBytes);
-      const parsed = schema.safeParse(JSON.parse(raw.toString("utf8")));
-
-      if (!parsed.success) {
-        throw new Error("Peer sent an invalid payload");
-      }
-
-      return parsed.data;
+      return (await readPeerBody(response, maxPeerJsonBytes)).toString("utf8");
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  /** Sealed peer request over a live transport session, with a one-shot re-handshake on expiry. */
+  async function sealedFetchPeerText(
+    session: PeerTransportSession,
+    peerUrl: string,
+    path: string,
+    body?: unknown,
+  ): Promise<string> {
+    const response = await sealedFetch(session, peerUrl, path, {
+      body,
+      // Seal the sync token INSIDE the envelope rather than presenting it as a wire header (docs/08) — so a
+      // node-membership bearer credential is never readable on the wire and the request proves key
+      // possession. A present token also makes a bodyless digest a sealed POST.
+      syncToken: appConfig.sync.token,
+      maxBytes: maxPeerJsonBytes,
+      reHandshake: async () => {
+        try {
+          // Fold the fresh session into THIS request's `session` object (and re-cache it) so the cache and
+          // the in-flight request never diverge into two replay counters, even if the map was cleared.
+          return await rehandshakePeerInto(session, peerUrl);
+        } catch {
+          peerTransportSessions.delete(peerUrl);
+          return undefined;
+        }
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Peer answered ${response.status}`);
+    }
+    return response.text;
   }
 
   /**
@@ -3139,6 +3326,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
+  /**
+   * Fetch a peer's attachment bytes over the channel that peer actually supports (Sol round-2 #4):
+   *  - an ENCRYPTED peer (`optional`/`required`) serves them sealed as base64 JSON from
+   *    `/api/sync/attachment` — the tunnel-only binary `/api/attachments/:fileName` would 401 without a
+   *    session, which is why a plain-fetch copy silently dropped every attachment on a required peer;
+   *  - a PLAINTEXT (`off`-mode) peer uses the **legacy public binary GET** `/api/attachments/:fileName`,
+   *    preserving back-compat with older / off-mode peers that predate the sync-attachment route (whose
+   *    attachments would otherwise disappear permanently). An older *encrypted* peer without the new route
+   *    can't be served this way (documented: it must be upgraded).
+   * Throws on any failure; the caller treats a throw as "image absent, message still imports".
+   */
+  async function fetchPeerAttachmentBytes(peerUrl: string, attachment: MessageAttachment): Promise<Buffer> {
+    const fileName = attachmentFileName(attachment);
+    const transport = await resolvePeerTransport(peerUrl);
+
+    if (transport === "plaintext") {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      try {
+        const response = await fetch(`${peerUrl.replace(/\/+$/, "")}/api/attachments/${fileName}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`Peer answered ${response.status}`);
+        }
+        return await readPeerBody(response, attachmentMaxBytes);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    const result = await fetchPeerJson(peerUrl, "/api/sync/attachment", SyncAttachmentResponseSchema, { fileName });
+    return Buffer.from(result.data, "base64");
+  }
+
   /** Best-effort copy of an imported message's attachment files from the peer that has them. */
   async function importPeerAttachments(peerUrl: string, message: Message, generation: number): Promise<void> {
     if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
@@ -3156,21 +3378,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10_000);
-        const response = await fetch(
-          `${peerUrl.replace(/\/+$/, "")}/api/attachments/${attachmentFileName(attachment)}`,
-          { signal: controller.signal },
-        ).finally(() => clearTimeout(timeout));
+        const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment);
 
-        if (!response.ok) {
-          continue;
-        }
-
-        // Bounded read: the cap applies while streaming, not after buffering the whole body.
-        const bytes = await readPeerBody(response, attachmentMaxBytes);
-
-        if (!bytes.length || !avatarImageHasExpectedSignature(bytes, attachment.mimeType)) {
+        if (
+          bytes.length > attachmentMaxBytes ||
+          !bytes.length ||
+          !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
+        ) {
           continue;
         }
 
@@ -3189,8 +3403,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           return;
         }
       } catch {
-        // Message still imports; the image 404s until a later sync round retries... it won't —
-        // acceptable v1 tradeoff, the text is the payload that matters off-grid.
+        // Best-effort at import time: the fetch genuinely failed (peer unreachable, attachment gone, or a
+        // transient error). The message still imports; the image stays absent (the puller only re-requests
+        // messages it lacks, so an imported message's attachment isn't retried) — acceptable off-grid,
+        // where the text is the payload that matters. The required-mode 401 that dropped EVERY attachment
+        // is the case this path now fixes.
       }
     }
   }
@@ -3734,9 +3951,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     staticFilesRegistered = true;
   }
 
-  await loadAppConfig();
-  loadData();
-  reapExpiredMessages();
+  try {
+    await loadAppConfig();
+    loadData();
+    reapExpiredMessages();
+  } catch (error) {
+    // Startup aborted (e.g. `loadAppConfig` fails closed on an invalid config source) — release the SQLite
+    // handle opened above so a rejected `buildApp` doesn't leak an open store / lock file (matters under
+    // repeated test builds and a supervisor that retries boot).
+    store.close();
+    throw error;
+  }
 
   if (appConfig.admin.bootstrap === "setupCode" && !anyAdminExists()) {
     adminSetupCode = makeAdminSetupCode();
@@ -3812,6 +4037,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // handshake/resume/logout/tunnel stay directly reachable.
     const boundSession = activeSession?.authMode === "bound";
     if ((mode === "required" || boundSession) && requiresTransportSession(request)) {
+      // Node-to-node sync is reachable via a DIRECT sealed request rather than the identity tunnel: it is
+      // sync-token-authed public data with no user identity to bind (docs/08/11/20 — see
+      // `DIRECT_SEALED_SYNC_ROUTES`). It still must be sealed — a sync route reached WITHOUT a resolved
+      // transport session has no `activeSession` here and falls through to the 401, so plaintext sync is
+      // still refused in `required` mode.
+      if (activeSession && DIRECT_SEALED_SYNC_ROUTES.has(request.routeOptions?.url ?? "")) {
+        return;
+      }
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
     }
   });
@@ -3832,9 +4065,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // monotonic sequence for replay protection, `b` the actual request body (omitted for a bodyless
       // mutation). `s` lives INSIDE the AEAD, so it's authenticated — an attacker can't renumber a
       // replay to dodge the window without breaking the tag.
-      let envelope: { s?: unknown; b?: unknown };
+      let envelope: { s?: unknown; b?: unknown; tok?: unknown };
       try {
-        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown };
+        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown; tok?: unknown };
       } catch {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
@@ -3847,6 +4080,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
       }
       transportRequestSeq.set(request, envelope.s);
+      // A sealed node-to-node sync request carries the `sync.token` INSIDE the envelope (docs/08) — stash it
+      // (authenticated by the AEAD) for `syncPeerAuthorized`, which prefers it over any wire header.
+      if (typeof envelope.tok === "string") {
+        transportRequestSyncToken.set(request, envelope.tok);
+      }
       request.body = envelope.b;
       return;
     }
@@ -3870,7 +4108,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!key || typeof payload !== "string") {
       return payload;
     }
-    const sealed = sealTransport(key, payload, `${request.method} ${request.url}`);
+    // Bind a node-to-node sync RESPONSE to the request's authenticated sequence (docs/08 / Sol round-2 #1):
+    // sealing under `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a
+    // different request on the same route (the puller opens with the exact seq it sent). Scoped to the
+    // direct-sealed sync routes — the browser's own direct/tunnel paths are unchanged. (`transportRequestSeq`
+    // is always set for a sync request, since every sealed sync request now carries a `{ s }` envelope.)
+    const seq = transportRequestSeq.get(request);
+    const routeUrl = request.routeOptions?.url;
+    const responseAad =
+      seq !== undefined && routeUrl !== undefined && DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)
+        ? `${request.method} ${request.url}#${seq}`
+        : `${request.method} ${request.url}`;
+    const sealed = sealTransport(key, payload, responseAad);
     reply.header("content-type", "application/json; charset=utf-8");
     reply.header("x-loam-enc", "1");
     return JSON.stringify({ enc: sealed });
@@ -4944,8 +5193,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return true;
     }
 
+    // An ENCRYPTED request (one that resolved a transport key) must authenticate ONLY via the token sealed
+    // inside its `{ s, b, tok }` envelope — never a plaintext `x-loam-sync-token` header. Accepting the
+    // header on a sealed session would let a captured token authorize an attacker's own encrypted session
+    // by simply attaching it as a header, defeating the whole point of sealing it. The header is honoured
+    // only on the plaintext (`off`-mode) path, which has no sealed channel to carry the token (docs/08).
+    const encrypted = transportRequestKeys.has(request);
     const header = request.headers["x-loam-sync-token"];
-    const provided = Array.isArray(header) ? header[0] : header;
+    const provided = encrypted
+      ? transportRequestSyncToken.get(request)
+      : Array.isArray(header)
+        ? header[0]
+        : header;
     if (typeof provided !== "string") {
       return false;
     }
@@ -4955,17 +5214,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return a.length === b.length && timingSafeEqual(a, b);
   }
 
-  server.get(
-    "/api/sync/digest",
-    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
-        return reply.code(404).send(errorBody("Not found"));
-      }
-
-      return buildSyncDigest();
-    },
-  );
+  // GET for a plaintext (`off`-mode) peer; POST for a sealed peer, which carries the `{ s, b, tok }`
+  // envelope so the sync token is sealed and the request proves session-key possession (docs/08). The
+  // handler ignores the (empty) POST body — it's the sealed envelope that matters. Registered as two
+  // POSITIONAL routes rather than one `server.route({ config })` so CodeQL's missing-rate-limiting query
+  // credits the per-route limit (it only recognises the `server.<method>(url, { config }, handler)` form).
+  const syncDigestHandler = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
+      return reply.code(404).send(errorBody("Not found"));
+    }
+    return buildSyncDigest();
+  };
+  server.get("/api/sync/digest", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, syncDigestHandler);
+  server.post("/api/sync/digest", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, syncDigestHandler);
 
   server.post(
     "/api/sync/messages",
@@ -4989,6 +5250,54 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // shadowBanned), and an import strips authority regardless.
       const users = data.users.filter((user) => authorIds.has(user.id)).map(publicUser);
       return { messages, users };
+    },
+  );
+
+  // A peer fetches a public-message attachment's bytes as base64 JSON here (docs/08) rather than the
+  // tunnel-only binary `/api/attachments/:fileName`, so it rides the sealed transport channel (`onSend`
+  // seals string payloads; a raw binary GET can't be app-sealed and is 401'd in required mode). Only
+  // attachments on SYNCABLE (public, non-shadow-banned) messages are served — the same scope as the
+  // messages export — so DM / private-channel attachments never cross.
+  server.post(
+    "/api/sync/attachment",
+    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const body = SyncAttachmentRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid sync request"));
+      }
+
+      const attachment = parseAttachmentFileName(body.data.fileName);
+      if (!attachment) {
+        return reply.code(404).send(errorBody("Attachment does not exist"));
+      }
+
+      // Serve only if a SYNCABLE (public) message actually references it — mirrors the messages export
+      // scope so a peer can't pull a DM / private-channel attachment by guessing its file name.
+      const owningMessage = data.messages.find(
+        (message) =>
+          isSyncableMessage(message) &&
+          message.type !== "reaction" &&
+          message.type !== "sealed" &&
+          !!message.attachments?.some((entry) => entry.id === attachment.id),
+      );
+      if (!owningMessage) {
+        return reply.code(404).send(errorBody("Attachment does not exist"));
+      }
+
+      try {
+        const bytes = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
+        return { data: bytes.toString("base64"), mimeType: attachment.mimeType };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return reply.code(404).send(errorBody("Attachment does not exist"));
+        }
+        throw error;
+      }
     },
   );
 
@@ -5496,6 +5805,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         peerSyncStatus.delete(url);
       }
     }
+    // Drop every cached puller-side transport session (docs/08): a peer's URL, pinned transportKey, or
+    // the sync token may have just changed, so an entry established under the old config could be stale
+    // or pinned to a now-wrong key. They re-handshake lazily on the next sync tick.
+    peerTransportSessions.clear();
     // Switching INTO setupCode bootstrap at runtime must mint a code — otherwise the claim flow is
     // enabled but no code was ever generated, so `allowAdminClaim` stays false and no one can claim
     // (docs/15 #8). Only on the transition (not every PATCH while already in setupCode), so a code

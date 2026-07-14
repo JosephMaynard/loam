@@ -401,6 +401,19 @@ export type AccessConfig = z.infer<typeof AccessConfigSchema>;
 export const SyncPeerSchema = z.object({
   url: z.url({ protocol: /^https?$/ }),
   label: z.string().trim().min(1).max(80).optional(),
+  /**
+   * Optional pinned peer transport key (base64url X25519 public key, docs/08). When set, this node
+   * verifies the peer's handshake-returned static key against it and refuses to sync on a mismatch —
+   * the operator delivering it out-of-band (e.g. copied from the peer's join QR) is what upgrades
+   * inter-node sync to active-MITM resistance. Unset = unauthenticated key discovery against the key the
+   * peer advertises over its (plain-HTTP) `/api/bootstrap` (not pinned/remembered — see docs/08).
+   */
+  transportKey: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/, "must be base64url")
+    .min(1)
+    .max(64)
+    .optional(),
 });
 export type SyncPeer = z.infer<typeof SyncPeerSchema>;
 
@@ -753,6 +766,29 @@ export const SyncMessagesRequestSchema = z.object({
   ids: z.array(IdSchema).min(1).max(500),
 });
 export type SyncMessagesRequest = z.infer<typeof SyncMessagesRequestSchema>;
+
+/** `POST /api/sync/attachment` — request one public-message attachment's bytes by file name. Served as
+ * base64 JSON (not a raw binary GET) so it can ride the sealed transport channel: `onSend` seals string
+ * payloads, and the tunnel-only `/api/attachments/:fileName` binary route is unreachable to a peer. */
+export const SyncAttachmentRequestSchema = z.object({
+  fileName: z.string().min(1).max(128),
+});
+export type SyncAttachmentRequest = z.infer<typeof SyncAttachmentRequestSchema>;
+
+export const SyncAttachmentResponseSchema = z.object({
+  /** The attachment bytes, standard base64. Capped at the base64 length of the 256 KiB attachment limit
+   * (`ceil(262144 / 3) * 4 = 349528` chars) and constrained to the base64 alphabet so a malformed or
+   * oversized payload is rejected at the boundary. */
+  data: z
+    .string()
+    .max(349_528)
+    .regex(
+      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
+      "must be standard base64",
+    ),
+  mimeType: z.string().min(1).max(100),
+});
+export type SyncAttachmentResponse = z.infer<typeof SyncAttachmentResponseSchema>;
 
 export const SyncMessagesResponseSchema = z.object({
   messages: z.array(MessageSchema),

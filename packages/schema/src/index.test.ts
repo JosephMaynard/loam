@@ -12,6 +12,7 @@ import {
   securityProfilePreset,
   SERVER_ERROR_CODES,
   StreamEventSchema,
+  SyncAttachmentResponseSchema,
   UserSchema,
 } from "./index.js";
 
@@ -424,6 +425,33 @@ describe("schema refinements", () => {
           body: "   ",
         }),
       ).toThrow();
+    });
+  });
+
+  describe("SyncAttachmentResponseSchema.data (standard base64)", () => {
+    const ok = (data: string) => SyncAttachmentResponseSchema.safeParse({ data, mimeType: "image/png" }).success;
+
+    it("accepts valid standard base64, padded and unpadded quanta", () => {
+      // Real 1×1 PNG (ends with `==`), a `=`-padded value, an unpadded 4-quantum value, and empty.
+      expect(ok("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")).toBe(true);
+      expect(ok("YWJj")).toBe(true); // "abc"
+      expect(ok("YWJjZA==")).toBe(true); // "abcd"
+      expect(ok("YWJjZGU=")).toBe(true); // "abcde"
+      expect(ok("")).toBe(true);
+    });
+
+    it("rejects malformed padding / non-quantum lengths", () => {
+      expect(ok("A=")).toBe(false);
+      expect(ok("AB=")).toBe(false);
+      expect(ok("abcde=")).toBe(false);
+      expect(ok("YWJj=")).toBe(false); // padding after a full quantum
+      expect(ok("****")).toBe(false); // outside the alphabet
+    });
+
+    it("rejects a payload beyond the 256 KiB decoded cap", () => {
+      // 349532 is a valid 4-char-quantum length just past the 349528 cap, so this isolates the max check.
+      expect(ok("A".repeat(349_532))).toBe(false);
+      expect(ok("A".repeat(349_528))).toBe(true);
     });
   });
 });

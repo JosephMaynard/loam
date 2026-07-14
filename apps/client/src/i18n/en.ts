@@ -187,6 +187,7 @@ export const en = {
   "admin.flagMarkdown": "Markdown rendering",
   "admin.flagAttachments": "Image attachments",
   "admin.flagPresence": "Online presence (reveals who is connected — off for privacy-sensitive settings)",
+  "admin.flagLocationSharing": "Location sharing (opt-in; lets people attach their location to messages)",
   // Admin view — identity-permission labels.
   "admin.identityDisplayName": "Users can edit their display name",
   "admin.identityAvatarEdit": "Users can edit their avatar",
@@ -328,6 +329,7 @@ export const en = {
   "admin.syncFailed": "Sync failed: {status}",
   "admin.syncRunError": "Unable to run sync.",
   "admin.syncStatusEyebrow": "Status (saved peers)",
+  "admin.syncEvery": "Auto-syncs every {seconds}s",
   "admin.syncing": "Syncing…",
   "admin.syncNow": "Sync now",
   "admin.peerError": "Error: {error}",

@@ -129,6 +129,108 @@ unavailable, so ship one):
 - ⚠️ **Metadata** (who talks to whom, timing, sizes) is still visible to the host and partially to the
   network. Note it honestly.
 
+## Node-to-node sync over the transport channel (BUILT)
+
+> **Status: BUILT & TESTED** (`feat/sync-transport-encryption`). The puller side of the transport
+> handshake now also lives **server-side**, so node-to-node sync (docs/11) rides the same encrypted
+> channel instead of plain HTTP.
+
+The transport hooks above were written for the browser client, but they don't care *who* the peer is —
+they decrypt any request bearing `x-loam-enc` + a sealed `{ enc }` body, and seal the response. So a
+LOAM node that **pulls** from another node can be a transport *client* to it. `apps/server/src/sync-transport.ts`
+is that client (pure `@loam/crypto`, no native deps), mirroring `apps/client/src/lib/transport.ts`:
+
+- `handshakeWithPeer(peerUrl, { expectedHostKey? })` — `transportClientHello()` → `POST
+  /api/transport/handshake` → validate with `TransportHandshakeResponseSchema` → `transportClientDerive`
+  → a `{ sessionId, key, hostPublicKey }` session. A supplied `expectedHostKey` (a pinned peer key) is
+  verified against the handshake's returned `hostPublicKey` and **fails closed** on mismatch.
+- `sealedFetch(session, peerUrl, path, { body?, syncToken?, headers?, reHandshake? })` — always a sealed
+  **POST** `{ enc: sealTransport(key, JSON.stringify({ s, b?, tok? }), "POST ${path}") }`. `b` is included
+  when a `body` is given, `tok` when a `syncToken` is; even a tokenless digest carries just `{ s }` (so the
+  response can be sequence-bound — see the framing note). Header `x-loam-enc: sessionId`; the `x-loam-enc: 1`
+  response is unsealed under `"POST ${path}#${s}"`. On a `401` or an undecryptable/unsealed response it
+  re-handshakes **once** and retries — always safe because every sync request is a read-only query. (The
+  bodyless-GET plaintext path is a separate function, `fetchPeerText`, used only for `off`-mode peers.)
+
+**Framing note (important):** every sealed sync request is a **POST** whose inner sealed plaintext is the
+**`{ s, b?, tok? }` envelope** — `s` a per-session monotonic sequence (starts at 1, resets on
+re-handshake), `b` the route body (omitted for a bodyless digest), `tok` the `sync.token` bearer
+credential. The peer's `preValidation` runs `s` through its `TRANSPORT_REPLAY_WINDOW` sliding window (a
+replayed/out-of-window sequence gets a **409**), stashes `tok` for `syncPeerAuthorized`, and sets
+`request.body = envelope.b` before schema validation. `s` (and `tok`) live inside the AEAD, so they can't
+be renumbered/read without breaking the tag. Even a tokenless digest is a POST carrying just `{ s }` — so
+the **response** can be bound to it: the peer seals its reply under `${method} ${path}#${seq}` (the
+request sequence; sync paths carry no query, so `path === url`), and the puller opens it with the exact
+`seq` it sent, so a captured response can't be **replayed or cross-fed** to another request on the same
+route (the tunnel binds its responses `{s,m,p}` the same way). An `off`-mode peer's plaintext digest stays
+a GET (nothing to seal). **Encrypted sessions authorize
+ONLY via the sealed `tok`** — the `x-loam-sync-token` header is honoured solely on the plaintext path, so
+a captured token can't authorize an attacker's own encrypted session by being attached as a header.
+
+**Tunnel-only gate reconcile:** under `required` mode the peer makes user-facing content *tunnel-only*
+(`/api/transport/tunnel`, identity-bound). Sync is different — it is authenticated by the shared
+`sync.token` (a *node* credential, not a user identity, so there is nothing to bind or carry over
+`x-loam-user`, and the tunnel would admit neither an unbound session nor the token). So the two sync
+routes (`/api/sync/digest`, `/api/sync/messages`) are reachable via a **direct sealed request**
+(`DIRECT_SEALED_SYNC_ROUTES` in `app.ts`): they still **must** be sealed in `required` mode (a plaintext
+hit with no resolved session is refused), so the data is encrypted end-to-end; they are only exempt from
+the tunnel/bound requirement, never from encryption.
+
+`fetchPeerJson` (`apps/server/src/app.ts`, the single choke point for every peer request) decides per
+peer:
+
+1. Reuse a cached decision if fresh (a live session is cached ~11 h — just under the peer's 12 h
+   server-side TTL; a "this peer runs plaintext" verdict is cached only ~5 min so a peer that *enables*
+   transport is noticed quickly). The cache is cleared on any config PATCH and by the kill switch.
+2. Otherwise learn the peer's posture from its unauthenticated `/api/bootstrap`
+   (`networkConfig.transportEncryption` + `transportPublicKey`) — the public, cookie-free bootstrap;
+   under the auth-binding change `/api/config` itself became session-gated content, so posture is read
+   from `/api/bootstrap` instead.
+3. `off` / no key / posture unreadable → the **unchanged plaintext path** (a genuinely `required` peer
+   whose `/api/bootstrap` we can't read just 401s the plaintext pull, surfacing as a normal sync failure —
+   never a silent wrong result).
+4. `optional` / `required` with a key → handshake + route the digest/messages/attachment requests through
+   `sealedFetch`, so the **sync data AND the `sync.token`** are sealed on the wire (the token rides inside
+   the `{ s, b, tok }` envelope, never a header). **Fail-closed:** a `required` peer (or any peer with a
+   pinned key) that can't complete the handshake fails the sync attempt rather than falling back to a
+   plaintext pull that would 401 anyway; an `optional` peer degrades to plaintext (it still serves the
+   clear path). An UNSEALED 2xx over a live session is refused (a downgrade), never imported.
+
+This closes a real gap: a peer running `transportEncryption: "required"` previously **401'd every
+plaintext sync pull** (its transport hook refuses any `/api/*` content request without a session), so it
+could not be synced *from* at all. It can now.
+
+**Attachments** are fetched over the channel the peer supports: from an **encrypted** peer as base64
+JSON from `POST /api/sync/attachment` (a string payload `onSend` can seal), **not** the tunnel-only binary
+`/api/attachments/:fileName` (which a peer's sessionless GET would 401, dropping every attachment on a
+required peer). A **plaintext** (`off`-mode) peer keeps using the legacy public binary GET
+`/api/attachments/:fileName` — preserving back-compat with older / off-mode peers that predate the
+sync-attachment route (an older *encrypted* peer without it must be upgraded). Only attachments on
+syncable (public) messages are served.
+
+**Token confidentiality (honest scope):** over a **sealed** channel (`optional`/`required` peer) the
+`sync.token` is confidential + authenticated — it never leaves the AEAD. Over the **plaintext** path
+(an `off`-mode peer) it still rides as an `x-loam-sync-token` header, since there is no encrypted channel
+to carry it — but there the whole sync is plaintext anyway, and the token gates public-data-only reads.
+
+### MITM disposition between nodes (honest scope)
+
+The peer's static transport key is learned from its `/api/bootstrap` **over plain HTTP** — that is *not*
+an out-of-band channel (unlike the browser's join-QR `#k=`). Unpinned, this is **unauthenticated key
+discovery**, not true trust-on-first-use: the key is taken from the peer's advertisement on *each*
+resolve and is **not** persisted or pinned across session expiry, so there is no first-seen key to detect
+a later swap against. So by default node-to-node sync gets **passive-eavesdropper confidentiality +
+integrity for the sync data and the token, but NOT active-MITM resistance** between nodes: a
+machine-in-the-middle could present its own key on `/api/bootstrap` and the handshake, then re-encrypt to
+the real peer (and so read the token it terminates). Pinning the peer key closes that.
+
+To get active-MITM resistance, an operator **pins** the peer's key: `SyncPeer.transportKey` (a
+base64url X25519 key, e.g. copied from the peer's join QR / host screen out-of-band). When set, the
+puller verifies the handshake's `hostPublicKey` against it and **refuses to sync on a mismatch**, and
+goes encrypted regardless of what `/api/bootstrap` claims. Unpinned = unauthenticated key discovery (the
+honest default; documented here and in docs/15 as the residual). This mirrors the browser's
+QR-key-vs-config-key trust rule.
+
 ## Alternative: get a real secure context (real TLS on the LAN)
 
 Only viable for **self-hosters with a domain**, *not* a mass-distributed app:
