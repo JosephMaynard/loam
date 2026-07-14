@@ -10,11 +10,14 @@ ranked within each group. Each entry names the file and the concrete change.
 ## Security — do these before any hostile-environment deployment
 
 1. **Sync import trusts peer-supplied `authorId` (impersonation).** `importPeerMessages`
-   (`apps/server/src/app.ts`) accepts any `authorId`, including a **local** admin/moderator's id, and
-   renders the injected message as authored by that identity. Mitigation now: `sync.token` gates
-   *which* peers may talk. Next: reject an imported message whose `authorId` matches a locally
-   *authoritative* user (admin/moderator/greeter) unless that author record was itself imported;
-   longer-term, per-peer **signed authors** (docs/11).
+   (`apps/server/src/app.ts`) accepts any `authorId`. The locally-**authoritative** guard has landed
+   (`isLocallyAuthoritative` rejects an import colliding with a local admin/moderator/greeter). **Sol
+   round-4 (2026-07-14) confirms the residual:** a collision with an ordinary **regular** local user is
+   still accepted — transport auth proves which *node* sent the message, not which *user* authored it. So
+   an authenticated peer can still make a message render as a regular local user. **Fixes:** per-author
+   **signed authors** is the durable one (docs/11/16); a lighter interim is **namespacing remote identities
+   by peer** (e.g. prefix imported author ids with the peer) so a remote author can never collide with a
+   local id. Address **before real/sensitive-data multi-node use**.
 2. ~~**Kill switch can be partially undone by an in-flight sync round.**~~ **RESOLVED**
    (`feat/mesh-secure-addressing`): a `wipeGeneration` counter is bumped at the top of
    `executeKillSwitch` (before its first await); `syncWithPeer` snapshots it and bails after the digest
@@ -160,3 +163,50 @@ ranked within each group. Each entry names the file and the concrete change.
     and the security docs unchanged — only display text.
 27. **Opportunistic mesh / DTN delivery** (`docs/16`) — the committed next major initiative: carry a
     message from A to B via an intermediary C. Start at Phase 0 (`packages/crypto` identity primitive).
+
+## Android host / APK readiness (Sol round-4 repo sweep, 2026-07-14)
+
+A repository sweep during the transport-auth-binding review (Sol built + verified a debug APK — 568 tests,
+all workspace builds, apps/app tsc, `pnpm audit --prod` clean, API 36 arm64-v8a, 16 KB-aligned; **fine for
+a default-transport synthetic-data two-device smoke test as-is**). Fix these before the noted milestones.
+
+**Before HARDENED-profile (required-mode) device testing:**
+- **A1. Required transport can't bootstrap on Android.** The embedded WebView and the native sharing QR
+  both use plain URLs with **no `#k=` transport key** (`apps/app/src/app/index.tsx:222`). So enabling
+  `required` mode can lock the host's own UI out, and joining devices get a QR that must be rejected. Fetch
+  the host transport public key over trusted loopback and append `#k=` to **both** URLs.
+- **A2. Foreground hosting service can outlive the Node server.** `LoamHostService` is `START_STICKY` with
+  an unbounded wake lock, but the React lifecycle never stops it (`LoamHostService.kt:38`) — after process
+  death Android can recreate the service without restarting Node, leaving a "hosting" notification + wake
+  lock for a dead server. Add an explicit stop lifecycle, a bounded wake lock, and likely
+  `START_NOT_STICKY` (unless the service itself can restart Node).
+
+**Before REAL / sensitive-data use:**
+- **A3. Author authentication** — see item **1** (regular-user impersonation across authenticated peers).
+- **A4. Android storage is plaintext.** The packaged host selects plain `better-sqlite3` with no DB key
+  (`apps/app/nodejs-project-template/main.js:25`) — messages/sessions/identities/config are extractable on
+  a rooted/compromised device. (On-device SQLCipher is item **6**; needs an ABI-108 multiple-ciphers
+  android-arm64 prebuild.)
+- **A5. Embedded Node 18.20.4 is EOL** (`apps/app/package.json:6`) — `pnpm audit` can't assess the bundled
+  native runtime. OK for controlled LAN; public/hostile deployment needs a maintained runtime or an
+  explicit security-backport plan (nodejs-mobile ceiling — see docs/01/04).
+
+**Multi-device reliability (P2):**
+- **A6. Transient attachment failures become permanent.** A message imports even if its attachment copy
+  fails; later digests see it as already-synced, so the attachment is never re-requested — an
+  attachment-only message can stay permanently empty (`apps/server/src/app.ts` `importPeerAttachments`).
+  Persist a "missing attachment" work item and retry it independently of message import.
+- **A7. Web-client invite URL can be stale after a hotspot start.** The server picks its LAN address once
+  at startup, but the hotspot starts later (`apps/server/src/embedded.ts:79`); native sharing refreshes
+  addresses, but a QR generated in the web UI may still advertise localhost / an earlier Wi-Fi address.
+- **A8. Async embedded-startup failures don't reach the RN error UI.** The launcher catches synchronous
+  `require()` failures, but a config/listen failure is a rejected promise after `require()` returns
+  (`apps/server/src/embedded-main.ts:6`) — the process exits and the UI only shows a generic ~150 s
+  timeout. Report the rejection over the bridge + offer a config reset/recovery path.
+- **A9. Expo dependency matrix unsatisfied.** `expo-doctor` flags Gesture Handler 3.0 vs 2.32, TS 7 vs 6,
+  and an incompatible `@expo/metro-runtime` patch (`apps/app/package.json:27`, `pnpm-workspace.yaml:17`);
+  the APK compiles but device behaviour is harder to interpret until aligned. The committed `expo lint`
+  also can't run in a clean checkout (no ESLint config/deps committed).
+- **A10. Android 13+ requests precise location unnecessarily.** `with-loam-host.js:23` requests both
+  `ACCESS_FINE_LOCATION` and `NEARBY_WIFI_DEVICES` while the UI says location is never requested. Restrict
+  fine location to API ≤32 and use `neverForLocation` on Nearby Wi-Fi for API 33+.
