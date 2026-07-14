@@ -6,6 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
 import { HostShareOverlay } from '@/components/host-share-overlay';
+import { ModelManagerOverlay } from '@/components/model-manager';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
@@ -77,6 +78,8 @@ export default function HostScreen() {
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
   const [shareOpen, setShareOpen] = useState(false);
+  // Whether the on-device LLM model manager overlay (docs/06) is open.
+  const [modelManagerOpen, setModelManagerOpen] = useState(false);
   // The host's real network addresses, reported by the launcher (loam-hostinfo). Used to build the
   // Step-2 join QR from the actual hotspot IP instead of a hardcoded guess.
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
@@ -213,15 +216,24 @@ export default function HostScreen() {
             floating button on top wouldn't register — a top bar reliably does. */}
         <ThemedView type="backgroundElement" style={styles.topBar}>
           <ThemedText type="smallBold">LOAM host</ThemedText>
-          <Pressable
-            onPress={() => setShareOpen(true)}
-            accessibilityRole="button"
-            accessibilityLabel="Share or host this LOAM node"
-            style={styles.shareButton}>
-            <ThemedText type="smallBold" style={styles.shareButtonLabel}>
-              Share · Host
-            </ThemedText>
-          </Pressable>
+          <ThemedView style={styles.topBarActions}>
+            <Pressable
+              onPress={() => setModelManagerOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Manage the on-device AI model"
+              style={styles.secondaryButton}>
+              <ThemedText type="smallBold">AI model</ThemedText>
+            </Pressable>
+            <Pressable
+              onPress={() => setShareOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Share or host this LOAM node"
+              style={styles.shareButton}>
+              <ThemedText type="smallBold" style={styles.shareButtonLabel}>
+                Share · Host
+              </ThemedText>
+            </Pressable>
+          </ThemedView>
         </ThemedView>
         <WebView
           ref={webViewRef}
@@ -271,6 +283,11 @@ export default function HostScreen() {
           onKeepAwakeChange={setKeepAwake}
           kiosk={kiosk}
           onKioskChange={setKiosk}
+        />
+        <ModelManagerOverlay
+          visible={modelManagerOpen}
+          onClose={() => setModelManagerOpen(false)}
+          channel={nodejs.channel}
         />
       </SafeAreaView>
     );
@@ -349,6 +366,19 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
+  },
+  topBarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    backgroundColor: 'transparent',
+  },
+  secondaryButton: {
+    borderWidth: 1,
+    borderColor: '#208AEF',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.five,
   },
   shareButton: {
     backgroundColor: '#208AEF',
