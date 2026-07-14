@@ -46,27 +46,6 @@ export type MeshTransportHandlers = {
 };
 
 /**
- * The Android runtime permissions the transport needs. On API 31+ the Bluetooth trio + Wi-Fi nearby;
- * on older devices BLE scanning is location-gated. Requested via `PermissionsAndroid.requestMultiple`,
- * exactly like the hotspot flow.
- */
-function wantedPermissions(): Permission[] {
-  if (Platform.OS !== 'android') {
-    return [];
-  }
-  const apiLevel = typeof Platform.Version === 'number' ? Platform.Version : 0;
-  if (apiLevel >= 31) {
-    return [
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-      PermissionsAndroid.PERMISSIONS.NEARBY_WIFI_DEVICES,
-    ];
-  }
-  return [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
-}
-
-/**
  * The single façade the courier talks to. A module-scope singleton (like the hotspot store) so the
  * radios have exactly one owner regardless of how many callers subscribe. Every method is safe to call
  * when the native module is absent — it degrades to a no-op.
@@ -104,11 +83,10 @@ export class MeshTransport {
     if (missing.length === 0) {
       return true;
     }
-    // Prompt for the full wanted set (requestMultiple no-ops already-granted ones); then re-check.
-    const toRequest = wantedPermissions();
-    if (toRequest.length > 0) {
-      await PermissionsAndroid.requestMultiple(toRequest);
-    }
+    // Request EXACTLY what native reports missing — native owns the correct API/capability split (P1). The
+    // RN side must not hardcode its own set, or it re-introduces the API 31/32 bug (requesting the
+    // API-33-only NEARBY_WIFI_DEVICES and omitting the ACCESS_FINE_LOCATION Aware needs there).
+    await PermissionsAndroid.requestMultiple(missing as Permission[]);
     missing = await getMissingMeshPermissions();
     return missing.length === 0;
   }
@@ -134,10 +112,17 @@ export class MeshTransport {
     if (this.startInFlight) {
       return this.startInFlight;
     }
-    this.startInFlight = this.doStart(advert).finally(() => {
-      this.startInFlight = null;
+    const attempt = this.doStart(advert);
+    this.startInFlight = attempt;
+    // Clear the field only if it STILL points at this attempt: a stop() (which nulls it) + a newer start()
+    // may have replaced it while this one was pending, and this attempt's finally must not erase the newer
+    // one (which would let a third caller start concurrently and double-register) (P1).
+    void attempt.finally(() => {
+      if (this.startInFlight === attempt) {
+        this.startInFlight = null;
+      }
     });
-    return this.startInFlight;
+    return attempt;
   }
 
   private async doStart(advert: MeshAdvertState): Promise<boolean> {

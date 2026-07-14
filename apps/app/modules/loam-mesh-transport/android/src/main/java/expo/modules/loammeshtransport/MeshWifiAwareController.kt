@@ -10,6 +10,7 @@ import android.net.wifi.aware.DiscoverySession
 import android.net.wifi.aware.DiscoverySessionCallback
 import android.net.wifi.aware.PeerHandle
 import android.net.wifi.aware.PublishConfig
+import android.net.wifi.aware.PublishDiscoverySession
 import android.net.wifi.aware.SubscribeConfig
 import android.net.wifi.aware.WifiAwareManager
 import android.net.wifi.aware.WifiAwareNetworkInfo
@@ -22,8 +23,8 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * Wi-Fi Aware (NAN) bulk transfer for the LOAM mesh (docs/16 §5, docs/17). Wi-Fi Aware forms a direct,
@@ -68,14 +69,19 @@ internal class MeshWifiAwareController(
   private val activeReceives = java.util.concurrent.atomic.AtomicInteger(0)
   private var awareManager: WifiAwareManager? = null
   private var session: WifiAwareSession? = null
-  private var publishSession: DiscoverySession? = null
+  private var publishSession: PublishDiscoverySession? = null
   private var subscribeSession: DiscoverySession? = null
   private var serverSocket: ServerSocket? = null
   private var listenPort: Int = 0
 
   // Opaque peerId → the live PeerHandle we can open a data path to. peerId is a session-local string so
-  // the JS bridge never touches a PeerHandle (not serialisable) or a MAC (privacy).
-  private val peers = ConcurrentHashMap<String, PeerHandle>()
+  // the JS bridge never touches a PeerHandle (not serialisable) or a MAC (privacy). Bounded LRU so a churn
+  // of transient matches can't grow it until transport shutdown (P2); guarded by `peersLock`.
+  private val peers = object : LinkedHashMap<String, PeerHandle>(16, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PeerHandle>): Boolean =
+      size > MeshConstants.MAX_TRACKED_PEERS
+  }
+  private val peersLock = Any()
   private var peerSeq = 0L
 
   fun isSupported(): Boolean {
@@ -139,19 +145,28 @@ internal class MeshWifiAwareController(
     }
   }
 
-  /** Update the advertised have-mail flag by re-publishing (Aware has no in-place advert update). */
+  /** Update the advertised have-mail flag. Prefer updating the ACTIVE publish IN PLACE
+   * (`PublishDiscoverySession.updatePublish`, API 26+) — closing and asynchronously re-publishing lets two
+   * overlapping refreshes each create a session where only the last `onPublishStarted` handle is tracked,
+   * leaking the others (P1). Only publish afresh if there is no live publish yet. */
   fun updateAdvert(advert: MeshAdvert) {
+    val existing = publishSession
+    if (existing != null) {
+      existing.updatePublish(buildPublishConfig(advert))
+      return
+    }
     val active = session ?: return
-    publishSession?.close()
     publish(active, advert)
   }
 
-  private fun publish(session: WifiAwareSession, advert: MeshAdvert) {
-    val config = PublishConfig.Builder()
+  private fun buildPublishConfig(advert: MeshAdvert): PublishConfig =
+    PublishConfig.Builder()
       .setServiceName(MeshConstants.WIFI_AWARE_SERVICE_NAME)
       .setServiceSpecificInfo(MeshAdvertCodec.encode(advert))
       .build()
-    session.publish(config, object : DiscoverySessionCallback() {
+
+  private fun publish(session: WifiAwareSession, advert: MeshAdvert) {
+    session.publish(buildPublishConfig(advert), object : DiscoverySessionCallback() {
       override fun onPublishStarted(discoverySession: android.net.wifi.aware.PublishDiscoverySession) {
         publishSession = discoverySession
       }
@@ -190,15 +205,17 @@ internal class MeshWifiAwareController(
   }
 
   private fun rememberPeer(handle: PeerHandle, advert: MeshAdvert?): String {
-    // Reuse an existing id for the same handle where possible so repeated sightings don't leak entries.
-    for ((id, existing) in peers) {
-      if (existing == handle) {
-        return id
+    synchronized(peersLock) {
+      // Reuse an existing id for the same handle where possible so repeated sightings don't leak entries.
+      for ((id, existing) in peers) {
+        if (existing == handle) {
+          return id
+        }
       }
+      val id = "aware-${peerSeq++}"
+      peers[id] = handle
+      return id
     }
-    val id = "aware-${peerSeq++}"
-    peers[id] = handle
-    return id
   }
 
   /**
@@ -230,7 +247,17 @@ internal class MeshWifiAwareController(
               }
             } else {
               activeReceives.incrementAndGet()
-              executor.execute { receiveOne(client) }
+              try {
+                executor.execute { receiveOne(client) }
+              } catch (rejected: RejectedExecutionException) {
+                // stop() shut the executor down between accept and dispatch — undo the reservation and
+                // close the client rather than leak an ever-open connection + a stuck counter (P1).
+                activeReceives.decrementAndGet()
+                try {
+                  client.close()
+                } catch (_: IOException) {
+                }
+              }
             }
           } catch (error: IOException) {
             // An IOException on a CLOSED socket is our own shutdown (`stop()` closed it) — exit quietly.
@@ -293,7 +320,7 @@ internal class MeshWifiAwareController(
   fun sendBlob(peerId: String, bytes: ByteArray) {
     val manager = awareManager ?: throw IOException("Wi-Fi Aware not attached")
     val publisher = publishSession ?: subscribeSession ?: throw IOException("No Aware discovery session")
-    val handle = peers[peerId] ?: throw IOException("Unknown peer $peerId")
+    val handle = synchronized(peersLock) { peers[peerId] } ?: throw IOException("Unknown peer $peerId")
 
     val specifier: WifiAwareNetworkSpecifier =
       WifiAwareNetworkSpecifier.Builder(publisher, handle).build()
@@ -308,14 +335,21 @@ internal class MeshWifiAwareController(
 
     val callback = object : ConnectivityManager.NetworkCallback() {
       override fun onAvailable(network: Network) {
-        executor.execute {
-          try {
-            writeOverNetwork(network, connectivity, bytes)
-          } catch (error: Throwable) {
-            failure = error
-          } finally {
-            done.countDown()
+        try {
+          executor.execute {
+            try {
+              writeOverNetwork(network, connectivity, bytes)
+            } catch (error: Throwable) {
+              failure = error
+            } finally {
+              done.countDown()
+            }
           }
+        } catch (rejected: RejectedExecutionException) {
+          // stop() shut the executor down while the data path was coming up — fail fast instead of letting
+          // the latch below block until the full transfer timeout (P1).
+          failure = IOException("Wi-Fi Aware transport stopped")
+          done.countDown()
         }
       }
 
@@ -372,7 +406,7 @@ internal class MeshWifiAwareController(
       subscribeSession = null
       serverSocket = null
       session = null
-      peers.clear()
+      synchronized(peersLock) { peers.clear() }
       // Shut the cached-thread-pool down so repeated start/stop cycles can't leave accept/receive worker
       // threads running or idle. The controller is discarded after stop() (a fresh one is created on the
       // next start), so a dead executor is never reused.
