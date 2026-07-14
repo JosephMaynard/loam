@@ -5200,19 +5200,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   // GET for a plaintext (`off`-mode) peer; POST for a sealed peer, which carries the `{ s, b, tok }`
   // envelope so the sync token is sealed and the request proves session-key possession (docs/08). The
-  // handler ignores the (empty) POST body — it's the sealed envelope that matters.
-  server.route({
-    method: ["GET", "POST"],
-    url: "/api/sync/digest",
-    config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
-    handler: async (request, reply) => {
-      if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
-        return reply.code(404).send(errorBody("Not found"));
-      }
-
-      return buildSyncDigest();
-    },
-  });
+  // handler ignores the (empty) POST body — it's the sealed envelope that matters. Registered as two
+  // POSITIONAL routes rather than one `server.route({ config })` so CodeQL's missing-rate-limiting query
+  // credits the per-route limit (it only recognises the `server.<method>(url, { config }, handler)` form).
+  const syncDigestHandler = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
+      return reply.code(404).send(errorBody("Not found"));
+    }
+    return buildSyncDigest();
+  };
+  server.get("/api/sync/digest", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, syncDigestHandler);
+  server.post("/api/sync/digest", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, syncDigestHandler);
 
   server.post(
     "/api/sync/messages",
