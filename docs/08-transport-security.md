@@ -159,10 +159,11 @@ credential. The peer's `preValidation` runs `s` through its `TRANSPORT_REPLAY_WI
 replayed/out-of-window sequence gets a **409**), stashes `tok` for `syncPeerAuthorized`, and sets
 `request.body = envelope.b` before schema validation. `s` (and `tok`) live inside the AEAD, so they can't
 be renumbered/read without breaking the tag. Even a tokenless digest is a POST carrying just `{ s }` — so
-the **response** can be bound to it: the peer seals its reply under `${method} ${url}#${s}` (the request
-sequence), and the puller opens it with the exact `s` it sent, so a captured response can't be **replayed
-or cross-fed** to another request on the same route (the tunnel binds its responses `{s,m,p}` the same
-way). An `off`-mode peer's plaintext digest stays a GET (nothing to seal). **Encrypted sessions authorize
+the **response** can be bound to it: the peer seals its reply under `${method} ${path}#${seq}` (the
+request sequence; sync paths carry no query, so `path === url`), and the puller opens it with the exact
+`seq` it sent, so a captured response can't be **replayed or cross-fed** to another request on the same
+route (the tunnel binds its responses `{s,m,p}` the same way). An `off`-mode peer's plaintext digest stays
+a GET (nothing to seal). **Encrypted sessions authorize
 ONLY via the sealed `tok`** — the `x-loam-sync-token` header is honoured solely on the plaintext path, so
 a captured token can't authorize an attacker's own encrypted session by being attached as a header.
 
