@@ -10,6 +10,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
+import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
@@ -154,6 +155,10 @@ export default function HostScreen() {
     // Answer optional on-device LLM requests from the embedded server (no-op unless the operator
     // enables the on-device backend and a model is wired — see docs/06).
     const cleanupLlm = registerOnDeviceLlm(nodejs.channel);
+    // Bridge the opportunistic-mesh transport (BLE/Wi-Fi Aware) to the launcher's courier (docs/17).
+    // Inert unless the operator enables `mesh.enabled` AND the native transport module is present —
+    // on a device/build without the radios, `meshTransport` is a no-op, so this is always safe.
+    const cleanupMesh = registerMeshCourier(nodejs.channel);
 
     if (!nodeStarted) {
       nodeStarted = true;
@@ -166,6 +171,7 @@ export default function HostScreen() {
       nodejs.channel.removeListener('loam-status', onStatus);
       nodejs.channel.removeListener('loam-hostinfo', onHostInfo);
       cleanupLlm();
+      cleanupMesh();
     };
   }, []);
 

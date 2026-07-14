@@ -39,6 +39,7 @@ import {
   MessageEditRequestSchema,
   MeshBroadcastRequestSchema,
   MeshIdentityCardSchema,
+  MeshInboundRequestSchema,
   MeshSendRequestSchema,
   MessageSchema,
   ModerationUpdateRequestSchema,
@@ -5187,6 +5188,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * presents the matching token (constant-time). A missing/wrong token is treated exactly like sync
    * being disabled — a 404 — so a prober can't distinguish "token-guarded" from "feature off".
    */
+  /**
+   * True when a request arrived over the loopback interface. The opportunistic-mesh transport bridge
+   * endpoints (`/api/mesh/outbound` + `/api/mesh/inbound`, docs/17) are for the **in-process** Android
+   * launcher only — it fetches them over 127.0.0.1 to shuttle sealed blobs between the native
+   * BLE/Wi-Fi-Aware radio and the already-built relay. Restricting them to loopback keeps a joiner on
+   * the hotspot LAN from draining this node's sealed queue or injecting into it directly (that path
+   * stays the token-guarded `/api/sync/*`). `trustProxy` is off by design (see the join-URL protocol
+   * note above), so `request.ip` is the real socket peer and can't be spoofed via `x-forwarded-for`.
+   */
+  function requestFromLoopback(request: FastifyRequest): boolean {
+    const ip = request.ip;
+    return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+  }
+
   function syncPeerAuthorized(request: FastifyRequest): boolean {
     const required = appConfig.sync.token;
     if (!required) {
@@ -5488,6 +5503,59 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       return { ok: true, sent, skipped };
+    },
+  );
+
+  // ---- Opportunistic-mesh transport bridge (Phase 3 — docs/16 §5, docs/17) -----------------------
+  // Two loopback-only endpoints that let the in-process Android launcher (nodejs-project-template/
+  // main.js) shuttle sealed blobs between the native BLE/Wi-Fi-Aware transport and the existing sealed
+  // relay, WITHOUT teaching the native layer anything about crypto/relay rules. They are a thin,
+  // radio-fed mirror of the `/api/sync/*` sealed path: `outbound` is the same set the sync digest
+  // offers (full records, so the courier ships bytes without a second round trip); `inbound` runs each
+  // blob through the same defensive `acceptSealedFromPeer` used by sync imports. Both 404 (identical to
+  // absent) unless `mesh.enabled`, and both refuse non-loopback callers so only this device's launcher
+  // can reach them. Public-data sync is completely untouched.
+
+  server.get(
+    "/api/mesh/outbound",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!appConfig.mesh.enabled || !requestFromLoopback(request)) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      // Exactly what the sync digest would advertise as `sealed`, but as full records ready to hand to
+      // the radio. Bounded so one transfer window can't try to push the whole store at once.
+      const messages = data.messages
+        .filter((message): message is SealedMessage => message.type === "sealed" && isSyncableMessage(message))
+        .slice(0, 200);
+      return { messages };
+    },
+  );
+
+  server.post(
+    "/api/mesh/inbound",
+    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!appConfig.mesh.enabled || !requestFromLoopback(request)) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+
+      const body = MeshInboundRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid mesh inbound request"));
+      }
+
+      // `acceptSealedFromPeer` is the single trust boundary: it re-checks TTL/hop/tombstone/dedup and
+      // the per-node storage cap, then delivers-if-ours or relays-onward (hop-decremented). A blob that
+      // fails any check is silently ignored, exactly as an inbound sync copy would be.
+      let accepted = 0;
+      for (const message of body.data.messages) {
+        if (acceptSealedFromPeer(message)) {
+          accepted += 1;
+        }
+      }
+      return { accepted };
     },
   );
 

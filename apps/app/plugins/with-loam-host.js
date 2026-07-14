@@ -37,6 +37,18 @@ const HOTSPOT_PERMISSIONS = [
   "android.permission.POST_NOTIFICATIONS",
 ];
 
+// Opportunistic-mesh transport permissions (docs/16 §5, docs/17 — modules/loam-mesh-transport).
+// Android 12+ split Bluetooth into the ADVERTISE/SCAN/CONNECT trio (advertise a LOAM beacon, scan for
+// peers, connect for the GATT control/fallback path). NEARBY_WIFI_DEVICES + ACCESS_FINE_LOCATION
+// (already required by the hotspot) also gate Wi-Fi Aware and pre-12 BLE scanning. The `neverForLocation`
+// usage flag on SCAN keeps us out of the location-permission story where the OS allows it. The runtime
+// grant is requested from JS (src/mesh/mesh-transport.ts) before the radios start.
+const MESH_PERMISSIONS = [
+  "android.permission.BLUETOOTH_ADVERTISE",
+  "android.permission.BLUETOOTH_SCAN",
+  "android.permission.BLUETOOTH_CONNECT",
+];
+
 const HOST_SERVICE_NAME = "expo.modules.loamhotspot.LoamHostService";
 
 /** Declare the foreground host service (LoamHostService) in the app manifest. */
@@ -122,12 +134,51 @@ function withArmOnlyReactNativeArchitectures(config) {
   });
 }
 
+/**
+ * Declare the mesh-transport hardware (BLE + Wi-Fi Aware) as OPTIONAL features so Google Play does not
+ * filter out devices that lack them (many phones have no Wi-Fi Aware) — the app degrades gracefully
+ * (BLE-only, or no mesh at all). Also stamp `usesPermissionFlags="neverForLocation"` on BLUETOOTH_SCAN
+ * and NEARBY_WIFI_DEVICES so BLE-beacon scanning + Wi-Fi Aware discovery don't drag in the location-
+ * permission story (we never derive location from either) — required for a mesh-only startup on API 33+.
+ */
+function withMeshManifest(config) {
+  return withAndroidManifest(config, (cfg) => {
+    const manifest = cfg.modResults.manifest;
+    manifest["uses-feature"] = manifest["uses-feature"] ?? [];
+    const features = [
+      "android.hardware.bluetooth_le",
+      "android.hardware.wifi.aware",
+    ];
+    for (const name of features) {
+      const already = manifest["uses-feature"].some((feature) => feature.$?.["android:name"] === name);
+      if (!already) {
+        manifest["uses-feature"].push({ $: { "android:name": name, "android:required": "false" } });
+      }
+    }
+
+    // Stamp `neverForLocation` on BOTH BLUETOOTH_SCAN and NEARBY_WIFI_DEVICES — we never derive physical
+    // location from BLE scanning or Wi-Fi Aware. Critically for NEARBY_WIFI_DEVICES (API 33+): without this
+    // flag Android *also* requires ACCESS_FINE_LOCATION to be granted, so a fresh MESH-ONLY startup (which
+    // requests only NEARBY_WIFI_DEVICES) would fail unless the hotspot flow had separately granted location
+    // first (P1). The hotspot keeps its own ACCESS_FINE_LOCATION declaration, so this is additive.
+    const perms = manifest["uses-permission"] ?? [];
+    for (const name of ["android.permission.BLUETOOTH_SCAN", "android.permission.NEARBY_WIFI_DEVICES"]) {
+      const entry = perms.find((permission) => permission.$?.["android:name"] === name);
+      if (entry) {
+        entry.$["android:usesPermissionFlags"] = "neverForLocation";
+      }
+    }
+    return cfg;
+  });
+}
+
 module.exports = function withLoamHost(config) {
   config = withCleartextTraffic(config);
   config = withArmOnlyAbiFilters(config);
   config = withArmOnlyReactNativeArchitectures(config);
-  // Merge (de-duped) the hotspot + foreground-service permissions into AndroidManifest.xml.
-  config = AndroidConfig.Permissions.withPermissions(config, HOTSPOT_PERMISSIONS);
+  // Merge (de-duped) the hotspot + foreground-service + mesh-transport permissions into the manifest.
+  config = AndroidConfig.Permissions.withPermissions(config, [...HOTSPOT_PERMISSIONS, ...MESH_PERMISSIONS]);
+  config = withMeshManifest(config);
   config = withHostService(config);
   return config;
 };

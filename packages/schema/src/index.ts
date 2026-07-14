@@ -852,6 +852,38 @@ export const MeshBroadcastRequestSchema = z.object({
 });
 export type MeshBroadcastRequest = z.infer<typeof MeshBroadcastRequestSchema>;
 
+/**
+ * `GET /api/mesh/outbound` — the sealed blobs this node currently holds and is willing to hand to a
+ * nearby device over the opportunistic transport (Phase 3, docs/16 / docs/17). It is the exact set
+ * `buildSyncDigest().sealed` advertises, but returned as full `SealedMessage` records so the courier
+ * can ship the bytes straight to a peer's radio without a second fetch. Loopback-only + gated on
+ * `mesh.enabled` — it exists purely so the in-process Android launcher (`nodejs-project-template/main.js`)
+ * can bridge the native BLE/Wi-Fi-Aware transport to the already-built sealed relay. Never exposed to
+ * a LAN joiner or a remote peer (that path stays `/api/sync/*`).
+ */
+export const MeshOutboundResponseSchema = z.object({
+  messages: z.array(SealedMessageSchema),
+});
+export type MeshOutboundResponse = z.infer<typeof MeshOutboundResponseSchema>;
+
+/**
+ * `POST /api/mesh/inbound` — sealed blobs a nearby device just handed us over the opportunistic
+ * transport (Phase 3, docs/16 / docs/17). Each is fed through the same defensive `acceptSealedFromPeer`
+ * path the sync layer uses (TTL / hop / tombstone / storage-cap checks, then deliver-if-ours-else-relay),
+ * so this endpoint adds no new trust: it is just a second, radio-fed doorway into the existing relay.
+ * Loopback-only + gated on `mesh.enabled`; bounded to one transfer batch.
+ */
+export const MeshInboundRequestSchema = z.object({
+  messages: z.array(SealedMessageSchema).min(1).max(500),
+});
+export type MeshInboundRequest = z.infer<typeof MeshInboundRequestSchema>;
+
+export const MeshInboundResponseSchema = z.object({
+  /** How many of the offered blobs were accepted (delivered locally or taken on to carry). */
+  accepted: z.number().int().nonnegative(),
+});
+export type MeshInboundResponse = z.infer<typeof MeshInboundResponseSchema>;
+
 /** Live per-peer sync bookkeeping, as reported by `GET /api/admin/sync`. */
 export const SyncPeerStatusSchema = z.object({
   lastAttemptAt: TimestampSchema.optional(),
