@@ -71,6 +71,10 @@ internal class MeshWifiAwareController(
   // Same for subscribe: without it a config-fail / termination would leave discovery permanently dead
   // (nothing re-subscribes) — the recurring start() re-subscribes when both are clear (P1).
   private var subscribing = false
+  // Consecutive discovery (publish/subscribe) config failures. On API 29-32 there's no
+  // `onAwareSessionTerminated` callback, so a dead PARENT session surfaces only as its child discovery
+  // sessions failing to (re)start; after a few we reattach from scratch as a fallback (P1).
+  private var discoveryFailures = 0
 
   private val executor = Executors.newCachedThreadPool()
   // Hard cap on concurrent inbound transfers. `ServerSocket` accepts on local interfaces, so without this
@@ -153,6 +157,18 @@ internal class MeshWifiAwareController(
             }
           }
         }
+
+        // The PARENT Aware session itself terminated (API 33+). Because `session` would otherwise stay
+        // non-null, every later start() would keep refreshing discovery on a DEAD attach. Reset for a fresh
+        // reattach on the next tick — WITHOUT shutting the executor down (P1). (Pre-33 has no such callback;
+        // the discoveryFailures fallback below covers those releases.)
+        override fun onAwareSessionTerminated() {
+          synchronized(lifecycleLock) {
+            if (gen == generation) {
+              resetForReattach()
+            }
+          }
+        }
       }, null)
     } catch (error: SecurityException) {
       starting = false
@@ -209,6 +225,7 @@ internal class MeshWifiAwareController(
           }
           publishing = false
           publishSession = discoverySession
+          discoveryFailures = 0 // a healthy discovery clears the dead-parent fallback counter
           // Apply any advert refresh that arrived while this first publish was in flight (P1).
           pendingAdvert?.let { discoverySession.updatePublish(buildPublishConfig(it)) }
           pendingAdvert = null
@@ -217,15 +234,17 @@ internal class MeshWifiAwareController(
 
       override fun onSessionConfigFailed() {
         synchronized(lifecycleLock) {
+          if (gen != generation) {
+            return
+          }
           // The initial publish FAILED. Clear `publishing` so a later updateAdvert can retry, instead of
           // wedging forever (every refresh only overwriting pendingAdvert, never re-publishing) (P1). Also
           // drop the stashed pendingAdvert: it's now stale, and a fresh retry publishes the CURRENT advert —
           // otherwise a later success could apply this old value and briefly revert the payload (P2).
-          if (gen == generation) {
-            publishing = false
-            pendingAdvert = null
-            listener.onError("Wi-Fi Aware publish failed")
-          }
+          publishing = false
+          pendingAdvert = null
+          listener.onError("Wi-Fi Aware publish failed")
+          maybeReattachOnDiscoveryFailure()
         }
       }
 
@@ -248,6 +267,14 @@ internal class MeshWifiAwareController(
         rememberPeer(peerHandle, MeshAdvertCodec.decode(message))
       }
     }, null)
+  }
+
+  /** Pre-API-33 fallback for a dead PARENT session: repeated discovery config-failures (the child sessions
+   * can't (re)start on a dead attach) trip a full reattach after a few tries (P1). Caller holds the lock. */
+  private fun maybeReattachOnDiscoveryFailure() {
+    if (++discoveryFailures >= MeshConstants.MAX_DISCOVERY_FAILURES) {
+      resetForReattach()
+    }
   }
 
   /** Re-subscribe if discovery isn't live — called from the recurring start() so a failed/terminated
@@ -277,17 +304,20 @@ internal class MeshWifiAwareController(
           }
           subscribing = false
           subscribeSession = discoverySession
+          discoveryFailures = 0 // a healthy discovery clears the dead-parent fallback counter
         }
       }
 
       override fun onSessionConfigFailed() {
         synchronized(lifecycleLock) {
+          if (gen != generation) {
+            return
+          }
           // Discovery couldn't start. Clear `subscribing` so the recurring start()'s ensureSubscribed
           // re-subscribes — otherwise this node would never discover peers (P1).
-          if (gen == generation) {
-            subscribing = false
-            listener.onError("Wi-Fi Aware subscribe failed")
-          }
+          subscribing = false
+          listener.onError("Wi-Fi Aware subscribe failed")
+          maybeReattachOnDiscoveryFailure()
         }
       }
 
@@ -504,31 +534,45 @@ internal class MeshWifiAwareController(
   }
 
   fun stop(): Unit = synchronized(lifecycleLock) {
-    // Under the SAME lock as onAttached's setup, so teardown is atomic vs a concurrent attach callback: a
-    // late onAttached either already advanced past its guard (and set up under this lock, so we tear its
-    // resources down here) or hasn't run yet (it sees the bumped generation and discards its session) (P1).
+    // Full teardown: also shut the executor down (the controller is discarded after stop(); a fresh one is
+    // created on the next start, so a dead executor is never reused).
+    teardown(shutdownExecutor = true)
+  }
+
+  /** Recover from a dead PARENT Wi-Fi Aware session (its `onAwareSessionTerminated`, API 33+, or the pre-33
+   * repeated-discovery-failure fallback). Unlike [stop], this does NOT shut the executor down — the
+   * controller stays alive and simply reattaches on the next `start()` tick (session is cleared to null,
+   * so `start()` takes the fresh-attach path) (P1). */
+  private fun resetForReattach(): Unit = synchronized(lifecycleLock) {
+    teardown(shutdownExecutor = false)
+  }
+
+  /** Shared teardown, under [lifecycleLock] (callers hold it). Bumps the generation so any in-flight
+   * attach/discovery callback is invalidated, closes + clears all session/socket/discovery state, and
+   * optionally shuts the executor down (only `stop()` does — a reattach keeps it). Atomic vs `onAttached`. */
+  private fun teardown(shutdownExecutor: Boolean) {
     generation++
     starting = false
     publishing = false
     subscribing = false
     pendingAdvert = null
+    discoveryFailures = 0
     try {
       publishSession?.close()
       subscribeSession?.close()
       serverSocket?.close()
       session?.close()
     } catch (error: Throwable) {
-      Log.w(TAG, "Wi-Fi Aware stop failed", error)
+      Log.w(TAG, "Wi-Fi Aware teardown failed", error)
     } finally {
       publishSession = null
       subscribeSession = null
       serverSocket = null
       session = null
       synchronized(peersLock) { peers.clear() }
-      // Shut the cached-thread-pool down so repeated start/stop cycles can't leave accept/receive worker
-      // threads running or idle. The controller is discarded after stop() (a fresh one is created on the
-      // next start), so a dead executor is never reused.
-      executor.shutdown()
+      if (shutdownExecutor) {
+        executor.shutdown()
+      }
     }
   }
 
