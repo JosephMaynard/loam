@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ChannelSchema,
+  DbEncryptionModeSchema,
   LoamConfigSchema,
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
@@ -10,6 +11,7 @@ import {
   ModerationUpdateRequestSchema,
   NetworkConfigSchema,
   securityProfilePreset,
+  SecurityConfigSchema,
   SERVER_ERROR_CODES,
   StreamEventSchema,
   SyncAttachmentResponseSchema,
@@ -91,6 +93,7 @@ describe("@loam/schema", () => {
         joinPolicy: "open",
         securityProfile: "standard",
         transportEncryption: "off",
+        dbEncryption: "off",
         locale: "en",
       }),
     ).not.toThrow();
@@ -120,6 +123,7 @@ describe("@loam/schema", () => {
         joinPolicy: "open",
         securityProfile: "standard",
         transportEncryption: "off",
+        dbEncryption: "off",
         locale: "xx",
       }).success,
     ).toBe(false);
@@ -160,7 +164,7 @@ describe("@loam/schema", () => {
         admin: { bootstrap: "firstUser" },
         killSwitch: { enabled: false, requireConfirmation: true },
         retention: {},
-        security: { profile: "standard", transportEncryption: "off" },
+        security: { profile: "standard", transportEncryption: "off", dbEncryption: "off" },
         access: { joinPolicy: "open" },
         sync: { enabled: false, peers: [], intervalMs: 30_000 },
         mesh: { enabled: false, relay: false, ttlMs: 259_200_000, hopLimit: 6, maxCarried: 5_000, maxContacts: 1_000 },
@@ -334,6 +338,25 @@ describe("@loam/schema", () => {
       killSwitchEnabled: false,
       transportEncryption: "optional",
     });
+  });
+
+  it("accepts every declared dbEncryption mode and rejects unknown ones", () => {
+    for (const mode of ["off", "ephemeral", "persistent", "passphrase"] as const) {
+      expect(() =>
+        SecurityConfigSchema.parse({ profile: "custom", transportEncryption: "off", dbEncryption: mode }),
+      ).not.toThrow();
+    }
+    expect(DbEncryptionModeSchema.safeParse("hardware").success).toBe(false);
+    expect(
+      SecurityConfigSchema.safeParse({ profile: "custom", transportEncryption: "off", dbEncryption: "hardware" })
+        .success,
+    ).toBe(false);
+  });
+
+  it("keeps dbEncryption out of the security-profile forcing bundle (an independent axis)", () => {
+    for (const profile of ["open", "standard", "hardened"] as const) {
+      expect(securityProfilePreset(profile)).not.toHaveProperty("dbEncryption");
+    }
   });
 
   it("validates LLM stream events", () => {

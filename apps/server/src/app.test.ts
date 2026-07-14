@@ -393,6 +393,40 @@ describe("admin config API", () => {
     expect(response.statusCode).toBe(400);
   });
 
+  it("defaults dbEncryption to off and reflects a PATCHed value in /api/config, independent of the security profile", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const before = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(before.networkConfig.dbEncryption).toBe("off");
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { dbEncryption: "ephemeral" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string; securityProfile: string };
+    };
+    expect(after.networkConfig.dbEncryption).toBe("ephemeral");
+    // dbEncryption is not one of the axes a named profile forces (only transportEncryption /
+    // joinPolicy / messageTtlMs / killSwitch are), so switching profiles must not clobber it.
+    expect(after.networkConfig.securityProfile).toBe("custom");
+
+    const rejected = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { dbEncryption: "hardware-hsm" } },
+    });
+    expect(rejected.statusCode).toBe(400);
+  });
+
   it("applies, enforces, broadcasts shape, and persists feature flag changes", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));

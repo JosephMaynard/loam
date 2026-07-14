@@ -504,6 +504,10 @@ export function defaultLoamConfig(): LoamConfig {
       // Off by default so existing plain-HTTP deployments are unchanged; operators opt in via a profile
       // or this axis (docs/08).
       transportEncryption: "off",
+      // Off by default so existing unencrypted deployments are unchanged; the actual DB keying is
+      // driven by LOAM_DB_KEY / openStore, wired separately (Android host key handoff). This is the
+      // declared/displayed posture, and it is not forced by a security profile (see SecurityConfigSchema).
+      dbEncryption: "off",
     },
     access: {
       joinPolicy: "open",
@@ -1399,6 +1403,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // can handshake + show the fingerprint. The client still prefers the QR-delivered key (docs/08).
       transportPublicKey:
         appConfig.security.transportEncryption === "off" ? undefined : transportIdentity?.publicKey,
+      dbEncryption: appConfig.security.dbEncryption,
       locale: appConfig.node.locale,
     };
   }
