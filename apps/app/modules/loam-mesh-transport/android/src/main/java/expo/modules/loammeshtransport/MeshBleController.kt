@@ -52,6 +52,26 @@ internal class MeshBleController(
   // BLE device address → last time we emitted it, so a chatty advertiser doesn't spam onPeerDiscovered.
   private val lastSeen = ConcurrentHashMap<String, Long>()
 
+  // Opaque session-local token → BLE MAC address. The token is what crosses to JS / the Node launcher —
+  // the MAC (privacy-sensitive, even though modern Android rotates it) never leaves this class (P1-3),
+  // mirroring the Wi-Fi Aware PeerHandle mapping. Bounded LRU so rotating addresses can't grow it.
+  private val blePeers = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>): Boolean =
+      size > MeshConstants.MAX_TRACKED_PEERS
+  }
+  private val blePeersLock = Any()
+  private var blePeerSeq = 0L
+
+  /** Resolve (or mint) the opaque token for a device address; the token is the only handle JS ever sees. */
+  private fun tokenForAddress(address: String): String = synchronized(blePeersLock) {
+    for ((token, existing) in blePeers) {
+      if (existing == address) return token
+    }
+    val token = "ble-${blePeerSeq++}"
+    blePeers[token] = address
+    token
+  }
+
   /** True when this device has BLE AND the adapter can advertise (peripheral role) — required to be
    * discoverable. Some older/cheaper phones are central-only. */
   fun isSupported(): Boolean {
@@ -194,10 +214,9 @@ internal class MeshBleController(
     }
     lastSeen[address] = now
 
-    // The BLE device address is the transport handle for the fallback GATT path. It is NOT sent to JS
-    // (privacy — it's a rotating random address on modern Android anyway); the JS peerId is derived so
-    // the courier can round-trip it back to `sendBlob` without ever touching the MAC.
-    val peerId = "ble-$address"
+    // The JS peerId is an OPAQUE session-local token, never the MAC — the courier round-trips the token
+    // back to `sendBlob`, and only this class maps it to the device address (P1-3).
+    val peerId = tokenForAddress(address)
     listener.onPeerDiscovered(peerId, advert.haveMail, advert.meshHintHex(), result.rssi)
   }
 

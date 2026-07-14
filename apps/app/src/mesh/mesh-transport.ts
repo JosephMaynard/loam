@@ -77,6 +77,10 @@ export class MeshTransport {
   private started = false;
   /** Shared promise for an in-flight `start()` so overlapping callers don't double-start (see `start`). */
   private startInFlight: Promise<boolean> | null = null;
+  /** Lifecycle generation, bumped by `stop()`. `doStart()` captures it before the async permission
+   * request and bails if it changed — so a stop() during startup can't be undone by the resuming
+   * `doStart()` registering listeners + starting the radios after teardown. */
+  private generation = 0;
 
   /** True when the native transport module is linked (Android host build). */
   get supported(): boolean {
@@ -143,7 +147,13 @@ export class MeshTransport {
     if (!this.supported) {
       return false;
     }
+    const gen = this.generation;
     const granted = await this.ensurePermissions();
+    // A stop() (or another start()) happened while the permission dialog was up — abandon this startup
+    // rather than register listeners + start the radios after teardown (P1-4).
+    if (gen !== this.generation) {
+      return false;
+    }
     if (!granted) {
       this.handlers.onError?.('Mesh permissions were not granted.');
       return false;
@@ -193,6 +203,10 @@ export class MeshTransport {
 
   /** Stop the radios and drop event subscriptions. Idempotent. */
   stop(): void {
+    // Bump the generation so any in-flight `doStart()` (awaiting permissions) abandons instead of
+    // resuming into a started state after this teardown (P1-4).
+    this.generation += 1;
+    this.startInFlight = null;
     for (const unsubscribe of this.unsubscribers) {
       unsubscribe();
     }

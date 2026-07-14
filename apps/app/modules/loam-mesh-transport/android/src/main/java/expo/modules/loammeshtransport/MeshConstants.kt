@@ -54,6 +54,15 @@ internal object MeshConstants {
   /** Wi-Fi Aware data-path + socket transfer timeout. */
   const val TRANSFER_TIMEOUT_MS = 30_000L
 
+  /** Hard cap on concurrent inbound Wi-Fi Aware transfers. The responder `ServerSocket` accepts on local
+   * interfaces, so this bounds how many receive threads a connection flood can create before the
+   * server-side sealed-message validation runs (docs/17 — a small number: real mesh peers are few). */
+  const val MAX_CONCURRENT_TRANSFERS = 4
+
   /** How long a discovered peer stays "fresh" before we re-emit it on a new sighting. */
   const val PEER_DEBOUNCE_MS = 15_000L
+
+  /** Bound on the opaque-token → device-address maps (BLE + Wi-Fi Aware), so a churn of rotating
+   * addresses can't grow them without limit. Real meshes have a handful of nearby peers. */
+  const val MAX_TRACKED_PEERS = 256
 }

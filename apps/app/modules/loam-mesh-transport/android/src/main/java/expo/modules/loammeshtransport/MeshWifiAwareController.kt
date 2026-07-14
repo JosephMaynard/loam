@@ -56,7 +56,16 @@ internal class MeshWifiAwareController(
     fun onError(message: String)
   }
 
+  // A monotonic lifecycle generation: `stop()` bumps it, so a late `onAttached` (attach is async) from a
+  // superseded/stopped start is detected and discarded instead of resurrecting the radios (P1-4).
+  @Volatile private var generation = 0
+  @Volatile private var starting = false
+
   private val executor = Executors.newCachedThreadPool()
+  // Hard cap on concurrent inbound transfers. `ServerSocket` accepts on local interfaces, so without this
+  // a flood of connections would each spawn a receive thread (unbounded) before any server-side sealed
+  // validation runs (P1-5). Excess connections are closed immediately — before a thread is dispatched.
+  private val activeReceives = java.util.concurrent.atomic.AtomicInteger(0)
   private var awareManager: WifiAwareManager? = null
   private var session: WifiAwareSession? = null
   private var publishSession: DiscoverySession? = null
@@ -77,28 +86,55 @@ internal class MeshWifiAwareController(
   /** Attach, start the responder socket, then publish + subscribe. Best-effort; errors surface via the
    * listener and leave the module in a BLE-only state. */
   fun start(advert: MeshAdvert) {
+    // Already attached → just refresh the advertised have-mail flag (P1-2). Without this, the launcher's
+    // 30s advert refresh would attach a NEW session + responder socket + accept loop every time, while
+    // stop() only tracks the latest — leaking sessions/sockets/threads.
+    if (session != null) {
+      updateAdvert(advert)
+      return
+    }
+    if (starting) {
+      return // an attach is already in flight; don't start a second
+    }
     val manager = context.getSystemService(Context.WIFI_AWARE_SERVICE) as? WifiAwareManager
     if (manager == null || !manager.isAvailable) {
       listener.onError("Wi-Fi Aware is unavailable on this device")
       return
     }
     awareManager = manager
+    val gen = generation
+    starting = true
     try {
       manager.attach(object : AttachCallback() {
         override fun onAttached(newSession: WifiAwareSession) {
+          // attach is async: if stop() (or a superseding start) ran meanwhile, `generation` advanced —
+          // discard this now-orphan session instead of resurrecting the radios after teardown (P1-4).
+          if (gen != generation) {
+            try {
+              newSession.close()
+            } catch (_: Throwable) {
+            }
+            return
+          }
           session = newSession
+          starting = false
           startResponderSocket()
           publish(newSession, advert)
           subscribe(newSession)
         }
 
         override fun onAttachFailed() {
-          listener.onError("Wi-Fi Aware attach failed")
+          starting = false
+          if (gen == generation) {
+            listener.onError("Wi-Fi Aware attach failed")
+          }
         }
       }, null)
     } catch (error: SecurityException) {
+      starting = false
       listener.onError("Missing NEARBY_WIFI_DEVICES permission for Wi-Fi Aware")
     } catch (error: Throwable) {
+      starting = false
       listener.onError("Wi-Fi Aware start failed: ${error.message}")
     }
   }
@@ -171,6 +207,13 @@ internal class MeshWifiAwareController(
    */
   private fun startResponderSocket() {
     try {
+      // NOTE (P1-5, partial): `ServerSocket(0)` binds all local interfaces, so on a device also running the
+      // hotspot a LAN client that found the port could connect here. Binding to the Aware interface alone
+      // needs the responder restructured around the per-peer Aware `Network` lifecycle (tied to the
+      // still-unverified port-exchange scaffold — see `sendBlob`'s doc caveat), so it's a device-iteration
+      // follow-up. The admission cap below + the per-connection deadline in `receiveOne` bound the DoS
+      // impact meanwhile (≤ MAX_CONCURRENT_TRANSFERS slots, each ≤ TRANSFER_TIMEOUT_MS), and every accepted
+      // blob is still validated server-side (sealed relay) before anything is delivered.
       val socket = ServerSocket(0)
       serverSocket = socket
       listenPort = socket.localPort
@@ -178,7 +221,17 @@ internal class MeshWifiAwareController(
         while (!socket.isClosed) {
           try {
             val client = socket.accept()
-            executor.execute { receiveOne(client) }
+            // Hard admission cap: close excess connections immediately (before dispatching a thread) so a
+            // flood can't spawn unbounded receive threads ahead of server-side validation (P1-5).
+            if (activeReceives.get() >= MeshConstants.MAX_CONCURRENT_TRANSFERS) {
+              try {
+                client.close()
+              } catch (_: IOException) {
+              }
+            } else {
+              activeReceives.incrementAndGet()
+              executor.execute { receiveOne(client) }
+            }
           } catch (error: IOException) {
             // An IOException on a CLOSED socket is our own shutdown (`stop()` closed it) — exit quietly.
             // On an OPEN socket it's a real accept failure that must not be silently swallowed as shutdown.
@@ -195,6 +248,18 @@ internal class MeshWifiAwareController(
   }
 
   private fun receiveOne(client: Socket) {
+    // Absolute deadline: `soTimeout` only bounds a single blocked read, so a peer trickling one byte per
+    // sub-timeout window could hold the connection indefinitely. A watchdog closes the socket after the
+    // whole-transfer budget regardless, capping how long any one slot is held (P1-5).
+    val watchdog = executor.let {
+      Thread {
+        try {
+          Thread.sleep(MeshConstants.TRANSFER_TIMEOUT_MS)
+          if (!client.isClosed) client.close()
+        } catch (_: Throwable) {
+        }
+      }.apply { isDaemon = true; start() }
+    }
     try {
       client.soTimeout = MeshConstants.TRANSFER_TIMEOUT_MS.toInt()
       val bytes = client.getInputStream().use { MeshFraming.readBlob(it) }
@@ -206,6 +271,8 @@ internal class MeshWifiAwareController(
     } catch (error: Throwable) {
       Log.w(TAG, "Wi-Fi Aware receive failed", error)
     } finally {
+      watchdog.interrupt()
+      activeReceives.decrementAndGet()
       try {
         client.close()
       } catch (_: IOException) {
@@ -290,6 +357,9 @@ internal class MeshWifiAwareController(
   }
 
   fun stop() {
+    // Bump the generation FIRST so any in-flight attach's late `onAttached` is discarded (P1-4).
+    generation++
+    starting = false
     try {
       publishSession?.close()
       subscribeSession?.close()

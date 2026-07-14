@@ -245,20 +245,37 @@ class LoamMeshTransportModule : Module() {
 
   private fun missingPermissions(context: Context): List<String> {
     val needed = mutableListOf<String>()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    val sdk = Build.VERSION.SDK_INT
+    val awareSupported =
+      sdk >= Build.VERSION_CODES.Q &&
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_AWARE)
+
+    // Bluetooth runtime permissions are the API 31+ model (with `neverForLocation` on SCAN in the
+    // manifest); below 31, BLE scanning is location-gated (handled by the FINE_LOCATION branch).
+    if (sdk >= Build.VERSION_CODES.S) {
       for (p in listOf(
         Manifest.permission.BLUETOOTH_ADVERTISE,
         Manifest.permission.BLUETOOTH_SCAN,
         Manifest.permission.BLUETOOTH_CONNECT,
-        Manifest.permission.NEARBY_WIFI_DEVICES,
       )) {
         if (!hasPermission(context, p)) needed += p
       }
-    } else {
+    }
+
+    // Wi-Fi Aware's nearby-device permission is `NEARBY_WIFI_DEVICES` — which ONLY exists from API 33.
+    // On API 29-32 Wi-Fi Aware needs `ACCESS_FINE_LOCATION` instead (as does BLE scanning below API 31).
+    // Only ask for an Aware-specific permission when the device actually has Wi-Fi Aware.
+    if (sdk >= Build.VERSION_CODES.TIRAMISU) {
+      if (awareSupported && !hasPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES)) {
+        needed += Manifest.permission.NEARBY_WIFI_DEVICES
+      }
+    } else if (sdk < Build.VERSION_CODES.S || awareSupported) {
+      // Pre-31 (BLE scan) or pre-33-with-Aware — FINE_LOCATION is the gate.
       if (!hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)) {
         needed += Manifest.permission.ACCESS_FINE_LOCATION
       }
     }
+
     return needed
   }
 
