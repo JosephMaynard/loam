@@ -24,7 +24,7 @@ crypto/relay rule stays server-side in the existing sealed relay (docs/16 §2–
 
 ## Architecture recap (how a message actually moves)
 
-```
+```text
  Phone A (sender host)                         Phone B (recipient host)
  ┌──────────────────────────┐                 ┌──────────────────────────┐
  │ Node server (relay)       │   BLE beacon    │ Node server (relay)       │
@@ -53,8 +53,9 @@ crypto/relay rule stays server-side in the existing sealed relay (docs/16 §2–
    Convergence bounds (TTL, hop, per-node cap) are entirely server-side and unchanged.
 
 **Gating.** The launcher only spins the radios up once it sees a `200` from `/api/mesh/outbound`, which
-only happens when an operator has turned **`mesh.enabled`** on (admin UI Mesh panel / `PATCH
-/api/admin/config`). With mesh off the endpoint `404`s and the courier stays idle (one cheap loopback
+only happens when an operator has turned **`mesh.enabled`** on — via `PATCH /api/admin/config` (or by
+editing `config.json` before boot), and, in a build that ships it, the admin UI **Mesh panel** is a
+convenience wrapper over the same PATCH. With mesh off the endpoint `404`s and the courier stays idle (one cheap loopback
 GET per 30 s). The endpoints are **loopback-only** (`request.ip` must be `127.0.0.1`/`::1`; `trustProxy`
 is off, so this is unspoofable) — a joiner on the hotspot LAN cannot drain or inject the sealed queue;
 that path stays the token-guarded `/api/sync/*`.
@@ -64,9 +65,9 @@ that path stays the token-guarded `/api/sync/*`.
 - **Two (ideally three) physical Android phones.** No emulator — neither BLE peripheral mode nor
   Wi-Fi Aware exists on the emulator.
 - **Wi-Fi Aware hardware** for the bulk path: check `adb shell pm list features | grep wifi.aware`.
-  Common on Pixel 3+/recent flagships; **absent on many mid-range/older devices** — those fall to the
-  BLE-only chunked path, which is **not yet implemented** (see stubs). Verify at least two Aware-capable
-  phones for the primary test.
+  Common on Pixel 3+/recent flagships; **absent on many mid-range/older devices**. There is **no working
+  fallback yet** — the BLE-only chunked path is unimplemented (stubs only), so a phone without Wi-Fi Aware
+  **cannot run the primary Phase-3 test at all**. You need at least **two Wi-Fi-Aware-capable phones**.
 - **BLE advertise (peripheral) support** on both — most phones have it, some cheap/old ones are
   central-only (`BluetoothAdapter.isMultipleAdvertisementSupported()`).
 - Android **12+ (API 31+)** recommended so the `BLUETOOTH_ADVERTISE/SCAN/CONNECT` runtime-permission
@@ -81,9 +82,10 @@ that path stays the token-guarded `/api/sync/*`.
 ### 0. Pre-flight (per phone)
 1. Install the APK, open LOAM, let the embedded host reach "ready".
 2. Grant the mesh permissions when prompted (or Settings → Apps → LOAM → Permissions → Nearby devices).
-3. As the node admin, open the **admin UI → Mesh panel** and set **`mesh.enabled = true`** (and
-   `relay = true` on the middle node for the 3-phone relay test). Optionally set a shared `sync.token`
-   so only your phones pair — not required for the transport itself.
+3. As the node admin, enable mesh: `PATCH /api/admin/config` with `{ "mesh": { "enabled": true } }` (and
+   `"relay": true` on the middle node for the 3-phone relay test) — or, in a build that ships it, the
+   admin UI **Mesh panel** does the same. Optionally set a shared `sync.token` so only your phones pair —
+   not required for the transport itself.
 4. `adb logcat -s NODEJS-MOBILE MeshBle MeshWifiAware LoamMeshTransport` to watch both layers.
 
 ### 1. Two-phone direct delivery (the Phase-3 acceptance gate)

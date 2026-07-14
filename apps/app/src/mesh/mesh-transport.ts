@@ -75,6 +75,8 @@ export class MeshTransport {
   private handlers: MeshTransportHandlers = {};
   private unsubscribers: (() => void)[] = [];
   private started = false;
+  /** Shared promise for an in-flight `start()` so overlapping callers don't double-start (see `start`). */
+  private startInFlight: Promise<boolean> | null = null;
 
   /** True when the native transport module is linked (Android host build). */
   get supported(): boolean {
@@ -116,8 +118,25 @@ export class MeshTransport {
    * Start advertising + discovery. Requests permissions first; if they're denied, stays stopped and
    * reports an error through `onError`. Idempotent — a second call while running is a no-op. Returns
    * true when the radios were actually started.
+   *
+   * Serialized: `start()` awaits permissions, so two overlapping calls could otherwise both pass the
+   * `started` check and each register listeners + start the radios twice. Concurrent callers share the
+   * one in-flight startup promise instead.
    */
   async start(advert: MeshAdvertState): Promise<boolean> {
+    if (this.started) {
+      return true;
+    }
+    if (this.startInFlight) {
+      return this.startInFlight;
+    }
+    this.startInFlight = this.doStart(advert).finally(() => {
+      this.startInFlight = null;
+    });
+    return this.startInFlight;
+  }
+
+  private async doStart(advert: MeshAdvertState): Promise<boolean> {
     if (this.started) {
       return true;
     }

@@ -83,6 +83,9 @@ internal class MeshBleController(
     val adapter = bluetoothManager?.adapter ?: return listener.onError("No Bluetooth adapter")
     val leAdvertiser = adapter.bluetoothLeAdvertiser
       ?: return listener.onError("This device can't BLE-advertise (central-only)")
+    // Stop any advertisement already running (with its old callback) before starting a new one, so a
+    // repeated start can't leave the previous advertiser live or orphan its callback.
+    stopAdvertising()
     advertiser = leAdvertiser
 
     val settings = AdvertiseSettings.Builder()
@@ -177,7 +180,13 @@ internal class MeshBleController(
       return // a differently-versioned mesh — ignore rather than mis-parse
     }
 
-    val address = result.device?.address ?: return
+    // Reading the device address can throw SecurityException if BLUETOOTH_CONNECT was revoked mid-scan;
+    // bail out cleanly (before any debounce / peerId / listener callback) rather than crash the scan.
+    val address = try {
+      result.device?.address ?: return
+    } catch (error: SecurityException) {
+      return
+    }
     val now = SystemClock.elapsedRealtime()
     val previous = lastSeen[address]
     if (previous != null && now - previous < MeshConstants.PEER_DEBOUNCE_MS) {

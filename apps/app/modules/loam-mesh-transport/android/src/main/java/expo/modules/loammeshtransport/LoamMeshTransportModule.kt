@@ -42,7 +42,12 @@ internal class AdvertRecord : Record {
  * docs/17). The Expo definition + delegation are standard; the radio internals are the risk surface.
  */
 class LoamMeshTransportModule : Module() {
-  private val executor = Executors.newSingleThreadExecutor()
+  // One lock guards controller lifecycle (create/teardown) + the executor, so concurrent JS calls
+  // (start/stop/sendBlob) and OnDestroy can't race into orphaned controllers or a dead executor.
+  private val lock = Any()
+  // Recreatable: `teardown()` shuts it down (so its thread can't outlive a destroyed/recreated module),
+  // and `dispatch` lazily spins up a fresh one if a later sendBlob arrives after a soft `shutdown()`.
+  private var executor = Executors.newSingleThreadExecutor()
 
   @Volatile private var ble: MeshBleController? = null
   @Volatile private var aware: MeshWifiAwareController? = null
@@ -78,10 +83,14 @@ class LoamMeshTransportModule : Module() {
     }
 
     Function("startAdvertising") { advert: AdvertRecord ->
-      val context = safeContext() ?: return@Function
-      val parsed = advert.toAdvert()
-      ensureBle(context).startAdvertising(parsed)
-      ensureAware(context)?.let { if (it.isSupported()) it.start(parsed) }
+      val context = safeContext()
+      if (context == null) {
+        sendEvent("onTransportError", mapOf("error" to "No application context for startAdvertising"))
+      } else {
+        val parsed = advert.toAdvert()
+        ensureBle(context).startAdvertising(parsed)
+        ensureAware(context)?.let { if (it.isSupported()) it.start(parsed) }
+      }
     }
 
     Function("stopAdvertising") {
@@ -92,7 +101,9 @@ class LoamMeshTransportModule : Module() {
 
     Function("startDiscovery") {
       val context = safeContext()
-      if (context != null) {
+      if (context == null) {
+        sendEvent("onTransportError", mapOf("error" to "No application context for startDiscovery"))
+      } else {
         ensureBle(context).startDiscovery()
       }
     }
@@ -102,7 +113,7 @@ class LoamMeshTransportModule : Module() {
     }
 
     AsyncFunction("sendBlob") { peerId: String, base64: String, promise: Promise ->
-      executor.execute { sendBlob(peerId, base64, promise) }
+      dispatch { sendBlob(peerId, base64, promise) }
     }
 
     Function("shutdown") {
@@ -118,25 +129,37 @@ class LoamMeshTransportModule : Module() {
 
   private fun safeContext(): Context? = appContext.reactContext?.applicationContext
 
-  private fun ensureBle(context: Context): MeshBleController {
-    ble?.let { return it }
-    val controller = MeshBleController(
-      context,
-      object : MeshBleController.Listener {
-        override fun onPeerDiscovered(peerId: String, haveMail: Boolean, meshHint: String, rssi: Int) {
-          sendEvent(
-            "onPeerDiscovered",
-            mapOf("peerId" to peerId, "haveMail" to haveMail, "meshHint" to meshHint, "rssi" to rssi),
-          )
-        }
+  /** Submit background work on the executor, resurrecting it if a prior soft `shutdown()` terminated it. */
+  private fun dispatch(task: Runnable) {
+    synchronized(lock) {
+      if (executor.isShutdown) {
+        executor = Executors.newSingleThreadExecutor()
+      }
+      executor.execute(task)
+    }
+  }
 
-        override fun onError(message: String) {
-          sendEvent("onTransportError", mapOf("error" to message))
-        }
-      },
-    )
-    ble = controller
-    return controller
+  private fun ensureBle(context: Context): MeshBleController {
+    synchronized(lock) {
+      ble?.let { return it }
+      val controller = MeshBleController(
+        context,
+        object : MeshBleController.Listener {
+          override fun onPeerDiscovered(peerId: String, haveMail: Boolean, meshHint: String, rssi: Int) {
+            sendEvent(
+              "onPeerDiscovered",
+              mapOf("peerId" to peerId, "haveMail" to haveMail, "meshHint" to meshHint, "rssi" to rssi),
+            )
+          }
+
+          override fun onError(message: String) {
+            sendEvent("onTransportError", mapOf("error" to message))
+          }
+        },
+      )
+      ble = controller
+      return controller
+    }
   }
 
   private fun ensureAware(context: Context): MeshWifiAwareController? {
@@ -146,45 +169,49 @@ class LoamMeshTransportModule : Module() {
     if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_AWARE)) {
       return null // fall back to BLE-only (with the documented chunked-transfer TODO)
     }
-    aware?.let { return it }
-    val controller = MeshWifiAwareController(
-      context,
-      object : MeshWifiAwareController.Listener {
-        override fun onPeerMatched(peerId: String, haveMail: Boolean, meshHint: String) {
-          sendEvent(
-            "onPeerDiscovered",
-            mapOf("peerId" to peerId, "haveMail" to haveMail, "meshHint" to meshHint, "rssi" to null),
-          )
-        }
+    synchronized(lock) {
+      aware?.let { return it }
+      val controller = MeshWifiAwareController(
+        context,
+        object : MeshWifiAwareController.Listener {
+          override fun onPeerMatched(peerId: String, haveMail: Boolean, meshHint: String) {
+            sendEvent(
+              "onPeerDiscovered",
+              mapOf("peerId" to peerId, "haveMail" to haveMail, "meshHint" to meshHint, "rssi" to null),
+            )
+          }
 
-        override fun onBlobReceived(peerId: String, bytes: ByteArray) {
-          sendEvent(
-            "onTransferReceived",
-            mapOf("peerId" to peerId, "base64" to Base64.encodeToString(bytes, Base64.NO_WRAP)),
-          )
-        }
+          override fun onBlobReceived(peerId: String, bytes: ByteArray) {
+            sendEvent(
+              "onTransferReceived",
+              mapOf("peerId" to peerId, "base64" to Base64.encodeToString(bytes, Base64.NO_WRAP)),
+            )
+          }
 
-        override fun onError(message: String) {
-          sendEvent("onTransportError", mapOf("error" to message))
-        }
-      },
-    )
-    aware = controller
-    return controller
+          override fun onError(message: String) {
+            sendEvent("onTransportError", mapOf("error" to message))
+          }
+        },
+      )
+      aware = controller
+      return controller
+    }
   }
 
   /** Route an outbound blob to Wi-Fi Aware (preferred) or the BLE fallback, by peerId namespace. */
   private fun sendBlob(peerId: String, base64: String, promise: Promise) {
     try {
       val bytes = Base64.decode(base64, Base64.NO_WRAP)
+      // Snapshot the controller under the lock so a concurrent teardown that nulls the field can't leave
+      // this task calling into a half-stopped controller; the actual send I/O then runs outside the lock.
       when {
         peerId.startsWith("aware-") -> {
-          val controller = aware ?: throw MeshTransportException("Wi-Fi Aware is not active")
+          val controller = synchronized(lock) { aware } ?: throw MeshTransportException("Wi-Fi Aware is not active")
           controller.sendBlob(peerId, bytes)
         }
         peerId.startsWith("ble-") -> {
           // No Aware link to this peer — fall back to the (currently unimplemented) chunked BLE path.
-          val controller = ble ?: throw MeshTransportException("BLE is not active")
+          val controller = synchronized(lock) { ble } ?: throw MeshTransportException("BLE is not active")
           controller.sendBlobFallback(peerId, bytes)
         }
         else -> throw MeshTransportException("Unknown peer id: $peerId")
@@ -198,12 +225,18 @@ class LoamMeshTransportModule : Module() {
   }
 
   private fun teardown() {
-    try {
-      ble?.stop()
-      aware?.stop()
-    } finally {
-      ble = null
-      aware = null
+    synchronized(lock) {
+      try {
+        ble?.stop()
+        aware?.stop()
+      } finally {
+        ble = null
+        aware = null
+        // Shut the executor down so its worker thread can't outlive a destroyed/recreated module (a
+        // leaked thread across OnDestroy). `dispatch` lazily creates a fresh executor if the module is
+        // reused after a soft `shutdown()`.
+        executor.shutdown()
+      }
     }
   }
 

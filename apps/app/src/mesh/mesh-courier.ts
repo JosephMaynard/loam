@@ -86,6 +86,8 @@ export function registerMeshCourier(channel: BridgeChannel): () => void {
     const base64 = asString(command.base64);
     const blobId = asString(command.blobId);
     if (!peerId || !base64) {
+      // Still ack (ok: false) so the launcher's pending send resolves instead of hanging forever.
+      channel.post('loam-mesh-sent', { peerId, blobId, ok: false });
       return;
     }
     void meshTransport.sendBlob(peerId, base64).then((ok) => {

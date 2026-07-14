@@ -180,7 +180,12 @@ internal class MeshWifiAwareController(
             val client = socket.accept()
             executor.execute { receiveOne(client) }
           } catch (error: IOException) {
-            break // socket closed on shutdown
+            // An IOException on a CLOSED socket is our own shutdown (`stop()` closed it) — exit quietly.
+            // On an OPEN socket it's a real accept failure that must not be silently swallowed as shutdown.
+            if (!socket.isClosed) {
+              listener.onError("Wi-Fi Aware responder accept failed: ${error.message}")
+            }
+            break
           }
         }
       }
@@ -298,6 +303,10 @@ internal class MeshWifiAwareController(
       serverSocket = null
       session = null
       peers.clear()
+      // Shut the cached-thread-pool down so repeated start/stop cycles can't leave accept/receive worker
+      // threads running or idle. The controller is discarded after stop() (a fresh one is created on the
+      // next start), so a dead executor is never reused.
+      executor.shutdown()
     }
   }
 
