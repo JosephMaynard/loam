@@ -933,6 +933,16 @@ describe("config robustness", () => {
     await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
   });
 
+  it("ABORTS startup when the persisted config row is present but EMPTY (not silently skipped)", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const initialApp = await buildApp({ dataDir, logger: false });
+    initialApp.store.setConfigValue("config", ""); // a corrupt/empty row is present, not absent
+    await initialApp.close();
+
+    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
+  });
+
   it("ABORTS rather than silently serving `off` when a required-mode config has an invalid field", async () => {
     // The exact footgun: a `required` node whose `sync.token` is under the 16-char minimum invalidates the
     // whole document. It must NOT boot advertising `off` — it must refuse to start.

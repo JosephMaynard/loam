@@ -1143,7 +1143,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const stored = store.getConfigValue("config");
 
-    if (stored) {
+    // `!== undefined` (not truthiness): a PRESENT empty string is a corrupt row that must fail closed
+    // through `parseConfigUpdate` (JSON.parse("") throws → abort), not be silently skipped to defaults. An
+    // absent key returns `undefined` → a normal fresh boot.
+    if (stored !== undefined) {
       const storedUpdate = parseConfigUpdate(stored, "the persisted config table");
 
       // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
@@ -3948,9 +3951,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     staticFilesRegistered = true;
   }
 
-  await loadAppConfig();
-  loadData();
-  reapExpiredMessages();
+  try {
+    await loadAppConfig();
+    loadData();
+    reapExpiredMessages();
+  } catch (error) {
+    // Startup aborted (e.g. `loadAppConfig` fails closed on an invalid config source) — release the SQLite
+    // handle opened above so a rejected `buildApp` doesn't leak an open store / lock file (matters under
+    // repeated test builds and a supervisor that retries boot).
+    store.close();
+    throw error;
+  }
 
   if (appConfig.admin.bootstrap === "setupCode" && !anyAdminExists()) {
     adminSetupCode = makeAdminSetupCode();
