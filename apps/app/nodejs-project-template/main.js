@@ -346,6 +346,121 @@ rnBridge.channel.on('loam-mesh-error', (payload) => {
   console.warn('Mesh transport error', (payload && payload.error) || payload);
 });
 
+// ---- On-device model selection (model manager UI, apps/app/src/lib/model-manager-bridge.ts) -------
+// The RN model manager downloads GGUF files into its own (Expo) sandbox and, when the operator taps
+// "Set active"/"Deactivate", asks THIS process to persist the chosen `llm.onDevice` block into
+// config.json — the same boot-time config layer the server already reads (layered defaults ←
+// config.json ← DB admin edits, see CLAUDE.md). This is done over the rn-bridge channel and
+// deliberately NEVER over HTTP: any authenticated request from this process (even just
+// `/api/config`) would mint a session and, on a fresh node with `firstUser` bootstrap, silently
+// steal the one-time admin grant from the operator — exactly the trap `waitForServer` above avoids
+// by probing `/api/health` instead. nodejs-mobile can't restart in-process, so this takes effect the
+// NEXT time the app (re)starts the embedded server; the RN UI is expected to say so.
+//
+// Every field is re-validated here (mirroring packages/schema's OnDeviceLlmConfigSchema bounds)
+// before it's ever written to disk: config.json is a fail-closed boot layer (an invalid document
+// makes the whole server refuse to start, see app.ts's parseConfigUpdate), so a malformed manager
+// request must be rejected, never written.
+const fs = require('fs');
+const configPath = path.join(dataDir, 'config.json');
+
+/** Read + JSON-parse config.json. Absent file → `{}` (a normal fresh boot); any other error (unlikely,
+ * since a malformed file would already have kept the server from booting) propagates to the caller. */
+function readConfigFile() {
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      return {};
+    }
+    throw err;
+  }
+  const parsed = JSON.parse(raw);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+/** Same bounds as `OnDeviceLlmConfigSchema` in packages/schema (kept in sync by hand — this file has
+ * no access to the zod schema). Returns false (never throws) on anything out of range. */
+function isValidSetPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return false;
+  }
+  if (typeof payload.modelPath !== 'string' || payload.modelPath.length < 1 || payload.modelPath.length > 1024) {
+    return false;
+  }
+  if (
+    payload.model !== undefined &&
+    (typeof payload.model !== 'string' || payload.model.length < 1 || payload.model.length > 120)
+  ) {
+    return false;
+  }
+  if (
+    payload.contextSize !== undefined &&
+    (typeof payload.contextSize !== 'number' ||
+      !Number.isInteger(payload.contextSize) ||
+      payload.contextSize < 1 ||
+      payload.contextSize > 32768)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Write `next` to config.json atomically (temp file + rename) so a mid-write crash can never leave a
+ * half-written, unparseable file behind — that would strand the operator with a server that refuses
+ * to boot and no in-app way to fix it. */
+function writeConfigFile(next) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf8');
+  fs.renameSync(tmpPath, configPath);
+}
+
+rnBridge.channel.on('loam-model-set-active', (payload) => {
+  const requestId = payload && payload.requestId;
+  const reply = (ok, error) => {
+    try {
+      rnBridge.channel.post('loam-model-set-active-result', { requestId: requestId, ok: ok, error: error });
+    } catch (err) {
+      // RN side isn't listening (screen unmounted mid-request) — nothing more to do.
+    }
+  };
+
+  try {
+    const current = readConfigFile();
+    let onDevice;
+
+    if (payload && payload.action === 'clear') {
+      onDevice = Object.assign({}, current.llm && current.llm.onDevice, { enabled: false });
+    } else if (payload && payload.action === 'set') {
+      if (!isValidSetPayload(payload)) {
+        reply(false, 'Invalid model configuration (path/model/contextSize out of range).');
+        return;
+      }
+      onDevice = Object.assign({}, current.llm && current.llm.onDevice, {
+        enabled: true,
+        modelPath: payload.modelPath,
+      });
+      if (typeof payload.model === 'string' && payload.model) {
+        onDevice.model = payload.model;
+      }
+      if (typeof payload.contextSize === 'number') {
+        onDevice.contextSize = payload.contextSize;
+      }
+    } else {
+      reply(false, 'Unknown action.');
+      return;
+    }
+
+    const next = Object.assign({}, current, { llm: Object.assign({}, current.llm, { onDevice: onDevice }) });
+    writeConfigFile(next);
+    reply(true);
+  } catch (err) {
+    reply(false, String((err && err.message) || err));
+  }
+});
+
 notify('starting');
 
 try {
