@@ -65,8 +65,4 @@ internal object MeshConstants {
   /** Bound on the opaque-token → device-address maps (BLE + Wi-Fi Aware), so a churn of rotating
    * addresses can't grow them without limit. Real meshes have a handful of nearby peers. */
   const val MAX_TRACKED_PEERS = 256
-
-  /** Consecutive Wi-Fi Aware discovery config-failures before we assume the parent attach session died and
-   * reattach from scratch — the pre-API-33 fallback for the missing `onAwareSessionTerminated` (docs/17). */
-  const val MAX_DISCOVERY_FAILURES = 3
 }

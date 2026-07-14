@@ -1,6 +1,9 @@
 package expo.modules.loammeshtransport
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -71,10 +74,12 @@ internal class MeshWifiAwareController(
   // Same for subscribe: without it a config-fail / termination would leave discovery permanently dead
   // (nothing re-subscribes) — the recurring start() re-subscribes when both are clear (P1).
   private var subscribing = false
-  // Consecutive discovery (publish/subscribe) config failures. On API 29-32 there's no
-  // `onAwareSessionTerminated` callback, so a dead PARENT session surfaces only as its child discovery
-  // sessions failing to (re)start; after a few we reattach from scratch as a fallback (P1).
-  private var discoveryFailures = 0
+  // Cross-version parent-session-death recovery (P1): API 33+ has `AttachCallback.onAwareSessionTerminated`,
+  // but on API 29-32 AOSP's publish()/subscribe() just log-and-return on a dead parent (no
+  // `onSessionConfigFailed`), so a counter-based fallback can't work. The documented solution on all
+  // versions is to listen for `ACTION_WIFI_AWARE_STATE_CHANGED`: when Aware availability changes under a
+  // live attach, discard it and reattach. Registered on the first attach, unregistered only on final stop().
+  private var stateReceiver: BroadcastReceiver? = null
 
   private val executor = Executors.newCachedThreadPool()
   // Hard cap on concurrent inbound transfers. `ServerSocket` accepts on local interfaces, so without this
@@ -124,6 +129,8 @@ internal class MeshWifiAwareController(
       return
     }
     awareManager = manager
+    // Listen for Aware availability changes so a dead PARENT session is detected on every API level (P1).
+    registerStateReceiver()
     val gen = generation
     starting = true
     try {
@@ -161,7 +168,7 @@ internal class MeshWifiAwareController(
         // The PARENT Aware session itself terminated (API 33+). Because `session` would otherwise stay
         // non-null, every later start() would keep refreshing discovery on a DEAD attach. Reset for a fresh
         // reattach on the next tick — WITHOUT shutting the executor down (P1). (Pre-33 has no such callback;
-        // the discoveryFailures fallback below covers those releases.)
+        // the ACTION_WIFI_AWARE_STATE_CHANGED receiver is the cross-version path.)
         override fun onAwareSessionTerminated() {
           synchronized(lifecycleLock) {
             if (gen == generation) {
@@ -225,7 +232,6 @@ internal class MeshWifiAwareController(
           }
           publishing = false
           publishSession = discoverySession
-          discoveryFailures = 0 // a healthy discovery clears the dead-parent fallback counter
           // Apply any advert refresh that arrived while this first publish was in flight (P1).
           pendingAdvert?.let { discoverySession.updatePublish(buildPublishConfig(it)) }
           pendingAdvert = null
@@ -244,7 +250,6 @@ internal class MeshWifiAwareController(
           publishing = false
           pendingAdvert = null
           listener.onError("Wi-Fi Aware publish failed")
-          maybeReattachOnDiscoveryFailure()
         }
       }
 
@@ -269,12 +274,44 @@ internal class MeshWifiAwareController(
     }, null)
   }
 
-  /** Pre-API-33 fallback for a dead PARENT session: repeated discovery config-failures (the child sessions
-   * can't (re)start on a dead attach) trip a full reattach after a few tries (P1). Caller holds the lock. */
-  private fun maybeReattachOnDiscoveryFailure() {
-    if (++discoveryFailures >= MeshConstants.MAX_DISCOVERY_FAILURES) {
-      resetForReattach()
+  /** Register (once) a receiver for `ACTION_WIFI_AWARE_STATE_CHANGED`. When Aware availability changes while
+   * we hold a live attach, that attach is dead — discard it and reattach on the next tick. This is the
+   * documented cross-version parent-death signal (API 33+'s `onAwareSessionTerminated` covers only 33+, and
+   * on 29-32 a dead parent produces NO discovery callback at all). Unregistered only on final stop(). */
+  private fun registerStateReceiver() {
+    if (stateReceiver != null) {
+      return
     }
+    val receiver = object : BroadcastReceiver() {
+      override fun onReceive(context: Context?, intent: Intent?) {
+        synchronized(lifecycleLock) {
+          // A state change under a live attach means that attach is now suspect/dead — discard it (keeping
+          // the executor + this receiver) so the next start() reattaches when Aware is available again.
+          if (session != null) {
+            resetForReattach()
+          }
+        }
+      }
+    }
+    val filter = IntentFilter(WifiAwareManager.ACTION_WIFI_AWARE_STATE_CHANGED)
+    // API 34+ requires an explicit export flag. ACTION_WIFI_AWARE_STATE_CHANGED is a protected system
+    // broadcast, so NOT_EXPORTED is correct (only the system delivers it; no other app can).
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+    } else {
+      context.registerReceiver(receiver, filter)
+    }
+    stateReceiver = receiver
+  }
+
+  private fun unregisterStateReceiver() {
+    stateReceiver?.let {
+      try {
+        context.unregisterReceiver(it)
+      } catch (_: IllegalArgumentException) {
+      }
+    }
+    stateReceiver = null
   }
 
   /** Re-subscribe if discovery isn't live — called from the recurring start() so a failed/terminated
@@ -304,7 +341,6 @@ internal class MeshWifiAwareController(
           }
           subscribing = false
           subscribeSession = discoverySession
-          discoveryFailures = 0 // a healthy discovery clears the dead-parent fallback counter
         }
       }
 
@@ -317,7 +353,6 @@ internal class MeshWifiAwareController(
           // re-subscribes — otherwise this node would never discover peers (P1).
           subscribing = false
           listener.onError("Wi-Fi Aware subscribe failed")
-          maybeReattachOnDiscoveryFailure()
         }
       }
 
@@ -534,8 +569,10 @@ internal class MeshWifiAwareController(
   }
 
   fun stop(): Unit = synchronized(lifecycleLock) {
-    // Full teardown: also shut the executor down (the controller is discarded after stop(); a fresh one is
-    // created on the next start, so a dead executor is never reused).
+    // Final teardown: unregister the state receiver (a reattach keeps it) and shut the executor down (the
+    // controller is discarded after stop(); a fresh one is created on the next start, so a dead executor is
+    // never reused).
+    unregisterStateReceiver()
     teardown(shutdownExecutor = true)
   }
 
@@ -556,23 +593,28 @@ internal class MeshWifiAwareController(
     publishing = false
     subscribing = false
     pendingAdvert = null
-    discoveryFailures = 0
+    // Close each resource INDEPENDENTLY (P2): a single shared try means one failing close would skip the
+    // rest — critically the responder socket — while all references are nulled, so during a reattach (the
+    // executor stays alive) the orphaned accept loop keeps running while a new responder is created.
+    closeQuietly("publish") { publishSession?.close() }
+    closeQuietly("subscribe") { subscribeSession?.close() }
+    closeQuietly("serverSocket") { serverSocket?.close() }
+    closeQuietly("session") { session?.close() }
+    publishSession = null
+    subscribeSession = null
+    serverSocket = null
+    session = null
+    synchronized(peersLock) { peers.clear() }
+    if (shutdownExecutor) {
+      executor.shutdown()
+    }
+  }
+
+  private inline fun closeQuietly(what: String, close: () -> Unit) {
     try {
-      publishSession?.close()
-      subscribeSession?.close()
-      serverSocket?.close()
-      session?.close()
+      close()
     } catch (error: Throwable) {
-      Log.w(TAG, "Wi-Fi Aware teardown failed", error)
-    } finally {
-      publishSession = null
-      subscribeSession = null
-      serverSocket = null
-      session = null
-      synchronized(peersLock) { peers.clear() }
-      if (shutdownExecutor) {
-        executor.shutdown()
-      }
+      Log.w(TAG, "Wi-Fi Aware close failed ($what)", error)
     }
   }
 
