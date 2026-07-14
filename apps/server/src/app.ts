@@ -79,6 +79,7 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
 import { importLegacyJsonData, openStore, type LoamStore, type StoreDriver } from "./db.js";
+import { resolveLanIPv4 } from "./net.js";
 import {
   fetchPeerTransportPosture,
   handshakeWithPeer,
@@ -197,8 +198,21 @@ export type AppOptions = {
   configPath?: string;
   /** Built client directory to serve statically; skipped when absent. */
   clientDistDir?: string;
-  /** Host used in the join URL returned by /api/config. */
+  /**
+   * Host used in the join URL returned by /api/bootstrap and /api/config. When set, it's used
+   * verbatim on every response (the desktop/Pi CLI resolves its LAN address once at boot and passes
+   * it here — fine, since that address is up before the process starts). When left unset, the join
+   * host is instead re-resolved via `resolveLanAddress` on every request (docs/15 A7) — the embedded
+   * Android host needs this because its Wi-Fi hotspot interface comes up *after* boot, so a
+   * boot-frozen address served a stale (or missing) host to a QR generated once the hotspot is live.
+   */
   joinHost?: string;
+  /**
+   * Resolves the current best LAN address for the join URL when `joinHost` isn't set. Defaults to a
+   * live network-interface scan (`resolveLanIPv4`); overridable so tests can simulate the address
+   * changing between requests without touching real interfaces.
+   */
+  resolveLanAddress?: () => string;
   /** Port used in the join URL returned by /api/config. */
   clientPort?: number;
   /** When set, encrypt the database at rest (SQLCipher). Requires a real data dir, not in-memory. */
@@ -271,6 +285,9 @@ export type LoamApp = {
   reapExpiredMessages(): void;
   /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
   reapOrphanedAttachments(): Promise<void>;
+  /** Retry attachments that failed to copy during a sync import now (also runs on the reaper timer;
+   * docs/15 A6) — re-fetches missing files from their source peer without re-importing the message. */
+  retryMissingAttachments(): Promise<void>;
   /** Drop expired per-IP rate-limit entries (identity budget + claim/panic attempt limiters) now
    * (also runs on the reaper timer) so the maps stay bounded to the IPs active within a window. */
   pruneExpiredRateLimiters(): void;
@@ -783,6 +800,13 @@ function parseAttachmentFileName(value: string): { id: string; mimeType: AvatarI
 
 const attachmentMaxBytes = 256 * 1024;
 
+// Bounded retry for a missing-attachment work item (docs/15 A6): `retryMissingAttachments` gives up
+// (and drops the work item) once either bound is hit, so an unreachable peer or a permanently-gone
+// file can't grow the `missing_attachments` table forever. Deliberately generous — a peer flapping
+// in and out over several reaper ticks, or even days, should still converge.
+const missingAttachmentMaxAttempts = 20;
+const missingAttachmentMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
+
 /**
  * Map an avatar image MIME type to its canonical file extension.
  *
@@ -875,8 +899,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const avatarsDir = join(dataDir, "avatars");
   const attachmentsDir = join(dataDir, "attachments");
   const configPath = options.configPath ?? join(dataDir, "config.json");
-  const joinHost = options.joinHost ?? "localhost";
+  const resolveLanAddress = options.resolveLanAddress ?? resolveLanIPv4;
   const clientPort = options.clientPort ?? 3000;
+
+  /**
+   * The host advertised in the join URL: an explicit `joinHost` wins outright (a caller that
+   * resolved it at boot, or pinned a hostname); otherwise re-resolved on every call (docs/15 A7) so
+   * the web-served QR reflects whatever's reachable right now, not whatever was up at listen() time.
+   */
+  function currentJoinHost(): string {
+    return options.joinHost ?? resolveLanAddress();
+  }
 
   const server = Fastify({
     logger: options.logger ?? true,
@@ -3386,6 +3419,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           !bytes.length ||
           !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
         ) {
+          // Fetched something, but it isn't usable — record it as missing too (docs/15 A6) rather
+          // than silently dropping it: a peer mid-write or serving a truncated/corrupt copy today can
+          // look fine on a later retry.
+          store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
           continue;
         }
 
@@ -3405,10 +3442,95 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
       } catch {
         // Best-effort at import time: the fetch genuinely failed (peer unreachable, attachment gone, or a
-        // transient error). The message still imports; the image stays absent (the puller only re-requests
-        // messages it lacks, so an imported message's attachment isn't retried) — acceptable off-grid,
-        // where the text is the payload that matters. The required-mode 401 that dropped EVERY attachment
-        // is the case this path now fixes.
+        // transient error). The message still imports — the text is the payload that matters off-grid —
+        // but a plain digest pull never re-offers an already-known message id, so without a work item the
+        // image would stay absent forever (docs/15 A6). `retryMissingAttachments` is the independent pass
+        // that re-fetches just this file from this peer, without re-importing the message. The
+        // required-mode 401 that dropped EVERY attachment is the case this path originally fixed.
+        store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
+      }
+    }
+  }
+
+  /**
+   * Independent retry pass for attachments that failed to copy during a sync import (docs/15 A6).
+   * `importPeerAttachments` is best-effort and, on failure, leaves the message imported but
+   * image-less; a later digest round sees the message id as already-known and never re-offers it, so
+   * without this the image stays missing forever. This re-fetches just the missing file(s) from the
+   * peer that had them (reusing `fetchPeerAttachmentBytes`, the same peer-fetch path the initial
+   * import used) — it never re-imports or otherwise touches the message. Runs on the reaper timer;
+   * gives up (drops the work item) past a bounded attempt count or age so an unreachable peer or a
+   * permanently-gone file can't grow the work-item table forever.
+   */
+  async function retryMissingAttachments(): Promise<void> {
+    const records = store.loadMissingAttachments();
+
+    if (!records.length) {
+      return;
+    }
+
+    // Snapshot the wipe generation, same defense as importPeerAttachments/syncWithPeer: if a kill
+    // switch fires mid-pass, stop touching the store/disk it just wiped (docs/15 #2).
+    const generation = wipeGeneration;
+    const now = Date.now();
+
+    for (const record of records) {
+      if (wipeGeneration !== generation) {
+        return;
+      }
+
+      // The message this attachment belonged to is gone locally (deleted/tombstoned/expired since) —
+      // nothing left to attach it to.
+      if (!data.messages.some((message) => message.id === record.messageId)) {
+        store.clearMissingAttachment(record.messageId, record.attachmentId);
+        continue;
+      }
+
+      const filePath = join(attachmentsDir, attachmentFileName({ id: record.attachmentId, mimeType: record.mimeType }));
+
+      try {
+        await stat(filePath);
+        store.clearMissingAttachment(record.messageId, record.attachmentId); // another path already got it
+        continue;
+      } catch {
+        // still missing — fall through to retry
+      }
+
+      if (record.createdAt < now - missingAttachmentMaxAgeMs || record.attempts >= missingAttachmentMaxAttempts) {
+        store.clearMissingAttachment(record.messageId, record.attachmentId);
+        server.log.warn(
+          `Giving up on missing attachment ${record.attachmentId} for message ${record.messageId} (peer ${record.peerUrl})`,
+        );
+        continue;
+      }
+
+      try {
+        const bytes = await fetchPeerAttachmentBytes(record.peerUrl, { id: record.attachmentId, mimeType: record.mimeType });
+
+        if (wipeGeneration !== generation) {
+          return;
+        }
+
+        if (
+          bytes.length > attachmentMaxBytes ||
+          !bytes.length ||
+          !avatarImageHasExpectedSignature(bytes, record.mimeType)
+        ) {
+          store.bumpMissingAttachmentAttempts(record.messageId, record.attachmentId);
+          continue;
+        }
+
+        await mkdir(attachmentsDir, { recursive: true });
+        await writeFile(filePath, bytes);
+
+        if (wipeGeneration !== generation) {
+          await rm(filePath, { force: true });
+          return;
+        }
+
+        store.clearMissingAttachment(record.messageId, record.attachmentId);
+      } catch {
+        store.bumpMissingAttachmentAttempts(record.messageId, record.attachmentId);
       }
     }
   }
@@ -3982,6 +4104,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     pruneExpiredRateLimiters();
 
     void reapOrphanedAttachments().catch((error: unknown) => server.log.error(error));
+    void retryMissingAttachments().catch((error: unknown) => server.log.error(error));
   }, 30_000);
 
   // Sync ticker: a fixed 5s heartbeat; runSyncLoop itself enforces the configured interval (so an
@@ -4175,7 +4298,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   server.get("/api/bootstrap", async () => ({
     nodeName: appConfig.node.name,
     version: options.version ?? "dev",
-    joinUrl: `http://${joinHost}:${clientPort}`,
+    joinUrl: `http://${currentJoinHost()}:${clientPort}`,
     websocketPath: "/ws",
     networkConfig: currentNetworkConfig(),
   }));
@@ -4186,7 +4309,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return {
       nodeName: appConfig.node.name,
       version: options.version ?? "dev",
-      joinUrl: `http://${joinHost}:${clientPort}`,
+      joinUrl: `http://${currentJoinHost()}:${clientPort}`,
       websocketPath: "/ws",
       currentUser: rolesVisibleUser(currentUser),
       networkConfig: currentNetworkConfig(),
@@ -6186,6 +6309,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     getAdminSetupCode: () => adminSetupCode,
     reapExpiredMessages,
     reapOrphanedAttachments,
+    retryMissingAttachments,
     pruneExpiredRateLimiters,
     rateLimiterEntryCounts: () => ({
       claim: claimAttempts.size,

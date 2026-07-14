@@ -6,6 +6,7 @@ import {
   ChannelSchema,
   MessageSchema,
   UserSchema,
+  type AvatarImageMimeType,
   type Channel,
   type Message,
   type User,
@@ -22,6 +23,22 @@ export type SessionRecord = {
 export type IdentityTokenRecord = {
   tokenHash: string;
   userId: string;
+  createdAt: number;
+};
+
+/**
+ * A work item recording that a peer's attachment file failed to copy during a node-to-node sync
+ * import (docs/15 A6): the message itself still imported (best-effort), but without this record a
+ * later sync digest would see the message id as already-known and never re-offer the attachment,
+ * stranding it image-less forever. `attempts` bounds the independent retry pass that re-fetches just
+ * this file from `peerUrl` without re-importing the message.
+ */
+export type MissingAttachmentRecord = {
+  messageId: string;
+  attachmentId: string;
+  mimeType: AvatarImageMimeType;
+  peerUrl: string;
+  attempts: number;
   createdAt: number;
 };
 
@@ -161,6 +178,17 @@ export interface LoamStore {
    */
   upsertMeshContact(ownerUserId: string, meshId: string, data: string): void;
   loadMeshContacts(): { ownerUserId: string; meshId: string; data: string }[];
+  /**
+   * Record that a peer attachment failed to copy during a sync import (docs/15 A6), starting its
+   * attempt counter at 0. A conflict (same message+attachment already tracked) is a no-op — it keeps
+   * the original `attempts`/`createdAt` rather than resetting the retry clock.
+   */
+  addMissingAttachment(record: Omit<MissingAttachmentRecord, "attempts" | "createdAt">): void;
+  loadMissingAttachments(): MissingAttachmentRecord[];
+  /** The attachment copy finally succeeded (or the message/work item it belonged to is gone) — drop it. */
+  clearMissingAttachment(messageId: string, attachmentId: string): void;
+  /** Another retry against the peer failed — bump the counter the retry pass bounds against. */
+  bumpMissingAttachmentAttempts(messageId: string, attachmentId: string): void;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -281,6 +309,15 @@ function buildStore(db: SqliteConnection): LoamStore {
       user_id TEXT NOT NULL,
       created_at INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS missing_attachments (
+      message_id TEXT NOT NULL,
+      attachment_id TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      peer_url TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (message_id, attachment_id)
+    );
   `);
   migrateTombstonesCreatedAt(db);
 
@@ -327,6 +364,19 @@ function buildStore(db: SqliteConnection): LoamStore {
      ON CONFLICT(owner_user_id, mesh_id) DO UPDATE SET data = excluded.data`,
   );
   const loadMeshContactsStmt = db.prepare("SELECT owner_user_id, mesh_id, data FROM mesh_contacts");
+  const addMissingAttachmentStmt = db.prepare(
+    `INSERT INTO missing_attachments (message_id, attachment_id, mime_type, peer_url, attempts, created_at)
+     VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(message_id, attachment_id) DO NOTHING`,
+  );
+  const loadMissingAttachmentsStmt = db.prepare(
+    "SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at FROM missing_attachments ORDER BY rowid",
+  );
+  const clearMissingAttachmentStmt = db.prepare(
+    "DELETE FROM missing_attachments WHERE message_id = ? AND attachment_id = ?",
+  );
+  const bumpMissingAttachmentAttemptsStmt = db.prepare(
+    "UPDATE missing_attachments SET attempts = attempts + 1 WHERE message_id = ? AND attachment_id = ?",
+  );
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -436,6 +486,25 @@ function buildStore(db: SqliteConnection): LoamStore {
         data: row.data as string,
       }));
     },
+    addMissingAttachment(record) {
+      addMissingAttachmentStmt.run(record.messageId, record.attachmentId, record.mimeType, record.peerUrl, Date.now());
+    },
+    loadMissingAttachments() {
+      return loadMissingAttachmentsStmt.all().map((row) => ({
+        messageId: row.message_id as string,
+        attachmentId: row.attachment_id as string,
+        mimeType: row.mime_type as AvatarImageMimeType,
+        peerUrl: row.peer_url as string,
+        attempts: row.attempts as number,
+        createdAt: row.created_at as number,
+      }));
+    },
+    clearMissingAttachment(messageId, attachmentId) {
+      clearMissingAttachmentStmt.run(messageId, attachmentId);
+    },
+    bumpMissingAttachmentAttempts(messageId, attachmentId) {
+      bumpMissingAttachmentAttemptsStmt.run(messageId, attachmentId);
+    },
     transaction(fn) {
       db.exec("BEGIN IMMEDIATE");
 
@@ -462,6 +531,7 @@ function buildStore(db: SqliteConnection): LoamStore {
         db.exec("DELETE FROM mesh_identities");
         db.exec("DELETE FROM mesh_contacts");
         db.exec("DELETE FROM transport_identity_tokens");
+        db.exec("DELETE FROM missing_attachments");
       });
     },
     close() {

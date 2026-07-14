@@ -34,6 +34,16 @@ function notify(status, extra) {
   }
 }
 
+// embedded-main.ts (bundled into loam-server.js below) does the real startup work asynchronously —
+// require('./loam-server.js') returns long before a config-load or server.listen() failure would
+// reject, so this file's own try/catch around require() can't see it (docs/15 A8). It instead calls
+// this hook, installed on `global` BEFORE requiring the bundle (same pattern as
+// global.__loamOnDeviceChat below), so a failure still reaches the host screen as a real error
+// instead of just the generic readiness-poll timeout.
+global.__loamReportBootError = function (message, code) {
+  notify('error', { message: message, code: code });
+};
+
 /**
  * The host's non-internal IPv4 addresses. The hotspot's AP interface (192.168.49.1 on stock Android
  * LocalOnlyHotspot, but not guaranteed) only appears once the hotspot is up, so we re-post these

@@ -206,6 +206,55 @@ describe("openStore", () => {
     expect(store.loadTombstones()).toEqual([]);
   });
 
+  it("round-trips missing-attachment work items, bumps attempts, and clears them (docs/15 A6)", () => {
+    store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://peer.example",
+    });
+
+    const [record] = store.loadMissingAttachments();
+    expect(record).toMatchObject({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://peer.example",
+      attempts: 0,
+    });
+    expect(typeof record?.createdAt).toBe("number");
+
+    // Re-adding the same (message, attachment) pair is a no-op — it must not reset the retry clock.
+    store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://other-peer.example",
+    });
+    expect(store.loadMissingAttachments()).toHaveLength(1);
+    expect(store.loadMissingAttachments()[0]?.peerUrl).toBe("http://peer.example");
+
+    store.bumpMissingAttachmentAttempts("msg_1", "att_1");
+    store.bumpMissingAttachmentAttempts("msg_1", "att_1");
+    expect(store.loadMissingAttachments()[0]?.attempts).toBe(2);
+
+    store.clearMissingAttachment("msg_1", "att_1");
+    expect(store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("wipeAll clears missing-attachment work items too", () => {
+    store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://peer.example",
+    });
+
+    store.wipeAll();
+
+    expect(store.loadMissingAttachments()).toEqual([]);
+  });
+
   it("migrates a pre-horizon-GC tombstones table by backfilling created_at", () => {
     // Simulate a database created before the `created_at` column existed: open a fresh file-backed
     // store, drop its `tombstones` table and re-create the bare-bones (pre-migration) shape, write a

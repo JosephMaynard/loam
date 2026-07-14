@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
-import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildApp } from "./app.js";
+import { resolveLanIPv4 } from "./net.js";
 
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
 const serverDir = fileURLToPath(new URL("..", import.meta.url));
@@ -40,18 +40,6 @@ const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
 const host = process.env.HOST ?? "0.0.0.0";
 
-function localIPv4(): string {
-  for (const interfaces of Object.values(networkInterfaces())) {
-    for (const address of interfaces ?? []) {
-      if (address.family === "IPv4" && !address.internal) {
-        return address.address;
-      }
-    }
-  }
-
-  return "localhost";
-}
-
 // LOAM_DB_KEY: a passphrase encrypts at rest; the literal "ephemeral" uses a random RAM-only key
 // (never persisted; lost on reboot; rotated by the kill switch). Unset = no encryption.
 const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
@@ -60,7 +48,10 @@ const app = await buildApp({
   dataDir,
   configPath: process.env.LOAM_CONFIG_FILE,
   clientDistDir: process.env.LOAM_CLIENT_DIST ?? join(rootDir, "apps/client/dist"),
-  joinHost: process.env.LOAM_JOIN_HOST ?? localIPv4(),
+  // An explicit override is passed through as-is (frozen for this boot); LAN address resolution here
+  // is boot-time too — fine for the desktop/Pi CLI, whose network is up before this process starts
+  // (see docs/15 A7 for the embedded/Android host, which instead resolves at request time).
+  joinHost: process.env.LOAM_JOIN_HOST ?? resolveLanIPv4(),
   clientPort,
   dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
   ephemeralDbKey,

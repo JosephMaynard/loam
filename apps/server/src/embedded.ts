@@ -1,5 +1,3 @@
-import { networkInterfaces } from "node:os";
-
 import { buildApp, type LoamApp } from "./app.js";
 import type { StoreDriver } from "./db.js";
 
@@ -16,21 +14,15 @@ import type { StoreDriver } from "./db.js";
  * - `LOAM_DATA_DIR`   — writable directory for the SQLite DB + avatars (app sandbox on device).
  * - `LOAM_CLIENT_DIST`— directory of the built web client to serve (shipped inside the bundle).
  * - `PORT` / `HOST`   — listen address (defaults 3000 / 0.0.0.0 for hotspot reachability).
- * - `LOAM_JOIN_HOST`  — host shown in the join URL (defaults to the first non-internal IPv4).
+ * - `LOAM_JOIN_HOST`  — host shown in the join URL. Left unset here (rather than resolved once at
+ *   boot) so `buildApp` re-resolves the current best non-internal IPv4 on every request instead of
+ *   freezing whatever was up (or nothing) at `startEmbeddedServer` time — the Android hotspot
+ *   interface comes up *after* this process starts, so a boot-time scan can miss it entirely or
+ *   capture a stale earlier address (docs/04, docs/15 A7). Set it to pin an explicit host instead.
  * - `LOAM_DB_DRIVER`  — plaintext SQLite backend: `better-sqlite3` (the Android host, whose Node 18
  *   lacks `node:sqlite`) or `node-sqlite` (default). Ignored when `LOAM_DB_KEY` enables encryption.
  */
-export function firstLanIPv4(): string {
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const address of addresses ?? []) {
-      if (address.family === "IPv4" && !address.internal) {
-        return address.address;
-      }
-    }
-  }
-
-  return "localhost";
-}
+export { resolveLanIPv4 as firstLanIPv4 } from "./net.js";
 
 /**
  * Parse a TCP port from an env value, falling back to `fallback` for missing/invalid/out-of-range
@@ -76,7 +68,9 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     dataDir,
     configPath: process.env.LOAM_CONFIG_FILE,
     clientDistDir,
-    joinHost: process.env.LOAM_JOIN_HOST ?? firstLanIPv4(),
+    // Undefined (rather than resolved here) when unset — see the LOAM_JOIN_HOST note above; buildApp
+    // does the (repeatable, request-time) resolution itself.
+    joinHost: process.env.LOAM_JOIN_HOST,
     clientPort,
     dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
     ephemeralDbKey,

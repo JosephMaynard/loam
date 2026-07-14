@@ -968,6 +968,39 @@ describe("config robustness", () => {
   });
 });
 
+describe("join address resolution (docs/15 A7)", () => {
+  it("re-resolves the join host on every request when no explicit joinHost is configured", async () => {
+    let currentAddress = "10.0.0.1";
+    const { app } = await makeApp(undefined, { resolveLanAddress: () => currentAddress });
+
+    const first = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as { joinUrl: string };
+    expect(first.joinUrl).toContain("10.0.0.1");
+
+    // Simulate the Android hotspot interface coming up (or changing) after boot — a later request
+    // must reflect it, not whatever was resolved when the process started.
+    currentAddress = "192.168.49.1";
+
+    const second = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as { joinUrl: string };
+    expect(second.joinUrl).toContain("192.168.49.1");
+    expect(second.joinUrl).not.toContain("10.0.0.1");
+
+    // /api/config (used post-hydration) resolves the same live way.
+    const config = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as { joinUrl: string };
+    expect(config.joinUrl).toContain("192.168.49.1");
+  });
+
+  it("an explicit joinHost wins outright and is never re-resolved (desktop/Pi: the boot address is fine)", async () => {
+    const { app } = await makeApp(undefined, {
+      joinHost: "pinned.example",
+      resolveLanAddress: () => "should-never-be-used",
+    });
+
+    const response = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as { joinUrl: string };
+    expect(response.joinUrl).toContain("pinned.example");
+    expect(response.joinUrl).not.toContain("should-never-be-used");
+  });
+});
+
 describe("avatar uploads", () => {
   it("keeps only the latest uploaded avatar image per user", async () => {
     const { app, dataDir } = await makeApp({
@@ -3443,6 +3476,61 @@ describe("attachment + sync review hardening", () => {
     expect(existsSync(join(attachmentsDir, `${attached.id}.png`))).toBe(true);
     expect(existsSync(join(attachmentsDir, `${pending.id}.png`))).toBe(true);
     expect(existsSync(strayPath)).toBe(false);
+  });
+
+  it("retries a transiently-failed sync attachment copy independently, without re-importing the message (docs/15 A6)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const attachment = await uploadAttachment(source, sourceAdmin.cookie);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+
+    const sourceFilePath = join(source.dataDir, "attachments", `${attachment.id}.png`);
+    expect(existsSync(sourceFilePath)).toBe(true);
+
+    // Simulate a transient failure: the peer's copy of the file is briefly unavailable (a hiccup, a
+    // mid-write) at the moment the puller's sync round asks for it — the message itself still
+    // imports (best-effort), but the attachment fetch throws.
+    const bytes = readFileSync(sourceFilePath);
+    rmSync(sourceFilePath);
+
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+
+    const firstRun = (
+      await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } })
+    ).json() as { peers: { status?: { imported: number } }[] };
+    const importedAfterFirstRun = firstRun.peers[0]?.status?.imported ?? -1;
+    expect(importedAfterFirstRun).toBeGreaterThan(0); // the message (text) imported fine
+
+    const pullerFilePath = join(puller.dataDir, "attachments", `${attachment.id}.png`);
+    expect(existsSync(pullerFilePath)).toBe(false); // ...but the image is still missing
+
+    // A second sync round is idempotent (the message id is already known — `imported` is a
+    // cumulative counter, so it stays unchanged) and — this is the bug A6 fixes — on its own never
+    // re-offers or re-fetches the attachment.
+    const again = (
+      await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } })
+    ).json() as { peers: { status?: { imported: number } }[] };
+    expect(again.peers[0]?.status?.imported).toBe(importedAfterFirstRun);
+    expect(existsSync(pullerFilePath)).toBe(false);
+
+    // The peer's file comes back (the transient failure resolves) — the independent retry pass
+    // (NOT a re-import: no /api/admin/sync/run here) picks it up from the recorded work item.
+    writeFileSync(sourceFilePath, bytes);
+    await puller.retryMissingAttachments();
+
+    expect(existsSync(pullerFilePath)).toBe(true);
+    expect(readFileSync(pullerFilePath)).toEqual(bytes);
+
+    // The work item is cleared on success — a further retry pass is a no-op, not a repeated fetch.
+    await puller.retryMissingAttachments();
+    expect(existsSync(pullerFilePath)).toBe(true);
   });
 
   it("blocks a banned user from editing or deleting their old messages", async () => {
