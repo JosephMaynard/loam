@@ -294,10 +294,12 @@ internal class MeshWifiAwareController(
       }
     }
     val filter = IntentFilter(WifiAwareManager.ACTION_WIFI_AWARE_STATE_CHANGED)
-    // API 34+ requires an explicit export flag. ACTION_WIFI_AWARE_STATE_CHANGED is a protected system
-    // broadcast, so NOT_EXPORTED is correct (only the system delivers it; no other app can).
+    // API 34+ requires an explicit export flag. Android's guidance is that receivers for SYSTEM broadcasts
+    // should be EXPORTED — NOT_EXPORTED receives only some system broadcasts and can miss sends from
+    // privileged framework components. `ACTION_WIFI_AWARE_STATE_CHANGED` is a PROTECTED broadcast, so
+    // exporting can't let ordinary apps spoof it (only the system may send it).
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-      context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+      context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
     } else {
       context.registerReceiver(receiver, filter)
     }
