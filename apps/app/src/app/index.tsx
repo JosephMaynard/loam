@@ -5,11 +5,13 @@ import { ActivityIndicator, Linking, Platform, Pressable, StyleSheet } from 'rea
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
+import { DbEncryptionSettingsOverlay } from '@/components/db-encryption-settings';
 import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { registerDbEncryption } from '@/lib/db-encryption';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
@@ -85,6 +87,8 @@ export default function HostScreen() {
   const [shareOpen, setShareOpen] = useState(false);
   // Whether the on-device LLM model manager overlay (docs/06) is open.
   const [modelManagerOpen, setModelManagerOpen] = useState(false);
+  // Whether the on-device DB-encryption mode picker overlay (docs/01, docs/21) is open.
+  const [dbEncryptionOpen, setDbEncryptionOpen] = useState(false);
   // The host's real network addresses, reported by the launcher (loam-hostinfo). Used to build the
   // Step-2 join QR from the actual hotspot IP instead of a hardcoded guess.
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
@@ -172,6 +176,10 @@ export default function HostScreen() {
     // Inert unless the operator enables `mesh.enabled` AND the native transport module is present —
     // on a device/build without the radios, `meshTransport` is a no-op, so this is always safe.
     const cleanupMesh = registerMeshCourier(nodejs.channel);
+    // Answer main.js's DB-encryption key request at boot (docs/01, docs/21). Registered here rather
+    // than gated on nodeStarted so it's always listening before/whenever main.js's own request arrives
+    // — though main.js's request/response handoff is race-free regardless (it requests and waits).
+    const cleanupDbEncryption = registerDbEncryption(nodejs.channel);
 
     if (!nodeStarted) {
       nodeStarted = true;
@@ -185,6 +193,7 @@ export default function HostScreen() {
       nodejs.channel.removeListener('loam-hostinfo', onHostInfo);
       cleanupLlm();
       cleanupMesh();
+      cleanupDbEncryption();
     };
   }, []);
 
@@ -263,6 +272,13 @@ export default function HostScreen() {
               <ThemedText type="smallBold">AI model</ThemedText>
             </Pressable>
             <Pressable
+              onPress={() => setDbEncryptionOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel="On-device encryption settings"
+              style={styles.secondaryButton}>
+              <ThemedText type="smallBold">Encryption</ThemedText>
+            </Pressable>
+            <Pressable
               onPress={() => setShareOpen(true)}
               accessibilityRole="button"
               accessibilityLabel="Share or host this LOAM node"
@@ -327,6 +343,7 @@ export default function HostScreen() {
           onClose={() => setModelManagerOpen(false)}
           channel={nodejs.channel}
         />
+        <DbEncryptionSettingsOverlay visible={dbEncryptionOpen} onClose={() => setDbEncryptionOpen(false)} />
       </SafeAreaView>
     );
   }

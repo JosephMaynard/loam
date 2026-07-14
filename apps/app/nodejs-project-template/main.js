@@ -11,6 +11,7 @@
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
 const rnBridge = require('rn-bridge');
 
 const PORT = 3000;
@@ -361,7 +362,6 @@ rnBridge.channel.on('loam-mesh-error', (payload) => {
 // before it's ever written to disk: config.json is a fail-closed boot layer (an invalid document
 // makes the whole server refuse to start, see app.ts's parseConfigUpdate), so a malformed manager
 // request must be rejected, never written.
-const fs = require('fs');
 const configPath = path.join(dataDir, 'config.json');
 
 /** Read + JSON-parse config.json. Absent file → `{}` (a normal fresh boot); any other error (unlikely,
@@ -461,16 +461,144 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
   }
 });
 
-notify('starting');
+// ---- On-device DB-encryption key handoff (PR B — docs/01, docs/21) --------------------------------
+// The embedded server encrypts its SQLite DB at rest when handed a key via LOAM_DB_KEY (see
+// apps/server/src/embedded.ts / db.ts). On the Android host the key/mode choice lives in RN, backed by
+// the device Keystore via expo-secure-store (apps/app/src/lib/db-encryption.ts) — this process has no
+// access to that store, so it REQUESTS the key over the nodejs-mobile bridge and WAITS for RN's answer
+// before requiring the server. We request and RN answers (never the reverse), the same request/response
+// idiom `loam-model-set-active` uses above — so there's no race against listener-registration order at
+// boot (main.js doesn't need RN to have posted before it started listening).
+//
+// The safe default is always "off" — no key, today's plaintext `better-sqlite3` driver: if RN's reply
+// says `off`, the wait times out, or no key comes back for ANY reason (old RN build, screen not yet
+// mounted, a thrown post()), this falls straight through to the existing behaviour. Crisis messaging
+// must always work, so a slow/missing RN response can never block or crash boot over encryption.
+const DB_KEY_TIMEOUT_MS = 5000;
+const DB_ENCRYPTION_MODES = ['off', 'ephemeral', 'persistent', 'passphrase'];
 
-try {
-  require('./loam-server.js');
-  waitForServer(0);
-  // Start the mesh courier poll once the server is required. refreshMesh no-ops (404) until an operator
-  // enables mesh, so this costs one cheap loopback GET per 30s while off.
-  setInterval(refreshMesh, MESH_POLL_MS);
-  setTimeout(refreshMesh, 5000);
-} catch (err) {
-  console.error('Failed to start the embedded LOAM server', err);
-  notify('error', { message: String((err && err.message) || err) });
+/** Ask the RN host for the DB-encryption mode/key, waiting up to `timeoutMs`. Never rejects — any
+ * failure (timeout, malformed payload, a post() throw) resolves to the safe default `{ mode: 'off' }`
+ * so the caller can fall through to unencrypted boot unconditionally. */
+function requestDbKey(timeoutMs) {
+  return new Promise(function (resolve) {
+    var settled = false;
+
+    function finish(result) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      rnBridge.channel.removeListener('loam-db-key-response', onResponse);
+      resolve(result);
+    }
+
+    function onResponse(payload) {
+      var mode = payload && payload.mode;
+      if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
+        finish({ mode: 'off' });
+        return;
+      }
+      var key = payload && typeof payload.key === 'string' && payload.key.length > 0 ? payload.key : undefined;
+      finish({ mode: mode, key: key });
+    }
+
+    var timer = setTimeout(function () {
+      finish({ mode: 'off' });
+    }, timeoutMs);
+
+    // Listener registered BEFORE the request is posted — no race with RN's answer, however fast.
+    rnBridge.channel.on('loam-db-key-response', onResponse);
+    try {
+      rnBridge.channel.post('loam-db-key-request');
+    } catch (err) {
+      finish({ mode: 'off' });
+    }
+  });
 }
+
+/** Best-effort delete of a previous encrypted DB's files. Only called for 'ephemeral' mode, where a
+ * fresh random key is generated every launch, so a DB encrypted under a PREVIOUS launch's key can never
+ * be opened again — leaving the stale files behind would just make openStore fail on a confusing
+ * "file is not a database" error instead of starting clean. ENOENT (nothing to delete on a fresh
+ * install, or when the DB was never encrypted) and any other error are both swallowed: failing to
+ * delete a stale file must never block boot. */
+function deleteStaleEphemeralDb() {
+  ['loam.db', 'loam.db-wal', 'loam.db-shm'].forEach(function (name) {
+    try {
+      fs.unlinkSync(path.join(dataDir, name));
+    } catch (err) {
+      // best-effort — ENOENT is the expected/common case
+    }
+  });
+}
+
+/**
+ * Resolve process.env.LOAM_DB_KEY (or the plaintext driver fallback) from the RN key handoff, then
+ * require + start the embedded server exactly as before. Never throws — any failure anywhere in this
+ * resolution falls back to the existing plaintext better-sqlite3 driver so the host still boots.
+ */
+function resolveDbEncryptionAndBoot() {
+  requestDbKey(DB_KEY_TIMEOUT_MS)
+    .then(function (result) {
+      var mode = result.mode;
+      var key = result.key;
+
+      if (mode === 'off' || !key) {
+        // Safe default: today's plaintext behaviour, unchanged.
+        process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+        return;
+      }
+
+      // The encrypted driver (better-sqlite3-multiple-ciphers) isn't shipped in this build yet — only
+      // plain better-sqlite3 is (docs/01 "Native prebuild", docs/04). Check availability BEFORE trusting
+      // the key: openStore would otherwise throw deep inside server startup the first time an operator
+      // picks an encrypted mode on a build that lacks the module. Report the downgrade loudly (A8 boot-
+      // error bridge) instead of silently serving plaintext, or bricking boot.
+      var encryptedDriverAvailable = false;
+      try {
+        require.resolve('better-sqlite3-multiple-ciphers');
+        encryptedDriverAvailable = true;
+      } catch (err) {
+        encryptedDriverAvailable = false;
+      }
+
+      if (!encryptedDriverAvailable) {
+        global.__loamReportBootError(
+          "Encrypted storage needs the SQLCipher native module, which isn't in this build yet — starting UNENCRYPTED.",
+          'db_encryption_unavailable',
+        );
+        process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+        return;
+      }
+
+      if (mode === 'ephemeral') {
+        deleteStaleEphemeralDb();
+      }
+
+      // openStore's encryptionKey path takes precedence over LOAM_DB_DRIVER (see db.ts) — leave the
+      // driver env unset here. NEVER logged.
+      process.env.LOAM_DB_KEY = key;
+    })
+    .catch(function () {
+      // Should be unreachable (requestDbKey never rejects), but keep the fallback total.
+      process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+    })
+    .then(function () {
+      try {
+        require('./loam-server.js');
+        waitForServer(0);
+        // Start the mesh courier poll once the server is required. refreshMesh no-ops (404) until an
+        // operator enables mesh, so this costs one cheap loopback GET per 30s while off.
+        setInterval(refreshMesh, MESH_POLL_MS);
+        setTimeout(refreshMesh, 5000);
+      } catch (err) {
+        console.error('Failed to start the embedded LOAM server', err);
+        notify('error', { message: String((err && err.message) || err) });
+      }
+    });
+}
+
+notify('starting');
+resolveDbEncryptionAndBoot();
