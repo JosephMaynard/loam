@@ -41,11 +41,13 @@ import { openStore } from "./db.js";
 // real implementation) and self-disarms the instant it fires, so every other test in this file — which
 // never arms it — is completely unaffected; every other `node:fs` export is untouched (`...actual`).
 const renameFailure = vi.hoisted(() => ({ armed: false }));
-// P1-d (Sol round 6): a single-shot fault-injection seam for `node:fs`'s `writeFileSync` targeting the
-// `.loam-wipe-pending` marker specifically — used ONLY by the fail-closed kill-switch test below to force
-// the durable-marker write to fail so the synchronous, fail-closed ciphertext-destruction path runs.
-// Defaults disarmed (pass through) and self-disarms on fire, so no other test is affected; never matches
-// any other `writeFileSync` caller.
+// P1-1 (Sol round 8): a fault-injection seam for `node:fs`'s `writeFileSync` targeting the durable
+// `.loam-wipe-phase` file specifically (both its atomic `.tmp-*` staging path AND the direct fallback
+// write) — used by the fail-closed kill-switch tests to force the durable phase write to fail so the
+// "delete + verify synchronously, THEN signal" fail-closed path runs even without a durable phase. Unlike a
+// single-shot seam it stays armed (`writeWipePhase` writes twice — `delete-pending` then `key-clear-ready`
+// — and BOTH must fail to simulate "no durable phase at all"); reset in `afterEach`. Never matches any
+// other `writeFileSync` caller.
 const wipeMarkerWriteFailure = vi.hoisted(() => ({ armed: false }));
 // P1-a (Sol round 6): a capture seam for the migration's pre-migration backup copy. When `dir` is set, the
 // `copyFileSync(loam.db → loam.db.premigration.tmp)` the migration performs is mirrored to
@@ -70,10 +72,34 @@ const postRekeyCleanupFailure = vi.hoisted(() => ({ armed: false }));
 // marker-SUCCESS kill-switch path's `deleteAndVerifyDbArtifacts()` sees the survivor and must refuse to
 // signal the launcher. Defaults disarmed (pass through); reset in `afterEach`.
 const premigrationDeleteFailure = vi.hoisted(() => ({ armed: false }));
+// P1-2 (Sol round 8): fault-injection seams for the FAIL-CLOSED "verified gone" checks. `readdirFailure.dir`
+// makes `readdirSync` of that exact directory throw EACCES (an unreadable data dir is NOT proof no
+// `*.unreadable-*` survivor exists — `dbArtifactInventory` must surface it as an error). `lstatFailure.path`
+// makes `lstatSync` of that exact path throw a NON-ENOENT error (EIO) so `provenAbsence` returns "unknown"
+// (could-not-determine, NOT confirmed absence). Both default inert and target one exact path, so no other
+// test / unrelated fs call is affected; reset in `afterEach`.
+const readdirFailure = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+const lstatFailure = vi.hoisted(() => ({ path: undefined as string | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    readdirSync: (...args: Parameters<typeof actual.readdirSync>) => {
+      if (readdirFailure.dir && String(args[0]) === readdirFailure.dir) {
+        const err = new Error("simulated readdir EACCES (P1-2 test fault injection)") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      }
+      return actual.readdirSync(...(args as Parameters<typeof actual.readdirSync>));
+    },
+    lstatSync: (...args: Parameters<typeof actual.lstatSync>) => {
+      if (lstatFailure.path && String(args[0]) === lstatFailure.path) {
+        const err = new Error("simulated lstat EIO (P1-2 test fault injection)") as NodeJS.ErrnoException;
+        err.code = "EIO";
+        throw err;
+      }
+      return actual.lstatSync(...(args as Parameters<typeof actual.lstatSync>));
+    },
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
       if (rmSyncCapture.paths) {
         rmSyncCapture.paths.push(String(args[0]));
@@ -96,9 +122,10 @@ vi.mock("node:fs", async (importOriginal) => {
       return actual.renameSync(...args);
     },
     writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
-      if (wipeMarkerWriteFailure.armed && String(args[0]).endsWith(".loam-wipe-pending")) {
-        wipeMarkerWriteFailure.armed = false;
-        throw new Error("simulated wipe-pending marker write failure (P1-d test fault injection)");
+      // Match the durable phase file's atomic `.tmp-*` staging path AND its direct fallback write, and stay
+      // armed (both `writeWipePhase` calls must fail to simulate "no durable phase") — P1-1, Sol round 8.
+      if (wipeMarkerWriteFailure.armed && String(args[0]).includes(".loam-wipe-phase")) {
+        throw new Error("simulated wipe-phase write failure (P1-1 test fault injection)");
       }
       return actual.writeFileSync(...args);
     },
@@ -170,6 +197,8 @@ afterEach(async () => {
   backupCapture.dir = undefined;
   postRekeyCleanupFailure.armed = false;
   premigrationDeleteFailure.armed = false;
+  readdirFailure.dir = undefined;
+  lstatFailure.path = undefined;
   rmSyncCapture.paths = undefined;
   while (cleanups.length) {
     await cleanups.pop()?.();
@@ -1616,7 +1645,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
   });
 
-  it("P1-2(b): a durable wipe-pending marker is written before signaling the launcher, and this process never deletes it itself (only a verified `loam-wipe-complete` ack may)", async () => {
+  it("P1-1 (Sol round 8): a durable `key-clear-ready` phase file is written before signaling the launcher, and this process never deletes it itself (only a verified `loam-wipe-complete` ack may)", async () => {
     const hook = installFakeWipeRestartHook();
     const { app, dataDir } = await makeEncryptedApp(
       { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
@@ -1633,11 +1662,13 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(wipe.statusCode).toBe(200);
     expect(hook.calls).toBe(1);
 
-    // This process signaled the launcher but has no way to observe whether it actually cleared the
-    // Keystore key — the marker MUST still be on disk. Only main.js's `loam-wipe-complete` handler
-    // (after a VERIFIED `clearStoredDbKeys()`) is allowed to delete it, and that never happens here
-    // (the fake hook is a bare recorder, not a real launcher).
-    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+    // Every artifact was proven gone, so the phase advanced to `key-clear-ready` before the launcher was
+    // signaled. This process has no way to observe whether the launcher actually cleared the device key —
+    // the phase file MUST still be on disk. Only main.js's `loam-wipe-complete` handler (after a VERIFIED
+    // `clearStoredDbKeys()`) is allowed to delete it, and that never happens here (the fake hook is a bare
+    // recorder, not a real launcher).
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")).toBe("key-clear-ready");
   });
 
   it("P1-2(a): a concurrent request during the slow file-deletion await already sees the lockdown (503), never stale in-memory data", async () => {
@@ -1685,7 +1716,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(hook.calls).toBe(1);
   });
 
-  it("P1-4 (Sol round 5): config.json is persisted DURABLY before the wipe-pending marker is written and the launcher hook is signaled", async () => {
+  it("P1-4 (Sol round 5): config.json is persisted DURABLY before the wipe phase is written and the launcher hook is signaled", async () => {
     const hook = installFakeWipeRestartHook();
     const { app, dataDir } = await makeEncryptedApp(
       { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
@@ -1709,10 +1740,10 @@ describe("encryption at rest + key-discard kill switch", () => {
     // gated config.json write — which still precedes the marker + hook, per P1-4's fixed ordering.
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // Neither the durable marker nor the launcher signal has happened yet — config persistence comes
+    // Neither the durable phase file nor the launcher signal has happened yet — config persistence comes
     // first now, not after (the bug this fixes: the OLD order let both fire before config was durable).
     expect(hook.calls).toBe(0);
-    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
 
     // RF-a (adversarial review): a request landing DURING the persistConfigForRestart await must ALREADY
     // see the 503 lockdown, never a stale 200 from the still-populated `data`/`sessions`. This is the
@@ -1729,7 +1760,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     const wipe = await wipePromise;
     expect(wipe.statusCode).toBe(200);
     expect(hook.calls).toBe(1);
-    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
   });
 
   it("P1-4 (Sol round 5): retries a failed config.json persist once, and on a SECOND failure still proceeds with the wipe (reporting a distinct notice, never silently continuing as if config were preserved)", async () => {
@@ -1752,7 +1783,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     });
     expect(wipeOnce.statusCode).toBe(200);
     expect(hook.calls).toBe(1);
-    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
     // Recovered on retry — config.json exists and carries the effective config (the armed kill switch).
     const recoveredConfig = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
       killSwitch: { enabled: boolean };
@@ -1779,10 +1810,10 @@ describe("encryption at rest + key-discard kill switch", () => {
       payload: { confirm: "wipe" },
     });
     expect(wipeTwice.statusCode).toBe(200);
-    // The wipe still proceeded — the launcher was still signaled and the durable marker still written —
+    // The wipe still proceeded — the launcher was still signaled and the durable phase still written —
     // even though config.json could not be persisted.
     expect(hook2.calls).toBe(1);
-    expect(existsSync(join(second.dataDir, ".loam-wipe-pending"))).toBe(true);
+    expect(existsSync(join(second.dataDir, ".loam-wipe-phase"))).toBe(true);
     expect(existsSync(join(second.dataDir, "loam.db"))).toBe(false);
     // A distinct, unmistakable notice was logged — never silently "succeeded".
     expect(errorSpy2.mock.calls.some((call) => String(call[call.length - 1] ?? "").includes("KILL SWITCH NOTICE"))).toBe(
@@ -1791,7 +1822,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     errorSpy2.mockRestore();
   });
 
-  it("P1-d (Sol round 6): when the durable wipe-pending marker CANNOT be written, the ciphertext is deleted and VERIFIED gone SYNCHRONOUSLY before the launcher is signaled (fail closed) — a kill right after the hook cannot recover the data", async () => {
+  it("P1-1/P1-d (Sol round 8): when the durable wipe-phase file CANNOT be written, the ciphertext is deleted and VERIFIED gone SYNCHRONOUSLY before the launcher is signaled (fail closed) — a kill right after the hook cannot recover the data", async () => {
     // A launcher hook that records, at the moment it is called, whether ANY ciphertext file still exists.
     // The fix's guarantee is that by the time the launcher is signaled, the ciphertext is already gone —
     // so a kill immediately after `hook()` (with RN's key-clear also interrupted) leaves nothing to recover.
@@ -1818,7 +1849,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect((await post(app, admin.cookie, "MUST_NOT_SURVIVE_A_FAILED_MARKER")).statusCode).toBe(201);
     expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
 
-    // Force the durable marker write to fail — this is exactly the fail-open window P1-d closes.
+    // Force the durable phase write to fail — this is exactly the fail-open window P1-d closes.
     wipeMarkerWriteFailure.armed = true;
 
     const wipe = await app.server.inject({
@@ -1835,18 +1866,18 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(hookCalls).toBe(1);
     expect(ciphertextPresentAtHook).toBe(false);
 
-    // And it is genuinely gone on disk afterward, with NO marker written (the write failed by design).
+    // And it is genuinely gone on disk afterward, with NO phase file written (the write failed by design).
     expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
     expect(existsSync(join(dataDir, "loam.db-wal"))).toBe(false);
     expect(existsSync(join(dataDir, "loam.db-shm"))).toBe(false);
-    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
 
-    // A distinct notice was surfaced so the operator knows the wipe completed without a resumable marker
-    // (and must reopen to finish clearing the now-unused key if RN's key-clear was also interrupted).
+    // A distinct notice was surfaced so the operator knows the wipe completed without a durable resume
+    // phase (and must reopen to finish clearing the now-unused key if RN's key-clear was also interrupted).
     expect(reports.some((r) => r.code === "kill_switch_wipe_no_marker")).toBe(true);
   });
 
-  it("RF7-a (Sol round 7): on the marker-SUCCESS path, a `.premigration` survivor that can't be deleted BLOCKS the launcher handoff — the wipe reports incomplete and stays 503-locked instead of signaling while recoverable ciphertext remains", async () => {
+  it("RF7-a/P1-1 (Sol round 8): a `.premigration` survivor that can't be deleted BLOCKS the launcher handoff — the wipe reports INCOMPLETE (503), stays `delete-pending` + 503-locked, and never signals while recoverable ciphertext remains", async () => {
     const reports = installFakeBootBridge();
     const hook = installFakeWipeRestartHook();
     const { app, dataDir } = await makeEncryptedApp(
@@ -1858,7 +1889,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
     // Plant a committed legacy-key `.premigration` snapshot (still-readable ciphertext under the
     // NON-discardable SHA256(passphrase) key) alongside the live DB, then make its deletion FAIL
-    // PERSISTENTLY — the survivor the marker-SUCCESS path must never signal the launcher past.
+    // PERSISTENTLY — the survivor the wipe must never signal the launcher past.
     const premigration = join(dataDir, "loam.db.premigration");
     writeFileSync(premigration, Buffer.from("legacy-key ciphertext that must not survive a wipe"));
     premigrationDeleteFailure.armed = true;
@@ -1869,15 +1900,17 @@ describe("encryption at rest + key-discard kill switch", () => {
       headers: { cookie: admin.cookie },
       payload: { confirm: "wipe" },
     });
-    expect(wipe.statusCode).toBe(200);
+    // P1-1 (Sol round 8): the endpoint no longer reports success on an INCOMPLETE wipe — it 503s.
+    expect(wipe.statusCode).toBe(503);
 
     // The crux (RF7-a): the launcher was NOT signaled while the survivor remained — so RN can't clear the
     // device secret (which doesn't decrypt `.premigration`) and restart into a Step-0b restore of it.
     expect(hook.calls).toBe(0);
     // The survivor is still on disk (it genuinely couldn't be deleted), and a distinct incomplete notice
-    // was surfaced — the marker IS still written so the next boot re-attempts the handoff.
+    // was surfaced — the phase stays `delete-pending` (durable), so the next boot re-runs deletion.
     expect(existsSync(premigration)).toBe(true);
-    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")).toBe("delete-pending");
     expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
 
     // The node stays locked down (503 everywhere) — the RF-a synchronous in-memory lockdown ran first and
@@ -1926,6 +1959,13 @@ describe("encryption at rest + key-discard kill switch", () => {
       const configOnDisk = JSON.parse(rawConfig) as { killSwitch: { enabled: boolean }; sync: { token?: string } };
       expect(configOnDisk.killSwitch.enabled).toBe(true);
       expect(configOnDisk.sync.token).toBeUndefined();
+
+      // The wipe reached `key-clear-ready` and wrote the durable phase file. Simulate the launcher's
+      // `loam-wipe-complete` handoff (main.js's `clearWipePhase()` after RN VERIFIED the key is gone):
+      // delete the phase file BEFORE the restart, otherwise the boot-time resume would (correctly) refuse
+      // to open the store under the un-rotated key.
+      expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")).toBe("key-clear-ready");
+      rmSync(join(dataDir, ".loam-wipe-phase"), { force: true });
 
       // Simulate the launcher's actual restart: a fresh boot, same dataDir, a NEW (rotated) key — the
       // whole point of the P1-2 handoff. The fresh DB's config table starts empty, so config.json is
@@ -2047,7 +2087,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
     });
 
-    it("marker-FAILURE fail-closed branch (fixed-key, marker write fails): synchronously deletes AND verifies EVERY artifact before signaling the launcher", async () => {
+    it("phase-write-FAILURE fail-closed branch (fixed-key, phase write fails): synchronously deletes AND verifies EVERY artifact before signaling the launcher", async () => {
       const { app, dataDir } = await makeEncryptedApp(
         { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
         { killSwitch: { enabled: true } },
@@ -2073,7 +2113,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect(artifactsPresentAtHook).toEqual([]);
       expect(staleArtifactsRemaining(dataDir)).toEqual([]);
       expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
-      expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+      expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
     });
 
     it("ephemeral branch: deletes stale migration/recovery artifacts before rotating to a fresh key", async () => {
@@ -2595,43 +2635,51 @@ describe("encryption at rest + key-discard kill switch", () => {
   });
 
   describe("resilient encrypted-DB open (F4, docs/15)", () => {
-    it("falls back to serving an existing PLAINTEXT database when the configured key can't open it, and reports db_encryption_open_failed", async () => {
+    it("P1-4-server (Sol round 8): an existing PLAINTEXT database under a configured encrypted mode is NOT silently served as plaintext — it reports `db_encryption_plaintext_unconverted` and LOCKS; a start-fresh confirmation then deletes it and starts a fresh ENCRYPTED database", async () => {
       const reports = installFakeBootBridge();
 
       // A plaintext DB already on disk (no encryption ever configured) — simulates a node switched
       // into an encrypted mode without a rekey of the existing data.
-      const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-fallback-test-"));
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-plaintext-unconverted-test-"));
       cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
       const plain = await buildApp({ dataDir, logger: false });
       const plainAdmin = await session(plain);
       expect((await post(plain, plainAdmin.cookie, "PLAINTEXT_ALREADY_ON_DISK")).statusCode).toBe(201);
       await plain.close();
 
-      // Reopen the SAME data dir with an encryption key configured — case 1 (keyed open) fails against
-      // the real plaintext file; case 2 (plaintext open) must succeed, and boot must not crash-loop.
-      const reopened = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" });
-      cleanups.push(() => reopened.close());
-
-      expect(reports).toEqual([
-        expect.objectContaining({ code: "db_encryption_open_failed" }),
-      ]);
+      // Reopen the SAME data dir with an encryption key configured. The keyed open fails against the real
+      // plaintext file, and a plaintext probe SUCCEEDS — the old code silently served that plaintext file
+      // (a confidentiality downgrade). Now it must LOCK with the distinct code, NOT serve.
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" }),
+      ).rejects.toThrow(/refusing to serve it unencrypted/);
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_plaintext_unconverted" })]);
       // The key itself must never appear in the reported message.
       expect(reports[0]?.message).not.toContain("a newly configured key");
+      // Nothing on disk was touched — the plaintext file is still there, still plaintext.
+      expect(readFileSync(join(dataDir, "loam.db")).subarray(0, 15).toString("ascii")).toBe("SQLite format 3");
 
-      // Data survived (it opened the SAME plaintext file, not a fresh one).
-      expect(reopened.store.loadMessages().some((m) => "body" in m && m.body === "PLAINTEXT_ALREADY_ON_DISK")).toBe(
-        true,
-      );
+      // The operator confirms "delete data and start encrypted": the RN start-fresh marker is written.
+      reports.length = 0;
+      writeFileSync(join(dataDir, ".loam-db-start-fresh"), "");
 
-      // The effective posture on the wire is "off" — F5 — even though a key was configured.
-      const config = (await reopened.server.inject({ method: "GET", url: "/api/config" })).json() as {
-        networkConfig: { dbEncryption: string };
-      };
-      expect(config.networkConfig.dbEncryption).toBe("off");
+      const encrypted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" });
+      cleanups.push(() => encrypted.close());
 
-      // The node still boots fully usable.
-      const reopenedAdmin = await session(reopened);
-      expect((await post(reopened, reopenedAdmin.cookie, "after fallback")).statusCode).toBe(201);
+      // The plaintext DB was DELETED (not preserved as a readable `.unreadable-` rename) and a FRESH
+      // encrypted database was created — reported as a recovered-fresh start.
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_recovered_fresh" })]);
+      // The old plaintext data is gone (a fresh DB), and the marker was consumed.
+      expect(encrypted.store.loadMessages()).toEqual([]);
+      expect(existsSync(join(dataDir, ".loam-db-start-fresh"))).toBe(false);
+      // The plaintext file was DELETED, not renamed aside — no `*.unreadable-*` copy of it survives.
+      expect(readdirSync(dataDir).some((n) => n.includes(".unreadable-"))).toBe(false);
+      // The new loam.db is genuinely encrypted: an UNKEYED open now fails ("not a database").
+      expect(() => openStore(join(dataDir, "loam.db"), {}).close()).toThrow();
+      // Fully usable, and reports encrypted posture.
+      const encAdmin = await session(encrypted);
+      expect((await post(encrypted, encAdmin.cookie, "after encrypted start")).statusCode).toBe(201);
+      expect(dataDirHasPlaintext(dataDir, "after encrypted start")).toBe(false);
     });
 
     /** Path to the shared launcher "start fresh" confirmation marker (SF2, docs/15) inside `dataDir`. */
@@ -2851,6 +2899,151 @@ describe("encryption at rest + key-discard kill switch", () => {
       // ...and the marker (still an undeleted directory) is exactly where it was — NOT silently
       // "consumed" despite authorizing nothing.
       expect(existsSync(markerPath)).toBe(true);
+    });
+  });
+
+  describe("P1-1/P1-2 (Sol round 8): durable wipe-phase state machine + fail-closed deletion", () => {
+    function fireKillSwitch(app: LoamApp, cookie: string): Promise<InjectResponse> {
+      return app.server.inject({
+        method: "POST",
+        url: "/api/admin/kill-switch",
+        headers: { cookie },
+        payload: { confirm: "wipe" },
+      });
+    }
+
+    it("P1-1: a two-boot fixed-key lifecycle — boot 1 leaves phase `delete-pending` when a legacy-key `.premigration` deletion fails PERSISTENTLY (incomplete 503, NO key-clear signal, survivor recoverable); a fresh boot with deletion now succeeding RE-RUNS deletion, advances to `key-clear-ready`, and ONLY THEN signals the key-clear", async () => {
+      const reports = installFakeBootBridge();
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // Seed a VALID legacy-key `.premigration` snapshot — still-readable ciphertext under the
+      // NON-discardable SHA256(passphrase) key (THE crypto-wipe hole a surviving `.premigration` leaves;
+      // clearing the device secret does NOT decrypt it).
+      const legacyKey = "an old legacy premigration key";
+      const seedDir = mkdtempSync(join(tmpdir(), "loam-two-boot-legacy-"));
+      cleanups.push(() => rmSync(seedDir, { recursive: true, force: true }));
+      const seedDb = join(seedDir, "legacy.db");
+      const legacy = openStore(seedDb, { encryptionKey: legacyKey });
+      legacy.setConfigValue("legacy-sentinel", "TWO_BOOT_PREMIG_SECRET");
+      legacy.checkpoint();
+      legacy.close();
+      copyFileSync(seedDb, join(dataDir, "loam.db.premigration"));
+
+      // --- Boot 1: PERSISTENT deletion failure on the survivor; fire the wipe.
+      premigrationDeleteFailure.armed = true;
+      const wipe1 = await fireKillSwitch(app, admin.cookie);
+      // Incomplete → the endpoint 503s (never a false `{ ok: true }`), NO key-clear signal, phase stays
+      // `delete-pending` (durable), and the survivor is still on disk AND still recoverable under the legacy key.
+      expect(wipe1.statusCode).toBe(503);
+      expect(hook.calls).toBe(0);
+      expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")).toBe("delete-pending");
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+      const stillReadable = openStore(join(dataDir, "loam.db.premigration"), { encryptionKey: legacyKey });
+      expect(stillReadable.getConfigValue("legacy-sentinel")).toBe("TWO_BOOT_PREMIG_SECRET");
+      stillReadable.close();
+      // The node is 503-locked (nothing reopened while recoverable ciphertext survives).
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
+
+      // --- Boot 2: a fresh boot on the same dataDir with the OLD key, deletion now succeeding. The
+      // boot-time resume (drive it directly via buildApp — a full two-process launcher test isn't feasible
+      // in-suite) re-runs deletion under the old key, advances the phase, hands off, and refuses to serve.
+      premigrationDeleteFailure.armed = false;
+      reports.length = 0;
+      await expect(
+        buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: "a fixed persistent key",
+          dbEncryptionMode: "persistent",
+        }),
+      ).rejects.toThrow(/Resuming an interrupted emergency wipe/);
+
+      // The retry RE-RAN deletion (the survivor is finally gone), advanced to `key-clear-ready` DURABLY,
+      // and ONLY THEN signaled the launcher to clear the device key — never before deletion was proven.
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+      expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")).toBe("key-clear-ready");
+      expect(hook.calls).toBe(1);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_resumed")).toBe(true);
+    });
+
+    it("P1-2: an unreadable data dir (readdir fault) BLOCKS a fixed-key wipe — 'can't enumerate' is not 'nothing to enumerate', so it fails closed (incomplete 503, phase `delete-pending`, launcher NOT signaled)", async () => {
+      const reports = installFakeBootBridge();
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // The data dir can't be enumerated — a `*.unreadable-*` survivor could exist unseen, so the wipe
+      // must NOT declare itself clean.
+      readdirFailure.dir = dataDir;
+      const wipe = await fireKillSwitch(app, admin.cookie);
+      expect(wipe.statusCode).toBe(503);
+      expect(hook.calls).toBe(0);
+      expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")).toBe("delete-pending");
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+      readdirFailure.dir = undefined;
+      // Still locked down.
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
+    });
+
+    it("P1-2: an UNVERIFIABLE deletion (lstat throws a non-ENOENT error) fails closed on the EPHEMERAL path — the key is NOT rotated / the DB NOT reopened while absence can't be proven (503-locked)", async () => {
+      const reports = installFakeBootBridge();
+      const { app, dataDir } = await makeEncryptedApp(
+        { ephemeralDbKey: true, dbEncryptionMode: "ephemeral" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // After the live DB is unlinked, its proven-absence check throws EIO (NOT ENOENT) — "could-not-
+      // determine", which must NOT be treated as confirmed absence.
+      lstatFailure.path = join(dataDir, "loam.db");
+      const wipe = await fireKillSwitch(app, admin.cookie);
+      expect(wipe.statusCode).toBe(503);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+      lstatFailure.path = undefined;
+      // Fail closed: the node is locked down (503), NOT reopened under a rotated key as if the wipe succeeded.
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
+    });
+
+    it("P1-2: a persistent deletion failure fails closed on the fixed-key/NO-hook same-key fallback path — it does NOT recreate a usable node while recoverable ciphertext survives (503-locked)", async () => {
+      // Deliberately NOT installing __loamRequestWipeRestart — the desktop/CI same-key fallback path.
+      const reports = installFakeBootBridge();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed passphrase key", dbEncryptionMode: "passphrase" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // Plant a legacy-key `.premigration` whose deletion fails persistently — a survivor the same-key
+      // fallback must fail closed on rather than recreating a clean-looking node over it.
+      writeFileSync(join(dataDir, "loam.db.premigration"), Buffer.from("legacy-key ciphertext survivor"));
+      premigrationDeleteFailure.armed = true;
+
+      const wipe = await fireKillSwitch(app, admin.cookie);
+      expect(wipe.statusCode).toBe(503);
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+      // Fail closed: locked down (503), NOT recreated as a usable node under the same key.
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
     });
   });
 });

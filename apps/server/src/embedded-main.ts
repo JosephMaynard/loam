@@ -67,15 +67,36 @@ function messageOf(error: unknown): string {
  */
 const DB_ENCRYPTION_UNREADABLE_CODE = "db_encryption_unreadable";
 
-/** True when `error` carries the typed `.code` `openInitialStore` throws for an unopenable DB with no
- *  start-fresh confirmation present (app.ts). Narrow, defensive shape check — never assumes `error` is
- *  even an object. */
-function hasDbEncryptionUnreadableCode(error: unknown): boolean {
+/**
+ * The set of typed boot-error `.code`s that mean boot failed NON-destructively and RECOVERABLY from within
+ * this same still-alive process — so, uniquely, the process must NOT be torn down (`process.exit`) for them:
+ *  - `db_encryption_unreadable`          — an unopenable DB with no start-fresh confirmation (app.ts). The
+ *                                          RN launcher bridge (main.js's `loam-db-start-fresh`) recovers it.
+ *  - `db_encryption_plaintext_unconverted` — an existing PLAINTEXT DB under a configured encrypted mode
+ *                                          (P1-4-server, Sol round 8). The RN UI offers "delete data and
+ *                                          start encrypted", which writes the same start-fresh marker.
+ *  - `db_encryption_wipe_resume`         — the boot-time wipe-phase resume (P1-1, Sol round 8) either
+ *                                          re-ran deletion and handed off to the launcher for a key-clear +
+ *                                          restart, or is still awaiting a durable deletion. Either way the
+ *                                          imminent launcher restart / a later reopen drives it forward —
+ *                                          exiting would kill the very listeners that finish it.
+ * In every other case boot is presumed unrecoverable without intervention outside this process, so it exits.
+ */
+const STAY_ALIVE_BOOT_ERROR_CODES = new Set<string>([
+  DB_ENCRYPTION_UNREADABLE_CODE,
+  "db_encryption_plaintext_unconverted",
+  "db_encryption_wipe_resume",
+]);
+
+/** True when `error` carries one of the {@link STAY_ALIVE_BOOT_ERROR_CODES}. Narrow, defensive shape check
+ *  — never assumes `error` is even an object. */
+function hasStayAliveBootErrorCode(error: unknown): boolean {
   return (
     typeof error === "object" &&
     error !== null &&
     "code" in error &&
-    (error as { code?: unknown }).code === DB_ENCRYPTION_UNREADABLE_CODE
+    typeof (error as { code?: unknown }).code === "string" &&
+    STAY_ALIVE_BOOT_ERROR_CODES.has((error as { code: string }).code)
   );
 }
 
@@ -100,7 +121,7 @@ let bootInFlight: Promise<void> | undefined;
 // `process.exit(1)`s the very server that just recovered. Tracking the last SETTLED state (not just
 // "is an attempt in flight right now") closes this: once `bootState` is `"ready"`, a further call is a
 // pure no-op — there is nothing left to retry, healthy or not.
-type BootState = "idle" | "booting" | "ready" | "db_encryption_unreadable" | "failed";
+type BootState = "idle" | "booting" | "ready" | "boot_recoverable" | "failed";
 let bootState: BootState = "idle";
 
 /**
@@ -169,16 +190,17 @@ async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
   } catch (error) {
     console.error("Failed to start embedded LOAM server:", error);
 
-    if (hasDbEncryptionUnreadableCode(error)) {
-      // FATAL, but recoverable without restarting the process. `openInitialStore` (app.ts) already
-      // reported this over the SAME bridge, with this SAME code, immediately before throwing — that
-      // report is what the RN host screen needs to show the "Preserve old database & start fresh"
-      // action (see index.tsx's DB_UNREADABLE_CODE), so re-reporting here would just duplicate it.
-      // The one thing THIS layer uniquely owns is deciding whether to exit — and, critically, it must
-      // NOT process.exit() for this code: the `loam-db-start-fresh` bridge listener that can recover
-      // from this lives in THIS process (main.js), so exiting here would kill it before it could ever
-      // receive that message, permanently stranding the operator (the exact bug this redesign fixes).
-      bootState = "db_encryption_unreadable";
+    if (hasStayAliveBootErrorCode(error)) {
+      // FATAL, but recoverable without restarting the process (one of STAY_ALIVE_BOOT_ERROR_CODES —
+      // `db_encryption_unreadable`, `db_encryption_plaintext_unconverted`, or `db_encryption_wipe_resume`).
+      // `app.ts` already reported it over the SAME bridge, with the SAME code, immediately before throwing
+      // — that report is what the RN host screen needs to show the right recovery action (start-fresh /
+      // delete-and-encrypt) — so re-reporting here would just duplicate it. The one thing THIS layer
+      // uniquely owns is deciding whether to exit — and, critically, it must NOT process.exit() for these:
+      // the bridge listeners that recover from them (main.js's `loam-db-start-fresh` / the launcher's
+      // wipe-restart handoff) live in THIS process, so exiting here would kill them before they could ever
+      // receive the message, permanently stranding the operator (the exact bug this redesign fixes).
+      bootState = "boot_recoverable";
       return;
     }
 

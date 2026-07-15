@@ -14,17 +14,21 @@
 // a `db_encryption_locked` boot-timeout report could resolve a key and boot a fresh (post-wipe) database
 // under the OLD secret the wipe was meant to destroy, while the wipe-pending marker sat unread on disk.
 //
-// A wipe-pending marker still on disk (`.loam-wipe-pending`, written by the server's kill switch before
-// it hands off to the launcher — see `executeKillSwitchBody` in apps/server/src/app.ts) means an earlier
-// wipe's Keystore key-clear was never confirmed complete (`db-encryption.ts`'s `clearStoredDbKeys` /
-// main.js's `loam-wipe-complete` handler). Resolving a key — let alone booting — while that's true risks
-// encrypting/opening the fresh post-wipe database under the very device secret the wipe was meant to
-// destroy. Only a confirmed `loam-wipe-complete` (which deletes the marker) may lift this.
+// P1-1 (Sol round 8): the input is now whether a device-KEY-CLEAR is still pending — i.e. the durable
+// `.loam-wipe-phase` file (written by the server's kill switch before it hands off to the launcher — see
+// `executeKillSwitchBody` in apps/server/src/app.ts) reads `key-clear-ready`. That phase means every wiped
+// artifact is PROVEN gone and the ONLY remaining step is clearing the device key, which was never confirmed
+// complete (`db-encryption.ts`'s `clearStoredDbKeys` / main.js's `loam-wipe-complete` handler). Resolving a
+// key — let alone booting — while that's true risks encrypting/opening the fresh post-wipe database under
+// the very device secret the wipe was meant to destroy. Only a confirmed `loam-wipe-complete` (which
+// deletes the phase file) may lift this. NB: a `delete-pending` phase is NOT blocked here — the launcher
+// DEFERS to the server's boot-time deletion retry under the old key (main.js's `bootWithWipeResume`), which
+// still resolves a key and boots; only `key-clear-ready` blocks the fast path.
 //
-// @param {boolean} wipePendingMarkerExists
+// @param {boolean} keyClearPending — true when the wipe phase is `key-clear-ready` (device key not yet cleared).
 // @returns {boolean} true when it is safe to resolve a key and boot this call.
-function mayResolveDbKeyThisBoot(wipePendingMarkerExists) {
-  return wipePendingMarkerExists !== true;
+function mayResolveDbKeyThisBoot(keyClearPending) {
+  return keyClearPending !== true;
 }
 
 module.exports = { mayResolveDbKeyThisBoot: mayResolveDbKeyThisBoot };

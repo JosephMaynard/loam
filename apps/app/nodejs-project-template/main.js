@@ -979,54 +979,74 @@ rnBridge.channel.on('loam-db-unlock', function (payload) {
   );
 });
 
-// ---- Wipe-restart handoff: durable resume (P1-2b, Sol round 4) ---------------------------------------
-// The server-side kill switch (executeKillSwitchBody, apps/server/src/app.ts) writes this marker BEFORE
-// signaling `loam-wipe-restart` for a `persistent`/`passphrase`-encrypted node — see `wipePendingMarkerPath`
-// there. If the app is suspended/backgrounded/killed before RN can VERIFY the Keystore key material is
-// actually cleared (or the clear itself fails), the marker survives on disk and this boot gets another
-// chance: re-post the SAME `loam-wipe-restart` event index.tsx's listener already handles (it doesn't
-// distinguish "live signal from the kill switch" from "resume repost from this boot") — it clears the
-// key, verifies, and on success posts `loam-wipe-complete` right back to the listener below, which is
-// the ONLY thing allowed to delete this marker.
-var WIPE_PENDING_MARKER_PATH = path.join(dataDir, '.loam-wipe-pending');
+// ---- Wipe-restart handoff: durable PHASE resume (P1-1, Sol round 8) ----------------------------------
+// Replaces the old single `.loam-wipe-pending` marker, which conflated "deletion still pending" with "safe
+// to clear the key". SHARED CONTRACT with the server (`executeKillSwitchBody` in apps/server/src/app.ts —
+// both sides updated together): a durable `.loam-wipe-phase` file whose contents are one of two values:
+//   - `delete-pending`  → a fixed-key wipe STARTED but its artifacts are NOT yet PROVEN gone. The launcher
+//                         must NOT clear the device key. It DEFERS to the server's boot-time retry: boot the
+//                         server under the OLD key (`resolveDbEncryptionAndBoot`), and the server re-runs
+//                         artifact deletion before serving (advancing the phase itself, and signaling the
+//                         wipe-restart hook once the deletion is verified).
+//   - `key-clear-ready` → every artifact + media path is PROVEN absent; the ONLY remaining step is clearing
+//                         the device key. ONLY here does the launcher do the key-clear + `loam-wipe-complete`
+//                         dance, then DELETE the phase file.
+// Route on the PHASE, never on mere presence.
+var WIPE_PHASE_MARKER_PATH = path.join(dataDir, '.loam-wipe-phase');
 
-function hasWipePendingMarker() {
+// Read the durable wipe phase. Confirmed ENOENT → undefined (no wipe pending). A recognized value → that
+// phase. ANY other state (unreadable, or malformed/truncated/unrecognized contents) → 'delete-pending':
+// an ambiguous-but-present phase file means a wipe WAS in progress, so err toward the server's deletion
+// retry rather than forgetting the wipe / clearing the key prematurely. MIRRORS `readWipePhase` in app.ts.
+function readWipePhase() {
+  var raw;
   try {
-    return fs.existsSync(WIPE_PENDING_MARKER_PATH);
+    raw = fs.readFileSync(WIPE_PHASE_MARKER_PATH, 'utf8');
   } catch (err) {
-    return false;
+    if (err && err.code === 'ENOENT') {
+      return undefined;
+    }
+    return 'delete-pending';
   }
+  var trimmed = String(raw).trim();
+  if (trimmed === 'key-clear-ready') {
+    return 'key-clear-ready';
+  }
+  // 'delete-pending', or anything malformed/truncated/unrecognized → fail-safe to the deletion retry.
+  return 'delete-pending';
 }
 
-// P1-c (Sol round 6): delete the wipe-pending marker AND VERIFY it's actually gone, returning real
+// P1-c (Sol round 6/8): delete the wipe-phase file AND VERIFY it's actually gone, returning real
 // success/failure. The old version swallowed unlink failures, so `proceed()` (below) would boot and mint
-// a BRAND-NEW device secret while the marker silently lingered — and the NEXT boot's wipe-resume would
-// then re-clear THAT fresh secret, leaving the new database unreadable. A verified return lets `proceed()`
-// refuse to mint a new secret unless the marker is provably gone. ENOENT (already absent) counts as
-// success; any other unlink error, or the file still being present/unverifiable afterward, is a failure.
-function clearWipePendingMarker() {
+// a BRAND-NEW device secret while the phase file silently lingered — and the NEXT boot's key-clear-ready
+// resume would then re-clear THAT fresh secret, leaving the new database unreadable. A verified return lets
+// `proceed()` refuse to mint a new secret unless the phase file is provably gone. ENOENT (already absent)
+// counts as success; any other unlink error, or the file still being present/unverifiable afterward, fails.
+function clearWipePhase() {
   try {
-    fs.unlinkSync(WIPE_PENDING_MARKER_PATH);
+    fs.unlinkSync(WIPE_PHASE_MARKER_PATH);
   } catch (err) {
     if (err && err.code === 'ENOENT') {
       return true; // already gone — nothing pending
     }
-    return false; // a real delete failure — the marker may still be on disk
+    return false; // a real delete failure — the phase file may still be on disk
   }
   try {
-    return fs.existsSync(WIPE_PENDING_MARKER_PATH) === false;
+    return fs.existsSync(WIPE_PHASE_MARKER_PATH) === false;
   } catch (err) {
     return false; // couldn't verify removal — must not be reported as a clean success
   }
 }
 
-// P1-2(b): the ONLY place this marker is ever deleted — never on a bare signal, never speculatively. This
-// standalone handler covers the LIVE / no-active-resume path (a kill-switch wipe while the server is
-// already running); the resume path's `proceed()` does its own verified clear-and-decide (P1-c). A failure
-// here is not fatal on the live path: the marker simply persists, and the NEXT boot's wipe-resume re-drives
-// the clear and retries the delete.
+// P1-2(b)/P1-1: the ONLY standalone place the phase file is ever deleted — never speculatively. `loam-wipe-
+// complete` means RN VERIFIED the device key is gone, which only ever follows a `key-clear-ready` handoff
+// (the live kill switch's, or a resume's) — so at this point the phase file has served its purpose and is
+// safe to delete. This covers the LIVE path (a kill-switch wipe while the server is already running); the
+// resume path's `proceed()` does its own verified clear-and-decide (P1-c). A failure here is not fatal on
+// the live path: the phase file simply persists, and the NEXT boot's key-clear-ready resume re-drives the
+// clear and retries the delete.
 rnBridge.channel.on('loam-wipe-complete', function () {
-  clearWipePendingMarker();
+  clearWipePhase();
 });
 
 // NOTE (Sol round-4 finding #1): the wipe-restart re-post is intentionally NOT fired here as a bare,
@@ -1294,21 +1314,23 @@ function resolveDbEncryptionAndBoot() {
 
 notify('starting');
 
-// Sol round-4 finding #1 / P1-2 (Sol round 5): on a boot where a wipe handoff was interrupted (the
-// `.loam-wipe-pending` marker survived), let the RN host clear the device secret BEFORE resolving a DB
-// key for this boot. Re-post the clear, wait for `loam-wipe-complete` (the marker-delete handler above
-// confirms the key is verifiably gone), and only THEN resolve the key + boot — resolveDbKey will mint a
-// NEW device secret since the old one is gone. On timeout we do NOT boot under the un-cleared key:
-// surface a locked state and keep the listener, so a late completion still boots and reopening the app
-// retries (the marker persists).
+// P1-1 (Sol round 8): route on the durable wipe PHASE, not mere marker presence.
+//   - phase `undefined`      → no wipe pending → resolve a key + boot normally.
+//   - phase `delete-pending` → an earlier fixed-key wipe never PROVED its artifacts gone. DEFER to the
+//                              server's boot-time retry: resolve the OLD key (RN still holds it — we do NOT
+//                              clear it here) + boot the server, which re-runs artifact deletion before
+//                              serving and, once verified, signals the wipe-restart hook itself. So this is
+//                              still a normal `resolveDbEncryptionAndBoot()` call — the server does the rest.
+//   - phase `key-clear-ready`→ artifacts are PROVEN gone; the ONLY step left is clearing the device key.
+//                              Do the wipe-restart dance: re-post `loam-wipe-restart`, wait for
+//                              `loam-wipe-complete` (RN VERIFIED the key is gone), delete the phase file,
+//                              and ONLY THEN resolve a NEW key + boot. On timeout we do NOT boot under the
+//                              un-cleared key — surface a locked state; reopening retries (the phase file
+//                              persists).
 //
-// P1-2 (Sol round 5): this is now the ONE SINGLE CHOKE POINT allowed to call
-// `resolveDbEncryptionAndBoot()` — EVERY boot/unlock entry point (the initial boot at the bottom of this
-// file, AND the `loam-db-unlock` retry listener above) MUST go through this function, gated by
-// `mayResolveDbKeyThisBoot` (db-key-gate.js). Before this fix, `loam-db-unlock`'s handler called
-// `resolveDbEncryptionAndBoot()` directly — bypassing the marker check entirely — so a Retry/Unlock tap
-// after a `db_encryption_locked` report (which can also fire while a wipe-resume is still pending) could
-// resolve a key and boot a fresh database under the OLD secret the wipe was meant to destroy.
+// The `mayResolveDbKeyThisBoot(keyClearPending)` gate (db-key-gate.js) blocks the fast path ONLY for
+// `key-clear-ready`; `delete-pending`/`undefined` both resolve a key and boot. This is the ONE SINGLE CHOKE
+// POINT allowed to call `resolveDbEncryptionAndBoot()` — EVERY boot/unlock entry point routes through it.
 //
 // Always returns a Promise that resolves once THIS call's outcome is settled (key resolved & boot
 // attempted, OR still locked pending the resume) — never rejects. A wait-for-resume in progress is a
@@ -1316,7 +1338,7 @@ notify('starting');
 // own resume wait is still pending) joins the SAME wait rather than registering a second overlapping
 // `loam-wipe-complete` listener/timer.
 var wipeResumeWait;
-// RF-d (adversarial review, round 5): a single-flight guard for the NO-marker fast path below. The
+// RF-d (adversarial review, round 5): a single-flight guard for the NO-resume fast path below. The
 // resume path is already a singleton via `wipeResumeWait`, but the direct `return
 // resolveDbEncryptionAndBoot()` had no guard — two concurrent callers (the initial boot at the bottom of
 // this file and a `loam-db-unlock` retry firing in the same tick) could each start an overlapping boot
@@ -1333,7 +1355,11 @@ function bootWithWipeResume() {
     return bootInFlight;
   }
 
-  if (mayResolveDbKeyThisBoot(hasWipePendingMarker())) {
+  var phase = readWipePhase();
+
+  // `undefined` (no wipe) and `delete-pending` (defer to the server's boot-time deletion retry under the
+  // OLD key) both resolve a key + boot; only `key-clear-ready` blocks to do the device-key-clear dance.
+  if (mayResolveDbKeyThisBoot(phase === 'key-clear-ready')) {
     bootInFlight = resolveDbEncryptionAndBoot().finally(function () {
       bootInFlight = undefined;
     });
@@ -1350,15 +1376,15 @@ function bootWithWipeResume() {
       proceeded = true;
       clearTimeout(timer);
       rnBridge.channel.removeListener('loam-wipe-complete', proceed);
-      // P1-c (Sol round 6): RN only posts `loam-wipe-complete` after `clearStoredDbKeys` VERIFIED the
-      // device secret is gone — but we must ALSO confirm OUR OWN wipe-pending marker is actually deleted
-      // before booting. If the marker delete failed, booting now would mint a fresh device secret while
-      // the marker lingers, and the NEXT boot's wipe-resume would clear THAT fresh secret and brick the
-      // new DB. So on a marker-cleanup failure, do NOT resolve a key / mint a secret: leave the marker in
-      // place and surface a distinct "reopen to finish" state. Reopening re-drives the resume — RN
-      // re-clears the already-gone key idempotently (destroying no fresh secret, because we never minted
-      // one) and the marker delete is retried — so recovery completes without data loss.
-      if (clearWipePendingMarker() !== true) {
+      // P1-c (Sol round 6/8): RN only posts `loam-wipe-complete` after `clearStoredDbKeys` VERIFIED the
+      // device secret is gone — but we must ALSO confirm OUR OWN wipe-phase file is actually deleted before
+      // booting. If the delete failed, booting now would mint a fresh device secret while the phase file
+      // lingers, and the NEXT boot's key-clear-ready resume would clear THAT fresh secret and brick the new
+      // DB. So on a cleanup failure, do NOT resolve a key / mint a secret: leave the phase file in place and
+      // surface a distinct "reopen to finish" state. Reopening re-drives the resume — RN re-clears the
+      // already-gone key idempotently (destroying no fresh secret, because we never minted one) and the
+      // phase-file delete is retried — so recovery completes without data loss.
+      if (clearWipePhase() !== true) {
         notify('error', {
           message:
             'The security reset cleared the encryption key, but a cleanup step is still pending — reopen ' +
@@ -1377,7 +1403,7 @@ function bootWithWipeResume() {
       }
       proceeded = true;
       rnBridge.channel.removeListener('loam-wipe-complete', proceed);
-      // The clear didn't complete in time — do NOT boot under the un-destroyed key. The marker persists,
+      // The clear didn't complete in time — do NOT boot under the un-destroyed key. The phase file persists,
       // so reopening the app re-attempts; a later `loam-wipe-complete` (if it eventually arrives after
       // this timeout) is picked up by the NEXT call to this function, since `wipeResumeWait` is cleared
       // in the `finally` below.
@@ -1389,7 +1415,7 @@ function bootWithWipeResume() {
       resolve('locked');
     }, WIPE_RESUME_TIMEOUT_MS);
 
-    // `proceed` also runs once the marker-delete handler above has cleared the marker on the SAME event.
+    // `proceed` also runs once the phase-file-delete handler above has cleared the file on the SAME event.
     rnBridge.channel.on('loam-wipe-complete', proceed);
     try {
       rnBridge.channel.post('loam-wipe-restart');
