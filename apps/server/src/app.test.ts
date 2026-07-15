@@ -1178,7 +1178,7 @@ describe("secret storage", () => {
 describe("encryption at rest + key-discard kill switch", () => {
   // Build directly (not via makeApp) so `app.store` stays the live getter across an encrypted wipe.
   async function makeEncryptedApp(
-    opts: Pick<AppOptions, "dbEncryptionKey" | "ephemeralDbKey">,
+    opts: Pick<AppOptions, "dbEncryptionKey" | "ephemeralDbKey" | "dbEncryptionMode">,
     config?: unknown,
   ): Promise<{ app: LoamApp; dataDir: string }> {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-app-test-"));
@@ -1259,6 +1259,62 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect((await post(app, returning.cookie, "after wipe")).statusCode).toBe(201);
   });
 
+  it("SF1/P1-1+P2-1: an Android-style ephemeral boot (ephemeralDbKey + dbEncryptionMode, as embedded.ts " +
+    "now derives them) reports the effective posture immediately AND rotates the key on kill switch", async () => {
+    // Mirrors exactly what the fixed `embedded.ts` passes for a real ephemeral session: `ephemeralDbKey`
+    // is already resolved true (via `resolveEphemeralDbKey`, P1-1) and `dbEncryptionMode` carries the
+    // launcher's declared mode — `dbEncryptionKey` is never set for this path (a real ephemeral session
+    // discards whatever hex key LOAM_DB_KEY carried).
+    const { app, dataDir } = await makeEncryptedApp(
+      { ephemeralDbKey: true, dbEncryptionMode: "ephemeral" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+
+    // P2-1: the wire reports "ephemeral" from the FIRST request — no admin PATCH of the declarative
+    // `security.dbEncryption` axis (which defaults "off") is needed to make this true.
+    const before = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(before.networkConfig.dbEncryption).toBe("ephemeral");
+
+    expect((await post(app, admin.cookie, "ANDROID_EPHEMERAL_NEEDLE")).statusCode).toBe(201);
+    const beforeWipeFile = readFileSync(join(dataDir, "loam.db"));
+
+    // P1-1: with the fix, executeKillSwitch's `ephemeralDbKey` branch actually rotates the key for this
+    // scenario (the old embedded.ts, checking only the LOAM_DB_KEY==="ephemeral" literal, would have
+    // left `ephemeralDbKey` false here and skipped rotation entirely).
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    expect(app.store.loadMessages()).toEqual([]);
+    const afterWipeFile = readFileSync(join(dataDir, "loam.db"));
+    expect(afterWipeFile.equals(beforeWipeFile)).toBe(false); // fresh key ⇒ entirely different ciphertext
+
+    // Posture still reports "ephemeral" post-wipe (still encrypted, mode unchanged).
+    const after = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(after.networkConfig.dbEncryption).toBe("ephemeral");
+  });
+
+  it("SF1/P2-1: a boot-resolved dbEncryptionMode (passphrase/persistent) is reported without an admin PATCH", async () => {
+    const { app } = await makeEncryptedApp({
+      dbEncryptionKey: "a fixed host passphrase",
+      dbEncryptionMode: "persistent",
+    });
+
+    const config = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(config.networkConfig.dbEncryption).toBe("persistent");
+  });
+
   it("kill switch on a passphrase-key node also empties and recovers", async () => {
     const { app } = await makeEncryptedApp(
       { dbEncryptionKey: "a fixed host passphrase" },
@@ -1331,7 +1387,17 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect((await post(reopened, reopenedAdmin.cookie, "after fallback")).statusCode).toBe(201);
     });
 
-    it("renames aside an unopenable encrypted database (wrong/lost key) and starts a fresh one, reporting db_encryption_unreadable", async () => {
+    /** Path to the shared launcher "start fresh" confirmation marker (SF2, docs/15) inside `dataDir`. */
+    function startFreshMarkerPath(dataDir: string): string {
+      return join(dataDir, ".loam-db-start-fresh");
+    }
+
+    /** Every `loam.db*` file in `dataDir`, for asserting nothing (or something specific) was touched. */
+    function dbFileNames(dataDir: string): string[] {
+      return readdirSync(dataDir).filter((name) => name.startsWith("loam.db"));
+    }
+
+    it("P1-2/design#1: a genuinely unopenable DB with NO start-fresh marker present THROWS non-destructively — the original files are untouched, not silently opened as plaintext or auto-replaced", async () => {
       const reports = installFakeBootBridge();
 
       const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the original key" });
@@ -1339,24 +1405,107 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect((await post(original, originalAdmin.cookie, "LOCKED_BEHIND_KEY_A")).statusCode).toBe(201);
       await original.close();
 
-      // Reopen with a DIFFERENT key — case 1 (keyed open under the new key) fails, and case 2
-      // (plaintext open) also fails because the file is genuinely SQLCipher ciphertext, not a valid
-      // plain SQLite header. Case 3 must still boot: rename the unreadable file aside and start fresh.
-      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" });
-      cleanups.push(() => recovered.close());
+      const filesBefore = dbFileNames(dataDir).sort();
+      const bytesBefore = readFileSync(join(dataDir, "loam.db"));
+
+      // Reopen with a DIFFERENT key — case 1 (keyed open under the new key) fails, and case 2 (plaintext
+      // open) also fails because the file is genuinely SQLCipher ciphertext, not a valid plain SQLite
+      // header. Design#1: with no marker present, this must THROW rather than auto-replace the DB.
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" }),
+      ).rejects.toThrow(/could not be opened/);
 
       expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
       expect(reports[0]?.message).not.toContain("the original key");
       expect(reports[0]?.message).not.toContain("a completely different key");
 
-      // The old (unreadable) ciphertext is preserved on disk, not deleted.
-      expect(existsSync(join(dataDir, "loam.db.unreadable"))).toBe(true);
+      // Nothing on disk was touched — no rename, no new/renamed files, identical bytes.
+      expect(dbFileNames(dataDir).sort()).toEqual(filesBefore);
+      expect(readFileSync(join(dataDir, "loam.db")).equals(bytesBefore)).toBe(true);
+    });
+
+    it("P1-2: a ciphertext DB with NO key configured at all ALSO gets non-destructive recovery treatment, instead of buildApp's raw 'not a database' throw", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "some key" });
+      await session(original);
+      await original.close();
+
+      const filesBefore = dbFileNames(dataDir).sort();
+
+      // No dbEncryptionKey/ephemeralDbKey at all this time — encryptionEnabled starts false, but the
+      // file on disk is genuine SQLCipher ciphertext. Before the fix this bypassed recovery entirely
+      // (encryptionEnabled gated it) and buildApp rejected with a raw "file is not a database" error;
+      // now it must reach the same marker-gated non-destructive path as the keyed case.
+      await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/could not be opened/);
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+      expect(dbFileNames(dataDir).sort()).toEqual(filesBefore); // untouched
+    });
+
+    it("design#1: an explicit .loam-db-start-fresh marker consumes itself and triggers a unique-suffix recovery, reporting db_encryption_recovered_fresh", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the original key" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "LOCKED_BEHIND_KEY_A")).statusCode).toBe(201);
+      await original.close();
+
+      // The RN host's explicit start-fresh confirmation UI writes this marker before restarting.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+
+      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" });
+      cleanups.push(() => recovered.close());
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_recovered_fresh" })]);
+      expect(reports[0]?.message).not.toContain("the original key");
+      expect(reports[0]?.message).not.toContain("a completely different key");
+
+      // The marker is consumed (deleted), never re-triggering recovery on a later boot.
+      expect(existsSync(startFreshMarkerPath(dataDir))).toBe(false);
+
+      // The old ciphertext is preserved on disk under a unique suffix (not deleted, and not the old
+      // fixed `loam.db.unreadable` name — P1-3).
+      const preserved = readdirSync(dataDir).filter((name) => name.startsWith("loam.db.unreadable-"));
+      expect(preserved.length).toBeGreaterThan(0);
+      expect(existsSync(join(dataDir, "loam.db.unreadable"))).toBe(false);
 
       // The fresh DB has no memory of the old data, but is fully usable (and still encrypted — the
       // effective posture wasn't downgraded, unlike the plaintext-fallback case above).
       expect(recovered.store.loadMessages()).toEqual([]);
       const recoveredAdmin = await session(recovered);
       expect((await post(recovered, recoveredAdmin.cookie, "fresh after recovery")).statusCode).toBe(201);
+    });
+
+    it("P1-3: two successive marker-confirmed recoveries each keep their OWN preserved copy — the second never overwrites the first", async () => {
+      installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "seed")).statusCode).toBe(201);
+      await original.close();
+
+      // First recovery: wrong key + marker present.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+      const first = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" });
+      const admin1 = await session(first);
+      expect((await post(first, admin1.cookie, "after first recovery")).statusCode).toBe(201);
+      await first.close();
+
+      const preservedAfterFirst = readdirSync(dataDir).filter((name) => name.startsWith("loam.db.unreadable-"));
+      expect(preservedAfterFirst.length).toBeGreaterThan(0);
+
+      // Second recovery: open under yet ANOTHER wrong key, with a fresh marker again.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+      const second = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key C" });
+      cleanups.push(() => second.close());
+
+      const preservedAfterSecond = readdirSync(dataDir).filter((name) => name.startsWith("loam.db.unreadable-"));
+      // Both the first recovery's preserved set AND the second's are present — nothing was overwritten.
+      expect(preservedAfterSecond.length).toBeGreaterThan(preservedAfterFirst.length);
+      for (const name of preservedAfterFirst) {
+        expect(preservedAfterSecond).toContain(name);
+      }
     });
   });
 });
@@ -3766,6 +3915,78 @@ describe("attachment + sync review hardening", () => {
 
     await app.retryMissingAttachments();
 
+    expect(app.store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("SF3: a tick overlapping an in-flight (slow) pass no-ops instead of running a second concurrent pass", async () => {
+    // A local, definitely-unlistened port — the eventual peer fetch fails fast (ECONNREFUSED, no real
+    // network/DNS involved), so the test stays quick while still giving the first pass a genuine async
+    // suspension point (see below) to be "in flight" at.
+    const unreachablePeerUrl = "http://127.0.0.1:39217";
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: unreachablePeerUrl }] } });
+    const admin = await newSession(app);
+
+    // A record referencing a REAL local message (so it survives the F2b/message-exists checks and
+    // reaches its first genuine `await` — `await stat(filePath)` on the still-missing file — instead of
+    // being dropped synchronously). That's what makes the first call still "in flight" (suspended, not
+    // yet past its `try`/`finally`) at the instant the second, overlapping call is fired.
+    const posted = (await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "carries a missing attachment" },
+    })).json() as { message: { id: string } };
+
+    app.store.addMissingAttachment({
+      messageId: posted.message.id,
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: unreachablePeerUrl,
+    });
+
+    // A pass calls `store.loadMissingAttachments()` exactly once, synchronously, right at its start —
+    // so counting calls to it distinguishes "a second pass actually ran" from "the mutex no-op'd it".
+    let calls = 0;
+    const original = app.store.loadMissingAttachments.bind(app.store);
+    app.store.loadMissingAttachments = (): ReturnType<typeof original> => {
+      calls += 1;
+      return original();
+    };
+
+    const first = app.retryMissingAttachments(); // synchronously runs up to `await stat(filePath)`, then suspends
+    const second = app.retryMissingAttachments(); // fired while `first` is still in flight
+    await Promise.all([first, second]);
+
+    expect(calls).toBe(1);
+    // The mutex was released once the (slow) first pass finished — a later, non-overlapping call runs
+    // normally again.
+    await app.retryMissingAttachments();
+    expect(calls).toBe(2);
+  });
+
+  it("SF3: bounds work per pass at missingAttachmentMaxRecordsPerPass (25), leaving the rest for the next tick", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://still-active.example" }] } });
+
+    // All 30 point at a peer NOT in sync.peers, so every record the pass actually looks at is dropped
+    // immediately (F2b) — a fast, deterministic way to observe exactly how many records one pass
+    // touched, without any network mocking.
+    for (let i = 0; i < 30; i += 1) {
+      app.store.addMissingAttachment({
+        messageId: `msg_${i}`,
+        attachmentId: `att_${i}`,
+        mimeType: "image/png",
+        peerUrl: "http://long-gone.example",
+      });
+    }
+    expect(app.store.loadMissingAttachments()).toHaveLength(30);
+
+    await app.retryMissingAttachments();
+
+    // Only the first 25 (the per-pass cap) were looked at and dropped; the remaining 5 are untouched.
+    expect(app.store.loadMissingAttachments()).toHaveLength(5);
+
+    // A second pass picks up where the first left off.
+    await app.retryMissingAttachments();
     expect(app.store.loadMissingAttachments()).toEqual([]);
   });
 

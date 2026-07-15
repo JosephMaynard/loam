@@ -1,3 +1,5 @@
+import type { DbEncryptionMode } from "@loam/schema";
+
 import { buildApp, type LoamApp } from "./app.js";
 import type { StoreDriver } from "./db.js";
 
@@ -21,6 +23,13 @@ import type { StoreDriver } from "./db.js";
  *   capture a stale earlier address (docs/04, docs/15 A7). Set it to pin an explicit host instead.
  * - `LOAM_DB_DRIVER`  — plaintext SQLite backend: `better-sqlite3` (the Android host, whose Node 18
  *   lacks `node:sqlite`) or `node-sqlite` (default). Ignored when `LOAM_DB_KEY` enables encryption.
+ * - `LOAM_DB_ENCRYPTION_MODE` — the launcher's declared at-rest key strategy (`off`/`ephemeral`/
+ *   `persistent`/`passphrase`, see `DbEncryptionModeSchema` in `@loam/schema`). Threaded into `buildApp`
+ *   as `dbEncryptionMode` so the reported posture (`networkConfig.dbEncryption`) reflects what the
+ *   launcher actually did with the key, not just the admin's declarative config axis — and, for
+ *   `ephemeral`, drives `ephemeralDbKey` alongside the legacy `LOAM_DB_KEY==="ephemeral"` literal (a
+ *   real ephemeral session's `LOAM_DB_KEY` is a real hex key, not that literal, so the mode is the
+ *   authoritative signal; see the P1-1 note on `ephemeralDbKey` below).
  */
 export { resolveLanIPv4 as firstLanIPv4 } from "./net.js";
 
@@ -39,6 +48,28 @@ export function parsePort(value: string | undefined, fallback: number): number {
  */
 export function parseDbDriver(value: string | undefined): StoreDriver | undefined {
   return value === "better-sqlite3" || value === "node-sqlite" ? value : undefined;
+}
+
+/**
+ * Parse the DB-encryption mode from `LOAM_DB_ENCRYPTION_MODE`. Only the four known values are
+ * honoured; anything else (including unset) leaves the choice to `buildApp`'s default (`"off"`).
+ */
+export function parseDbEncryptionMode(value: string | undefined): DbEncryptionMode | undefined {
+  return value === "off" || value === "ephemeral" || value === "persistent" || value === "passphrase"
+    ? value
+    : undefined;
+}
+
+/**
+ * Resolve whether the server should generate its own RAM-only ephemeral key (P1-1, docs/15). Honours
+ * BOTH the legacy `LOAM_DB_KEY === "ephemeral"` literal (a caller that only ever set `LOAM_DB_KEY`) and
+ * `LOAM_DB_ENCRYPTION_MODE === "ephemeral"` (the current Android contract, where a real session passes
+ * an actual hex key in `LOAM_DB_KEY` alongside the mode). Checking the literal alone — the original bug
+ * — treated a real-key ephemeral session as a FIXED key, so `executeKillSwitch`'s key rotation never
+ * fired for it even though the node believed it was running ephemeral.
+ */
+export function resolveEphemeralDbKey(dbKeyEnv: string | undefined, mode: DbEncryptionMode | undefined): boolean {
+  return dbKeyEnv === "ephemeral" || mode === "ephemeral";
 }
 
 export async function startEmbeddedServer(): Promise<LoamApp> {
@@ -60,9 +91,10 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
   const host = process.env.HOST ?? "0.0.0.0";
   const clientPort = parsePort(process.env.CLIENT_PORT, port);
 
-  // LOAM_DB_KEY="ephemeral" → random RAM-only key (lost on reboot, rotated by the kill switch);
-  // any other value → passphrase; unset → no encryption. See docs/02-kill-switch.md.
-  const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
+  const dbEncryptionMode = parseDbEncryptionMode(process.env.LOAM_DB_ENCRYPTION_MODE);
+  // See `resolveEphemeralDbKey` (P1-1): any other LOAM_DB_KEY value → passphrase/persistent key; unset
+  // → no encryption. See docs/02-kill-switch.md.
+  const ephemeralDbKey = resolveEphemeralDbKey(process.env.LOAM_DB_KEY, dbEncryptionMode);
 
   const app = await buildApp({
     dataDir,
@@ -74,6 +106,7 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     clientPort,
     dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
     ephemeralDbKey,
+    dbEncryptionMode,
     dbDriver: parseDbDriver(process.env.LOAM_DB_DRIVER),
     // The Android host / npm CLI inject the app version via LOAM_VERSION (no package.json on the
     // bundle path); "dev" if unset.
