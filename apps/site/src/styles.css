@@ -1,5 +1,5 @@
 /* ============================================================================
-   LOAM — loamnet.com landing page
+   LOAM: loamnet.com landing page
    Earthy, local-first, off-grid. Warm greens + ember accent, editorial serif.
    ============================================================================ */
 
@@ -28,7 +28,7 @@
   --ember-strong: #b23e00;
   --ember-strong-hover: #983a00;
 
-  /* Fixed "on-dark" palette for the intentionally-dark panels (deep band, footer, phone) —
+  /* Fixed "on-dark" palette for the intentionally-dark panels (deep band, footer, phone):
      these do NOT flip with the colour scheme, so those sections stay dark-with-light-text in both. */
   --deep-bg: #16281d;
   --deep-bg-2: #0f1d15;
@@ -703,7 +703,7 @@ p {
     animation: reveal-failsafe 0.01s linear 1.2s forwards;
   }
   /* Once the observer is running it owns revealing (via .in on scroll), so disarm the CSS
-     fail-safe — otherwise below-the-fold items would auto-reveal at 1.2s and lose the effect. */
+     fail-safe, otherwise below-the-fold items would auto-reveal at 1.2s and lose the effect. */
   .reveal-js .reveal {
     animation: none;
   }

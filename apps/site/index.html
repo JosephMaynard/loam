@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LOAM — off-grid, local-first messaging</title>
+    <title>LOAM: off-grid, local-first messaging</title>
     <meta
       name="description"
       content="LOAM is a local-first, off-grid messaging network. A host runs it on a laptop, Raspberry Pi, or phone; nearby people scan a QR code and join over the local network. Link nodes and separate hotspots converge into one conversation. No internet, no accounts, no cloud."
@@ -12,7 +12,7 @@
     <link rel="apple-touch-icon" href="/loam-512.png" />
     <meta name="theme-color" content="#17231d" />
     <meta property="og:site_name" content="LOAM" />
-    <meta property="og:title" content="LOAM — off-grid, local-first messaging" />
+    <meta property="og:title" content="LOAM: off-grid, local-first messaging" />
     <meta
       property="og:description"
       content="A message network that works with no internet, no accounts, and no cloud. Scan a QR code and join over local WiFi."
@@ -26,7 +26,7 @@
     <!-- The share asset is a square logo, so `summary` is the correct card (large-image expects a
          wide ~1.91:1 image). Both point at the same PNG. -->
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="LOAM — off-grid, local-first messaging" />
+    <meta name="twitter:title" content="LOAM: off-grid, local-first messaging" />
     <meta
       name="twitter:description"
       content="A message network that works with no internet, no accounts, and no cloud. Scan a QR code and join over local WiFi."
@@ -94,7 +94,7 @@
                   <span># general</span>
                 </div>
                 <div class="bubble them"><span class="who">river.stone.owl</span>Meeting point is the north gate 🌲</div>
-                <div class="bubble me">On our way — 5 min</div>
+                <div class="bubble me">On our way, 5 min</div>
                 <div class="bubble them"><span class="who">amber.clay.wren</span>Bringing water + the map</div>
                 <div class="chat-input"><span>Message #general</span></div>
               </div>
@@ -121,7 +121,7 @@
               <h3>Someone hosts</h3>
               <p>
                 Run LOAM on a laptop, a Raspberry&nbsp;Pi, or an Android phone. It starts a local WiFi
-                hotspot and prints a join QR — no servers, no setup. You name the network and set the
+                hotspot and prints a join QR. No servers, no setup. You name the network and set the
                 rules.
               </p>
             </li>
@@ -130,7 +130,7 @@
               <h3>People scan &amp; join</h3>
               <p>
                 Nearby devices scan the QR to connect and open LOAM in the browser. Everyone gets a
-                privacy-preserving, ephemeral identity — no email, no phone number. Approve newcomers if you
+                privacy-preserving, ephemeral identity: no email, no phone number. Approve newcomers if you
                 want to vet who's in.
               </p>
             </li>
@@ -139,7 +139,7 @@
               <h3>You talk, locally</h3>
               <p>
                 Post to public or invite-only channels, reply in threads, DM, react, search, and share
-                images — and optionally chat with a local AI assistant. Everything stays on the local
+                images, and optionally chat with a local AI assistant. Everything stays on the local
                 network.
               </p>
             </li>
@@ -155,16 +155,16 @@
             <h2 id="mesh-title" class="section-title">When the crowd outgrows one hotspot.</h2>
             <p class="who-lede">
               One host covers everyone in WiFi range. But a field, a building, or a whole
-              neighbourhood is bigger than a single hotspot — so LOAM nodes can join up. Two nodes
+              neighbourhood is bigger than a single hotspot, so LOAM nodes can join up. Two nodes
               that can reach each other sync their public channels, and separate hotspots converge
               into one conversation.
             </p>
           </div>
           <ul class="who-list reveal">
-            <li><strong>One host is a network</strong> — a laptop, Pi, or phone serves everyone nearby with no internet at all.</li>
-            <li><strong>Many hosts are one network</strong> — link nodes and their public channels merge, so the conversation spans them all.</li>
-            <li><strong>Link by QR</strong> — point one node at another with a scan; a node's join code is its sync address.</li>
-            <li><strong>Resilient by design</strong> — DMs and private channels stay put; if a node drops the others carry on, then catch up when it returns.</li>
+            <li><strong>One host is a network:</strong> a laptop, Pi, or phone serves everyone nearby with no internet at all.</li>
+            <li><strong>Many hosts are one network:</strong> link nodes and their public channels merge, so the conversation spans them all.</li>
+            <li><strong>Link by QR:</strong> point one node at another with a scan; a node's join code is its sync address.</li>
+            <li><strong>Resilient by design:</strong> DMs and private channels stay put; if a node drops the others carry on, then catch up when it returns.</li>
           </ul>
         </div>
       </section>
@@ -208,7 +208,7 @@
             <article class="feature reveal">
               <div class="feature-icon">⊘</div>
               <h3>Encryption &amp; Emergency Reset</h3>
-              <p>Encrypt the database at rest, then trigger an Emergency Reset to erase everything in one action — including remotely with a pre-shared token.</p>
+              <p>Encrypt the database at rest (on desktop or the Android host), then trigger an Emergency Reset to erase everything in one action, including remotely with a pre-shared token.</p>
             </article>
             <article class="feature reveal">
               <div class="feature-icon">◐</div>
@@ -223,7 +223,7 @@
             <article class="feature reveal">
               <div class="feature-icon">✦</div>
               <h3>Optional local AI</h3>
-              <p>Point it at a local Ollama model and an assistant appears as a contact — answers stay on the host, offline.</p>
+              <p>Point it at a laptop's Ollama, or run a small model on the Android host itself. An assistant appears as a contact and answers stay on the host, offline. Off by default.</p>
             </article>
             <article class="feature reveal">
               <div class="feature-icon">⤓</div>
@@ -246,19 +246,19 @@
             <p class="eyebrow">Who it's for</p>
             <h2 id="who-title" class="section-title">For people, where the network isn't.</h2>
             <p class="who-lede">
-              LOAM is built for moments the internet can't reach — and for keeping ordinary people
+              LOAM is built for moments the internet can't reach, and for keeping ordinary people
               connected when staying in touch is what matters most.
             </p>
           </div>
           <ul class="who-list reveal">
-            <li><strong>Communities off the grid</strong> — remote areas, boats, camps, anywhere without coverage.</li>
-            <li><strong>Events &amp; gatherings</strong> — a room, a venue, a field: a private space to coordinate.</li>
-            <li><strong>When infrastructure fails</strong> — outages and disasters, where a hotspot is the only link.</li>
-            <li><strong>Organisers &amp; helpers</strong> — a simple, no-account way to reach the people around you.</li>
+            <li><strong>Communities off the grid:</strong> remote areas, boats, camps, anywhere without coverage.</li>
+            <li><strong>Events &amp; gatherings:</strong> a room, a venue, a field: a private space to coordinate.</li>
+            <li><strong>When infrastructure fails:</strong> outages and disasters, where a hotspot is the only link.</li>
+            <li><strong>Organisers &amp; helpers:</strong> a simple, no-account way to reach the people around you.</li>
           </ul>
         </div>
         <p class="wrap ethos">
-          These protections exist to keep everyday people safe and connected — not to hide wrongdoing.
+          These protections exist to keep everyday people safe and connected, not to hide wrongdoing.
         </p>
       </section>
 
@@ -270,7 +270,7 @@
             <h2 id="open-title" class="section-title">Yours to run, read, and improve.</h2>
             <p class="lede">
               LOAM is free and open source under the AGPL. Read every line, run your own node, and help
-              build the roadmap — encrypted storage and node-to-node sync ship today; low-bandwidth
+              build the roadmap. Encrypted storage and node-to-node sync ship today; low-bandwidth
               LoRa relay that reaches beyond WiFi is next.
             </p>
             <div class="hero-actions">

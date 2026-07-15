@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Off-grid, local-first messaging.</strong><br />
-  Run it on a laptop, a Raspberry&nbsp;Pi, or your phone. Everyone nearby scans a QR code and starts talking — no internet, no accounts, no cloud.
+  Run it on a laptop, a Raspberry&nbsp;Pi, or your phone. Everyone nearby scans a QR code and starts talking. No internet, no accounts, no cloud.
 </p>
 
 <p align="center">
@@ -29,9 +29,9 @@
 ## What LOAM is
 
 LOAM is a messaging system that works **when the internet doesn't**. One person becomes the
-*host* — they run LOAM on any device and turn it into a small WiFi hotspot. Everyone nearby scans a
+*host*: they run LOAM on any device and turn it into a small WiFi hotspot. Everyone nearby scans a
 QR code, the messaging app opens in their browser, and the group can post to channels, reply in
-threads, send direct messages, react, and — if the host enables it — chat with a local AI, all over
+threads, send direct messages, react, and (if the host enables it) chat with a local AI, all over
 the local network. Nothing leaves the immediate area and nothing touches a server you don't control.
 
 It's built for the moments when normal networks are **unavailable, unreliable, or unsafe**:
@@ -40,31 +40,33 @@ without an account, a data plan, or anyone in the middle.
 
 LOAM's priorities, in order:
 
-- **Simplicity** — no accounts, no installs, no setup. Scan and go.
-- **Privacy** — identities are ephemeral and privacy-preserving by default, with no account required.
-- **Resilience** — designed for very low bandwidth and intermittent connectivity.
+- **Simplicity**: no accounts, no installs, no setup. Scan and go.
+- **Privacy**: identities are ephemeral and privacy-preserving by default, with no account required.
+- **Resilience**: designed for very low bandwidth and intermittent connectivity.
 
 It is **transport-agnostic**: WiFi today, with low-bandwidth radio relay (LoRa) a stated design
 goal, so a message can eventually hop device-to-device across a wider area with the same experience.
+An opportunistic store-and-forward relay (one device carrying a message toward another) is in early
+development on the same transport-agnostic layer.
 
 ## Features
 
-- 📡 **Off-grid by design** — a local hotspot is the whole network; no internet required at any point.
-- 📱 **Nothing to install** — joiners open a link (or scan a QR); the host can run it from a laptop, Pi, or [an Android phone](docs/04-android-host-app.md).
-- 🕶️ **Ephemeral, privacy-preserving identities** — every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
-- 💬 **Real messaging** — public and private (invite-only) channels, threaded replies, direct messages, reactions, image attachments, and message search.
-- 🕸️ **Node-to-node sync (optional)** — two LOAM nodes that can reach each other sync their public channels, so separate hotspots converge into one conversation ([docs/11](docs/11-node-sync.md)).
-- 🤖 **Optional local AI** — point it at a local [Ollama](https://ollama.com) model and a bot appears as a DM contact; replies stream in. Entirely local, entirely optional.
-- 🔌 **Works offline** — the client is an installable PWA that keeps working against its local cache when the connection drops.
-- 🌍 **Minimal by design** — an intentionally sparse interface that stays out of the way and renders text in any language, including right-to-left scripts.
-- 🌗 **Light & dark** — the client follows your system theme automatically.
-- 🔒 **Optional encryption at rest + an Emergency Reset** — the host can encrypt the on-disk database and wipe everything in one action (see [Security](#security)).
+- 📡 **Off-grid by design**: a local hotspot is the whole network; no internet required at any point.
+- 📱 **Nothing to install**: joiners open a link (or scan a QR); the host can run it from a laptop, Pi, or [an Android phone](docs/04-android-host-app.md).
+- 🕶️ **Ephemeral, privacy-preserving identities**: every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
+- 💬 **Real messaging**: public and private (invite-only) channels, threaded replies, direct messages, reactions, image attachments, and message search.
+- 🕸️ **Node-to-node sync (optional)**: two LOAM nodes that can reach each other sync their public channels, so separate hotspots converge into one conversation ([docs/11](docs/11-node-sync.md)).
+- 🤖 **Optional local AI**: point it at a laptop's [Ollama](https://ollama.com) model, or run a small downloadable model on the Android host itself (via llama.rn). Either way a bot appears as a DM contact and its replies stream in. Off by default, operator-installed, and entirely local.
+- 🔌 **Works offline**: the client is an installable PWA that keeps working against its local cache when the connection drops.
+- 🌍 **Minimal by design**: an intentionally sparse interface that stays out of the way and renders text in any language, including right-to-left scripts.
+- 🌗 **Light & dark**: the client follows your system theme automatically.
+- 🔒 **Optional encryption at rest + an Emergency Reset**: the host (desktop or Android) can encrypt the on-disk database and wipe everything in one action (see [Security](#security)).
 
 ## Quick start
 
 ### Install with npm (easiest)
 
-If you just want to **run** a node, install the published package (Node ≥22 required — the default
+If you just want to **run** a node, install the published package (Node ≥22 required; the default
 database uses the built-in `node:sqlite`, so there's **no native build / no node-gyp**):
 
 ```bash
@@ -72,7 +74,7 @@ npm install -g loamnet     # the npm name is loamnet; the command is `loam`
 loam                       # boots a node and prints a join QR + LAN URL
 ```
 
-Scan the printed QR (or open the URL) from another device on the same network — that's the whole join
+Scan the printed QR (or open the URL) from another device on the same network. That's the whole join
 flow. Useful flags: `loam --port 8080`, `loam --data-dir ~/loam-data` (defaults to `$XDG_DATA_HOME/loam`
 or `~/.loam`), and `loam --encrypt <passphrase>` to encrypt the database at rest (pulls an optional
 native SQLCipher driver; skip it and storage stays plain). See [`loam --help`](docs/14-distribution.md).
@@ -88,7 +90,7 @@ pnpm dev
 ```
 
 `pnpm dev` starts the server and client together and prints a **join QR code plus a LAN URL** to your
-terminal. On any device connected to the same network, scan the QR or open the URL — that's the whole
+terminal. On any device connected to the same network, scan the QR or open the URL. That's the whole
 join flow. (Under the hood the client runs on `:3000` and proxies the API to the server on `:3001`.)
 
 ### Run it as one process (production)
@@ -102,19 +104,19 @@ pnpm --filter @loam/server start   # serves the built client + API, defaults to 
 ```
 
 The `loamnet` npm package above is exactly this single-origin build, bundled into one self-contained
-file with the web client — see [docs/14-distribution.md](docs/14-distribution.md).
+file with the web client. See [docs/14-distribution.md](docs/14-distribution.md).
 
 ### Host it from an Android phone
 
 `apps/app` is an Expo/React-Native host that runs the LOAM server **embedded on the phone**, brings
-up a local-only WiFi hotspot, and shows the join QR — turning a single phone into a complete,
+up a local-only WiFi hotspot, and shows the join QR, turning a single phone into a complete,
 internet-free LOAM node.
 
 **Prerequisites:** [Android Studio](https://developer.android.com/studio) (for its bundled JDK, the
 Android SDK + platform-tools, and NDK r27+) with `adb` on your `PATH`. On macOS the build script
 auto-detects the Studio JDK and SDK; otherwise set `JAVA_HOME` and `ANDROID_HOME` yourself.
 
-**Build the APK** — one command from the repo root:
+**Build the APK** (one command from the repo root):
 
 ```bash
 pnpm install
@@ -159,7 +161,7 @@ two-step join flow, and troubleshooting.
 ```
 
 The host runs a small [Fastify](https://fastify.dev) server that stores everything locally and
-serves a [Preact](https://preactjs.com) PWA. Joiners never install anything — they load the app in a
+serves a [Preact](https://preactjs.com) PWA. Joiners never install anything; they load the app in a
 browser and talk to the host over the local network via REST and a WebSocket. The client and server
 share a single [Zod](https://zod.dev) schema package as their contract and both validate every
 message against it, so the wire format can't drift.
@@ -172,7 +174,7 @@ A [pnpm workspace](pnpm-workspace.yaml) (`apps/*`, `packages/*`).
 |------|------------|
 | [`apps/server`](apps/server) | Fastify backend: REST + WebSocket, SQLite persistence (optionally encrypted), optional Ollama LLM. |
 | [`apps/client`](apps/client) | The Preact + Vite PWA everyone connects to. |
-| [`apps/app`](apps/app) | Expo/React-Native Android host — runs the server on a phone and brings up a hotspot. |
+| [`apps/app`](apps/app) | Expo/React-Native Android host: runs the server on a phone and brings up a hotspot. |
 | [`apps/site`](apps/site) | The [loamnet.com](https://loamnet.com) landing site (static Vite build). |
 | [`packages/schema`](packages/schema) | The client↔server contract: shared Zod schemas + inferred types. |
 | [`packages/display-name`](packages/display-name) | Deterministic, privacy-preserving display names from an id. |
@@ -207,21 +209,29 @@ LOAM runs with **no config file at all**. Optional identity and LLM features are
 
 When the LLM is enabled the bot appears as a DM contact and its replies stream into the conversation.
 With `allowUserAvatarUpload` on, users can pick an image, crop it **locally in the browser**, and
-upload only the final 256×256 avatar — the original file never leaves the device. If the config is
-absent, none of these features are active.
+upload only the final 256×256 avatar; the original file never leaves the device. If the config is
+absent, none of these features are active. The AI assistant can also run on the Android host as a
+small downloadable on-device model instead of a laptop's Ollama; either path is optional and local.
 
 ## Security
 
 LOAM can **encrypt its on-disk database** so that a lost or seized host device doesn't readily give
 up stored messages. It's **off by default** and controlled by the `LOAM_DB_KEY` environment variable:
 
-- **unset** — no encryption; the database is a plain SQLite file.
-- **a passphrase** — encrypted at rest with SQLCipher (AES-256); the same passphrase is required on every start.
-- **`ephemeral`** — a random key is generated in memory and **never written to disk**. Data is readable only while the process runs; a reboot loses the key forever, and an Emergency Reset ([kill switch](docs/02-kill-switch.md)) rotates to a fresh key so anything still physically on flash becomes unreadable.
+- **unset**: no encryption; the database is a plain SQLite file.
+- **a passphrase**: encrypted at rest with SQLCipher (AES-256); the same passphrase is required on every start.
+- **`ephemeral`**: a random key is generated in memory and **never written to disk**. Data is readable only while the process runs; a reboot loses the key forever, and an Emergency Reset ([kill switch](docs/02-kill-switch.md)) rotates to a fresh key so anything still physically on flash becomes unreadable.
 
 ```bash
 LOAM_DB_KEY=ephemeral pnpm --filter @loam/server start
 ```
+
+The SQLCipher driver ships with the Android host too, so encryption at rest is available there and
+not only on desktop. It stays off by default on every platform.
+
+For untrusted networks there is also an **optional app-layer transport encryption** (an X25519
+handshake bootstrapped from the join QR, off by default) that seals request and WebSocket traffic on
+top of plain HTTP on the LAN. It is an emerging feature: see [docs/08](docs/08-transport-security.md).
 
 **Honest limitations.** This raises the bar; it is not a guarantee of safety. The host processes
 messages in plaintext while running, so a compromised host, a device seized while powered on with the
@@ -229,7 +239,7 @@ key in memory, or coercion of a known passphrase can still expose data. Anyone w
 on this should seek a professional security review and not treat LOAM as sufficient on its own. See
 [`SECURITY.md`](SECURITY.md) and the [docs](#documentation) for the full threat model.
 
-> **A note on intent.** These protections exist to protect *ordinary people* — during emergencies, in
+> **A note on intent.** These protections exist to protect *ordinary people*: during emergencies, in
 > communities cut off from connectivity, and in everyday situations where privacy and safety matter. They
 > are deliberately **not** marketed as a way to hide wrongdoing, and LOAM's other design choices (a
 > trusted host who can read and wipe everything, admin moderation) reflect that.
@@ -243,9 +253,9 @@ Design notes, threat models, and initiative briefings live in [`docs/`](docs/):
 - [Android host app](docs/04-android-host-app.md) · [Authentication](docs/05-authentication.md) · [LLM](docs/06-llm.md)
 - [More features menu](docs/07-more-features.md) · [Transport security](docs/08-transport-security.md) · [Security profiles](docs/09-security-profiles.md)
 - [Maps & location sharing](docs/10-maps-location-sharing.md) · [Node-to-node sync](docs/11-node-sync.md)
-- [Operator's guide — running a node](docs/12-operators-guide.md) · [Internationalization](docs/13-i18n.md)
-- [Distribution — the `loamnet` npm package](docs/14-distribution.md)
-- [`CLAUDE.md`](CLAUDE.md) — architecture baseline for contributors (and AI agents).
+- [Operator's guide: running a node](docs/12-operators-guide.md) · [Internationalization](docs/13-i18n.md)
+- [Distribution: the `loamnet` npm package](docs/14-distribution.md)
+- [`CLAUDE.md`](CLAUDE.md): architecture baseline for contributors (and AI agents).
 
 ## Contributing
 
@@ -257,7 +267,7 @@ pnpm test       # run the workspace test suite
 ```
 
 CI runs `pnpm build` then `pnpm test` on every push and PR to `master`. There's no separate lint or
-typecheck script — type-checking happens as part of `pnpm build`. If you're new to the codebase,
+typecheck script; type-checking happens as part of `pnpm build`. If you're new to the codebase,
 [`CLAUDE.md`](CLAUDE.md) is the fastest way in, and a server or client test harness is a
 high-value first contribution.
 
