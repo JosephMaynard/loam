@@ -40,7 +40,8 @@
   "devDependencies": {
     "@types/react": "~19.2.2",
     "esbuild": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "scripts": {
     "start": "expo start",
@@ -53,7 +54,8 @@
     "fetch:native": "node ./scripts/fetch-native-modules.mjs",
     "apk": "node ./scripts/build-apk.mjs",
     "keystore": "node ./scripts/generate-keystore.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "private": true
 }
