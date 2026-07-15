@@ -518,13 +518,53 @@ function requestDbKey(timeoutMs) {
   });
 }
 
+// A marker file recording that the LAST boot ran in ephemeral mode (G4). `deleteStaleEphemeralDb`
+// below always deletes the DB when mode is 'ephemeral' — that's ephemeral's whole design, wipe-on-
+// restart — but the marker lets it tell that EXPECTED case apart from an operator having just switched
+// INTO ephemeral from a mode with real data (persistent/passphrase/off), where the same deletion is
+// actually a silent, unrecoverable data loss the RN picker's confirmation dialog (G4) is meant to have
+// already warned about. Purely informational — best-effort, and never blocks or changes boot behavior.
+var EPHEMERAL_MARKER_PATH = path.join(dataDir, '.loam-db-ephemeral');
+
+function hasEphemeralMarker() {
+  try {
+    return fs.existsSync(EPHEMERAL_MARKER_PATH);
+  } catch (err) {
+    return false;
+  }
+}
+
+function writeEphemeralMarker() {
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(EPHEMERAL_MARKER_PATH, String(Date.now()), 'utf8');
+  } catch (err) {
+    // best-effort
+  }
+}
+
+function clearEphemeralMarker() {
+  try {
+    fs.unlinkSync(EPHEMERAL_MARKER_PATH);
+  } catch (err) {
+    // best-effort — ENOENT is the expected/common case
+  }
+}
+
 /** Best-effort delete of a previous encrypted DB's files. Only called for 'ephemeral' mode, where a
  * fresh random key is generated every launch, so a DB encrypted under a PREVIOUS launch's key can never
  * be opened again — leaving the stale files behind would just make openStore fail on a confusing
  * "file is not a database" error instead of starting clean. ENOENT (nothing to delete on a fresh
  * install, or when the DB was never encrypted) and any other error are both swallowed: failing to
- * delete a stale file must never block boot. */
+ * delete a stale file must never block boot. Logs (never blocks on) the "this deletion wasn't expected"
+ * case per the marker comment above, then marks THIS boot as ephemeral for the next one. */
 function deleteStaleEphemeralDb() {
+  if (!hasEphemeralMarker()) {
+    console.warn(
+      'Booting in ephemeral DB-encryption mode, but the previous boot was not marked ephemeral — ' +
+        'this deletion may be destroying data from a different (non-ephemeral) mode.',
+    );
+  }
   ['loam.db', 'loam.db-wal', 'loam.db-shm'].forEach(function (name) {
     try {
       fs.unlinkSync(path.join(dataDir, name));
@@ -532,6 +572,7 @@ function deleteStaleEphemeralDb() {
       // best-effort — ENOENT is the expected/common case
     }
   });
+  writeEphemeralMarker();
 }
 
 /**
@@ -545,20 +586,42 @@ function resolveDbEncryptionAndBoot() {
       var mode = result.mode;
       var key = result.key;
 
-      if (mode === 'off' || !key) {
-        // Safe default: today's plaintext behaviour, unchanged.
+      if (mode === 'off') {
+        // Safe default: today's plaintext behaviour, unchanged. Silent — 'off' is the true default,
+        // not a downgrade, so it must never trigger a boot-error notice.
         process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+        clearEphemeralMarker();
         return;
       }
 
-      // The encrypted driver (better-sqlite3-multiple-ciphers) isn't shipped in this build yet — only
-      // plain better-sqlite3 is (docs/01 "Native prebuild", docs/04). Check availability BEFORE trusting
-      // the key: openStore would otherwise throw deep inside server startup the first time an operator
-      // picks an encrypted mode on a build that lacks the module. Report the downgrade loudly (A8 boot-
-      // error bridge) instead of silently serving plaintext, or bricking boot.
+      if (!key) {
+        // An encrypted mode is selected but no key came back — e.g. passphrase mode with no
+        // passphrase entered yet, or a Keystore/RNG failure on the RN side. Unlike 'off' this IS a
+        // silent downgrade to plaintext unless reported (G5): the operator picked an encrypted mode
+        // and would otherwise have no idea their data is going in unencrypted. NEVER logs `key`
+        // (there isn't one) or any other secret material.
+        global.__loamReportBootError(
+          'Encryption mode "' + mode + '" is selected but no key is available (e.g. no passphrase ' +
+            'entered yet, or a device Keystore/RNG failure) — starting UNENCRYPTED.',
+          'db_encryption_no_key',
+        );
+        process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+        clearEphemeralMarker();
+        return;
+      }
+
+      // The encrypted driver (better-sqlite3-multiple-ciphers) isn't shipped in every build yet — only
+      // plain better-sqlite3 always is (docs/01 "Native prebuild", docs/04). Check availability BEFORE
+      // trusting the key: openStore would otherwise throw deep inside server startup the first time an
+      // operator picks an encrypted mode on a build that lacks the module. This actually REQUIRES the
+      // module (not just require.resolve) — resolving only proves the JS entry point exists, not that
+      // the native binding loads; a shipped-but-broken binding would pass a resolve-only guard and then
+      // crash-loop server boot instead of failing here where it can be reported and downgraded cleanly.
+      // Report the downgrade loudly (A8 boot-error bridge) instead of silently serving plaintext, or
+      // bricking boot.
       var encryptedDriverAvailable = false;
       try {
-        require.resolve('better-sqlite3-multiple-ciphers');
+        require('better-sqlite3-multiple-ciphers');
         encryptedDriverAvailable = true;
       } catch (err) {
         encryptedDriverAvailable = false;
@@ -570,11 +633,14 @@ function resolveDbEncryptionAndBoot() {
           'db_encryption_unavailable',
         );
         process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+        clearEphemeralMarker();
         return;
       }
 
       if (mode === 'ephemeral') {
         deleteStaleEphemeralDb();
+      } else {
+        clearEphemeralMarker();
       }
 
       // openStore's encryptionKey path takes precedence over LOAM_DB_DRIVER (see db.ts) — leave the

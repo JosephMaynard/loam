@@ -35,6 +35,13 @@ export type ModelCatalogEntry = {
    * SHA-256 of the exact file at `url`, when known — see provenance above. `undefined` means "not
    * pinned"; `model-download.ts` then skips hash verification and relies on the (always-performed)
    * exact-size check.
+   *
+   * NOTE: every entry below IS pinned, but `model-download.ts` still never actually verifies it —
+   * every current catalog file is far above the 100MB `MAX_HASHABLE_BYTES` cap (hashing a
+   * multi-hundred-MB file in RN JS risks exhausting heap / wedging the JS thread), so hashing is
+   * always skipped for these entries in practice. The exact-size check + TLS are the real integrity
+   * story for the shipped catalog today; the hash stays pinned so a future smaller model (or a
+   * smaller re-quant) gets a real check automatically.
    */
   sha256?: string;
   /** Minimum device RAM LOAM requires before offering a download — see provenance above. */

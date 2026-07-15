@@ -71,6 +71,12 @@ async function ensureContext(modelPath: string): Promise<LlamaContext> {
     loadedContext = null;
     loadedModelPath = null;
   }
+  // n_ctx is a fixed constant, not read from config.json's llm.onDevice.contextSize: this module reads
+  // the active model from its OWN local model-manager-store.json (see activeModelPath above), not from
+  // config.json, and nothing in the RN model-manager UI currently collects a context-size choice from
+  // the operator — threading contextSize through would need new UI + storage plumbing, not just
+  // reading a field (see model-manager-bridge.ts's header comment for the full config.json story).
+  // Left as a documented follow-up rather than half-wired.
   const context = await initLlama({ model: modelPath, n_ctx: 4096, n_gpu_layers: 99 });
   loadedContext = context;
   loadedModelPath = modelPath;
@@ -135,6 +141,17 @@ function isChatMessage(value: unknown): value is ChatMessage {
   );
 }
 
+/** `channel.post` can throw (e.g. the bridge is torn down mid-stream, screen unmounted) — called from
+ * inside `runInference`'s callbacks, that throw would otherwise become an unhandled rejection deep in
+ * a promise chain instead of a harmless no-op (mirrors `db-encryption.ts`'s `registerDbEncryption`). */
+function safePost(channel: BridgeChannel, name: string, payload: unknown): void {
+  try {
+    channel.post(name, payload);
+  } catch {
+    // the RN bridge isn't listening any more — nothing more to do.
+  }
+}
+
 export function registerOnDeviceLlm(channel: BridgeChannel): () => void {
   const onRequest = (payload: LlmRequest): void => {
     const id = payload?.id;
@@ -146,11 +163,11 @@ export function registerOnDeviceLlm(channel: BridgeChannel): () => void {
     const messages: ChatMessage[] = (Array.isArray(payload?.messages) ? payload.messages : []).filter(isChatMessage);
 
     void runInference(messages, {
-      onDelta: (text) => channel.post('loam-llm-delta', { id, text }),
-      onEnd: () => channel.post('loam-llm-end', { id }),
-      onError: (message) => channel.post('loam-llm-error', { id, error: message }),
+      onDelta: (text) => safePost(channel, 'loam-llm-delta', { id, text }),
+      onEnd: () => safePost(channel, 'loam-llm-end', { id }),
+      onError: (message) => safePost(channel, 'loam-llm-error', { id, error: message }),
     }).catch((error: unknown) => {
-      channel.post('loam-llm-error', { id, error: error instanceof Error ? error.message : String(error) });
+      safePost(channel, 'loam-llm-error', { id, error: error instanceof Error ? error.message : String(error) });
     });
   };
 

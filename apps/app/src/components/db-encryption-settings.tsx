@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -28,6 +28,15 @@ const MODE_LABELS: Record<DbEncryptionMode, string> = {
   persistent: 'Persistent',
   passphrase: 'Passphrase',
 };
+
+/** Modes whose selection needs an explicit confirmation before it's persisted (G4): `ephemeral` wipes
+ * the on-device database on every restart by design, and `persistent`/`passphrase` can make an
+ * EXISTING database (encrypted under a different key, or plaintext) permanently unreadable the next
+ * time the host boots (see G2) — neither failure mode is recoverable, so the operator must opt in
+ * knowingly rather than just seeing a "takes effect next restart" toast. `off` is exempt: it never
+ * destroys data on its own (Encryption settings stays reachable from the boot-error screen either
+ * way if a pre-existing encrypted database becomes unreadable — G2). */
+const DESTRUCTIVE_MODES: ReadonlySet<DbEncryptionMode> = new Set(['ephemeral', 'persistent', 'passphrase']);
 
 /**
  * The on-device DB-encryption mode picker (PR B — docs/01, docs/21): off / ephemeral / persistent /
@@ -68,13 +77,35 @@ export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSe
     };
   }, [visible]);
 
-  const handleSelect = async (next: DbEncryptionMode) => {
+  /** Actually persist the mode choice — the part `handleSelect` gates behind a destructive-action
+   * confirmation for the modes that can wipe or strand existing data (G4). */
+  const applyModeChange = async (next: DbEncryptionMode) => {
     setMode(next);
     await setDbEncryptionMode(next);
     setStatusMessage(
       next === 'off'
         ? 'Encryption off. Takes effect next time the host app is restarted.'
         : `${MODE_LABELS[next]} selected. Takes effect next time the host app is restarted.`,
+    );
+  };
+
+  const handleSelect = (next: DbEncryptionMode) => {
+    if (!DESTRUCTIVE_MODES.has(next)) {
+      void applyModeChange(next);
+      return;
+    }
+    Alert.alert(
+      `Switch to ${MODE_LABELS[next]}?`,
+      next === 'ephemeral'
+        ? 'Ephemeral mode wipes the on-device message database on every app restart. The next restart ' +
+            'will permanently delete any existing messages, and this cannot be undone.'
+        : 'Switching encryption modes can make the existing on-device message database unreadable — a ' +
+            'different (or missing) key can never decrypt data that was encrypted under another key. ' +
+            'Existing messages may become permanently inaccessible, and this cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Continue', style: 'destructive', onPress: () => void applyModeChange(next) },
+      ],
     );
   };
 
@@ -130,7 +161,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSe
                 ? DB_ENCRYPTION_MODES.map((entry) => (
                     <Pressable
                       key={entry}
-                      onPress={() => void handleSelect(entry)}
+                      onPress={() => handleSelect(entry)}
                       accessibilityRole="radio"
                       accessibilityState={{ checked: mode === entry }}
                       style={styles.row}>

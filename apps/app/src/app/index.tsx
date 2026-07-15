@@ -26,6 +26,21 @@ const LOAM_URL = `http://localhost:${SERVER_PORT}`;
 const HOTSPOT_GATEWAY_FALLBACK = `http://192.168.49.1:${SERVER_PORT}`;
 // Cold start is ~80s (docs/04); give it comfortably more before declaring the runtime hung.
 const STARTUP_TIMEOUT_MS = 150_000;
+// How long to wait for GET /api/bootstrap to resolve before mounting the WebView anyway (G7): in
+// `required` transport mode the very first WebView load needs the `#k=` fragment already present, or
+// the host's own WebView briefly flashes a blocked/error page before the reload carrying the key. The
+// fetch is a loopback call to the just-booted server, so it normally resolves in well under this.
+const BOOTSTRAP_KEY_TIMEOUT_MS = 2000;
+// Boot-status error codes (from the server via embedded-main.ts's boot-error bridge, or from main.js
+// itself) that point at the on-device DB-encryption feature specifically — an operator hitting one of
+// these is very likely locked out because of an unopenable/undecryptable encrypted DB, so the fix is
+// "open Encryption settings and switch back to Off", not "close and reopen the app" (G2).
+const DB_ENCRYPTION_ERROR_CODES = new Set([
+  'db_encryption_open_failed',
+  'db_encryption_unreadable',
+  'db_encryption_unavailable',
+  'db_encryption_no_key',
+]);
 
 /**
  * Build the Step-2 join URL from the host's real reported addresses, in order of how likely a joiner
@@ -58,7 +73,7 @@ function isLoamUrl(url: string | undefined): boolean {
 }
 
 type HostStatus = 'starting' | 'ready' | 'error';
-type StatusPayload = { status?: HostStatus; message?: string };
+type StatusPayload = { status?: HostStatus; message?: string; code?: string };
 type HostInfoPayload = { port?: number; addresses?: string[] };
 // The subset of GET /api/bootstrap this screen reads (docs/20 — cookie-free, mints no session, so
 // it's safe to poll from the host's own WebView client before any identity exists).
@@ -83,6 +98,10 @@ export default function HostScreen() {
   // doesn't get stuck showing "starting" (the runtime won't re-emit).
   const [status, setStatus] = useState<HostStatus>(() => nodeStatus);
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
+  // The boot-status error `code` (if any) from the last `loam-status` payload — see
+  // `DB_ENCRYPTION_ERROR_CODES` above. Used to surface the Encryption-settings action prominently when
+  // the failure looks DB-encryption-related (G2), rather than making the operator guess.
+  const [errorCode, setErrorCode] = useState<string | undefined>();
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
   const [shareOpen, setShareOpen] = useState(false);
   // Whether the on-device LLM model manager overlay (docs/06) is open.
@@ -97,6 +116,11 @@ export default function HostScreen() {
   // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
   // the join QR carry the key a `required`-mode handshake needs (docs/08).
   const [transportKeyFragment, setTransportKeyFragment] = useState('');
+  // Whether it's safe to mount the WebView yet (G7): held back until the bootstrap key fetch below
+  // resolves (or times out) so the FIRST load already carries `#k=` when transport encryption is
+  // `required` — otherwise the WebView loads a bare URL, gets blocked, then reloads with the fragment,
+  // flashing a blocked page. Set once per "become ready" transition.
+  const [webViewReady, setWebViewReady] = useState(false);
   // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
   const [keepAwake, setKeepAwake] = useState(false);
   // Optional kiosk mode — pin the app (Android screen pinning) so a passer-by can't wander off into
@@ -150,6 +174,7 @@ export default function HostScreen() {
         nodeStatus = 'ready';
         setStatus('ready');
         setErrorMessage(undefined);
+        setErrorCode(undefined);
         // Keep the host alive when the screen locks (docs/04). Best-effort — a device that refuses
         // the foreground service just falls back to foreground-only hosting.
         startHostService();
@@ -158,6 +183,7 @@ export default function HostScreen() {
         nodeStatus = 'error';
         setStatus('error');
         setErrorMessage(payload.message);
+        setErrorCode(payload.code);
       }
     };
 
@@ -206,6 +232,18 @@ export default function HostScreen() {
       return;
     }
     let cancelled = false;
+    // Gate WebView mounting on this fetch settling (or the timeout below) — see `webViewReady`'s
+    // comment (G7). `finish` fires exactly once regardless of which path (success/no-payload/error/
+    // timeout) gets there first.
+    let settled = false;
+    const finish = () => {
+      if (cancelled || settled) {
+        return;
+      }
+      settled = true;
+      setWebViewReady(true);
+    };
+    const timeoutId = setTimeout(finish, BOOTSTRAP_KEY_TIMEOUT_MS);
     fetch(`${LOAM_URL}/api/bootstrap`, { credentials: 'omit' })
       .then((response) => (response.ok ? (response.json() as Promise<BootstrapPayload>) : null))
       .then((payload) => {
@@ -214,14 +252,21 @@ export default function HostScreen() {
         }
         const { transportEncryption, transportPublicKey } = payload.networkConfig ?? {};
         if (transportEncryption && transportEncryption !== 'off' && typeof transportPublicKey === 'string' && transportPublicKey.length > 0) {
-          setTransportKeyFragment(`#k=${transportPublicKey}`);
+          // Defensive: the fragment gets embedded straight into a URL string below (G10c) — encode it
+          // so a key value that somehow contained a fragment-breaking character can't malform the URL.
+          setTransportKeyFragment(`#k=${encodeURIComponent(transportPublicKey)}`);
         }
       })
       .catch(() => {
         // Best-effort: the host still loads over a plain URL, same as transport encryption being off.
+      })
+      .finally(() => {
+        clearTimeout(timeoutId);
+        finish();
       });
     return () => {
       cancelled = true;
+      clearTimeout(timeoutId);
     };
   }, [status]);
 
@@ -289,45 +334,53 @@ export default function HostScreen() {
             </Pressable>
           </ThemedView>
         </ThemedView>
-        <WebView
-          ref={webViewRef}
-          source={{ uri: `${LOAM_URL}${transportKeyFragment}` }}
-          style={styles.flex}
-          // The LOAM client relies on the loam_session cookie, localStorage/IndexedDB, and a
-          // WebSocket — enable all of them, and allow the cleartext localhost origin.
-          javaScriptEnabled
-          domStorageEnabled
-          thirdPartyCookiesEnabled
-          sharedCookiesEnabled
-          cacheEnabled
-          // Keep the WebView pinned to the embedded server's origin. originWhitelist is a coarse
-          // prefix guard; onShouldStartLoadWithRequest is the real one — it allows only LOAM-origin
-          // navigations and shunts external links (the client opens them with target=_blank) to the
-          // system browser, so the host frame never leaves LOAM.
-          originWhitelist={['http://localhost:3000']}
-          onShouldStartLoadWithRequest={(request) => {
-            if (isLoamUrl(request.url)) {
-              return true;
-            }
-            if (/^https?:\/\//i.test(request.url)) {
-              void Linking.openURL(request.url).catch(() => undefined);
-            }
-            return false;
-          }}
-          mixedContentMode="always"
-          onError={({ nativeEvent }) => {
-            console.warn('LOAM WebView error', nativeEvent.description);
-            failWebView(nativeEvent.description || 'The LOAM page failed to load.');
-          }}
-          onHttpError={({ nativeEvent }) => {
-            console.warn('LOAM WebView HTTP error', nativeEvent.statusCode, nativeEvent.url);
-            // Any HTTP error from the LOAM origin is fatal (on Android onHttpError is the main frame);
-            // compare origins so a redirect to /channels or a trailing slash still matches.
-            if (isLoamUrl(nativeEvent.url)) {
-              failWebView(`The LOAM server returned HTTP ${nativeEvent.statusCode}.`);
-            }
-          }}
-        />
+        {webViewReady ? (
+          <WebView
+            ref={webViewRef}
+            source={{ uri: `${LOAM_URL}${transportKeyFragment}` }}
+            style={styles.flex}
+            // The LOAM client relies on the loam_session cookie, localStorage/IndexedDB, and a
+            // WebSocket — enable all of them, and allow the cleartext localhost origin.
+            javaScriptEnabled
+            domStorageEnabled
+            thirdPartyCookiesEnabled
+            sharedCookiesEnabled
+            cacheEnabled
+            // Keep the WebView pinned to the embedded server's origin. originWhitelist is a coarse
+            // prefix guard; onShouldStartLoadWithRequest is the real one — it allows only LOAM-origin
+            // navigations and shunts external links (the client opens them with target=_blank) to the
+            // system browser, so the host frame never leaves LOAM.
+            originWhitelist={['http://localhost:3000']}
+            onShouldStartLoadWithRequest={(request) => {
+              if (isLoamUrl(request.url)) {
+                return true;
+              }
+              if (/^https?:\/\//i.test(request.url)) {
+                void Linking.openURL(request.url).catch(() => undefined);
+              }
+              return false;
+            }}
+            mixedContentMode="always"
+            onError={({ nativeEvent }) => {
+              console.warn('LOAM WebView error', nativeEvent.description);
+              failWebView(nativeEvent.description || 'The LOAM page failed to load.');
+            }}
+            onHttpError={({ nativeEvent }) => {
+              console.warn('LOAM WebView HTTP error', nativeEvent.statusCode, nativeEvent.url);
+              // Any HTTP error from the LOAM origin is fatal (on Android onHttpError is the main frame);
+              // compare origins so a redirect to /channels or a trailing slash still matches.
+              if (isLoamUrl(nativeEvent.url)) {
+                failWebView(`The LOAM server returned HTTP ${nativeEvent.statusCode}.`);
+              }
+            }}
+          />
+        ) : (
+          // Held back until the bootstrap key fetch settles (G7) — see `webViewReady`'s comment. This
+          // window is normally sub-second (a loopback fetch to the just-booted server).
+          <ThemedView style={styles.webViewLoading}>
+            <ActivityIndicator size="large" style={styles.spinner} />
+          </ThemedView>
+        )}
         <HostShareOverlay
           visible={shareOpen}
           onClose={() => setShareOpen(false)}
@@ -348,6 +401,11 @@ export default function HostScreen() {
     );
   }
 
+  // A boot failure that looks DB-encryption-related (G2): the operator needs a way to switch back to
+  // Off and restart even though the host never became ready — surfaced below regardless of whether
+  // this is the plain "starting" spinner or the error screen.
+  const dbEncryptionSuspect = status === 'error' && errorCode !== undefined && DB_ENCRYPTION_ERROR_CODES.has(errorCode);
+
   return (
     <ThemedView style={styles.center}>
       <ThemedText type="title">LOAM host</ThemedText>
@@ -367,6 +425,15 @@ export default function HostScreen() {
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {errorMessage ?? 'The embedded server did not become ready.'}
           </ThemedText>
+          {dbEncryptionSuspect ? (
+            <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+              <ThemedText type="smallBold">This looks like a database-encryption problem.</ThemedText>
+              <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                Open Encryption settings below, switch the mode back to Off, then close and reopen the
+                app.
+              </ThemedText>
+            </ThemedView>
+          ) : null}
           {nodeStatus === 'ready' ? (
             // The server is up; a Retry just remounts the WebView for a fresh load.
             <Pressable
@@ -386,6 +453,17 @@ export default function HostScreen() {
           )}
         </>
       )}
+      {/* Reachable even when the host never became ready (G2) — an unopenable/undecryptable DB under
+          an encrypted mode would otherwise lock the operator out with no way back to Off. */}
+      <Pressable
+        onPress={() => setDbEncryptionOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel="On-device encryption settings">
+        <ThemedView type="backgroundElement" style={styles.retry}>
+          <ThemedText type="link">Encryption settings</ThemedText>
+        </ThemedView>
+      </Pressable>
+      <DbEncryptionSettingsOverlay visible={dbEncryptionOpen} onClose={() => setDbEncryptionOpen(false)} />
     </ThemedView>
   );
 }
@@ -393,6 +471,11 @@ export default function HostScreen() {
 const styles = StyleSheet.create({
   flex: {
     flex: 1,
+  },
+  webViewLoading: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   center: {
     flex: 1,
@@ -414,6 +497,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     borderRadius: Spacing.four,
+  },
+  dbEncryptionNotice: {
+    marginTop: Spacing.three,
+    gap: Spacing.one,
+    padding: Spacing.three,
+    borderRadius: Spacing.three,
   },
   topBar: {
     flexDirection: 'row',
