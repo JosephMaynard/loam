@@ -140,26 +140,36 @@ export async function setDbEncryptionMode(mode: DbEncryptionMode): Promise<SetDb
   }
 }
 
-/** Whether an operator passphrase has already been entered (for the picker UI — it should prompt for
- * one only when this is false, and offer to change it when true). Never returns the passphrase itself. */
-export async function hasStoredPassphrase(): Promise<boolean> {
+/**
+ * Tri-state presence of a COMMITTED operator passphrase (P1-3, Sol round 7). Deliberately NOT a boolean:
+ * a SecureStore READ FAILURE is `'error'`, NEVER `'absent'`. Collapsing a read error to `'absent'`/
+ * `false` (as this used to) let the picker show "No passphrase set" on a transient Keystore hiccup and
+ * expose a first-time-entry path that could OVERWRITE the committed passphrase — reintroducing the
+ * passphrase-replacement bug while the existing DB is still under the OLD key. `'present'` = a non-empty
+ * committed passphrase; `'absent'` = a SUCCESSFUL read that came back null/empty; `'error'` = the read
+ * threw. The UI must not expose any committed-overwrite affordance on `'error'`. Never returns the
+ * passphrase itself. */
+export type PassphrasePresence = 'present' | 'absent' | 'error';
+
+export async function hasStoredPassphrase(): Promise<PassphrasePresence> {
+  let raw: string | null;
   try {
-    const raw = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
-    return typeof raw === 'string' && raw.length > 0;
+    raw = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
   } catch {
-    return false;
+    return 'error';
   }
+  return typeof raw === 'string' && raw.length > 0 ? 'present' : 'absent';
 }
 
-/** Store (or overwrite) the operator's passphrase in the Keystore-backed secure store. Never written
- * anywhere else — no AsyncStorage, no plain file, no log line.
+/** Store (COMMIT) the operator's passphrase in the Keystore-backed secure store. Never written anywhere
+ * else — no AsyncStorage, no plain file, no log line.
  *
- * P2-a (Sol round 6): this COMMITS the passphrase directly and is only used for a FIRST-time entry (no
- * passphrase set yet), where there is no existing DB encrypted under a different passphrase to strand.
- * It is deliberately NOT used to REPLACE an existing passphrase (that would leave the DB under the old
- * key → `db_encryption_unreadable`) — changing a passphrase requires the destructive start-fresh flow.
- * The boot-time unlock GUESS path uses {@link setPassphraseCandidate} instead, so a wrong guess never
- * overwrites a committed passphrase. */
+ * P1-3 (Sol round 7): this COMMITS the passphrase DIRECTLY, so it is no longer used by any UI entry
+ * path — the settings picker AND the boot-time unlock prompt both go through the CANDIDATE flow
+ * ({@link setPassphraseCandidate} → promoted by {@link markPassphraseKeyMigrated} only once the DB
+ * actually opens under it), so neither can ever overwrite a committed passphrase and strand the DB under
+ * the old key. Retained as the low-level commit primitive (and exercised by tests); prefer the candidate
+ * flow for anything reachable while a DB may exist. */
 export async function setStoredPassphrase(passphrase: string): Promise<void> {
   await SecureStore.setItemAsync(PASSPHRASE_ITEM, passphrase);
 }
@@ -176,16 +186,38 @@ export async function setPassphraseCandidate(passphrase: string): Promise<void> 
   await SecureStore.setItemAsync(PASSPHRASE_CANDIDATE_ITEM, passphrase);
 }
 
-/** Forget the stored passphrase AND any pending unlock candidate (e.g. the operator switches away from
- * passphrase mode). Best-effort. */
-export async function clearStoredPassphrase(): Promise<void> {
+/**
+ * Forget the stored passphrase AND any pending unlock candidate (e.g. the operator switches away from
+ * passphrase mode), VERIFYING each is actually gone afterward (P1-3, Sol round 7). Returns a REAL
+ * `{ ok, error? }` result rather than swallowing delete failures: the old best-effort version always
+ * "succeeded", so `handleForgetPassphrase` reported "forgotten" even when the delete silently failed —
+ * which then re-enabled the first-time-entry path and let a NEW passphrase overwrite the still-committed
+ * old one while the DB was under the OLD key. The caller must only report "forgotten" (and re-expose
+ * entry) when this resolves `{ ok: true }`. `error` is a human-readable summary — only item names and
+ * generic error messages, NEVER the passphrase material itself. */
+export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
+  const errors: string[] = [];
+
   for (const item of [PASSPHRASE_ITEM, PASSPHRASE_CANDIDATE_ITEM]) {
     try {
       await SecureStore.deleteItemAsync(item);
-    } catch {
-      // best-effort
+    } catch (err) {
+      errors.push(`delete ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
+      continue; // no point verifying a delete that itself threw
+    }
+    try {
+      const remaining = await SecureStore.getItemAsync(item);
+      if (remaining !== null) {
+        errors.push(`${item} is still present after delete`);
+      }
+    } catch (err) {
+      // A failed verification READ is not proof the item is gone — surface it as its own failure rather
+      // than reporting a verified success.
+      errors.push(`verifying ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  return errors.length > 0 ? { ok: false, error: errors.join('; ') } : { ok: true };
 }
 
 /**
@@ -638,7 +670,26 @@ export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, ti
 }
 
 /**
- * P1-b (Sol round 6): the PURE "may a plaintext boot be authorized after a locked-error?" decision.
+ * TRI-STATE result of reading the last-known mode-NAME hint (P1-1, Sol round 7). The reader
+ * (`readDbModeHint` in `nodejs-project-template/main.js`) must NOT collapse a read ERROR into `absent`:
+ *   - `present` → the hint file held a recognized mode NAME.
+ *   - `absent`  → a CONFIRMED ENOENT (the file genuinely does not exist).
+ *   - `error`   → the read threw for any OTHER reason, OR the contents were malformed/truncated/
+ *     unrecognized. This must LOCK, never boot plaintext — an unreadable/corrupt hint tells us nothing
+ *     about whether there's a secret to protect, and an ephemeral node (no DB at boot) with a hint read
+ *     error would otherwise present as `absent + no DB → plaintext`, a confidentiality downgrade.
+ * Mirrored (by hand) in main.js's `readDbModeHint`, which cannot import this TS module.
+ */
+export type DbModeHintResult =
+  | { status: 'present'; mode: string }
+  | { status: 'absent' }
+  | { status: 'error' };
+
+/**
+ * P1-1 (Sol round 7, was P1-b round 6): the PURE "may a plaintext boot be authorized after a
+ * locked-error?" decision, now over the TRI-STATE {@link DbModeHintResult} (was `hint | undefined`,
+ * which conflated a confirmed-absent hint with an unreadable/corrupt one and let a read error boot
+ * plaintext).
  *
  * This is MIRRORED inline in `nodejs-project-template/main.js`'s `resolveDbEncryptionAndBoot` — main.js
  * is CJS on the embedded Node runtime and cannot import this TS module, so the two copies must be kept in
@@ -647,44 +698,96 @@ export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, ti
  * harness-loadable (it pulls in `rn-bridge` and boots as a side effect on require).
  *
  * A `locked-error` means main.js could not determine the operator's real mode this boot (a SecureStore
- * read failure, a `requestDbKey` timeout, or a malformed reply). Whether that should fall back to a
- * plaintext boot (availability) or LOCK (confidentiality) turns on whether this node actually has a
- * secret to protect:
- *   - `hint === 'off'` → the last-known mode was explicitly plaintext → plaintext is safe.
- *   - `dbExists === false` AND `hint === undefined` → no on-disk database AND no recorded mode choice (a
- *     genuinely fresh, never-configured node) → nothing to protect → plaintext.
- *   - otherwise → LOCK, never plaintext. This now includes RF6-c (Sol round 6): a KNOWN encrypted-mode
- *     hint (`ephemeral`/`persistent`/`passphrase`) LOCKS even with NO DB file present. Ephemeral mode
- *     wipes its DB every boot (so `dbExists` is legitimately false at boot time), and a freshly-selected
- *     persistent/passphrase mode has no DB yet either — in both cases the operator has explicitly chosen
- *     an encrypted mode, so a transient error must not boot plaintext and write an UNENCRYPTED `loam.db`,
- *     a confidentiality downgrade vs. the chosen mode. Only the true "no choice recorded at all AND no
- *     DB" case (`hint === undefined && !dbExists`) still boots plaintext.
+ * read failure, a `requestDbKey` timeout, or a malformed reply). Authorize a plaintext boot ONLY when:
+ *   - `present` AND `mode === 'off'` → the last-known mode was explicitly plaintext → plaintext is safe.
+ *   - `absent` (CONFIRMED ENOENT) AND `dbExists === false` → no on-disk DB AND no recorded mode choice at
+ *     all (a genuinely fresh, never-configured node) → nothing to protect → plaintext.
+ * Everything else LOCKS, never plaintext:
+ *   - `error` (read failure/corrupt/truncated/unrecognized) → LOCK regardless of `dbExists` — closes the
+ *     ephemeral "no DB + hint read error → plaintext" hole.
+ *   - `absent` WITH a DB present → LOCK (a DB exists but no mode was recorded — don't downgrade it).
+ *   - a `present` ENCRYPTED-mode hint (`ephemeral`/`persistent`/`passphrase`) → LOCK even with NO DB file
+ *     (RF6-c): ephemeral wipes its DB every boot and a freshly-selected persistent/passphrase mode has no
+ *     DB yet, but the operator explicitly chose an encrypted mode, so a transient error must not write an
+ *     UNENCRYPTED `loam.db`.
  *
- * @param hint the last-known mode NAME, or `undefined` when absent/unreadable/unrecognized.
+ * @param hint the tri-state hint read result.
  * @param dbExists whether an on-disk DB file exists.
  */
-export function mayBootPlaintextOnLockedError(hint: string | undefined, dbExists: boolean): boolean {
-  if (hint === 'off') {
+export function mayBootPlaintextOnLockedError(hint: DbModeHintResult, dbExists: boolean): boolean {
+  if (hint.status === 'present' && hint.mode === 'off') {
     return true;
   }
-  if (dbExists === false && hint === undefined) {
+  if (hint.status === 'absent' && dbExists === false) {
     return true;
   }
   return false;
 }
 
+/** Dependencies for {@link applyDbModeChange} — the two authoritative writes a picker selection performs.
+ * Injected so the sequencing can be harness-tested against scripted successes/failures (the React
+ * component wires `writeMode = setDbEncryptionMode` and `writeHint = (m) => setDbModeHint(channel, m)`). */
+export interface ApplyDbModeChangeDeps {
+  writeMode: (mode: DbEncryptionMode) => Promise<SetDbEncryptionModeResult>;
+  writeHint: (mode: DbEncryptionMode) => Promise<SetDbModeHintResult>;
+}
+
+/** Outcome of {@link applyDbModeChange}: whether the change is safely applied, which mode the picker
+ * radio should now DISPLAY (the committed SecureStore value — `next` only on a coherent apply, else the
+ * unchanged `previous`), an `error` when not applied, and a soft `hintWarning` when an 'off' selection
+ * applied but its best-effort hint sync failed. */
+export interface ApplyDbModeChangeOutcome {
+  applied: boolean;
+  committedMode: DbEncryptionMode;
+  error?: string;
+  hintWarning?: boolean;
+}
+
 /**
- * P2-c (Sol round 6): which mode the picker should DISPLAY after a `setDbEncryptionMode` write attempt —
- * the `requested` mode ONLY once the write actually succeeded, otherwise the `previous` (unchanged)
- * selection. Pure and harness-tested. Its whole point is that the radio, the SecureStore value, and the
- * status message can never disagree: previously the picker set the selected mode optimistically BEFORE
- * awaiting the write, so a failed write left the radio showing a mode that was never persisted.
+ * P1-1 (Sol round 7, hole 3): the PURE, harness-tested sequencing for a mode-picker selection that
+ * guarantees the SecureStore mode and the mode-NAME hint never diverge into the DANGEROUS state —
+ * SecureStore committed to an ENCRYPTED mode while the hint still says `'off'`/absent, which a transient
+ * boot-time key-request failure would then resolve as a PLAINTEXT downgrade even WITH a DB on disk.
+ *
+ * Previously the picker committed the SecureStore mode FIRST and treated a failed hint write as a soft
+ * warning, so an off→encrypted selection whose hint write failed left exactly that dangerous divergence.
+ *
+ *   - `'off'`: committing plaintext is never a confidentiality risk (a stale ENCRYPTED hint only
+ *     over-locks a later boot, fail-closed), so commit the SecureStore mode directly and treat the hint
+ *     as best-effort — a hint failure is only a soft `hintWarning`.
+ *   - ENCRYPTED modes: require BOTH writes. Write the HINT first (so a hint failure never touches
+ *     SecureStore — nothing to roll back), then commit SecureStore; on a SecureStore failure, roll the
+ *     hint back to `previous`. The only residual divergence ever left is the SAFE one (hint encrypted +
+ *     SecureStore unchanged → over-locks, never downgrades). Only reports `applied` when the end state is
+ *     coherent.
+ *
+ * Never writes key/passphrase material anywhere — the hint carries only the non-secret mode NAME.
  */
-export function pickerModeAfterWrite(
+export async function applyDbModeChange(
   previous: DbEncryptionMode,
-  requested: DbEncryptionMode,
-  writeSucceeded: boolean,
-): DbEncryptionMode {
-  return writeSucceeded ? requested : previous;
+  next: DbEncryptionMode,
+  deps: ApplyDbModeChangeDeps,
+): Promise<ApplyDbModeChangeOutcome> {
+  if (next === 'off') {
+    const modeResult = await deps.writeMode('off');
+    if (!modeResult.ok) {
+      return { applied: false, committedMode: previous, error: modeResult.error };
+    }
+    const hintResult = await deps.writeHint('off');
+    return { applied: true, committedMode: 'off', hintWarning: !hintResult.ok };
+  }
+
+  // Encrypted mode: hint first, so a hint failure never leaves SecureStore ahead of the hint.
+  const hintResult = await deps.writeHint(next);
+  if (!hintResult.ok) {
+    return { applied: false, committedMode: previous, error: hintResult.error };
+  }
+  const modeResult = await deps.writeMode(next);
+  if (!modeResult.ok) {
+    // Roll the hint back to `previous` so SecureStore (unchanged) and the hint agree again. Best-effort:
+    // a failed revert only leaves the SAFE over-locking divergence, never a plaintext downgrade.
+    await deps.writeHint(previous);
+    return { applied: false, committedMode: previous, error: modeResult.error };
+  }
+  return { applied: true, committedMode: next };
 }

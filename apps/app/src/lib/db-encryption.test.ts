@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clearSecureStoreFailure,
   cryptoMock,
   failSecureStoreItem,
   resetCryptoMock,
@@ -19,11 +20,12 @@ vi.mock("expo-crypto", () => cryptoMock);
 
 const {
   DB_ENCRYPTION_MODE_READ_ERROR,
+  applyDbModeChange,
+  clearStoredPassphrase,
   getDbEncryptionMode,
   hasStoredPassphrase,
   markPassphraseKeyMigrated,
   mayBootPlaintextOnLockedError,
-  pickerModeAfterWrite,
   registerDbEncryption,
   resolveDbKey,
   setDbEncryptionMode,
@@ -32,6 +34,9 @@ const {
   setStoredPassphrase,
 } = await import("@/lib/db-encryption");
 type BridgeChannel = import("@/lib/db-encryption").BridgeChannel;
+type DbEncryptionMode = import("@/lib/db-encryption").DbEncryptionMode;
+type SetDbEncryptionModeResult = import("@/lib/db-encryption").SetDbEncryptionModeResult;
+type SetDbModeHintResult = import("@/lib/db-encryption").SetDbModeHintResult;
 
 const PASSPHRASE_ITEM = "loam-db-encryption-passphrase";
 const PASSPHRASE_CANDIDATE_ITEM = "loam-db-encryption-passphrase-candidate";
@@ -235,19 +240,19 @@ describe("registerDbEncryption", () => {
   });
 });
 
-describe("mayBootPlaintextOnLockedError (P1-b, Sol round 6)", () => {
-  it("an existing encrypted install upgrading (no hint yet) with a DB present → LOCK (false)", () => {
-    expect(mayBootPlaintextOnLockedError(undefined, true)).toBe(false);
+describe("mayBootPlaintextOnLockedError (P1-1, Sol round 7 — tri-state hint)", () => {
+  it("an existing encrypted install upgrading (confirmed-absent hint) with a DB present → LOCK (false)", () => {
+    expect(mayBootPlaintextOnLockedError({ status: "absent" }, true)).toBe(false);
   });
 
-  it("off→encrypted (hint now an encrypted mode) with a DB present + timeout → LOCK (false)", () => {
-    expect(mayBootPlaintextOnLockedError("persistent", true)).toBe(false);
-    expect(mayBootPlaintextOnLockedError("passphrase", true)).toBe(false);
-    expect(mayBootPlaintextOnLockedError("ephemeral", true)).toBe(false);
+  it("off→encrypted (present encrypted-mode hint) with a DB present + timeout → LOCK (false)", () => {
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "persistent" }, true)).toBe(false);
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "passphrase" }, true)).toBe(false);
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "ephemeral" }, true)).toBe(false);
   });
 
-  it("a genuinely fresh node — no DB file AND no recorded mode choice — + timeout → plaintext is safe (true)", () => {
-    expect(mayBootPlaintextOnLockedError(undefined, false)).toBe(true);
+  it("a genuinely fresh node — CONFIRMED-absent hint AND no DB file — + timeout → plaintext is safe (true)", () => {
+    expect(mayBootPlaintextOnLockedError({ status: "absent" }, false)).toBe(true);
   });
 
   it("RF6-c: a KNOWN encrypted-mode hint with NO DB file still LOCKS (false)", () => {
@@ -255,24 +260,93 @@ describe("mayBootPlaintextOnLockedError (P1-b, Sol round 6)", () => {
     // passphrase mode has no DB yet — but the operator explicitly chose an encrypted mode, so a
     // transient error must NOT boot plaintext and write an unencrypted loam.db (a confidentiality
     // downgrade vs. the chosen mode).
-    expect(mayBootPlaintextOnLockedError("ephemeral", false)).toBe(false);
-    expect(mayBootPlaintextOnLockedError("persistent", false)).toBe(false);
-    expect(mayBootPlaintextOnLockedError("passphrase", false)).toBe(false);
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "ephemeral" }, false)).toBe(false);
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "persistent" }, false)).toBe(false);
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "passphrase" }, false)).toBe(false);
   });
 
-  it("an explicit 'off' hint authorizes plaintext regardless of whether a DB exists (true)", () => {
-    expect(mayBootPlaintextOnLockedError("off", true)).toBe(true);
-    expect(mayBootPlaintextOnLockedError("off", false)).toBe(true);
+  it("an explicit present-'off' hint authorizes plaintext regardless of whether a DB exists (true)", () => {
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "off" }, true)).toBe(true);
+    expect(mayBootPlaintextOnLockedError({ status: "present", mode: "off" }, false)).toBe(true);
+  });
+
+  it("P1-1 round-7 hole 1: a hint READ-ERROR always LOCKS, even ephemeral (no DB) — never plaintext", () => {
+    // The ephemeral case: no DB at boot + a hint that FAILED to read. The old boolean gate collapsed this
+    // to `undefined + no DB → plaintext`; the tri-state 'error' status must LOCK instead.
+    expect(mayBootPlaintextOnLockedError({ status: "error" }, false)).toBe(false);
+    expect(mayBootPlaintextOnLockedError({ status: "error" }, true)).toBe(false);
+  });
+
+  it("P1-1 round-7: a truncated/unrecognized hint surfaces as 'error' → LOCK (never treated as absent)", () => {
+    // `readDbModeHint` (main.js) returns { status: 'error' } for malformed/truncated/unrecognized
+    // contents — this helper must LOCK on it, not boot plaintext, regardless of the DB.
+    expect(mayBootPlaintextOnLockedError({ status: "error" }, false)).toBe(false);
+    expect(mayBootPlaintextOnLockedError({ status: "error" }, true)).toBe(false);
   });
 });
 
-describe("pickerModeAfterWrite (P2-c, Sol round 6)", () => {
-  it("shows the requested mode only after a successful write", () => {
-    expect(pickerModeAfterWrite("off", "persistent", true)).toBe("persistent");
+describe("applyDbModeChange (P1-1, Sol round 7 — hole 3: no mode/hint divergence)", () => {
+  /** Build scripted `writeMode`/`writeHint` deps plus a call log so a test can assert BOTH the outcome
+   * and that the writes happened in the divergence-safe order. */
+  function makeDeps(opts: { modeOk?: boolean; hintOk?: boolean } = {}) {
+    const modeOk = opts.modeOk ?? true;
+    const hintOk = opts.hintOk ?? true;
+    const calls: string[] = [];
+    return {
+      calls,
+      writeMode: async (m: DbEncryptionMode): Promise<SetDbEncryptionModeResult> => {
+        calls.push(`mode:${m}`);
+        return modeOk ? { ok: true } : { ok: false, error: "mode write failed" };
+      },
+      writeHint: async (m: DbEncryptionMode): Promise<SetDbModeHintResult> => {
+        calls.push(`hint:${m}`);
+        return hintOk ? { ok: true } : { ok: false, error: "hint write failed" };
+      },
+    };
+  }
+
+  it("off→encrypted with a hint WRITE FAILURE does NOT commit the SecureStore mode (prevents divergence)", async () => {
+    const deps = makeDeps({ hintOk: false });
+    const outcome = await applyDbModeChange("off", "persistent", deps);
+    expect(outcome.applied).toBe(false);
+    expect(outcome.committedMode).toBe("off");
+    // The hint is attempted FIRST; because it failed, the SecureStore mode write is never reached — so the
+    // committed mode can never be 'persistent' while the hint still says 'off'.
+    expect(deps.calls).toEqual(["hint:persistent"]);
   });
 
-  it("keeps the previous mode when the write failed (radio must not show an unapplied mode)", () => {
-    expect(pickerModeAfterWrite("off", "persistent", false)).toBe("off");
+  it("an encrypted selection whose SecureStore write fails rolls the hint back to `previous`", async () => {
+    const deps = makeDeps({ modeOk: false });
+    const outcome = await applyDbModeChange("off", "persistent", deps);
+    expect(outcome.applied).toBe(false);
+    expect(outcome.committedMode).toBe("off");
+    // hint(persistent) succeeded, mode(persistent) failed → hint rolled back to the previous 'off'.
+    expect(deps.calls).toEqual(["hint:persistent", "mode:persistent", "hint:off"]);
+  });
+
+  it("an encrypted selection with BOTH writes succeeding is applied (hint first, then mode)", async () => {
+    const deps = makeDeps();
+    const outcome = await applyDbModeChange("off", "passphrase", deps);
+    expect(outcome).toEqual({ applied: true, committedMode: "passphrase" });
+    expect(deps.calls).toEqual(["hint:passphrase", "mode:passphrase"]);
+  });
+
+  it("'off' commits directly and treats the hint as best-effort (a hint failure is only a soft warning)", async () => {
+    const deps = makeDeps({ hintOk: false });
+    const outcome = await applyDbModeChange("persistent", "off", deps);
+    expect(outcome.applied).toBe(true);
+    expect(outcome.committedMode).toBe("off");
+    expect(outcome.hintWarning).toBe(true);
+    // 'off' writes the mode FIRST (a stale encrypted hint only over-locks, never downgrades).
+    expect(deps.calls).toEqual(["mode:off", "hint:off"]);
+  });
+
+  it("'off' with a failing SecureStore write is NOT applied (and never touches the hint)", async () => {
+    const deps = makeDeps({ modeOk: false });
+    const outcome = await applyDbModeChange("persistent", "off", deps);
+    expect(outcome.applied).toBe(false);
+    expect(outcome.committedMode).toBe("persistent");
+    expect(deps.calls).toEqual(["mode:off"]);
   });
 });
 
@@ -317,9 +391,9 @@ describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
     resetCryptoMock();
   });
 
-  it("setPassphraseCandidate does NOT commit the passphrase (hasStoredPassphrase stays false)", async () => {
+  it("setPassphraseCandidate does NOT commit the passphrase (hasStoredPassphrase stays 'absent')", async () => {
     await setPassphraseCandidate("a-guess");
-    expect(await hasStoredPassphrase()).toBe(false);
+    expect(await hasStoredPassphrase()).toBe("absent");
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
   });
 
@@ -345,7 +419,7 @@ describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
     await markPassphraseKeyMigrated();
 
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("verified-guess");
-    expect(await hasStoredPassphrase()).toBe(true);
+    expect(await hasStoredPassphrase()).toBe("present");
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
   });
 
@@ -357,5 +431,81 @@ describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
     // The committed passphrase that actually opened the DB is preserved; the stale candidate is dropped.
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("correct");
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+  });
+});
+
+describe("hasStoredPassphrase tri-state (P1-3, Sol round 7)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("returns 'absent' after a SUCCESSFUL read that finds nothing committed", async () => {
+    await expect(hasStoredPassphrase()).resolves.toBe("absent");
+  });
+
+  it("returns 'present' when a committed passphrase exists", async () => {
+    await setStoredPassphrase("committed");
+    await expect(hasStoredPassphrase()).resolves.toBe("present");
+  });
+
+  it("returns 'error' (NEVER 'absent') on a SecureStore read failure — the UI must not expose overwrite entry", async () => {
+    // A transient read failure used to collapse to `false`/'absent', which showed "No passphrase set" and
+    // re-exposed the first-time-entry (committed-overwrite) path even though a passphrase was in fact set.
+    await setStoredPassphrase("still-committed");
+    failSecureStoreItem(PASSPHRASE_ITEM, new Error("Keystore unavailable"));
+    await expect(hasStoredPassphrase()).resolves.toBe("error");
+  });
+});
+
+describe("clearStoredPassphrase verified deletion (P1-3, Sol round 7)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("reports ok:true and removes BOTH the committed passphrase and any pending candidate on success", async () => {
+    await setStoredPassphrase("committed");
+    await setPassphraseCandidate("pending");
+    await expect(clearStoredPassphrase()).resolves.toEqual({ ok: true });
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+  });
+
+  it("reports ok:false on a delete failure — and the committed passphrase is NOT removed (no false 'forgotten')", async () => {
+    await setStoredPassphrase("committed");
+    failSecureStoreItem(PASSPHRASE_ITEM, new Error("Keystore unavailable"));
+
+    const result = await clearStoredPassphrase();
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(PASSPHRASE_ITEM);
+
+    // Clear the injected failure and confirm the committed passphrase is still there — so the UI, which
+    // only reports "forgotten" on ok:true, keeps `hasStoredPassphrase === 'present'` and never re-exposes
+    // the first-time-entry path that would overwrite it.
+    clearSecureStoreFailure(PASSPHRASE_ITEM);
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("committed");
+  });
+});
+
+describe("passphrase settings entry uses the CANDIDATE flow (P1-3, Sol round 7)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("an existing DB + no committed SecureStore entry: a settings passphrase entry never overwrites the committed value", async () => {
+    // Simulate the locked-settings path: a passphrase was previously committed (the DB is encrypted under
+    // it), and the operator opens settings and types a DIFFERENT passphrase. The settings entry stores a
+    // CANDIDATE (setPassphraseCandidate) — it must NOT clobber the committed passphrase, so the DB stays
+    // recoverable under the original.
+    await setStoredPassphrase("original-committed");
+    await setPassphraseCandidate("new-entry-from-settings");
+
+    // The committed value is untouched; resolveDbKey still derives from the COMMITTED passphrase.
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("original-committed");
+    const { key: deviceSecret } = await resolveDbKey("persistent");
+    const { key } = await resolveDbKey("passphrase");
+    expect(key).toBe(sha256Hex(`original-committed:${deviceSecret}`));
   });
 });
