@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
@@ -13,6 +13,12 @@ import {
   storageFit,
   type DeviceCapabilities,
 } from '@/lib/device-capabilities';
+import {
+  deactivateAction,
+  deleteAction,
+  setActiveAction,
+  type ModelActionDeps,
+} from '@/lib/model-manager-actions';
 import { deleteModelFile, downloadModel, sanitizeModelFileName, sweepOrphanedModelFiles } from '@/lib/model-download';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
@@ -73,6 +79,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * finished — initialized from the module-level flag so a remount after the sweep already ran once
    * doesn't re-block controls. */
   const [sweepReady, setSweepReady] = useState(orphanSweepDone);
+  /** True while ANY activate/deactivate/delete transaction is running. Globally disables the
+   * conflicting controls (Set active / Delete / Deactivate on every row, plus downloads) so two
+   * transactions can't be started concurrently (P2-2) — a UI-level complement to the mutex in
+   * `model-manager-actions.ts` that serializes them even if they somehow both start. */
+  const [operationInFlight, setOperationInFlight] = useState(false);
   // Every in-flight download/verify's `AbortController`, keyed by the same id used in `busyIds`/
   // `progress` — lets the AppState listener below cancel everything at once on backgrounding.
   const activeDownloads = useRef<Map<string, AbortController>>(new Map());
@@ -175,6 +186,42 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       setStatusMessage("Couldn't save that change to the model list — it may not survive an app restart. Try again.");
     }
     return persisted;
+  };
+
+  /** The store + bridge + filesystem operations the activate/deactivate/delete transactions need,
+   * bound to the real implementations (the bridge fns partially applied with this overlay's `channel`).
+   * Memoized on `channel` so the transaction module sees a stable dependency object. */
+  const actionDeps = useMemo<ModelActionDeps>(
+    () => ({
+      mutate: mutateModelManagerState,
+      setActiveModel: (request) => setActiveModel(channel, request),
+      clearActiveModel: () => clearActiveModel(channel),
+      deleteModelFile,
+    }),
+    [channel],
+  );
+
+  /** Run one serialized activate/deactivate/delete transaction (see `model-manager-actions.ts`),
+   * flipping `operationInFlight` (and the acting row's `busy`) around it and adopting the resulting
+   * state + status message. All rollback / timeout-ambiguity handling lives in the transaction; here we
+   * only surface its outcome. */
+  const runOperation = async (busyId: string | undefined, action: () => Promise<{ state?: ModelManagerState; message: string }>) => {
+    setOperationInFlight(true);
+    if (busyId) {
+      setBusy(busyId, true);
+    }
+    try {
+      const outcome = await action();
+      if (outcome.state) {
+        setManagerState(outcome.state);
+      }
+      setStatusMessage(outcome.message);
+    } finally {
+      if (busyId) {
+        setBusy(busyId, false);
+      }
+      setOperationInFlight(false);
+    }
   };
 
   /** Download one curated catalog entry into `<id>.gguf`, verifying size + (now real — P2-4/AF7)
@@ -308,137 +355,26 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   };
 
   /**
-   * Delete a downloaded model (P2-4, tightened by the P2-6/P2-4 round-4 fix below). Sequenced so a
-   * failure at any step leaves a SAFE, recoverable state rather than the old order (clear config →
-   * ignore its result → delete the GGUF bytes → THEN persist metadata), which could leave metadata
-   * pointing at a file that no longer exists if the process died between the delete and the persist.
-   *
-   * The RN-local `model-manager-store.json` is the authoritative record of what's downloaded/active
-   * (see `model-manager-bridge.ts`'s doc comment — `on-device-llm.ts` reads it directly); the
-   * launcher-config write (`clearActiveModel`) is what actually controls whether the assistant EXISTS
-   * server-side (`llm.onDevice.enabled`) — so a failed clear can no longer be waved off as "just a
-   * cosmetic label lagging behind". Order: (1) persist the metadata removal; (2) if this was the
-   * active model, clear the launcher's active pointer and CHECK the result; (3) only if that bridge
-   * call succeeds (or there was no active pointer to clear) do we proceed to the IRREVERSIBLE file-byte
-   * deletion. If the bridge clear fails, roll the metadata removal back (re-add the model, restore
-   * `activeId`) and leave the file on disk — reporting failure, never "deleted, but…" for a delete that
-   * didn't actually happen.
+   * Delete a downloaded model. The whole persist → bridge → rollback transaction now lives in
+   * `model-manager-actions.ts` (`deleteAction`, P2-2), serialized against every other
+   * activate/deactivate/delete op by that module's global mutex; here we just run it under
+   * `operationInFlight` and surface the outcome. The transaction sequences the metadata removal, the
+   * launcher clear (checked), and the IRREVERSIBLE byte delete so a failure at any step leaves a safe,
+   * recoverable state — and never deletes the bytes when the launcher clear couldn't be confirmed.
    */
-  const handleDelete = async (model: DownloadedModel) => {
-    setBusy(model.id, true);
-
-    let wasActive = false;
-    const persisted = await persist((current) => {
-      wasActive = current.activeId === model.id;
-      return {
-        downloaded: current.downloaded.filter((existing) => existing.id !== model.id),
-        activeId: wasActive ? undefined : current.activeId,
-      };
-    });
-    if (!persisted) {
-      setBusy(model.id, false);
-      // `persist` already surfaced why — don't touch the bridge or the file on top of a failed write.
-      return;
-    }
-
-    if (wasActive) {
-      const result = await clearActiveModel(channel);
-      if (!result.ok) {
-        // The launcher still thinks this model is active — deleting its bytes now would leave
-        // config.json pointing at a file that no longer exists. Roll back the metadata removal so
-        // RN-local state matches what's actually still true (the model is still there, still active),
-        // and refuse the irreversible delete rather than reporting a success that didn't happen.
-        const rolledBack = await persist((current) => ({
-          downloaded: current.downloaded.some((existing) => existing.id === model.id)
-            ? current.downloaded
-            : [...current.downloaded, model],
-          activeId: model.id,
-        }));
-        setBusy(model.id, false);
-        setStatusMessage(
-          rolledBack
-            ? `Couldn't delete ${model.displayName} — the host app's active-model config couldn't be cleared (${result.error ?? 'unknown error'}). No change was made.`
-            : `Couldn't delete ${model.displayName}, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
-        );
-        return;
-      }
-    }
-
-    await deleteModelFile(model.uri);
-    setBusy(model.id, false);
-    setStatusMessage(`${model.displayName} deleted.`);
-  };
+  const handleDelete = (model: DownloadedModel) => runOperation(model.id, () => deleteAction(actionDeps, model));
 
   /**
-   * Make `model` the active on-device model (P2-4, tightened by the round-4 fix below). Persists the
-   * durable local record FIRST, then mirrors it to the launcher config — the reverse of the old order
-   * (bridge write, then persist), which could leave the running host pointed at a model
-   * `model-manager-store.json` didn't know about if the persist failed after the bridge call already
-   * succeeded.
-   *
-   * Round-4 fix: `llm.onDevice.enabled`/`model` in config.json is what actually controls whether the
-   * on-device assistant EXISTS as a DM contact server-side (see `model-manager-bridge.ts`'s doc
-   * comment) — it's not just a cosmetic label. So a bridge-write failure here can no longer just be
-   * warned about while leaving local state pointed at a model the launcher never picked up: this now
-   * ROLLS BACK the local `activeId` to whatever it was before this call when the bridge write fails,
-   * so RN-local state and config.json never diverge.
+   * Make `model` the active on-device model. Delegates to `setActiveAction` (P2-2): persist the durable
+   * local record FIRST, then mirror it to the launcher config, with a DEFINITE-failure-only conditional
+   * rollback and — for a bridge TIMEOUT — no rollback at all (the write may have landed; P2-1). Runs
+   * under the global operation mutex so it can't interleave with another op and clobber its selection.
    */
-  const handleSetActive = async (model: DownloadedModel) => {
-    setBusy(model.id, true);
+  const handleSetActive = (model: DownloadedModel) => runOperation(model.id, () => setActiveAction(actionDeps, model));
 
-    let previousActiveId: string | undefined;
-    const persisted = await persist((current) => {
-      previousActiveId = current.activeId;
-      return { ...current, activeId: model.id };
-    });
-    if (!persisted) {
-      setBusy(model.id, false);
-      return;
-    }
-
-    const result = await setActiveModel(channel, { modelPath: model.uri, model: model.displayName });
-    if (!result.ok) {
-      // The launcher never actually got the new active model — don't leave local state claiming it
-      // did. Restore whatever was active before this attempt.
-      const rolledBack = await persist((current) => ({ ...current, activeId: previousActiveId }));
-      setBusy(model.id, false);
-      setStatusMessage(
-        rolledBack
-          ? `Couldn't set ${model.displayName} active — the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't set ${model.displayName} active, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
-      );
-      return;
-    }
-    setBusy(model.id, false);
-    setStatusMessage(`${model.displayName} is now the active model. Restart the LOAM host app to load it.`);
-  };
-
-  /** Clear the active model (P2-4) — same persist-then-mirror-with-rollback ordering as
-   * `handleSetActive` above (round-4 fix): a failed bridge clear rolls the local `activeId` back to
-   * whatever it was, rather than leaving local state claiming "deactivated" while config.json still
-   * has the assistant enabled with the old model. */
-  const handleDeactivate = async () => {
-    let previousActiveId: string | undefined;
-    const persisted = await persist((current) => {
-      previousActiveId = current.activeId;
-      return { ...current, activeId: undefined };
-    });
-    if (!persisted) {
-      return;
-    }
-
-    const result = await clearActiveModel(channel);
-    if (!result.ok) {
-      const rolledBack = await persist((current) => ({ ...current, activeId: previousActiveId }));
-      setStatusMessage(
-        rolledBack
-          ? `Couldn't deactivate the on-device model — the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't deactivate the on-device model, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
-      );
-      return;
-    }
-    setStatusMessage('On-device model deactivated. Restart the LOAM host app to apply it.');
-  };
+  /** Clear the active model — `deactivateAction` (P2-2), same serialized persist-then-mirror
+   * transaction with conditional rollback on a definite failure and no rollback on a timeout. */
+  const handleDeactivate = () => runOperation(undefined, () => deactivateAction(actionDeps));
 
   const customModels = managerState.downloaded.filter((model) => model.isCustom);
 
@@ -484,7 +420,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                   <ThemedText type="smallBold">
                     Active: {managerState.downloaded.find((m) => m.id === managerState.activeId)?.displayName ?? managerState.activeId}
                   </ThemedText>
-                  <Pressable onPress={() => void handleDeactivate()} accessibilityRole="button">
+                  <Pressable
+                    onPress={() => void handleDeactivate()}
+                    disabled={operationInFlight}
+                    accessibilityRole="button"
+                    style={operationInFlight ? styles.buttonDisabled : undefined}>
                     <ThemedText type="link">Deactivate</ThemedText>
                   </Pressable>
                 </ThemedView>
@@ -507,7 +447,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                   isActive={managerState.activeId === entry.id}
                   isBusy={busyIds.has(entry.id)}
                   progress={progress[entry.id]}
-                  downloadDisabled={!sweepReady}
+                  downloadDisabled={!sweepReady || operationInFlight}
+                  opInFlight={operationInFlight}
                   onDownload={() => void handleDownloadCatalogEntry(entry)}
                   onDelete={(model) => void handleDelete(model)}
                   onSetActive={(model) => void handleSetActive(model)}
@@ -533,9 +474,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
               />
               <Pressable
                 onPress={() => void handleAddCustomUrl()}
-                disabled={!customUrl.trim() || !sweepReady}
+                disabled={!customUrl.trim() || !sweepReady || operationInFlight}
                 accessibilityRole="button"
-                style={[styles.button, (!customUrl.trim() || !sweepReady) && styles.buttonDisabled]}>
+                style={[styles.button, (!customUrl.trim() || !sweepReady || operationInFlight) && styles.buttonDisabled]}>
                 <ThemedText type="smallBold" style={styles.buttonLabel}>
                   Add &amp; download
                 </ThemedText>
@@ -552,6 +493,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                       model={model}
                       isActive={managerState.activeId === model.id}
                       isBusy={busyIds.has(model.id)}
+                      opInFlight={operationInFlight}
                       onDelete={() => void handleDelete(model)}
                       onSetActive={() => void handleSetActive(model)}
                     />
@@ -575,6 +517,7 @@ function CatalogRow({
   isBusy,
   progress,
   downloadDisabled,
+  opInFlight,
   onDownload,
   onDelete,
   onSetActive,
@@ -585,10 +528,13 @@ function CatalogRow({
   isActive: boolean;
   isBusy: boolean;
   progress: { written: number; total: number; phase: 'download' | 'verify' } | undefined;
-  /** True while the P2-7 round-4 orphan sweep is still in flight — disables starting a NEW download
-   * (an already-downloaded model's Set-active/Delete stay enabled; only a fresh `createDownloadResumable`
-   * could race the sweep). */
+  /** True while the P2-7 round-4 orphan sweep is still in flight OR an activate/deactivate/delete op is
+   * in flight — disables starting a NEW download (a fresh `createDownloadResumable` could race the
+   * sweep, and a new download shouldn't start on top of an in-flight op). */
   downloadDisabled: boolean;
+  /** True while an activate/deactivate/delete transaction is running anywhere in the manager (P2-2) —
+   * globally disables this row's Set-active/Delete so a second op can't start concurrently. */
+  opInFlight: boolean;
   onDownload: () => void;
   onDelete: (model: DownloadedModel) => void;
   onSetActive: (model: DownloadedModel) => void;
@@ -637,9 +583,9 @@ function CatalogRow({
             {!isActive ? (
               <Pressable
                 onPress={() => onSetActive(downloaded)}
-                disabled={isBusy}
+                disabled={isBusy || opInFlight}
                 accessibilityRole="button"
-                style={[styles.button, isBusy && styles.buttonDisabled]}>
+                style={[styles.button, (isBusy || opInFlight) && styles.buttonDisabled]}>
                 <ThemedText type="smallBold" style={styles.buttonLabel}>
                   Set active
                 </ThemedText>
@@ -647,9 +593,9 @@ function CatalogRow({
             ) : null}
             <Pressable
               onPress={() => onDelete(downloaded)}
-              disabled={isBusy}
+              disabled={isBusy || opInFlight}
               accessibilityRole="button"
-              style={[styles.buttonSecondary, isBusy && styles.buttonDisabled]}>
+              style={[styles.buttonSecondary, (isBusy || opInFlight) && styles.buttonDisabled]}>
               <ThemedText type="smallBold">Delete</ThemedText>
             </Pressable>
           </>
@@ -674,12 +620,16 @@ function DownloadedRow({
   model,
   isActive,
   isBusy,
+  opInFlight,
   onDelete,
   onSetActive,
 }: {
   model: DownloadedModel;
   isActive: boolean;
   isBusy: boolean;
+  /** True while any activate/deactivate/delete op is running (P2-2) — globally disables this row's
+   * actions so a second op can't start concurrently. */
+  opInFlight: boolean;
   onDelete: () => void;
   onSetActive: () => void;
 }) {
@@ -700,9 +650,9 @@ function DownloadedRow({
         {!isActive ? (
           <Pressable
             onPress={onSetActive}
-            disabled={isBusy}
+            disabled={isBusy || opInFlight}
             accessibilityRole="button"
-            style={[styles.button, isBusy && styles.buttonDisabled]}>
+            style={[styles.button, (isBusy || opInFlight) && styles.buttonDisabled]}>
             <ThemedText type="smallBold" style={styles.buttonLabel}>
               Set active
             </ThemedText>
@@ -710,9 +660,9 @@ function DownloadedRow({
         ) : null}
         <Pressable
           onPress={onDelete}
-          disabled={isBusy}
+          disabled={isBusy || opInFlight}
           accessibilityRole="button"
-          style={[styles.buttonSecondary, isBusy && styles.buttonDisabled]}>
+          style={[styles.buttonSecondary, (isBusy || opInFlight) && styles.buttonDisabled]}>
           <ThemedText type="smallBold">Delete</ThemedText>
         </Pressable>
       </View>

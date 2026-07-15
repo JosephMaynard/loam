@@ -50,21 +50,46 @@ export async function loadModelManagerState(): Promise<ModelManagerState> {
 }
 
 /**
- * Strict validity check (P2-6 round 4): a state is VALID only if it parses to an object carrying a
- * `downloaded` array. Before this fix, `tryReadState` ran EVERY parsed value — including `null`, `{}`,
- * or any other truncated/wrong-shape write — through `normalizeState`, which silently mapped all of
- * those to `EMPTY_STATE`. That made a corrupt file indistinguishable from "legitimately nothing has
- * been downloaded yet", which broke the two-slot recovery scheme in both directions:
- *   1. `loadModelManagerState` treated a corrupt primary as a valid (if boring) result and never fell
+ * Strict, DEEP validity check (P2-6 round 4, tightened P2-3 round 5): a state is VALID only if it
+ * parses to an object whose `downloaded` is an array in which EVERY entry is a well-formed
+ * `DownloadedModel`, AND whose `activeId` is either `undefined` or a string that references one of
+ * those entries. Anything else — a missing/wrong-typed `downloaded`, a single malformed entry, a
+ * non-string `activeId`, or a dangling `activeId` that names no downloaded model — is INVALID.
+ *
+ * Why the earlier "downloaded is an array" check was not enough (P2-3): `{"downloaded":[{}]}` passed
+ * that shallow test, so `tryReadState` accepted the slot and ran it through the lossy `normalizeState`,
+ * which silently DROPPED the malformed entry and returned an empty state. That made a corrupt file
+ * indistinguishable from "legitimately nothing has been downloaded yet", which broke the two-slot
+ * recovery scheme in both directions:
+ *   1. `loadModelManagerState` treated a corrupt primary as a valid (if empty) result and never fell
  *      through to a possibly-good `.bak`.
- *   2. `saveModelManagerState` then saw that corrupt primary as "exists, so rotate it into `.bak`" on
- *      the very next save — overwriting the last genuinely good backup with garbage. A crash right
- *      after that left BOTH slots bad, with no way back to the real data.
- * A legitimately-empty state is instead the EXPLICIT `EMPTY_STATE` value above, written out like any
- * other state, so "empty" and "invalid" are never conflated.
+ *   2. `saveModelManagerState` then saw that corrupt primary as valid ("exists + parses, so rotate it
+ *      into `.bak`") on the very next save — overwriting the last genuinely good backup with garbage.
+ *      A crash right after that left BOTH slots bad, with no way back to the real data.
+ * Validating every entry (and the `activeId` reference) BEFORE accepting a slot — never using
+ * `normalizeState` to DECIDE validity — closes both. A legitimately-empty state is instead the
+ * EXPLICIT `EMPTY_STATE` value above (`{ downloaded: [], activeId: undefined }`), which passes this
+ * check unchanged, so "empty" and "invalid" are never conflated.
  */
-function isValidState(value: unknown): value is { downloaded: unknown[]; activeId?: unknown } {
-  return !!value && typeof value === 'object' && Array.isArray((value as { downloaded?: unknown }).downloaded);
+function isValidState(value: unknown): value is ModelManagerState {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as { downloaded?: unknown; activeId?: unknown };
+  if (!Array.isArray(record.downloaded) || !record.downloaded.every(isDownloadedModel)) {
+    return false;
+  }
+  if (record.activeId !== undefined) {
+    if (typeof record.activeId !== 'string') {
+      return false;
+    }
+    // A dangling `activeId` (references no downloaded entry) is corrupt, not just cosmetically stale:
+    // fall through to the backup rather than silently normalizing it away.
+    if (!record.downloaded.some((entry) => (entry as DownloadedModel).id === record.activeId)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function tryReadState(path: string): Promise<ModelManagerState | undefined> {
@@ -76,11 +101,15 @@ async function tryReadState(path: string): Promise<ModelManagerState | undefined
     const raw = await FileSystem.readAsStringAsync(path);
     const parsed: unknown = JSON.parse(raw);
     if (!isValidState(parsed)) {
-      // Parseable but the wrong shape (null, `{}`, missing `downloaded`, ...) — treated the same as an
-      // unparsable/missing file, NOT as a legitimate empty state (P2-6 round 4). The caller falls back
-      // to the other slot instead of silently accepting this as "nothing downloaded".
+      // Parseable but structurally corrupt (null, `{}`, missing/wrong `downloaded`, a malformed entry,
+      // a bad-typed or dangling `activeId`, ...) — treated the same as an unparsable/missing file, NOT
+      // as a legitimate empty state (P2-6 round 4 / P2-3 round 5). The caller falls back to the other
+      // slot instead of silently accepting this as "nothing downloaded".
       return undefined;
     }
+    // `parsed` is fully validated now; `normalizeState` is a lossless identity for a valid state (every
+    // entry already passes `isDownloadedModel`, and `activeId` references a real entry), producing a
+    // clean `ModelManagerState` without trusting arbitrary extra keys.
     return normalizeState(parsed);
   } catch {
     return undefined;
