@@ -25,6 +25,7 @@ import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/mode
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
   dispositionFromLoad,
+  MODEL_LIST_UNREADABLE_MESSAGE,
   mutateModelManagerState,
   pendingProtectedUris,
   readModelManagerState,
@@ -161,13 +162,27 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         // is the post-reconcile state the sweep and UI must use.
         let current = disposition.state;
         if ((current.pending ?? []).length > 0) {
-          const { state: reconciled, settled, message } = await reconcilePendingActions(actionDeps);
-          current = reconciled;
+          const reconciled = await reconcilePendingActions(actionDeps);
+          if (reconciled.unreadable) {
+            // RF7-b: reconcile's OWN state read refused (a transient I/O error / corruption AFTER this
+            // open's initial load). Its returned `state` is an untrusted EMPTY_STATE — adopting it and
+            // sweeping against it would delete every downloaded model. Treat it EXACTLY like the
+            // direct-load `error` path: keep the last good state on screen (already set above), BLOCK the
+            // destructive controls (`loadFailed`), SKIP the orphan sweep (the early return below), and
+            // surface the recovery banner. A later reopen retries the read. The `finally` still flips
+            // `sweepReady`, so the "Preparing…" note clears while downloads stay gated by `loadFailed`.
+            if (!cancelled) {
+              setLoadFailed(true);
+              setStatusMessage(reconciled.message ?? MODEL_LIST_UNREADABLE_MESSAGE);
+            }
+            return;
+          }
+          current = reconciled.state;
           if (!cancelled) {
-            setManagerState(reconciled);
-            setPendingUnsettled(!settled);
-            if (message) {
-              setStatusMessage(message);
+            setManagerState(reconciled.state);
+            setPendingUnsettled(!reconciled.settled);
+            if (reconciled.message) {
+              setStatusMessage(reconciled.message);
             }
           }
         } else if (!cancelled) {

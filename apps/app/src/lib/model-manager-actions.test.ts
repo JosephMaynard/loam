@@ -26,7 +26,7 @@ import {
   setActiveAction,
   type ModelActionDeps,
 } from "@/lib/model-manager-actions";
-import { POINTER_PENDING_ID } from "@/lib/model-manager-store";
+import { MODEL_LIST_UNREADABLE_MESSAGE, POINTER_PENDING_ID } from "@/lib/model-manager-store";
 import type { DownloadedModel, ModelManagerState, PendingAction } from "@/lib/model-manager-store";
 
 function model(id: string): DownloadedModel {
@@ -595,5 +595,47 @@ describe("reconcile only reports settled from CONFIRMED-on-disk state (P2-1)", (
     expect(reconciled.settled).toBe(true);
     expect(setActive).not.toHaveBeenCalledWith({ modelPath: A.uri, model: A.displayName });
     expect(store.get().pending ?? []).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RF7-b (Sol round 7): reconcile must NOT report a settled/empty state when its OWN state read refuses —
+// that untrusted EMPTY_STATE would make the component sweep every downloaded model away.
+// ---------------------------------------------------------------------------
+
+describe("reconcile refuses to settle (or let the caller sweep) when its state read is UNREADABLE (RF7-b)", () => {
+  it("identity-read refusal → unreadable + NOT settled; the bridge and file delete are NEVER touched", async () => {
+    // A delete pending: were reconcile NOT to bail on the unreadable read, it would re-send the launcher
+    // clear and (on ok) delete the bytes. The refusal must stop BOTH — and must not report settled, so the
+    // component blocks controls and skips the orphan sweep (which, against the untrusted EMPTY_STATE this
+    // refusal would otherwise yield, deletes every downloaded `.gguf`).
+    const pending: PendingAction = { id: `delete:${A.uri}`, kind: "delete", desired: { enabled: false }, fileUri: A.uri };
+    const store = makeStore({ downloaded: [B], activeId: undefined, pending: [pending] });
+    // Fail the reconcile's FIRST write — its identity read `mutate(current => current)`, mirroring
+    // `mutateModelManagerState` refusing (returning `persisted:false`) when `readModelManagerState()` errors.
+    store.failNextWrite();
+    const clear = vi.fn(async () => OK);
+    const deleteFile = vi.fn(async () => {});
+    const deps = scriptedDeps(store, { clearActiveModel: clear, deleteModelFile: deleteFile });
+
+    const result = await reconcilePendingActions(deps);
+
+    expect(result.unreadable).toBe(true);
+    expect(result.settled).toBe(false);
+    expect(result.message).toBe(MODEL_LIST_UNREADABLE_MESSAGE);
+    // Bailed BEFORE the bridge/file — the "delete every model" vector is closed.
+    expect(clear).not.toHaveBeenCalled();
+    expect(deleteFile).not.toHaveBeenCalled();
+    // The on-disk pending is left intact for a later, readable reconcile to settle.
+    expect(store.get().pending).toEqual([pending]);
+  });
+
+  it("a READABLE reconcile is unaffected — no `unreadable` flag, still settles normally", async () => {
+    // Guards against the RF7-b check misfiring on the healthy path (a successful identity read).
+    const store = makeStore({ downloaded: [A], activeId: "A" });
+    const result = await reconcilePendingActions(scriptedDeps(store));
+
+    expect(result.unreadable).toBeUndefined();
+    expect(result.settled).toBe(true);
   });
 });

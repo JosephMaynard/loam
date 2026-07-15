@@ -3547,37 +3547,66 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           return;
         }
 
-        // Normal path (marker written): signal the launcher now that in-memory state is locked out and the
-        // durable marker is on disk. This is NOT yet a confirmed cryptographic wipe from the operator's
-        // perspective — that's only true once the launcher acks with `loam-wipe-complete` and deletes the
-        // marker (P1-2b); this process has no way to observe that ack (it may not even survive to see it),
-        // so the log line below deliberately describes the wipe as REQUESTED, not completed. The ciphertext
-        // is deleted after the signal (async is safe here: the marker makes an interrupted handoff resumable).
+        // Normal path (marker written). RF7-a (Sol round 7 adversarial review): make this path SYMMETRIC
+        // with the fail-closed marker-FAILURE branch above — destroy AND verify EVERY persisted artifact
+        // BEFORE signaling the launcher, and REFUSE to signal if any survive. The old order signaled the
+        // launcher FIRST and only LOGGED a survivor, which was unsafe: a `.premigration` snapshot is
+        // legacy-key ciphertext encrypted under the NON-discardable `SHA256(passphrase)` key, so if it
+        // couldn't be deleted (a per-file lock/permission) while the marker wrote fine, signaling would let
+        // RN clear only the DEVICE SECRET (which does NOT decrypt `.premigration`) and restart — then
+        // Step-0b would RESTORE the survivor and recoverable ciphertext would outlive the emergency reset,
+        // with the resume flow never re-running artifact deletion. So delete+verify first; on ANY survivor,
+        // do NOT signal and stay 503-locked (`awaitingWipeRestart` is already set) with a hard notice,
+        // exactly like the fail-closed branch. The durable marker is still on disk, so a
+        // successful-but-interrupted KEY-clear still resumes on the next boot.
+        store.close();
+        // P1-2 (Sol round 7): delete AND verify EVERY DB artifact (including the legacy-key-encrypted
+        // `.premigration` snapshot, `-journal`, and `*.unreadable-<ts>` recovery renames), not just the
+        // three live files.
+        const undeleted = deleteAndVerifyDbArtifacts();
+        // Plaintext user media is data too — remove AND verify the dirs synchronously, so this gate covers
+        // the FULL inventory (not only the DB files) before any signal, same as the fail-closed branch.
+        for (const dir of [avatarsDir, attachmentsDir]) {
+          try {
+            rmSync(dir, { recursive: true, force: true });
+          } catch {
+            // Fall through to the existence check.
+          }
+          if (existsSync(dir)) {
+            undeleted.push(dir);
+          }
+        }
+
+        if (undeleted.length > 0) {
+          // Could not delete some recoverable artifact. Do NOT signal the launcher — clearing the device
+          // key now would leave the legacy-key `.premigration` (which Step-0b would then RESTORE) readable
+          // after the wipe. Stay locked down (503) and surface a hard notice; the durable marker means the
+          // next boot re-attempts the handoff once the artifact can be removed. Reopen the node to retry.
+          const message =
+            "KILL SWITCH NOTICE: the wipe-pending marker was written, but some persisted data could not be " +
+            `deleted and VERIFIED gone (${undeleted.join(", ")}). The launcher was NOT signaled, to avoid ` +
+            "clearing the device key while recoverable ciphertext (e.g. a legacy-key `.premigration` snapshot " +
+            "that Step-0b would restore) survives. The node is locked down (503) — reopen it to retry the wipe.";
+          server.log.error(message);
+          reportBootNotice(message, "kill_switch_wipe_incomplete");
+          return;
+        }
+
+        // Every artifact is verified gone AND a durable resume marker is on disk. Only NOW hand off to the
+        // launcher to clear the (now-unused) device key and restart. This is NOT yet a confirmed
+        // cryptographic wipe from the operator's perspective — that's only true once the launcher acks with
+        // `loam-wipe-complete` and deletes the marker (P1-2b); this process has no way to observe that ack
+        // (it may not even survive to see it), so the log line below deliberately says REQUESTED.
         try {
           hook();
         } catch (error) {
           server.log.error(error, "Kill switch: failed to signal the RN launcher for the wipe-restart handoff");
         }
 
-        store.close();
-        // P1-2 (Sol round 7): delete AND verify EVERY DB artifact (including the legacy-key-encrypted
-        // `.premigration` snapshot, `-journal`, and `*.unreadable-<ts>` recovery renames), not just the
-        // three live files. The durable marker makes an interrupted handoff resumable, so any straggler
-        // logged here is retried by the next boot rather than blocking — but it must still be surfaced.
-        const undeleted = deleteAndVerifyDbArtifacts();
-        await rm(avatarsDir, { recursive: true, force: true });
-        await rm(attachmentsDir, { recursive: true, force: true });
-        if (undeleted.length > 0) {
-          server.log.error(
-            `KILL SWITCH NOTICE: some DB artifacts could not be deleted after the launcher handoff (${undeleted.join(", ")}). ` +
-              "The wipe-pending marker will make the next boot re-attempt the handoff; remove these files if they persist.",
-          );
-        }
-
         server.log.warn(
-          "Kill switch: persistent/passphrase-encrypted database deleted; a device-key-clear-and-restart " +
-            "was REQUESTED from the launcher (durable pending marker written) — the key rotation is only " +
-            "confirmed once the launcher acknowledges it cleared the Keystore key.",
+          "Kill switch: persistent/passphrase-encrypted database deleted and VERIFIED gone; a " +
+            "device-key-clear-and-restart was REQUESTED from the launcher (durable pending marker written) — " +
+            "the key rotation is only confirmed once the launcher acknowledges it cleared the Keystore key.",
         );
         return;
       }
@@ -3641,7 +3670,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         try {
           rmSync(file, { force: true });
         } catch {
-          // Best-effort — a leftover artifact here is stale metadata, not the live DB.
+          // Fall through to the existence check — a delete failure is surfaced there, not swallowed here.
+        }
+        // RF7-c (Sol round 7 adversarial review): verify + WARN on any survivor, consistent with the
+        // encrypted paths above. This is a documented non-secure LOGICAL wipe (no fail-closed), but a
+        // stale `.premigration` here is still-readable legacy-key ciphertext — a silent failure that left
+        // it behind must at least get operator notice rather than vanishing without a trace.
+        if (existsSync(file)) {
+          server.log.warn(
+            `KILL SWITCH NOTICE: a stale DB artifact could not be deleted during the logical wipe (${file}) — ` +
+              "recoverable ciphertext from a prior encrypted era may remain on disk; remove it manually.",
+          );
         }
       }
     }

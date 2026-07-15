@@ -25,7 +25,7 @@
 
 import type { ActiveModelResult, SetActiveModelRequest } from './model-manager-bridge';
 import type { DownloadedModel, ModelManagerState, MutateResult, PendingAction } from './model-manager-store';
-import { POINTER_PENDING_ID, recordPending } from './model-manager-store';
+import { MODEL_LIST_UNREADABLE_MESSAGE, POINTER_PENDING_ID, recordPending } from './model-manager-store';
 
 /** The store + bridge + filesystem operations each transaction needs, injected so the logic is pure
  * and testable. `model-manager.tsx` binds these to the real implementations (the bridge fns are
@@ -354,6 +354,13 @@ async function rollbackActiveId(
 export type ReconcileResult = {
   state: ModelManagerState;
   settled: boolean;
+  /** RF7-b: true when reconcile could NOT reliably READ the persisted state — its identity mutate refused
+   * because `readModelManagerState()` errored (a transient I/O failure / corruption, NOT a clean absence).
+   * The returned `state` is then an UNTRUSTED `EMPTY_STATE`: the component must NOT adopt it or run the
+   * orphan sweep against it (doing so would delete every downloaded `.gguf`), and must block the
+   * destructive controls with the recovery banner — exactly like `dispositionFromLoad`'s direct-load
+   * `error` path. Never set together with a trustworthy `settled` result. */
+  unreadable?: boolean;
   message?: string;
 };
 
@@ -439,7 +446,17 @@ async function reconcileOne(
  */
 export function reconcilePendingActions(deps: ModelActionDeps): Promise<ReconcileResult> {
   return runExclusive(async () => {
-    const { state: initial } = await deps.mutate((current) => current);
+    // RF7-b: CHECK `persisted` on the identity read. `mutateModelManagerState` REFUSES (returns
+    // `{ state: EMPTY_STATE, persisted: false }`) when `readModelManagerState()` errors — a transient
+    // I/O failure or corruption that is NOT a clean absence. If we trusted that EMPTY_STATE here, reconcile
+    // would see `pending: []`, report `settled: true`, and the component would adopt an empty model list
+    // and sweep every downloaded `.gguf` away (its own second read bypasses `dispositionFromLoad`'s guard).
+    // Instead surface a distinct `unreadable` signal so the component SKIPS the sweep, BLOCKS the
+    // destructive controls, and shows the recovery banner — mirroring the direct-load `error` path.
+    const { state: initial, persisted } = await deps.mutate((current) => current);
+    if (!persisted) {
+      return { state: initial, settled: false, unreadable: true, message: MODEL_LIST_UNREADABLE_MESSAGE };
+    }
     const pending = initial.pending ?? [];
     if (pending.length === 0) {
       return { state: initial, settled: true };

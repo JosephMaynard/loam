@@ -63,6 +63,13 @@ const rmSyncCapture = vi.hoisted(() => ({ paths: undefined as string[] | undefin
 // migration). Used to prove that a cleanup failure AFTER a successful rekey does NOT fail the boot / leak
 // the migrated handle. Defaults disarmed (pass through) and self-disarms on fire.
 const postRekeyCleanupFailure = vi.hoisted(() => ({ armed: false }));
+// RF7-a (Sol round 7 adversarial review): a PERSISTENT (does NOT self-disarm) fault-injection seam for
+// `node:fs`'s `rmSync` targeting ONLY the committed `loam.db.premigration` legacy-key ciphertext snapshot
+// (exact `.premigration` path — never the `.tmp`/`-wal`/`-shm`/`-journal` sidecars). Unlike the single-shot
+// `postRekeyCleanupFailure` above, this keeps failing for every delete attempt on that file, so the
+// marker-SUCCESS kill-switch path's `deleteAndVerifyDbArtifacts()` sees the survivor and must refuse to
+// signal the launcher. Defaults disarmed (pass through); reset in `afterEach`.
+const premigrationDeleteFailure = vi.hoisted(() => ({ armed: false }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
@@ -74,6 +81,10 @@ vi.mock("node:fs", async (importOriginal) => {
       if (postRekeyCleanupFailure.armed && String(args[0]).endsWith("loam.db.premigration")) {
         postRekeyCleanupFailure.armed = false;
         throw new Error("simulated post-rekey cleanup rmSync failure (P2-2 test fault injection)");
+      }
+      if (premigrationDeleteFailure.armed && String(args[0]).endsWith("loam.db.premigration")) {
+        // PERSISTENT — no self-disarm: the survivor can never be deleted this test run.
+        throw new Error("simulated persistent .premigration rmSync failure (RF7-a test fault injection)");
       }
       return actual.rmSync(...args);
     },
@@ -158,6 +169,7 @@ afterEach(async () => {
   wipeMarkerWriteFailure.armed = false;
   backupCapture.dir = undefined;
   postRekeyCleanupFailure.armed = false;
+  premigrationDeleteFailure.armed = false;
   rmSyncCapture.paths = undefined;
   while (cleanups.length) {
     await cleanups.pop()?.();
@@ -1832,6 +1844,46 @@ describe("encryption at rest + key-discard kill switch", () => {
     // A distinct notice was surfaced so the operator knows the wipe completed without a resumable marker
     // (and must reopen to finish clearing the now-unused key if RN's key-clear was also interrupted).
     expect(reports.some((r) => r.code === "kill_switch_wipe_no_marker")).toBe(true);
+  });
+
+  it("RF7-a (Sol round 7): on the marker-SUCCESS path, a `.premigration` survivor that can't be deleted BLOCKS the launcher handoff — the wipe reports incomplete and stays 503-locked instead of signaling while recoverable ciphertext remains", async () => {
+    const reports = installFakeBootBridge();
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed under a fixed key")).statusCode).toBe(201);
+
+    // Plant a committed legacy-key `.premigration` snapshot (still-readable ciphertext under the
+    // NON-discardable SHA256(passphrase) key) alongside the live DB, then make its deletion FAIL
+    // PERSISTENTLY — the survivor the marker-SUCCESS path must never signal the launcher past.
+    const premigration = join(dataDir, "loam.db.premigration");
+    writeFileSync(premigration, Buffer.from("legacy-key ciphertext that must not survive a wipe"));
+    premigrationDeleteFailure.armed = true;
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // The crux (RF7-a): the launcher was NOT signaled while the survivor remained — so RN can't clear the
+    // device secret (which doesn't decrypt `.premigration`) and restart into a Step-0b restore of it.
+    expect(hook.calls).toBe(0);
+    // The survivor is still on disk (it genuinely couldn't be deleted), and a distinct incomplete notice
+    // was surfaced — the marker IS still written so the next boot re-attempts the handoff.
+    expect(existsSync(premigration)).toBe(true);
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+    expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+
+    // The node stays locked down (503 everywhere) — the RF-a synchronous in-memory lockdown ran first and
+    // was never cleared, so nothing reopened while recoverable ciphertext survives.
+    const locked = await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } });
+    expect(locked.statusCode).toBe(503);
   });
 
   describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {
