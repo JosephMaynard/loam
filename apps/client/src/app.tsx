@@ -351,6 +351,24 @@ function notifyIfHidden(title: string, body: string): void {
 }
 
 /**
+ * Tell the Android host app (if this page is running inside its WebView) that the node was just
+ * wiped, so it can rotate any Keystore-held DB-encryption key material (AF1 / Sol P1-1) — see
+ * `apps/app/src/app/index.tsx`'s WebView `onMessage` handler and `apps/app/src/lib/db-encryption.ts`'s
+ * `clearStoredDbKeys()`. `window.ReactNativeWebView` only ever exists inside that WebView (react-native-
+ * webview injects it), so this is a silent no-op on every other origin this client runs on — desktop
+ * browser, Pi, another phone's browser. Best-effort and never throws.
+ */
+function notifyAndroidHostOfWipe(): void {
+  try {
+    const bridge = (window as unknown as { ReactNativeWebView?: { postMessage: (message: string) => void } })
+      .ReactNativeWebView;
+    bridge?.postMessage(JSON.stringify({ type: "loam-wipe" }));
+  } catch {
+    // Best effort only — absent/broken bridge is the common (non-Android-host) case.
+  }
+}
+
+/**
  * Issues a user-related admin/moderation/access request and returns the validated user the server
  * echoes back. Throws with the server's error message (or a status fallback) on failure. Mirrors
  * `requestChannel` for the user-management endpoints.
@@ -1553,6 +1571,10 @@ function LoamApp() {
 
         if (payload.type === "wipe") {
           void purgeLocalData();
+          // Server-initiated node wipe (kill switch) — distinct from a self-service "wipe this
+          // device" action, which never touches the node's DB-encryption key material. See
+          // `notifyAndroidHostOfWipe`'s comment (AF1 / Sol P1-1).
+          notifyAndroidHostOfWipe();
           return;
         }
 

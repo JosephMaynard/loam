@@ -99,10 +99,47 @@ export async function clearStoredPassphrase(): Promise<void> {
 }
 
 /**
+ * Forget the persisted 'persistent'-mode key AND the passphrase (Sol P1-1, second half). `resolveDbKey`
+ * only ever ROTATES the ephemeral key (a fresh one is generated server-side per boot, see above) —
+ * 'persistent'/'passphrase' key material is designed to survive across boots, which also means it
+ * survives a kill-switch wipe unless something explicitly clears it: without this, the very next boot
+ * after a wipe would re-derive/reuse the SAME key for the brand-new (post-wipe) database, silently
+ * defeating a real "rotate the key on a wipe" story for those two modes.
+ *
+ * Called from the WebView `onMessage` handler in `index.tsx` when the client posts `loam-wipe` (see
+ * `apps/client/src/app.tsx`'s `wipe` WS-event handler) — i.e. only on an actual server-side kill-switch
+ * wipe, never on an ordinary boot or a local "forget passphrase" action. Best-effort and never throws;
+ * a failed delete just means the old key material stays around, exactly as it would have before this
+ * function existed. Device-verify: exercised in code, but the end-to-end "wipe → next boot re-derives a
+ * genuinely different key" path needs a real device to confirm (this repo has no on-device test harness).
+ */
+export async function clearStoredDbKeys(): Promise<void> {
+  try {
+    await SecureStore.deleteItemAsync(PERSISTENT_KEY_ITEM);
+  } catch {
+    // best-effort
+  }
+  try {
+    await SecureStore.deleteItemAsync(PASSPHRASE_ITEM);
+  } catch {
+    // best-effort
+  }
+}
+
+/**
  * Resolve the DB-encryption key material for `mode`, generating/persisting it as needed:
  *   - 'off'        → no key.
- *   - 'ephemeral'  → a fresh random 32-byte key, hex-encoded, NEVER stored (in memory only, for the
- *                    life of this resolution — the caller hands it straight to main.js over the bridge).
+ *   - 'ephemeral'  → NO key from this module any more (Sol P1-1). main.js recognizes `mode ===
+ *                    'ephemeral'` itself and sets the embedded server's `LOAM_DB_KEY` to the LITERAL
+ *                    string `'ephemeral'`; the server (apps/server/src/embedded.ts) then generates and
+ *                    holds its OWN random RAM-only key. That key living server-side — not here — is
+ *                    what lets the kill switch actually ROTATE it on wipe (`executeKillSwitch`): when
+ *                    this module used to hand back a fresh key on every call, the key was regenerated
+ *                    per BOOT (via this function), not per WIPE, so a wipe with no restart had no key
+ *                    here to rotate at all, and "rotation" only ever happened as a side effect of the
+ *                    next cold start. Returning no key keeps this module out of that loop entirely —
+ *                    `resolveDbEncryptionAndBoot` in main.js special-cases 'ephemeral' and never
+ *                    reaches the "no key" plaintext-downgrade path for it.
  *   - 'persistent' → a random 32-byte key, generated once and stored in the Keystore-backed secure
  *                    store; subsequent calls reuse the same key so the DB stays openable across boots.
  *   - 'passphrase' → derived from an operator-entered passphrase (Keystore-backed). This is a SIMPLE
@@ -129,8 +166,9 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     }
 
     if (mode === 'ephemeral') {
-      const bytes = await Crypto.getRandomBytesAsync(32);
-      return { mode, key: bytesToHex(bytes) };
+      // No key generated here (see the doc comment above) — main.js sets LOAM_DB_KEY to the literal
+      // string 'ephemeral' itself and the server generates its own RAM-only key.
+      return { mode };
     }
 
     if (mode === 'persistent') {
@@ -188,4 +226,55 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
 
   channel.addListener('loam-db-key-request', onRequest);
   return () => channel.removeListener('loam-db-key-request', onRequest);
+}
+
+export type StartFreshResult = { ok: boolean; error?: string };
+
+/**
+ * Ask the launcher (main.js) to write the `.loam-db-start-fresh` confirmation marker into its data
+ * directory (design#1 / AF8, docs/01, docs/15). When boot fails with `db_encryption_unreadable` (an
+ * encrypted DB that the current key can't open), the operator can explicitly choose "preserve the old
+ * database as-is and start a fresh one" — the server consumes and deletes this marker on the next boot
+ * as confirmation that a human actually asked for that, rather than the app silently doing it on its
+ * own. This module has no direct filesystem access to main.js's `dataDir`
+ * (`rnBridge.app.datadir()/loam`), so the write has to happen over there — this is a request/response
+ * round trip over the bridge, mirroring `model-manager-bridge.ts`'s `roundTrip` helper.
+ *
+ * Never throws — a timeout, an old launcher build with no handler, or a thrown `post()` all resolve to
+ * `{ ok: false }` so the caller can tell the operator to retry rather than hang indefinitely.
+ */
+export function requestDbStartFresh(channel: BridgeChannel, timeoutMs = 5000): Promise<StartFreshResult> {
+  return new Promise((resolve) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+
+    const finish = (result: StartFreshResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      channel.removeListener('loam-db-start-fresh-result', onResult);
+      resolve(result);
+    };
+
+    const onResult = (payload: unknown): void => {
+      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown } | undefined;
+      if (!result || result.requestId !== requestId) {
+        return;
+      }
+      finish({ ok: result.ok === true, error: typeof result.error === 'string' ? result.error : undefined });
+    };
+
+    const timer = setTimeout(() => {
+      finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
+    }, timeoutMs);
+
+    channel.addListener('loam-db-start-fresh-result', onResult);
+    try {
+      channel.post('loam-db-start-fresh', { requestId });
+    } catch (err) {
+      finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 }

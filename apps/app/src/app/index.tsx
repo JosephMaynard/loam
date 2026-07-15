@@ -1,7 +1,7 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Linking, Platform, Pressable, StyleSheet } from 'react-native';
+import { ActivityIndicator, Alert, Linking, Platform, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
@@ -11,7 +11,7 @@ import { ModelManagerOverlay } from '@/components/model-manager';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
-import { registerDbEncryption } from '@/lib/db-encryption';
+import { clearStoredDbKeys, registerDbEncryption, requestDbStartFresh } from '@/lib/db-encryption';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
@@ -34,13 +34,29 @@ const BOOTSTRAP_KEY_TIMEOUT_MS = 2000;
 // Boot-status error codes (from the server via embedded-main.ts's boot-error bridge, or from main.js
 // itself) that point at the on-device DB-encryption feature specifically — an operator hitting one of
 // these is very likely locked out because of an unopenable/undecryptable encrypted DB, so the fix is
-// "open Encryption settings and switch back to Off", not "close and reopen the app" (G2).
+// "open Encryption settings and switch back to Off", not "close and reopen the app" (G2). Kept as a
+// defensive fallback for the terminal error screen below — in the normal case these codes now arrive
+// as the non-fatal `notice` status handled by `onStatus` (see `BootNotice`/AF2), not `error`.
 const DB_ENCRYPTION_ERROR_CODES = new Set([
   'db_encryption_open_failed',
   'db_encryption_unreadable',
   'db_encryption_unavailable',
   'db_encryption_no_key',
 ]);
+
+// The one DB-encryption notice code with a dedicated recovery action (AF8/design#1, docs/01, docs/15):
+// an existing encrypted database the current key can't open. Unlike the other notice codes (which are
+// purely informational — boot degraded but continues), this one needs the operator to make an explicit
+// choice, so it gets its own persistent block (in both the non-ready and ready views) with a "Preserve
+// old database & start fresh" action, rather than just the generic dismissible notice banner.
+const DB_UNREADABLE_CODE = 'db_encryption_unreadable';
+
+/** A non-fatal boot-time notice (status `'notice'`, distinct from `'error'` — see `onStatus`). Kept in
+ * its own state, separate from `status`/`errorMessage`/`errorCode`, specifically so it SURVIVES the
+ * `ready` transition instead of being silently cleared by it (AF2/P1-4) — a downgrade to plaintext, or
+ * a fresh-started database, is exactly the kind of thing the operator must not lose sight of once the
+ * WebView is up and everything otherwise looks normal. */
+type BootNotice = { code: string; message?: string };
 
 /**
  * Build the Step-2 join URL from the host's real reported addresses, in order of how likely a joiner
@@ -73,7 +89,11 @@ function isLoamUrl(url: string | undefined): boolean {
 }
 
 type HostStatus = 'starting' | 'ready' | 'error';
-type StatusPayload = { status?: HostStatus; message?: string; code?: string };
+// `'notice'` is a THIRD status the bridge can send (main.js / embedded-main.ts's boot-error hook —
+// see the `BootNotice` comment above) that deliberately does NOT drive `HostStatus`/the screen switch:
+// it only ever updates the separate `notice` state below, so it can never regress a 'ready' host back
+// to a spinner/error screen, and — unlike 'error' before this fix — is never cleared by a later 'ready'.
+type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string };
 type HostInfoPayload = { port?: number; addresses?: string[] };
 // The subset of GET /api/bootstrap this screen reads (docs/20 — cookie-free, mints no session, so
 // it's safe to poll from the host's own WebView client before any identity exists).
@@ -86,6 +106,9 @@ type BootstrapPayload = {
 // so a remount reflects reality instead of resetting to "starting" forever.
 let nodeStarted = false;
 let nodeStatus: HostStatus = 'starting';
+// Same "survive a remount" reasoning as `nodeStatus` above, but for the persistent boot notice (AF2):
+// once set it's never cleared by a status change, only by the operator dismissing it in this render.
+let nodeNotice: BootNotice | undefined;
 
 /**
  * The LOAM Android host screen. Boots the embedded Node server on first mount, waits for its
@@ -102,6 +125,13 @@ export default function HostScreen() {
   // `DB_ENCRYPTION_ERROR_CODES` above. Used to surface the Encryption-settings action prominently when
   // the failure looks DB-encryption-related (G2), rather than making the operator guess.
   const [errorCode, setErrorCode] = useState<string | undefined>();
+  // The persistent boot notice (AF2/P1-4) — see `BootNotice`. Independent of `status`: it survives a
+  // later `ready`, and is only cleared by the operator dismissing it (`noticeDismissed`) below.
+  const [notice, setNotice] = useState<BootNotice | undefined>(() => nodeNotice);
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
+  // "Preserve old database & start fresh" (AF8/design#1) in-flight state — see `handleStartFresh`.
+  const [startFreshBusy, setStartFreshBusy] = useState(false);
+  const [startFreshMessage, setStartFreshMessage] = useState<string | undefined>();
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
   const [shareOpen, setShareOpen] = useState(false);
   // Whether the on-device LLM model manager overlay (docs/06) is open.
@@ -175,9 +205,22 @@ export default function HostScreen() {
         setStatus('ready');
         setErrorMessage(undefined);
         setErrorCode(undefined);
+        // Deliberately NOT touching `notice`/`nodeNotice` here (AF2/P1-4) — a boot notice describes a
+        // degraded DB-encryption posture that's still true once the host is up; clearing it just
+        // because the server also became ready is exactly the bug this fix removes.
         // Keep the host alive when the screen locks (docs/04). Best-effort — a device that refuses
         // the foreground service just falls back to foreground-only hosting.
         startHostService();
+      } else if (payload?.status === 'notice') {
+        // Non-fatal (main.js only ever sends this for DB-encryption boot degradations — see its
+        // `DB_ENCRYPTION_NOTICE_CODES`) — never touches `status`/`nodeStatus`, so it can't regress a
+        // 'ready' host back to a spinner/error screen, and it persists past a later 'ready' (see above).
+        if (payload.code) {
+          const next: BootNotice = { code: payload.code, message: payload.message };
+          nodeNotice = next;
+          setNotice(next);
+          setNoticeDismissed(false);
+        }
       } else if (payload?.status === 'error') {
         clearTimeout(startupTimeout);
         nodeStatus = 'error';
@@ -289,6 +332,43 @@ export default function HostScreen() {
     setErrorMessage(message);
   };
 
+  // "Preserve old database & start fresh" (AF8/design#1): ask the launcher to write the confirmation
+  // marker, then tell the operator to restart — nodejs-mobile can't restart its runtime in-process
+  // (same limitation as every other "takes effect next restart" action in this screen), so there's no
+  // in-app way to re-trigger boot after the marker lands.
+  const handleStartFresh = async () => {
+    setStartFreshBusy(true);
+    setStartFreshMessage(undefined);
+    const result = await requestDbStartFresh(nodejs.channel);
+    setStartFreshBusy(false);
+    if (!result.ok) {
+      setStartFreshMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      return;
+    }
+    setStartFreshMessage('Confirmed. Close and reopen the app to start fresh — the old database is preserved on disk.');
+    Alert.alert(
+      'Restart LOAM',
+      'The old database will be preserved on disk. Close and reopen the app now to start a fresh one.',
+    );
+  };
+
+  // Bridge from the WebView's web content (the LOAM client) back to this native screen (AF1/Sol P1-1):
+  // the client's `wipe` WS-event handler (apps/client/src/app.tsx) posts
+  // `{"type":"loam-wipe"}` via `window.ReactNativeWebView.postMessage` whenever the SERVER announces a
+  // node wipe (kill switch), so the persistent/passphrase Keystore-held key material can be rotated
+  // here rather than silently surviving to "protect" the brand-new post-wipe database. Best-effort and
+  // defensive — a malformed/foreign message is just ignored, never thrown.
+  const handleWebViewMessage = (event: { nativeEvent: { data: string } }) => {
+    try {
+      const payload = JSON.parse(event.nativeEvent.data) as { type?: unknown };
+      if (payload?.type === 'loam-wipe') {
+        void clearStoredDbKeys();
+      }
+    } catch {
+      // not a message this screen understands — ignore.
+    }
+  };
+
   if (Platform.OS !== 'android') {
     return (
       <ThemedView style={styles.center}>
@@ -334,6 +414,40 @@ export default function HostScreen() {
             </Pressable>
           </ThemedView>
         </ThemedView>
+        {/* Persistent boot notice (AF2/P1-4): rendered as a sibling ABOVE the WebView, same reasoning
+            as the top bar's comment — an overlay wouldn't receive touches. Survives 'ready' (unlike the
+            old behaviour, where this arrived as a terminal 'error' and got wiped the moment 'ready'
+            followed) and stays until the operator dismisses it. */}
+        {notice && !noticeDismissed ? (
+          <ThemedView type="backgroundSelected" style={styles.noticeBanner}>
+            <ThemedText type="small" style={styles.noticeBannerText}>
+              {notice.message ?? 'A database-encryption setting was downgraded during startup.'}
+            </ThemedText>
+            <ThemedView style={styles.noticeBannerActions}>
+              {notice.code === DB_UNREADABLE_CODE ? (
+                <Pressable
+                  onPress={() => void handleStartFresh()}
+                  disabled={startFreshBusy}
+                  accessibilityRole="button">
+                  <ThemedText type="link">
+                    {startFreshBusy ? 'Confirming…' : 'Preserve old database & start fresh'}
+                  </ThemedText>
+                </Pressable>
+              ) : null}
+              <Pressable onPress={() => setDbEncryptionOpen(true)} accessibilityRole="button">
+                <ThemedText type="link">Encryption settings</ThemedText>
+              </Pressable>
+              <Pressable onPress={() => setNoticeDismissed(true)} accessibilityRole="button" hitSlop={Spacing.two}>
+                <ThemedText type="link">Dismiss</ThemedText>
+              </Pressable>
+            </ThemedView>
+            {startFreshMessage ? (
+              <ThemedText type="small" themeColor="textSecondary">
+                {startFreshMessage}
+              </ThemedText>
+            ) : null}
+          </ThemedView>
+        ) : null}
         {webViewReady ? (
           <WebView
             ref={webViewRef}
@@ -346,6 +460,9 @@ export default function HostScreen() {
             thirdPartyCookiesEnabled
             sharedCookiesEnabled
             cacheEnabled
+            // Bridge from the LOAM web client back to this native screen (AF1/Sol P1-1) — see
+            // `handleWebViewMessage`'s comment.
+            onMessage={handleWebViewMessage}
             // Keep the WebView pinned to the embedded server's origin. originWhitelist is a coarse
             // prefix guard; onShouldStartLoadWithRequest is the real one — it allows only LOAM-origin
             // navigations and shunts external links (the client opens them with target=_blank) to the
@@ -409,6 +526,48 @@ export default function HostScreen() {
   return (
     <ThemedView style={styles.center}>
       <ThemedText type="title">LOAM host</ThemedText>
+      {/* Persistent boot notice (AF2/P1-4), shown here too so it's visible even while still "starting"
+          or on the generic timeout/error screen — independent of `status`, unlike `dbEncryptionSuspect`
+          below. `db_encryption_unreadable` specifically (AF8/design#1) gets its own explanation + the
+          "Preserve old database & start fresh" action, since the server refuses to auto-replace an
+          unreadable DB and this is the only way forward short of reinstalling. */}
+      {notice && !noticeDismissed ? (
+        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+          <ThemedText type="smallBold">
+            {notice.code === DB_UNREADABLE_CODE
+              ? "The on-device database couldn't be opened with the current key."
+              : 'A database-encryption setting was downgraded during startup.'}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            {notice.message ?? 'See Encryption settings below for details.'}
+          </ThemedText>
+          {notice.code === DB_UNREADABLE_CODE ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              The old database is never deleted automatically. Preserve it and start a fresh one below,
+              or open Encryption settings to change the mode back.
+            </ThemedText>
+          ) : null}
+          <ThemedView style={styles.noticeBannerActions}>
+            {notice.code === DB_UNREADABLE_CODE ? (
+              <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy} accessibilityRole="button">
+                <ThemedView type="backgroundElement" style={styles.retry}>
+                  <ThemedText type="link">
+                    {startFreshBusy ? 'Confirming…' : 'Preserve old database & start fresh'}
+                  </ThemedText>
+                </ThemedView>
+              </Pressable>
+            ) : null}
+            <Pressable onPress={() => setNoticeDismissed(true)} accessibilityRole="button" hitSlop={Spacing.two}>
+              <ThemedText type="link">Dismiss</ThemedText>
+            </Pressable>
+          </ThemedView>
+          {startFreshMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {startFreshMessage}
+            </ThemedText>
+          ) : null}
+        </ThemedView>
+      ) : null}
       {status === 'starting' ? (
         <>
           <ActivityIndicator size="large" style={styles.spinner} />
@@ -503,6 +662,19 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
     padding: Spacing.three,
     borderRadius: Spacing.three,
+  },
+  noticeBanner: {
+    gap: Spacing.one,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+  },
+  noticeBannerText: {
+    flexShrink: 1,
+  },
+  noticeBannerActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.three,
   },
   topBar: {
     flexDirection: 'row',
