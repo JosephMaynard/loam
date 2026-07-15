@@ -3762,12 +3762,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         //      THEN signal the launcher to clear the device key + restart.
         // If deletion is incomplete/unverifiable → stay `delete-pending`, do NOT signal, stay 503-locked;
         // the next boot's server-side resume re-runs deletion under the OLD key before serving.
-        store.close();
-
-        // Step 1: phase=delete-pending, durable, BEFORE deletion. If even this can't be written we still
-        // proceed to a synchronous delete-before-signal (below): a kill after the signal then finds no
-        // recoverable data, though the handoff won't be auto-resumable (reported distinctly).
+        // Step 1: record the durable intent (phase=delete-pending) BEFORE any destruction — including the
+        // store close. `writeWipePhase` only writes a file (it does not need the store closed), and the
+        // ordering matters: a SIGKILL/power-loss landing between "record intent" and "begin destroying"
+        // must find the intent already on disk, so the next boot re-runs the wipe rather than reopening the
+        // intact DB and forgetting it. If even this can't be written we still proceed to a synchronous
+        // delete-before-signal (below): a kill after the signal then finds no recoverable data, though the
+        // handoff won't be auto-resumable (reported distinctly).
         const phasePending = writeWipePhase("delete-pending");
+
+        // Now close the store so its files can be deleted.
+        store.close();
 
         // Step 2: fail-closed deletion + proof of absence for the FULL inventory (DB artifacts + media).
         const deletion = deleteAndVerifyAllWipeArtifacts();
@@ -3812,9 +3817,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
 
         // Data is already unrecoverable and the launcher was signaled, but the durable `key-clear-ready`
-        // phase could not be written. If the launcher's key-clear is ALSO interrupted, the next boot re-reads
-        // the phase as `delete-pending` (fail-safe) and re-verifies deletion (idempotent — all already gone)
-        // before re-requesting the key-clear, so recovery still converges. Surface a distinct notice.
+        // phase could not be written. Auto-resume convergence depends on Step 1's `delete-pending` write
+        // having landed: if `phasePending` succeeded, that file survives, so a next boot (should the
+        // launcher's key-clear ALSO be interrupted) re-reads the phase as `delete-pending` (fail-safe),
+        // re-verifies deletion (idempotent — all already gone), and re-requests the key-clear. If BOTH
+        // writes failed (e.g. a full disk), no phase file exists, `readWipePhase`→`undefined`, and there is
+        // no auto-resume — benign here (the data is already proven gone; only an unused, uncleared device
+        // key lingers), but not a guaranteed re-signal. Surface a distinct notice either way.
         const noMarkerMessage =
           "KILL SWITCH NOTICE: all data was deleted and VERIFIED gone and a device-key-clear-and-restart was " +
           "REQUESTED, but the durable `key-clear-ready` phase could not be written — if the key-clear is " +
