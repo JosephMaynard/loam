@@ -53,6 +53,7 @@ const networkConfig: NetworkConfig = {
   joinPolicy: "open",
   securityProfile: "standard",
   transportEncryption: "off",
+  dbEncryption: "off",
   locale: "en",
 };
 
