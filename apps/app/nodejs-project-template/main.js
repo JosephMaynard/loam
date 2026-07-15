@@ -701,18 +701,22 @@ function requestDbKey(timeoutMs) {
 // over the bridge and threaded through LOAM_DB_ENCRYPTION_MODE.
 var DB_MODE_HINT_PATH = path.join(dataDir, '.loam-db-mode-hint');
 
-/** Persist the last successfully-resolved mode NAME (best-effort). Refuses to write anything that isn't a
- *  known mode string, so no key-shaped value can ever land here even by a caller mistake. */
+/** Persist the last-known mode NAME. Refuses to write anything that isn't a known mode string, so no
+ *  key-shaped value can ever land here even by a caller mistake. Returns true only on a genuine write
+ *  success (P1-b, Sol round 6): the `loam-db-set-mode-hint` handler below reports that back so the RN
+ *  picker can warn when a transactional hint write failed. Existing callers ignore the return. */
 function writeDbModeHint(mode) {
   if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
-    return;
+    return false;
   }
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(DB_MODE_HINT_PATH, mode, 'utf8');
+    return true;
   } catch (err) {
     // best-effort — a missing hint only makes a future transient failure err toward locking when a secret
     // mode was previously recorded; an unwritten hint on a fresh/off node just keeps booting plaintext.
+    return false;
   }
 }
 
@@ -725,6 +729,46 @@ function readDbModeHint() {
     return undefined;
   }
 }
+
+// P1-b (Sol round 6): whether an on-disk DB file exists — the fail-closed input to the locked-error
+// plaintext decision below. `existsSync` throwing (unexpected) errs on the SAFE side: assume a DB may be
+// present, so a locked-error with an absent hint LOCKS rather than downgrades.
+function dbFileExists() {
+  try {
+    return fs.existsSync(path.join(dataDir, 'loam.db'));
+  } catch (err) {
+    return true;
+  }
+}
+
+// P1-b (Sol round 6): write the mode-NAME hint TRANSACTIONALLY with a mode SELECTION, on request from the
+// RN picker (db-encryption.ts's `setDbModeHint`), rather than only when a mode is successfully RESOLVED
+// at boot. Without this, an off→encrypted selection left the stale `off` hint (or, on a fresh encrypted
+// upgrade, NO hint) until the next successful encrypted boot — so a `requestDbKey` timeout in between
+// would trust the stale/absent hint and boot plaintext. Only the mode NAME is ever written here; the
+// payload never carries (and this file never persists) key/passphrase material.
+rnBridge.channel.on('loam-db-set-mode-hint', function (payload) {
+  var requestId = payload && payload.requestId;
+  var mode = payload && payload.mode;
+  var ok = false;
+  var error;
+  try {
+    if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
+      error = 'Unknown or missing mode.';
+    } else if (writeDbModeHint(mode)) {
+      ok = true;
+    } else {
+      error = 'Could not persist the mode hint.';
+    }
+  } catch (err) {
+    error = String((err && err.message) || err);
+  }
+  try {
+    rnBridge.channel.post('loam-db-set-mode-hint-result', { requestId: requestId, ok: ok, error: error });
+  } catch (postErr) {
+    // RN side isn't listening — nothing more to do.
+  }
+});
 
 // A marker file recording that the LAST boot ran in ephemeral mode (G4). `deleteStaleEphemeralDb`
 // below always deletes the DB when mode is 'ephemeral' — that's ephemeral's whole design, wipe-on-
@@ -923,15 +967,33 @@ function hasWipePendingMarker() {
   }
 }
 
+// P1-c (Sol round 6): delete the wipe-pending marker AND VERIFY it's actually gone, returning real
+// success/failure. The old version swallowed unlink failures, so `proceed()` (below) would boot and mint
+// a BRAND-NEW device secret while the marker silently lingered — and the NEXT boot's wipe-resume would
+// then re-clear THAT fresh secret, leaving the new database unreadable. A verified return lets `proceed()`
+// refuse to mint a new secret unless the marker is provably gone. ENOENT (already absent) counts as
+// success; any other unlink error, or the file still being present/unverifiable afterward, is a failure.
 function clearWipePendingMarker() {
   try {
     fs.unlinkSync(WIPE_PENDING_MARKER_PATH);
   } catch (err) {
-    // best-effort — ENOENT is the expected/common case once already cleared
+    if (err && err.code === 'ENOENT') {
+      return true; // already gone — nothing pending
+    }
+    return false; // a real delete failure — the marker may still be on disk
+  }
+  try {
+    return fs.existsSync(WIPE_PENDING_MARKER_PATH) === false;
+  } catch (err) {
+    return false; // couldn't verify removal — must not be reported as a clean success
   }
 }
 
-// P1-2(b): the ONLY place this marker is ever deleted — never on a bare signal, never speculatively.
+// P1-2(b): the ONLY place this marker is ever deleted — never on a bare signal, never speculatively. This
+// standalone handler covers the LIVE / no-active-resume path (a kill-switch wipe while the server is
+// already running); the resume path's `proceed()` does its own verified clear-and-decide (P1-c). A failure
+// here is not fatal on the live path: the marker simply persists, and the NEXT boot's wipe-resume re-drives
+// the clear and retries the delete.
 rnBridge.channel.on('loam-wipe-complete', function () {
   clearWipePendingMarker();
 });
@@ -997,15 +1059,27 @@ function resolveDbEncryptionAndBoot() {
         // lock a node that has no secret — that would hurt crisis-messaging availability for the common
         // case. Consult the last successfully-resolved mode hint:
         var hint = readDbModeHint();
-        if (hint === undefined || hint === 'off') {
-          // No secret was ever configured (fresh node → no hint) or the last-known mode was plaintext
-          // 'off'. A transient key-request failure must NOT lock a node with nothing to encrypt — boot
-          // plaintext, exactly like a genuine 'off' reply. The hint is left untouched — this FAILED
-          // resolution is not authoritative enough to write one (only a real reply from RN is).
+        var dbExists = dbFileExists();
+        // P1-b (Sol round 6): MIRROR of `mayBootPlaintextOnLockedError(hint, dbExists)` in
+        // apps/app/src/lib/db-encryption.ts (harness-tested there; this CJS file can't import the TS
+        // module, so the two copies are kept in sync by hand). Authorize a plaintext boot ONLY when the
+        // last-known mode was explicitly 'off', OR no DB file exists at all (a fresh node with nothing to
+        // protect). An ABSENT/unreadable/ENCRYPTED-mode hint with a DB PRESENT now LOCKS — it must never
+        // silently downgrade an encrypted node on a transient failure. This closes two holes the old
+        // `hint === undefined || hint === 'off'` check left open: (1) an existing encrypted install
+        // upgrading has no hint yet, and (2) an off→encrypted selection whose transactional hint write
+        // was lost still had a stale 'off' — both would otherwise boot plaintext over an encrypted DB.
+        if (hint === 'off' || dbExists === false) {
+          // No secret to protect: the last-known mode was plaintext 'off', or there's no database file at
+          // all. A transient key-request failure must NOT lock such a node — boot plaintext, exactly like
+          // a genuine 'off' reply. The hint is left untouched — this FAILED resolution is not
+          // authoritative enough to write one (only a real reply from RN is).
           console.warn(
-            'Could not determine the on-device encryption mode this boot; the last-known mode is ' +
-              (hint === undefined ? 'unset' : "'off'") +
-              ' — booting plaintext (no secret to protect). Availability over a transient lock (RF-c).',
+            'Could not determine the on-device encryption mode this boot; last-known mode ' +
+              (hint === undefined ? 'unset' : "'" + hint + "'") +
+              ', DB file ' +
+              (dbExists ? 'present' : 'absent') +
+              ' — booting plaintext (no secret to protect). Availability over a transient lock (RF-c/P1-b).',
           );
           process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
           process.env.LOAM_DB_DRIVER = 'better-sqlite3';
@@ -1013,10 +1087,10 @@ function resolveDbEncryptionAndBoot() {
           clearEphemeralMarker();
           return 'proceed';
         }
-        // The last-known mode was secret-based (persistent/passphrase/ephemeral) — do NOT silently
-        // downgrade to plaintext on a transient failure. Stay locked, exactly like the "no usable key"
-        // case below — `index.tsx` shows the same Retry recovery (`loam-db-unlock`), which re-runs this
-        // function once the app is responsive.
+        // A DB file exists and the hint is absent/unreadable or a secret-based mode (persistent/
+        // passphrase/ephemeral) — do NOT silently downgrade to plaintext on a transient failure. Stay
+        // locked, exactly like the "no usable key" case below — `index.tsx` shows the same Retry recovery
+        // (`loam-db-unlock`), which re-runs this function once the app is responsive.
         global.__loamReportBootError(
           'Could not determine the on-device encryption mode this boot (a device security-store read ' +
             'failed, the request timed out, or the response was malformed) — refusing to start ' +
@@ -1238,6 +1312,24 @@ function bootWithWipeResume() {
       proceeded = true;
       clearTimeout(timer);
       rnBridge.channel.removeListener('loam-wipe-complete', proceed);
+      // P1-c (Sol round 6): RN only posts `loam-wipe-complete` after `clearStoredDbKeys` VERIFIED the
+      // device secret is gone — but we must ALSO confirm OUR OWN wipe-pending marker is actually deleted
+      // before booting. If the marker delete failed, booting now would mint a fresh device secret while
+      // the marker lingers, and the NEXT boot's wipe-resume would clear THAT fresh secret and brick the
+      // new DB. So on a marker-cleanup failure, do NOT resolve a key / mint a secret: leave the marker in
+      // place and surface a distinct "reopen to finish" state. Reopening re-drives the resume — RN
+      // re-clears the already-gone key idempotently (destroying no fresh secret, because we never minted
+      // one) and the marker delete is retried — so recovery completes without data loss.
+      if (clearWipePendingMarker() !== true) {
+        notify('error', {
+          message:
+            'The security reset cleared the encryption key, but a cleanup step is still pending — reopen ' +
+            'the app to finish it. The database was not reopened.',
+          code: 'db_encryption_locked',
+        });
+        resolve('locked');
+        return;
+      }
       resolve(resolveDbEncryptionAndBoot());
     }
 

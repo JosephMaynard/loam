@@ -20,13 +20,21 @@ vi.mock("expo-crypto", () => cryptoMock);
 const {
   DB_ENCRYPTION_MODE_READ_ERROR,
   getDbEncryptionMode,
+  hasStoredPassphrase,
   markPassphraseKeyMigrated,
+  mayBootPlaintextOnLockedError,
+  pickerModeAfterWrite,
   registerDbEncryption,
   resolveDbKey,
   setDbEncryptionMode,
+  setDbModeHint,
+  setPassphraseCandidate,
   setStoredPassphrase,
 } = await import("@/lib/db-encryption");
 type BridgeChannel = import("@/lib/db-encryption").BridgeChannel;
+
+const PASSPHRASE_ITEM = "loam-db-encryption-passphrase";
+const PASSPHRASE_CANDIDATE_ITEM = "loam-db-encryption-passphrase-candidate";
 
 function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
@@ -224,5 +232,122 @@ describe("registerDbEncryption", () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe("mayBootPlaintextOnLockedError (P1-b, Sol round 6)", () => {
+  it("an existing encrypted install upgrading (no hint yet) with a DB present → LOCK (false)", () => {
+    expect(mayBootPlaintextOnLockedError(undefined, true)).toBe(false);
+  });
+
+  it("off→encrypted (hint now an encrypted mode) with a DB present + timeout → LOCK (false)", () => {
+    expect(mayBootPlaintextOnLockedError("persistent", true)).toBe(false);
+    expect(mayBootPlaintextOnLockedError("passphrase", true)).toBe(false);
+    expect(mayBootPlaintextOnLockedError("ephemeral", true)).toBe(false);
+  });
+
+  it("a fresh node with no DB file at all + timeout → plaintext is safe (true)", () => {
+    expect(mayBootPlaintextOnLockedError(undefined, false)).toBe(true);
+    // Even an encrypted hint can't strand data when there is no database to protect.
+    expect(mayBootPlaintextOnLockedError("persistent", false)).toBe(true);
+  });
+
+  it("an explicit 'off' hint authorizes plaintext regardless of whether a DB exists (true)", () => {
+    expect(mayBootPlaintextOnLockedError("off", true)).toBe(true);
+    expect(mayBootPlaintextOnLockedError("off", false)).toBe(true);
+  });
+});
+
+describe("pickerModeAfterWrite (P2-c, Sol round 6)", () => {
+  it("shows the requested mode only after a successful write", () => {
+    expect(pickerModeAfterWrite("off", "persistent", true)).toBe("persistent");
+  });
+
+  it("keeps the previous mode when the write failed (radio must not show an unapplied mode)", () => {
+    expect(pickerModeAfterWrite("off", "persistent", false)).toBe("off");
+  });
+});
+
+describe("setDbModeHint (P1-b, Sol round 6)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("posts a loam-db-set-mode-hint carrying the mode NAME and resolves ok on a matching result", async () => {
+    const channel = makeFakeChannel();
+    const promise = setDbModeHint(channel, "persistent");
+
+    const request = channel.posted.find((p) => p.name === "loam-db-set-mode-hint");
+    expect(request).toBeTruthy();
+    const payload = request!.payload as { requestId: string; mode: string };
+    expect(payload.mode).toBe("persistent");
+    expect(typeof payload.requestId).toBe("string");
+
+    channel.emit("loam-db-set-mode-hint-result", { requestId: payload.requestId, ok: true });
+    await expect(promise).resolves.toEqual({ ok: true });
+  });
+
+  it("resolves ok:false on a timeout (host never answered)", async () => {
+    const channel = makeFakeChannel();
+    const result = await setDbModeHint(channel, "off", 5);
+    expect(result.ok).toBe(false);
+  });
+
+  it("ignores a result for a different requestId", async () => {
+    const channel = makeFakeChannel();
+    const promise = setDbModeHint(channel, "passphrase", 50);
+    channel.emit("loam-db-set-mode-hint-result", { requestId: "not-mine", ok: true });
+    // Still pending → falls through to the timeout as ok:false.
+    await expect(promise).resolves.toEqual({ ok: false, error: expect.any(String) });
+  });
+});
+
+describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("setPassphraseCandidate does NOT commit the passphrase (hasStoredPassphrase stays false)", async () => {
+    await setPassphraseCandidate("a-guess");
+    expect(await hasStoredPassphrase()).toBe(false);
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+  });
+
+  it("resolveDbKey('passphrase') falls back to the candidate when nothing is committed", async () => {
+    await setPassphraseCandidate("a-guess");
+    const { key: deviceSecret } = await resolveDbKey("persistent");
+    const { key } = await resolveDbKey("passphrase");
+    expect(key).toBe(sha256Hex(`a-guess:${deviceSecret}`));
+  });
+
+  it("a committed passphrase takes precedence over a leftover candidate", async () => {
+    await setStoredPassphrase("committed");
+    await setPassphraseCandidate("stale-guess");
+    const { key: deviceSecret } = await resolveDbKey("persistent");
+    const { key } = await resolveDbKey("passphrase");
+    expect(key).toBe(sha256Hex(`committed:${deviceSecret}`));
+  });
+
+  it("markPassphraseKeyMigrated PROMOTES a verified candidate to the committed passphrase and clears it", async () => {
+    await setPassphraseCandidate("verified-guess");
+    // Simulate main.js resolving the key from the candidate, then the server confirming the DB opened.
+    await resolveDbKey("passphrase");
+    await markPassphraseKeyMigrated();
+
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("verified-guess");
+    expect(await hasStoredPassphrase()).toBe(true);
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+  });
+
+  it("markPassphraseKeyMigrated never CLOBBERS a committed passphrase with a stale candidate", async () => {
+    await setStoredPassphrase("correct");
+    await setPassphraseCandidate("wrong-leftover");
+    await markPassphraseKeyMigrated();
+
+    // The committed passphrase that actually opened the DB is preserved; the stale candidate is dropped.
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("correct");
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
   });
 });
