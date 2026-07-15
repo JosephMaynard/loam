@@ -57,15 +57,37 @@ silently drift when npm/GitHub move (all set at the top of `build-mc-android-arm
 | `better-sqlite3-multiple-ciphers` (source) | `12.11.1` (npm) | Supplies the MC amalgamation + JS wrapper. |
 | nodejs-mobile Node / ABI | `18.20.4` / ABI `108` | The target runtime. Not passed to cmake by the script — it's the default baked into the pinned `cmake-napi` commit (`download_node_headers`), so the script **asserts** the fork's default equals `NODE_VERSION` and aborts if a future `cmake-napi` bump retargets a different Node. |
 | `cmake-napi` | `github:digidem/cmake-napi-nodejs-mobile#0e344601443a11c636c39d1e19a11d6e5f871a35` | digidem's fork that fetches nodejs-mobile headers/libnode. Pinned to a commit (was an unpinned branch). |
-| `cmake-bare` | `1.8.0` (npm) | |
-| `cmake-fetch` | `1.5.2` (npm) | |
-| `bare-make` | `1.8.0` (npm) | Was `@latest`. |
-| Android NDK | `27.x` (`27.1.12297006`) | 16KB page-size alignment + `android-24` platform pin. |
+| `cmake-bare` | `1.8.0` (npm) | Installed **locally** (`--save-exact`). |
+| `cmake-fetch` | `1.5.2` (npm) | Installed **locally** (`--save-exact`). |
+| `bare-make` | `1.8.0` (npm) | Was a global `@latest`; now a **local** exact-pinned install invoked by its resolved `node_modules/.bin/bare-make` path (never a bare `npx bare-make`). |
+| Android NDK | `27.1.12297006` (asserted) | The script **asserts** `$ANDROID_NDK_HOME/source.properties` matches this revision (a `27.1.*` patch WARNs and proceeds; anything else aborts). 16KB page-size alignment + `android-24` platform pin. |
+| host cmake | `>= 3.25` (asserted) | The script **asserts** `cmake --version` meets this minimum and aborts otherwise. |
 
 **To update a pin:** change the exact version / SHA at the top of `build-mc-android-arm64.sh`,
 re-run it, and update `MC_PREBUILD_SHA256` (+ this file's checksum) to the value the script prints.
 Current npm "latest" for the cmake tooling and the digidem fork's current `main` HEAD were resolved
 when these pins were set; bump deliberately, not automatically.
+
+### What is NOT pinned (the honest residual)
+
+The claim "every build input is pinned" would be too strong, so here is the accurate accounting:
+
+- **Direct** inputs above are exact-pinned (npm version or commit SHA) and installed **locally** —
+  no global/`@latest` install remains.
+- **Transitive** dependencies are **not** lockfile-pinned: the `npm install` of the MC package's own
+  deps and of the cmake tooling resolve their transitive graph fresh, and there is **no committed
+  `package-lock.json`** in this directory, so those can drift within semver. Committing a
+  `package-lock.json` and installing via `npm ci` is the robust follow-up; it was left out here to
+  keep the recipe self-contained.
+- The **host toolchain** (cmake / binutils / bash) is the caller's, **except** the NDK revision and
+  the cmake minimum, which the script now **asserts up front** and aborts on mismatch — so a
+  caller-supplied wrong NDK/CMake is caught, not silently used.
+- The raw `.node` is **not** byte-identical across machines regardless (embedded build-id).
+
+Why this residual is acceptable: bit-for-bit reproducibility is neither achievable nor the authority
+here. The authority is (1) the **sha256 pin** on the committed tarball and (2) the **hard ABI/symbol
+gate** in step 6 of the build script (below) — any transitive drift that changed the binary's shape
+would fail that gate.
 
 ## Reproducibility — what a rebuild reproduces (and what it doesn't)
 
@@ -81,19 +103,33 @@ Consequently:
   artifact — `fetch:native` installs *that exact file* and nothing else. It is a supply-chain
   integrity check on the committed binary, **not** a claim that a rebuild will hash-match.
 - A rebuilder verifies an independently built `.node` by comparing its **ABI/symbol shape** to the
-  vendored one, not its hash. `build-mc-android-arm64.sh`'s final step runs `readelf` on the fresh
-  binary (ELF64 / AArch64 / DYN header + the `napi_register_module_v1` N-API entry symbol); compare
-  that against the same `readelf` output for the committed tarball's `.node`.
+  vendored one, not its hash. `build-mc-android-arm64.sh`'s final step runs a **hard ABI/symbol gate**
+  (step 6) via `readelf`/`llvm-readelf` that **exits non-zero unless every** assertion holds — no
+  `|| true`, no print-and-succeed. It asserts:
+  - ELF header is **ELF64 / AArch64 / DYN** (shared object);
+  - the **Node ABI entry symbol `node_register_module_v108`** is DEFINED — this is the ABI-108 /
+    Node-18 lock. (This binary is a **Node/V8 ABI addon, not N-API**; earlier revisions of this recipe
+    wrongly checked for `napi_register_module_v1`, which this module does **not** export, so the check
+    could never fail. That was Sol round-8 finding P2-2 and is now fixed.)
+  - the MultipleCiphers/SQLCipher encryption exports `sqlite3_key`, `sqlite3_rekey`, `sqlite3mc_config`
+    are DEFINED (plus `sqlite3_key_v2` / `sqlite3mc_config_cipher` when present);
+  - the dynamic `NEEDED` set is the minimal expected `libnode.so` / `libm.so` / `libdl.so` / `libc.so`
+    with **no external crypto library** (`libssl`/`libcrypto`/…) — MC uses its bundled cipher.
+
+  Run the same gate against the committed tarball's `.node` to confirm the vendored artifact still
+  matches this shape.
 
 ## How it was built
 
-Run `./build-mc-android-arm64.sh` (requires host Node 20+, Android NDK 27.x, cmake, and `readelf`
-from binutils). It mirrors `digidem/better-sqlite3-nodejs-mobile`'s recipe — cross-compiling against
-nodejs-mobile's Node 18 headers with the Android NDK — but swaps the plain SQLite amalgamation for
-the SQLite3MultipleCiphers amalgamation that the `better-sqlite3-multiple-ciphers` npm package
-vendors. Its final steps package the built `.node` into the exact tarball name above, `readelf`-verify
-its ABI/symbol shape, and print its sha256 for comparison against the pin. See the cross-compile
-recipe in `docs/01-sqlite-migration.md` for the full rationale.
+Run `./build-mc-android-arm64.sh` (requires host Node 20+, Android NDK `27.1.12297006` and host
+cmake `>= 3.25` — both **asserted** at the top of the script — plus `llvm-readelf`, which ships inside
+the NDK toolchain; the gate prefers that and falls back to a PATH `llvm-readelf`/`readelf`). It mirrors
+`digidem/better-sqlite3-nodejs-mobile`'s recipe — cross-compiling against nodejs-mobile's Node 18
+headers with the Android NDK — but swaps the plain SQLite amalgamation for the SQLite3MultipleCiphers
+amalgamation that the `better-sqlite3-multiple-ciphers` npm package vendors. Its final steps package
+the built `.node` into the exact tarball name above, run the **hard ABI/symbol gate** on it (exiting
+non-zero — and refusing to publish — on any mismatch), and print its sha256 for comparison against the
+pin. See the cross-compile recipe in `docs/01-sqlite-migration.md` for the full rationale.
 
 ## Why vendored (not a hosted pin)
 
@@ -111,10 +147,12 @@ tarball (as the plain driver already does) and retire this vendored copy.
 Two separate things must hold, and only one is proven today:
 
 1. **The native binary is a correct ABI-108 aarch64 module** — proven as **build evidence**: it's a
-   valid ELF64 / AArch64 shared object at Node ABI 108 (verified via `readelf`, and byte-comparable
-   in ELF characteristics to the known-good plain prebuild), so the APK ships the exact vendored
-   binary with the right symbols and it will *load* on nodejs-mobile's Node 18. This is a statement
-   about the compiled artifact, **not** about runtime behaviour.
+   valid ELF64 / AArch64 shared object at Node ABI 108 (now enforced by the hard ABI/symbol gate —
+   `node_register_module_v108` + the MC encryption exports + a clean `NEEDED` set), so the APK ships
+   the exact vendored binary with the right symbols and it will *load* on nodejs-mobile's Node 18.
+   This is a statement about the compiled artifact, **not** about runtime behaviour. The gate is now
+   fail-closed rather than advisory, but **build inspection still cannot replace the device runtime
+   gate below** — proving the binary is shaped correctly is not proving it runs correctly.
 
 2. **The JS wrapper + runtime path actually works on Node 18 — NOT yet proven; this is the release
    gate.** `better-sqlite3-multiple-ciphers@12.11.1`'s `package.json` declares
