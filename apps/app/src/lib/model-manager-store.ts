@@ -25,42 +25,85 @@ export type ModelManagerState = {
 };
 
 const STATE_PATH = `${FileSystem.documentDirectory}loam-model-manager.json`;
+/** Backup slot used by `saveModelManagerState`'s two-slot scheme (P2-1 round-3 fix) — see there. */
+const BAK_PATH = `${STATE_PATH}.bak`;
 
 const EMPTY_STATE: ModelManagerState = { downloaded: [] };
 
-/** Load the persisted manager state. Never throws — a missing/corrupt file just yields empty state. */
+/**
+ * Load the persisted manager state. Never throws. Falls back from `STATE_PATH` to the `.bak` backup
+ * slot (P2-1 round-3 fix) when the primary file is missing or unparsable — `saveModelManagerState`
+ * guarantees ONE of the two always holds a complete, valid file, so only genuinely never having saved
+ * successfully at all yields `EMPTY_STATE`.
+ */
 export async function loadModelManagerState(): Promise<ModelManagerState> {
+  const primary = await tryReadState(STATE_PATH);
+  if (primary) {
+    return primary;
+  }
+  const backup = await tryReadState(BAK_PATH);
+  return backup ?? EMPTY_STATE;
+}
+
+async function tryReadState(path: string): Promise<ModelManagerState | undefined> {
   try {
-    const info = await FileSystem.getInfoAsync(STATE_PATH);
+    const info = await FileSystem.getInfoAsync(path);
     if (!info.exists) {
-      return EMPTY_STATE;
+      return undefined;
     }
-    const raw = await FileSystem.readAsStringAsync(STATE_PATH);
+    const raw = await FileSystem.readAsStringAsync(path);
     return normalizeState(JSON.parse(raw));
   } catch {
-    return EMPTY_STATE;
+    return undefined;
   }
 }
 
 /**
- * Persist the manager state ATOMICALLY (P2-4): write to a temp file, delete any stale destination,
- * then move the temp file into place. `expo-file-system/legacy` has no single atomic-rename primitive
- * that's guaranteed to overwrite an existing destination on every platform, so this composes
- * `writeAsStringAsync` (into a throwaway temp path) + `deleteAsync` + `moveAsync` — from any reader's
- * perspective (`loadModelManagerState` above) `STATE_PATH` is always either the complete OLD file or
- * the complete NEW one, never a partial write from a crash/kill mid-write.
+ * Persist the manager state RECOVERABLY (P2-1 round-3 fix). `expo-file-system/legacy` has no single
+ * primitive on this SDK that atomically overwrites an existing destination on every platform
+ * (`moveAsync` can fail when the target already exists), so the PREVIOUS version of this function
+ * wrote a temp file, then DELETED `STATE_PATH`, then moved the temp file into place — which has a
+ * window, between the delete and the move, where NEITHER the old nor the new file exists. A
+ * crash/kill/move-failure landing in that window left `loadModelManagerState` finding nothing and
+ * silently returning `EMPTY_STATE`: real data loss (every downloaded model "disappearing"), directly
+ * contradicting the "readers always see old or new complete file" guarantee that version's comment
+ * claimed.
  *
- * Returns whether the write actually landed. Unlike the old best-effort-and-swallow version, callers
- * MUST check this (see `mutateModelManagerState` below) — silently reporting success on a failed
- * persist is exactly the kind of bug that made P2-4 possible in the first place (an operator sees
- * "model set active" when the change never made it to disk).
+ * This version uses a two-slot backup scheme instead: write the new content to a temp file, move the
+ * CURRENT `STATE_PATH` (if one exists) to the `.bak` slot, move the temp file into `STATE_PATH`, then
+ * delete `.bak` only once the new file is confirmed in place. At every point in that sequence, EITHER
+ * `STATE_PATH` or `BAK_PATH` (often both) holds a complete file — `loadModelManagerState` above falls
+ * back to `.bak` whenever `STATE_PATH` is missing or fails to parse. So the real guarantee this
+ * provides is: a reader always sees either the fully-new state or the last state that was fully
+ * persisted before this call — never nothing, regardless of where a crash/kill lands.
+ *
+ * Returns whether the write actually landed. Callers MUST check this (see `mutateModelManagerState`
+ * below) — silently reporting success on a failed persist is exactly the kind of bug that made P2-4
+ * possible in the first place (an operator sees "model set active" when the change never made it to
+ * disk).
  */
 export async function saveModelManagerState(state: ModelManagerState): Promise<boolean> {
   const tmpPath = `${STATE_PATH}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await FileSystem.writeAsStringAsync(tmpPath, JSON.stringify(state));
-    await FileSystem.deleteAsync(STATE_PATH, { idempotent: true });
+
+    const existing = await FileSystem.getInfoAsync(STATE_PATH);
+    if (existing.exists) {
+      // Back up the CURRENT state before touching it. If the process dies anywhere from here through
+      // the next move, `STATE_PATH` may be briefly absent, but `.bak` already holds the complete old
+      // file, so `loadModelManagerState` never comes up empty.
+      await FileSystem.deleteAsync(BAK_PATH, { idempotent: true });
+      await FileSystem.moveAsync({ from: STATE_PATH, to: BAK_PATH });
+    }
+
+    // `STATE_PATH` is now guaranteed absent (either just backed up, or never existed), so this move
+    // has nothing to overwrite and can't hit the same "destination already exists" failure mode the
+    // old delete-then-move dance was working around.
     await FileSystem.moveAsync({ from: tmpPath, to: STATE_PATH });
+
+    // Best-effort cleanup — `.bak` is only ever consulted when `STATE_PATH` is missing/corrupt, so a
+    // failure here doesn't change the return value or leave the state file itself inconsistent.
+    await FileSystem.deleteAsync(BAK_PATH, { idempotent: true }).catch(() => undefined);
     return true;
   } catch {
     await FileSystem.deleteAsync(tmpPath, { idempotent: true }).catch(() => undefined);

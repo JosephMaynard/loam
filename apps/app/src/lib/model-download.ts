@@ -91,6 +91,16 @@ function isWithinModelsDir(uri: string): boolean {
  *
  * Either a fresh `createDownloadResumable` failure or a failed verification deletes the partial/bad
  * file before returning, so a rejected download never leaves junk behind.
+ *
+ * `signal` (optional) makes both phases CANCELLABLE (Sol's hash-performance/device-gate note): abort
+ * it to stop an in-flight download outright, or to break out of the streaming hash loop between
+ * chunks. Either way the outcome is treated exactly like a checksum mismatch — fail closed, delete
+ * whatever bytes are on disk, return `ok: false` — so a cancel (e.g. the app being backgrounded mid-
+ * verify, see `model-manager.tsx`) can never leave a partially-hashed file registered as valid. A hard
+ * process kill has no JS-level hook at all; that case is instead made safe by construction, since
+ * `model-manager.tsx` only ever registers a model in `model-manager-store.json` AFTER this function
+ * returns `ok: true` — a killed-mid-verify run leaves an unregistered orphan file, never a
+ * "half-registered" one (see `sweepOrphanedModelFiles` below, which cleans those up on next launch).
  */
 export async function downloadModel(
   url: string,
@@ -99,25 +109,39 @@ export async function downloadModel(
   expectedSha256: string | undefined,
   onProgress: DownloadProgressCallback,
   onHashProgress?: HashProgressCallback,
+  signal?: AbortSignal,
 ): Promise<DownloadOutcome> {
   await ensureModelsDir();
   const destUri = `${MODELS_DIR}${fileName}`;
   if (!isWithinModelsDir(destUri)) {
     return { ok: false, error: 'Refusing to download: the resolved file name would escape the models directory.' };
   }
+  if (signal?.aborted) {
+    return { ok: false, error: 'Cancelled before the download started.' };
+  }
 
   const resumable = FileSystem.createDownloadResumable(url, destUri, {}, (data) => {
     onProgress(data.totalBytesWritten, data.totalBytesExpectedToWrite);
   });
 
+  // Wire cancellation into the download phase: `resumable.downloadAsync()` otherwise has no way to
+  // be interrupted early. `cancelAsync` makes `downloadAsync()` resolve with a falsy/undefined
+  // result (handled by the `!result` branch below), same as any other cancellation.
+  const onAbort = () => {
+    resumable.cancelAsync().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', onAbort);
+
   let result: Awaited<ReturnType<typeof resumable.downloadAsync>>;
   try {
     result = await resumable.downloadAsync();
   } catch (error) {
+    signal?.removeEventListener('abort', onAbort);
     await safeDelete(destUri);
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  if (!result) {
+  signal?.removeEventListener('abort', onAbort);
+  if (!result || signal?.aborted) {
     await safeDelete(destUri);
     return { ok: false, error: 'The download was cancelled.' };
   }
@@ -146,10 +170,12 @@ export async function downloadModel(
   if (expectedSha256) {
     // FAIL CLOSED (P2-4/AF7): `expectedSha256` only ever arrives here for a curated catalog entry
     // (see this function's doc comment) — a mismatch OR a hashing failure both delete the file and
-    // reject the download, never a silent fall-through to "the size check already passed".
+    // reject the download, never a silent fall-through to "the size check already passed". A cancel
+    // via `signal` takes this same path (`verifySha256Streaming` returns `false` rather than throwing
+    // when aborted, but it's handled identically either way).
     let hashOk: boolean;
     try {
-      hashOk = await verifySha256Streaming(destUri, expectedSha256, sizeBytes, onHashProgress);
+      hashOk = await verifySha256Streaming(destUri, expectedSha256, sizeBytes, onHashProgress, signal);
     } catch {
       hashOk = false;
     }
@@ -157,12 +183,47 @@ export async function downloadModel(
       await safeDelete(destUri);
       return {
         ok: false,
-        error: 'SHA-256 checksum did not match (or could not be verified) — the file was deleted.',
+        error:
+          signal?.aborted
+            ? 'Verification was cancelled — the partial file was deleted.'
+            : 'SHA-256 checksum did not match (or could not be verified) — the file was deleted.',
       };
     }
   }
 
   return { ok: true, uri: destUri, sizeBytes };
+}
+
+/**
+ * Delete any `.gguf` file inside `MODELS_DIR` that isn't referenced by `referencedUris`. Cleans up an
+ * orphan left by a download that finished writing bytes but was never registered in
+ * `model-manager-store.json` — most notably a real process kill mid-verify, which (unlike an
+ * in-app-JS abort via `signal` above) has no hook this module can observe. Because registration only
+ * ever happens AFTER `downloadModel` returns `ok: true`, such an orphan is by construction wasted
+ * storage, never a "half-registered" model — this just reclaims the space. Best-effort: `model-
+ * manager.tsx` is expected to call this once per process lifetime (not mid-download — see its call
+ * site), and any failure here is swallowed, since this is opportunistic cleanup, not a correctness
+ * requirement.
+ */
+export async function sweepOrphanedModelFiles(referencedUris: readonly string[]): Promise<void> {
+  try {
+    const info = await FileSystem.getInfoAsync(MODELS_DIR);
+    if (!info.exists) {
+      return;
+    }
+    const referenced = new Set(referencedUris);
+    const entries = await FileSystem.readDirectoryAsync(MODELS_DIR);
+    await Promise.all(
+      entries.map(async (name) => {
+        const uri = `${MODELS_DIR}${name}`;
+        if (!referenced.has(uri)) {
+          await safeDelete(uri);
+        }
+      }),
+    );
+  } catch {
+    // best-effort
+  }
 }
 
 export async function deleteModelFile(uri: string): Promise<void> {
@@ -188,18 +249,39 @@ async function safeDelete(uri: string): Promise<void> {
 const HASH_CHUNK_BYTES = 8 * 1024 * 1024; // 8MB per chunk — small enough to keep peak memory low,
 // large enough that a multi-GB file doesn't need thousands of round trips through the bridge.
 
-/** Stream-hash `uri` and compare against `expectedHex`. Throws on any I/O error (deliberately — see
- * `downloadModel`'s FAIL CLOSED handling above; this function does NOT swallow errors into a
- * `false`/`undefined` return the way the old best-effort version did). */
+/** Stream-hash `uri` and compare against `expectedHex`. Throws on I/O error (deliberately — see
+ * `downloadModel`'s FAIL CLOSED handling above; this function does NOT swallow I/O errors into a
+ * `false`/`undefined` return the way the old best-effort version did). Returns `false` (not a throw)
+ * when `signal` is aborted mid-loop — cancellation isn't an error, but `downloadModel` treats the two
+ * identically (fail closed either way).
+ *
+ * DEVICE-VERIFY GATE (Sol, round 3 — not resolved by this change, just made as cheap as reasonable
+ * without a native hash): the largest catalog entry is a 4.5GB GGUF, which means ~6GB of base64 text
+ * streamed through this loop across ~560 sequential 8MB reads. `base64ToBytes` below is the one part
+ * of that loop worth hand-optimizing in JS (see its own comment); the fundamentally expensive part —
+ * SHA-256 over multiple GB in RN's JS thread via `js-sha256`, with no native accelerator — is not
+ * something this file can fix, only bound (chunking keeps peak memory to ~2 chunks' worth regardless
+ * of file size, and `signal` lets the caller cut it short). This MUST be benchmarked on a
+ * representative mid-range Android device before the 4.5GB entry is considered production-ready:
+ * wall-clock verify duration, UI responsiveness/ANR risk while it runs, peak memory, that cancellation
+ * actually stops it promptly, and that the app survives foreground the whole time. None of that has
+ * been measured on real hardware — this codebase has no device to run it on. */
 async function verifySha256Streaming(
   uri: string,
   expectedHex: string,
   sizeBytes: number,
   onProgress?: HashProgressCallback,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const hasher = sha256.create();
   let position = 0;
   while (position < sizeBytes) {
+    if (signal?.aborted) {
+      // Cancelled mid-verify (e.g. the app was backgrounded — see model-manager.tsx): stop hashing
+      // immediately rather than burning battery/CPU on a result nobody will accept, and let the
+      // caller's fail-closed path delete the partial file.
+      return false;
+    }
     const length = Math.min(HASH_CHUNK_BYTES, sizeBytes - position);
     // Deliberately sequential (not Promise.all'd) — the whole point is one chunk in memory at a time.
     const base64Chunk = await FileSystem.readAsStringAsync(uri, {
@@ -216,16 +298,32 @@ async function verifySha256Streaming(
 
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-/** Manual base64 → bytes decoder (avoids relying on `atob`, which isn't guaranteed under Hermes). */
+// Precomputed char-code -> 6-bit value lookup, built once at module load. `base64ToBytes` runs over
+// ~6GB of base64 text for the largest catalog entry (across ~8MB-base64-string chunks) — an
+// `indexOf` scan of a 64-char string per input character, PLUS a separate `.replace(/regex/)` pass to
+// strip non-alphabet characters first (the old approach), is two extra full passes over that much
+// text for no algorithmic reason. A flat lookup table turns each character into an O(1) array read,
+// and folding the "skip non-alphabet characters" check into the same loop removes the `.replace` pass
+// entirely — one pass over the string instead of three.
+const BASE64_LOOKUP = new Int16Array(128).fill(-1);
+for (let i = 0; i < BASE64_CHARS.length; i += 1) {
+  BASE64_LOOKUP[BASE64_CHARS.charCodeAt(i)] = i;
+}
+
+/** Manual base64 → bytes decoder (avoids relying on `atob`, which isn't guaranteed under Hermes).
+ * Single pass over `base64` via the lookup table above rather than a `.replace()` pre-pass followed by
+ * a per-character `.indexOf()` scan — see the table's comment for why that matters at this scale. */
 function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
-  const clean = base64.replace(/[^A-Za-z0-9+/]/g, '');
-  const byteLength = Math.floor((clean.length * 6) / 8);
-  const bytes = new Uint8Array(byteLength);
+  // Sized off the raw (unfiltered) length, same upper bound the old `clean.length`-based sizing used
+  // (padding/skipped characters only make this a slight overestimate); trimmed to the real length
+  // below via `subarray`, which is a view, not a copy.
+  const bytes = new Uint8Array(Math.floor((base64.length * 6) / 8));
   let bitBuffer = 0;
   let bitCount = 0;
   let byteIndex = 0;
-  for (let i = 0; i < clean.length; i += 1) {
-    const value = BASE64_CHARS.indexOf(clean[i]);
+  for (let i = 0; i < base64.length; i += 1) {
+    const code = base64.charCodeAt(i);
+    const value = code < 128 ? BASE64_LOOKUP[code] : -1;
     if (value === -1) {
       continue;
     }
@@ -237,5 +335,5 @@ function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
       byteIndex += 1;
     }
   }
-  return bytes;
+  return byteIndex === bytes.length ? bytes : bytes.subarray(0, byteIndex);
 }
