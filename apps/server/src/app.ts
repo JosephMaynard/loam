@@ -1318,33 +1318,43 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    // Step 0b (RF-b, adversarial review): resume an interrupted rekey-migration. The migration branch
-    // below rekeys the live DB in place (SQLCipher `PRAGMA rekey`), which is NOT crash-atomic — an OS-kill
-    // mid-rekey can leave `loam.db` openable under NEITHER the legacy key nor the current one, destroying
-    // pre-round-4 passphrase data. To make that recoverable, the migration branch first copies the intact
-    // legacy-encrypted files to `*.premigration` sidecars and deletes them only on rekey SUCCESS. So a
-    // `loam.db.premigration` present HERE means an earlier migration was interrupted before it finished:
-    // restore the intact originals over the (possibly half-rekeyed) live files, so this boot sees the
-    // legacy DB again and the migration retries cleanly. Best-effort — if the restore itself fails, the
-    // normal open + recovery chain below still runs (no worse than before). Sidecars hold ciphertext, not
-    // the key.
-    if (existsSync(`${dbPath}.premigration`)) {
+    // Step 0b (P1-a, Sol round 6): resume an interrupted rekey-migration, CRASH-ATOMICALLY. The migration
+    // branch below rekeys the live DB in place (SQLCipher `PRAGMA rekey`), which is NOT crash-atomic — an
+    // OS-kill mid-rekey can leave `loam.db` openable under NEITHER the legacy key nor the current one,
+    // destroying pre-round-4 passphrase data. To make that recoverable the migration first COMMITS a
+    // single-file, checkpoint-folded snapshot of the intact legacy DB to `loam.db.premigration` (copy →
+    // `.tmp` → atomic rename), then rekeys, then deletes it on success. So a COMMITTED `loam.db.premigration`
+    // present HERE means a migration was interrupted after the backup committed but before it finished:
+    // restore it. Because the snapshot is a SINGLE file, restore is ONE atomic `rename` — no multi-file
+    // race, and it can never install a partial backup. A leftover `.premigration.tmp` (a kill before the
+    // commit rename) is NOT a committed backup — discard it, never restore from it (the live DB is still
+    // intact; the migration just re-runs). Best-effort — a restore failure falls through to the normal
+    // open/recovery chain below (no worse than before). The backup holds ciphertext, not the key.
+    {
+      const committedBackup = `${dbPath}.premigration`;
+      const backupTmp = `${dbPath}.premigration.tmp`;
       try {
-        for (const suffix of ["", "-wal", "-shm"]) {
-          const live = `${dbPath}${suffix}`;
-          const backup = `${live}.premigration`;
-          // Drop the possibly-half-rekeyed live file first, then restore the intact legacy original. A
-          // `-wal`/`-shm` present with no matching backup is stale half-rekey state — removing it keeps
-          // the restored set internally consistent (the legacy `.db` opens on its own).
-          rmSync(live, { force: true });
-          if (existsSync(backup)) {
-            renameSync(backup, live);
-          }
+        // Discard any uncommitted/partial artifacts unconditionally: a stray `.tmp` (killed before the
+        // commit rename) and any legacy multi-file `-wal`/`-shm` sidecars a pre-redesign build may have
+        // left. None of these is a committed backup, so none is ever restored.
+        rmSync(backupTmp, { force: true });
+        rmSync(`${dbPath}-wal.premigration`, { force: true });
+        rmSync(`${dbPath}-shm.premigration`, { force: true });
+
+        if (existsSync(committedBackup)) {
+          // Drop the possibly-half-rekeyed live `-wal`/`-shm` first (stale half-rekey state), then a SINGLE
+          // atomic rename installs the intact single-file snapshot over the live DB. The snapshot folded its
+          // own WAL in before it was copied, so the restored `loam.db` opens standalone with no WAL of its
+          // own. Killed between the rm and the rename? The committed backup is still present, so the next
+          // boot repeats this idempotently.
+          rmSync(`${dbPath}-wal`, { force: true });
+          rmSync(`${dbPath}-shm`, { force: true });
+          renameSync(committedBackup, dbPath);
+          server.log.warn(
+            "Restored an interrupted DB key-migration from its committed single-file pre-migration backup — " +
+              "the legacy-encrypted database is intact again and the migration will be retried this boot.",
+          );
         }
-        server.log.warn(
-          "Restored an interrupted DB key-migration from its pre-migration backup — the legacy-encrypted " +
-            "database is intact again and the migration will be retried this boot.",
-        );
       } catch (error) {
         server.log.error(
           error,
@@ -1384,29 +1394,37 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           driver: options.dbDriver,
         });
 
-        // RF-b: back up the intact legacy-encrypted files BEFORE the in-place `PRAGMA rekey`. `rekey`
-        // rewrites pages under the new key in place and is NOT crash-atomic; an OS-kill mid-rekey could
-        // leave the DB openable under neither key, permanently losing pre-round-4 passphrase data. The
-        // legacy store is open but nothing has been written to it, so the on-disk set is consistent to
-        // copy. On rekey SUCCESS these sidecars are deleted (below); on FAILURE they're left, and Step 0b
-        // on a later boot restores them and retries. If the backup itself can't be taken, do NOT proceed
-        // with an unbackable non-atomic rekey — clean up any partial sidecars and fall through instead.
+        // P1-a (Sol round 6): commit a CRASH-ATOMIC, single-file pre-migration backup BEFORE the in-place
+        // `PRAGMA rekey`. `rekey` rewrites pages under the new key in place and is NOT crash-atomic; an
+        // OS-kill mid-rekey could leave the DB openable under neither key, permanently losing pre-round-4
+        // passphrase data. The backup makes that recoverable — but the backup ITSELF must be crash-atomic,
+        // or a kill mid-copy would leave a truncated sidecar that Step 0b then restores OVER the intact live
+        // DB. So, crash-atomically:
+        //   1. `checkpoint()` (`wal_checkpoint(TRUNCATE)`) folds the WAL into the single `loam.db` file, so
+        //      committed transactions still resident in the WAL are NOT lost by the file-level copy below —
+        //      and there is nothing left in `-wal`/`-shm` to snapshot. (legacyStore is the sole connection.)
+        //   2. Copy that single file to `loam.db.premigration.tmp`.
+        //   3. Atomically `rename` (POSIX-atomic) `.tmp` → `loam.db.premigration`. The COMMITTED backup is
+        //      ONLY ever the post-rename file: a kill before the rename leaves an ignored `.tmp`, never a
+        //      half-written backup Step 0b could restore.
+        // On rekey SUCCESS the committed backup is deleted (below); on FAILURE it is left for Step 0b to
+        // restore and retry. If the backup can't be committed, do NOT proceed with an unbackable non-atomic
+        // rekey — clean up and fall through instead.
+        const committedBackup = `${dbPath}.premigration`;
+        const backupTmp = `${dbPath}.premigration.tmp`;
         try {
-          for (const suffix of ["", "-wal", "-shm"]) {
-            const from = `${dbPath}${suffix}`;
-            if (existsSync(from)) {
-              copyFileSync(from, `${from}.premigration`);
-            }
-          }
+          legacyStore.checkpoint();
+          rmSync(backupTmp, { force: true }); // clear any stray tmp from a prior interrupted attempt
+          copyFileSync(dbPath, backupTmp);
+          renameSync(backupTmp, committedBackup);
         } catch (backupError) {
-          for (const suffix of ["", "-wal", "-shm"]) {
-            rmSync(`${dbPath}${suffix}.premigration`, { force: true });
-          }
+          rmSync(backupTmp, { force: true });
+          rmSync(committedBackup, { force: true });
           legacyStore.close();
           server.log.error(
             backupError,
-            "Could not back up the legacy database before rekey — skipping the in-place migration this " +
-              "boot rather than risk an unrecoverable interrupted rekey",
+            "Could not commit the pre-migration DB backup before rekey — skipping the in-place migration " +
+              "this boot rather than risk an unrecoverable interrupted rekey",
           );
           throw backupError;
         }
@@ -1414,17 +1432,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         try {
           legacyStore.rekey(dbKey!);
         } catch (rekeyError) {
-          // Leave the `.premigration` sidecars in place — Step 0b on the next boot restores the intact
-          // legacy DB and retries. Only the store handle is released here.
+          // Leave the committed backup in place — Step 0b on the next boot restores the intact legacy DB
+          // and retries. Only the store handle is released here.
           legacyStore.close();
           throw rekeyError;
         }
 
-        // Rekey committed the new-key pages — the pre-migration backup is no longer needed; drop the
-        // sidecars so a later boot doesn't mistake them for an interrupted migration to resume.
-        for (const suffix of ["", "-wal", "-shm"]) {
-          rmSync(`${dbPath}${suffix}.premigration`, { force: true });
-        }
+        // Rekey committed the new-key pages — the pre-migration backup is no longer needed; drop it (and
+        // any stray tmp) so a later boot doesn't mistake it for an interrupted migration to resume.
+        rmSync(committedBackup, { force: true });
+        rmSync(backupTmp, { force: true });
 
         encryptionEnabled = true;
         const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
@@ -3313,27 +3330,86 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // only once `clearStoredDbKeys()` VERIFIED the key material is gone (see db-encryption.ts).
         // Written synchronously; NOT fsync'd, so a hard power-loss in this window could in theory lose the
         // marker on some filesystems (Sol round-4 #2, accepted low — the resumed handoff is a process-kill
-        // mechanism). We are already committed to the launcher handoff at this point (the lockdown above
-        // cleared in-memory state and 503'd every route), so a marker-write failure no longer falls back
-        // to a same-key logical wipe — it only means the handoff isn't RESUMABLE if this process is killed
-        // before the launcher acks; the ciphertext is deleted below regardless, so no data survives either
-        // way.
+        // mechanism).
+        let markerWritten = false;
         try {
           writeFileSync(wipePendingMarkerPath, String(Date.now()), "utf8");
+          markerWritten = true;
         } catch (error) {
           server.log.error(
             error,
-            "Kill switch: failed to write the wipe-pending marker — the launcher handoff proceeds anyway " +
-              "(the ciphertext is still deleted below), but a process-kill before the launcher acks won't " +
-              "be resumable from a durable record",
+            "Kill switch: failed to write the wipe-pending marker — falling back to a synchronous, " +
+              "fail-closed ciphertext destruction before the launcher handoff (see below)",
           );
         }
 
-        // Signal the launcher now that in-memory state is locked out and (best-effort) the durable marker
-        // is on disk. This is NOT yet a confirmed cryptographic wipe from the operator's perspective —
-        // that's only true once the launcher acks with `loam-wipe-complete` and deletes the marker above
-        // (P1-2b); this process has no way to observe that ack (it may not even survive to see it), so the
-        // log line below deliberately describes the wipe as REQUESTED, not completed.
+        if (!markerWritten) {
+          // P1-d (Sol round 6, option b — FAIL CLOSED): the durable resume-marker could not be written, so
+          // the normal "signal the launcher, THEN async-delete the ciphertext" ordering is unsafe. In that
+          // ordering, a kill after `hook()` but before the async `rm` completes — with RN's own key-clear
+          // also interrupted — would leave BOTH the ciphertext AND the key recoverable, with no marker to
+          // resume the wipe: the emergency wipe silently vanishes. Instead, destroy (and VERIFY gone) the
+          // ciphertext SYNCHRONOUSLY, BEFORE signaling the launcher, so a kill any time after `hook()` finds
+          // no recoverable ciphertext. The synchronous in-memory lockdown (RF-a) already ran above, before
+          // any await, so this branch changes only the durable-destruction ordering, not the confidentiality
+          // window. Plaintext user media (avatars/attachments) is data too — remove it synchronously here as
+          // well, so nothing sensitive survives a kill right after the signal.
+          store.close();
+          const undeleted: string[] = [];
+          for (const suffix of ["", "-wal", "-shm"]) {
+            const file = `${dbPath}${suffix}`;
+            try {
+              rmSync(file, { force: true });
+            } catch {
+              // Fall through to the existence check — an undeletable file is caught there, not here.
+            }
+            if (existsSync(file)) {
+              undeleted.push(file);
+            }
+          }
+          rmSync(avatarsDir, { recursive: true, force: true });
+          rmSync(attachmentsDir, { recursive: true, force: true });
+
+          if (undeleted.length > 0) {
+            // Could not even delete the ciphertext synchronously. Do NOT signal the launcher — doing so
+            // would reopen the very window this branch exists to close (RN might clear the key and restart
+            // while readable ciphertext with no marker remains). Stay locked down (503 everywhere) and
+            // surface a hard notice so the operator can retry.
+            const message =
+              "KILL SWITCH NOTICE: the wipe-pending marker could NOT be written AND the ciphertext could " +
+              `not be synchronously deleted (${undeleted.join(", ")}). The launcher was NOT signaled, to ` +
+              "avoid clearing the key while recoverable ciphertext with no resume marker remains. The node " +
+              "is locked down (503) — reopen it to retry the wipe.";
+            server.log.error(message);
+            reportBootNotice(message, "kill_switch_wipe_incomplete");
+            return;
+          }
+
+          // Ciphertext is verified gone. Only now hand off to the launcher to clear the (now-unused) key and
+          // restart. A kill after this point can no longer recover any data.
+          try {
+            hook();
+          } catch (error) {
+            server.log.error(error, "Kill switch: failed to signal the RN launcher for the wipe-restart handoff");
+          }
+
+          const message =
+            "KILL SWITCH NOTICE: the encrypted database was deleted and VERIFIED gone synchronously, then a " +
+            "device-key-clear-and-restart was requested from the launcher — but WITHOUT a durable resume " +
+            "marker (its write failed). The data is already unrecoverable; if the launcher's key-clear is " +
+            "ALSO interrupted, the handoff is not auto-resumable — reopen the node to finish clearing the " +
+            "(now-unused) encryption key.";
+          server.log.warn(message);
+          reportBootNotice(message, "kill_switch_wipe_no_marker");
+          return;
+        }
+
+        // Normal path (marker written): signal the launcher now that in-memory state is locked out and the
+        // durable marker is on disk. This is NOT yet a confirmed cryptographic wipe from the operator's
+        // perspective — that's only true once the launcher acks with `loam-wipe-complete` and deletes the
+        // marker (P1-2b); this process has no way to observe that ack (it may not even survive to see it),
+        // so the log line below deliberately describes the wipe as REQUESTED, not completed. The ciphertext
+        // is deleted after the signal (async is safe here: the marker makes an interrupted handoff resumable).
         try {
           hook();
         } catch (error) {
@@ -3358,8 +3434,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a NEW
       // key from in-process. Fall through to the existing recreate-under-the-same-key behaviour rather
       // than bricking the wipe entirely; this is a documented limitation; see docs/02. (When a hook IS
-      // present the block above always returns — it commits to the handoff after the synchronous lockdown,
-      // even if the durable marker write happened to fail; RF-a.)
+      // present the block above always returns — after the synchronous lockdown it destroys the ciphertext
+      // and hands off to the launcher; a marker-write failure switches it to a fail-closed synchronous
+      // ciphertext destruction BEFORE the handoff rather than falling back here; P1-d/RF-a.)
       server.log.warn(
         "Kill switch: this node uses a fixed (persistent/passphrase) encryption key, but no launcher " +
           "restart hook is installed, so the key cannot be rotated in-process. Falling back to a logical " +

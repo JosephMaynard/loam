@@ -31,6 +31,7 @@ import {
 } from "@loam/schema";
 
 import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.js";
+import { openStore } from "./db.js";
 
 // RF4: a single-shot fault-injection seam for `node:fs`'s `renameSync`, used ONLY by the "marker-
 // confirmed recovery failure" test below to make `openInitialStore`'s rename-aside step throw
@@ -40,6 +41,17 @@ import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.
 // real implementation) and self-disarms the instant it fires, so every other test in this file — which
 // never arms it — is completely unaffected; every other `node:fs` export is untouched (`...actual`).
 const renameFailure = vi.hoisted(() => ({ armed: false }));
+// P1-d (Sol round 6): a single-shot fault-injection seam for `node:fs`'s `writeFileSync` targeting the
+// `.loam-wipe-pending` marker specifically — used ONLY by the fail-closed kill-switch test below to force
+// the durable-marker write to fail so the synchronous, fail-closed ciphertext-destruction path runs.
+// Defaults disarmed (pass through) and self-disarms on fire, so no other test is affected; never matches
+// any other `writeFileSync` caller.
+const wipeMarkerWriteFailure = vi.hoisted(() => ({ armed: false }));
+// P1-a (Sol round 6): a capture seam for the migration's pre-migration backup copy. When `dir` is set, the
+// `copyFileSync(loam.db → loam.db.premigration.tmp)` the migration performs is mirrored to
+// `<dir>/captured-backup.db`, so a test can open that single-file snapshot under the legacy key and PROVE it
+// contains committed rows that were WAL-resident before the checkpoint folded them in. Inert by default.
+const backupCapture = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
@@ -50,6 +62,20 @@ vi.mock("node:fs", async (importOriginal) => {
         throw new Error("simulated renameSync failure (RF4 test fault injection)");
       }
       return actual.renameSync(...args);
+    },
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      if (wipeMarkerWriteFailure.armed && String(args[0]).endsWith(".loam-wipe-pending")) {
+        wipeMarkerWriteFailure.armed = false;
+        throw new Error("simulated wipe-pending marker write failure (P1-d test fault injection)");
+      }
+      return actual.writeFileSync(...args);
+    },
+    copyFileSync: (...args: Parameters<typeof actual.copyFileSync>) => {
+      const result = actual.copyFileSync(...args);
+      if (backupCapture.dir && String(args[1]).endsWith(".premigration.tmp")) {
+        actual.copyFileSync(String(args[1]), `${backupCapture.dir}/captured-backup.db`);
+      }
+      return result;
     },
   };
 });
@@ -108,6 +134,8 @@ afterEach(async () => {
   rmGate.promise = undefined;
   configWriteGate.promise = undefined;
   configWriteFailures.remaining = 0;
+  wipeMarkerWriteFailure.armed = false;
+  backupCapture.dir = undefined;
   while (cleanups.length) {
     await cleanups.pop()?.();
   }
@@ -1728,6 +1756,61 @@ describe("encryption at rest + key-discard kill switch", () => {
     errorSpy2.mockRestore();
   });
 
+  it("P1-d (Sol round 6): when the durable wipe-pending marker CANNOT be written, the ciphertext is deleted and VERIFIED gone SYNCHRONOUSLY before the launcher is signaled (fail closed) — a kill right after the hook cannot recover the data", async () => {
+    // A launcher hook that records, at the moment it is called, whether ANY ciphertext file still exists.
+    // The fix's guarantee is that by the time the launcher is signaled, the ciphertext is already gone —
+    // so a kill immediately after `hook()` (with RN's key-clear also interrupted) leaves nothing to recover.
+    const reports = installFakeBootBridge();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+
+    let ciphertextPresentAtHook: boolean | undefined;
+    let hookCalls = 0;
+    (globalThis as unknown as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart = () => {
+      ciphertextPresentAtHook =
+        existsSync(join(dataDir, "loam.db")) ||
+        existsSync(join(dataDir, "loam.db-wal")) ||
+        existsSync(join(dataDir, "loam.db-shm"));
+      hookCalls += 1;
+    };
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamRequestWipeRestart?: unknown }).__loamRequestWipeRestart;
+    });
+
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "MUST_NOT_SURVIVE_A_FAILED_MARKER")).statusCode).toBe(201);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+
+    // Force the durable marker write to fail — this is exactly the fail-open window P1-d closes.
+    wipeMarkerWriteFailure.armed = true;
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // The crux: the launcher WAS signaled, but the ciphertext was already gone at that instant — so a stop
+    // immediately after the hook cannot recover the encrypted data (the fail-OPEN bug would have had the
+    // ciphertext still present here, deleted only by a later async rm that a kill could skip).
+    expect(hookCalls).toBe(1);
+    expect(ciphertextPresentAtHook).toBe(false);
+
+    // And it is genuinely gone on disk afterward, with NO marker written (the write failed by design).
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-wal"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-shm"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+
+    // A distinct notice was surfaced so the operator knows the wipe completed without a resumable marker
+    // (and must reopen to finish clearing the now-unused key if RN's key-clear was also interrupted).
+    expect(reports.some((r) => r.code === "kill_switch_wipe_no_marker")).toBe(true);
+  });
+
   describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {
     async function expectConfigSurvivesFixedKeyWipe(dbEncryptionMode: "persistent" | "passphrase"): Promise<void> {
       const hook = installFakeWipeRestartHook();
@@ -1946,6 +2029,162 @@ describe("encryption at rest + key-discard kill switch", () => {
         reopened.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_INTERRUPTED_REKEY"),
       ).toBe(true);
       await reopened.close();
+    });
+
+    describe("P1-a (Sol round 6): the pre-migration backup is CRASH-ATOMIC (single-file, checkpoint-folded, commit-by-rename)", () => {
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      /** Build a legacy-encrypted passphrase DB carrying `body`, closed cleanly (WAL checkpointed away, so
+       *  only a single-file `loam.db` remains on disk). Returns the dataDir it lives in. */
+      async function makeLegacyDb(body: string): Promise<string> {
+        const dataDir = mkdtempSync(join(tmpdir(), "loam-p1a-test-"));
+        cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+        const app = await buildApp({ dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" });
+        const admin = await session(app);
+        expect((await post(app, admin.cookie, body)).statusCode).toBe(201);
+        await app.close();
+        return dataDir;
+      }
+
+      /** Assert `dataDir` migrates cleanly under the current key with `body` intact and no leftover backup
+       *  artifacts (neither a committed `.premigration` nor a stray `.premigration.tmp`). */
+      async function expectCleanMigration(dataDir: string, body: string): Promise<void> {
+        const migrated = installFakeMigratedHook();
+        const app = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated.calls).toBe(1);
+        expect(app.store.loadMessages().some((m) => "body" in m && m.body === body)).toBe(true);
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await app.close();
+      }
+
+      it("kill AFTER checkpoint but BEFORE the copy: no backup artifacts exist, so the migration simply re-runs on the intact live DB", async () => {
+        // A checkpoint is non-destructive; a kill right after it (before any copy) leaves the intact legacy
+        // DB and NO `.premigration`/`.tmp` at all. This models that exact on-disk state.
+        const dataDir = await makeLegacyDb("AFTER_CHECKPOINT_BEFORE_COPY");
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await expectCleanMigration(dataDir, "AFTER_CHECKPOINT_BEFORE_COPY");
+      });
+
+      it("kill AFTER the copy but BEFORE the commit rename: a stray `.premigration.tmp` is DISCARDED, never restored, and the migration re-runs on the intact live DB", async () => {
+        const dataDir = await makeLegacyDb("AFTER_COPY_BEFORE_RENAME");
+        // Simulate a kill mid-copy: a truncated/partial `.tmp` is present, but no COMMITTED backup exists.
+        writeFileSync(join(dataDir, "loam.db.premigration.tmp"), Buffer.from("a half-written backup copy"));
+        expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+
+        // Step 0b must NOT restore from the uncommitted `.tmp` (that is the whole crash-atomicity guarantee —
+        // an incomplete backup can never replace the intact live DB); it discards it and the migration runs.
+        await expectCleanMigration(dataDir, "AFTER_COPY_BEFORE_RENAME");
+        expect(existsSync(join(dataDir, "loam.db.premigration.tmp"))).toBe(false);
+      });
+
+      it("kill AFTER the backup commit but BEFORE the rekey: the committed single-file backup is restored (single atomic rename) and the migration retries", async () => {
+        const dataDir = await makeLegacyDb("AFTER_COMMIT_BEFORE_REKEY");
+        // The committed backup exists and the rekey never ran, so the live DB still equals the (intact,
+        // legacy-encrypted) backup — exactly the state a kill in this window leaves.
+        copyFileSync(join(dataDir, "loam.db"), join(dataDir, "loam.db.premigration"));
+
+        await expectCleanMigration(dataDir, "AFTER_COMMIT_BEFORE_REKEY");
+      });
+
+      it("kill MID-rekey: the committed single-file backup is restored over the half-rekeyed (corrupt) live DB and the migration retries", async () => {
+        const dataDir = await makeLegacyDb("MID_REKEY");
+        // Committed backup = the intact legacy DB; live loam.db = half-rekeyed corruption (openable under
+        // neither key) plus stale `-wal`/`-shm` from the interrupted rekey.
+        copyFileSync(join(dataDir, "loam.db"), join(dataDir, "loam.db.premigration"));
+        writeFileSync(join(dataDir, "loam.db"), Buffer.from("half-rekeyed corruption — opens under no key"));
+        writeFileSync(join(dataDir, "loam.db-wal"), Buffer.from("stale half-rekey wal"));
+        writeFileSync(join(dataDir, "loam.db-shm"), Buffer.from("stale half-rekey shm"));
+
+        await expectCleanMigration(dataDir, "MID_REKEY");
+      });
+
+      it("committed data still resident in the WAL: the checkpoint folds it into the single-file backup, which a restore then preserves (no committed rows lost)", async () => {
+        // 1. Build a legacy DB whose committed row lives ONLY in the WAL, not in loam.db's main file.
+        const dataDir = mkdtempSync(join(tmpdir(), "loam-p1a-wal-test-"));
+        cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+        const producer = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        const admin = await session(producer);
+        expect((await post(producer, admin.cookie, "WAL_RESIDENT_ROW")).statusCode).toBe(201);
+        // Snapshot the live files WHILE the connection is open (row committed to the WAL, not yet folded
+        // into the main file — nothing writes after the synchronous write-through, so the copy is quiescent).
+        const snapDir = mkdtempSync(join(tmpdir(), "loam-p1a-wal-snap-"));
+        for (const suffix of ["", "-wal", "-shm"]) {
+          const live = join(dataDir, `loam.db${suffix}`);
+          if (existsSync(live)) copyFileSync(live, join(snapDir, `loam.db${suffix}`));
+        }
+        await producer.close(); // a clean close checkpoints + deletes the WAL — undone by the restore below
+        for (const suffix of ["", "-wal", "-shm"]) {
+          const snap = join(snapDir, `loam.db${suffix}`);
+          const live = join(dataDir, `loam.db${suffix}`);
+          if (existsSync(snap)) copyFileSync(snap, live);
+          else rmSync(live, { force: true });
+        }
+
+        // Precondition proof: the main file ALONE (no WAL) does not yet contain the row — it is WAL-resident.
+        const mainOnlyDir = mkdtempSync(join(tmpdir(), "loam-p1a-mainonly-"));
+        cleanups.push(() => rmSync(mainOnlyDir, { recursive: true, force: true }));
+        copyFileSync(join(snapDir, "loam.db"), join(mainOnlyDir, "loam.db"));
+        const mainOnly = openStore(join(mainOnlyDir, "loam.db"), { encryptionKey: legacyKey });
+        expect(mainOnly.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(false);
+        mainOnly.close();
+        rmSync(snapDir, { recursive: true, force: true });
+
+        // 2. Capture the single-file backup the migration commits, and run the (clean) migration.
+        const captureDir = mkdtempSync(join(tmpdir(), "loam-p1a-capture-"));
+        cleanups.push(() => rmSync(captureDir, { recursive: true, force: true }));
+        backupCapture.dir = captureDir;
+        const migrated = installFakeMigratedHook();
+        const migratedApp = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated.calls).toBe(1);
+        // The clean migration preserved the WAL-resident row.
+        expect(migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(true);
+        await migratedApp.close();
+
+        // 3. The CAPTURED single-file backup — a copy of loam.db taken AFTER the checkpoint but BEFORE the
+        // rekey — contains the row. Without the checkpoint-before-copy this file would be the main-only file
+        // proven row-less above, and a restore from it would lose committed data.
+        const captured = openStore(join(captureDir, "captured-backup.db"), { encryptionKey: legacyKey });
+        expect(captured.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(true);
+        captured.close();
+
+        // 4. End-to-end restore: feed that production-made backup back through Step 0b over a corrupt live
+        // DB and confirm the row survives the backup+restore round trip.
+        backupCapture.dir = undefined;
+        copyFileSync(join(captureDir, "captured-backup.db"), join(dataDir, "loam.db.premigration"));
+        writeFileSync(join(dataDir, "loam.db"), Buffer.from("corrupt live db — must be restored from backup"));
+        rmSync(join(dataDir, "loam.db-wal"), { force: true });
+        rmSync(join(dataDir, "loam.db-shm"), { force: true });
+        const migrated2 = installFakeMigratedHook();
+        const restored = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated2.calls).toBe(1);
+        expect(restored.store.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(true);
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await restored.close();
+      });
     });
 
     it("a fresh install (no prior DB) opens cleanly under the current key without ever needing the offered legacy one, and still reports migrated so the launcher stops offering it", async () => {

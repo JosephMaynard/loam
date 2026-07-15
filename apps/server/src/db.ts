@@ -217,6 +217,17 @@ export interface LoamStore {
   /** Delete all users, channels, messages, and sessions in one transaction. Config is preserved. */
   wipeAll(): void;
   /**
+   * Fold the write-ahead log back into the main `loam.db` file via `PRAGMA wal_checkpoint(TRUNCATE)`,
+   * so that single file is a complete, standalone snapshot with nothing left to lose in `-wal`/`-shm`
+   * (TRUNCATE also shrinks the WAL to zero, so a later file-level copy can't pick up stale frames).
+   * Used by the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
+   * pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
+   * transactions still resident in the WAL — this makes the snapshot single-file-consistent first.
+   * Only meaningful on a SQLCipher (encrypted) connection, the only path that migrates; throws on a
+   * plaintext store (no `pragma` handle), mirroring {@link rekey}. Never logs any key material.
+   */
+  checkpoint(): void;
+  /**
    * Re-encrypt an already-open SQLCipher-backed store under `newKey`, via `PRAGMA rekey` (P1-1, Sol
    * round 5 — the passphrase key-derivation migration: round 4 changed the passphrase KDF from
    * `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)`, so an existing passphrase DB
@@ -624,6 +635,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM transport_identity_tokens");
         db.exec("DELETE FROM missing_attachments");
       });
+    },
+    checkpoint() {
+      if (!pragma) {
+        throw new Error(
+          "checkpoint() requires a store opened with encryptionKey (SQLCipher) — this store is plaintext.",
+        );
+      }
+      // TRUNCATE folds all committed WAL frames back into the main DB file and resets the WAL to zero
+      // bytes. This store is the sole open connection when the migration calls it (nothing else can
+      // hold a read lock), so the checkpoint can't be blocked/partial — the single `loam.db` is a
+      // complete snapshot afterward.
+      pragma("wal_checkpoint(TRUNCATE)");
     },
     rekey(newKey) {
       if (!pragma) {
