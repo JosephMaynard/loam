@@ -1716,7 +1716,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(hook.calls).toBe(1);
   });
 
-  it("P1-4 (Sol round 5): config.json is persisted DURABLY before the wipe phase is written and the launcher hook is signaled", async () => {
+  it("P1-3 (Sol round 8): the durable delete-pending phase is written BEFORE the first await (config persist); the launcher hook still fires only after deletion, and a concurrent request sees 503 throughout", async () => {
     const hook = installFakeWipeRestartHook();
     const { app, dataDir } = await makeEncryptedApp(
       { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
@@ -1736,19 +1736,20 @@ describe("encryption at rest + key-discard kill switch", () => {
       payload: { confirm: "wipe" },
     });
 
-    // Give the handler a turn to run its synchronous lockdown (RF-a) and then reach (and block on) the
-    // gated config.json write — which still precedes the marker + hook, per P1-4's fixed ordering.
+    // Give the handler a turn to run its synchronous lockdown (RF-a) + the durable phase write (P1-3), then
+    // reach (and block on) the gated config.json write.
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // Neither the durable phase file nor the launcher signal has happened yet — config persistence comes
-    // first now, not after (the bug this fixes: the OLD order let both fire before config was durable).
+    // P1-3: the durable wipe INTENT is now recorded BEFORE the first await — so while the config write is
+    // blocked, the `delete-pending` phase file ALREADY exists on disk (a kill during the config write can no
+    // longer forget the wipe). The launcher signal still has NOT happened (it comes only after verified
+    // deletion, which is after this config write).
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8").trim()).toBe("delete-pending");
     expect(hook.calls).toBe(0);
-    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
 
     // RF-a (adversarial review): a request landing DURING the persistConfigForRestart await must ALREADY
-    // see the 503 lockdown, never a stale 200 from the still-populated `data`/`sessions`. This is the
-    // confidentiality regression the fix closes — P1-4 had moved this await ahead of the synchronous
-    // lockdown, so before the fix this GET was served a normal 200 with real content on the kill path.
+    // see the 503 lockdown, never a stale 200 from the still-populated `data`/`sessions`.
     const duringConfigWrite = await app.server.inject({
       method: "GET",
       url: "/api/channels",
@@ -1760,7 +1761,8 @@ describe("encryption at rest + key-discard kill switch", () => {
     const wipe = await wipePromise;
     expect(wipe.statusCode).toBe(200);
     expect(hook.calls).toBe(1);
-    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    // After a verified deletion the phase advanced to key-clear-ready.
+    expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8").trim()).toBe("key-clear-ready");
   });
 
   it("P1-4 (Sol round 5): retries a failed config.json persist once, and on a SECOND failure still proceeds with the wipe (reporting a distinct notice, never silently continuing as if config were preserved)", async () => {

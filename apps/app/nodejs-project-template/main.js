@@ -843,6 +843,54 @@ function clearEphemeralMarker() {
 // boot as proof a human actually chose this, not an automatic behaviour.
 var START_FRESH_MARKER_PATH = path.join(dataDir, '.loam-db-start-fresh');
 
+// fsync a directory so a create/rename/unlink INSIDE it is durable across power-loss (the directory entry,
+// not just a file's bytes, must be flushed). Returns whether the fsync succeeded. Mirrors the server's
+// `fsyncDir` (apps/server/src/app.ts). Some filesystems reject directory fsync; the wipe/marker callers here
+// choose correctness over availability on those platforms and fail closed on false.
+function fsyncDir(dir) {
+  try {
+    var dirFd = fs.openSync(dir, 'r');
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+// Durable file write (Sol round-8 P1-5/P2-2): staging write + file-bytes fsync + atomic rename + parent-dir
+// fsync. Returns true ONLY when every step succeeds, so a caller may treat the write as power-loss-durable
+// strictly on true — a bare writeFileSync+rename is atomic but the OS may still hold the bytes and/or the
+// rename in the page cache and lose them on power-loss (for the start-fresh marker that means the operator's
+// confirmed destructive action is silently forgotten). fsync reopens the temp read-only purely to flush the
+// inode. Mirrors the server's `durableWriteFileSync` (apps/server/src/app.ts).
+function durableWriteFileSync(filePath, contents) {
+  var tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
+  try {
+    fs.writeFileSync(tmpPath, contents, 'utf8');
+    var fd = fs.openSync(tmpPath, 'r');
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch (cleanupErr) {
+      // ENOENT is the common case (the staging write itself failed) — nothing to clean up.
+    }
+    return false;
+  }
+  // Parent-directory fsync is REQUIRED, not best-effort: without it the rename itself can be lost on
+  // power-loss (resurrecting stale contents), so a failure here means "not durable" → false.
+  return fsyncDir(path.dirname(filePath));
+}
+
 // RF2: true while a reboot THIS listener triggered is still running. `bootEmbeddedServer` itself is
 // now re-entrant-safe (embedded-main.ts ignores/joins a concurrent call rather than racing a second
 // `listen()`), but debouncing here too means a double-tap of the button doesn't even re-write the
@@ -869,7 +917,19 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
 
   try {
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(START_FRESH_MARKER_PATH, String(Date.now()), 'utf8');
+    // P1-6 (Sol round 8): record the operator's INTENT in the marker. 'delete' = a deliberate destructive
+    // mode change (Settings "Delete & start fresh") → the server DELETES + proves the old DB gone; anything
+    // else = accidental-lockout recovery → the server renames the old ciphertext aside. Default 'preserve'
+    // (never escalate to destruction on a missing/odd intent).
+    var intent = payload && payload.intent === 'delete' ? 'delete' : 'preserve';
+    // P2-2 (Sol round 8): write the marker DURABLY (fd + fsync + atomic rename + parent-dir fsync) and only
+    // ack ok:true AFTER it is on stable storage. When this is requested from the ALREADY-running Settings
+    // screen the in-process reboot is a no-op (the server is already up), so the marker must survive until
+    // the NEXT real app restart; a non-durable write that a power-loss then discarded would report a false
+    // "scheduled" success and force the operator to repeat the destructive confirmation.
+    if (!durableWriteFileSync(START_FRESH_MARKER_PATH, intent)) {
+      throw new Error('could not durably write the start-fresh marker');
+    }
     rnBridge.channel.post('loam-db-start-fresh-result', { requestId: requestId, ok: true });
   } catch (err) {
     try {
@@ -993,6 +1053,11 @@ rnBridge.channel.on('loam-db-unlock', function (payload) {
 //                         dance, then DELETE the phase file.
 // Route on the PHASE, never on mere presence.
 var WIPE_PHASE_MARKER_PATH = path.join(dataDir, '.loam-wipe-phase');
+// The PRE-round-8 single marker (P1-1, Sol round-8). A round-7 fail-closed wipe could leave THIS on disk
+// alongside a deletion survivor while 503-locked; if the device upgraded before reopening, the launcher must
+// still recognise it as an unfinished wipe rather than forgetting it. Both names are cleared together only
+// once the whole wipe protocol completes.
+var LEGACY_WIPE_PENDING_MARKER_PATH = path.join(dataDir, '.loam-wipe-pending');
 
 // Read the durable wipe phase. Confirmed ENOENT → undefined (no wipe pending). A recognized value → that
 // phase. ANY other state (unreadable, or malformed/truncated/unrecognized contents) → 'delete-pending':
@@ -1004,7 +1069,19 @@ function readWipePhase() {
     raw = fs.readFileSync(WIPE_PHASE_MARKER_PATH, 'utf8');
   } catch (err) {
     if (err && err.code === 'ENOENT') {
-      return undefined;
+      // No NEW phase file — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished
+      // wipe (P1-1). If present (or unreadable), treat it as 'delete-pending' so the launcher DEFERS to the
+      // server's deletion retry (NEVER 'key-clear-ready' — the old marker cannot prove deletion completed,
+      // so it must be re-run first). The server migrates it forward to `.loam-wipe-phase`.
+      try {
+        fs.lstatSync(LEGACY_WIPE_PENDING_MARKER_PATH);
+        return 'delete-pending'; // legacy marker present → a wipe was pending
+      } catch (legacyErr) {
+        if (legacyErr && legacyErr.code === 'ENOENT') {
+          return undefined; // no wipe under EITHER name — a normal boot
+        }
+        return 'delete-pending'; // unverifiable legacy marker → fail-safe to the deletion retry
+      }
     }
     return 'delete-pending';
   }
@@ -1023,25 +1100,37 @@ function readWipePhase() {
 // `proceed()` refuse to mint a new secret unless the phase file is provably gone. ENOENT (already absent)
 // counts as success; any other unlink error, or the file still being present/unverifiable afterward, fails.
 function clearWipePhase() {
-  try {
-    fs.unlinkSync(WIPE_PHASE_MARKER_PATH);
-  } catch (err) {
-    if (err && err.code === 'ENOENT') {
-      return true; // already gone — nothing pending
+  // Remove BOTH the new phase file AND any migrated-from legacy `.loam-wipe-pending` marker (P1-1): a
+  // lingering legacy name would make the NEXT boot re-recognise a pending wipe and re-wipe the fresh DB in a
+  // loop. Both must be proven gone (lstat, ENOENT-only) for a clean completion.
+  var paths = [WIPE_PHASE_MARKER_PATH, LEGACY_WIPE_PENDING_MARKER_PATH];
+  for (var i = 0; i < paths.length; i++) {
+    var p = paths[i];
+    try {
+      fs.unlinkSync(p);
+    } catch (err) {
+      if (!(err && err.code === 'ENOENT')) {
+        return false; // a real delete failure — the file may still be on disk
+      }
     }
-    return false; // a real delete failure — the phase file may still be on disk
+    // Verify absence with lstatSync, not existsSync: existsSync returns false for MANY stat errors (EACCES,
+    // EIO, ...), conflating "confirmed gone" with "could-not-determine" — so a permission/IO fault on the
+    // marker path would be misreported as a clean removal. Only ENOENT is proof of absence. Mirrors the
+    // server's `provenAbsence` (apps/server/src/app.ts).
+    try {
+      fs.lstatSync(p);
+      return false; // still present after a "successful" unlink (e.g. reappeared) — not a clean removal
+    } catch (err2) {
+      if (!(err2 && err2.code === 'ENOENT')) {
+        return false; // unverifiable stat error → must stay locked
+      }
+    }
   }
-  // Verify absence with lstatSync, not existsSync: existsSync returns false for MANY stat errors (EACCES,
-  // EIO, ...), conflating "confirmed gone" with "could-not-determine" — so a permission/IO fault on the
-  // marker path would be misreported as a clean removal. Only ENOENT is proof of absence; the file still
-  // being present, or ANY other stat error, is a failure (must stay locked). Mirrors the server's
-  // `provenAbsence` (apps/server/src/app.ts).
-  try {
-    fs.lstatSync(WIPE_PHASE_MARKER_PATH);
-    return false; // still present after a "successful" unlink (e.g. reappeared) — not a clean removal
-  } catch (err) {
-    return Boolean(err && err.code === 'ENOENT');
-  }
+  // fsync the parent DIRECTORY so the unlinks are durable BEFORE `proceed()` mints a new device secret /
+  // opens a fresh DB (Sol round-8 P1-5.3): otherwise a power-loss after the unlink but before it reaches
+  // stable storage can RESURRECT the phase file as 'key-clear-ready', and the next boot would clear the
+  // freshly minted key and strand the new database. A parent-dir fsync failure → NOT-cleared (fail closed).
+  return fsyncDir(dataDir);
 }
 
 // P1-2(b)/P1-1: the ONLY standalone place the phase file is ever deleted — never speculatively. `loam-wipe-

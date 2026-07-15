@@ -1,8 +1,8 @@
 import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
@@ -1426,63 +1426,122 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // deletion is verified. Route on the PHASE, never on mere presence — see `executeKillSwitchBody` and the
   // boot-time resume below.
   const wipePhaseMarkerPath = join(dataDir, ".loam-wipe-phase");
+  // The PRE-round-8 single marker. A round-7 fail-closed wipe could leave THIS on disk alongside a deletion
+  // survivor (e.g. an undeletable legacy-key `.premigration`) while 503-locked, telling the operator to
+  // reopen. If a device upgrades to this build before reopening, the new phase machine must still recognise
+  // the old marker as an unfinished wipe (P1-1, Sol round-8) rather than forgetting it and serving surviving
+  // pre-wipe data. Migrated forward to `.loam-wipe-phase=delete-pending`; both names are cleared together
+  // only once the whole wipe protocol completes.
+  const legacyWipePendingMarkerPath = join(dataDir, ".loam-wipe-pending");
   type WipePhase = "delete-pending" | "key-clear-ready";
 
   /**
-   * Durably record the wipe phase (P1-1). Primary write is ATOMIC (temp file + rename, so an interrupted
-   * write can never leave a TRUNCATED phase that a reader mis-parses). On failure, a best-effort direct
-   * write is attempted as a last resort so SOME durable failure signal survives even a rename failure — a
-   * truncated/garbled phase file still reads as `delete-pending` (fail-safe toward re-running deletion,
-   * see `readWipePhase`). Returns whether a durable write of THIS exact phase succeeded.
+   * fsync a directory so a create/rename/unlink INSIDE it is durable across power-loss (the directory
+   * entry, not just the file's bytes, must be flushed). Returns whether the fsync succeeded — callers that
+   * need genuine durability must fail closed on false, NOT log-and-continue (Sol round-8 P1-5). Some
+   * filesystems legitimately reject directory fsync with EINVAL; a caller may choose to tolerate that, but
+   * the wipe/config paths here do not (correctness over availability on those platforms).
    */
-  function writeWipePhase(phase: WipePhase): boolean {
-    const tmpPath = `${wipePhaseMarkerPath}.tmp-${process.pid}-${Date.now()}`;
+  function fsyncDir(dir: string): boolean {
     try {
-      // fsync the temp file's BYTES to stable storage BEFORE the rename, then fsync the parent DIRECTORY
-      // AFTER the rename, so the marker is durable across power-loss — not merely atomic. A bare
-      // writeFileSync+rename is atomic (a reader sees old-or-new, never a torn file) but the OS may still
-      // hold both the bytes and the rename in the page cache; a power-loss before flush could lose the
-      // whole marker, forgetting the wipe. The phase file exists precisely to survive a crash mid-wipe, so
-      // it must be fsync'd. The bytes are written by PATH (not by fd) so the write stays a single
-      // interceptable call; fsync then reopens the file read-only purely to flush it (fsync operates on the
-      // inode, not the fd's mode). A file-fsync failure routes to the fallback write below; the directory
-      // fsync is best-effort (the rename already landed, and some filesystems reject directory fsync).
-      writeFileSync(tmpPath, phase, "utf8");
+      const dirFd = openSync(dir, "r");
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+      return true;
+    } catch (error) {
+      server.log.error(error, `Durable write: parent-directory fsync failed for ${dir} (a rename/unlink there may not survive power-loss)`);
+      return false;
+    }
+  }
+
+  /**
+   * Write `contents` to `filePath` DURABLY and ATOMICALLY (Sol round-8 P1-5 / P2-1). Atomic: a reader sees
+   * the old file or the complete new one, never a torn write. Durable: it returns `true` ONLY after EVERY
+   * step — staging write, file-bytes fsync, atomic rename, AND parent-directory fsync — succeeded, so a
+   * caller may treat the write as power-loss-durable strictly on `true`. A bare `writeFileSync`+`rename` is
+   * atomic but NOT durable (the OS may hold the bytes and/or the rename in the page cache); a power-loss
+   * before both flushes can lose the whole update — which for the wipe-phase marker means forgetting a wipe,
+   * and for config.json means silently disarming an armed kill switch. There is deliberately NO non-durable
+   * fallback: a failure returns `false` so the caller fails closed rather than proceeding on an unflushed
+   * write it believes is durable. The staged bytes are written by PATH (a single interceptable call); the
+   * file fsync then reopens the temp read-only purely to flush it (fsync flushes the inode, reachable via
+   * any fd, regardless of that fd's mode).
+   */
+  function durableWriteFileSync(filePath: string, contents: string): boolean {
+    const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      writeFileSync(tmpPath, contents, "utf8");
       const fd = openSync(tmpPath, "r");
       try {
         fsyncSync(fd);
       } finally {
         closeSync(fd);
       }
-      renameSync(tmpPath, wipePhaseMarkerPath);
-      try {
-        const dirFd = openSync(dataDir, "r");
-        try {
-          fsyncSync(dirFd);
-        } finally {
-          closeSync(dirFd);
-        }
-      } catch (dirError) {
-        server.log.warn(dirError, "Kill switch: could not fsync the data directory after the wipe-phase rename (marker is written; the rename may be less durable)");
-      }
-      return true;
+      renameSync(tmpPath, filePath);
     } catch (error) {
       try {
         rmSync(tmpPath, { force: true });
       } catch {
-        // ENOENT is the common case (the writeFileSync itself failed) — nothing to clean up.
+        // ENOENT is the common case (the staging write itself failed) — nothing to clean up.
       }
-      server.log.error(error, "Kill switch: failed to durably write the wipe-phase file (trying a direct fallback write)");
-    }
-    // Last resort: a non-atomic direct write. Even a truncated result reads as `delete-pending`, which
-    // still re-runs deletion on the next boot rather than forgetting the wipe entirely.
-    try {
-      writeFileSync(wipePhaseMarkerPath, phase, "utf8");
-      return true;
-    } catch (error) {
-      server.log.error(error, "Kill switch: could NOT write the wipe-phase file at all — the wipe may not be durably resumable");
+      server.log.error(error, `Durable write failed for ${filePath}`);
       return false;
     }
+    // The parent-directory fsync is REQUIRED, not best-effort: without it the rename itself can be lost on
+    // power-loss (resurrecting stale contents), so a failure here means "not durable" → return false.
+    return fsyncDir(dirname(filePath));
+  }
+
+  /**
+   * Async sibling of {@link durableWriteFileSync} for the config-restart path (P2-1, Sol round-8), which is
+   * already on an async code path and must not block the event loop on fsync. Same durability contract: `true`
+   * only after staging write + file fsync + atomic rename + parent-directory fsync. Uses the module-level
+   * `writeFile` for the staging write (a single interceptable call), then a read-only FileHandle purely to
+   * `.sync()` its bytes, then `rename`, then a directory FileHandle `.sync()`.
+   */
+  async function durableWriteFileAsync(filePath: string, contents: string): Promise<boolean> {
+    const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      await writeFile(tmpPath, contents, "utf8");
+      const fh = await open(tmpPath, "r");
+      try {
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      await rename(tmpPath, filePath);
+    } catch (error) {
+      await rm(tmpPath, { force: true }).catch(() => {});
+      server.log.error(error, `Durable write failed for ${filePath}`);
+      return false;
+    }
+    // Parent-directory fsync REQUIRED (see the sync version) — a failure here means "not durable" → false.
+    try {
+      const dirFh = await open(dirname(filePath), "r");
+      try {
+        await dirFh.sync();
+      } finally {
+        await dirFh.close();
+      }
+    } catch (error) {
+      server.log.error(error, `Durable write: parent-directory fsync failed for ${filePath} (rename may not survive power-loss)`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Durably record the wipe phase (P1-1; durability hardened Sol round-8 P1-5). Returns whether a genuinely
+   * DURABLE write of THIS exact phase succeeded — `true` only after file + parent-directory fsync. A `false`
+   * means the caller must NOT treat the intent as recorded (fail closed). The atomic temp+rename means an
+   * interrupted write never leaves a TRUNCATED phase a reader mis-parses; `readWipePhase` additionally
+   * fail-safes any ambiguous content to `delete-pending`.
+   */
+  function writeWipePhase(phase: WipePhase): boolean {
+    return durableWriteFileSync(wipePhaseMarkerPath, phase);
   }
 
   /**
@@ -1498,7 +1557,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       raw = readFileSync(wipePhaseMarkerPath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        return undefined;
+        // No NEW phase file — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished
+        // wipe (P1-1, Sol round-8). Migrate it forward before concluding "no wipe".
+        return migrateLegacyWipeMarkerIfPresent();
       }
       return "delete-pending";
     }
@@ -1510,19 +1571,61 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return "delete-pending";
   }
 
+  /**
+   * P1-1 (Sol round-8) upgrade path: when there is NO new `.loam-wipe-phase`, a present (or unreadable)
+   * legacy `.loam-wipe-pending` marker means a pre-round-8 wipe was still unfinished — treat it as
+   * `delete-pending` (NEVER `key-clear-ready`: the old marker cannot prove deletion completed, so deletion
+   * must be re-run first) and MIGRATE it durably to the new phase file so the resume path drives it forward.
+   * The legacy marker is NOT removed here — both names are cleared together only once the whole protocol
+   * completes (`clearWipePhase`), so an interrupted migration is retried on the next boot. Returns the phase
+   * verdict: `delete-pending` when a legacy wipe was pending, else `undefined` (genuinely no wipe).
+   */
+  function migrateLegacyWipeMarkerIfPresent(): WipePhase | undefined {
+    if (provenAbsence(legacyWipePendingMarkerPath) === "absent") {
+      return undefined; // no wipe pending under EITHER name — a normal boot
+    }
+    // present OR unverifiable ("unknown") → assume a wipe was pending and fail safe to re-running deletion.
+    if (!writeWipePhase("delete-pending")) {
+      // Could not durably migrate. Do NOT report `undefined` (that would forget the wipe) — the legacy
+      // marker is still on disk, so report `delete-pending` for THIS boot; a later boot retries the migration.
+      server.log.error(
+        "Wipe resume: found a legacy `.loam-wipe-pending` marker but could NOT durably migrate it to " +
+          "`.loam-wipe-phase` — treating as delete-pending for this boot; the legacy marker persists so a later boot retries.",
+      );
+    } else {
+      server.log.warn(
+        "Wipe resume: migrated a pre-round-8 `.loam-wipe-pending` marker to `.loam-wipe-phase=delete-pending`; " +
+          "deletion will be re-run and verified before any device-key clear.",
+      );
+    }
+    return "delete-pending";
+  }
+
   /** Delete the durable wipe-phase file, returning whether it is now PROVEN gone (removed, or confirmed
    *  absent). The ONLY places allowed to call this: the launcher's verified `loam-wipe-complete` handoff
    *  (via main.js, not here) after a `key-clear-ready` wipe, and the desktop/no-hook fallback below where
    *  the key cannot be rotated in-process anyway. A `false` return means the marker may still be on disk,
    *  so the caller must NOT treat the wipe as finished (else the next boot re-reads it and re-wipes). */
   function clearWipePhase(): boolean {
-    try {
-      rmSync(wipePhaseMarkerPath, { force: true });
-    } catch (error) {
-      server.log.warn(error, "Kill switch: failed to delete the wipe-phase file (a later boot re-reads it)");
+    // Remove BOTH the new phase file AND any migrated-from legacy `.loam-wipe-pending` marker (P1-1): if the
+    // legacy name lingered after a migration, leaving it would make the NEXT boot re-recognise it as a
+    // pending wipe and re-wipe the fresh DB in a loop. Both must be proven gone for a clean completion.
+    for (const path of [wipePhaseMarkerPath, legacyWipePendingMarkerPath]) {
+      try {
+        rmSync(path, { force: true });
+      } catch (error) {
+        server.log.warn(error, `Kill switch: failed to delete ${path} (a later boot re-reads it)`);
+      }
+      // `rmSync{force:true}` swallows ENOENT, so a throw here is a real removal failure — re-verify absence.
+      if (provenAbsence(path) !== "absent") {
+        return false;
+      }
     }
-    // `rmSync{force:true}` swallows ENOENT, so a throw here is a real removal failure — re-verify absence.
-    return provenAbsence(wipePhaseMarkerPath) === "absent";
+    // fsync the parent DIRECTORY so the unlinks are durable BEFORE any caller mints a new device key or opens
+    // a fresh DB (Sol round-8 P1-5.3): otherwise a power-loss after the unlink but before it reaches stable
+    // storage can RESURRECT the phase file as `key-clear-ready`, and the next boot would clear the freshly
+    // minted key and strand the new database. A parent-dir fsync failure → report NOT-cleared (fail closed).
+    return fsyncDir(dataDir);
   }
 
   /**
@@ -1578,7 +1681,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // Step 0 (P2-3): consume the marker up front, unconditionally, before any open attempt — see the
     // doc comment above for why this can't wait until both opens have failed.
     let startFreshConfirmed = false;
+    // P1-6 (Sol round 8): the marker carries the operator's INTENT. `delete` = a DELIBERATE destructive mode
+    // change (the operator chose "Delete & start fresh" in Settings) → the prior DB must be DELETED and PROVEN
+    // gone, not renamed aside (a renamed-aside encrypted DB stays recoverable under the retained device
+    // secret, so "deleted" would be a lie). Anything else — `preserve`, a legacy timestamp marker, or an
+    // unreadable one — = accidental wrong/lost-key LOCKOUT recovery → preserve the old ciphertext aside for a
+    // possible later attempt. Default `preserve` (NEVER destroy on an ambiguous/unreadable marker).
+    let startFreshIntent: "delete" | "preserve" = "preserve";
     if (existsSync(dbStartFreshMarkerPath)) {
+      try {
+        if (readFileSync(dbStartFreshMarkerPath, "utf8").trim() === "delete") {
+          startFreshIntent = "delete";
+        }
+      } catch {
+        // Unreadable marker → keep the safe `preserve` default (never escalate to destruction on ambiguity).
+      }
       try {
         rmSync(dbStartFreshMarkerPath, { force: true });
         startFreshConfirmed = true;
@@ -1871,6 +1988,46 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       server.log.error(message);
       reportBootNotice(message, "db_encryption_unreadable");
       throw new DbEncryptionUnreadableError(message);
+    }
+
+    if (startFreshIntent === "delete") {
+      // P1-6 (Sol round 8): a DELIBERATE destructive mode change (the operator chose "Delete & start fresh"
+      // in Settings) reached here because the existing DB is genuine ciphertext the NEW key can't open. It
+      // must be DELETED and PROVEN gone — not renamed aside like the accidental-lockout path below: a
+      // renamed-aside encrypted DB stays fully recoverable under the RETAINED device secret (both encrypted
+      // modes share it), so "Delete & start fresh" would be a lie. Delete the FULL artifact inventory and
+      // fail CLOSED on any survivor/unverifiable path (like the kill-switch wipe), rather than opening a
+      // fresh, clean-looking node over still-recoverable ciphertext. `deleteAndVerifyDbArtifacts` never
+      // throws (it returns survivors/errors), so this fail-closed check runs outside the try below.
+      const deletion = deleteAndVerifyDbArtifacts();
+      if (!deletion.ok) {
+        const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+        const message =
+          "Delete-and-start-fresh was confirmed for a deliberate encryption-mode change, but the previous " +
+          `database could not be deleted and VERIFIED gone (${remaining}) — refusing to open a fresh database ` +
+          "over recoverable data. The operator can confirm delete-and-start-fresh again to retry.";
+        server.log.error(message);
+        reportBootNotice(message, "db_encryption_unreadable");
+        throw new DbEncryptionUnreadableError(message);
+      }
+      try {
+        // Artifacts are proven gone; the rename loop below would be a no-op, so open a fresh DB directly.
+        const store = openLoamStore();
+        const message =
+          "The database could not be opened with the new key; a DELETE start-fresh confirmation was present, " +
+          "so the previous database was deleted and VERIFIED gone and a fresh ENCRYPTED database was started.";
+        server.log.warn(message);
+        reportBootNotice(message, "db_encryption_recovered_fresh");
+        return store;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const message =
+          "Delete-and-start-fresh deleted the previous database but then failed opening a fresh one " +
+          `(${detail}). The confirmation was already consumed; the operator can confirm again to retry.`;
+        server.log.error(message);
+        reportBootNotice(message, "db_encryption_unreadable");
+        throw new DbEncryptionUnreadableError(message);
+      }
     }
 
     // RF4: the marker was already consumed (step 0) by this point, so this block is wrapped — a
@@ -3719,41 +3876,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   async function persistConfigForRestart(config: LoamConfig): Promise<boolean> {
     const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
-    const write = async (): Promise<void> => {
-      const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-      try {
-        await writeFile(tmpPath, JSON.stringify(sanitized, null, 2), "utf8");
-        await rename(tmpPath, configPath);
-      } catch (error) {
-        // RF-e: a failure after `writeFile` but before/at `rename` would otherwise leak the temp file in
-        // the data dir. Best-effort cleanup (ignore its own error) before rethrowing so the caller's
-        // retry/notice policy is unchanged.
-        await rm(tmpPath, { force: true }).catch(() => {});
-        throw error;
-      }
-    };
-
-    try {
-      await write();
+    const contents = JSON.stringify(sanitized, null, 2);
+    // DURABLE write (P2-1, Sol round-8): staging write + file fsync + atomic rename + parent-dir fsync, via
+    // `durableWriteFileAsync`. A bare writeFile+rename is atomic but NOT power-loss-durable — it could return
+    // "success" while a crash then discards the new bytes or the rename, silently reverting admin settings
+    // (the armed kill switch, panic token, security profile…) to config.json/defaults after the wipe deletes
+    // the DB `config` table. Retries once (a transient fs error shouldn't cost the config) and returns whether
+    // it EVENTUALLY landed durably — the caller awaits this BEFORE deletion/handoff.
+    if (await durableWriteFileAsync(configPath, contents)) {
       return true;
-    } catch (error) {
-      server.log.error(
-        error,
-        "Kill switch: failed to persist config.json ahead of the encrypted wipe (attempt 1 of 2) — retrying once",
-      );
     }
-
-    try {
-      await write();
+    server.log.error(
+      "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe (attempt 1 of 2) — retrying once",
+    );
+    if (await durableWriteFileAsync(configPath, contents)) {
       return true;
-    } catch (error) {
-      server.log.error(
-        error,
-        "Kill switch: failed to persist config.json ahead of the encrypted wipe after a retry — giving up " +
-          "(the caller proceeds with the wipe regardless and reports a distinct notice)",
-      );
-      return false;
     }
+    server.log.error(
+      "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe after a retry — giving up " +
+        "(the caller proceeds with the wipe regardless and reports a distinct notice)",
+    );
+    return false;
   }
 
   /**
@@ -3810,16 +3953,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           pending.close();
         }
 
-        // P1-4 (Sol round 5): persist config.json DURABLY now — still BEFORE writing the wipe-pending
-        // marker or signaling the launcher (the order P1-4 requires), just AFTER the synchronous lockdown
-        // above (the order RF-a requires). A kill in the window between "launcher signaled" and "config
-        // actually persisted" could otherwise let RN clear the Keystore key and restart while this write
-        // never completed, silently reverting admin settings (the armed kill switch itself included) to
-        // config.json/defaults on the fresh boot. The lockdown above already closed the confidentiality
-        // window, so this await can no longer serve stale content. `persistConfigForRestart` retries once
-        // internally; if it STILL fails, the kill switch's data-destruction priority wins — proceed with
-        // the wipe regardless — but that must never look like an ordinary success, hence the distinct log
-        // line (never silently continue as if config was preserved).
+        // P1-3 (Sol round 8): RECORD THE DURABLE WIPE INTENT BEFORE THE FIRST AWAIT. Previously the
+        // `delete-pending` phase was written only AFTER `await persistConfigForRestart(...)` below — a
+        // kill/power-loss DURING that async config write left NO phase file, an intact DB, and (unless the
+        // now-removed WebView fallback happened to run) the old key intact, so the next boot opened the
+        // pre-wipe database and FORGOT the emergency wipe. The only durable state now precedes every await:
+        // the synchronous lockdown above, then this phase write. `writeWipePhase` is fully synchronous
+        // (durable temp+fsync+rename+dir-fsync), so a kill can only land BEFORE it (nothing destroyed yet,
+        // no wipe to forget) or AFTER it (intent on disk → next boot resumes deletion). Config preservation
+        // is deliberately SUBORDINATE to this: recorded next, best-effort, never at the cost of the wipe
+        // intent.
+        const phasePending = writeWipePhase("delete-pending");
+
+        // P1-4 (Sol round 5): persist config.json DURABLY now — AFTER the durable wipe intent (P1-3) and the
+        // synchronous lockdown (RF-a), still BEFORE any deletion or launcher signal. A kill in the window
+        // between "launcher signaled" and "config actually persisted" could otherwise let RN clear the
+        // Keystore key and restart while this write never completed, silently reverting admin settings (the
+        // armed kill switch itself included) to config.json/defaults on the fresh boot. `persistConfigForRestart`
+        // retries once internally; if it STILL fails, the kill switch's data-destruction priority wins —
+        // proceed with the wipe regardless — but that must never look like an ordinary success (distinct log).
         const configPersisted = await persistConfigForRestart(appConfig);
         if (!configPersisted) {
           server.log.error(
@@ -3832,23 +3984,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // P1-1 (Sol round 8): DURABLE PHASE STATE MACHINE — the old single `.loam-wipe-pending` marker
         // conflated "deletion still pending" with "safe to clear the key", so any surviving marker
         // authorized a key-clear on the next boot WITHOUT re-verifying deletion (a legacy-key
-        // `.premigration` survivor stayed recoverable; Step-0b could restore it). Now:
-        //   1. Write phase=`delete-pending` DURABLY, BEFORE any deletion.
+        // `.premigration` survivor stayed recoverable; Step-0b could restore it). The intent (phase=
+        // `delete-pending`) is already recorded above (P1-3). Now:
         //   2. Delete + PROVE-gone EVERY artifact + media (P1-2, fail-closed).
         //   3. ONLY when every path is PROVEN absent, advance to phase=`key-clear-ready` DURABLY, and ONLY
         //      THEN signal the launcher to clear the device key + restart.
         // If deletion is incomplete/unverifiable → stay `delete-pending`, do NOT signal, stay 503-locked;
         // the next boot's server-side resume re-runs deletion under the OLD key before serving.
-        // Step 1: record the durable intent (phase=delete-pending) BEFORE any destruction — including the
-        // store close. `writeWipePhase` only writes a file (it does not need the store closed), and the
-        // ordering matters: a SIGKILL/power-loss landing between "record intent" and "begin destroying"
-        // must find the intent already on disk, so the next boot re-runs the wipe rather than reopening the
-        // intact DB and forgetting it. If even this can't be written we still proceed to a synchronous
-        // delete-before-signal (below): a kill after the signal then finds no recoverable data, though the
-        // handoff won't be auto-resumable (reported distinctly).
-        const phasePending = writeWipePhase("delete-pending");
-
-        // Now close the store so its files can be deleted.
+        // Close the store so its files can be deleted.
         store.close();
 
         // Step 2: fail-closed deletion + proof of absence for the FULL inventory (DB artifacts + media).
@@ -3928,6 +4071,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // launcher hook): destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh key, so any
       // bytes a forensic tool recovers from flash are unreadable — stronger than a logical DELETE, which
       // leaves recoverable pages behind. See docs/02-kill-switch.md.
+      //
+      // P1-4 (Sol round 8): a NO-LAUNCHER fixed-key wipe (desktop persistent/passphrase) previously deleted
+      // in-process with NO durable record — so a deletion failure locked the process (503) but left nothing
+      // for a restart to resume, and the next boot opened the surviving DB under the same fixed key and served
+      // the supposedly-wiped data. Record `delete-pending` DURABLY BEFORE deletion so a failure is picked up
+      // by the boot-time wipe resume (which re-deletes and, for the no-hook case, clears the phase + recreates
+      // under the same key). Ephemeral wipes deliberately do NOT get a phase: their key is RAM-only and
+      // regenerated on restart, so a surviving file is unreadable regardless, and a lingering phase would only
+      // risk a benign re-wipe of the already-fresh ephemeral DB.
+      const fixedKeyNoHookWipe = fixedKeyMode;
+      if (fixedKeyNoHookWipe && !writeWipePhase("delete-pending")) {
+        server.log.error(
+          "Kill switch (no-hook fixed key): could NOT durably record the delete-pending phase before deletion — " +
+            "if deletion also fails, a restart cannot auto-resume the wipe; reopen promptly.",
+        );
+      }
       store.close();
       // P1-2 (Sol round 7/8): delete EVERY DB artifact while the store is closed and BEFORE reopening a
       // fresh one below — the legacy-key `.premigration` snapshot, `-journal`, and `*.unreadable-<ts>`
@@ -3979,6 +4138,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // so admin edits (an armed kill switch, the panic token, feature flags) survive a restart
       // instead of silently reverting to config.json/defaults.
       store.setConfigValue("config", JSON.stringify(appConfig));
+      if (fixedKeyNoHookWipe) {
+        // Deletion succeeded and the DB was recreated under the same key IN-PROCESS — the wipe is complete,
+        // so clear the durable phase (both names). A clear failure leaves the phase in place; the next boot's
+        // resume re-runs the (idempotent) deletion and clears again, so this is best-effort, not fatal.
+        if (!clearWipePhase()) {
+          server.log.warn(
+            "Kill switch (no-hook fixed key): completed the in-process wipe but could not durably clear the wipe " +
+              "phase — the next boot re-runs the (idempotent) deletion and clears it.",
+          );
+        }
+      }
     } else {
       // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
       store.wipeAll();
