@@ -13,6 +13,9 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const rnBridge = require('rn-bridge');
+// P1-2 (Sol round 5): the pure "may a key be resolved this boot?" decision, split out so it can be
+// unit-tested directly (this file itself can't be — see db-key-gate.js's doc comment).
+const { mayResolveDbKeyThisBoot } = require('./db-key-gate');
 
 const PORT = 3000;
 const projectDir = __dirname;
@@ -89,6 +92,21 @@ global.__loamRequestWipeRestart = function () {
     rnBridge.channel.post('loam-wipe-restart');
   } catch (err) {
     console.error('Failed to post loam-wipe-restart to the RN host', err);
+  }
+};
+
+// P1-1 (Sol round 5): the server's `openInitialStore` (apps/server/src/app.ts) calls this
+// (`globalThis.__loamReportDbKeyMigrated`) after successfully migrating a passphrase-mode DB to the
+// current key derivation — either by opening it directly under the current key (already migrated, or a
+// fresh install that never needed the legacy one) or by rekeying it in place from the legacy key. Forward
+// it to RN so `db-encryption.ts`'s `registerDbEncryption` can call `markPassphraseKeyMigrated()`, which
+// stops future boots from offering the legacy key at all. Best-effort, same pattern as every other
+// global.__loam* hook here — installed BEFORE requiring the server bundle. Never carries any key material.
+global.__loamReportDbKeyMigrated = function () {
+  try {
+    rnBridge.channel.post('loam-db-key-migrated');
+  } catch (err) {
+    console.error('Failed to post loam-db-key-migrated to the RN host', err);
   }
 };
 
@@ -595,16 +613,31 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
 // idiom `loam-model-set-active` uses above — so there's no race against listener-registration order at
 // boot (main.js doesn't need RN to have posted before it started listening).
 //
-// The safe default is always "off" — no key, today's plaintext `better-sqlite3` driver: if RN's reply
-// says `off`, the wait times out, or no key comes back for ANY reason (old RN build, screen not yet
-// mounted, a thrown post()), this falls straight through to the existing behaviour. Crisis messaging
-// must always work, so a slow/missing RN response can never block or crash boot over encryption.
+// `'off'` is the safe default ONLY when RN's reply genuinely says so — but a timeout, a malformed/
+// unrecognized payload, a thrown post(), or RN's own reported read failure (`{mode:'error'}`, from a
+// SecureStore/Keystore glitch — see db-encryption.ts's `DB_ENCRYPTION_MODE_READ_ERROR`) must NOT be
+// treated the same way any more (P1-3, Sol round 5): those tell us nothing about the operator's actual
+// choice, and silently falling through to plaintext would downgrade an encrypted node on a merely
+// transient hiccup. Those cases resolve to the `'locked-error'` sentinel mode instead — the caller
+// (`resolveDbEncryptionAndBoot` below) reports `db_encryption_locked` and refuses to start the server
+// AT ALL, exactly like the existing "persistent/passphrase with no usable key" case, rather than the old
+// silent plaintext fallback. Genuine `{mode:'off'}` (RN successfully read an unset/off selection) is
+// still a normal, silent boot — crisis messaging still always works for the actual default case.
 const DB_KEY_TIMEOUT_MS = 5000;
 const DB_ENCRYPTION_MODES = ['off', 'ephemeral', 'persistent', 'passphrase'];
+// RN's own sentinel for "I successfully asked, but the read itself failed" (db-encryption.ts's
+// `DB_ENCRYPTION_MODE_READ_ERROR`) — not a real encryption mode, so deliberately excluded from
+// `DB_ENCRYPTION_MODES` above.
+const DB_MODE_READ_ERROR = 'error';
+// This file's own sentinel (never sent over the bridge) for "do not resolve a real mode/key this call —
+// treat exactly like db_encryption_locked" — covers RN's read-error reply, a timeout, a malformed/
+// unrecognized payload, and a thrown post().
+const DB_KEY_LOCKED_ERROR = 'locked-error';
 
 /** Ask the RN host for the DB-encryption mode/key, waiting up to `timeoutMs`. Never rejects — any
- * failure (timeout, malformed payload, a post() throw) resolves to the safe default `{ mode: 'off' }`
- * so the caller can fall through to unencrypted boot unconditionally. */
+ * FAILURE (timeout, malformed/unrecognized payload, a post() throw, or RN's own reported read error)
+ * resolves to `{ mode: 'locked-error' }` (P1-3, Sol round 5) so the caller locks rather than silently
+ * falls back to plaintext. Only a genuinely successful `{mode:'off'}` reply resolves to `'off'`. */
 function requestDbKey(timeoutMs) {
   return new Promise(function (resolve) {
     var settled = false;
@@ -621,16 +654,29 @@ function requestDbKey(timeoutMs) {
 
     function onResponse(payload) {
       var mode = payload && payload.mode;
+      if (mode === DB_MODE_READ_ERROR) {
+        // RN successfully answered, but told us ITS read of the stored mode failed — not the same as
+        // "off selected". Lock rather than guess.
+        finish({ mode: DB_KEY_LOCKED_ERROR });
+        return;
+      }
       if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
-        finish({ mode: 'off' });
+        // Malformed/missing/unrecognized payload (old RN build, corrupt post) — must not be assumed
+        // 'off' either; lock instead.
+        finish({ mode: DB_KEY_LOCKED_ERROR });
         return;
       }
       var key = payload && typeof payload.key === 'string' && payload.key.length > 0 ? payload.key : undefined;
-      finish({ mode: mode, key: key });
+      var legacyKey =
+        payload && typeof payload.legacyKey === 'string' && payload.legacyKey.length > 0 ? payload.legacyKey : undefined;
+      finish({ mode: mode, key: key, legacyKey: legacyKey });
     }
 
     var timer = setTimeout(function () {
-      finish({ mode: 'off' });
+      // A timeout means RN never answered at all (screen not mounted yet, a hung Keystore call) — a
+      // transient condition, not evidence the operator wants plaintext. Lock; the operator (or a later
+      // `loam-db-unlock` retry once RN is up) can try again.
+      finish({ mode: DB_KEY_LOCKED_ERROR });
     }, timeoutMs);
 
     // Listener registered BEFORE the request is posted — no race with RN's answer, however fast.
@@ -638,7 +684,7 @@ function requestDbKey(timeoutMs) {
     try {
       rnBridge.channel.post('loam-db-key-request');
     } catch (err) {
-      finish({ mode: 'off' });
+      finish({ mode: DB_KEY_LOCKED_ERROR });
     }
   });
 }
@@ -775,6 +821,13 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
 // (index.tsx) posts this after the operator has done something that might now produce a key: for
 // passphrase mode, having just called `setStoredPassphrase`; for persistent mode, as a plain manual
 // retry (e.g. after a transient Keystore hiccup).
+//
+// P1-2 (Sol round 5): this MUST go through `bootWithWipeResume()`, never call
+// `resolveDbEncryptionAndBoot()` directly — a direct call here bypassed the wipe-pending marker check
+// entirely, so a Retry/Unlock tap could resolve a key (and boot) while an earlier wipe's Keystore
+// key-clear was still unconfirmed, opening the fresh post-wipe database under the very secret the wipe
+// was meant to destroy. `bootWithWipeResume` re-checks the marker on every call (see its doc comment) and
+// is the single choke point every boot/unlock entry point in this file routes through.
 var dbUnlockRetryInFlight = false;
 
 rnBridge.channel.on('loam-db-unlock', function (payload) {
@@ -803,7 +856,7 @@ rnBridge.channel.on('loam-db-unlock', function (payload) {
     // will see the outcome via the next `loam-status` regardless.
   }
 
-  resolveDbEncryptionAndBoot().then(
+  bootWithWipeResume().then(
     function () {
       dbUnlockRetryInFlight = false;
     },
@@ -896,6 +949,23 @@ function resolveDbEncryptionAndBoot() {
     .then(function (result) {
       var mode = result.mode;
       var key = result.key;
+      var legacyKey = result.legacyKey;
+
+      if (mode === DB_KEY_LOCKED_ERROR) {
+        // P1-3 (Sol round 5): RN couldn't tell us its actual mode selection at all — a Keystore/
+        // SecureStore read failure, a timeout, or a malformed/unrecognized response. This is NOT the
+        // same signal as an operator genuinely choosing 'off', so it must not fall through to a
+        // plaintext boot the way it used to. Stay locked, exactly like the "no usable key" case below —
+        // `index.tsx` shows the same Retry recovery (`loam-db-unlock`), which re-runs this function.
+        global.__loamReportBootError(
+          'Could not determine the on-device encryption mode this boot (a device security-store read ' +
+            'failed, the request timed out, or the response was malformed) — refusing to start ' +
+            'unencrypted. Retry once the app is responsive.',
+          'db_encryption_locked',
+        );
+        clearEphemeralMarker();
+        return 'locked';
+      }
 
       // Threaded to the embedded server for EVERY boot (AF1/shared contract), 'off' included — so
       // anything downstream that cares about the operator's CONFIGURED mode (as opposed to whether a
@@ -906,6 +976,7 @@ function resolveDbEncryptionAndBoot() {
         // Safe default: today's plaintext behaviour, unchanged. Silent — 'off' is the true default,
         // not a downgrade, so it must never trigger a boot-error notice.
         process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
         clearEphemeralMarker();
         return 'proceed';
       }
@@ -966,6 +1037,7 @@ function resolveDbEncryptionAndBoot() {
         // boot instead of degrading. Posture reporting must match reality too: this boot really is
         // unencrypted, for every mode, not just 'ephemeral'.
         process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
+        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
         clearEphemeralMarker();
         return 'proceed';
       }
@@ -978,6 +1050,7 @@ function resolveDbEncryptionAndBoot() {
         // derived from RN's `resolveDbKey('ephemeral')` any more — that no longer returns a key at all
         // for this mode (see db-encryption.ts).
         process.env.LOAM_DB_KEY = 'ephemeral';
+        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
         return 'proceed';
       }
 
@@ -985,6 +1058,15 @@ function resolveDbEncryptionAndBoot() {
       // openStore's encryptionKey path takes precedence over LOAM_DB_DRIVER (see db.ts) — leave the
       // driver env unset here. NEVER logged.
       process.env.LOAM_DB_KEY = key;
+      // P1-1 (Sol round 5): a pre-round-4 passphrase key derivation, offered ONLY when RN hasn't
+      // recorded a confirmed migration yet (db-encryption.ts's `resolveDbKey('passphrase')`). Threaded
+      // to the server as LOAM_DB_KEY_MIGRATE_FROM so `openInitialStore` can fall back to it and rekey in
+      // place — see embedded.ts. Never logged.
+      if (legacyKey) {
+        process.env.LOAM_DB_KEY_MIGRATE_FROM = legacyKey;
+      } else {
+        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
+      }
       return 'proceed';
     })
     .catch(function () {
@@ -992,6 +1074,7 @@ function resolveDbEncryptionAndBoot() {
       // plaintext, not 'locked' — an unexpected internal failure here is not the same signal as an
       // operator's encrypted mode genuinely having no key.
       process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+      delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
       return 'proceed';
     })
     .then(function (outcome) {
@@ -1026,54 +1109,89 @@ function resolveDbEncryptionAndBoot() {
 
 notify('starting');
 
-// Sol round-4 finding #1: on a boot where a wipe handoff was interrupted (the `.loam-wipe-pending` marker
-// survived), let the RN host clear the device secret BEFORE resolving a DB key for this boot. Re-post the
-// clear, wait for `loam-wipe-complete` (the marker-delete handler above confirms the key is verifiably
-// gone), and only THEN resolve the key + boot — resolveDbKey will mint a NEW device secret since the old
-// one is gone. On timeout we do NOT boot under the un-cleared key: surface a locked state and keep the
-// listener, so a late completion still boots and reopening the app retries (the marker persists).
+// Sol round-4 finding #1 / P1-2 (Sol round 5): on a boot where a wipe handoff was interrupted (the
+// `.loam-wipe-pending` marker survived), let the RN host clear the device secret BEFORE resolving a DB
+// key for this boot. Re-post the clear, wait for `loam-wipe-complete` (the marker-delete handler above
+// confirms the key is verifiably gone), and only THEN resolve the key + boot — resolveDbKey will mint a
+// NEW device secret since the old one is gone. On timeout we do NOT boot under the un-cleared key:
+// surface a locked state and keep the listener, so a late completion still boots and reopening the app
+// retries (the marker persists).
+//
+// P1-2 (Sol round 5): this is now the ONE SINGLE CHOKE POINT allowed to call
+// `resolveDbEncryptionAndBoot()` — EVERY boot/unlock entry point (the initial boot at the bottom of this
+// file, AND the `loam-db-unlock` retry listener above) MUST go through this function, gated by
+// `mayResolveDbKeyThisBoot` (db-key-gate.js). Before this fix, `loam-db-unlock`'s handler called
+// `resolveDbEncryptionAndBoot()` directly — bypassing the marker check entirely — so a Retry/Unlock tap
+// after a `db_encryption_locked` report (which can also fire while a wipe-resume is still pending) could
+// resolve a key and boot a fresh database under the OLD secret the wipe was meant to destroy.
+//
+// Always returns a Promise that resolves once THIS call's outcome is settled (key resolved & boot
+// attempted, OR still locked pending the resume) — never rejects. A wait-for-resume in progress is a
+// SINGLETON (`wipeResumeWait`): a second caller (e.g. `loam-db-unlock` firing while the initial boot's
+// own resume wait is still pending) joins the SAME wait rather than registering a second overlapping
+// `loam-wipe-complete` listener/timer.
+var wipeResumeWait;
+
 function bootWithWipeResume() {
-  if (!hasWipePendingMarker()) {
-    resolveDbEncryptionAndBoot();
-    return;
+  if (wipeResumeWait) {
+    return wipeResumeWait;
   }
 
-  var proceeded = false;
-  var timer;
-  function proceed() {
-    if (proceeded) {
-      return;
+  if (mayResolveDbKeyThisBoot(hasWipePendingMarker())) {
+    return resolveDbEncryptionAndBoot();
+  }
+
+  wipeResumeWait = new Promise(function (resolve) {
+    var proceeded = false;
+    var timer;
+    function proceed() {
+      if (proceeded) {
+        return;
+      }
+      proceeded = true;
+      clearTimeout(timer);
+      rnBridge.channel.removeListener('loam-wipe-complete', proceed);
+      resolve(resolveDbEncryptionAndBoot());
     }
-    proceeded = true;
-    clearTimeout(timer);
-    rnBridge.channel.removeListener('loam-wipe-complete', proceed);
-    resolveDbEncryptionAndBoot();
-  }
 
-  timer = setTimeout(function () {
-    if (proceeded) {
-      return;
+    timer = setTimeout(function () {
+      if (proceeded) {
+        return;
+      }
+      proceeded = true;
+      rnBridge.channel.removeListener('loam-wipe-complete', proceed);
+      // The clear didn't complete in time — do NOT boot under the un-destroyed key. The marker persists,
+      // so reopening the app re-attempts; a later `loam-wipe-complete` (if it eventually arrives after
+      // this timeout) is picked up by the NEXT call to this function, since `wipeResumeWait` is cleared
+      // in the `finally` below.
+      notify('error', {
+        message:
+          'A security reset is still finishing on this device — reopen the app to complete it. The database was not reopened.',
+        code: 'db_encryption_locked',
+      });
+      resolve('locked');
+    }, WIPE_RESUME_TIMEOUT_MS);
+
+    // `proceed` also runs once the marker-delete handler above has cleared the marker on the SAME event.
+    rnBridge.channel.on('loam-wipe-complete', proceed);
+    try {
+      rnBridge.channel.post('loam-wipe-restart');
+    } catch (err) {
+      proceeded = true;
+      clearTimeout(timer);
+      rnBridge.channel.removeListener('loam-wipe-complete', proceed);
+      console.error('Failed to post loam-wipe-restart for a resumed wipe handoff', err);
+      notify('error', {
+        message: 'A security reset could not be completed on this device — reopen the app to retry.',
+        code: 'db_encryption_locked',
+      });
+      resolve('locked');
     }
-    // The clear didn't complete in time — do NOT boot under the un-destroyed key. The marker persists, so
-    // reopening the app re-attempts; the listener stays armed in case RN completes late.
-    notify('error', {
-      message:
-        'A security reset is still finishing on this device — reopen the app to complete it. The database was not reopened.',
-      code: 'db_encryption_locked',
-    });
-  }, WIPE_RESUME_TIMEOUT_MS);
+  }).finally(function () {
+    wipeResumeWait = undefined;
+  });
 
-  // `proceed` also runs once the marker-delete handler above has cleared the marker on the SAME event.
-  rnBridge.channel.on('loam-wipe-complete', proceed);
-  try {
-    rnBridge.channel.post('loam-wipe-restart');
-  } catch (err) {
-    console.error('Failed to post loam-wipe-restart for a resumed wipe handoff', err);
-    notify('error', {
-      message: 'A security reset could not be completed on this device — reopen the app to retry.',
-      code: 'db_encryption_locked',
-    });
-  }
+  return wipeResumeWait;
 }
 
 bootWithWipeResume();

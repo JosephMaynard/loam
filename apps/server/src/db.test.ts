@@ -731,4 +731,50 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     // (post-wipe) file — proving the wipe genuinely rotated the key even though the passphrase survived.
     expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
   });
+
+  describe("rekey (P1-1, Sol round 5 — passphrase key-derivation migration)", () => {
+    it("re-encrypts an already-open store under a new key in place: the old key stops opening it, the new key opens it, and data survives", () => {
+      // Simulates exactly the scenario `openInitialStore` (app.ts) migrates: an EXISTING passphrase DB
+      // encrypted under the pre-round-4 derivation `SHA256(passphrase)` (legacyKey) needs to end up
+      // openable under the round-4+ derivation `SHA256(passphrase + ':' + deviceSecret)` (currentKey),
+      // with its data intact and the OLD key no longer usable.
+      const passphrase = "the operator's passphrase, unchanged across the migration";
+      const legacyKey = sha256Hex(passphrase);
+      const deviceSecret = "device-secret-32-random-bytes-hex";
+      const currentKey = sha256Hex(`${passphrase}:${deviceSecret}`);
+      expect(currentKey).not.toBe(legacyKey);
+
+      // Create the "existing" DB under the legacy derivation (pre-round-4 install).
+      const legacy = openStore(dbPath, { encryptionKey: legacyKey });
+      legacy.upsertUser(makeUser("user.pre-round-4"));
+      legacy.insertMessage(makeChannelPost("msg_pre_migration"));
+
+      // The migration itself: rekey the SAME open connection to the current derivation.
+      legacy.rekey(currentKey);
+      // The rekeyed connection is immediately usable under the new key without reopening.
+      expect(legacy.loadUsers()).toEqual([makeUser("user.pre-round-4")]);
+      legacy.close();
+
+      // The OLD (legacy) key can no longer open the file at all.
+      expect(() => openStore(dbPath, { encryptionKey: legacyKey })).toThrow();
+
+      // The NEW (current) key opens it, with every row intact.
+      const migrated = openStore(dbPath, { encryptionKey: currentKey });
+      try {
+        expect(migrated.loadUsers()).toEqual([makeUser("user.pre-round-4")]);
+        expect(migrated.loadMessages()).toEqual([makeChannelPost("msg_pre_migration")]);
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it("throws when called on a plaintext (unencrypted) store — there is no key to rotate", () => {
+      const plain = openStore(dbPath);
+      try {
+        expect(() => plain.rekey("anything")).toThrow();
+      } finally {
+        plain.close();
+      }
+    });
+  });
 });

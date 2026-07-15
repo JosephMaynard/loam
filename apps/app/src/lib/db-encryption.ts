@@ -37,8 +37,30 @@ const PASSPHRASE_ITEM = 'loam-db-encryption-passphrase';
  * genuinely rotate the key, even though the passphrase itself survives the wipe unchanged.
  */
 const DEVICE_SECRET_ITEM = 'loam-db-encryption-device-secret';
+/**
+ * Marks a passphrase-mode DB as confirmed-migrated to the CURRENT key derivation (P1-1, Sol round 5).
+ * Round 4 changed the passphrase key from `SHA256(passphrase)` (legacy) to
+ * `SHA256(passphrase + ':' + deviceSecret)` (current) — an existing round-3-and-earlier passphrase DB
+ * can only be opened with the legacy derivation. Absent (or any value other than
+ * {@link CURRENT_PASSPHRASE_KEY_VERSION}) means "not confirmed migrated yet", so `resolveDbKey` keeps
+ * offering the legacy key alongside the current one until the server confirms a successful migration
+ * (`markPassphraseKeyMigrated`, called from `registerDbEncryption`'s `loam-db-key-migrated` listener).
+ */
+const PASSPHRASE_KEY_VERSION_ITEM = 'loam-db-passphrase-key-version';
+const CURRENT_PASSPHRASE_KEY_VERSION = '2';
 
-export type ResolvedDbKey = { mode: DbEncryptionMode; key?: string };
+export type ResolvedDbKey = {
+  mode: DbEncryptionMode;
+  key?: string;
+  /**
+   * The pre-round-4 passphrase key derivation (`SHA256(passphrase)` alone, no device secret) — present
+   * ONLY for `mode === 'passphrase'` when this device hasn't recorded a confirmed migration yet (P1-1,
+   * Sol round 5). main.js threads it to the server as `LOAM_DB_KEY_MIGRATE_FROM`; `openInitialStore`
+   * tries `key` first and falls back to this only on failure, rekeying the DB to `key` in place on
+   * success. Never present for any other mode.
+   */
+  legacyKey?: string;
+};
 
 /** The subset of the nodejs-mobile bridge channel this module uses (kept loose, matching the other
  * RN↔launcher bridges — on-device-llm.ts, mesh-courier.ts, model-manager-bridge.ts). */
@@ -60,24 +82,47 @@ function bytesToHex(bytes: Uint8Array): string {
   return hex;
 }
 
-/** Read the operator's persisted mode choice. Defaults to `'off'` on any read failure or absent value —
- * a missing/corrupt setting must never be interpreted as "encrypt". */
-export async function getDbEncryptionMode(): Promise<DbEncryptionMode> {
+/** Distinct sentinel returned by {@link getDbEncryptionMode} on a genuine SecureStore READ FAILURE
+ * (P1-3, Sol round 5) — never conflated with `'off'`. A successful read that comes back `null`/absent/
+ * garbage IS genuinely "no mode ever selected", and `'off'` is the correct, safe default for THAT case;
+ * a thrown read (Keystore unavailable, corrupt store) tells you nothing about the operator's actual
+ * choice, so it must stay distinguishable. Any caller that feeds a BOOT decision (`registerDbEncryption`
+ * below, and main.js's `requestDbKey`) must treat this the same as "no usable key" (lock), never as
+ * `'off'` (which would silently downgrade an operator's encrypted mode to plaintext on a transient
+ * error). UI-only callers may treat it as "unknown, don't overwrite the last-known display". */
+export const DB_ENCRYPTION_MODE_READ_ERROR = 'error' as const;
+export type DbEncryptionModeOrError = DbEncryptionMode | typeof DB_ENCRYPTION_MODE_READ_ERROR;
+
+/** Read the operator's persisted mode choice. Returns `'off'` only after a SUCCESSFUL read that came
+ * back null/absent/unrecognized (genuinely "nothing selected yet" — the safe default); returns
+ * {@link DB_ENCRYPTION_MODE_READ_ERROR} on a thrown read (P1-3, Sol round 5) — that failure must never
+ * be silently reported as `'off'`, since a caller feeding a boot decision would then downgrade an
+ * operator's encrypted mode to plaintext on a mere transient Keystore hiccup. */
+export async function getDbEncryptionMode(): Promise<DbEncryptionModeOrError> {
+  let raw: string | null;
   try {
-    const raw = await SecureStore.getItemAsync(MODE_ITEM);
-    return isDbEncryptionMode(raw) ? raw : 'off';
+    raw = await SecureStore.getItemAsync(MODE_ITEM);
   } catch {
-    return 'off';
+    return DB_ENCRYPTION_MODE_READ_ERROR;
   }
+  return isDbEncryptionMode(raw) ? raw : 'off';
 }
 
-/** Persist the operator's mode choice. Best-effort — a failed write just means the picker's next read
- * falls back to `'off'`, the safe default. */
-export async function setDbEncryptionMode(mode: DbEncryptionMode): Promise<void> {
+/** Result of {@link setDbEncryptionMode} — P1-3, Sol round 5: a REAL success/failure, not a swallowed
+ *  best-effort, so the settings UI can surface a failed write as a failure rather than implying the mode
+ *  was actually applied. `error` is a generic, human-readable summary — never key/passphrase material
+ *  (this call never touches any, but kept consistent with the other Result types in this module). */
+export type SetDbEncryptionModeResult = { ok: boolean; error?: string };
+
+/** Persist the operator's mode choice, reporting whether the write actually succeeded (P1-3, Sol round
+ * 5) — a failed write here must not be presented to the operator as "applied": the picker's NEXT read
+ * still falls back to `'off'` (the safe default), which may not be the mode they just thought they set. */
+export async function setDbEncryptionMode(mode: DbEncryptionMode): Promise<SetDbEncryptionModeResult> {
   try {
     await SecureStore.setItemAsync(MODE_ITEM, mode);
-  } catch {
-    // best-effort
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -104,6 +149,24 @@ export async function clearStoredPassphrase(): Promise<void> {
     await SecureStore.deleteItemAsync(PASSPHRASE_ITEM);
   } catch {
     // best-effort
+  }
+}
+
+/**
+ * Record that the server CONFIRMED a passphrase-mode DB is now encrypted under the current key
+ * derivation (P1-1, Sol round 5) — called from `registerDbEncryption`'s `loam-db-key-migrated` listener
+ * once the server signals a successful `PRAGMA rekey` (or reports that the current key already opened
+ * the DB directly, e.g. a fresh install). After this resolves, `resolveDbKey('passphrase')` stops
+ * offering the legacy key on future boots. Best-effort: a failed write just means the legacy key keeps
+ * getting offered unnecessarily on later boots — self-healing (the current key still opens the DB first
+ * every time, and `openInitialStore` re-signals migrated again) rather than a correctness problem, so
+ * this deliberately does not surface a failure the way {@link setDbEncryptionMode} does.
+ */
+export async function markPassphraseKeyMigrated(): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(PASSPHRASE_KEY_VERSION_ITEM, CURRENT_PASSPHRASE_KEY_VERSION);
+  } catch {
+    // best-effort — see doc comment above.
   }
 }
 
@@ -246,6 +309,11 @@ async function clearStoredDbKeysUnlocked(): Promise<ClearDbKeysResult> {
  *                    first via `setStoredPassphrase`) — this module NEVER falls back to plaintext for
  *                    this mode itself; that decision belongs to main.js/index.tsx (see `resolveDbEncryptionAndBoot`'s
  *                    `db_encryption_locked` handling), which must also refuse to boot plaintext here.
+ *                    UNTIL a confirmed migration is recorded (`markPassphraseKeyMigrated`, P1-1 Sol
+ *                    round 5), also returns `legacyKey = SHA256(passphrase)` alongside `key` — the
+ *                    pre-round-4 derivation an existing passphrase DB may still be encrypted under; the
+ *                    server tries `key` first and falls back to `legacyKey` only on failure, rekeying in
+ *                    place on success. Once migration is confirmed, `legacyKey` is omitted.
  *
  * Never throws — any failure (Keystore unavailable, RNG failure) resolves to `{ mode, key: undefined }`
  * so the caller can decide how to handle a missing key (main.js: refuse to boot plaintext for
@@ -278,42 +346,77 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     }
     const deviceSecret = await getOrCreateDeviceSecret();
     const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `${passphrase}:${deviceSecret}`);
-    return { mode, key: digest };
+
+    const migratedVersion = await SecureStore.getItemAsync(PASSPHRASE_KEY_VERSION_ITEM);
+    if (migratedVersion === CURRENT_PASSPHRASE_KEY_VERSION) {
+      return { mode, key: digest };
+    }
+
+    // P1-1 (Sol round 5): no confirmed migration recorded yet — this could be an existing pre-round-4
+    // passphrase DB (legacy key = SHA256(passphrase) alone) OR a genuinely fresh install that simply
+    // never got marked. Offer BOTH: the server tries `digest` first (the fast path for an
+    // already-migrated-in-fact or fresh DB) and falls back to `legacyKey` only if that fails, rekeying
+    // in place on success and signalling back so `markPassphraseKeyMigrated` sets this marker and future
+    // boots skip the extra key entirely.
+    const legacyKey = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, passphrase);
+    return { mode, key: digest, legacyKey };
   } catch {
     return { mode };
   }
 }
 
 /**
- * Wire the DB-encryption key-handoff responder onto the nodejs-mobile channel: on each
- * `loam-db-key-request` from main.js, read the persisted mode, resolve its key material, and post
- * `loam-db-key-response`. Register this in `index.tsx` alongside the other bridge responders
- * (`registerOnDeviceLlm`, `registerMeshCourier`) — order relative to `nodejs.start()` doesn't matter
- * because main.js REQUESTS and waits (with its own timeout), rather than relying on this being
- * registered before the request is posted.
+ * Wire the DB-encryption bridge responders onto the nodejs-mobile channel:
+ *   - on each `loam-db-key-request` from main.js, read the persisted mode, resolve its key material,
+ *     and post `loam-db-key-response`. A mode READ FAILURE (P1-3, Sol round 5 — see
+ *     {@link DB_ENCRYPTION_MODE_READ_ERROR}) is forwarded as `{ mode: 'error' }`, never silently
+ *     reported as `'off'` — main.js's `requestDbKey` must lock rather than boot plaintext on this.
+ *   - on `loam-db-key-migrated` from main.js (the server's confirmed-migration signal, P1-1 Sol round
+ *     5 — see `openInitialStore`'s `reportDbKeyMigrated`), records the migration
+ *     (`markPassphraseKeyMigrated`) so future boots stop offering the legacy passphrase key.
  *
- * Never logs `key` or the passphrase. Returns a cleanup that removes the listener.
+ * Register this in `index.tsx` alongside the other bridge responders (`registerOnDeviceLlm`,
+ * `registerMeshCourier`) — order relative to `nodejs.start()` doesn't matter because main.js REQUESTS
+ * and waits (with its own timeout), rather than relying on this being registered before the request is
+ * posted.
+ *
+ * Never logs `key`/`legacyKey`/the passphrase. Returns a cleanup that removes both listeners.
  */
 export function registerDbEncryption(channel: BridgeChannel): () => void {
   const onRequest = (): void => {
     void (async () => {
-      let response: ResolvedDbKey;
+      let response: ResolvedDbKey | { mode: typeof DB_ENCRYPTION_MODE_READ_ERROR };
       try {
         const mode = await getDbEncryptionMode();
-        response = await resolveDbKey(mode);
+        response = mode === DB_ENCRYPTION_MODE_READ_ERROR ? { mode } : await resolveDbKey(mode);
       } catch {
-        response = { mode: 'off' };
+        response = { mode: DB_ENCRYPTION_MODE_READ_ERROR };
       }
       try {
-        channel.post('loam-db-key-response', response.key ? { mode: response.mode, key: response.key } : { mode: response.mode });
+        const payload: { mode: DbEncryptionModeOrError; key?: string; legacyKey?: string } = { mode: response.mode };
+        if ('key' in response && response.key) {
+          payload.key = response.key;
+        }
+        if ('legacyKey' in response && response.legacyKey) {
+          payload.legacyKey = response.legacyKey;
+        }
+        channel.post('loam-db-key-response', payload);
       } catch {
         // main.js isn't listening (unlikely — it just posted the request) — nothing more to do.
       }
     })();
   };
 
+  const onMigrated = (): void => {
+    void markPassphraseKeyMigrated();
+  };
+
   channel.addListener('loam-db-key-request', onRequest);
-  return () => channel.removeListener('loam-db-key-request', onRequest);
+  channel.addListener('loam-db-key-migrated', onMigrated);
+  return () => {
+    channel.removeListener('loam-db-key-request', onRequest);
+    channel.removeListener('loam-db-key-migrated', onMigrated);
+  };
 }
 
 export type StartFreshResult = { ok: boolean; error?: string };

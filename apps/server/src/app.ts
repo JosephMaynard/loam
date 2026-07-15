@@ -213,6 +213,24 @@ function reportBootNotice(message: string, code: string): void {
   }
 }
 
+/**
+ * Best-effort signal to the RN host bridge that a passphrase-mode DB was just migrated to the current
+ * key derivation (P1-1, Sol round 5 — see `AppOptions.dbEncryptionMigrateFromKey` and `openInitialStore`
+ * below). `globalThis.__loamReportDbKeyMigrated` is installed by `nodejs-project-template/main.js`
+ * before requiring the server bundle, same pattern as {@link reportBootNotice}; on the Android host it
+ * forwards to `db-encryption.ts`'s `markPassphraseKeyMigrated()` so future boots stop offering the
+ * legacy key. Absent (a silent no-op) on every other host and in tests that don't install it. Never
+ * passes any key material — this is a bare signal, not a payload.
+ */
+function reportDbKeyMigrated(): void {
+  try {
+    const reporter = (globalThis as { __loamReportDbKeyMigrated?: () => void }).__loamReportDbKeyMigrated;
+    reporter?.();
+  } catch (reportError) {
+    console.error("Failed to report DB key migration to the RN host:", reportError);
+  }
+}
+
 export type AppOptions = {
   /** Directory holding the SQLite DB, avatars, and (by default) config.json. */
   dataDir: string;
@@ -239,6 +257,17 @@ export type AppOptions = {
   clientPort?: number;
   /** When set, encrypt the database at rest (SQLCipher). Requires a real data dir, not in-memory. */
   dbEncryptionKey?: string;
+  /**
+   * A PRIOR key derivation to fall back to if `dbEncryptionKey` can't open the database on boot (P1-1,
+   * Sol round 5): the Android launcher's passphrase-mode key derivation changed from `SHA256(passphrase)`
+   * (pre-round-4) to `SHA256(passphrase + ':' + deviceSecret)` (round 4+), so an existing passphrase DB
+   * only opens under the OLD derivation. `embedded.ts` threads its `LOAM_DB_KEY_MIGRATE_FROM` env
+   * through here. `openInitialStore` tries `dbEncryptionKey` first; only on failure, and only when this
+   * is set, does it retry with this key — and on THAT success, `PRAGMA rekey`s the database to
+   * `dbEncryptionKey` in place (see `LoamStore.rekey`) so every later boot uses the current key
+   * directly, and reports the migration back to the launcher. Never logged.
+   */
+  dbEncryptionMigrateFromKey?: string;
   /**
    * Encrypt at rest with a **random, RAM-only key** generated at startup and never written to disk
    * (takes precedence over `dbEncryptionKey`). Data is readable only while this process runs — a
@@ -1290,9 +1319,49 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     try {
-      return openLoamStore();
+      const opened = openLoamStore();
+      if (keyWasResolved && options.dbEncryptionMigrateFromKey !== undefined) {
+        // P1-1 (Sol round 5): the current key opened it directly — either this is already migrated, or
+        // it's a genuinely fresh install that never needed the legacy key at all. Either way, the
+        // launcher offered a legacy key because it hasn't recorded a confirmed migration yet (see
+        // db-encryption.ts's passphrase key-version marker) — tell it to stop, so later boots skip this
+        // extra key entirely.
+        reportDbKeyMigrated();
+      }
+      return opened;
     } catch {
-      // Fall through — try the plaintext fallback below (case 2), or recovery (case 3).
+      // Fall through — try the legacy-key migration below, then the plaintext fallback (case 2), or
+      // recovery (case 3).
+    }
+
+    // P1-1 (Sol round 5): passphrase key-derivation migration. Round 4 changed the passphrase-mode key
+    // from `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)` — an existing passphrase DB
+    // encrypted under the OLD derivation can no longer be opened with `dbKey` at all. If the launcher
+    // handed us that legacy derivation too (`dbEncryptionMigrateFromKey`, set only when it hasn't
+    // recorded a confirmed migration), try opening with IT; on success, `PRAGMA rekey` the database to
+    // the current key in place — every later boot then opens directly under `dbKey`, and this boot
+    // reports the migration back so the launcher stops offering the legacy key. Never logs either key.
+    if (keyWasResolved && options.dbEncryptionMigrateFromKey !== undefined) {
+      try {
+        const legacyStore = openStore(dbPath, {
+          encryptionKey: options.dbEncryptionMigrateFromKey,
+          driver: options.dbDriver,
+        });
+        try {
+          legacyStore.rekey(dbKey!);
+        } catch (rekeyError) {
+          legacyStore.close();
+          throw rekeyError;
+        }
+        encryptionEnabled = true;
+        const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
+        server.log.warn(message);
+        reportDbKeyMigrated();
+        return legacyStore;
+      } catch {
+        // The legacy key didn't open it either (or the rekey itself failed) — this isn't a stale-
+        // derivation DB after all; fall through to the plaintext fallback / recovery chain below.
+      }
     }
 
     if (keyWasResolved) {
@@ -3039,23 +3108,54 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Persist `config` to `configPath` (P1-3, Sol round 4): the fixed-key kill-switch branch below deletes
-   * the whole DB — and with it, its `config` table — without ever recreating one in-process; the fresh
-   * DB only exists once the NEXT boot resolves a rotated key. Without this, admin-set values (an armed
-   * kill switch, the panic token, the security profile, retention, sync/mesh, feature flags…) would
-   * silently revert to config.json/defaults on that next boot, DISARMING the kill switch along with
-   * everything else. Writes atomically (temp file + rename) so a crash mid-write can never leave
+   * Persist `config` to `configPath` (P1-3/P1-4, Sol rounds 4/5): the fixed-key kill-switch branch below
+   * deletes the whole DB — and with it, its `config` table — without ever recreating one in-process; the
+   * fresh DB only exists once the NEXT boot resolves a rotated key. Without this, admin-set values (an
+   * armed kill switch, the panic token, the security profile, retention, sync/mesh, feature flags…)
+   * would silently revert to config.json/defaults on that next boot, DISARMING the kill switch along
+   * with everything else. Writes atomically (temp file + rename) so a crash mid-write can never leave
    * `config.json` truncated/corrupt and brick the next boot — `loadAppConfig` fails CLOSED on an
    * unparseable file. Blanks `sync.token`, the one plaintext bearer secret in `LoamConfig`
    * (`admin.passphrase`/`killSwitch.panicToken` are already scrypt-hashed and safe to persist as-is) —
    * `config.json` is a plain, unprotected file, unlike the DB `config` table it would otherwise only
    * ever have lived in.
+   *
+   * Retries once on failure (a transient fs error shouldn't cost the operator their config) and returns
+   * whether it EVENTUALLY succeeded — the caller (P1-4, `executeKillSwitchBody`) must call this and await
+   * its result BEFORE writing the wipe-pending marker or signaling the launcher, never after: signaling
+   * first meant a kill in the window between "launcher signaled" and "config persisted" could let RN
+   * clear the Keystore key and restart while this write never completed, silently reverting admin
+   * settings (the armed kill switch itself included) on the fresh boot.
    */
-  async function persistConfigForRestart(config: LoamConfig): Promise<void> {
+  async function persistConfigForRestart(config: LoamConfig): Promise<boolean> {
     const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
-    const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-    await writeFile(tmpPath, JSON.stringify(sanitized, null, 2), "utf8");
-    await rename(tmpPath, configPath);
+    const write = async (): Promise<void> => {
+      const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+      await writeFile(tmpPath, JSON.stringify(sanitized, null, 2), "utf8");
+      await rename(tmpPath, configPath);
+    };
+
+    try {
+      await write();
+      return true;
+    } catch (error) {
+      server.log.error(
+        error,
+        "Kill switch: failed to persist config.json ahead of the encrypted wipe (attempt 1 of 2) — retrying once",
+      );
+    }
+
+    try {
+      await write();
+      return true;
+    } catch (error) {
+      server.log.error(
+        error,
+        "Kill switch: failed to persist config.json ahead of the encrypted wipe after a retry — giving up " +
+          "(the caller proceeds with the wipe regardless and reports a distinct notice)",
+      );
+      return false;
+    }
   }
 
   /** The actual kill-switch work, split out so {@link executeKillSwitch} can guarantee `wipeInProgress`
@@ -3074,13 +3174,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const hook = wipeRestartHook();
 
       if (hook) {
+        // P1-4 (Sol round 5): persist config.json DURABLY *before* writing the wipe-pending marker or
+        // signaling the launcher at all. The OLD order did this AFTER both — so a kill in the window
+        // between "launcher signaled" and "config actually persisted" could let RN clear the Keystore key
+        // and restart while this write never completed, silently reverting admin settings (the armed
+        // kill switch itself included) to config.json/defaults on the fresh boot. `persistConfigForRestart`
+        // retries once internally; if it STILL fails, the kill switch's data-destruction priority wins —
+        // proceed with the wipe regardless — but that must never look like an ordinary success, hence the
+        // distinct log line (never silently continue as if config was preserved).
+        const configPersisted = await persistConfigForRestart(appConfig);
+        if (!configPersisted) {
+          server.log.error(
+            "KILL SWITCH NOTICE: config.json could NOT be durably persisted before this fixed-key wipe, " +
+              "even after a retry — proceeding with the wipe regardless (kill-switch priority), but admin " +
+              "settings (e.g. the armed kill switch itself) may revert to config.json/defaults on the next boot.",
+          );
+        }
+
         // P1-2(b): a durable marker written BEFORE signaling the launcher — a crash/kill anywhere
         // between "signaled" and "the launcher confirms the key is actually cleared" must be resumable,
         // not silently lost. main.js re-posts `loam-wipe-restart` on its NEXT boot for as long as this
         // marker is present, and deletes it itself only once it receives `loam-wipe-complete` — i.e.
         // only once `clearStoredDbKeys()` VERIFIED the key material is gone (see db-encryption.ts).
         // Written synchronously, before any of the lockdown state below, which itself must land before
-        // this function's first `await`.
+        // this function's next `await`.
         let markerWritten = false;
         try {
           // Synchronous so it lands before the in-memory lockdown + the destructive deletes below. This
@@ -3100,12 +3217,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         if (markerWritten) {
           // P1-2(a): close the confidentiality window. EVERY piece of in-memory lockdown below is
-          // synchronous and runs BEFORE the first `await` in this function (persisting config.json,
-          // closing the store, and deleting its files, further down) — a concurrent request arriving
-          // while that later async work is still in flight must never observe stale in-memory data.
-          // `awaitingWipeRestart` is what the `onRequest` hook 503s on; setting it (and clearing `data`
-          // and every session/auth map) here, synchronously, means even a request already queued behind
-          // this turn of the event loop sees the lockdown, not a stale 200.
+          // synchronous and runs BEFORE this function's NEXT `await` (closing the store and deleting its
+          // files, further down — config.json is now already durably persisted ABOVE, before the marker
+          // write, per P1-4) — a concurrent request arriving while that later async work is still in
+          // flight must never observe stale in-memory data. `awaitingWipeRestart` is what the `onRequest`
+          // hook 503s on; setting it (and clearing `data` and every session/auth map) here, synchronously,
+          // means even a request already queued behind this turn of the event loop sees the lockdown, not
+          // a stale 200.
           awaitingWipeRestart = true;
           data = { users: [], channels: [], messages: [] };
           attachmentOwners.clear();
@@ -3138,16 +3256,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             hook();
           } catch (error) {
             server.log.error(error, "Kill switch: failed to signal the RN launcher for the wipe-restart handoff");
-          }
-
-          try {
-            await persistConfigForRestart(appConfig);
-          } catch (error) {
-            server.log.error(
-              error,
-              "Kill switch: failed to persist config.json ahead of the encrypted wipe — admin settings " +
-                "(e.g. an armed kill switch) may revert to config.json/defaults on the next boot",
-            );
           }
 
           store.close();

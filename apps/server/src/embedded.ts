@@ -23,6 +23,10 @@ import type { StoreDriver } from "./db.js";
  *   capture a stale earlier address (docs/04, docs/15 A7). Set it to pin an explicit host instead.
  * - `LOAM_DB_DRIVER`  — plaintext SQLite backend: `better-sqlite3` (the Android host, whose Node 18
  *   lacks `node:sqlite`) or `node-sqlite` (default). Ignored when `LOAM_DB_KEY` enables encryption.
+ * - `LOAM_DB_KEY_MIGRATE_FROM` — a prior (pre-round-4) passphrase key derivation to retry `openInitialStore`
+ *   with if `LOAM_DB_KEY` can't open the database (P1-1, docs/15, Sol round 5); on success the database is
+ *   `PRAGMA rekey`'d to `LOAM_DB_KEY` in place. Never set except by a launcher offering an unmigrated
+ *   passphrase DB's legacy key. Never logged.
  * - `LOAM_DB_ENCRYPTION_MODE` — the launcher's declared at-rest key strategy (`off`/`ephemeral`/
  *   `persistent`/`passphrase`, see `DbEncryptionModeSchema` in `@loam/schema`). Threaded into `buildApp`
  *   as `dbEncryptionMode` so the reported posture (`networkConfig.dbEncryption`) reflects what the
@@ -117,6 +121,11 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     joinHost: process.env.LOAM_JOIN_HOST,
     clientPort,
     dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
+    // P1-1 (Sol round 5): a prior (pre-round-4) passphrase key derivation, offered by main.js only when
+    // it hasn't recorded a confirmed migration yet (db-encryption.ts). `undefined` (never an empty
+    // string) when main.js has nothing to offer — see `openInitialStore`'s migration attempt. Never
+    // logged.
+    dbEncryptionMigrateFromKey: process.env.LOAM_DB_KEY_MIGRATE_FROM || undefined,
     ephemeralDbKey,
     dbEncryptionMode,
     dbDriver: parseDbDriver(process.env.LOAM_DB_DRIVER),

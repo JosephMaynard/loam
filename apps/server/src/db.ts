@@ -216,6 +216,18 @@ export interface LoamStore {
   isEmpty(): boolean;
   /** Delete all users, channels, messages, and sessions in one transaction. Config is preserved. */
   wipeAll(): void;
+  /**
+   * Re-encrypt an already-open SQLCipher-backed store under `newKey`, via `PRAGMA rekey` (P1-1, Sol
+   * round 5 — the passphrase key-derivation migration: round 4 changed the passphrase KDF from
+   * `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)`, so an existing passphrase DB
+   * opens only under the OLD derivation; the caller — `openInitialStore` in `app.ts` — opens with that
+   * legacy key and calls this to re-key it in place under the current one, so every later boot uses the
+   * current key directly). SQLCipher applies the new key to the existing (already-decrypted) pages in
+   * place; the connection stays open and usable immediately afterward under the new key. Throws if this
+   * store was not opened with `encryptionKey` (plaintext `node:sqlite`/plain `better-sqlite3` stores have
+   * no key to rotate). Never logs `newKey`.
+   */
+  rekey(newKey: string): void;
   close(): void;
 }
 
@@ -247,7 +259,10 @@ export function openStore(path: string, options: OpenStoreOptions = {}): LoamSto
   const db = openConnection(path, options);
 
   try {
-    return buildStore(db);
+    // Only an encrypted (SQLCipher) connection exposes `.pragma()` — threaded through separately so
+    // `buildStore` can implement `rekey()` (P1-1, Sol round 5) without needing to know the driver.
+    const pragma = options.encryptionKey ? (db as EncryptedDatabase).pragma.bind(db as EncryptedDatabase) : undefined;
+    return buildStore(db, pragma);
   } catch (error) {
     // A wrong encryption key surfaces here (the first pragma/DDL fails); don't leak the handle.
     db.close();
@@ -306,8 +321,10 @@ function migrateMissingAttachmentsNextAttempt(db: SqliteConnection): void {
 /**
  * Initialise the schema and prepared statements on an open connection and return the store.
  * Split out so `openStore` can close the connection if any setup step throws.
+ *
+ * @param pragma - Present only for an encrypted (SQLCipher) connection; backs {@link LoamStore.rekey}.
  */
-function buildStore(db: SqliteConnection): LoamStore {
+function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown): LoamStore {
   let closed = false;
 
   db.exec("PRAGMA journal_mode = WAL");
@@ -607,6 +624,22 @@ function buildStore(db: SqliteConnection): LoamStore {
         db.exec("DELETE FROM transport_identity_tokens");
         db.exec("DELETE FROM missing_attachments");
       });
+    },
+    rekey(newKey) {
+      if (!pragma) {
+        throw new Error("rekey() requires a store opened with encryptionKey (SQLCipher) — this store is plaintext.");
+      }
+      // SQLCipher's `PRAGMA rekey` refuses to run in WAL journal mode ("Rekeying is not supported in
+      // WAL journal mode") — drop to DELETE mode for the rekey itself, then restore WAL (matching the
+      // `PRAGMA journal_mode = WAL` this store always opens with).
+      pragma("journal_mode='DELETE'");
+      try {
+        // Escape single quotes so an arbitrary key/passphrase-derived string can't break out of the
+        // pragma literal — mirrors the same escaping `openConnection` applies to the initial `key=`.
+        pragma(`rekey='${newKey.replace(/'/g, "''")}'`);
+      } finally {
+        pragma("journal_mode='WAL'");
+      }
     },
     close() {
       if (!closed) {

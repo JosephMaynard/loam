@@ -9,6 +9,7 @@ import { useTheme } from '@/hooks/use-theme';
 import {
   DB_ENCRYPTION_MODES,
   DB_ENCRYPTION_MODE_DESCRIPTIONS,
+  DB_ENCRYPTION_MODE_READ_ERROR,
   clearStoredPassphrase,
   getDbEncryptionMode,
   hasStoredPassphrase,
@@ -67,7 +68,15 @@ export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSe
     void (async () => {
       const [currentMode, passphraseSet] = await Promise.all([getDbEncryptionMode(), hasStoredPassphrase()]);
       if (!cancelled) {
-        setMode(currentMode);
+        // P1-3 (Sol round 5): a genuine SecureStore read failure (`DB_ENCRYPTION_MODE_READ_ERROR`) is
+        // NOT the same as "off selected" — showing 'off' here would misrepresent the operator's actual
+        // (unknown, on this read) choice. Keep the last-known/default display and surface the failure
+        // instead of silently overwriting it.
+        if (currentMode === DB_ENCRYPTION_MODE_READ_ERROR) {
+          setStatusMessage("Couldn't read the current encryption setting (a device security-store error) — showing the last-known selection.");
+        } else {
+          setMode(currentMode);
+        }
         setHasPassphrase(passphraseSet);
         setLoaded(true);
       }
@@ -81,11 +90,16 @@ export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSe
    * confirmation for the modes that can wipe or strand existing data (G4). */
   const applyModeChange = async (next: DbEncryptionMode) => {
     setMode(next);
-    await setDbEncryptionMode(next);
+    const result = await setDbEncryptionMode(next);
+    // P1-3 (Sol round 5): setDbEncryptionMode now reports real success/failure — a failed write must
+    // never be presented as "applied" (the picker's next read would fall back to 'off', which may not
+    // be what the operator just thought they set).
     setStatusMessage(
-      next === 'off'
-        ? 'Encryption off. Takes effect next time the host app is restarted.'
-        : `${MODE_LABELS[next]} selected. Takes effect next time the host app is restarted.`,
+      !result.ok
+        ? `Couldn't save — ${result.error ?? 'unknown error'}. The change was NOT applied; try again.`
+        : next === 'off'
+          ? 'Encryption off. Takes effect next time the host app is restarted.'
+          : `${MODE_LABELS[next]} selected. Takes effect next time the host app is restarted.`,
     );
   };
 

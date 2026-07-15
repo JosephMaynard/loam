@@ -52,6 +52,14 @@ vi.mock("node:fs", async (importOriginal) => {
 // so every other test — which never sets it — is unaffected; every other `node:fs/promises` export is
 // untouched (`...actual`).
 const rmGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
+// P1-4: a matching fault/delay-injection seam, but for `writeFile` calls that target the kill switch's
+// `persistConfigForRestart` tmp file specifically (`config.json.tmp-...` — never any other `writeFile`
+// caller, e.g. avatar/attachment uploads) — used to prove config.json is durably persisted BEFORE the
+// wipe-pending marker is written and the launcher hook is signaled (the ordering P1-4 fixes), and to
+// simulate a config-persist failure (`configWriteFailures.remaining`) to exercise the retry-once +
+// proceed-with-the-wipe-regardless policy. Both default to inert (`undefined`/`0`) for every other test.
+const configWriteGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
+const configWriteFailures = vi.hoisted(() => ({ remaining: 0 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -61,6 +69,19 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         await rmGate.promise;
       }
       return actual.rm(...args);
+    },
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      const target = String(args[0]);
+      if (target.includes("config.json.tmp-")) {
+        if (configWriteFailures.remaining > 0) {
+          configWriteFailures.remaining -= 1;
+          throw new Error("simulated config.json write failure (P1-4 test fault injection)");
+        }
+        if (configWriteGate.promise) {
+          await configWriteGate.promise;
+        }
+      }
+      return actual.writeFile(...args);
     },
   };
 });
@@ -76,6 +97,8 @@ afterEach(async () => {
   // Belt-and-suspenders: a test that armed the P1-2(a) `rm()` gate but failed before releasing it must
   // never leave a later, unrelated test's own `rm()` calls hanging on a promise nobody will resolve.
   rmGate.promise = undefined;
+  configWriteGate.promise = undefined;
+  configWriteFailures.remaining = 0;
   while (cleanups.length) {
     await cleanups.pop()?.();
   }
@@ -1590,6 +1613,101 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(hook.calls).toBe(1);
   });
 
+  it("P1-4 (Sol round 5): config.json is persisted DURABLY before the wipe-pending marker is written and the launcher hook is signaled", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+
+    let release!: () => void;
+    configWriteGate.promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const wipePromise = app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+
+    // Give the handler a turn to reach (and block on) the gated config.json write — the FIRST thing it
+    // should do, per P1-4's fixed ordering.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Neither the durable marker nor the launcher signal has happened yet — config persistence comes
+    // first now, not after (the bug this fixes: the OLD order let both fire before config was durable).
+    expect(hook.calls).toBe(0);
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+
+    release();
+    const wipe = await wipePromise;
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+  });
+
+  it("P1-4 (Sol round 5): retries a failed config.json persist once, and on a SECOND failure still proceeds with the wipe (reporting a distinct notice, never silently continuing as if config were preserved)", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+
+    // Fail the config.json write exactly once — the retry (attempt 2) succeeds.
+    configWriteFailures.remaining = 1;
+    const errorSpy = vi.spyOn(app.server.log, "error");
+
+    const wipeOnce = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipeOnce.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+    // Recovered on retry — config.json exists and carries the effective config (the armed kill switch).
+    const recoveredConfig = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
+      killSwitch: { enabled: boolean };
+    };
+    expect(recoveredConfig.killSwitch.enabled).toBe(true);
+    errorSpy.mockRestore();
+
+    // A SECOND node, where the config write fails twice in a row (attempt 1 AND the retry) — the wipe
+    // must still proceed (data-destruction priority) rather than get stuck, but must report a distinct
+    // notice rather than the ordinary "signaled" log line.
+    const hook2 = installFakeWipeRestartHook();
+    const second = await makeEncryptedApp(
+      { dbEncryptionKey: "another fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin2 = await session(second.app);
+    configWriteFailures.remaining = 2;
+    const errorSpy2 = vi.spyOn(second.app.server.log, "error");
+
+    const wipeTwice = await second.app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin2.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipeTwice.statusCode).toBe(200);
+    // The wipe still proceeded — the launcher was still signaled and the durable marker still written —
+    // even though config.json could not be persisted.
+    expect(hook2.calls).toBe(1);
+    expect(existsSync(join(second.dataDir, ".loam-wipe-pending"))).toBe(true);
+    expect(existsSync(join(second.dataDir, "loam.db"))).toBe(false);
+    // A distinct, unmistakable notice was logged — never silently "succeeded".
+    expect(errorSpy2.mock.calls.some((call) => String(call[call.length - 1] ?? "").includes("KILL SWITCH NOTICE"))).toBe(
+      true,
+    );
+    errorSpy2.mockRestore();
+  });
+
   describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {
     async function expectConfigSurvivesFixedKeyWipe(dbEncryptionMode: "persistent" | "passphrase"): Promise<void> {
       const hook = installFakeWipeRestartHook();
@@ -1680,6 +1798,110 @@ describe("encryption at rest + key-discard kill switch", () => {
     });
     return reports;
   }
+
+  describe("P1-1 (Sol round 5): passphrase key-derivation migration (dbEncryptionMigrateFromKey / PRAGMA rekey)", () => {
+    /** Install the `globalThis.__loamReportDbKeyMigrated` bridge (main.js's migration-confirmed signal,
+     *  see db-encryption.ts's `markPassphraseKeyMigrated`) and count every invocation. Auto-uninstalled. */
+    function installFakeMigratedHook(): { calls: number } {
+      const state = { calls: 0 };
+      (globalThis as unknown as { __loamReportDbKeyMigrated?: () => void }).__loamReportDbKeyMigrated = () => {
+        state.calls += 1;
+      };
+      cleanups.push(() => {
+        delete (globalThis as unknown as { __loamReportDbKeyMigrated?: unknown }).__loamReportDbKeyMigrated;
+      });
+      return state;
+    }
+
+    it("migrates an existing legacy-keyed passphrase DB in place: rows survive, the current key opens it directly afterward, the legacy key no longer does, and the launcher is told it migrated", async () => {
+      const migrated = installFakeMigratedHook();
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-migrate-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      // An "existing" passphrase DB, encrypted under the pre-round-4 legacy derivation.
+      const original = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      const admin = await session(original);
+      expect((await post(original, admin.cookie, "MIGRATE_ME")).statusCode).toBe(201);
+      await original.close();
+
+      expect(migrated.calls).toBe(0);
+
+      // Boot with the CURRENT key plus the legacy key as a migration fallback — mirrors main.js offering
+      // both because it hasn't recorded a confirmed migration yet.
+      const migratedApp = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMigrateFromKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+
+      expect(migrated.calls).toBe(1);
+      expect(migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "MIGRATE_ME")).toBe(true);
+      await migratedApp.close();
+
+      // Rekeyed in place: a LATER boot with only the current key (no legacy key offered at all) opens
+      // the same file directly.
+      const reopened = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(reopened.store.loadMessages().some((m) => "body" in m && m.body === "MIGRATE_ME")).toBe(true);
+      await reopened.close();
+
+      // The OLD legacy key can no longer open the file at all.
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" }),
+      ).rejects.toThrow();
+    });
+
+    it("a fresh install (no prior DB) opens cleanly under the current key without ever needing the offered legacy one, and still reports migrated so the launcher stops offering it", async () => {
+      const migrated = installFakeMigratedHook();
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-migrate-fresh-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      const app = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: "current SHA256(passphrase + deviceSecret) key",
+        dbEncryptionMigrateFromKey: "a legacy key that will never actually be needed",
+        dbEncryptionMode: "passphrase",
+      });
+      cleanups.push(() => app.close());
+
+      expect(migrated.calls).toBe(1);
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "fresh install")).statusCode).toBe(201);
+    });
+
+    it("falls through to the existing db_encryption_unreadable recovery path when NEITHER the current nor the offered legacy key opens the database", async () => {
+      const reports = installFakeBootBridge();
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the real key" });
+      await session(original);
+      await original.close();
+
+      await expect(
+        buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: "a totally wrong current key",
+          dbEncryptionMigrateFromKey: "a totally wrong legacy key too",
+        }),
+      ).rejects.toThrow(/could not be opened/);
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+    });
+  });
 
   describe("resilient encrypted-DB open (F4, docs/15)", () => {
     it("falls back to serving an existing PLAINTEXT database when the configured key can't open it, and reports db_encryption_open_failed", async () => {

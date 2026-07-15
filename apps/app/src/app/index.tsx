@@ -14,6 +14,7 @@ import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
   clearStoredDbKeys,
+  DB_ENCRYPTION_MODE_READ_ERROR,
   getDbEncryptionMode,
   registerDbEncryption,
   requestDbStartFresh,
@@ -202,14 +203,16 @@ export default function HostScreen() {
   const dbLocked = status === 'error' && errorCode === DB_LOCKED_CODE;
 
   // Once the locked state becomes active, learn which mode is actually locked (purely to decide whether
-  // to show the passphrase input, which only makes sense for 'passphrase' mode).
+  // to show the passphrase input, which only makes sense for 'passphrase' mode). A read-error sentinel
+  // (P1-3, Sol round 5) is deliberately NOT stored here — this is cosmetic (which recovery input to
+  // show), so a transient read failure just leaves the plain-Retry UI rather than a bogus mode value.
   useEffect(() => {
     if (!dbLocked) {
       return;
     }
     let cancelled = false;
     void getDbEncryptionMode().then((mode) => {
-      if (!cancelled) {
+      if (!cancelled && mode !== DB_ENCRYPTION_MODE_READ_ERROR) {
         setLockedMode(mode);
       }
     });
