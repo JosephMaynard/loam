@@ -332,8 +332,11 @@ kill switch. See `docs/09-security-profiles.md`.
 - `security.profile` is wired (see the feature-flag note) but only bundles the axes LOAM enforces
   today; the axes that would distinguish `open` from `standard` (transport encryption, invite tokens
   — docs/08) are unbuilt, so those two profiles apply the same settings for now.
-- On-device SQLCipher (encrypted Android DB) is still deferred — needs a multiple-ciphers ABI-108
-  android-arm64 prebuild (docs/01, docs/04).
+- On-device SQLCipher (encrypted Android DB) now SHIPS: the multiple-ciphers ABI-108 android-arm64
+  prebuild is cross-compiled + vendored (`apps/app/native-prebuilds/multiple-ciphers/`, sha256-pinned
+  tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the
+  plain driver, so `security.dbEncryption` modes key the DB on-device. On-device runtime verification
+  (actual `PRAGMA key`/rekey/wipe on a physical arm64 phone) is the remaining device-test item (docs/01, docs/04).
 - LoRa / alternate transports: the node-to-node sync protocol (docs/11) is the transport-agnostic
   layer a LoRa link would carry; the LoRa framing/bandwidth work itself is unbuilt. **Sync peer
   authentication is now built**: an optional shared `sync.token` (stored in the clear — it's a bearer

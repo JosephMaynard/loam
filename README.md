@@ -28,6 +28,8 @@
 
 ## What LOAM is
 
+*The name is a backronym: **L**ocal **O**ff-grid **A**d-hoc **M**essaging. (Yes, it is a type of soil, we picked the word first, and reverse-engineered the acronym afterwards. As one does.)*
+
 LOAM is a messaging system that works **when the internet doesn't**. One person becomes the
 *host*: they run LOAM on any device and turn it into a small WiFi hotspot. Everyone nearby scans a
 QR code, the messaging app opens in their browser, and the group can post to channels, reply in
