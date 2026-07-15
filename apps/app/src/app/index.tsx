@@ -13,12 +13,16 @@ import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
+  applyDbModeChange,
   clearStoredDbKeys,
   DB_ENCRYPTION_MODE_READ_ERROR,
+  DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
+  dbEncryptionRecoveryForCode,
   getDbEncryptionMode,
   registerDbEncryption,
   requestDbStartFresh,
   requestDbUnlock,
+  setDbEncryptionMode,
   setDbModeHint,
   setPassphraseCandidate,
   type DbEncryptionMode,
@@ -54,6 +58,7 @@ const DB_ENCRYPTION_ERROR_CODES = new Set([
   'db_encryption_unavailable',
   'db_encryption_no_key',
   'db_encryption_locked',
+  DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
 ]);
 
 // The one DB-encryption code with a dedicated recovery action (AF8/design#1, docs/01, docs/15): an
@@ -165,6 +170,11 @@ export default function HostScreen() {
   const [unlockPassphraseInput, setUnlockPassphraseInput] = useState('');
   const [unlockBusy, setUnlockBusy] = useState(false);
   const [unlockMessage, setUnlockMessage] = useState<string | undefined>();
+  // `db_encryption_plaintext_unconverted` recovery (P1-4-RN, Sol round 8) in-flight state — see
+  // `handleRevertToOff`. The DESTRUCTIVE alternative ("delete existing data & start encrypted") reuses
+  // `handleStartFresh`/`startFreshBusy`; this is the non-destructive "switch encryption back off" path.
+  const [revertBusy, setRevertBusy] = useState(false);
+  const [revertMessage, setRevertMessage] = useState<string | undefined>();
   // P1-2(b): the durable, acked wipe-key-clear handoff. Set only on a VERIFIED clear FAILURE (never a
   // blanket "cleared") — see `attemptWipeKeyClear`. The launcher's own durable `.loam-wipe-pending`
   // marker (main.js) is the actual source of truth for whether the clear still needs retrying across an
@@ -317,6 +327,9 @@ export default function HostScreen() {
         // block also only exists in the non-ready view (see `dbLocked`'s definition).
         setUnlockBusy(false);
         setUnlockMessage(undefined);
+        // P1-4-RN (Sol round 8): same reasoning for the `db_encryption_plaintext_unconverted` recovery.
+        setRevertBusy(false);
+        setRevertMessage(undefined);
         // Deliberately NOT touching `notice`/`nodeNotice` here (AF2/P1-4) — a boot notice describes a
         // degraded DB-encryption posture that's still true once the host is up; clearing it just
         // because the server also became ready is exactly the bug this fix removes.
@@ -346,7 +359,10 @@ export default function HostScreen() {
           // database & start fresh" button silently vanished even though recovery was still possible
           // (the operator would have to force-quit and reopen the app to see it again). `'boot_timeout'`
           // is main.js's now-explicit code for that same give-up path — treated the same way here.
-          if (current === DB_UNREADABLE_CODE && (payload.code === undefined || payload.code === 'boot_timeout')) {
+          if (
+            (current === DB_UNREADABLE_CODE || current === DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE) &&
+            (payload.code === undefined || payload.code === 'boot_timeout')
+          ) {
             return current;
           }
           return payload.code;
@@ -360,6 +376,8 @@ export default function HostScreen() {
         // ITS outcome (still locked, or a different error entirely once the retry proceeds past
         // locked), or unrelated; harmless either way since `unlockBusy` is already false when it is.
         setUnlockBusy(false);
+        // Same for the `db_encryption_plaintext_unconverted` "switch off" retry (P1-4-RN, Sol round 8).
+        setRevertBusy(false);
       }
     };
 
@@ -567,6 +585,37 @@ export default function HostScreen() {
     setUnlockMessage('Retrying…');
   };
 
+  // `db_encryption_plaintext_unconverted` recovery (P1-4-RN, Sol round 8): the operator selected an
+  // encrypted mode but an existing PLAINTEXT database is on disk, which can't be keyed in place — the
+  // server refuses to silently serve plaintext under an encrypted selection. "Switch encryption back off"
+  // persists mode 'off' (so the server can open the existing plaintext DB) via the same serialized
+  // hint+mode transaction the picker uses, then asks main.js to retry key-resolution-and-boot. The
+  // DESTRUCTIVE alternative — "Delete existing data & start encrypted" — reuses `handleStartFresh` (the
+  // start-fresh marker, which the server consumes to delete the plaintext DB and boot a fresh keyed one).
+  const handleRevertToOff = async () => {
+    setRevertBusy(true);
+    setRevertMessage(undefined);
+    const outcome = await applyDbModeChange('off', {
+      readMode: getDbEncryptionMode,
+      writeMode: setDbEncryptionMode,
+      writeHint: (m) => setDbModeHint(nodejs.channel, m),
+    });
+    if (!outcome.applied) {
+      setRevertBusy(false);
+      setRevertMessage(`Couldn't switch encryption off — ${outcome.error ?? 'unknown error'}. You can try again.`);
+      return;
+    }
+    const result = await requestDbUnlock(nodejs.channel);
+    if (!result.ok) {
+      setRevertBusy(false);
+      setRevertMessage(`Couldn't retry — ${result.error ?? 'unknown error'}. You can try again.`);
+      return;
+    }
+    // The retry's OUTCOME (ready / a different boot error) arrives via `loam-status` — see onStatus's
+    // 'ready'/'error' branches, both of which reset `revertBusy`.
+    setRevertMessage('Switching encryption off and restarting…');
+  };
+
   // Bridge from the WebView's web content (the LOAM client) back to this native screen (AF1/Sol P1-1):
   // the client's `wipe` WS-event handler (apps/client/src/app.tsx) posts
   // `{"type":"loam-wipe"}` via `window.ReactNativeWebView.postMessage` whenever the SERVER announces a
@@ -752,12 +801,18 @@ export default function HostScreen() {
     errorCode !== undefined &&
     errorCode !== DB_UNREADABLE_CODE &&
     errorCode !== DB_LOCKED_CODE &&
+    errorCode !== DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE &&
     DB_ENCRYPTION_ERROR_CODES.has(errorCode);
   // FATAL db_encryption_unreadable (P1-1, Sol round 3, AF8/design#1): boot genuinely failed and the
   // embedded runtime stayed alive specifically so this recovery can work — see DB_UNREADABLE_CODE's
   // comment. `status` can only be `'error'` while this is active (never `'ready'`), and a subsequent
   // `'ready'` clears it automatically (the `onStatus` 'ready' branch resets `errorCode`).
   const dbUnreadable = status === 'error' && errorCode === DB_UNREADABLE_CODE;
+  // FATAL db_encryption_plaintext_unconverted (P1-4-RN, Sol round 8): an encrypted mode is selected but
+  // the on-disk DB is still plaintext, which can't be keyed in place. Its own destructive-recovery block
+  // (delete existing data & start encrypted, or switch encryption back off) — never a silent plaintext
+  // downgrade under an encrypted selection. Uses the shared code→recovery classifier for the mapping.
+  const dbPlaintextUnconverted = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'plaintext-unconverted';
 
   return (
     <ThemedView style={styles.center}>
@@ -861,6 +916,49 @@ export default function HostScreen() {
           ) : null}
         </ThemedView>
       ) : null}
+      {/* FATAL, NOT dismissible (P1-4-RN, Sol round 8) — an encrypted mode is selected but an existing
+          PLAINTEXT database is on disk. There is no in-place plaintext→encrypted conversion, so the host
+          must NEVER silently serve plaintext under an encrypted selection: the operator must explicitly
+          choose to delete the existing data and start a fresh encrypted database, or switch encryption
+          back off to keep the existing unencrypted data. A subsequent `ready` clears this (onStatus). */}
+      {dbPlaintextUnconverted ? (
+        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+          <ThemedText type="smallBold">Encryption is on, but the existing database is unencrypted.</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            {errorMessage ??
+              'The selected encrypted mode can only apply to a fresh database — an existing plaintext database cannot be converted in place.'}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            Delete the existing data and start a fresh encrypted database, or switch encryption back off to
+            keep the existing (unencrypted) data. In-place conversion is a future enhancement — not yet
+            available.
+          </ThemedText>
+          <ThemedView style={styles.noticeBannerActions}>
+            <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">
+                  {startFreshBusy ? 'Starting…' : 'Delete existing data & start encrypted'}
+                </ThemedText>
+              </ThemedView>
+            </Pressable>
+            <Pressable onPress={() => void handleRevertToOff()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">{revertBusy ? 'Switching…' : 'Switch encryption back off'}</ThemedText>
+              </ThemedView>
+            </Pressable>
+          </ThemedView>
+          {startFreshMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {startFreshMessage}
+            </ThemedText>
+          ) : null}
+          {revertMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {revertMessage}
+            </ThemedText>
+          ) : null}
+        </ThemedView>
+      ) : null}
       {/* P1-2(b): a wipe-key-clear attempt failed and was NOT acked as complete — the launcher's durable
           marker is still pending, so this must never look like a benign notice; it stays until a retry
           succeeds. Shown in both the ready and non-ready views (see the matching block above) since a
@@ -920,12 +1018,13 @@ export default function HostScreen() {
                 <ThemedText type="link">Retry</ThemedText>
               </ThemedView>
             </Pressable>
-          ) : dbUnreadable || dbLocked ? null : (
+          ) : dbUnreadable || dbLocked || dbPlaintextUnconverted ? null : (
             // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process) —
-            // except for `dbUnreadable` (P1-1, Sol round 3) and `dbLocked` (P1-1, Sol round 4), both of
-            // which have their own in-app recovery above and deliberately do NOT show this text:
-            // closing/reopening WITHOUT using that recovery first would just hit the identical failure
-            // again (nothing changed), so this generic instruction would be actively misleading.
+            // except for `dbUnreadable` (P1-1, Sol round 3), `dbLocked` (P1-1, Sol round 4), and
+            // `dbPlaintextUnconverted` (P1-4-RN, Sol round 8), all of which have their own in-app recovery
+            // above and deliberately do NOT show this text: closing/reopening WITHOUT using that recovery
+            // first would just hit the identical failure again (nothing changed), so this generic
+            // instruction would be actively misleading.
             <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
               Close and reopen the app to try again.
             </ThemedText>

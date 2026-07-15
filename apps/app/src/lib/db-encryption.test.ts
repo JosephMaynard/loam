@@ -20,8 +20,11 @@ vi.mock("expo-crypto", () => cryptoMock);
 
 const {
   DB_ENCRYPTION_MODE_READ_ERROR,
+  DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
   applyDbModeChange,
   clearStoredPassphrase,
+  dbEncryptionRecoveryForCode,
+  dbModeSelectionIsDestructive,
   getDbEncryptionMode,
   hasStoredPassphrase,
   markPassphraseKeyMigrated,
@@ -35,6 +38,7 @@ const {
 } = await import("@/lib/db-encryption");
 type BridgeChannel = import("@/lib/db-encryption").BridgeChannel;
 type DbEncryptionMode = import("@/lib/db-encryption").DbEncryptionMode;
+type DbEncryptionModeOrError = import("@/lib/db-encryption").DbEncryptionModeOrError;
 type SetDbEncryptionModeResult = import("@/lib/db-encryption").SetDbEncryptionModeResult;
 type SetDbModeHintResult = import("@/lib/db-encryption").SetDbModeHintResult;
 
@@ -285,15 +289,18 @@ describe("mayBootPlaintextOnLockedError (P1-1, Sol round 7 — tri-state hint)",
   });
 });
 
-describe("applyDbModeChange (P1-1, Sol round 7 — hole 3: no mode/hint divergence)", () => {
-  /** Build scripted `writeMode`/`writeHint` deps plus a call log so a test can assert BOTH the outcome
-   * and that the writes happened in the divergence-safe order. */
-  function makeDeps(opts: { modeOk?: boolean; hintOk?: boolean } = {}) {
+describe("applyDbModeChange (P1-3, Sol round 8 — serialized, re-read, no mode/hint divergence)", () => {
+  /** Build scripted `readMode`/`writeMode`/`writeHint` deps plus a call log so a test can assert BOTH the
+   * outcome and that the writes happened in the divergence-safe order. `previous` is what `readMode`
+   * returns (the committed mode re-read INSIDE the lock — no longer a positional arg). */
+  function makeDeps(opts: { previous?: DbEncryptionModeOrError; modeOk?: boolean; hintOk?: boolean } = {}) {
+    const previous = opts.previous ?? "off";
     const modeOk = opts.modeOk ?? true;
     const hintOk = opts.hintOk ?? true;
     const calls: string[] = [];
     return {
       calls,
+      readMode: async (): Promise<DbEncryptionModeOrError> => previous,
       writeMode: async (m: DbEncryptionMode): Promise<SetDbEncryptionModeResult> => {
         calls.push(`mode:${m}`);
         return modeOk ? { ok: true } : { ok: false, error: "mode write failed" };
@@ -306,8 +313,8 @@ describe("applyDbModeChange (P1-1, Sol round 7 — hole 3: no mode/hint divergen
   }
 
   it("off→encrypted with a hint WRITE FAILURE does NOT commit the SecureStore mode (prevents divergence)", async () => {
-    const deps = makeDeps({ hintOk: false });
-    const outcome = await applyDbModeChange("off", "persistent", deps);
+    const deps = makeDeps({ previous: "off", hintOk: false });
+    const outcome = await applyDbModeChange("persistent", deps);
     expect(outcome.applied).toBe(false);
     expect(outcome.committedMode).toBe("off");
     // The hint is attempted FIRST; because it failed, the SecureStore mode write is never reached — so the
@@ -315,25 +322,25 @@ describe("applyDbModeChange (P1-1, Sol round 7 — hole 3: no mode/hint divergen
     expect(deps.calls).toEqual(["hint:persistent"]);
   });
 
-  it("an encrypted selection whose SecureStore write fails rolls the hint back to `previous`", async () => {
-    const deps = makeDeps({ modeOk: false });
-    const outcome = await applyDbModeChange("off", "persistent", deps);
+  it("an encrypted selection whose SecureStore write fails rolls the hint back to the RE-READ `previous`", async () => {
+    const deps = makeDeps({ previous: "off", modeOk: false });
+    const outcome = await applyDbModeChange("persistent", deps);
     expect(outcome.applied).toBe(false);
     expect(outcome.committedMode).toBe("off");
-    // hint(persistent) succeeded, mode(persistent) failed → hint rolled back to the previous 'off'.
+    // hint(persistent) succeeded, mode(persistent) failed → hint rolled back to the re-read previous 'off'.
     expect(deps.calls).toEqual(["hint:persistent", "mode:persistent", "hint:off"]);
   });
 
   it("an encrypted selection with BOTH writes succeeding is applied (hint first, then mode)", async () => {
-    const deps = makeDeps();
-    const outcome = await applyDbModeChange("off", "passphrase", deps);
+    const deps = makeDeps({ previous: "off" });
+    const outcome = await applyDbModeChange("passphrase", deps);
     expect(outcome).toEqual({ applied: true, committedMode: "passphrase" });
     expect(deps.calls).toEqual(["hint:passphrase", "mode:passphrase"]);
   });
 
   it("'off' commits directly and treats the hint as best-effort (a hint failure is only a soft warning)", async () => {
-    const deps = makeDeps({ hintOk: false });
-    const outcome = await applyDbModeChange("persistent", "off", deps);
+    const deps = makeDeps({ previous: "persistent", hintOk: false });
+    const outcome = await applyDbModeChange("off", deps);
     expect(outcome.applied).toBe(true);
     expect(outcome.committedMode).toBe("off");
     expect(outcome.hintWarning).toBe(true);
@@ -342,11 +349,106 @@ describe("applyDbModeChange (P1-1, Sol round 7 — hole 3: no mode/hint divergen
   });
 
   it("'off' with a failing SecureStore write is NOT applied (and never touches the hint)", async () => {
-    const deps = makeDeps({ modeOk: false });
-    const outcome = await applyDbModeChange("persistent", "off", deps);
+    const deps = makeDeps({ previous: "persistent", modeOk: false });
+    const outcome = await applyDbModeChange("off", deps);
     expect(outcome.applied).toBe(false);
     expect(outcome.committedMode).toBe("persistent");
     expect(deps.calls).toEqual(["mode:off"]);
+  });
+
+  it("a READ-ERROR on the committed mode ABORTS the transaction — no writes, no committedMode", async () => {
+    // Without a known committed mode there is no safe rollback target, so the transaction refuses to touch
+    // SecureStore or the hint at all.
+    const deps = makeDeps({ previous: DB_ENCRYPTION_MODE_READ_ERROR });
+    const outcome = await applyDbModeChange("persistent", deps);
+    expect(outcome.applied).toBe(false);
+    expect(outcome.committedMode).toBeUndefined();
+    expect(outcome.error).toBeTruthy();
+    expect(deps.calls).toEqual([]);
+  });
+
+  it("serializes concurrent transitions and re-reads the committed mode inside the lock — never leaves mode/hint divergent", async () => {
+    // Reproduces the exact P1-3 A/B interleaving from off: A (off→persistent) and B (off→off) racing. A
+    // shared backing store models SecureStore mode + the hint; readMode reflects prior committed writes.
+    const store = { mode: "off" as DbEncryptionMode, hint: "off" as DbEncryptionMode };
+    const readModes: DbEncryptionMode[] = [];
+
+    // Gate A's FIRST writeHint so A is paused mid-transaction while we start B.
+    let releaseAHint: () => void = () => undefined;
+    const aHintGate = new Promise<void>((resolve) => {
+      releaseAHint = resolve;
+    });
+    let firstHint = true;
+
+    const deps = {
+      readMode: async (): Promise<DbEncryptionModeOrError> => {
+        readModes.push(store.mode);
+        return store.mode;
+      },
+      writeMode: async (m: DbEncryptionMode): Promise<SetDbEncryptionModeResult> => {
+        store.mode = m;
+        return { ok: true };
+      },
+      writeHint: async (m: DbEncryptionMode): Promise<SetDbModeHintResult> => {
+        if (firstHint) {
+          firstHint = false;
+          await aHintGate;
+        }
+        store.hint = m;
+        return { ok: true };
+      },
+    };
+
+    // A starts: acquires the lock, re-reads 'off', reaches the paused writeHint('persistent').
+    const aPromise = applyDbModeChange("persistent", deps);
+    await flushMicrotasks();
+    // B starts WHILE A is paused mid-transaction.
+    const bPromise = applyDbModeChange("off", deps);
+    await flushMicrotasks();
+
+    // The mutex must keep B from starting: only A's readMode has run, and A hasn't committed its mode yet
+    // (its hint is still paused, before the mode write).
+    expect(readModes).toEqual(["off"]);
+    expect(store.mode).toBe("off");
+
+    // Let A finish; B then runs to completion.
+    releaseAHint();
+    const [aOutcome, bOutcome] = await Promise.all([aPromise, bPromise]);
+
+    expect(aOutcome.applied).toBe(true);
+    expect(bOutcome.applied).toBe(true);
+    // B re-read the ACTUALLY-committed 'persistent' inside its own lock turn — NOT the stale 'off' the
+    // caller would have captured.
+    expect(readModes).toEqual(["off", "persistent"]);
+    // Final state is COHERENT — never the fail-open (SecureStore encrypted + hint 'off').
+    expect(store.mode).toBe("off");
+    expect(store.hint).toBe("off");
+  });
+});
+
+describe("dbModeSelectionIsDestructive (P1-4-RN, Sol round 8)", () => {
+  it("treats every encrypted mode as destructive (needs explicit confirmation) and 'off' as safe", () => {
+    expect(dbModeSelectionIsDestructive("off")).toBe(false);
+    expect(dbModeSelectionIsDestructive("ephemeral")).toBe(true);
+    expect(dbModeSelectionIsDestructive("persistent")).toBe(true);
+    expect(dbModeSelectionIsDestructive("passphrase")).toBe(true);
+  });
+});
+
+describe("dbEncryptionRecoveryForCode (P1-4-RN, Sol round 8)", () => {
+  it("maps the plaintext_unconverted boot code to the destructive plaintext-unconverted recovery UI", () => {
+    expect(dbEncryptionRecoveryForCode(DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE)).toBe("plaintext-unconverted");
+  });
+
+  it("maps the other DB-encryption recovery codes to their own recovery UI", () => {
+    expect(dbEncryptionRecoveryForCode("db_encryption_unreadable")).toBe("unreadable");
+    expect(dbEncryptionRecoveryForCode("db_encryption_locked")).toBe("locked");
+  });
+
+  it("returns null for codes with no dedicated recovery (and for undefined)", () => {
+    expect(dbEncryptionRecoveryForCode("boot_timeout")).toBeNull();
+    expect(dbEncryptionRecoveryForCode("db_encryption_unavailable")).toBeNull();
+    expect(dbEncryptionRecoveryForCode(undefined)).toBeNull();
   });
 });
 
