@@ -222,6 +222,7 @@ describe("openStore", () => {
       peerUrl: "http://peer.example",
       attempts: 0,
       lastAttemptAt: 0, // F1: 0 means "never attempted" — the retry pass treats this as due immediately
+      nextAttemptAt: 0, // P2-2: same "due immediately" default, now the column loadDueMissingAttachments filters on
     });
     expect(typeof record?.createdAt).toBe("number");
 
@@ -236,15 +237,42 @@ describe("openStore", () => {
     expect(store.loadMissingAttachments()[0]?.peerUrl).toBe("http://peer.example");
 
     const beforeBump = Date.now();
-    store.bumpMissingAttachmentAttempts("msg_1", "att_1");
-    store.bumpMissingAttachmentAttempts("msg_1", "att_1");
+    const farFuture = Date.now() + 3_600_000;
+    store.bumpMissingAttachmentAttempts("msg_1", "att_1", 1); // caller (app.ts) owns the backoff policy
+    store.bumpMissingAttachmentAttempts("msg_1", "att_1", farFuture);
     const bumped = store.loadMissingAttachments()[0];
     expect(bumped?.attempts).toBe(2);
     // F1: each bump also stamps lastAttemptAt (now) — what the retry pass's backoff measures from.
     expect(bumped?.lastAttemptAt).toBeGreaterThanOrEqual(beforeBump);
+    // P2-2: nextAttemptAt is exactly whatever the caller passed — a dumb storage write, no policy here.
+    expect(bumped?.nextAttemptAt).toBe(farFuture);
+
+    // Not due yet — loadDueMissingAttachments must not return it.
+    expect(store.loadDueMissingAttachments(Date.now(), 100)).toEqual([]);
 
     store.clearMissingAttachment("msg_1", "att_1");
     expect(store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("loadDueMissingAttachments selects only due records, ordered earliest-due-first, capped at limit (P2-2)", () => {
+    const now = Date.now();
+
+    // Three NOT-yet-due records (bumped into the future) and two DUE ones (default nextAttemptAt=0),
+    // added in an order that would mislead a naive rowid/creation-order read.
+    for (const id of ["future_a", "future_b", "future_c"]) {
+      store.addMissingAttachment({ messageId: id, attachmentId: "att", mimeType: "image/png", peerUrl: "http://peer.example" });
+      store.bumpMissingAttachmentAttempts(id, "att", now + 3_600_000);
+    }
+    store.addMissingAttachment({ messageId: "due_late", attachmentId: "att", mimeType: "image/png", peerUrl: "http://peer.example" });
+    store.bumpMissingAttachmentAttempts("due_late", "att", now - 1_000); // overdue by 1s
+    store.addMissingAttachment({ messageId: "due_early", attachmentId: "att", mimeType: "image/png", peerUrl: "http://peer.example" });
+    store.bumpMissingAttachmentAttempts("due_early", "att", now - 5_000); // overdue by 5s (more overdue)
+
+    const due = store.loadDueMissingAttachments(now, 100);
+    expect(due.map((record) => record.messageId)).toEqual(["due_early", "due_late"]);
+
+    // The cap applies to the DUE set, not the full table.
+    expect(store.loadDueMissingAttachments(now, 1).map((record) => record.messageId)).toEqual(["due_early"]);
   });
 
   it("wipeAll clears missing-attachment work items too", () => {
@@ -333,6 +361,58 @@ describe("openStore", () => {
           attempts: 3,
           lastAttemptAt: 0,
         });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates a pre-fair-retry missing_attachments table by backfilling next_attempt_at (P2-2)", () => {
+    // Simulate a database created before fair-ordered due-selection existed: has `last_attempt_at`
+    // (an earlier migration) but not yet `next_attempt_at`. Reopening through `openStore` must backfill
+    // it to 0 ("due immediately"), so pre-existing rows become eligible on the very next pass rather
+    // than being silently excluded from `loadDueMissingAttachments` forever.
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-db-migration-test-"));
+    const dbPath = join(dataDir, "loam.db");
+
+    try {
+      const initial = openStore(dbPath);
+      initial.close();
+
+      const raw = new DatabaseSync(dbPath);
+      raw.exec("DROP TABLE missing_attachments");
+      raw.exec(`
+        CREATE TABLE missing_attachments (
+          message_id TEXT NOT NULL,
+          attachment_id TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          peer_url TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          last_attempt_at INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (message_id, attachment_id)
+        )
+      `);
+      raw
+        .prepare(
+          "INSERT INTO missing_attachments (message_id, attachment_id, mime_type, peer_url, attempts, created_at, last_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run("msg_legacy", "att_legacy", "image/png", "http://peer.example", 3, Date.now(), Date.now());
+      raw.close();
+
+      const reopened = openStore(dbPath);
+      try {
+        const [record] = reopened.loadMissingAttachments();
+        expect(record).toMatchObject({
+          messageId: "msg_legacy",
+          attachmentId: "att_legacy",
+          attempts: 3,
+          nextAttemptAt: 0,
+        });
+        // Backfilled to due-immediately, so it's picked up by the fair-selection query too.
+        expect(reopened.loadDueMissingAttachments(Date.now(), 100).map((r) => r.messageId)).toEqual(["msg_legacy"]);
       } finally {
         reopened.close();
       }
@@ -503,5 +583,63 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     } finally {
       store.close();
     }
+  });
+
+  // P1-2 (docs/15, Sol round 3): a FIXED (persistent/passphrase) key can't be rotated in-process — the
+  // real recovery is "delete the ciphertext, clear the Keystore key, restart" so the NEXT boot resolves
+  // a genuinely NEW key together with a fresh database. These two tests simulate exactly that cold
+  // restart at the store level (openStore stands in for what a fresh boot does), for both modes that
+  // use a fixed key — see executeKillSwitch's `fixedKeyMode` branch in app.ts for the in-process half.
+  it("P1-2 persistent-mode cold restart: delete + reopen under a NEW key produces a fresh DB the OLD key can no longer open", () => {
+    const keyA = "persistent-mode-key-A";
+    const original = openStore(dbPath, { encryptionKey: keyA });
+    original.upsertUser(makeUser("user.doomed"));
+    original.insertMessage(makeChannelPost("msg_before_wipe"));
+    original.close();
+
+    // What executeKillSwitch's fixedKeyMode branch does: close + delete the ciphertext (and its WAL/SHM
+    // sidecars), then hand off — here, simulated directly as "the next boot resolves a new key".
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+    expect(existsSync(dbPath)).toBe(false);
+
+    const keyB = "persistent-mode-key-B"; // resolveDbKey('persistent') generates a genuinely new one
+    const fresh = openStore(dbPath, { encryptionKey: keyB });
+    try {
+      expect(fresh.loadUsers()).toEqual([]); // no memory of the wiped data
+      expect(fresh.loadMessages()).toEqual([]);
+      fresh.upsertUser(makeUser("user.after"));
+      expect(fresh.loadUsers()).toEqual([makeUser("user.after")]);
+    } finally {
+      fresh.close();
+    }
+
+    // The OLD key can never open the new file — it's an entirely different database, not a rekey.
+    expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
+  });
+
+  it("P1-2 passphrase-mode cold restart: same lifecycle — delete + reopen under a NEW derived key locks out the OLD passphrase's key", () => {
+    // passphrase mode derives its SQLCipher key from an operator passphrase (db-encryption.ts's
+    // resolveDbKey — a SHA-256 pass, unrelated to this store-level test, which only cares that the
+    // RESULTING key string changes across the restart, exactly as it would for persistent mode above.
+    const keyA = "sha256-of-the-old-passphrase";
+    const original = openStore(dbPath, { encryptionKey: keyA });
+    original.upsertUser(makeUser("user.doomed"));
+    original.close();
+
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+
+    const keyB = "sha256-of-a-brand-new-passphrase";
+    const fresh = openStore(dbPath, { encryptionKey: keyB });
+    try {
+      expect(fresh.loadUsers()).toEqual([]);
+    } finally {
+      fresh.close();
+    }
+
+    expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
   });
 });

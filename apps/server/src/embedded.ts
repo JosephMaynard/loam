@@ -26,10 +26,11 @@ import type { StoreDriver } from "./db.js";
  * - `LOAM_DB_ENCRYPTION_MODE` — the launcher's declared at-rest key strategy (`off`/`ephemeral`/
  *   `persistent`/`passphrase`, see `DbEncryptionModeSchema` in `@loam/schema`). Threaded into `buildApp`
  *   as `dbEncryptionMode` so the reported posture (`networkConfig.dbEncryption`) reflects what the
- *   launcher actually did with the key, not just the admin's declarative config axis — and, for
- *   `ephemeral`, drives `ephemeralDbKey` alongside the legacy `LOAM_DB_KEY==="ephemeral"` literal (a
- *   real ephemeral session's `LOAM_DB_KEY` is a real hex key, not that literal, so the mode is the
- *   authoritative signal; see the P1-1 note on `ephemeralDbKey` below).
+ *   launcher actually did with the key, not just the admin's declarative config axis, and so
+ *   `executeKillSwitch` can tell a fixed (`persistent`/`passphrase`) key apart from a rotatable
+ *   (`ephemeral`) one (P1-2). It does **not** drive `ephemeralDbKey` (P1-3, Sol round 3) — that comes
+ *   ONLY from the literal `LOAM_DB_KEY==="ephemeral"` contract; see the note on `resolveEphemeralDbKey`
+ *   below for why the mode used to also feed that decision, and why that was a bug.
  */
 export { resolveLanIPv4 as firstLanIPv4 } from "./net.js";
 
@@ -61,15 +62,25 @@ export function parseDbEncryptionMode(value: string | undefined): DbEncryptionMo
 }
 
 /**
- * Resolve whether the server should generate its own RAM-only ephemeral key (P1-1, docs/15). Honours
- * BOTH the legacy `LOAM_DB_KEY === "ephemeral"` literal (a caller that only ever set `LOAM_DB_KEY`) and
- * `LOAM_DB_ENCRYPTION_MODE === "ephemeral"` (the current Android contract, where a real session passes
- * an actual hex key in `LOAM_DB_KEY` alongside the mode). Checking the literal alone — the original bug
- * — treated a real-key ephemeral session as a FIXED key, so `executeKillSwitch`'s key rotation never
- * fired for it even though the node believed it was running ephemeral.
+ * Resolve whether the server should generate its own RAM-only ephemeral key (P1-3, docs/15, Sol round
+ * 3). Honours ONLY the literal `LOAM_DB_KEY === "ephemeral"` contract — main.js's `ephemeral` branch
+ * always sets exactly this literal (never a real hex key) before requiring the server bundle, so the
+ * literal alone is a complete and authoritative signal.
+ *
+ * A previous version ALSO treated `mode === "ephemeral"` as ephemeral (P1-1), reasoning that a real
+ * ephemeral session might one day pass a real hex key alongside the mode. That never happens in
+ * practice (see main.js), and the extra clause created a WORSE bug (P1-3): when main.js downgrades to
+ * the plaintext driver because the encrypted native module isn't available, it used to leave
+ * `LOAM_DB_ENCRYPTION_MODE` at `"ephemeral"` while never setting `LOAM_DB_KEY` at all — so this
+ * function still returned `true` (mode alone was enough), `ephemeralDbKey` got set, a random key was
+ * generated, and `openStore` then tried to `require("better-sqlite3-multiple-ciphers")` — the exact
+ * module main.js had just determined was MISSING — crash-looping boot instead of degrading. Checking
+ * only the literal fixes this: an absent/unset `LOAM_DB_KEY` (main.js's downgrade branch also now sets
+ * `LOAM_DB_ENCRYPTION_MODE="off"`, see main.js) can never resolve to ephemeral. `mode` is still THREADED
+ * through to `buildApp` (see below) — it just no longer feeds this decision, only the reported posture.
  */
-export function resolveEphemeralDbKey(dbKeyEnv: string | undefined, mode: DbEncryptionMode | undefined): boolean {
-  return dbKeyEnv === "ephemeral" || mode === "ephemeral";
+export function resolveEphemeralDbKey(dbKeyEnv: string | undefined): boolean {
+  return dbKeyEnv === "ephemeral";
 }
 
 export async function startEmbeddedServer(): Promise<LoamApp> {
@@ -92,9 +103,10 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
   const clientPort = parsePort(process.env.CLIENT_PORT, port);
 
   const dbEncryptionMode = parseDbEncryptionMode(process.env.LOAM_DB_ENCRYPTION_MODE);
-  // See `resolveEphemeralDbKey` (P1-1): any other LOAM_DB_KEY value → passphrase/persistent key; unset
-  // → no encryption. See docs/02-kill-switch.md.
-  const ephemeralDbKey = resolveEphemeralDbKey(process.env.LOAM_DB_KEY, dbEncryptionMode);
+  // See `resolveEphemeralDbKey` (P1-3): the literal LOAM_DB_KEY="ephemeral" contract only. Any other
+  // LOAM_DB_KEY value → passphrase/persistent key; unset → no encryption. `dbEncryptionMode` is passed
+  // to `buildApp` below for POSTURE REPORTING only — it never feeds this decision. See docs/02-kill-switch.md.
+  const ephemeralDbKey = resolveEphemeralDbKey(process.env.LOAM_DB_KEY);
 
   const app = await buildApp({
     dataDir,

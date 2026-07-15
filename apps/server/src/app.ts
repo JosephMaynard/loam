@@ -303,6 +303,21 @@ class IdentityLimitError extends Error {
   }
 }
 
+/**
+ * Thrown by `openInitialStore` (P1-1, docs/15) when a database is genuinely unopenable (wrong/lost
+ * key, or an unreadable file) and no start-fresh confirmation was present for THIS boot attempt. The
+ * typed `.code` lets `embedded-main.ts` tell this ONE specific, recoverable-without-a-process-restart
+ * failure apart from every other boot error — see its `hasDbEncryptionUnreadableCode` — without
+ * string-matching the human-readable message.
+ */
+class DbEncryptionUnreadableError extends Error {
+  readonly code = "db_encryption_unreadable" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEncryptionUnreadableError";
+  }
+}
+
 export type LoamApp = {
   server: FastifyInstance;
   store: LoamStore;
@@ -1201,6 +1216,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * the identical failure, permanently locking the operator out of their own node. The host must always
    * boot (crisis-messaging priority), so this degrades in order instead of throwing straight through:
    *
+   *  0. Consume the start-fresh confirmation marker FIRST, before touching anything else (P2-3, Sol
+   *     round 3). It's a one-shot, human-confirmed authorization for a SPECIFIC unopenable-DB incident,
+   *     so it must be read-and-deleted atomically-in-intent up front, not lazily checked only once
+   *     everything else has already failed — the old code left it on disk untouched whenever the
+   *     normal open (step 1) or the plaintext fallback (step 2) happened to succeed (e.g. the operator
+   *     independently fixed the key), so a stale marker could silently authorize a LATER, UNRELATED
+   *     unopenable-DB failure the operator never actually confirmed. If the delete itself fails, fail
+   *     CLOSED: treat the marker as NOT confirmed for this boot rather than risk honoring it without
+   *     actually consuming it.
    *  1. Open exactly as configured (keyed if a key was resolved, else plaintext).
    *  2. On failure, IF a key was resolved, try opening the SAME file with no key. This covers "the node
    *     was switched to an encrypted mode but the DB already on disk is still plaintext" (there's no
@@ -1214,10 +1238,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    *     — only an explicit operator confirmation may do that (the design issue with the old behaviour,
    *     which auto-replaced on every unopenable DB and, on a second occurrence, renamed straight onto
    *     the fixed `loam.db.unreadable` name, destroying the first preserved copy — P1-3). So:
-   *       - marker ABSENT → report `db_encryption_unreadable` and THROW, failing boot NON-destructively
-   *         (the original files are untouched) — the host shell surfaces the explicit start-fresh action.
-   *       - marker PRESENT → consume (delete) it, rename the whole `loam.db`/`-wal`/`-shm` set aside
-   *         together under a UNIQUE, collision-proof suffix (timestamp + random bytes, so two successive
+   *       - marker was NOT confirmed (step 0) → report `db_encryption_unreadable` and THROW a typed
+   *         {@link DbEncryptionUnreadableError}, failing boot NON-destructively (the original files are
+   *         untouched) — `embedded-main.ts` recognizes the `.code` and keeps the host runtime alive
+   *         (rather than exiting) specifically so the RN launcher bridge can still receive an
+   *         operator's subsequent start-fresh confirmation and retry boot in-process (P1-1).
+   *       - marker WAS confirmed (step 0) → rename the whole `loam.db`/`-wal`/`-shm` set aside together
+   *         under a UNIQUE, collision-proof suffix (timestamp + random bytes, so two successive
    *         recoveries each keep their own preserved copy instead of the second overwriting the first),
    *         open a fresh database, and report `db_encryption_recovered_fresh`.
    *
@@ -1228,6 +1255,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function openInitialStore(): LoamStore {
     const keyWasResolved = dbKey !== undefined;
+
+    // Step 0 (P2-3): consume the marker up front, unconditionally, before any open attempt — see the
+    // doc comment above for why this can't wait until both opens have failed.
+    let startFreshConfirmed = false;
+    if (existsSync(dbStartFreshMarkerPath)) {
+      try {
+        rmSync(dbStartFreshMarkerPath, { force: true });
+        startFreshConfirmed = true;
+      } catch {
+        // Fail closed: an unremovable marker is NOT treated as a valid confirmation this boot. It
+        // stays on disk (we couldn't delete it), so a later boot gets another chance at a clean delete
+        // — but THIS boot must not skip straight to a destructive replace on the strength of a marker
+        // it couldn't actually consume.
+        startFreshConfirmed = false;
+      }
+    }
 
     try {
       return openLoamStore();
@@ -1249,19 +1292,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    if (!existsSync(dbStartFreshMarkerPath)) {
+    if (!startFreshConfirmed) {
       const message =
         "The database could not be opened (wrong/lost key, or an unreadable file) and no start-fresh " +
         "confirmation is present; boot failed without touching the existing files.";
       server.log.error(message);
       reportBootNotice(message, "db_encryption_unreadable");
-      throw new Error(message);
-    }
-
-    try {
-      rmSync(dbStartFreshMarkerPath, { force: true });
-    } catch {
-      // Best-effort: an unremovable marker must not block an operator-confirmed recovery.
+      throw new DbEncryptionUnreadableError(message);
     }
 
     // Unique per recovery (not just per-file) so a SECOND unopenable-DB recovery keeps its own set
@@ -2932,6 +2969,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * sessions, avatar files), signal connected clients to purge their local caches, close their
    * sockets, and re-seed the node's defaults so it comes back factory-fresh. Config (including the
    * kill-switch settings themselves) survives — the wipe destroys data, not settings.
+   *
+   * Exception (P1-2, docs/15): a `persistent`/`passphrase`-encrypted node has a FIXED key this
+   * process can't replace in-process, so it deletes the ciphertext and hands off to the RN launcher
+   * to clear the Keystore key and restart instead of recreating the database under the same key —
+   * see the branch at the top of {@link executeKillSwitchBody}.
    */
   async function executeKillSwitch(): Promise<void> {
     // Invalidate any in-flight sync round up front (before the first await here): a pull that resumes
@@ -2948,9 +2990,80 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
+  /**
+   * Best-effort request to the RN launcher (P1-2, docs/15) asking it to clear the Keystore-held DB
+   * key material and restart the embedded runtime. Installed by `nodejs-project-template/main.js`
+   * on `globalThis` before requiring the server bundle, same pattern as `__loamReportBootError` and
+   * `__loamOnDeviceChat` — absent on every other host (desktop/Pi/CI), where it's simply undefined.
+   */
+  function requestWipeRestart(): boolean {
+    const hook = (globalThis as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart;
+    if (!hook) {
+      return false;
+    }
+    hook();
+    return true;
+  }
+
   /** The actual kill-switch work, split out so {@link executeKillSwitch} can guarantee `wipeInProgress`
    *  is cleared via `finally` regardless of how this returns. */
   async function executeKillSwitchBody(): Promise<void> {
+    // A `persistent`/`passphrase` key is FIXED (Keystore-held on Android, config-held on desktop) —
+    // this process has no way to mint a new one. Recreating the encrypted DB in-process (as the
+    // ephemeral/off branches below do) would just re-key the fresh database under the SAME key that
+    // the wipe is supposed to be discarding, defeating the whole point (P1-2/Sol round 3). Instead:
+    // delete the ciphertext, hand off to the RN launcher (which clears the Keystore key and restarts
+    // the embedded runtime), and STOP — the store is now closed, so nothing below this branch may
+    // touch it again (a fresh key only exists once the NEXT boot resolves one).
+    const fixedKeyMode = options.dbEncryptionMode === "persistent" || options.dbEncryptionMode === "passphrase";
+
+    if (encryptionEnabled && fixedKeyMode) {
+      const restarting = requestWipeRestart();
+
+      if (restarting) {
+        store.close();
+        for (const suffix of ["", "-wal", "-shm"]) {
+          await rm(`${dbPath}${suffix}`, { force: true });
+        }
+        await rm(avatarsDir, { recursive: true, force: true });
+        await rm(attachmentsDir, { recursive: true, force: true });
+
+        // The rest of this function only touches in-memory state (no `store` access), so it's still
+        // safe to run — it tells any still-connected client to purge its local cache right away
+        // instead of waiting for the whole app to restart.
+        attachmentOwners.clear();
+        sessions.clear();
+        identityTokens.clear();
+        claimAttempts.clear();
+        panicAttempts.clear();
+
+        broadcast({ type: "wipe" });
+
+        for (const { socket } of sockets) {
+          socket.close();
+        }
+        sockets.clear();
+        for (const pending of [...pendingSockets]) {
+          pending.close();
+        }
+
+        server.log.warn(
+          "Kill switch: persistent/passphrase-encrypted database deleted; handed off to the launcher to " +
+            "clear the device key and restart — the next boot creates a fresh key together with a fresh database.",
+        );
+        return;
+      }
+
+      // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a
+      // NEW key from in-process. Fall through to the existing recreate-under-the-same-key behaviour
+      // rather than bricking the wipe entirely; this is a documented limitation; see docs/02.
+      server.log.warn(
+        "Kill switch: this node uses a fixed (persistent/passphrase) encryption key and no launcher " +
+          "restart hook is available, so the key cannot be rotated in-process. Falling back to a logical " +
+          "wipe that recreates the database under the SAME key (documented limitation, docs/02).",
+      );
+    }
+
     if (encryptionEnabled) {
       // Cryptographic wipe: destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh
       // key, so any bytes a forensic tool recovers from flash are unreadable — stronger than a
@@ -3648,9 +3761,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * peer sync is currently off, or one the operator has since removed from `sync.peers` — dropping
    * that record instead. Gives up (drops the work item) past `missingAttachmentMaxAgeMs` so a
    * permanently-gone file can't grow the work-item table forever. (SF3) Single-flight: a tick that
-   * lands while a pass is still in flight no-ops rather than starting a second concurrent pass, each
-   * pass looks at at most `missingAttachmentMaxRecordsPerPass` records, and no new pass starts while a
-   * kill-switch wipe is in progress.
+   * lands while a pass is still in flight no-ops rather than starting a second concurrent pass, and no
+   * new pass starts while a kill-switch wipe is in progress.
+   *
+   * (P2-2, docs/15 A6/F1, Sol round 3) The per-pass cap (`missingAttachmentMaxRecordsPerPass`) is
+   * applied by `store.loadDueMissingAttachments` at the SQL level — `WHERE next_attempt_at <= now
+   * ORDER BY next_attempt_at ASC LIMIT`, so it selects from the records actually ELIGIBLE for a retry
+   * right now, fairly ordered by how overdue they are. The old code loaded EVERY record in creation
+   * (rowid) order and sliced the first `missingAttachmentMaxRecordsPerPass` BEFORE checking each one's
+   * own backoff — so if the oldest 25 records all happened to still be in backoff (e.g. a peer flapped
+   * and bumped them all around the same time), records 26+ were never even looked at, no matter how
+   * overdue they were: permanent starvation for anything added after the first
+   * `missingAttachmentMaxRecordsPerPass` records went into backoff together.
    */
   async function retryMissingAttachments(): Promise<void> {
     // SF3: single-flight guard — an overlapping reaper tick (or a manual /api/admin/sync/run-triggered
@@ -3671,7 +3793,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    const records = store.loadMissingAttachments();
+    const now = Date.now();
+    // P2-2: only the DUE records, fairly ordered and already capped at the DB level — see the doc
+    // comment above for why this replaced a full-table load + slice.
+    const records = store.loadDueMissingAttachments(now, missingAttachmentMaxRecordsPerPass);
 
     if (!records.length) {
       return;
@@ -3683,13 +3808,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // Snapshot the wipe generation, same defense as importPeerAttachments/syncWithPeer: if a kill
       // switch fires mid-pass, stop touching the store/disk it just wiped (docs/15 #2).
       const generation = wipeGeneration;
-      const now = Date.now();
       const activePeerUrls = new Set(appConfig.sync.peers.map((peer) => peer.url));
 
-      // SF3: bound how many work items a single pass even looks at, so a queue of many stuck records
-      // can't make one pass run long enough to overlap the next reaper tick — the rest are simply due
-      // again next tick (each record's own backoff still governs whether that's a real network hit).
-      for (const record of records.slice(0, missingAttachmentMaxRecordsPerPass)) {
+      for (const record of records) {
         if (wipeGeneration !== generation) {
           return;
         }
@@ -3727,12 +3848,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           continue;
         }
 
-        // F1: back off between actual fetch attempts (0 = never attempted, always due immediately) —
-        // this is what keeps a flapping/unreachable peer from burning through this reaper's every-30s
-        // tick, and what makes the age bound above the real "give up" governor.
-        if (record.lastAttemptAt !== 0 && now - record.lastAttemptAt < missingAttachmentBackoffMs(record.attempts)) {
-          continue;
-        }
+        // The SQL WHERE clause already guaranteed this record is due (next_attempt_at <= now) — no
+        // per-record backoff check needed here any more (P2-2).
 
         try {
           const bytes = await fetchPeerAttachmentBytes(record.peerUrl, { id: record.attachmentId, mimeType: record.mimeType });
@@ -3746,7 +3863,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             !bytes.length ||
             !avatarImageHasExpectedSignature(bytes, record.mimeType)
           ) {
-            store.bumpMissingAttachmentAttempts(record.messageId, record.attachmentId);
+            store.bumpMissingAttachmentAttempts(
+              record.messageId,
+              record.attachmentId,
+              now + missingAttachmentBackoffMs(record.attempts + 1),
+            );
             continue;
           }
 
@@ -3767,7 +3888,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             return;
           }
 
-          store.bumpMissingAttachmentAttempts(record.messageId, record.attachmentId);
+          store.bumpMissingAttachmentAttempts(
+            record.messageId,
+            record.attachmentId,
+            now + missingAttachmentBackoffMs(record.attempts + 1),
+          );
         }
       }
     } finally {

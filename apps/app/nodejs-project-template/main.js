@@ -43,9 +43,17 @@ function notify(status, extra) {
 // the moment 'ready' followed — see index.tsx's persistent notice state, AF2/P1-4). Any OTHER code
 // (e.g. `boot_failed`/`boot_unhandled_rejection` from embedded-main.ts, where the process exits and
 // 'ready' can never follow) stays a real 'error'.
+//
+// `db_encryption_unreadable` is deliberately NOT in this list (P1-1, Sol round 3): unlike the others,
+// the server did NOT keep booting for it — `openInitialStore` threw and boot failed. It used to still
+// arrive here as a 'notice' (this DB open failure is non-destructive, so it *felt* like a degrade), but
+// then embedded-main.ts's catch immediately followed up with a SECOND report at 'boot_failed', which
+// clobbered the notice into a generic fatal error anyway — so it was never really a notice in practice,
+// just a confusing double-report. It now arrives as a single 'error' with the specific code, the runtime
+// stays alive (embedded-main.ts no longer exits for this one), and index.tsx shows it as a persistent
+// FATAL state with the "Preserve old database & start fresh" action — see index.tsx's DB_UNREADABLE_CODE.
 const DB_ENCRYPTION_NOTICE_CODES = [
   'db_encryption_open_failed',
-  'db_encryption_unreadable',
   'db_encryption_recovered_fresh',
   'db_encryption_no_key',
   'db_encryption_unavailable',
@@ -62,6 +70,22 @@ const DB_ENCRYPTION_NOTICE_CODES = [
 global.__loamReportBootError = function (message, code) {
   const isNotice = DB_ENCRYPTION_NOTICE_CODES.indexOf(code) !== -1;
   notify(isNotice ? 'notice' : 'error', { message: message, code: code });
+};
+
+// P1-2 (Sol round 3): the server's kill switch calls this (`globalThis.__loamRequestWipeRestart`, see
+// executeKillSwitch in apps/server/src/app.ts) when a `persistent`/`passphrase`-encrypted node is wiped
+// — its key is FIXED (Keystore-held) and the server process has no way to mint a new one in-process, so
+// it deletes the now-orphaned ciphertext and asks THIS process (over the bridge, same reasoning as every
+// other RN-owned action here) to clear the Keystore key material and restart the embedded runtime. The
+// RN side (index.tsx) owns `clearStoredDbKeys()` and the actual restart; installed BEFORE requiring the
+// server bundle (same pattern as every other global.__loam* hook above/below) so it's always present by
+// the time a kill switch could possibly fire.
+global.__loamRequestWipeRestart = function () {
+  try {
+    rnBridge.channel.post('loam-wipe-restart');
+  } catch (err) {
+    console.error('Failed to post loam-wipe-restart to the RN host', err);
+  }
 };
 
 // Interface NAME prefixes that belong to a VPN/tunnel/virtual adapter rather than the real hotspot/LAN
@@ -616,6 +640,32 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.
     }
+    return;
+  }
+
+  // P1-1 (Sol round 3): re-attempt boot right here, in the SAME still-alive process. The marker is now
+  // on disk, so this time `openInitialStore` (apps/server/src/app.ts) will see it, consume it, and
+  // recover instead of throwing again. This only works because embedded-main.ts no longer
+  // `process.exit()`s on a `db_encryption_unreadable` failure — the runtime (and this very listener)
+  // stays alive specifically so it can receive this event and drive the retry; before that fix, the
+  // process backing this listener was already dead by the time the operator could ever tap the button.
+  // `global.__loamBootEmbeddedServer` is the hook loam-server.js (embedded-main.ts's bundle entry)
+  // installs on `global` — idempotent-safe to call again. `waitForServer` (kicked off after the
+  // original `require('./loam-server.js')` below) is still polling /api/health in the background and
+  // will pick up the recovered server's readiness on its own; nothing else to wire up here.
+  var reboot = global.__loamBootEmbeddedServer;
+  if (typeof reboot === 'function') {
+    try {
+      reboot().catch(function (err) {
+        console.error('Retry boot after start-fresh confirmation failed', err);
+      });
+    } catch (err) {
+      console.error('Failed to invoke the retry-boot hook after start-fresh confirmation', err);
+    }
+  } else {
+    console.error(
+      'No retry-boot hook installed (unexpected — loam-server.js should have set global.__loamBootEmbeddedServer)',
+    );
   }
 });
 
@@ -708,6 +758,14 @@ function resolveDbEncryptionAndBoot() {
           'db_encryption_unavailable',
         );
         process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+        // P1-3 (Sol round 3): also downgrade the DECLARED mode to 'off', not just the driver. Leaving
+        // LOAM_DB_ENCRYPTION_MODE at 'ephemeral' here used to make embedded.ts's resolveEphemeralDbKey
+        // (which used to also check the mode, not just the LOAM_DB_KEY literal) generate an ephemeral
+        // key and set `ephemeralDbKey`, so the server tried to require the very
+        // better-sqlite3-multiple-ciphers module this branch just proved was MISSING — crash-looping
+        // boot instead of degrading. Posture reporting must match reality too: this boot really is
+        // unencrypted, for every mode, not just 'ephemeral'.
+        process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
         clearEphemeralMarker();
         return;
       }

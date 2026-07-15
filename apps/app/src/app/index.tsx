@@ -44,11 +44,16 @@ const DB_ENCRYPTION_ERROR_CODES = new Set([
   'db_encryption_no_key',
 ]);
 
-// The one DB-encryption notice code with a dedicated recovery action (AF8/design#1, docs/01, docs/15):
-// an existing encrypted database the current key can't open. Unlike the other notice codes (which are
-// purely informational — boot degraded but continues), this one needs the operator to make an explicit
-// choice, so it gets its own persistent block (in both the non-ready and ready views) with a "Preserve
-// old database & start fresh" action, rather than just the generic dismissible notice banner.
+// The one DB-encryption code with a dedicated recovery action (AF8/design#1, docs/01, docs/15): an
+// existing encrypted database the current key can't open. Unlike the other DB-encryption codes (which
+// mean the server DEGRADED but kept booting, and arrive as the dismissible `notice` status — see
+// `onStatus` below), this one means boot genuinely FAILED (P1-1, Sol round 3) — it now arrives as a
+// real `'error'` status (main.js no longer maps it to `notice`), and the embedded runtime deliberately
+// stays alive (rather than exiting) specifically so the "Preserve old database & start fresh" action
+// below can drive an in-process retry. It gets its own persistent, NON-dismissible fatal block (in the
+// non-ready view only — `status` can never be `'ready'` while this is the active error) rather than the
+// generic dismissible notice banner; a subsequent `'ready'` clears it (the `onStatus` 'ready' branch
+// already resets `errorCode`/`status`, which this block's visibility is keyed on).
 const DB_UNREADABLE_CODE = 'db_encryption_unreadable';
 
 /** A non-fatal boot-time notice (status `'notice'`, distinct from `'error'` — see `onStatus`). Kept in
@@ -205,6 +210,12 @@ export default function HostScreen() {
         setStatus('ready');
         setErrorMessage(undefined);
         setErrorCode(undefined);
+        // P1-1 (Sol round 3): clear any leftover start-fresh confirmation state from a PRIOR
+        // `db_encryption_unreadable` recovery — that fatal block only exists in the non-ready view
+        // (see DB_UNREADABLE_CODE's comment), so once `ready` fires the operator can no longer see it,
+        // and a stale "Confirmed. Close and reopen…" message must not resurface later out of context.
+        setStartFreshBusy(false);
+        setStartFreshMessage(undefined);
         // Deliberately NOT touching `notice`/`nodeNotice` here (AF2/P1-4) — a boot notice describes a
         // degraded DB-encryption posture that's still true once the host is up; clearing it just
         // because the server also became ready is exactly the bug this fix removes.
@@ -236,8 +247,35 @@ export default function HostScreen() {
       }
     };
 
+    // P1-2 (Sol round 3): the server's kill switch posts this when a `persistent`/`passphrase`-encrypted
+    // node is wiped — its key is FIXED (Keystore-held), so the server deleted the now-orphaned ciphertext
+    // and handed off HERE to clear the key material and restart. Unlike the P1-1 `db_encryption_unreadable`
+    // recovery above (which retries boot in the SAME still-alive Node runtime — a plain JS function call
+    // inside that process), this genuinely needs a NEW OS process: the OLD embedded server is still bound
+    // to port 3000 with its store already closed, and nodejs-mobile's native module only starts its
+    // runtime ONCE per process (`_startedNodeAlready` — a second `nodejs.start()` call is a silent no-op,
+    // not an error, so it can never be trusted to have actually restarted anything). The only reliable
+    // recovery is the operator closing and reopening the app, so this always shows that prompt — the
+    // `nodejs.start()` call below is a forward-compatible best-effort attempt only.
+    const onWipeRestart = () => {
+      void (async () => {
+        await clearStoredDbKeys();
+        try {
+          nodejs.start('main.js', { redirectOutputToLogcat: true });
+        } catch {
+          // Expected on today's nodejs-mobile — see the comment above. The restart prompt below is the
+          // real recovery path either way.
+        }
+        Alert.alert(
+          'Restart LOAM',
+          'The database encryption key was cleared for the emergency reset. Close and reopen the app now to finish starting a fresh database.',
+        );
+      })();
+    };
+
     nodejs.channel.addListener('loam-status', onStatus);
     nodejs.channel.addListener('loam-hostinfo', onHostInfo);
+    nodejs.channel.addListener('loam-wipe-restart', onWipeRestart);
     // Answer optional on-device LLM requests from the embedded server (no-op unless the operator
     // enables the on-device backend and a model is wired — see docs/06).
     const cleanupLlm = registerOnDeviceLlm(nodejs.channel);
@@ -260,6 +298,7 @@ export default function HostScreen() {
       clearTimeout(startupTimeout);
       nodejs.channel.removeListener('loam-status', onStatus);
       nodejs.channel.removeListener('loam-hostinfo', onHostInfo);
+      nodejs.channel.removeListener('loam-wipe-restart', onWipeRestart);
       cleanupLlm();
       cleanupMesh();
       cleanupDbEncryption();
@@ -332,10 +371,12 @@ export default function HostScreen() {
     setErrorMessage(message);
   };
 
-  // "Preserve old database & start fresh" (AF8/design#1): ask the launcher to write the confirmation
-  // marker, then tell the operator to restart — nodejs-mobile can't restart its runtime in-process
-  // (same limitation as every other "takes effect next restart" action in this screen), so there's no
-  // in-app way to re-trigger boot after the marker lands.
+  // "Preserve old database & start fresh" (AF8/design#1, P1-1): ask the launcher to write the
+  // confirmation marker. As of Sol round 3 this ALSO makes main.js retry boot immediately, in the SAME
+  // still-alive Node runtime (see its `loam-db-start-fresh` listener) — no app restart needed any more.
+  // `onStatus`'s `'ready'` branch clears the fatal `dbUnreadable` block automatically once that retry
+  // succeeds (and resets this busy/message state); if it fails again, a fresh `db_encryption_unreadable`
+  // `'error'` status simply replaces this one.
   const handleStartFresh = async () => {
     setStartFreshBusy(true);
     setStartFreshMessage(undefined);
@@ -345,10 +386,8 @@ export default function HostScreen() {
       setStartFreshMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
       return;
     }
-    setStartFreshMessage('Confirmed. Close and reopen the app to start fresh — the old database is preserved on disk.');
-    Alert.alert(
-      'Restart LOAM',
-      'The old database will be preserved on disk. Close and reopen the app now to start a fresh one.',
+    setStartFreshMessage(
+      'Confirmed — the old database is preserved on disk and a fresh one is starting now…',
     );
   };
 
@@ -417,23 +456,15 @@ export default function HostScreen() {
         {/* Persistent boot notice (AF2/P1-4): rendered as a sibling ABOVE the WebView, same reasoning
             as the top bar's comment — an overlay wouldn't receive touches. Survives 'ready' (unlike the
             old behaviour, where this arrived as a terminal 'error' and got wiped the moment 'ready'
-            followed) and stays until the operator dismisses it. */}
+            followed) and stays until the operator dismisses it. Never carries `DB_UNREADABLE_CODE`
+            (P1-1, Sol round 3) — that code means boot genuinely failed, so `status` can't be `'ready'`
+            while it's active; it gets its own FATAL block in the non-ready view below instead. */}
         {notice && !noticeDismissed ? (
           <ThemedView type="backgroundSelected" style={styles.noticeBanner}>
             <ThemedText type="small" style={styles.noticeBannerText}>
               {notice.message ?? 'A database-encryption setting was downgraded during startup.'}
             </ThemedText>
             <ThemedView style={styles.noticeBannerActions}>
-              {notice.code === DB_UNREADABLE_CODE ? (
-                <Pressable
-                  onPress={() => void handleStartFresh()}
-                  disabled={startFreshBusy}
-                  accessibilityRole="button">
-                  <ThemedText type="link">
-                    {startFreshBusy ? 'Confirming…' : 'Preserve old database & start fresh'}
-                  </ThemedText>
-                </Pressable>
-              ) : null}
               <Pressable onPress={() => setDbEncryptionOpen(true)} accessibilityRole="button">
                 <ThemedText type="link">Encryption settings</ThemedText>
               </Pressable>
@@ -441,11 +472,6 @@ export default function HostScreen() {
                 <ThemedText type="link">Dismiss</ThemedText>
               </Pressable>
             </ThemedView>
-            {startFreshMessage ? (
-              <ThemedText type="small" themeColor="textSecondary">
-                {startFreshMessage}
-              </ThemedText>
-            ) : null}
           </ThemedView>
         ) : null}
         {webViewReady ? (
@@ -520,45 +546,57 @@ export default function HostScreen() {
 
   // A boot failure that looks DB-encryption-related (G2): the operator needs a way to switch back to
   // Off and restart even though the host never became ready — surfaced below regardless of whether
-  // this is the plain "starting" spinner or the error screen.
-  const dbEncryptionSuspect = status === 'error' && errorCode !== undefined && DB_ENCRYPTION_ERROR_CODES.has(errorCode);
+  // this is the plain "starting" spinner or the error screen. Excludes `DB_UNREADABLE_CODE`: that one
+  // gets its own dedicated, more specific fatal block (below) rather than this generic fallback one.
+  const dbEncryptionSuspect =
+    status === 'error' && errorCode !== undefined && errorCode !== DB_UNREADABLE_CODE && DB_ENCRYPTION_ERROR_CODES.has(errorCode);
+  // FATAL db_encryption_unreadable (P1-1, Sol round 3, AF8/design#1): boot genuinely failed and the
+  // embedded runtime stayed alive specifically so this recovery can work — see DB_UNREADABLE_CODE's
+  // comment. `status` can only be `'error'` while this is active (never `'ready'`), and a subsequent
+  // `'ready'` clears it automatically (the `onStatus` 'ready' branch resets `errorCode`).
+  const dbUnreadable = status === 'error' && errorCode === DB_UNREADABLE_CODE;
 
   return (
     <ThemedView style={styles.center}>
       <ThemedText type="title">LOAM host</ThemedText>
       {/* Persistent boot notice (AF2/P1-4), shown here too so it's visible even while still "starting"
-          or on the generic timeout/error screen — independent of `status`, unlike `dbEncryptionSuspect`
-          below. `db_encryption_unreadable` specifically (AF8/design#1) gets its own explanation + the
-          "Preserve old database & start fresh" action, since the server refuses to auto-replace an
-          unreadable DB and this is the only way forward short of reinstalling. */}
+          or on the generic timeout/error screen — independent of `status`. Never carries
+          `DB_UNREADABLE_CODE` any more (P1-1) — that gets the dedicated FATAL block below instead,
+          since (unlike every other notice code) it means boot did NOT keep running. */}
       {notice && !noticeDismissed ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">
-            {notice.code === DB_UNREADABLE_CODE
-              ? "The on-device database couldn't be opened with the current key."
-              : 'A database-encryption setting was downgraded during startup.'}
-          </ThemedText>
+          <ThemedText type="smallBold">A database-encryption setting was downgraded during startup.</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {notice.message ?? 'See Encryption settings below for details.'}
           </ThemedText>
-          {notice.code === DB_UNREADABLE_CODE ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              The old database is never deleted automatically. Preserve it and start a fresh one below,
-              or open Encryption settings to change the mode back.
-            </ThemedText>
-          ) : null}
           <ThemedView style={styles.noticeBannerActions}>
-            {notice.code === DB_UNREADABLE_CODE ? (
-              <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy} accessibilityRole="button">
-                <ThemedView type="backgroundElement" style={styles.retry}>
-                  <ThemedText type="link">
-                    {startFreshBusy ? 'Confirming…' : 'Preserve old database & start fresh'}
-                  </ThemedText>
-                </ThemedView>
-              </Pressable>
-            ) : null}
             <Pressable onPress={() => setNoticeDismissed(true)} accessibilityRole="button" hitSlop={Spacing.two}>
               <ThemedText type="link">Dismiss</ThemedText>
+            </Pressable>
+          </ThemedView>
+        </ThemedView>
+      ) : null}
+      {/* FATAL, NOT dismissible (P1-1, Sol round 3, AF8/design#1) — an existing encrypted database the
+          current key can't open. The server refuses to auto-replace an unreadable DB, so "Preserve old
+          database & start fresh" (an explicit, one-shot operator confirmation) is the only way forward
+          short of reinstalling; a subsequent `ready` (the in-process retry succeeding) clears this. */}
+      {dbUnreadable ? (
+        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+          <ThemedText type="smallBold">The on-device database couldn't be opened with the current key.</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            {errorMessage ?? 'See Encryption settings below for details.'}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            The old database is never deleted automatically. Preserve it and start a fresh one below, or
+            open Encryption settings to change the mode back.
+          </ThemedText>
+          <ThemedView style={styles.noticeBannerActions}>
+            <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">
+                  {startFreshBusy ? 'Confirming…' : 'Preserve old database & start fresh'}
+                </ThemedText>
+              </ThemedView>
             </Pressable>
           </ThemedView>
           {startFreshMessage ? (
@@ -604,8 +642,12 @@ export default function HostScreen() {
                 <ThemedText type="link">Retry</ThemedText>
               </ThemedView>
             </Pressable>
-          ) : (
-            // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process).
+          ) : dbUnreadable ? null : (
+            // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process) —
+            // except for `dbUnreadable` (P1-1, Sol round 3), which has its own in-app recovery above and
+            // deliberately does NOT show this text: closing/reopening WITHOUT using that button first
+            // would just hit the identical failure again (nothing changed), so this generic instruction
+            // would be actively misleading for this one specific error.
             <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
               Close and reopen the app to try again.
             </ThemedText>

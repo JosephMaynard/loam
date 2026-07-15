@@ -42,6 +42,13 @@ export type MissingAttachmentRecord = {
   attempts: number;
   createdAt: number;
   lastAttemptAt: number;
+  /**
+   * When this record next becomes eligible for a retry (epoch ms; 0 = due immediately — a fresh,
+   * never-attempted record). Stamped by `bumpMissingAttachmentAttempts` from the caller's own backoff
+   * policy (P2-2, docs/15 A6/F1) and used by `loadDueMissingAttachments` to select — and fairly order
+   * — only the records actually eligible right now, rather than every record in creation order.
+   */
+  nextAttemptAt: number;
 };
 
 /**
@@ -185,13 +192,24 @@ export interface LoamStore {
    * attempt counter at 0. A conflict (same message+attachment already tracked) is a no-op — it keeps
    * the original `attempts`/`createdAt` rather than resetting the retry clock.
    */
-  addMissingAttachment(record: Omit<MissingAttachmentRecord, "attempts" | "createdAt" | "lastAttemptAt">): void;
+  addMissingAttachment(
+    record: Omit<MissingAttachmentRecord, "attempts" | "createdAt" | "lastAttemptAt" | "nextAttemptAt">,
+  ): void;
   loadMissingAttachments(): MissingAttachmentRecord[];
+  /**
+   * Records currently due for a retry (P2-2, docs/15 A6/F1): `nextAttemptAt <= nowMs`, fairly ordered
+   * (earliest-due first) and capped at `limit`. Unlike `loadMissingAttachments` (every record, creation
+   * order), this is what the retry pass itself should page through — it guarantees the per-pass cap
+   * applies to records that are actually ELIGIBLE right now, so a block of records still in backoff can
+   * never starve out ones that came later but are already due.
+   */
+  loadDueMissingAttachments(nowMs: number, limit: number): MissingAttachmentRecord[];
   /** The attachment copy finally succeeded (or the message/work item it belonged to is gone) — drop it. */
   clearMissingAttachment(messageId: string, attachmentId: string): void;
-  /** Another retry against the peer failed — bump the attempt counter and stamp `lastAttemptAt` (now)
-   * so the retry pass's backoff has something to measure the next wait from. */
-  bumpMissingAttachmentAttempts(messageId: string, attachmentId: string): void;
+  /** Another retry against the peer failed — bump the attempt counter, stamp `lastAttemptAt` (now), and
+   * set `nextAttemptAt` to the caller-computed epoch ms (the caller owns the backoff policy; this is a
+   * dumb storage write) — so `loadDueMissingAttachments` skips this record until then. */
+  bumpMissingAttachmentAttempts(messageId: string, attachmentId: string, nextAttemptAt: number): void;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -270,6 +288,22 @@ function migrateMissingAttachmentsLastAttempt(db: SqliteConnection): void {
 }
 
 /**
+ * Backfill the `missing_attachments.next_attempt_at` column onto a database created before
+ * fair-ordered retry-due selection existed (docs/15 A6 / P2-2). `0` (due immediately) is the correct
+ * backfill for existing rows: it's exactly the "never contacted yet" default new rows already get, so
+ * every pre-existing record simply becomes eligible on the very next pass — nothing is starved worse
+ * than it already was.
+ */
+function migrateMissingAttachmentsNextAttempt(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(missing_attachments)").all() as { name: string }[];
+  const hasNextAttemptAt = columns.some((column) => column.name === "next_attempt_at");
+
+  if (!hasNextAttemptAt) {
+    db.exec("ALTER TABLE missing_attachments ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+/**
  * Initialise the schema and prepared statements on an open connection and return the store.
  * Split out so `openStore` can close the connection if any setup step throws.
  */
@@ -335,11 +369,13 @@ function buildStore(db: SqliteConnection): LoamStore {
       attempts INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       last_attempt_at INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (message_id, attachment_id)
     );
   `);
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
+  migrateMissingAttachmentsNextAttempt(db);
 
   const upsertUserStmt = db.prepare(
     "INSERT INTO users (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
@@ -389,13 +425,17 @@ function buildStore(db: SqliteConnection): LoamStore {
      VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(message_id, attachment_id) DO NOTHING`,
   );
   const loadMissingAttachmentsStmt = db.prepare(
-    "SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at, last_attempt_at FROM missing_attachments ORDER BY rowid",
+    "SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at, last_attempt_at, next_attempt_at FROM missing_attachments ORDER BY rowid",
+  );
+  const loadDueMissingAttachmentsStmt = db.prepare(
+    `SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at, last_attempt_at, next_attempt_at
+     FROM missing_attachments WHERE next_attempt_at <= ? ORDER BY next_attempt_at ASC, rowid ASC LIMIT ?`,
   );
   const clearMissingAttachmentStmt = db.prepare(
     "DELETE FROM missing_attachments WHERE message_id = ? AND attachment_id = ?",
   );
   const bumpMissingAttachmentAttemptsStmt = db.prepare(
-    "UPDATE missing_attachments SET attempts = attempts + 1, last_attempt_at = ? WHERE message_id = ? AND attachment_id = ?",
+    "UPDATE missing_attachments SET attempts = attempts + 1, last_attempt_at = ?, next_attempt_at = ? WHERE message_id = ? AND attachment_id = ?",
   );
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
@@ -518,13 +558,26 @@ function buildStore(db: SqliteConnection): LoamStore {
         attempts: row.attempts as number,
         createdAt: row.created_at as number,
         lastAttemptAt: row.last_attempt_at as number,
+        nextAttemptAt: row.next_attempt_at as number,
+      }));
+    },
+    loadDueMissingAttachments(nowMs, limit) {
+      return loadDueMissingAttachmentsStmt.all(nowMs, limit).map((row) => ({
+        messageId: row.message_id as string,
+        attachmentId: row.attachment_id as string,
+        mimeType: row.mime_type as AvatarImageMimeType,
+        peerUrl: row.peer_url as string,
+        attempts: row.attempts as number,
+        createdAt: row.created_at as number,
+        lastAttemptAt: row.last_attempt_at as number,
+        nextAttemptAt: row.next_attempt_at as number,
       }));
     },
     clearMissingAttachment(messageId, attachmentId) {
       clearMissingAttachmentStmt.run(messageId, attachmentId);
     },
-    bumpMissingAttachmentAttempts(messageId, attachmentId) {
-      bumpMissingAttachmentAttemptsStmt.run(Date.now(), messageId, attachmentId);
+    bumpMissingAttachmentAttempts(messageId, attachmentId, nextAttemptAt) {
+      bumpMissingAttachmentAttemptsStmt.run(Date.now(), nextAttemptAt, messageId, attachmentId);
     },
     transaction(fn) {
       db.exec("BEGIN IMMEDIATE");

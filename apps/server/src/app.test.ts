@@ -1334,6 +1334,98 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
   });
 
+  /** Install the launcher's `globalThis.__loamRequestWipeRestart` hook (P1-2, docs/15) and record every
+   *  invocation. Auto-uninstalled via the module-level `cleanups` array. */
+  function installFakeWipeRestartHook(): { calls: number } {
+    const state = { calls: 0 };
+    (globalThis as unknown as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart = () => {
+      state.calls += 1;
+    };
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamRequestWipeRestart?: unknown }).__loamRequestWipeRestart;
+    });
+    return state;
+  }
+
+  it("P1-2: persistent-mode executeKillSwitch deletes the DB files and does NOT recreate in-process — it hands off to the launcher's wipe-restart hook instead", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed under a fixed key")).statusCode).toBe(201);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // The launcher hook was invoked exactly once — it owns clearing the Keystore key and restarting
+    // the embedded runtime from here; this process must not try to obtain a new key itself.
+    expect(hook.calls).toBe(1);
+
+    // The DB files are gone and were NOT recreated in-process (this process has no way to mint the new
+    // key the launcher's restart will resolve) — a bare delete, unlike the ephemeral/off paths below.
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-wal"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-shm"))).toBe(false);
+
+    // Avatars/attachments still get cleaned up even on this early-return branch (they're plain
+    // filesystem, not store-dependent).
+    expect(existsSync(join(dataDir, "avatars"))).toBe(false);
+    expect(existsSync(join(dataDir, "attachments"))).toBe(false);
+  });
+
+  it("P1-2: passphrase-mode executeKillSwitch also hands off to the wipe-restart hook rather than recreating under the same key", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed passphrase-derived key", dbEncryptionMode: "passphrase" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    expect(hook.calls).toBe(1);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+  });
+
+  it("P1-2: falls back to the existing recreate-under-the-SAME-key behaviour when no launcher restart hook is installed (desktop/CI — documented limitation)", async () => {
+    // Deliberately NOT installing __loamRequestWipeRestart — simulates a non-Android host.
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed passphrase key", dbEncryptionMode: "passphrase" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // No hook available → the node must still boot usable, recreated in-process (same key) exactly as
+    // it always has — this is the documented limitation, not a crash or a stuck kill switch.
+    expect(app.store.loadMessages()).toEqual([]);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+    expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
+  });
+
   /** Install the `globalThis.__loamReportBootError` bridge (the same one `embedded-main.ts` uses for
    *  fatal boot errors — see its own test suite) and capture every report. Auto-uninstalled. */
   function installFakeBootBridge(): { message: string; code: string }[] {
@@ -1506,6 +1598,64 @@ describe("encryption at rest + key-discard kill switch", () => {
       for (const name of preservedAfterFirst) {
         expect(preservedAfterSecond).toContain(name);
       }
+    });
+
+    it("P2-3: a start-fresh marker present when the NORMAL open already succeeds is still consumed — it can never linger to authorize a LATER, unrelated failure", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the correct key" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "seed")).statusCode).toBe(201);
+      await original.close();
+
+      // The operator wrote the marker (e.g. anticipating a key problem) but then the RIGHT key ended up
+      // being used after all — case 1 (keyed open) succeeds immediately, never reaching the recovery
+      // branch at all.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+
+      const reopened = await buildApp({ dataDir, logger: false, dbEncryptionKey: "the correct key" });
+      cleanups.push(() => reopened.close());
+
+      // No boot-bridge report at all — this was a perfectly normal open, not a degrade or a recovery.
+      expect(reports).toEqual([]);
+
+      // Old data is untouched (normal open, not a destructive replace).
+      expect(reopened.store.loadMessages().some((m) => "body" in m && m.body === "seed")).toBe(true);
+
+      // The marker is GONE — consumed up front (P2-3), not left behind to silently authorize some LATER,
+      // unrelated unopenable-DB failure the operator never actually confirmed for.
+      expect(existsSync(startFreshMarkerPath(dataDir))).toBe(false);
+    });
+
+    it("P2-3: if the marker can't actually be deleted, boot fails CLOSED — it is NOT treated as a valid confirmation", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A" });
+      await session(original);
+      await original.close();
+
+      const filesBefore = dbFileNames(dataDir).sort();
+
+      // Force the marker deletion itself to fail: create it as a NON-EMPTY directory instead of a file.
+      // `rmSync(path, { force: true })` (no `recursive`) throws ENOTEMPTY/EISDIR for this, exactly the
+      // "delete failed" case P2-3 must fail closed on — `force` only swallows ENOENT (already-absent),
+      // never a genuine deletion failure.
+      const markerPath = startFreshMarkerPath(dataDir);
+      mkdirSync(markerPath);
+      writeFileSync(join(markerPath, "not-empty"), "");
+
+      // Wrong key too — case 1 and case 2 both fail, so this reaches the marker-gated recovery check.
+      await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" })).rejects.toThrow(
+        /could not be opened/,
+      );
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+
+      // Fail closed: no destructive replace happened — the original files are untouched...
+      expect(dbFileNames(dataDir).sort()).toEqual(filesBefore);
+      // ...and the marker (still an undeleted directory) is exactly where it was — NOT silently
+      // "consumed" despite authorizing nothing.
+      expect(existsSync(markerPath)).toBe(true);
     });
   });
 });
@@ -3944,13 +4094,14 @@ describe("attachment + sync review hardening", () => {
       peerUrl: unreachablePeerUrl,
     });
 
-    // A pass calls `store.loadMissingAttachments()` exactly once, synchronously, right at its start —
-    // so counting calls to it distinguishes "a second pass actually ran" from "the mutex no-op'd it".
+    // A pass calls `store.loadDueMissingAttachments()` exactly once, synchronously, right at its start
+    // (P2-2) — so counting calls to it distinguishes "a second pass actually ran" from "the mutex
+    // no-op'd it".
     let calls = 0;
-    const original = app.store.loadMissingAttachments.bind(app.store);
-    app.store.loadMissingAttachments = (): ReturnType<typeof original> => {
+    const original = app.store.loadDueMissingAttachments.bind(app.store);
+    app.store.loadDueMissingAttachments = (...args: Parameters<typeof original>): ReturnType<typeof original> => {
       calls += 1;
-      return original();
+      return original(...args);
     };
 
     const first = app.retryMissingAttachments(); // synchronously runs up to `await stat(filePath)`, then suspends
@@ -3988,6 +4139,44 @@ describe("attachment + sync review hardening", () => {
     // A second pass picks up where the first left off.
     await app.retryMissingAttachments();
     expect(app.store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("P2-2: the due set is looked at even when the first 25 (by creation order) are all still in backoff — no starvation", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://still-active.example" }] } });
+
+    // First 25 (in creation/rowid order) are all bumped into the future — deliberately still in backoff.
+    for (let i = 0; i < 25; i += 1) {
+      app.store.addMissingAttachment({
+        messageId: `future_${i}`,
+        attachmentId: "att",
+        mimeType: "image/png",
+        peerUrl: "http://long-gone.example", // dropped on sight (F2b) once actually looked at
+      });
+      app.store.bumpMissingAttachmentAttempts(`future_${i}`, "att", Date.now() + 3_600_000);
+    }
+
+    // Last 5 (created after) are due right now (default nextAttemptAt = 0).
+    for (let i = 0; i < 5; i += 1) {
+      app.store.addMissingAttachment({
+        messageId: `due_${i}`,
+        attachmentId: "att",
+        mimeType: "image/png",
+        peerUrl: "http://long-gone.example",
+      });
+    }
+
+    expect(app.store.loadMissingAttachments()).toHaveLength(30);
+
+    await app.retryMissingAttachments();
+
+    // The old rowid-order slice-then-check-backoff logic looked at the first 25 (all still in backoff,
+    // all skipped) and NEVER reached the 5 due records added after them — permanent starvation. The
+    // fixed pass selects by due-ness (loadDueMissingAttachments), not creation order, so the 5 due ones
+    // ARE processed (F2b drops them immediately — the peer is gone) while the 25 not-yet-due ones are
+    // left untouched for a later tick.
+    const remaining = app.store.loadMissingAttachments();
+    expect(remaining).toHaveLength(25);
+    expect(remaining.every((record) => record.messageId.startsWith("future_"))).toBe(true);
   });
 
   it("blocks a banned user from editing or deleting their old messages", async () => {
