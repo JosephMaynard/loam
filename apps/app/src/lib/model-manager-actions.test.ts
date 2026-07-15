@@ -45,18 +45,28 @@ const A = model("A");
 const B = model("B");
 
 /** An in-memory stand-in for the serialized store. Each `mutate` does an atomic read-modify-write
- * after a microtask, mirroring `mutateModelManagerState` closely enough for these tests. */
+ * after a microtask, mirroring `mutateModelManagerState` closely enough for these tests. On a failed
+ * write it returns the UNCHANGED state with `persisted:false` — the same "the mutation didn't land, so
+ * disk still holds the old value" contract callers rely on (P2-1). `failWriteAt(n)` fails the n-th mutate
+ * (1-based) so a test can fail a SECOND write mid-transaction (e.g. a clear-pending after a durable
+ * write-ahead), which `failNextWrite` (fails the very next one) can't target. */
 function makeStore(initial: ModelManagerState) {
   let state: ModelManagerState = initial;
   let failNext = false;
+  let writeNo = 0;
+  const failAt = new Set<number>();
   return {
     get: () => state,
     failNextWrite: () => {
       failNext = true;
     },
+    failWriteAt: (n: number) => {
+      failAt.add(n);
+    },
     mutate: vi.fn(async (fn: (current: ModelManagerState) => ModelManagerState) => {
       await Promise.resolve();
-      if (failNext) {
+      writeNo += 1;
+      if (failNext || failAt.has(writeNo)) {
         failNext = false;
         return { state, persisted: false };
       }
@@ -443,5 +453,147 @@ describe("reconcilePendingActions — RESTART-level: all attempts timed out, not
     expect(result.settled).toBe(true);
     expect(setActive).not.toHaveBeenCalled();
     expect(clear).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-1: the pending-action journal is only ever reported durable/settled when CONFIRMED on disk.
+// ---------------------------------------------------------------------------
+
+describe("write-ahead intent is atomic and durable (P2-1)", () => {
+  it("performSetActive records the pending in the SAME write as activeId, BEFORE the bridge call", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" });
+    // Bridge blocks so we can observe the on-disk state after the write-ahead but before confirmation.
+    const gate = deferred<ActiveModelResult>();
+    let bridgeCalled = false;
+    const deps = scriptedDeps(store, {
+      setActiveModel: () => {
+        bridgeCalled = true;
+        return gate.promise;
+      },
+    });
+
+    const p = performSetActive(deps, A);
+    await tick();
+
+    // The write-ahead landed FIRST: activeId set AND a durable setActive pending, before any bridge ack.
+    expect(bridgeCalled).toBe(true);
+    expect(store.get().activeId).toBe("A");
+    expect(store.get().pending).toEqual([
+      { id: POINTER_PENDING_ID, kind: "setActive", desired: { enabled: true, modelPath: A.uri, model: A.displayName } },
+    ]);
+    // Only ONE atomic write so far (the write-ahead); the pending was NOT a separate second write.
+    expect(store.mutate).toHaveBeenCalledTimes(1);
+
+    gate.resolve(OK);
+    await p;
+  });
+
+  it("failure to persist the write-ahead → persist-failed, no pending, bridge untouched (nothing reported durable)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" });
+    store.failNextWrite();
+    const setActive = vi.fn(async () => OK);
+    const deps = scriptedDeps(store, { setActiveModel: setActive });
+
+    const result = await performSetActive(deps, A);
+
+    expect(result.kind).toBe("persist-failed");
+    expect(setActive).not.toHaveBeenCalled();
+    // No durable pending was left behind, and the selection didn't move — a failed record is NOT durable.
+    expect(store.get().activeId).toBe("B");
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+
+  it("bridge OK but the pending-CLEAR write fails → reported AMBIGUOUS (not ok) and the pending survives", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" });
+    // Write 1 = the write-ahead (must land); write 2 = clearPendingEntry after the ok bridge (must FAIL).
+    store.failWriteAt(2);
+    const deps = scriptedDeps(store, { setActiveModel: async () => OK });
+
+    const result = await performSetActive(deps, A);
+
+    // Not reported as a clean `ok` — the clear didn't land, so the pending is still on disk.
+    expect(result.kind).toBe("ambiguous");
+    expect(store.get().activeId).toBe("A");
+    expect((store.get().pending ?? []).map((p) => p.id)).toEqual([POINTER_PENDING_ID]);
+  });
+
+  it("performDelete PRESERVES an unrelated pending array (P2-1: the old reconstruction dropped it)", async () => {
+    const unrelated: PendingAction = {
+      id: POINTER_PENDING_ID,
+      kind: "setActive",
+      desired: { enabled: true, modelPath: B.uri, model: B.displayName },
+    };
+    const store = makeStore({ downloaded: [A, B], activeId: "B", pending: [unrelated] });
+    const deleteFile = vi.fn(async () => {});
+    const deps = scriptedDeps(store, { deleteModelFile: deleteFile });
+
+    // Delete A, which is INACTIVE (activeId is B) — no launcher clear, immediate byte delete.
+    const result = await performDelete(deps, A);
+
+    expect(result.kind).toBe("ok");
+    expect(deleteFile).toHaveBeenCalledWith(A.uri);
+    expect(store.get().downloaded.map((m) => m.id)).toEqual(["B"]);
+    // The unrelated pointer pending must still be there — it was previously wiped by the bare
+    // `{ downloaded, activeId }` reconstruction.
+    expect(store.get().pending).toEqual([unrelated]);
+  });
+
+  it("definite setActive FAILURE drops the write-ahead pending as it rolls back (no stale replay)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" });
+    const deps = scriptedDeps(store, { setActiveModel: async () => FAILED });
+
+    const result = await performSetActive(deps, A);
+
+    expect(result.kind).toBe("rolled-back");
+    expect(store.get().activeId).toBe("B"); // reverted
+    // The write-ahead pending must be gone — a definitively-failed action must not leave a pending that
+    // replays after restart.
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+});
+
+describe("reconcile only reports settled from CONFIRMED-on-disk state (P2-1)", () => {
+  it("failure to CLEAR a confirmed delete pending → not settled, bytes NOT deleted, pending kept (no stale replay)", async () => {
+    const pending: PendingAction = { id: `delete:${A.uri}`, kind: "delete", desired: { enabled: false }, fileUri: A.uri };
+    const store = makeStore({ downloaded: [B], activeId: undefined, pending: [pending] });
+    // The reconcile's identity read is write #1; the clear-pending after the ok bridge is write #2 — fail it.
+    store.failWriteAt(2);
+    const deleteFile = vi.fn(async () => {});
+    const deps = scriptedDeps(store, { clearActiveModel: async () => OK, deleteModelFile: deleteFile });
+
+    const result = await reconcilePendingActions(deps);
+
+    // The launcher confirmed the clear, but we couldn't durably drop the pending — so DO NOT report
+    // settled and DO NOT delete the bytes; the on-disk pending must survive to be retried, never replaced
+    // by an in-memory assumption that would let the file be swept.
+    expect(result.settled).toBe(false);
+    expect(deleteFile).not.toHaveBeenCalled();
+    expect(store.get().pending).toEqual([pending]);
+  });
+
+  it("a newer setActive supersedes a stale pending so reconcile never REPLAYS the stale one (restart-safe)", async () => {
+    // Simulates a next-process load carrying a stale setActive-A pending from a prior session.
+    const stale: PendingAction = {
+      id: POINTER_PENDING_ID,
+      kind: "setActive",
+      desired: { enabled: true, modelPath: A.uri, model: A.displayName },
+    };
+    const store = makeStore({ downloaded: [A, B], activeId: "A", pending: [stale] });
+    const setActive = vi.fn(async () => OK);
+    const deps = scriptedDeps(store, { setActiveModel: setActive });
+
+    // The operator picks B before reconciliation runs: the write-ahead supersedes the stale A pending.
+    const setB = await performSetActive(deps, B);
+    expect(setB.kind).toBe("ok");
+    expect(store.get().activeId).toBe("B");
+
+    setActive.mockClear();
+    const reconciled = await reconcilePendingActions(deps);
+
+    // Reconcile finds nothing left (B's pending was cleared on its ok) and NEVER re-sends the stale A.
+    expect(reconciled.settled).toBe(true);
+    expect(setActive).not.toHaveBeenCalledWith({ modelPath: A.uri, model: A.displayName });
+    expect(store.get().pending ?? []).toEqual([]);
   });
 });

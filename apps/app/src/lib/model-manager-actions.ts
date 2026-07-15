@@ -84,9 +84,12 @@ export function runExclusive<T>(op: () => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------------------
 
 /**
- * Set `model` active: persist `activeId = model.id`, then mirror it to the launcher config. On a
- * DEFINITE bridge failure, conditionally roll `activeId` back to its previous value; on a TIMEOUT,
- * leave the change in place (P2-1 — the write may have landed) and report it as ambiguous.
+ * Set `model` active. WRITE-AHEAD intent journal (P2-1): persist `activeId = model.id` AND a durable
+ * pending-`setActive` record in ONE atomic write, BEFORE the bridge call — so if the process dies at any
+ * point after, reconciliation re-sends the (idempotent) launcher write and settles it, and the pending's
+ * `modelPath` keeps the file sweep-protected. Only after a CONFIRMED bridge result do we durably clear
+ * (`ok`) or resolve (`failed`) the pending; a bridge TIMEOUT leaves the already-durable pending in place.
+ * Every persist result is CHECKED — nothing is reported as durable/settled that isn't confirmed on disk.
  *
  * Exposed (not just the `*Action` wrapper) so tests can drive a deliberate interleaving — e.g. start
  * A, run B to completion, then fail A — and assert A's conditional rollback does NOT clobber B.
@@ -95,7 +98,15 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
   let previousActiveId: string | undefined;
   const { state, persisted } = await deps.mutate((current) => {
     previousActiveId = current.activeId;
-    return { ...current, activeId: model.id };
+    return {
+      ...current,
+      activeId: model.id,
+      pending: recordPending(current.pending, {
+        id: POINTER_PENDING_ID,
+        kind: 'setActive',
+        desired: { enabled: true, modelPath: model.uri, model: model.displayName },
+      }),
+    };
   });
   if (!persisted) {
     return { kind: 'persist-failed', message: PERSIST_FAILED_MESSAGE };
@@ -103,9 +114,20 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
 
   const result = await deps.setActiveModel({ modelPath: model.uri, model: model.displayName });
   if (result.status === 'ok') {
+    // Confirmed. Durably CLEAR the write-ahead pending — but only report a clean `ok` once that clear is
+    // itself confirmed on disk (P2-1). If it fails to persist, the on-disk pending survives, so report
+    // `ambiguous` and let the next reconcile finish it rather than claim a settled state that isn't.
+    const cleared = await clearPendingEntry(deps, POINTER_PENDING_ID);
+    if (!cleared.persisted) {
+      return {
+        kind: 'ambiguous',
+        state: cleared.state,
+        message: `${model.displayName} is now the active model, but its pending record couldn't be cleared — it'll be reconciled next time you open the model manager. Restart the LOAM host app to load it.`,
+      };
+    }
     return {
       kind: 'ok',
-      state,
+      state: cleared.state,
       message: `${model.displayName} is now the active model. Restart the LOAM host app to load it.`,
     };
   }
@@ -113,6 +135,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     return rollbackActiveId(deps, {
       expected: model.id,
       restoreTo: previousActiveId,
+      pendingId: POINTER_PENDING_ID,
       failedMessage: (rolledBack) =>
         rolledBack
           ? `Couldn't set ${model.displayName} active — the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
@@ -120,17 +143,12 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     });
   }
   // Timeout — AMBIGUOUS. The write may already have landed, so leave the local `activeId` set rather
-  // than reverting it (a wrong rollback is exactly the divergence P2-1 prevents). Record a DURABLE
-  // pending action (P2-b) so the launcher write is actually RE-SENT and settled on the next open/
-  // restart — the round-5 "reconciled next time" message was previously backed by no code at all.
-  const pendingState = await recordPendingAction(deps, {
-    id: POINTER_PENDING_ID,
-    kind: 'setActive',
-    desired: { enabled: true, modelPath: model.uri, model: model.displayName },
-  });
+  // than reverting it (a wrong rollback is exactly the divergence P2-1 prevents). The write-ahead
+  // pending is ALREADY durable (recorded above), so there is nothing more to persist — reconciliation
+  // re-sends the launcher write and settles it on the next open/restart.
   return {
     kind: 'ambiguous',
-    state: pendingState,
+    state,
     message: `Set ${model.displayName} active, but couldn't confirm the host app applied it (${result.error ?? 'no response'}). It'll be reconciled next time you open the model manager or restart the host.`,
   };
 }
@@ -141,9 +159,15 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
  */
 export async function performDeactivate(deps: ModelActionDeps): Promise<ModelActionResult> {
   let previousActiveId: string | undefined;
+  // Write-ahead intent (P2-1): clear `activeId` AND record a durable pending-`clear` in one atomic write
+  // before the bridge call — same durability guarantee as `performSetActive`.
   const { state, persisted } = await deps.mutate((current) => {
     previousActiveId = current.activeId;
-    return { ...current, activeId: undefined };
+    return {
+      ...current,
+      activeId: undefined,
+      pending: recordPending(current.pending, { id: POINTER_PENDING_ID, kind: 'clear', desired: { enabled: false } }),
+    };
   });
   if (!persisted) {
     return { kind: 'persist-failed', message: PERSIST_FAILED_MESSAGE };
@@ -151,26 +175,36 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
 
   const result = await deps.clearActiveModel();
   if (result.status === 'ok') {
-    return { kind: 'ok', state, message: 'On-device model deactivated. Restart the LOAM host app to apply it.' };
+    const cleared = await clearPendingEntry(deps, POINTER_PENDING_ID);
+    if (!cleared.persisted) {
+      return {
+        kind: 'ambiguous',
+        state: cleared.state,
+        message:
+          "On-device model deactivated, but its pending record couldn't be cleared — it'll be reconciled next time you open the model manager. Restart the LOAM host app to apply it.",
+      };
+    }
+    return {
+      kind: 'ok',
+      state: cleared.state,
+      message: 'On-device model deactivated. Restart the LOAM host app to apply it.',
+    };
   }
   if (result.status === 'failed') {
     return rollbackActiveId(deps, {
       expected: undefined,
       restoreTo: previousActiveId,
+      pendingId: POINTER_PENDING_ID,
       failedMessage: (rolledBack) =>
         rolledBack
           ? `Couldn't deactivate the on-device model — the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
           : `Couldn't deactivate the on-device model, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
     });
   }
-  const pendingState = await recordPendingAction(deps, {
-    id: POINTER_PENDING_ID,
-    kind: 'clear',
-    desired: { enabled: false },
-  });
+  // Timeout — AMBIGUOUS. The write-ahead pending is already durable; reconciliation re-sends the clear.
   return {
     kind: 'ambiguous',
-    state: pendingState,
+    state,
     message: `Deactivated the on-device model, but couldn't confirm the host app applied it (${result.error ?? 'no response'}). It'll be reconciled next time you open the model manager or restart the host.`,
   };
 }
@@ -189,11 +223,30 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
  */
 export async function performDelete(deps: ModelActionDeps, model: DownloadedModel): Promise<ModelActionResult> {
   let wasActive = false;
+  // Write-ahead intent (P2-1): remove the metadata AND — if it was active — record a durable
+  // pending-`delete` in ONE atomic write, BEFORE the bridge clear. The pending's `fileUri` keeps the
+  // bytes sweep-protected from the moment the metadata is gone (closing the "restart finds metadata
+  // removed but no pending protection → sweep deletes the file" window), and reconciliation re-sends the
+  // clear if we die before confirming. CRITICALLY, this preserves any OTHER `pending` entries: the old
+  // reconstruction returned a bare `{ downloaded, activeId }`, silently DROPPING the whole pending array.
   const { state, persisted } = await deps.mutate((current) => {
     wasActive = current.activeId === model.id;
-    return {
+    const base: ModelManagerState = {
+      ...current,
       downloaded: current.downloaded.filter((existing) => existing.id !== model.id),
       activeId: wasActive ? undefined : current.activeId,
+    };
+    if (!wasActive) {
+      return base; // inactive: no launcher clear needed, so no delete-pending to record
+    }
+    return {
+      ...base,
+      pending: recordPending(current.pending, {
+        id: `delete:${model.uri}`,
+        kind: 'delete',
+        desired: { enabled: false },
+        fileUri: model.uri,
+      }),
     };
   });
   if (!persisted) {
@@ -205,17 +258,21 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
     if (result.status === 'failed') {
       // Definite failure: the launcher still thinks this model is active — deleting its bytes now would
       // leave config.json pointing at a file that no longer exists. Conditionally roll the metadata
-      // removal back (only if nothing newer changed it) and refuse the irreversible delete.
+      // removal back (only if nothing newer changed the pointer) AND drop the write-ahead delete-pending,
+      // in one atomic write, and refuse the irreversible delete.
       const { state: rolled, persisted: rolledBack } = await deps.mutate((current) => {
-        // Someone else already changed the active pointer away from this model — leave their change be.
+        // Someone else already changed the active pointer away from this model — leave their change (and
+        // their pending) be.
         if (current.activeId !== undefined && current.activeId !== model.id) {
           return current;
         }
         return {
+          ...current,
           downloaded: current.downloaded.some((existing) => existing.id === model.id)
             ? current.downloaded
             : [...current.downloaded, model],
           activeId: model.id,
+          pending: dropPending(current.pending, `delete:${model.uri}`),
         };
       });
       return {
@@ -228,22 +285,29 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
     }
     if (result.status === 'timeout') {
       // Ambiguous: don't roll back (P2-1) and — critically — don't delete the bytes, since we can't
-      // confirm the launcher released the file. Leave the metadata removed and record a DURABLE pending
-      // `delete` (P2-b): its `fileUri` is now a do-not-sweep reference (so the next process's orphan
-      // sweep can't remove a `.gguf` the launcher may STILL point at — the dangling-pointer bug), and
-      // reconciliation re-sends the clear, only deleting the bytes once it's CONFIRMED.
-      const pendingState = await recordPendingAction(deps, {
-        id: `delete:${model.uri}`,
-        kind: 'delete',
-        desired: { enabled: false },
-        fileUri: model.uri,
-      });
+      // confirm the launcher released the file. The write-ahead delete-pending is ALREADY durable (its
+      // `fileUri` is a do-not-sweep reference guarding against the dangling-pointer bug), so there is
+      // nothing more to persist — reconciliation re-sends the clear and deletes the bytes once CONFIRMED.
       return {
         kind: 'ambiguous',
-        state: pendingState,
+        state,
         message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
       };
     }
+    // Confirmed `ok` — the launcher released the file. Durably CLEAR the write-ahead delete-pending FIRST
+    // and CHECK it landed; only then delete the bytes. If the clear write fails, keep the pending (bytes
+    // stay sweep-protected) and report `ambiguous` so the next reconcile finishes it — never delete bytes
+    // while a pending referencing them might still be on disk.
+    const cleared = await clearPendingEntry(deps, `delete:${model.uri}`);
+    if (!cleared.persisted) {
+      return {
+        kind: 'ambiguous',
+        state: cleared.state,
+        message: `Removed ${model.displayName} from the list and the host app released it, but the pending record couldn't be cleared — its file was kept and will be reconciled next time you open the model manager.`,
+      };
+    }
+    await deps.deleteModelFile(model.uri);
+    return { kind: 'ok', state: cleared.state, message: `${model.displayName} deleted.` };
   }
 
   await deps.deleteModelFile(model.uri);
@@ -254,23 +318,30 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
  * Conditional (versioned) rollback of `activeId`: revert to `restoreTo` ONLY if the current `activeId`
  * still equals `expected` (what the failed op set). If a later op already changed it, this is a no-op,
  * so a stale rollback can never clobber a newer selection (the P2-2 clobber guard, belt-and-suspenders
- * with the mutex).
+ * with the mutex). When it DOES revert, it also drops the failed op's write-ahead `pendingId` in the
+ * SAME atomic write (P2-1) — a definitively-failed action must not leave a stale pending that replays
+ * after restart. `persisted` is threaded into the message so a failed rollback-save is surfaced, never
+ * assumed durable.
  */
 async function rollbackActiveId(
   deps: ModelActionDeps,
-  opts: { expected: string | undefined; restoreTo: string | undefined; failedMessage: (rolledBack: boolean) => string },
+  opts: {
+    expected: string | undefined;
+    restoreTo: string | undefined;
+    pendingId?: string;
+    failedMessage: (rolledBack: boolean) => string;
+  },
 ): Promise<ModelActionResult> {
   const { state, persisted } = await deps.mutate((current) =>
-    current.activeId === opts.expected ? { ...current, activeId: opts.restoreTo } : current,
+    current.activeId === opts.expected
+      ? {
+          ...current,
+          activeId: opts.restoreTo,
+          pending: opts.pendingId ? dropPending(current.pending, opts.pendingId) : current.pending,
+        }
+      : current,
   );
   return { kind: 'rolled-back', state, message: opts.failedMessage(persisted) };
-}
-
-/** Durably record a pending action on top of whatever is currently persisted, superseding stale
- * entries via `recordPending`. Returns the resulting state so the ambiguous caller can adopt it. */
-async function recordPendingAction(deps: ModelActionDeps, action: PendingAction): Promise<ModelManagerState> {
-  const { state } = await deps.mutate((current) => ({ ...current, pending: recordPending(current.pending, action) }));
-  return state;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,9 +361,11 @@ function dropPending(pending: PendingAction[] | undefined, id: string): PendingA
   return (pending ?? []).filter((entry) => entry.id !== id);
 }
 
-async function clearPendingEntry(deps: ModelActionDeps, id: string): Promise<ModelManagerState> {
-  const { state } = await deps.mutate((current) => ({ ...current, pending: dropPending(current.pending, id) }));
-  return state;
+/** Drop pending entry `id`, returning the store's `MutateResult` so callers can CHECK `persisted`
+ * (P2-1): a settled/ok outcome may only be reported when the drop is CONFIRMED on disk — otherwise the
+ * on-disk pending survives and would replay after restart. */
+async function clearPendingEntry(deps: ModelActionDeps, id: string): Promise<MutateResult> {
+  return deps.mutate((current) => ({ ...current, pending: dropPending(current.pending, id) }));
 }
 
 /**
@@ -322,10 +395,18 @@ async function reconcileOne(
   }
 
   if (result.status === 'ok') {
+    // Confirmed. Durably drop the pending FIRST and CHECK it landed (P2-1): only once the drop is on
+    // disk may we treat it settled — and, for a `'delete'`, only then delete the bytes. If the drop
+    // write fails, keep the pending (and, for a delete, the bytes) in our view so the next pass retries;
+    // never report settled — or delete bytes — off an in-memory assumption that isn't on disk.
+    const cleared = await clearPendingEntry(deps, action.id);
+    if (!cleared.persisted) {
+      return state;
+    }
     if (action.kind === 'delete' && action.fileUri) {
       await deps.deleteModelFile(action.fileUri);
     }
-    return clearPendingEntry(deps, action.id);
+    return cleared.state;
   }
 
   // Definite failure.
@@ -333,7 +414,7 @@ async function reconcileOne(
     return state; // launcher still references the file — keep it protected, never delete the bytes
   }
   if (action.kind === 'setActive') {
-    const { state: next } = await deps.mutate((current) => {
+    const { state: next, persisted } = await deps.mutate((current) => {
       const stillOurs =
         current.downloaded.find((model) => model.id === current.activeId)?.uri === action.desired.modelPath;
       return {
@@ -342,9 +423,12 @@ async function reconcileOne(
         pending: dropPending(current.pending, action.id),
       };
     });
-    return next;
+    // If the resolve write itself failed, the on-disk pending survives — keep our pre-mutation view so
+    // `settled` reflects disk truth and the entry is retried next pass, not silently reported resolved.
+    return persisted ? next : state;
   }
-  return clearPendingEntry(deps, action.id);
+  const cleared = await clearPendingEntry(deps, action.id);
+  return cleared.persisted ? cleared.state : state;
 }
 
 /**

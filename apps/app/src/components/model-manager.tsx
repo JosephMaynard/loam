@@ -24,9 +24,10 @@ import { deleteModelFile, downloadModel, sanitizeModelFileName, sweepOrphanedMod
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
-  loadModelManagerState,
+  dispositionFromLoad,
   mutateModelManagerState,
   pendingProtectedUris,
+  readModelManagerState,
   type DownloadedModel,
   type ModelManagerState,
 } from '@/lib/model-manager-store';
@@ -90,6 +91,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * launcher couldn't be reached to confirm one or more earlier writes. Disables the action controls
    * (like `operationInFlight`) and surfaces a banner, until a later reopen's reconcile settles them. */
   const [pendingUnsettled, setPendingUnsettled] = useState(false);
+  /** True when the persisted model list couldn't be READ on open (P1-4: `readModelManagerState` returned
+   * `error` — an I/O failure or corruption that isn't a clean absence). The referenced-file set is
+   * unknown, so the destructive orphan sweep is SKIPPED and the destructive controls (delete / set-active
+   * / download) are BLOCKED, with a recovery banner — a transient read failure must never let the sweep
+   * delete every downloaded `.gguf`. A later reopen retries the read and clears this. */
+  const [loadFailed, setLoadFailed] = useState(false);
   // Every in-flight download/verify's `AbortController`, keyed by the same id used in `busyIds`/
   // `progress` — lets the AppState listener below cancel everything at once on backgrounding.
   const activeDownloads = useRef<Map<string, AbortController>>(new Map());
@@ -123,18 +130,37 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // `finally` always flips `sweepReady` (the `.partial`-suffix staging fix in model-download.ts is
       // the independent guard that keeps enabling controls after a FAILED sweep safe).
       try {
-        const [caps, loaded] = await Promise.all([probeDeviceCapabilities(), loadModelManagerState()]);
+        const [caps, loaded] = await Promise.all([probeDeviceCapabilities(), readModelManagerState()]);
         if (!cancelled) {
           setCapabilities(caps);
-          setManagerState(loaded);
+        }
+
+        // P1-4: turn the discriminated load result into a disposition. On `error` (couldn't read the
+        // state — an I/O failure or corruption, NOT a clean absence) the referenced-file set is unknown,
+        // so `canSweep` is false and `controlsBlocked` is true: we must NOT run the destructive orphan
+        // sweep (it would treat every `.gguf` as orphaned) and must block the destructive controls, with
+        // a recovery banner. On `ok`/`empty` sweeping is safe.
+        const disposition = dispositionFromLoad(loaded);
+        if (!cancelled) {
+          setLoadFailed(disposition.controlsBlocked);
+          setManagerState(disposition.state);
+          if (disposition.message) {
+            setStatusMessage(disposition.message);
+          }
+        }
+        if (!disposition.canSweep) {
+          // Couldn't read the model list: skip reconciliation AND the sweep, preserving every file. The
+          // controls stay blocked via `loadFailed`; a later reopen retries the read (the `finally` still
+          // flips `sweepReady` so the "Preparing…" note clears, but downloads remain gated by `loadFailed`).
+          return;
         }
 
         // Reconcile durable pending actions FIRST (P2-b), before the orphan sweep runs or any control is
         // enabled: re-send each unconfirmed launcher write (idempotent) and settle it. If every retry
         // still times out, the pending set survives and the affected files stay protected below. `current`
         // is the post-reconcile state the sweep and UI must use.
-        let current = loaded;
-        if ((loaded.pending ?? []).length > 0) {
+        let current = disposition.state;
+        if ((current.pending ?? []).length > 0) {
           const { state: reconciled, settled, message } = await reconcilePendingActions(actionDeps);
           current = reconciled;
           if (!cancelled) {
@@ -430,8 +456,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   /** Activate/deactivate/delete + download controls are disabled while an op is in flight (P2-2) OR
    * while durable pending actions remain unsettled (P2-b) — reconciliation couldn't reach the launcher,
    * so starting a NEW change (which could contradict an unconfirmed one) is gated until a reopen settles
-   * them. */
-  const actionsBlocked = operationInFlight || pendingUnsettled;
+   * them — OR when the persisted model list couldn't be read (P1-4, `loadFailed`): acting destructively
+   * on an unknown model set risks deleting a file the launcher still points at. */
+  const actionsBlocked = operationInFlight || pendingUnsettled || loadFailed;
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>

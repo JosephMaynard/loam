@@ -66,19 +66,92 @@ const BAK_PATH = `${STATE_PATH}.bak`;
 const EMPTY_STATE: ModelManagerState = { downloaded: [], activeId: undefined };
 
 /**
- * Load the persisted manager state. Never throws. Falls back from `STATE_PATH` to the `.bak` backup
- * slot (P2-1 round-3 fix) when the primary file is missing, unparsable, or structurally INVALID (P2-6
- * round-4 fix — see `isValidState`) — `saveModelManagerState` guarantees ONE of the two always holds a
- * complete, valid file once anything has ever saved successfully, so only genuinely never having saved
- * at all, or having BOTH slots simultaneously invalid, yields `EMPTY_STATE`.
+ * Discriminated result of loading the persisted manager state (P1-4):
+ *   - `ok`    — a valid state was read from the primary or the `.bak` slot.
+ *   - `empty` — BOTH slots are CONFIRMED absent (ENOENT / `!exists`): the state was authoritatively
+ *               never initialized, so an orphan sweep against an empty reference set is SAFE.
+ *   - `error` — neither slot yielded a valid state AND at least one FAILED to read — an I/O error or a
+ *               parseable-but-corrupt file, NOT a clean absence. The referenced-file set is UNKNOWN, so
+ *               the destructive orphan sweep must NOT run and the destructive controls must be blocked.
+ *
+ * Distinguishing `error` from `empty` is the whole point (P1-4): the two used to collapse into
+ * `EMPTY_STATE`, so a transient read failure (or corruption of the lone steady-state primary — `.bak`
+ * is normally deleted after a successful save) made the manager sweep with an empty reference set and
+ * DELETE every multi-gigabyte `.gguf`, including one the launcher still pointed at.
  */
-export async function loadModelManagerState(): Promise<ModelManagerState> {
+export type LoadModelManagerResult =
+  | { status: 'ok'; state: ModelManagerState }
+  | { status: 'empty' }
+  | { status: 'error' };
+
+/**
+ * Load the persisted manager state, distinguishing "never initialized" from "couldn't read" (P1-4).
+ * Never throws. Falls back from `STATE_PATH` to the `.bak` backup slot (P2-1 round-3 fix) when the
+ * primary is missing, unparsable, or structurally INVALID (P2-6 round-4 fix — see `isValidState`).
+ * `saveModelManagerState` guarantees ONE of the two always holds a complete, valid file once anything
+ * has saved successfully, so a valid state is normally found. When NEITHER slot yields one, the result
+ * is `empty` only if BOTH were a clean absence, and `error` if either read actually FAILED (I/O error or
+ * corruption) — the caller must NOT treat the latter as "nothing downloaded".
+ */
+export async function readModelManagerState(): Promise<LoadModelManagerResult> {
   const primary = await tryReadState(STATE_PATH);
-  if (primary) {
-    return primary;
+  if (primary.status === 'ok') {
+    return { status: 'ok', state: primary.state };
   }
   const backup = await tryReadState(BAK_PATH);
-  return backup ?? EMPTY_STATE;
+  if (backup.status === 'ok') {
+    return { status: 'ok', state: backup.state };
+  }
+  // Neither slot yielded a valid state. If EITHER read FAILED (corrupt or I/O error, not a confirmed
+  // ENOENT) we can't trust that no data exists — report `error` so the caller preserves every file.
+  // Only when BOTH slots are cleanly absent is this a genuine never-initialized `empty`.
+  if (primary.status === 'error' || backup.status === 'error') {
+    return { status: 'error' };
+  }
+  return { status: 'empty' };
+}
+
+/**
+ * Best-effort plain-state reader kept for callers that only need a state and safely treat "unreadable"
+ * as "nothing configured" — `on-device-llm.ts`'s active-model lookup (an absent state just means "no
+ * on-device model", a graceful no-op). Maps both `empty` and `error` to `EMPTY_STATE`, preserving the
+ * pre-P1-4 contract. Anything that must NOT act destructively on an unreadable state (the orphan sweep,
+ * and `mutateModelManagerState`'s refuse-to-clobber pre-read) uses `readModelManagerState` instead.
+ */
+export async function loadModelManagerState(): Promise<ModelManagerState> {
+  const result = await readModelManagerState();
+  return result.status === 'ok' ? result.state : EMPTY_STATE;
+}
+
+/** Recovery copy surfaced when the manager can't read its state (P1-4). No destructive action is taken,
+ * so the message reassures the operator their model files are left untouched. */
+export const MODEL_LIST_UNREADABLE_MESSAGE =
+  "Couldn't read the model list — not touching your files. Reopen the model manager to try again.";
+
+/**
+ * What the manager's open-effect should do given a load result (P1-4): the state to adopt, whether the
+ * DESTRUCTIVE orphan sweep may run, whether the destructive controls (delete / set-active / download)
+ * must be blocked, and a recovery message. On `error` the referenced-file set is unknown, so sweeping
+ * would delete every `.gguf` — it must NOT run and the controls must block; on `ok`/`empty` the set is
+ * known (or authoritatively empty), so sweeping truly-orphaned files is safe. Extracted as a pure
+ * function so the sweep/block decision is unit-testable without rendering the component.
+ */
+export type ManagerLoadDisposition = {
+  state: ModelManagerState;
+  canSweep: boolean;
+  controlsBlocked: boolean;
+  message?: string;
+};
+
+export function dispositionFromLoad(loaded: LoadModelManagerResult): ManagerLoadDisposition {
+  if (loaded.status === 'error') {
+    return { state: EMPTY_STATE, canSweep: false, controlsBlocked: true, message: MODEL_LIST_UNREADABLE_MESSAGE };
+  }
+  return {
+    state: loaded.status === 'ok' ? loaded.state : EMPTY_STATE,
+    canSweep: true,
+    controlsBlocked: false,
+  };
 }
 
 /**
@@ -131,27 +204,48 @@ function isValidState(value: unknown): value is ModelManagerState {
   return true;
 }
 
-async function tryReadState(path: string): Promise<ModelManagerState | undefined> {
+/** Discriminated outcome of reading a single slot (P1-4): distinguish a CONFIRMED absence (ENOENT /
+ * `!exists`) from a read/parse FAILURE (I/O error, unparsable, or structurally corrupt). The two used
+ * to collapse into a bare `undefined`, so the caller couldn't tell "never initialized" (safe to sweep)
+ * from "couldn't read" (must NOT sweep). Corrupt-but-parseable counts as a FAILURE, not an absence, so
+ * `readModelManagerState` still falls through to `.bak` yet reports `error` when neither slot is a clean
+ * absence. */
+type SlotReadResult =
+  | { status: 'ok'; state: ModelManagerState }
+  | { status: 'absent' }
+  | { status: 'error' };
+
+async function tryReadState(path: string): Promise<SlotReadResult> {
+  let exists: boolean;
   try {
     const info = await FileSystem.getInfoAsync(path);
-    if (!info.exists) {
-      return undefined;
-    }
+    exists = info.exists;
+  } catch {
+    // Couldn't even stat the slot — a real I/O failure, NOT a confirmed absence (P1-4). Reporting this
+    // as `error` (rather than treating it like a missing file) is what stops the orphan sweep from
+    // running against an empty reference set when the filesystem is momentarily unreadable.
+    return { status: 'error' };
+  }
+  if (!exists) {
+    return { status: 'absent' }; // confirmed ENOENT — genuinely nothing here
+  }
+  try {
     const raw = await FileSystem.readAsStringAsync(path);
     const parsed: unknown = JSON.parse(raw);
     if (!isValidState(parsed)) {
       // Parseable but structurally corrupt (null, `{}`, missing/wrong `downloaded`, a malformed entry,
-      // a bad-typed or dangling `activeId`, ...) — treated the same as an unparsable/missing file, NOT
-      // as a legitimate empty state (P2-6 round 4 / P2-3 round 5). The caller falls back to the other
-      // slot instead of silently accepting this as "nothing downloaded".
-      return undefined;
+      // a bad-typed or dangling `activeId`, ...) — treated as a read FAILURE, NOT a legitimate empty
+      // state (P2-6 round 4 / P2-3 round 5). The caller falls back to the other slot instead of
+      // accepting this as "nothing downloaded", and reports `error` if neither slot is readable.
+      return { status: 'error' };
     }
     // `parsed` is fully validated now; `normalizeState` is a lossless identity for a valid state (every
     // entry already passes `isDownloadedModel`, and `activeId` references a real entry), producing a
     // clean `ModelManagerState` without trusting arbitrary extra keys.
-    return normalizeState(parsed);
+    return { status: 'ok', state: normalizeState(parsed) };
   } catch {
-    return undefined;
+    // Exists but the read/parse threw — a real failure, not an absence.
+    return { status: 'error' };
   }
 }
 
@@ -197,7 +291,7 @@ export async function saveModelManagerState(state: ModelManagerState): Promise<b
     if (existingInfo.exists) {
       // Validate before rotating (P2-6 round 4) — see the doc comment above for why this can't be a
       // blind "it exists, so back it up" any more.
-      const existingIsValid = (await tryReadState(STATE_PATH)) !== undefined;
+      const existingIsValid = (await tryReadState(STATE_PATH)).status === 'ok';
       if (existingIsValid) {
         // The current primary is good: back it up before touching it. If the process dies anywhere
         // from here through the next move, `STATE_PATH` may be briefly absent, but `.bak` already
@@ -248,7 +342,15 @@ export function mutateModelManagerState(
   mutate: (current: ModelManagerState) => ModelManagerState,
 ): Promise<MutateResult> {
   const run = mutationChain.then(async (): Promise<MutateResult> => {
-    const current = await loadModelManagerState();
+    const loaded = await readModelManagerState();
+    if (loaded.status === 'error') {
+      // Couldn't read the current state reliably (I/O error / corruption on a slot that isn't a clean
+      // absence). Mutating on top of an assumed-empty state would CLOBBER existing-but-unreadable
+      // downloads (the P1-4 data-loss failure mode), so REFUSE the write and report it as not-persisted.
+      // Every caller bails on `!persisted` and surfaces a save failure rather than silently losing data.
+      return { state: EMPTY_STATE, persisted: false };
+    }
+    const current = loaded.status === 'ok' ? loaded.state : EMPTY_STATE;
     const next = mutate(current);
     const persisted = await saveModelManagerState(next);
     return { state: next, persisted };
