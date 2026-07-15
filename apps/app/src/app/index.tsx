@@ -119,6 +119,71 @@ function isLoamUrl(url: string | undefined): boolean {
   }
 }
 
+/**
+ * Classify a message posted from the WebView's web content (the LOAM client) back to this native
+ * screen, then act on the ones this screen recognises. Extracted (and exported) as a pure,
+ * dependency-free function so the native side-effect policy for each message type lives in one
+ * obvious, unit-testable place.
+ *
+ * `loam-wipe` (posted by the client's `wipe` WS-event handler when the SERVER announces a node reset)
+ * is deliberately a NATIVE NO-OP here. Two reasons:
+ *   1. The client-side purge (IndexedDB/localStorage/service-worker caches) happens inside the WebView
+ *      itself; nothing on the native side is required for it.
+ *   2. Rotating a FIXED on-device database key (persistent/passphrase modes) is driven EXCLUSIVELY by
+ *      the acknowledged launcher protocol — the server posts `loam-wipe-restart` only AFTER it has
+ *      deleted the orphaned ciphertext and advanced its durable `.loam-wipe-phase` marker to
+ *      `key-clear-ready`, at which point `attemptWipeKeyClear` performs a verified clear and acks with
+ *      `loam-wipe-complete`. Clearing the key straight from this unauthenticated WebView-origin message
+ *      would bypass that phase gate and could destroy the key while a deletion survivor still exists.
+ * Ephemeral/off nodes hold no stored key to rotate here either (ephemeral keys are RAM-only and rotated
+ * server-side; off has no key). A malformed or foreign message is simply ignored.
+ */
+export function handleClientWebViewMessage(data: string): void {
+  let type: unknown;
+  try {
+    ({ type } = JSON.parse(data) as { type?: unknown });
+  } catch {
+    // not a message this screen understands — ignore.
+    return;
+  }
+  switch (type) {
+    case 'loam-wipe':
+      // Intentional native no-op — see this function's doc comment. Left as an explicit branch so the
+      // reasoning is visible at the call site and future message types have an obvious home.
+      break;
+    default:
+      break;
+  }
+}
+
+/** Outcome of {@link clearWipeKeyAndAck} — the ack is sent to the launcher ONLY on a verified clear. */
+export type WipeKeyClearOutcome = { ok: boolean; error?: string };
+
+/**
+ * Perform the device-key clear for the acknowledged fixed-key rotation protocol and, ONLY on a VERIFIED
+ * success, notify the launcher so it can delete its durable `.loam-wipe-phase` marker. On any failure —
+ * a thrown/failed clear, or a verify that still finds the key present — the marker is left in place (this
+ * screen cannot touch it directly; the launcher keeps it until a verified ack arrives) so the operator
+ * can retry. Dependency-injected (the clear routine and the ack post) so it's pure and unit-testable.
+ */
+export async function clearWipeKeyAndAck(
+  clear: () => Promise<{ ok: boolean; error?: string }>,
+  postComplete: () => void,
+): Promise<WipeKeyClearOutcome> {
+  const result = await clear();
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+  try {
+    // Tell the launcher it can delete its durable marker — the key clear is VERIFIED, not just attempted.
+    postComplete();
+  } catch {
+    // The launcher isn't listening — its own boot-time resume check (re-posting `loam-wipe-restart`
+    // while the marker is still present) covers this; nothing more to do here.
+  }
+  return { ok: true };
+}
+
 type HostStatus = 'starting' | 'ready' | 'error';
 // `'notice'` is a THIRD status the bridge can send (main.js / embedded-main.ts's boot-error hook —
 // see the `BootNotice` comment above) that deliberately does NOT drive `HostStatus`/the screen switch:
@@ -242,7 +307,9 @@ export default function HostScreen() {
   // main.js's own boot-time RESUME repost (a suspended/backgrounded/killed RN gets another chance).
   const attemptWipeKeyClear = async () => {
     setWipeClearBusy(true);
-    const result = await clearStoredDbKeys();
+    // Clear the device key material and, only on a VERIFIED clear, ack the launcher — see
+    // `clearWipeKeyAndAck`. This is the SOLE native path that touches the stored key on a wipe.
+    const result = await clearWipeKeyAndAck(clearStoredDbKeys, () => nodejs.channel.post('loam-wipe-complete'));
     setWipeClearBusy(false);
 
     if (!result.ok) {
@@ -251,13 +318,6 @@ export default function HostScreen() {
     }
 
     setWipeClearFailure(undefined);
-    try {
-      // Tell main.js it can delete its durable marker — the key clear is VERIFIED, not just attempted.
-      nodejs.channel.post('loam-wipe-complete');
-    } catch {
-      // main.js isn't listening — its own boot-time resume check (re-posting `loam-wipe-restart` while
-      // the marker is still present) covers this; nothing more to do here.
-    }
     try {
       nodejs.start('main.js', { redirectOutputToLogcat: true });
     } catch {
@@ -514,7 +574,9 @@ export default function HostScreen() {
   const handleStartFresh = async () => {
     setStartFreshBusy(true);
     setStartFreshMessage(undefined);
-    const result = await requestDbStartFresh(nodejs.channel);
+    // Accidental-lockout recovery: PRESERVE the old (unreadable/plaintext) database on disk rather
+    // than deleting it — the operator is recovering from a key/mode mismatch, not wiping the node.
+    const result = await requestDbStartFresh(nodejs.channel, 'preserve');
     if (!result.ok) {
       // The marker write itself failed — main.js never got to (re)invoke boot, so there is no retry in
       // flight to wait for; safe to let the operator try again immediately.
@@ -617,23 +679,16 @@ export default function HostScreen() {
     setRevertMessage('Switching encryption off and restarting…');
   };
 
-  // Bridge from the WebView's web content (the LOAM client) back to this native screen (AF1/Sol P1-1):
-  // the client's `wipe` WS-event handler (apps/client/src/app.tsx) posts
-  // `{"type":"loam-wipe"}` via `window.ReactNativeWebView.postMessage` whenever the SERVER announces a
-  // node wipe (kill switch). This is a best-effort, UNACKED fallback clear — unlike `attemptWipeKeyClear`
-  // (the durable, acked `loam-wipe-restart`/`loam-wipe-complete` handoff, P1-2b), a failure here has no
-  // marker to keep it resumable, so it's deliberately not wired into that protocol; it exists mainly to
-  // still rotate the key promptly for OTHER wipe paths (e.g. an ephemeral/off-mode node) where no
-  // `loam-wipe-restart` signal fires at all. Defensive — a malformed/foreign message is just ignored.
+  // Bridge from the WebView's web content (the LOAM client) back to this native screen. The client's
+  // `wipe` WS-event handler (apps/client/src/app.tsx) posts `{"type":"loam-wipe"}` via
+  // `window.ReactNativeWebView.postMessage` when the SERVER announces a node reset, and future message
+  // types may be added. All routing/policy lives in the exported, unit-testable
+  // `handleClientWebViewMessage`; crucially, `loam-wipe` is a native NO-OP there — the device key is NOT
+  // cleared from this unauthenticated WebView-origin message. Fixed-key rotation happens EXCLUSIVELY via
+  // the acknowledged, phase-gated `loam-wipe-restart` -> verified clear -> `loam-wipe-complete` protocol
+  // (`attemptWipeKeyClear`); see `handleClientWebViewMessage`'s doc comment for the full rationale.
   const handleWebViewMessage = (event: { nativeEvent: { data: string } }) => {
-    try {
-      const payload = JSON.parse(event.nativeEvent.data) as { type?: unknown };
-      if (payload?.type === 'loam-wipe') {
-        void clearStoredDbKeys();
-      }
-    } catch {
-      // not a message this screen understands — ignore.
-    }
+    handleClientWebViewMessage(event.nativeEvent.data);
   };
 
   if (Platform.OS !== 'android') {
