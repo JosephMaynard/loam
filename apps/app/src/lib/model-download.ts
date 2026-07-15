@@ -69,8 +69,13 @@ function isWithinModelsDir(uri: string): boolean {
   return resolved.length > 0;
 }
 
+/** Suffix for an in-progress download's on-disk name (P2-7 round 4) — see `downloadModel`'s doc
+ * comment for why this exists, and `sweepOrphanedModelFiles` for the matching sweep-side handling. */
+const PARTIAL_SUFFIX = '.partial';
+
 /**
- * Download `url` into `<MODELS_DIR><fileName>` and verify the result.
+ * Download `url` into `<MODELS_DIR><fileName>` (via a `.partial`-suffixed staging name) and verify the
+ * result.
  *
  * `fileName` MUST already be a sanitized basename (see `sanitizeModelFileName`) — this function also
  * independently re-verifies the resolved path never escapes `MODELS_DIR` (defense in depth; see
@@ -89,6 +94,17 @@ function isWithinModelsDir(uri: string): boolean {
  *      URL with no pin gets exactly the same best-effort treatment as before (size + TLS only), plus the
  *      explicit "unverified" warning the model-manager UI already shows for it.
  *
+ * `.partial` staging (P2-7 round 4): the file lives at `<fileName>.partial` for the ENTIRE download +
+ * verify, and is only renamed to its final `<fileName>` once every check above has passed. Before this
+ * the file was written directly to its final name for the whole duration, which meant
+ * `sweepOrphanedModelFiles` — run on first overlay open to reclaim orphans from a killed-mid-verify
+ * process — could delete a download that was *currently in progress this session*: its destination
+ * isn't yet in the `referencedUris` list (registration only happens after this function returns
+ * `ok: true`), so the sweep's "unreferenced -> delete" logic couldn't tell it apart from an actual
+ * orphan. `.partial` files are categorically exempt from that logic now (see
+ * `sweepOrphanedModelFiles`), independent of the ALSO-fixed race in `model-manager.tsx` (the initial
+ * sweep is now awaited before download controls are enabled) — either fix alone closes the race.
+ *
  * Either a fresh `createDownloadResumable` failure or a failed verification deletes the partial/bad
  * file before returning, so a rejected download never leaves junk behind.
  *
@@ -99,8 +115,8 @@ function isWithinModelsDir(uri: string): boolean {
  * verify, see `model-manager.tsx`) can never leave a partially-hashed file registered as valid. A hard
  * process kill has no JS-level hook at all; that case is instead made safe by construction, since
  * `model-manager.tsx` only ever registers a model in `model-manager-store.json` AFTER this function
- * returns `ok: true` — a killed-mid-verify run leaves an unregistered orphan file, never a
- * "half-registered" one (see `sweepOrphanedModelFiles` below, which cleans those up on next launch).
+ * returns `ok: true` — a killed-mid-verify run leaves an unregistered `.partial` orphan, never a
+ * "half-registered" final file (see `sweepOrphanedModelFiles` below, which age-reclaims those).
  */
 export async function downloadModel(
   url: string,
@@ -112,8 +128,9 @@ export async function downloadModel(
   signal?: AbortSignal,
 ): Promise<DownloadOutcome> {
   await ensureModelsDir();
-  const destUri = `${MODELS_DIR}${fileName}`;
-  if (!isWithinModelsDir(destUri)) {
+  const finalUri = `${MODELS_DIR}${fileName}`;
+  const destUri = `${finalUri}${PARTIAL_SUFFIX}`;
+  if (!isWithinModelsDir(destUri) || !isWithinModelsDir(finalUri)) {
     return { ok: false, error: 'Refusing to download: the resolved file name would escape the models directory.' };
   }
   if (signal?.aborted) {
@@ -191,19 +208,53 @@ export async function downloadModel(
     }
   }
 
-  return { ok: true, uri: destUri, sizeBytes };
+  // Every check above passed — promote the verified `.partial` staging file to its final name. Only
+  // from this point on does the file look like a normal registered model to `sweepOrphanedModelFiles`
+  // (subject to the ordinary "unreferenced -> delete" check, same as any other final `.gguf`); that's
+  // fine because `model-manager.tsx` registers it in `model-manager-store.json` immediately after this
+  // returns `ok: true`.
+  try {
+    await FileSystem.deleteAsync(finalUri, { idempotent: true });
+    await FileSystem.moveAsync({ from: destUri, to: finalUri });
+  } catch (error) {
+    await safeDelete(destUri);
+    return {
+      ok: false,
+      error: `Verified download, but couldn't finalize the file (${error instanceof Error ? error.message : String(error)}).`,
+    };
+  }
+
+  return { ok: true, uri: finalUri, sizeBytes };
 }
 
+/** A `.partial` staging file older than this is assumed abandoned by a killed/crashed process (P2-7
+ * round 4). Nothing in a live session leaves a `.partial` sitting around this long without either
+ * finishing (renamed away by `downloadModel`) or being aborted (deleted by it) — this is the
+ * age/session-ownership stand-in `sweepOrphanedModelFiles` uses instead of ever treating a `.partial`
+ * as "just another unreferenced file". Deliberately conservative (an hour, not a minute) so a slow
+ * multi-GB download over a bad connection is never mistaken for an abandoned one. */
+const STALE_PARTIAL_AGE_MS = 60 * 60 * 1000;
+
 /**
- * Delete any `.gguf` file inside `MODELS_DIR` that isn't referenced by `referencedUris`. Cleans up an
- * orphan left by a download that finished writing bytes but was never registered in
- * `model-manager-store.json` — most notably a real process kill mid-verify, which (unlike an
- * in-app-JS abort via `signal` above) has no hook this module can observe. Because registration only
- * ever happens AFTER `downloadModel` returns `ok: true`, such an orphan is by construction wasted
- * storage, never a "half-registered" model — this just reclaims the space. Best-effort: `model-
- * manager.tsx` is expected to call this once per process lifetime (not mid-download — see its call
- * site), and any failure here is swallowed, since this is opportunistic cleanup, not a correctness
- * requirement.
+ * Delete any unreferenced FINAL `.gguf` file inside `MODELS_DIR` (never a `.partial` staging file —
+ * see below), plus any `.partial` old enough to be certainly abandoned. Cleans up an orphan left by a
+ * download that finished writing bytes but was never registered in `model-manager-store.json` — most
+ * notably a real process kill mid-verify, which (unlike an in-app-JS abort via `signal` in
+ * `downloadModel`) has no hook this module can observe. Because registration only ever happens AFTER
+ * `downloadModel` returns `ok: true` (at which point the file has already been renamed off its
+ * `.partial` staging name — see there), an unreferenced FINAL file is by construction wasted storage,
+ * never a "half-registered" model — this just reclaims the space.
+ *
+ * `.partial` files are handled separately and NEVER by the referenced-uris check (P2-7 round 4): a
+ * download in progress THIS session has a destination that, by design, isn't in `referencedUris` yet
+ * (it's only added to `model-manager-store.json` once the download finishes) — treating that the same
+ * as an orphan is exactly the bug this split fixes (see `downloadModel`'s doc comment). Instead a
+ * `.partial` is only ever reclaimed once it's old enough (`STALE_PARTIAL_AGE_MS`) that it cannot
+ * possibly still be an in-flight download.
+ *
+ * Best-effort: `model-manager.tsx` awaits this once per process lifetime, before enabling any download
+ * controls (so no `.partial` from *this* session can exist yet when it runs) — see its call site. Any
+ * failure here is swallowed, since this is opportunistic cleanup, not a correctness requirement.
  */
 export async function sweepOrphanedModelFiles(referencedUris: readonly string[]): Promise<void> {
   try {
@@ -213,9 +264,17 @@ export async function sweepOrphanedModelFiles(referencedUris: readonly string[])
     }
     const referenced = new Set(referencedUris);
     const entries = await FileSystem.readDirectoryAsync(MODELS_DIR);
+    const now = Date.now();
     await Promise.all(
       entries.map(async (name) => {
         const uri = `${MODELS_DIR}${name}`;
+        if (name.endsWith(PARTIAL_SUFFIX)) {
+          const fileInfo = await FileSystem.getInfoAsync(uri);
+          if (fileInfo.exists && !fileInfo.isDirectory && now - fileInfo.modificationTime * 1000 > STALE_PARTIAL_AGE_MS) {
+            await safeDelete(uri);
+          }
+          return;
+        }
         if (!referenced.has(uri)) {
           await safeDelete(uri);
         }

@@ -25,16 +25,20 @@ export type ModelManagerState = {
 };
 
 const STATE_PATH = `${FileSystem.documentDirectory}loam-model-manager.json`;
-/** Backup slot used by `saveModelManagerState`'s two-slot scheme (P2-1 round-3 fix) — see there. */
+/** Backup slot used by `saveModelManagerState`'s two-slot scheme (P2-1 round-3 fix, tightened by the
+ * P2-6 round-4 fix below) — see there. */
 const BAK_PATH = `${STATE_PATH}.bak`;
 
-const EMPTY_STATE: ModelManagerState = { downloaded: [] };
+/** The one legitimately-empty state. Always written out explicitly (never synthesized from invalid
+ * input — see `isValidState`), so it round-trips through the same validity check as any other state. */
+const EMPTY_STATE: ModelManagerState = { downloaded: [], activeId: undefined };
 
 /**
  * Load the persisted manager state. Never throws. Falls back from `STATE_PATH` to the `.bak` backup
- * slot (P2-1 round-3 fix) when the primary file is missing or unparsable — `saveModelManagerState`
- * guarantees ONE of the two always holds a complete, valid file, so only genuinely never having saved
- * successfully at all yields `EMPTY_STATE`.
+ * slot (P2-1 round-3 fix) when the primary file is missing, unparsable, or structurally INVALID (P2-6
+ * round-4 fix — see `isValidState`) — `saveModelManagerState` guarantees ONE of the two always holds a
+ * complete, valid file once anything has ever saved successfully, so only genuinely never having saved
+ * at all, or having BOTH slots simultaneously invalid, yields `EMPTY_STATE`.
  */
 export async function loadModelManagerState(): Promise<ModelManagerState> {
   const primary = await tryReadState(STATE_PATH);
@@ -45,6 +49,24 @@ export async function loadModelManagerState(): Promise<ModelManagerState> {
   return backup ?? EMPTY_STATE;
 }
 
+/**
+ * Strict validity check (P2-6 round 4): a state is VALID only if it parses to an object carrying a
+ * `downloaded` array. Before this fix, `tryReadState` ran EVERY parsed value — including `null`, `{}`,
+ * or any other truncated/wrong-shape write — through `normalizeState`, which silently mapped all of
+ * those to `EMPTY_STATE`. That made a corrupt file indistinguishable from "legitimately nothing has
+ * been downloaded yet", which broke the two-slot recovery scheme in both directions:
+ *   1. `loadModelManagerState` treated a corrupt primary as a valid (if boring) result and never fell
+ *      through to a possibly-good `.bak`.
+ *   2. `saveModelManagerState` then saw that corrupt primary as "exists, so rotate it into `.bak`" on
+ *      the very next save — overwriting the last genuinely good backup with garbage. A crash right
+ *      after that left BOTH slots bad, with no way back to the real data.
+ * A legitimately-empty state is instead the EXPLICIT `EMPTY_STATE` value above, written out like any
+ * other state, so "empty" and "invalid" are never conflated.
+ */
+function isValidState(value: unknown): value is { downloaded: unknown[]; activeId?: unknown } {
+  return !!value && typeof value === 'object' && Array.isArray((value as { downloaded?: unknown }).downloaded);
+}
+
 async function tryReadState(path: string): Promise<ModelManagerState | undefined> {
   try {
     const info = await FileSystem.getInfoAsync(path);
@@ -52,7 +74,14 @@ async function tryReadState(path: string): Promise<ModelManagerState | undefined
       return undefined;
     }
     const raw = await FileSystem.readAsStringAsync(path);
-    return normalizeState(JSON.parse(raw));
+    const parsed: unknown = JSON.parse(raw);
+    if (!isValidState(parsed)) {
+      // Parseable but the wrong shape (null, `{}`, missing `downloaded`, ...) — treated the same as an
+      // unparsable/missing file, NOT as a legitimate empty state (P2-6 round 4). The caller falls back
+      // to the other slot instead of silently accepting this as "nothing downloaded".
+      return undefined;
+    }
+    return normalizeState(parsed);
   } catch {
     return undefined;
   }
@@ -81,28 +110,48 @@ async function tryReadState(path: string): Promise<ModelManagerState | undefined
  * below) — silently reporting success on a failed persist is exactly the kind of bug that made P2-4
  * possible in the first place (an operator sees "model set active" when the change never made it to
  * disk).
+ *
+ * P2-6 round-4 fix: the previous version rotated whatever was at `STATE_PATH` into `.bak`
+ * unconditionally, just because it existed. That's unsafe — if the primary was already CORRUPT (from
+ * an earlier interrupted write) but `.bak` still held a valid backup, this would clobber the valid
+ * `.bak` with the corrupt primary. A crash between that rotation and the next step then left BOTH
+ * slots bad, with the previously-recoverable good copy gone for good. Now the current primary is
+ * validated FIRST: only a genuinely valid primary gets rotated into `.bak` (replacing whatever was
+ * there — it's newer and known-good); an invalid/corrupt primary is discarded outright, and any
+ * existing `.bak` is left untouched as the last-known-good fallback.
  */
 export async function saveModelManagerState(state: ModelManagerState): Promise<boolean> {
   const tmpPath = `${STATE_PATH}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await FileSystem.writeAsStringAsync(tmpPath, JSON.stringify(state));
 
-    const existing = await FileSystem.getInfoAsync(STATE_PATH);
-    if (existing.exists) {
-      // Back up the CURRENT state before touching it. If the process dies anywhere from here through
-      // the next move, `STATE_PATH` may be briefly absent, but `.bak` already holds the complete old
-      // file, so `loadModelManagerState` never comes up empty.
-      await FileSystem.deleteAsync(BAK_PATH, { idempotent: true });
-      await FileSystem.moveAsync({ from: STATE_PATH, to: BAK_PATH });
+    const existingInfo = await FileSystem.getInfoAsync(STATE_PATH);
+    if (existingInfo.exists) {
+      // Validate before rotating (P2-6 round 4) — see the doc comment above for why this can't be a
+      // blind "it exists, so back it up" any more.
+      const existingIsValid = (await tryReadState(STATE_PATH)) !== undefined;
+      if (existingIsValid) {
+        // The current primary is good: back it up before touching it. If the process dies anywhere
+        // from here through the next move, `STATE_PATH` may be briefly absent, but `.bak` already
+        // holds the complete old file, so `loadModelManagerState` never comes up empty.
+        await FileSystem.deleteAsync(BAK_PATH, { idempotent: true });
+        await FileSystem.moveAsync({ from: STATE_PATH, to: BAK_PATH });
+      } else {
+        // The current primary is corrupt/invalid: discard it rather than rotating it into `.bak` —
+        // doing so would destroy whatever good backup is already sitting there. Leave `.bak` (if any)
+        // exactly as it is; it's still the best available fallback until the write below lands.
+        await FileSystem.deleteAsync(STATE_PATH, { idempotent: true });
+      }
     }
 
-    // `STATE_PATH` is now guaranteed absent (either just backed up, or never existed), so this move
-    // has nothing to overwrite and can't hit the same "destination already exists" failure mode the
-    // old delete-then-move dance was working around.
+    // `STATE_PATH` is now guaranteed absent (either just backed up, discarded as corrupt, or never
+    // existed), so this move has nothing to overwrite and can't hit the same "destination already
+    // exists" failure mode the old delete-then-move dance was working around.
     await FileSystem.moveAsync({ from: tmpPath, to: STATE_PATH });
 
-    // Best-effort cleanup — `.bak` is only ever consulted when `STATE_PATH` is missing/corrupt, so a
-    // failure here doesn't change the return value or leave the state file itself inconsistent.
+    // Best-effort cleanup — once the new primary is confirmed in place (we just wrote it ourselves, so
+    // it's valid), `.bak` is redundant regardless of which branch above ran: `loadModelManagerState`
+    // only ever consults `.bak` when `STATE_PATH` is missing/invalid, and it no longer is.
     await FileSystem.deleteAsync(BAK_PATH, { idempotent: true }).catch(() => undefined);
     return true;
   } catch {
