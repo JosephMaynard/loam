@@ -80,10 +80,23 @@ const premigrationDeleteFailure = vi.hoisted(() => ({ armed: false }));
 // test / unrelated fs call is affected; reset in `afterEach`.
 const readdirFailure = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 const lstatFailure = vi.hoisted(() => ({ path: undefined as string | undefined }));
+// P1-5 (Sol round 8): fault-injection seam for the DURABLE-write fsync. `openSyncFailure.path` makes
+// `openSync` of that EXACT path throw EIO, so the parent-DIRECTORY fsync (`fsyncDir` opens the dir with
+// openSync) fails — proving `durableWriteFileSync`/`clearWipePhase` report NOT-durable (fail closed) rather
+// than claiming a write/clear survived power-loss. Targets one exact path; default inert; reset in afterEach.
+const openSyncFailure = vi.hoisted(() => ({ path: undefined as string | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      if (openSyncFailure.path && String(args[0]) === openSyncFailure.path) {
+        const err = new Error("simulated openSync EIO (P1-5 test fault injection)") as NodeJS.ErrnoException;
+        err.code = "EIO";
+        throw err;
+      }
+      return actual.openSync(...(args as Parameters<typeof actual.openSync>));
+    },
     readdirSync: (...args: Parameters<typeof actual.readdirSync>) => {
       if (readdirFailure.dir && String(args[0]) === readdirFailure.dir) {
         const err = new Error("simulated readdir EACCES (P1-2 test fault injection)") as NodeJS.ErrnoException;
@@ -193,6 +206,7 @@ afterEach(async () => {
   rmGate.promise = undefined;
   configWriteGate.promise = undefined;
   configWriteFailures.remaining = 0;
+  openSyncFailure.path = undefined;
   wipeMarkerWriteFailure.armed = false;
   backupCapture.dir = undefined;
   postRekeyCleanupFailure.armed = false;
@@ -1919,6 +1933,144 @@ describe("encryption at rest + key-discard kill switch", () => {
     // was never cleared, so nothing reopened while recoverable ciphertext survives.
     const locked = await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } });
     expect(locked.statusCode).toBe(503);
+  });
+
+  it("P1-1 (Sol round 8): an upgraded node with only a PRE-round-8 `.loam-wipe-pending` marker (+ a legacy-key `.premigration` survivor) RESUMES the wipe on boot — deletion runs and the pre-upgrade data is never served", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "PRE_UPGRADE_SECRET")).statusCode).toBe(201);
+    await app.close();
+
+    // The EXACT round-7 fail-closed state that upgraded to round-8: only the OLD marker on disk (no
+    // `.loam-wipe-phase`), a still-readable legacy-key `.premigration` survivor, and the live DB intact.
+    writeFileSync(join(dataDir, ".loam-wipe-pending"), "1");
+    writeFileSync(join(dataDir, "loam.db.premigration"), Buffer.from("legacy-key ciphertext survivor"));
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+
+    // Boot round-8 (no launcher hook = desktop path): it must recognise the legacy marker as an unfinished
+    // wipe, re-run deletion, clear BOTH marker names, and open a FRESH DB — never serve the surviving data.
+    const rebooted = await buildApp({
+      dataDir,
+      logger: false,
+      dbEncryptionKey: "a fixed persistent key",
+      dbEncryptionMode: "persistent",
+    });
+    cleanups.push(() => rebooted.close());
+    expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    const search = await rebooted.server.inject({
+      method: "GET",
+      url: "/api/search?q=PRE_UPGRADE_SECRET",
+      headers: { cookie: (await session(rebooted)).cookie },
+    });
+    expect(search.statusCode).toBe(200);
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+  });
+
+  it("P1-4 (Sol round 8): a NO-LAUNCHER fixed-key wipe whose deletion FAILS durably records delete-pending + stays 503-locked, and on the NEXT boot (fault cleared) completes the wipe — old rows never served between attempts", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "NOHOOK_WIPE_SECRET")).statusCode).toBe(201);
+
+    // A committed legacy-key `.premigration` whose deletion FAILS persistently — the survivor. NO wipe hook
+    // is installed (desktop no-launcher path).
+    writeFileSync(join(dataDir, "loam.db.premigration"), Buffer.from("survivor"));
+    premigrationDeleteFailure.armed = true;
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    // The no-hook wipe deletion could not be verified → 503 (incomplete), with a DURABLE delete-pending phase
+    // recorded (the P1-4 fix: previously there was no durable record, so a restart forgot the wipe).
+    expect(wipe.statusCode).toBe(503);
+    expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")).toBe("delete-pending");
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+    ).toBe(503);
+    await app.close();
+
+    // Boot 2 with the fault CLEARED: the boot-time resume re-runs deletion (now succeeds), clears the phase,
+    // and opens a fresh DB. The old rows are never served.
+    premigrationDeleteFailure.armed = false;
+    const boot2 = await buildApp({
+      dataDir,
+      logger: false,
+      dbEncryptionKey: "a fixed persistent key",
+      dbEncryptionMode: "persistent",
+    });
+    cleanups.push(() => boot2.close());
+    expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    const search = await boot2.server.inject({
+      method: "GET",
+      url: "/api/search?q=NOHOOK_WIPE_SECRET",
+      headers: { cookie: (await session(boot2)).cookie },
+    });
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+  });
+
+  it("P1-5 (Sol round 8): a no-hook wipe resume whose phase-clear cannot be made durable (parent-directory fsync fails) stays LOCKED rather than opening a fresh DB a resurrected phase would re-wipe", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // A wipe was mid-flight (durable delete-pending on disk), no launcher hook. Make EVERY parent-directory
+    // fsync on the data dir fail, so `clearWipePhase` can never confirm the unlink is power-loss-durable.
+    writeFileSync(join(dataDir, ".loam-wipe-phase"), "delete-pending");
+    openSyncFailure.path = dataDir;
+
+    // The resume deletes (best-effort), but the no-hook path refuses to open a fresh DB when the phase clear
+    // is not durable — it throws (stays locked) rather than risk a resurrected `key-clear-ready` re-wiping the
+    // freshly minted key on the next boot.
+    await expect(
+      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+    ).rejects.toThrow();
+    openSyncFailure.path = undefined;
+  });
+
+  it("P1-6 (Sol round 8): a DELIBERATE delete-and-start-fresh (marker intent `delete`) DELETES the old encrypted DB and proves it gone, instead of renaming it aside where it stays recoverable", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "DELETE_INTENT_SECRET")).statusCode).toBe(201);
+    await app.close();
+
+    // The operator confirmed "Delete & start fresh" for a deliberate mode change → the marker carries
+    // `delete`. Boot with a DIFFERENT key (the new mode's key can't open the old ciphertext).
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+
+    // DELETED, not renamed aside: no `.unreadable-*` recovery copies remain, and the fresh DB serves no old data.
+    expect(readdirSync(dataDir).filter((n) => n.includes(".unreadable-"))).toEqual([]);
+    const search = await boot2.server.inject({
+      method: "GET",
+      url: "/api/search?q=DELETE_INTENT_SECRET",
+      headers: { cookie: (await session(boot2)).cookie },
+    });
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+  });
+
+  it("P1-6 (Sol round 8): an accidental-lockout recovery (marker intent `preserve`) renames the old DB ASIDE instead of deleting it", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // Accidental wrong/lost-key lockout: the operator preserves the old DB while starting fresh. Boot with a
+    // different key so the old ciphertext can't open, and the `preserve` marker keeps it on disk.
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+    expect(readdirSync(dataDir).filter((n) => n.includes(".unreadable-")).length).toBeGreaterThan(0);
   });
 
   describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {

@@ -320,9 +320,11 @@ export type ClearDbKeysResult = { ok: boolean; error?: string };
  * new key). Either way the OLD ciphertext — already deleted server-side by the kill switch before this
  * is ever invoked — is undecryptable under the new key.
  *
- * Called from `index.tsx`'s `loam-wipe-restart` bridge listener (the server-side kill switch's
- * fixed-key handoff, P1-2) and from its WebView `loam-wipe` message handler (the client's own `wipe`
- * WS-event notice). Real success/failure, NOT swallowed (P1-2b): a delete or verify failure is reported
+ * Called ONLY from `index.tsx`'s `loam-wipe-restart` bridge listener — the server-side kill switch's
+ * acked, phase-gated fixed-key handoff (P1-2). The generic WebView `loam-wipe` message no longer clears
+ * the device key (Sol round-8 P1-2): key rotation is authorized exclusively by that acked protocol at
+ * phase `key-clear-ready`, never by the unauthenticated `wipe` WS notice. Real success/failure, NOT
+ * swallowed (P1-2b): a delete or verify failure is reported
  * back so the caller can keep its own durable wipe-pending marker around and let the operator retry,
  * rather than silently claiming the key is gone when it might not be. Never logs `key`/passphrase
  * material — only item names and generic error messages.
