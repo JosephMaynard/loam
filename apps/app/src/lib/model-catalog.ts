@@ -45,12 +45,14 @@ export type ModelCatalogEntry = {
    * pinned"; `model-download.ts` then skips hash verification and relies on the (always-performed)
    * exact-size check.
    *
-   * NOTE: every entry below IS pinned, but `model-download.ts` still never actually verifies it —
-   * every current catalog file is far above the 100MB `MAX_HASHABLE_BYTES` cap (hashing a
-   * multi-hundred-MB file in RN JS risks exhausting heap / wedging the JS thread), so hashing is
-   * always skipped for these entries in practice. The exact-size check + TLS are the real integrity
-   * story for the shipped catalog today; the hash stays pinned so a future smaller model (or a
-   * smaller re-quant) gets a real check automatically.
+   * Every entry below IS pinned, and `model-download.ts` DOES verify it: hashing streams the file
+   * through an incremental SHA-256 in fixed-size chunks (never holding more than one chunk in memory
+   * at once), so there's no size cap that skips the check for a large file any more — a mismatch, or
+   * a hashing failure of any kind, fails closed (the file is deleted and the download rejected). See
+   * `model-download.ts`'s "streaming SHA-256" section for the implementation, and its still-open
+   * device-verification gate: hashing multi-GB files this way on a phone's JS thread has not yet been
+   * benchmarked on real hardware (duration, UI responsiveness, memory, cancellation, process
+   * survival) for the largest catalog entry.
    */
   sha256?: string;
   /** Minimum device RAM LOAM requires before offering a download — see provenance above. */

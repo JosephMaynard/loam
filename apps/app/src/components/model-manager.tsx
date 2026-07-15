@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { AppState, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -13,7 +13,7 @@ import {
   storageFit,
   type DeviceCapabilities,
 } from '@/lib/device-capabilities';
-import { deleteModelFile, downloadModel, sanitizeModelFileName } from '@/lib/model-download';
+import { deleteModelFile, downloadModel, sanitizeModelFileName, sweepOrphanedModelFiles } from '@/lib/model-download';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
@@ -27,6 +27,15 @@ import {
  * distinguishes the download from the (now real — P2-4/AF7) streaming-hash verification pass that
  * follows it for curated catalog entries, so the UI doesn't look hung between the two. */
 type ProgressMap = Record<string, { written: number; total: number; phase: 'download' | 'verify' }>;
+
+/** Runs `sweepOrphanedModelFiles` at most once per process lifetime (module-level, not component
+ * state — the overlay itself stays mounted for the app's whole life, only `visible` toggles, see
+ * `index.tsx`). Deliberately NOT re-run on every re-open: a file that's mid-download in THIS session
+ * is legitimately unreferenced until it finishes, and re-sweeping while it's in flight would delete
+ * it out from under an active download. An orphan from a killed process can only exist at the first
+ * open after a fresh launch, so once is enough — see `model-download.ts`'s `sweepOrphanedModelFiles`
+ * doc comment for why an orphan is safe to delete blindly (it was never registered as active). */
+let orphanSweepDone = false;
 
 type ModelManagerOverlayProps = {
   visible: boolean;
@@ -51,6 +60,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set());
   const [customUrl, setCustomUrl] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
+  // Every in-flight download/verify's `AbortController`, keyed by the same id used in `busyIds`/
+  // `progress` — lets the AppState listener below cancel everything at once on backgrounding.
+  const activeDownloads = useRef<Map<string, AbortController>>(new Map());
 
   // Refresh the probe + persisted state every time the manager is opened — storage/RAM and the
   // downloaded-file list can both change between visits.
@@ -65,11 +77,36 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         setCapabilities(caps);
         setManagerState(loaded);
       }
+      if (!orphanSweepDone) {
+        orphanSweepDone = true;
+        // Best-effort: reclaim any `.gguf` left behind by a download whose verify/registration never
+        // finished because the app process was killed mid-way (hash-performance device-verify note —
+        // see model-download.ts). Safe here specifically because this only runs on the FIRST open of
+        // a fresh process, before any download in this session could possibly be in flight.
+        void sweepOrphanedModelFiles(loaded.downloaded.map((model) => model.uri));
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, [visible]);
+
+  // Cancel every in-flight download/verify when the app is backgrounded, rather than letting it keep
+  // running unattended (hash-performance device-verify note): Android can suspend or kill a
+  // backgrounded app's JS thread at any time, and a multi-GB hash left running unobserved is exactly
+  // the "corrupt state mid-verify" scenario Sol flagged. Aborting routes through the same fail-closed
+  // path as a checksum mismatch (see model-download.ts), so it always deletes the partial file rather
+  // than leaving something half-verified.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'background') {
+        for (const controller of activeDownloads.current.values()) {
+          controller.abort();
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
   const setBusy = (id: string, isBusy: boolean) => {
     setBusyIds((prev) => {
@@ -127,6 +164,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
     setBusy(entry.id, true);
     setModelProgress(entry.id, 0, entry.sizeBytes, 'download');
+    const controller = new AbortController();
+    activeDownloads.current.set(entry.id, controller);
     const outcome = await downloadModel(
       entry.url,
       fileName,
@@ -136,7 +175,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // Hashing a multi-GB file is slow — show its own progress rather than looking hung once the
       // download bar completes (P2-4/AF7).
       (hashed, total) => setModelProgress(entry.id, hashed, total, 'verify'),
+      controller.signal,
     );
+    activeDownloads.current.delete(entry.id);
     clearModelProgress(entry.id);
     setBusy(entry.id, false);
 
@@ -206,9 +247,18 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
 
     setBusy(id, true);
     setModelProgress(id, 0, 0);
-    const outcome = await downloadModel(trimmed, fileName, undefined, undefined, (written, total) =>
-      setModelProgress(id, written, total),
+    const controller = new AbortController();
+    activeDownloads.current.set(id, controller);
+    const outcome = await downloadModel(
+      trimmed,
+      fileName,
+      undefined,
+      undefined,
+      (written, total) => setModelProgress(id, written, total),
+      undefined,
+      controller.signal,
     );
+    activeDownloads.current.delete(id);
     clearModelProgress(id);
     setBusy(id, false);
 
@@ -232,47 +282,100 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
   };
 
+  /**
+   * Delete a downloaded model (P2-4). Sequenced so a failure at any step leaves a SAFE, recoverable
+   * state rather than the old order (clear config → ignore its result → delete the GGUF bytes → THEN
+   * persist metadata), which could leave metadata pointing at a file that no longer exists if the
+   * process died between the delete and the persist.
+   *
+   * The RN-local `model-manager-store.json` is the authoritative record of what's downloaded/active
+   * (see `model-manager-bridge.ts`'s doc comment — `on-device-llm.ts` reads it directly); the
+   * launcher-config write (`clearActiveModel`) is only a best-effort mirror for the host's cosmetic
+   * `enabled`/`model` label, so it's fine for it to lag briefly behind a warning rather than block the
+   * deletion. Order: (1) persist metadata FIRST — once this lands, nothing in local state references
+   * the file any more, so it's safe to delete the bytes even if a later step fails; (2) THEN clear the
+   * launcher's active pointer if this was the active model, checking (not ignoring) the result; (3)
+   * only THEN delete the file bytes, since step 1 already made that irreversible step safe to take.
+   */
   const handleDelete = async (model: DownloadedModel) => {
     setBusy(model.id, true);
-    if (managerState.activeId === model.id) {
-      await clearActiveModel(channel);
+
+    let wasActive = false;
+    const persisted = await persist((current) => {
+      wasActive = current.activeId === model.id;
+      return {
+        downloaded: current.downloaded.filter((existing) => existing.id !== model.id),
+        activeId: wasActive ? undefined : current.activeId,
+      };
+    });
+    if (!persisted) {
+      setBusy(model.id, false);
+      // `persist` already surfaced why — don't touch the bridge or the file on top of a failed write.
+      return;
     }
+
+    let bridgeWarning: string | undefined;
+    if (wasActive) {
+      const result = await clearActiveModel(channel);
+      if (!result.ok) {
+        // Local state is already consistent (nothing references this model any more) — it's the
+        // host's live config mirror that's stale, so warn instead of silently discarding the result
+        // the way the old code did.
+        bridgeWarning = `the host app's active-model config couldn't be cleared (${result.error ?? 'unknown error'}) — restart the LOAM host app`;
+      }
+    }
+
     await deleteModelFile(model.uri);
-    const persisted = await persist((current) => ({
-      downloaded: current.downloaded.filter((existing) => existing.id !== model.id),
-      activeId: current.activeId === model.id ? undefined : current.activeId,
-    }));
     setBusy(model.id, false);
-    if (persisted) {
-      setStatusMessage(`${model.displayName} deleted.`);
-    }
+    setStatusMessage(
+      bridgeWarning ? `${model.displayName} deleted, but ${bridgeWarning}.` : `${model.displayName} deleted.`,
+    );
   };
 
+  /**
+   * Make `model` the active on-device model (P2-4). Persists the durable local record FIRST, then
+   * mirrors it to the launcher config — the reverse of the old order (bridge write, then persist),
+   * which could leave the running host pointed at a model `model-manager-store.json` didn't know
+   * about if the persist failed after the bridge call already succeeded. Since `on-device-llm.ts`
+   * reads `activeId` from local state directly (see `model-manager-bridge.ts`), persisting first means
+   * a failed mirror write still leaves the REAL selection correct — only the host's cosmetic label is
+   * stale, which is surfaced rather than reported as a silent success.
+   */
   const handleSetActive = async (model: DownloadedModel) => {
     setBusy(model.id, true);
-    const result = await setActiveModel(channel, { modelPath: model.uri, model: model.displayName });
-    if (!result.ok) {
+
+    const persisted = await persist((current) => ({ ...current, activeId: model.id }));
+    if (!persisted) {
       setBusy(model.id, false);
-      setStatusMessage(`Couldn't set ${model.displayName} active — ${result.error ?? 'unknown error'}.`);
       return;
     }
-    const persisted = await persist((current) => ({ ...current, activeId: model.id }));
+
+    const result = await setActiveModel(channel, { modelPath: model.uri, model: model.displayName });
     setBusy(model.id, false);
-    if (persisted) {
-      setStatusMessage(`${model.displayName} is now the active model. Restart the LOAM host app to load it.`);
+    if (!result.ok) {
+      setStatusMessage(
+        `${model.displayName} is saved as the active model, but the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}) — restart the LOAM host app to pick it up.`,
+      );
+      return;
     }
+    setStatusMessage(`${model.displayName} is now the active model. Restart the LOAM host app to load it.`);
   };
 
+  /** Clear the active model (P2-4) — same persist-then-mirror ordering as `handleSetActive` above. */
   const handleDeactivate = async () => {
-    const result = await clearActiveModel(channel);
-    if (!result.ok) {
-      setStatusMessage(`Couldn't deactivate the on-device model — ${result.error ?? 'unknown error'}.`);
+    const persisted = await persist((current) => ({ ...current, activeId: undefined }));
+    if (!persisted) {
       return;
     }
-    const persisted = await persist((current) => ({ ...current, activeId: undefined }));
-    if (persisted) {
-      setStatusMessage('On-device model deactivated. Restart the LOAM host app to apply it.');
+
+    const result = await clearActiveModel(channel);
+    if (!result.ok) {
+      setStatusMessage(
+        `On-device model deactivated locally, but the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}) — restart the LOAM host app to apply it.`,
+      );
+      return;
     }
+    setStatusMessage('On-device model deactivated. Restart the LOAM host app to apply it.');
   };
 
   const customModels = managerState.downloaded.filter((model) => model.isCustom);
