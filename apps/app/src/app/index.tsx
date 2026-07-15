@@ -176,9 +176,9 @@ export default function HostScreen() {
   const [revertBusy, setRevertBusy] = useState(false);
   const [revertMessage, setRevertMessage] = useState<string | undefined>();
   // P1-2(b): the durable, acked wipe-key-clear handoff. Set only on a VERIFIED clear FAILURE (never a
-  // blanket "cleared") — see `attemptWipeKeyClear`. The launcher's own durable `.loam-wipe-pending`
-  // marker (main.js) is the actual source of truth for whether the clear still needs retrying across an
-  // app restart; this state is just this screen's live view of the most recent attempt.
+  // blanket "cleared") — see `attemptWipeKeyClear`. The launcher's own durable `.loam-wipe-phase`
+  // file (main.js) at `key-clear-ready` is the actual source of truth for whether the clear still needs
+  // retrying across an app restart; this state is just this screen's live view of the most recent attempt.
   const [wipeClearFailure, setWipeClearFailure] = useState<string | undefined>();
   const [wipeClearBusy, setWipeClearBusy] = useState(false);
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
@@ -233,10 +233,10 @@ export default function HostScreen() {
   }, [dbLocked]);
 
   // P1-2(b), Sol round 4: clear the device key material and, ONLY on a VERIFIED success, ack the
-  // launcher (`loam-wipe-complete`) so it deletes its durable `.loam-wipe-pending` marker. On ANY
+  // launcher (`loam-wipe-complete`) so it deletes its durable `.loam-wipe-phase` file. On ANY
   // failure — a thrown delete, a failed verify, or the item still present afterward (see
-  // `clearStoredDbKeys`'s real success/failure return) — the marker is left exactly where it is (this
-  // screen has no way to touch it directly; main.js's marker stays until a verified ack arrives) and
+  // `clearStoredDbKeys`'s real success/failure return) — the phase file is left exactly where it is (this
+  // screen has no way to touch it directly; main.js's phase file stays until a verified ack arrives) and
   // this screen shows the real failure with a Retry, never a blanket "cleared". Called from the
   // `loam-wipe-restart` bridge listener below — fired both for a LIVE kill-switch signal and for
   // main.js's own boot-time RESUME repost (a suspended/backgrounded/killed RN gets another chance).
@@ -398,8 +398,9 @@ export default function HostScreen() {
     // restarted anything). The only reliable recovery is the operator closing and reopening the app; the
     // `nodejs.start()` call inside `attemptWipeKeyClear` is a forward-compatible best-effort attempt only.
     //
-    // main.js also re-fires this SAME event at ITS OWN boot time if its durable `.loam-wipe-pending`
-    // marker is still present (P1-2b) — i.e. an earlier clear attempt never got far enough to ack. This
+    // main.js also re-fires this SAME event at ITS OWN boot time if its durable `.loam-wipe-phase`
+    // file still reads `key-clear-ready` (P1-2b) — i.e. an earlier clear attempt never got far enough to
+    // ack (the server proved artifacts gone but the device key was never confirmed cleared). This
     // handler doesn't need to (and can't) distinguish that from a live signal; `attemptWipeKeyClear` is
     // idempotent either way (clearing an already-cleared key just verifies clean and acks again).
     const onWipeRestart = () => {
