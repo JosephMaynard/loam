@@ -1031,10 +1031,16 @@ function clearWipePhase() {
     }
     return false; // a real delete failure — the phase file may still be on disk
   }
+  // Verify absence with lstatSync, not existsSync: existsSync returns false for MANY stat errors (EACCES,
+  // EIO, ...), conflating "confirmed gone" with "could-not-determine" — so a permission/IO fault on the
+  // marker path would be misreported as a clean removal. Only ENOENT is proof of absence; the file still
+  // being present, or ANY other stat error, is a failure (must stay locked). Mirrors the server's
+  // `provenAbsence` (apps/server/src/app.ts).
   try {
-    return fs.existsSync(WIPE_PHASE_MARKER_PATH) === false;
+    fs.lstatSync(WIPE_PHASE_MARKER_PATH);
+    return false; // still present after a "successful" unlink (e.g. reappeared) — not a clean removal
   } catch (err) {
-    return false; // couldn't verify removal — must not be reported as a clean success
+    return Boolean(err && err.code === 'ENOENT');
   }
 }
 
