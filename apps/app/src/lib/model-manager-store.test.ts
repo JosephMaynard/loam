@@ -4,13 +4,29 @@
 // corrupt primary over that good backup. A genuinely-empty state stays valid.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fileSystemMock, resetFileSystemMock, seedFile } from "@/test-utils/mocks";
+import {
+  clearFileSystemFailure,
+  failFileSystemUri,
+  fileSystemMock,
+  resetFileSystemMock,
+  seedFile,
+} from "@/test-utils/mocks";
 
 vi.mock("expo-file-system/legacy", () => fileSystemMock);
 
-const { loadModelManagerState, saveModelManagerState, recordPending, pendingProtectedUris, POINTER_PENDING_ID } =
-  await import("@/lib/model-manager-store");
+const {
+  loadModelManagerState,
+  readModelManagerState,
+  dispositionFromLoad,
+  mutateModelManagerState,
+  saveModelManagerState,
+  recordPending,
+  pendingProtectedUris,
+  POINTER_PENDING_ID,
+  MODEL_LIST_UNREADABLE_MESSAGE,
+} = await import("@/lib/model-manager-store");
 type PendingAction = import("@/lib/model-manager-store").PendingAction;
+type ModelManagerState = import("@/lib/model-manager-store").ModelManagerState;
 
 const STATE_PATH = `${fileSystemMock.documentDirectory}loam-model-manager.json`;
 const BAK_PATH = `${STATE_PATH}.bak`;
@@ -268,5 +284,138 @@ describe("pendingProtectedUris — do-not-sweep set (P2-b)", () => {
 
   it("returns an empty list for no pending", () => {
     expect(pendingProtectedUris(undefined)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-4: a READ ERROR must be distinguished from a never-initialized empty, so the destructive orphan
+// sweep can't run (and delete every downloaded model) when the state merely couldn't be read.
+// ---------------------------------------------------------------------------
+
+/** Stand-in for downloaded `.gguf` bytes on disk (in the shared FS mock's models area). The store never
+ * touches these itself, so their survival is the unit-level proxy for "the orphan sweep was NOT run". */
+const MODEL_FILE_A = "file:///mock-documents/models/A.gguf";
+const MODEL_FILE_B = "file:///mock-documents/models/B.gguf";
+
+function seedModelFiles() {
+  seedFile(MODEL_FILE_A, "gguf-bytes-A");
+  seedFile(MODEL_FILE_B, "gguf-bytes-B");
+}
+
+describe("readModelManagerState — discriminated ok/empty/error (P1-4)", () => {
+  beforeEach(() => {
+    resetFileSystemMock();
+    vi.restoreAllMocks();
+  });
+
+  it("both slots THROW on read (I/O failure) + model files exist → status:error (and files untouched)", async () => {
+    seedModelFiles();
+    // A real filesystem failure on BOTH slots — NOT a clean absence.
+    failFileSystemUri(STATE_PATH, new Error("EIO: transient read failure"));
+    failFileSystemUri(BAK_PATH, new Error("EIO: transient read failure"));
+
+    const loaded = await readModelManagerState();
+    expect(loaded.status).toBe("error");
+
+    // The destructive sweep decision must be "do not sweep, block controls".
+    const disposition = dispositionFromLoad(loaded);
+    expect(disposition.canSweep).toBe(false);
+    expect(disposition.controlsBlocked).toBe(true);
+    expect(disposition.message).toBe(MODEL_LIST_UNREADABLE_MESSAGE);
+
+    // No model file was removed (the store never sweeps; this asserts the read path left them intact).
+    clearFileSystemFailure(STATE_PATH);
+    clearFileSystemFailure(BAK_PATH);
+    expect((await fileSystemMock.getInfoAsync(MODEL_FILE_A)).exists).toBe(true);
+    expect((await fileSystemMock.getInfoAsync(MODEL_FILE_B)).exists).toBe(true);
+  });
+
+  it("both slots corrupt (parseable but invalid) + model files exist → status:error, no sweep", async () => {
+    seedModelFiles();
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [{}] })); // corrupt (malformed entry)
+    seedFile(BAK_PATH, JSON.stringify("garbage-not-an-object")); // corrupt (not an object)
+
+    const loaded = await readModelManagerState();
+    expect(loaded.status).toBe("error");
+    expect(dispositionFromLoad(loaded).canSweep).toBe(false);
+  });
+
+  it("primary corrupt but a VALID .bak → status:ok from the backup (two-slot fallback preserved)", async () => {
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [{}] })); // corrupt primary
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP)); // good backup
+
+    const loaded = await readModelManagerState();
+    expect(loaded).toEqual({ status: "ok", state: GOOD_BACKUP });
+    expect(dispositionFromLoad(loaded)).toMatchObject({ state: GOOD_BACKUP, canSweep: true, controlsBlocked: false });
+  });
+
+  it("genuinely never-initialized (BOTH slots absent/ENOENT) → status:empty, sweep MAY run", async () => {
+    // Nothing seeded — both slots are a clean absence.
+    const loaded = await readModelManagerState();
+    expect(loaded.status).toBe("empty");
+
+    const disposition = dispositionFromLoad(loaded);
+    expect(disposition.canSweep).toBe(true);
+    expect(disposition.controlsBlocked).toBe(false);
+    expect(disposition.state).toEqual({ downloaded: [], activeId: undefined });
+  });
+
+  it("a corrupt primary with an ABSENT backup is still status:error (a corrupt slot is a failure, not an absence)", async () => {
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [{}] }));
+    // no BAK seeded → absent
+
+    const loaded = await readModelManagerState();
+    expect(loaded.status).toBe("error");
+  });
+
+  it("a valid primary → status:ok, and the thin loadModelManagerState wrapper returns the plain state", async () => {
+    seedFile(STATE_PATH, JSON.stringify(GOOD_BACKUP));
+    expect(await readModelManagerState()).toEqual({ status: "ok", state: GOOD_BACKUP });
+    // The compat wrapper (used by on-device-llm.ts) keeps returning a plain state.
+    expect(await loadModelManagerState()).toEqual(GOOD_BACKUP);
+  });
+
+  it("loadModelManagerState maps BOTH empty and error to EMPTY_STATE (pre-P1-4 compat contract)", async () => {
+    // error case
+    failFileSystemUri(STATE_PATH, new Error("EIO"));
+    failFileSystemUri(BAK_PATH, new Error("EIO"));
+    expect(await loadModelManagerState()).toEqual({ downloaded: [], activeId: undefined });
+    clearFileSystemFailure(STATE_PATH);
+    clearFileSystemFailure(BAK_PATH);
+    // empty case
+    expect(await loadModelManagerState()).toEqual({ downloaded: [], activeId: undefined });
+  });
+});
+
+describe("mutateModelManagerState — refuses to write on an unreadable state (P1-4)", () => {
+  beforeEach(() => {
+    resetFileSystemMock();
+    vi.restoreAllMocks();
+  });
+
+  it("does NOT clobber existing-but-unreadable data: refuses the write and reports persisted:false", async () => {
+    // A valid state exists on disk, but the primary read fails transiently and there's no backup.
+    seedFile(STATE_PATH, JSON.stringify(GOOD_BACKUP));
+    failFileSystemUri(STATE_PATH, new Error("EIO: transient"));
+
+    // A mutation that, if it ran on an assumed-empty state, would wipe the downloaded list.
+    const wipe = vi.fn((current: ModelManagerState) => ({ ...current, downloaded: [] }));
+    const result = await mutateModelManagerState(wipe);
+
+    expect(result.persisted).toBe(false);
+    expect(wipe).not.toHaveBeenCalled(); // never even applied on top of an empty state
+
+    // The original data is intact once the transient failure clears — nothing was clobbered.
+    clearFileSystemFailure(STATE_PATH);
+    expect(await loadModelManagerState()).toEqual(GOOD_BACKUP);
+  });
+
+  it("still writes normally when the state is genuinely empty (never-initialized)", async () => {
+    const result = await mutateModelManagerState((current) => ({
+      ...current,
+      downloaded: [...current.downloaded, model("new")],
+    }));
+    expect(result.persisted).toBe(true);
+    expect(await loadModelManagerState()).toEqual({ downloaded: [model("new")], activeId: undefined });
   });
 });
