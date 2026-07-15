@@ -18,13 +18,15 @@ import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/mode
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
   loadModelManagerState,
-  saveModelManagerState,
+  mutateModelManagerState,
   type DownloadedModel,
   type ModelManagerState,
 } from '@/lib/model-manager-store';
 
-/** In-flight download progress, keyed by the same id used in `busy`/`state.downloaded`. */
-type ProgressMap = Record<string, { written: number; total: number }>;
+/** In-flight download/verify progress, keyed by the same id used in `busy`/`state.downloaded`. `phase`
+ * distinguishes the download from the (now real — P2-4/AF7) streaming-hash verification pass that
+ * follows it for curated catalog entries, so the UI doesn't look hung between the two. */
+type ProgressMap = Record<string, { written: number; total: number; phase: 'download' | 'verify' }>;
 
 type ModelManagerOverlayProps = {
   visible: boolean;
@@ -81,8 +83,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     });
   };
 
-  const setModelProgress = (id: string, written: number, total: number) => {
-    setProgress((prev) => ({ ...prev, [id]: { written, total } }));
+  const setModelProgress = (id: string, written: number, total: number, phase: 'download' | 'verify' = 'download') => {
+    setProgress((prev) => ({ ...prev, [id]: { written, total, phase } }));
   };
 
   const clearModelProgress = (id: string) => {
@@ -96,12 +98,25 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     });
   };
 
-  const persist = async (next: ModelManagerState) => {
-    setManagerState(next);
-    await saveModelManagerState(next);
+  /**
+   * Apply `mutate` on top of whatever is CURRENTLY persisted — never on top of this component's
+   * possibly-stale `managerState` snapshot (P2-4: two downloads/activations finishing back-to-back
+   * used to each build their next state from the state captured when THEIR OWN async op started, so
+   * the last one to finish silently erased the other's write). `mutateModelManagerState` serializes
+   * this against every other in-flight mutation and writes atomically; a failed write is surfaced
+   * here (not swallowed) rather than letting the caller report success on a change that never landed.
+   */
+  const persist = async (mutate: (current: ModelManagerState) => ModelManagerState): Promise<boolean> => {
+    const { state, persisted } = await mutateModelManagerState(mutate);
+    setManagerState(state);
+    if (!persisted) {
+      setStatusMessage("Couldn't save that change to the model list — it may not survive an app restart. Try again.");
+    }
+    return persisted;
   };
 
-  /** Download one curated catalog entry into `<id>.gguf`, verifying size (+ hash when small enough). */
+  /** Download one curated catalog entry into `<id>.gguf`, verifying size + (now real — P2-4/AF7)
+   * streaming SHA-256, fail-closed on a mismatch or a hashing failure. */
   const handleDownloadCatalogEntry = async (entry: ModelCatalogEntry) => {
     // Catalog ids are hardcoded, known-safe strings — this can't actually fail — but sanitize anyway
     // for consistency with the pasted-URL path and as defense in depth (see model-download.ts).
@@ -111,9 +126,16 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       return;
     }
     setBusy(entry.id, true);
-    setModelProgress(entry.id, 0, entry.sizeBytes);
-    const outcome = await downloadModel(entry.url, fileName, entry.sizeBytes, entry.sha256, (written, total) =>
-      setModelProgress(entry.id, written, total > 0 ? total : entry.sizeBytes),
+    setModelProgress(entry.id, 0, entry.sizeBytes, 'download');
+    const outcome = await downloadModel(
+      entry.url,
+      fileName,
+      entry.sizeBytes,
+      entry.sha256,
+      (written, total) => setModelProgress(entry.id, written, total > 0 ? total : entry.sizeBytes, 'download'),
+      // Hashing a multi-GB file is slow — show its own progress rather than looking hung once the
+      // download bar completes (P2-4/AF7).
+      (hashed, total) => setModelProgress(entry.id, hashed, total, 'verify'),
     );
     clearModelProgress(entry.id);
     setBusy(entry.id, false);
@@ -132,11 +154,13 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       sourceUrl: entry.url,
       downloadedAt: Date.now(),
     };
-    await persist({
-      ...managerState,
-      downloaded: [...managerState.downloaded.filter((existing) => existing.id !== entry.id), model],
-    });
-    setStatusMessage(`${entry.displayName} downloaded.`);
+    const persisted = await persist((current) => ({
+      ...current,
+      downloaded: [...current.downloaded.filter((existing) => existing.id !== entry.id), model],
+    }));
+    if (persisted) {
+      setStatusMessage(`${entry.displayName} downloaded.`);
+    }
   };
 
   /** Download a user-pasted URL — no size/hash to verify against, so it's always best-effort + warned. */
@@ -201,9 +225,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       sourceUrl: trimmed,
       downloadedAt: Date.now(),
     };
-    await persist({ ...managerState, downloaded: [...managerState.downloaded, model] });
+    const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
     setCustomUrl('');
-    setStatusMessage(`${guessedName} downloaded.`);
+    if (persisted) {
+      setStatusMessage(`${guessedName} downloaded.`);
+    }
   };
 
   const handleDelete = async (model: DownloadedModel) => {
@@ -212,24 +238,29 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       await clearActiveModel(channel);
     }
     await deleteModelFile(model.uri);
-    await persist({
-      downloaded: managerState.downloaded.filter((existing) => existing.id !== model.id),
-      activeId: managerState.activeId === model.id ? undefined : managerState.activeId,
-    });
+    const persisted = await persist((current) => ({
+      downloaded: current.downloaded.filter((existing) => existing.id !== model.id),
+      activeId: current.activeId === model.id ? undefined : current.activeId,
+    }));
     setBusy(model.id, false);
-    setStatusMessage(`${model.displayName} deleted.`);
+    if (persisted) {
+      setStatusMessage(`${model.displayName} deleted.`);
+    }
   };
 
   const handleSetActive = async (model: DownloadedModel) => {
     setBusy(model.id, true);
     const result = await setActiveModel(channel, { modelPath: model.uri, model: model.displayName });
-    setBusy(model.id, false);
     if (!result.ok) {
+      setBusy(model.id, false);
       setStatusMessage(`Couldn't set ${model.displayName} active — ${result.error ?? 'unknown error'}.`);
       return;
     }
-    await persist({ ...managerState, activeId: model.id });
-    setStatusMessage(`${model.displayName} is now the active model. Restart the LOAM host app to load it.`);
+    const persisted = await persist((current) => ({ ...current, activeId: model.id }));
+    setBusy(model.id, false);
+    if (persisted) {
+      setStatusMessage(`${model.displayName} is now the active model. Restart the LOAM host app to load it.`);
+    }
   };
 
   const handleDeactivate = async () => {
@@ -238,8 +269,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       setStatusMessage(`Couldn't deactivate the on-device model — ${result.error ?? 'unknown error'}.`);
       return;
     }
-    await persist({ ...managerState, activeId: undefined });
-    setStatusMessage('On-device model deactivated. Restart the LOAM host app to apply it.');
+    const persisted = await persist((current) => ({ ...current, activeId: undefined }));
+    if (persisted) {
+      setStatusMessage('On-device model deactivated. Restart the LOAM host app to apply it.');
+    }
   };
 
   const customModels = managerState.downloaded.filter((model) => model.isCustom);
@@ -379,7 +412,7 @@ function CatalogRow({
   downloaded: DownloadedModel | undefined;
   isActive: boolean;
   isBusy: boolean;
-  progress: { written: number; total: number } | undefined;
+  progress: { written: number; total: number; phase: 'download' | 'verify' } | undefined;
   onDownload: () => void;
   onDelete: (model: DownloadedModel) => void;
   onSetActive: (model: DownloadedModel) => void;
@@ -418,7 +451,9 @@ function CatalogRow({
         </ThemedText>
       ) : null}
 
-      {isBusy && progress ? <ProgressBar written={progress.written} total={progress.total} /> : null}
+      {isBusy && progress ? (
+        <ProgressBar written={progress.written} total={progress.total} phase={progress.phase} />
+      ) : null}
 
       <View style={styles.rowActions}>
         {downloaded ? (
@@ -510,13 +545,24 @@ function DownloadedRow({
 }
 
 /** A minimal determinate progress bar — no extra dependency needed for a filled-width `View`. */
-function ProgressBar({ written, total }: { written: number; total: number }) {
+function ProgressBar({
+  written,
+  total,
+  phase = 'download',
+}: {
+  written: number;
+  total: number;
+  /** 'verify' = the (now real, P2-4/AF7) post-download SHA-256 streaming pass — shown distinctly so a
+   * slow multi-GB hash doesn't look like a hung download. */
+  phase?: 'download' | 'verify';
+}) {
   const pct = total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0;
+  const label = phase === 'verify' ? 'Verifying' : 'Downloading';
   return (
     <View style={styles.progressTrack}>
       <View style={[styles.progressFill, { width: `${pct}%` }]} />
       <ThemedText type="small" themeColor="textSecondary" style={styles.progressLabel}>
-        {formatBytes(written)} / {total > 0 ? formatBytes(total) : '?'} ({pct}%)
+        {label}: {formatBytes(written)} / {total > 0 ? formatBytes(total) : '?'} ({pct}%)
       </ThemedText>
     </View>
   );

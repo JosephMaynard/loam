@@ -35,25 +35,65 @@ function notify(status, extra) {
   }
 }
 
+// Boot-notice codes (P1-4 / AF2): these all mean the server DEGRADED but kept booting — a DB opened
+// unencrypted after a key mismatch, a fresh DB after an unreadable one, no key available yet, or the
+// encrypted driver being absent — never that boot failed. `waitForServer` below still runs and will
+// post 'ready' once the server actually answers. Reported as status 'notice', NOT 'error': the RN host
+// screen must not treat these as fatal (they used to arrive as 'error' and then get silently clobbered
+// the moment 'ready' followed — see index.tsx's persistent notice state, AF2/P1-4). Any OTHER code
+// (e.g. `boot_failed`/`boot_unhandled_rejection` from embedded-main.ts, where the process exits and
+// 'ready' can never follow) stays a real 'error'.
+const DB_ENCRYPTION_NOTICE_CODES = [
+  'db_encryption_open_failed',
+  'db_encryption_unreadable',
+  'db_encryption_recovered_fresh',
+  'db_encryption_no_key',
+  'db_encryption_unavailable',
+];
+
 // embedded-main.ts (bundled into loam-server.js below) does the real startup work asynchronously —
 // require('./loam-server.js') returns long before a config-load or server.listen() failure would
 // reject, so this file's own try/catch around require() can't see it (docs/15 A8). It instead calls
 // this hook, installed on `global` BEFORE requiring the bundle (same pattern as
 // global.__loamOnDeviceChat below), so a failure still reaches the host screen as a real error
-// instead of just the generic readiness-poll timeout.
+// instead of just the generic readiness-poll timeout. Also used directly, below, by this file's own
+// DB-encryption downgrade paths (db_encryption_no_key / db_encryption_unavailable) — same single
+// choke point decides notice-vs-fatal for both callers.
 global.__loamReportBootError = function (message, code) {
-  notify('error', { message: message, code: code });
+  const isNotice = DB_ENCRYPTION_NOTICE_CODES.indexOf(code) !== -1;
+  notify(isNotice ? 'notice' : 'error', { message: message, code: code });
 };
 
+// Interface NAME prefixes that belong to a VPN/tunnel/virtual adapter rather than the real hotspot/LAN
+// (P2-3): an address on one of these is never reachable by a nearby device scanning the join QR, so
+// picking one would silently break joining. Mirrors the exclusions in apps/server/src/net.ts's
+// `resolveLanIPv4` (`tun`/`utun`/`tailscale`/`wg`/`ppp`), plus a few more that only show up on Android
+// (`rmnet` — the cellular radio interfaces; `dummy`/`docker`/`veth`/`bridge` — container/virtual
+// networking some ROMs or apps set up). Matched case-insensitively against the OS-reported name.
+const TUNNEL_INTERFACE_PREFIXES = ['tun', 'utun', 'tailscale', 'wg', 'ppp', 'rmnet', 'dummy', 'docker', 'veth', 'bridge'];
+
+function isTunnelInterfaceName(name) {
+  const lower = name.toLowerCase();
+  return TUNNEL_INTERFACE_PREFIXES.some(function (prefix) {
+    return lower.startsWith(prefix);
+  });
+}
+
 /**
- * The host's non-internal IPv4 addresses. The hotspot's AP interface (192.168.49.1 on stock Android
- * LocalOnlyHotspot, but not guaranteed) only appears once the hotspot is up, so we re-post these
- * periodically — the host UI builds the Step-2 join QR from the real address rather than a guess.
+ * The host's non-internal IPv4 addresses, excluding VPN/tunnel/virtual interfaces (P2-3) — the native
+ * Share QR (`hotspotJoinUrl` in apps/app/src/app/index.tsx) picks from this FLAT list, so filtering
+ * happens here rather than trusting the picker to know which addresses are real. The hotspot's AP
+ * interface (192.168.49.1 on stock Android LocalOnlyHotspot, but not guaranteed) only appears once the
+ * hotspot is up, so we re-post these periodically — the host UI builds the Step-2 join QR from the real
+ * address rather than a guess.
  */
 function lanAddresses() {
   const addresses = [];
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
+    if (isTunnelInterfaceName(name)) {
+      continue;
+    }
     for (const info of interfaces[name] || []) {
       if (info && info.family === 'IPv4' && !info.internal) {
         addresses.push(info.address);
@@ -551,6 +591,34 @@ function clearEphemeralMarker() {
   }
 }
 
+// ---- "Preserve old database & start fresh" operator confirmation (design#1 / AF8, P1-2) ------------
+// When boot fails with `db_encryption_unreadable` (an existing encrypted DB the current key can't
+// open), the RN error screen offers an explicit "Preserve old database & start fresh" action rather
+// than the server silently doing that itself. This marker is the confirmation: the RN UI asks THIS
+// process (over the bridge — same reason as the DB-key handoff above, this process owns `dataDir`) to
+// write it, then tells the operator to restart the app; the server consumes-and-deletes it on the next
+// boot as proof a human actually chose this, not an automatic behaviour.
+var START_FRESH_MARKER_PATH = path.join(dataDir, '.loam-db-start-fresh');
+
+rnBridge.channel.on('loam-db-start-fresh', function (payload) {
+  var requestId = payload && payload.requestId;
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(START_FRESH_MARKER_PATH, String(Date.now()), 'utf8');
+    rnBridge.channel.post('loam-db-start-fresh-result', { requestId: requestId, ok: true });
+  } catch (err) {
+    try {
+      rnBridge.channel.post('loam-db-start-fresh-result', {
+        requestId: requestId,
+        ok: false,
+        error: String((err && err.message) || err),
+      });
+    } catch (postErr) {
+      // RN side isn't listening — nothing more to do.
+    }
+  }
+});
+
 /** Best-effort delete of a previous encrypted DB's files. Only called for 'ephemeral' mode, where a
  * fresh random key is generated every launch, so a DB encrypted under a PREVIOUS launch's key can never
  * be opened again — leaving the stale files behind would just make openStore fail on a confusing
@@ -586,6 +654,11 @@ function resolveDbEncryptionAndBoot() {
       var mode = result.mode;
       var key = result.key;
 
+      // Threaded to the embedded server for EVERY boot (AF1/shared contract), 'off' included — so
+      // anything downstream that cares about the operator's CONFIGURED mode (as opposed to whether a
+      // key happened to come back) doesn't have to re-derive it from LOAM_DB_KEY's shape/value.
+      process.env.LOAM_DB_ENCRYPTION_MODE = mode;
+
       if (mode === 'off') {
         // Safe default: today's plaintext behaviour, unchanged. Silent — 'off' is the true default,
         // not a downgrade, so it must never trigger a boot-error notice.
@@ -594,12 +667,14 @@ function resolveDbEncryptionAndBoot() {
         return;
       }
 
-      if (!key) {
+      if (mode !== 'ephemeral' && !key) {
         // An encrypted mode is selected but no key came back — e.g. passphrase mode with no
         // passphrase entered yet, or a Keystore/RNG failure on the RN side. Unlike 'off' this IS a
         // silent downgrade to plaintext unless reported (G5): the operator picked an encrypted mode
         // and would otherwise have no idea their data is going in unencrypted. NEVER logs `key`
-        // (there isn't one) or any other secret material.
+        // (there isn't one) or any other secret material. Ephemeral mode is excluded from this branch
+        // entirely (see below) — db-encryption.ts's `resolveDbKey('ephemeral')` never returns a key any
+        // more by design, so it would otherwise ALWAYS hit this "no key" downgrade.
         global.__loamReportBootError(
           'Encryption mode "' + mode + '" is selected but no key is available (e.g. no passphrase ' +
             'entered yet, or a device Keystore/RNG failure) — starting UNENCRYPTED.',
@@ -639,10 +714,16 @@ function resolveDbEncryptionAndBoot() {
 
       if (mode === 'ephemeral') {
         deleteStaleEphemeralDb();
-      } else {
-        clearEphemeralMarker();
+        // The LITERAL string 'ephemeral' — NOT a generated key (Sol P1-1). The embedded server
+        // (apps/server/src/embedded.ts) recognizes this exact value and generates + holds its OWN
+        // random RAM-only key, which `executeKillSwitch` can then ROTATE in place on a wipe. Never
+        // derived from RN's `resolveDbKey('ephemeral')` any more — that no longer returns a key at all
+        // for this mode (see db-encryption.ts).
+        process.env.LOAM_DB_KEY = 'ephemeral';
+        return;
       }
 
+      clearEphemeralMarker();
       // openStore's encryptionKey path takes precedence over LOAM_DB_DRIVER (see db.ts) — leave the
       // driver env unset here. NEVER logged.
       process.env.LOAM_DB_KEY = key;

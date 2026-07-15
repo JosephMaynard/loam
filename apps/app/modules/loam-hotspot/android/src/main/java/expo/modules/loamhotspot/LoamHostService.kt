@@ -30,7 +30,7 @@ class LoamHostService : Service() {
   // alive — see `acquireWakeLock`/`scheduleWakeLockRenewal`. Cancelled in `releaseWakeLock` so it can
   // never outlive the service (or double up across restarts of the same instance).
   private val wakeLockHandler = Handler(Looper.getMainLooper())
-  private val renewWakeLockRunnable = Runnable { acquireWakeLock() }
+  private val renewWakeLockRunnable = Runnable { renewWakeLock() }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -116,13 +116,13 @@ class LoamHostService : Service() {
   }
 
   private fun acquireWakeLock() {
-    // Guard on the lock's actual held state, not just the field being non-null: the OS silently
-    // releases a `PARTIAL_WAKE_LOCK` once its bounded `acquire(timeout)` expires (12h here), but the
-    // field itself stays non-null forever — a field-only check would short-circuit on every renewal
-    // after that point and the host would silently lose its wake lock for good. When the lock is
-    // still genuinely held (e.g. a renewal fired slightly early), just reschedule the next one.
+    // Only acquire when nothing is currently held — avoids stacking a duplicate acquisition on a
+    // repeated `onStartCommand` (e.g. the system redelivering a start while already hosting). This is
+    // NOT how the 12h window gets reset — see `renewWakeLock` below for that (P1-6): a naive "guard on
+    // isHeld, else acquire" here would make the periodic renewal tick a no-op, since the lock is still
+    // genuinely held at the halfway point (it hasn't expired yet) — which is exactly the bug this
+    // split fixes.
     if (wakeLock?.isHeld == true) {
-      scheduleWakeLockRenewal()
       return
     }
     val power = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -136,6 +136,18 @@ class LoamHostService : Service() {
         acquire(WAKE_LOCK_TIMEOUT_MS)
       }
     scheduleWakeLockRenewal()
+  }
+
+  /** The renewal tick (fires at half the wake lock's own timeout, for as long as the service stays
+   * alive): explicitly RELEASE the current lock and ACQUIRE a fresh one, resetting the 12h window
+   * (P1-6). This is deliberately NOT just `acquireWakeLock()` — that guards on `isHeld` and no-ops when
+   * the lock is still held, which it always IS at this halfway-point tick (it hasn't expired yet); that
+   * guard made every renewal a no-op, so the original acquisition ran out at the full 12h mark with
+   * nothing having replaced it (a real gap/race in coverage, not just a missed optimization). */
+  private fun renewWakeLock() {
+    wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
+    wakeLock = null
+    acquireWakeLock()
   }
 
   /** (Re)schedule the next renewal at half the wake lock's own timeout, replacing any pending one so

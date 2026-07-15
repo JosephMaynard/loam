@@ -42,13 +42,61 @@ export async function loadModelManagerState(): Promise<ModelManagerState> {
   }
 }
 
-/** Persist the manager state. Best-effort — a failed write just means it won't survive a restart. */
-export async function saveModelManagerState(state: ModelManagerState): Promise<void> {
+/**
+ * Persist the manager state ATOMICALLY (P2-4): write to a temp file, delete any stale destination,
+ * then move the temp file into place. `expo-file-system/legacy` has no single atomic-rename primitive
+ * that's guaranteed to overwrite an existing destination on every platform, so this composes
+ * `writeAsStringAsync` (into a throwaway temp path) + `deleteAsync` + `moveAsync` — from any reader's
+ * perspective (`loadModelManagerState` above) `STATE_PATH` is always either the complete OLD file or
+ * the complete NEW one, never a partial write from a crash/kill mid-write.
+ *
+ * Returns whether the write actually landed. Unlike the old best-effort-and-swallow version, callers
+ * MUST check this (see `mutateModelManagerState` below) — silently reporting success on a failed
+ * persist is exactly the kind of bug that made P2-4 possible in the first place (an operator sees
+ * "model set active" when the change never made it to disk).
+ */
+export async function saveModelManagerState(state: ModelManagerState): Promise<boolean> {
+  const tmpPath = `${STATE_PATH}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
-    await FileSystem.writeAsStringAsync(STATE_PATH, JSON.stringify(state));
+    await FileSystem.writeAsStringAsync(tmpPath, JSON.stringify(state));
+    await FileSystem.deleteAsync(STATE_PATH, { idempotent: true });
+    await FileSystem.moveAsync({ from: tmpPath, to: STATE_PATH });
+    return true;
   } catch {
-    // best-effort
+    await FileSystem.deleteAsync(tmpPath, { idempotent: true }).catch(() => undefined);
+    return false;
   }
+}
+
+/**
+ * Serialized read-modify-write queue for the manager state (P2-4): each call reloads the CURRENT
+ * persisted state, applies `mutate` on top of it, and persists the result — chained through this
+ * module-level promise so concurrent callers (e.g. two catalog downloads finishing back-to-back) can
+ * never each build their next state from a snapshot captured back when their own async download
+ * started. Before this, the LAST completion's `{...staleManagerState, downloaded: [...]}` merge would
+ * silently overwrite whatever an earlier-starting, later-finishing download had just persisted — the
+ * mutation queue below is what actually fixes that, not just the atomic write.
+ *
+ * Every caller in `model-manager.tsx` should go through this instead of composing
+ * `loadModelManagerState`/`saveModelManagerState` with locally-held React state.
+ */
+let mutationChain: Promise<unknown> = Promise.resolve();
+
+export type MutateResult = { state: ModelManagerState; persisted: boolean };
+
+export function mutateModelManagerState(
+  mutate: (current: ModelManagerState) => ModelManagerState,
+): Promise<MutateResult> {
+  const run = mutationChain.then(async (): Promise<MutateResult> => {
+    const current = await loadModelManagerState();
+    const next = mutate(current);
+    const persisted = await saveModelManagerState(next);
+    return { state: next, persisted };
+  });
+  // Keep the chain alive regardless of outcome — a rejected mutation must not wedge every later one
+  // behind a permanently-broken promise.
+  mutationChain = run.catch(() => undefined);
+  return run;
 }
 
 function normalizeState(value: unknown): ModelManagerState {

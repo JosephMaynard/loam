@@ -21,6 +21,15 @@
 //   curl -s https://huggingface.co/api/models/<repo>/tree/main | jq '.[] | select(.path=="<file>")'
 // and read `.size` / `.lfs.oid`. A stale hash only ever causes a download to fail verification and
 // get deleted (see `model-download.ts`) — never a silent corruption.
+//
+// Hardware acceleration (Sol P2-5): every entry below is Q4_K_M. Android's OpenCL backend in
+// llama.rn/llama.cpp only accelerates a handful of quant formats — Q4_0 and Q6_K, notably, NOT
+// Q4_K_M — so a Q4_K_M download here most likely runs on CPU even on a phone with a usable GPU
+// backend (Hexagon/HTP offload is a separate, model-independent path — see on-device-llm.ts).
+// Q4_0/Q6_K re-quants of these same repos DO exist upstream (spot-checked live against the same
+// `tree/main` API used above) and could be added as accelerator-friendlier alternatives, but aren't
+// pinned here yet — that's a real follow-up, not done by adding this comment. Don't assume a
+// downloaded model here is GPU-accelerated; `on-device-llm.ts` logs the actual outcome per load.
 export type ModelCatalogEntry = {
   /** Stable id used for local storage + as the on-device config's cosmetic `model` label root. */
   id: string;

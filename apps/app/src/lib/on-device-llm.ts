@@ -6,13 +6,16 @@
 // the same `StreamEvent`s the laptop-Ollama path uses. Nothing else in the LLM path changes.
 //
 // `runInference` is now wired to a real engine via `llama.rn`: it loads the operator's active GGUF
-// (from the model manager) and streams a completion, offloading to the GPU/DSP where available. It
-// stays fully defensive — no active model, or any load/inference failure, surfaces as a graceful
+// (from the model manager) and streams a completion. It ATTEMPTS hardware acceleration where the
+// installed llama.rn build supports it, and falls back to CPU otherwise — see `ensureContext` below
+// for exactly what's verified vs. assumed (Sol P2-5: this repo has no way to confirm which backends a
+// given phone's llama.rn build actually exposes, so treat any GPU/DSP claim as best-effort, per-device).
+// It stays fully defensive — no active model, or any load/inference failure, surfaces as a graceful
 // assistant error (never a crash), so crisis messaging is unaffected. The remaining DEVICE SEAM is
 // only actual on-device token generation (needs a physical arm64 phone + a downloaded GGUF);
 // everything up to and including the llama.rn call is built and type-checked.
 
-import { initLlama, type LlamaContext } from 'llama.rn';
+import { getBackendDevicesInfo, initLlama, type LlamaContext } from 'llama.rn';
 
 import { loadModelManagerState } from './model-manager-store';
 
@@ -54,9 +57,37 @@ async function activeModelPath(): Promise<string | null> {
   return model.uri.replace(/^file:\/\//, '');
 }
 
-/** Load (or reuse) the llama.rn context for `modelPath`, releasing a previously-loaded different model
- * first. Offloads to the GPU/DSP where available (OpenCL/Hexagon are wired via the llama.rn Expo
- * plugin); llama.cpp falls back to CPU when no accelerator is present. */
+// The most recent load's hardware-acceleration outcome, as REPORTED BY llama.rn itself (never assumed)
+// — see `ensureContext` below. `undefined` until a model has actually been loaded once.
+let lastAccelerationInfo: { gpu: boolean; reasonNoGPU: string; devices?: string[] } | undefined;
+
+/** The most recent on-device model load's acceleration outcome, straight from llama.rn's own
+ * `LlamaContext.gpu`/`reasonNoGPU`/`devices` — exported for future UI surfacing (today it's logged, see
+ * `ensureContext`). `undefined` before any model has loaded. */
+export function getLastAccelerationInfo(): { gpu: boolean; reasonNoGPU: string; devices?: string[] } | undefined {
+  return lastAccelerationInfo;
+}
+
+/**
+ * Load (or reuse) the llama.rn context for `modelPath`, releasing a previously-loaded different model
+ * first.
+ *
+ * Hardware acceleration (Sol P2-5): this ATTEMPTS acceleration, but never claims it's delivered.
+ * `devices` is intentionally left unset — per llama.rn 0.12.6's own `ContextParams` doc comment, an
+ * unset `devices` already defaults to the full result of `getBackendDevicesInfo()` (i.e. every backend
+ * device the native build detects, GPU/accelerator included, with CPU as the implicit fallback), so
+ * explicitly re-deriving and passing the same list would only add a chance of getting it wrong (e.g. on
+ * a build/device where the detected device name doesn't match what the native side expects) for no
+ * behavioural gain. `getBackendDevicesInfo()` is still called and logged below, purely for diagnostics
+ * (verifiable over `adb logcat`, same as the rest of this launcher) — LOAM has no way to independently
+ * confirm which backend a given phone's llama.rn build actually wires up (Q4_0/Q6_K are the OpenCL-
+ * supported quants; every catalog entry today is Q4_K_M — see model-catalog.ts — so GPU offload via
+ * OpenCL is unlikely even when a GPU device is detected; Hexagon/HTP needs its own device-side
+ * extraction this module doesn't drive). `n_gpu_layers` is ALSO not a reliable Android lever — llama.rn's
+ * own type doc marks it "Currently only for iOS" — so it's passed for parity but not relied on. The
+ * actual outcome (`gpu`/`reasonNoGPU`/`devices`) is read back from the loaded context and captured in
+ * `lastAccelerationInfo` (see `getLastAccelerationInfo`) rather than assumed from any of this.
+ */
 async function ensureContext(modelPath: string): Promise<LlamaContext> {
   if (loadedContext && loadedModelPath === modelPath) {
     return loadedContext;
@@ -70,6 +101,13 @@ async function ensureContext(modelPath: string): Promise<LlamaContext> {
     loadedContext = null;
     loadedModelPath = null;
   }
+  try {
+    const devices = await getBackendDevicesInfo();
+    console.log('LOAM on-device LLM: detected backend devices', JSON.stringify(devices));
+  } catch (error) {
+    // Diagnostic-only — a probe failure must never block loading the model.
+    console.warn('LOAM on-device LLM: getBackendDevicesInfo() failed', error);
+  }
   // n_ctx is a fixed constant, not read from config.json's llm.onDevice.contextSize: this module reads
   // the active model from its OWN local model-manager-store.json (see activeModelPath above), not from
   // config.json, and nothing in the RN model-manager UI currently collects a context-size choice from
@@ -77,6 +115,13 @@ async function ensureContext(modelPath: string): Promise<LlamaContext> {
   // reading a field (see model-manager-bridge.ts's header comment for the full config.json story).
   // Left as a documented follow-up rather than half-wired.
   const context = await initLlama({ model: modelPath, n_ctx: 4096, n_gpu_layers: 99 });
+  lastAccelerationInfo = { gpu: context.gpu, reasonNoGPU: context.reasonNoGPU, devices: context.devices };
+  console.log(
+    'LOAM on-device LLM: model loaded — gpu=%s reasonNoGPU=%s devices=%s',
+    context.gpu,
+    context.reasonNoGPU,
+    JSON.stringify(context.devices),
+  );
   loadedContext = context;
   loadedModelPath = modelPath;
   return context;
