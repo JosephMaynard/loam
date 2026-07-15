@@ -689,6 +689,43 @@ function requestDbKey(timeoutMs) {
   });
 }
 
+// RF-c (adversarial review, round 5): a plaintext "last-known DB-encryption mode" hint. Records ONLY the
+// mode NAME (never key/passphrase material — those never touch disk here at all) whenever a mode is
+// SUCCESSFULLY resolved from the RN handoff. Its one job is to make a LATER boot's `requestDbKey` FAILURE
+// (`locked-error` — a 5s timeout before the RN screen has even mounted, a transient Keystore hiccup, a
+// malformed reply) recoverable in the RIGHT direction: `off`/absent means this node has no secret to
+// protect, so a transient failure must NOT block boot — crisis-messaging availability wins, boot
+// plaintext. `persistent`/`passphrase`/`ephemeral` means the node genuinely has (had) a secret-based mode,
+// so a transient failure must LOCK rather than silently downgrade to plaintext (the P1-3 confidentiality
+// guarantee). It is NOT key material and NOT secret — it's the same mode string already sent in the clear
+// over the bridge and threaded through LOAM_DB_ENCRYPTION_MODE.
+var DB_MODE_HINT_PATH = path.join(dataDir, '.loam-db-mode-hint');
+
+/** Persist the last successfully-resolved mode NAME (best-effort). Refuses to write anything that isn't a
+ *  known mode string, so no key-shaped value can ever land here even by a caller mistake. */
+function writeDbModeHint(mode) {
+  if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
+    return;
+  }
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(DB_MODE_HINT_PATH, mode, 'utf8');
+  } catch (err) {
+    // best-effort — a missing hint only makes a future transient failure err toward locking when a secret
+    // mode was previously recorded; an unwritten hint on a fresh/off node just keeps booting plaintext.
+  }
+}
+
+/** Read the last-known mode NAME, or `undefined` if absent/unreadable/unrecognized. */
+function readDbModeHint() {
+  try {
+    var raw = fs.readFileSync(DB_MODE_HINT_PATH, 'utf8').trim();
+    return DB_ENCRYPTION_MODES.indexOf(raw) === -1 ? undefined : raw;
+  } catch (err) {
+    return undefined;
+  }
+}
+
 // A marker file recording that the LAST boot ran in ephemeral mode (G4). `deleteStaleEphemeralDb`
 // below always deletes the DB when mode is 'ephemeral' — that's ephemeral's whole design, wipe-on-
 // restart — but the marker lets it tell that EXPECTED case apart from an operator having just switched
@@ -954,9 +991,32 @@ function resolveDbEncryptionAndBoot() {
       if (mode === DB_KEY_LOCKED_ERROR) {
         // P1-3 (Sol round 5): RN couldn't tell us its actual mode selection at all — a Keystore/
         // SecureStore read failure, a timeout, or a malformed/unrecognized response. This is NOT the
-        // same signal as an operator genuinely choosing 'off', so it must not fall through to a
-        // plaintext boot the way it used to. Stay locked, exactly like the "no usable key" case below —
-        // `index.tsx` shows the same Retry recovery (`loam-db-unlock`), which re-runs this function.
+        // same signal as an operator genuinely choosing 'off'. RF-c (adversarial review, round 5): but
+        // whether it should BLOCK boot depends on whether this node has a secret to protect. `off` is the
+        // default for most hosts, and a 5s requestDbKey timeout (the RN screen not mounted yet) must not
+        // lock a node that has no secret — that would hurt crisis-messaging availability for the common
+        // case. Consult the last successfully-resolved mode hint:
+        var hint = readDbModeHint();
+        if (hint === undefined || hint === 'off') {
+          // No secret was ever configured (fresh node → no hint) or the last-known mode was plaintext
+          // 'off'. A transient key-request failure must NOT lock a node with nothing to encrypt — boot
+          // plaintext, exactly like a genuine 'off' reply. The hint is left untouched — this FAILED
+          // resolution is not authoritative enough to write one (only a real reply from RN is).
+          console.warn(
+            'Could not determine the on-device encryption mode this boot; the last-known mode is ' +
+              (hint === undefined ? 'unset' : "'off'") +
+              ' — booting plaintext (no secret to protect). Availability over a transient lock (RF-c).',
+          );
+          process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
+          process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+          delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
+          clearEphemeralMarker();
+          return 'proceed';
+        }
+        // The last-known mode was secret-based (persistent/passphrase/ephemeral) — do NOT silently
+        // downgrade to plaintext on a transient failure. Stay locked, exactly like the "no usable key"
+        // case below — `index.tsx` shows the same Retry recovery (`loam-db-unlock`), which re-runs this
+        // function once the app is responsive.
         global.__loamReportBootError(
           'Could not determine the on-device encryption mode this boot (a device security-store read ' +
             'failed, the request timed out, or the response was malformed) — refusing to start ' +
@@ -978,6 +1038,7 @@ function resolveDbEncryptionAndBoot() {
         process.env.LOAM_DB_DRIVER = 'better-sqlite3';
         delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
         clearEphemeralMarker();
+        writeDbModeHint('off'); // RF-c: a later transient key-request failure may boot plaintext.
         return 'proceed';
       }
 
@@ -1001,6 +1062,9 @@ function resolveDbEncryptionAndBoot() {
           'db_encryption_locked',
         );
         clearEphemeralMarker();
+        // RF-c: record the operator's REAL secret-based selection even though no key is available yet, so
+        // a later transient key-request failure LOCKS (not plaintext-boots) this node. Not key material.
+        writeDbModeHint(mode);
         return 'locked';
       }
 
@@ -1039,6 +1103,10 @@ function resolveDbEncryptionAndBoot() {
         process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
         delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
         clearEphemeralMarker();
+        // RF-c: this build can only ever run plaintext (no SQLCipher module), and this boot IS plaintext,
+        // so record 'off' — a later transient failure should stay available, not lock. Self-corrects to
+        // the real mode on the first successful encrypted boot once the module ships.
+        writeDbModeHint('off');
         return 'proceed';
       }
 
@@ -1051,6 +1119,7 @@ function resolveDbEncryptionAndBoot() {
         // for this mode (see db-encryption.ts).
         process.env.LOAM_DB_KEY = 'ephemeral';
         delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
+        writeDbModeHint('ephemeral'); // RF-c: secret-based mode → a later transient failure LOCKS.
         return 'proceed';
       }
 
@@ -1067,6 +1136,10 @@ function resolveDbEncryptionAndBoot() {
       } else {
         delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
       }
+      // RF-c: a real persistent/passphrase key resolved — record the secret-based mode so a later
+      // transient key-request failure LOCKS rather than downgrading to plaintext. Only the mode NAME is
+      // written; `key`/`legacyKey` never touch this file (or any file) here.
+      writeDbModeHint(mode);
       return 'proceed';
     })
     .catch(function () {
@@ -1131,14 +1204,28 @@ notify('starting');
 // own resume wait is still pending) joins the SAME wait rather than registering a second overlapping
 // `loam-wipe-complete` listener/timer.
 var wipeResumeWait;
+// RF-d (adversarial review, round 5): a single-flight guard for the NO-marker fast path below. The
+// resume path is already a singleton via `wipeResumeWait`, but the direct `return
+// resolveDbEncryptionAndBoot()` had no guard — two concurrent callers (the initial boot at the bottom of
+// this file and a `loam-db-unlock` retry firing in the same tick) could each start an overlapping boot
+// of the embedded server. Cleared once the in-flight boot settles (`resolveDbEncryptionAndBoot` never
+// rejects), so a genuine SEQUENTIAL retry after a settled attempt still runs.
+var bootInFlight;
 
 function bootWithWipeResume() {
   if (wipeResumeWait) {
     return wipeResumeWait;
   }
 
+  if (bootInFlight) {
+    return bootInFlight;
+  }
+
   if (mayResolveDbKeyThisBoot(hasWipePendingMarker())) {
-    return resolveDbEncryptionAndBoot();
+    bootInFlight = resolveDbEncryptionAndBoot().finally(function () {
+      bootInFlight = undefined;
+    });
+    return bootInFlight;
   }
 
   wipeResumeWait = new Promise(function (resolve) {

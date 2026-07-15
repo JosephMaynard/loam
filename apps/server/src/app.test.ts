@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -1633,14 +1642,25 @@ describe("encryption at rest + key-discard kill switch", () => {
       payload: { confirm: "wipe" },
     });
 
-    // Give the handler a turn to reach (and block on) the gated config.json write — the FIRST thing it
-    // should do, per P1-4's fixed ordering.
+    // Give the handler a turn to run its synchronous lockdown (RF-a) and then reach (and block on) the
+    // gated config.json write — which still precedes the marker + hook, per P1-4's fixed ordering.
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // Neither the durable marker nor the launcher signal has happened yet — config persistence comes
     // first now, not after (the bug this fixes: the OLD order let both fire before config was durable).
     expect(hook.calls).toBe(0);
     expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+
+    // RF-a (adversarial review): a request landing DURING the persistConfigForRestart await must ALREADY
+    // see the 503 lockdown, never a stale 200 from the still-populated `data`/`sessions`. This is the
+    // confidentiality regression the fix closes — P1-4 had moved this await ahead of the synchronous
+    // lockdown, so before the fix this GET was served a normal 200 with real content on the kill path.
+    const duringConfigWrite = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(duringConfigWrite.statusCode).toBe(503);
 
     release();
     const wipe = await wipePromise;
@@ -1846,6 +1866,9 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       expect(migrated.calls).toBe(1);
       expect(migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "MIGRATE_ME")).toBe(true);
+      // RF-b: a CLEAN migration deletes the pre-migration backup sidecars — none must be left behind (a
+      // leftover would be misread as an interrupted migration on the next boot and trigger a restore).
+      expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
       await migratedApp.close();
 
       // Rekeyed in place: a LATER boot with only the current key (no legacy key offered at all) opens
@@ -1863,6 +1886,66 @@ describe("encryption at rest + key-discard kill switch", () => {
       await expect(
         buildApp({ dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" }),
       ).rejects.toThrow();
+    });
+
+    it("RF-b: an interrupted rekey (a .premigration backup present alongside a corrupt/half loam.db) is restored on boot and migrates successfully", async () => {
+      const migrated = installFakeMigratedHook();
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-migrate-interrupt-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      // A real legacy-encrypted passphrase DB with a row we must not lose.
+      const original = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      const admin = await session(original);
+      expect((await post(original, admin.cookie, "SURVIVE_INTERRUPTED_REKEY")).statusCode).toBe(201);
+      await original.close();
+
+      // Simulate a rekey interrupted by an OS-kill AFTER the pre-migration backup was taken but BEFORE
+      // (or during) the in-place PRAGMA rekey completed: the intact legacy files are preserved under
+      // `.premigration`, while the live `loam.db` is now half-rekeyed/corrupt (openable under neither key).
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const live = join(dataDir, `loam.db${suffix}`);
+        if (existsSync(live)) {
+          copyFileSync(live, `${live}.premigration`);
+        }
+      }
+      writeFileSync(join(dataDir, "loam.db"), Buffer.from("not a database — half-rekeyed corruption"));
+
+      // Boot: Step 0b must restore the intact legacy DB from the sidecars, then the migration branch
+      // rekeys it to the current key. The row survives and the launcher is told it migrated.
+      const recovered = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMigrateFromKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(migrated.calls).toBe(1);
+      expect(
+        recovered.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_INTERRUPTED_REKEY"),
+      ).toBe(true);
+      // The successful re-migration cleaned up the sidecars.
+      expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+      await recovered.close();
+
+      // And the rekey actually took: a later boot with only the current key opens it directly.
+      const reopened = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(
+        reopened.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_INTERRUPTED_REKEY"),
+      ).toBe(true);
+      await reopened.close();
     });
 
     it("a fresh install (no prior DB) opens cleanly under the current key without ever needing the offered legacy one, and still reports migrated so the launcher stops offering it", async () => {

@@ -1,4 +1,4 @@
-import { existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
@@ -1318,6 +1318,42 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    // Step 0b (RF-b, adversarial review): resume an interrupted rekey-migration. The migration branch
+    // below rekeys the live DB in place (SQLCipher `PRAGMA rekey`), which is NOT crash-atomic — an OS-kill
+    // mid-rekey can leave `loam.db` openable under NEITHER the legacy key nor the current one, destroying
+    // pre-round-4 passphrase data. To make that recoverable, the migration branch first copies the intact
+    // legacy-encrypted files to `*.premigration` sidecars and deletes them only on rekey SUCCESS. So a
+    // `loam.db.premigration` present HERE means an earlier migration was interrupted before it finished:
+    // restore the intact originals over the (possibly half-rekeyed) live files, so this boot sees the
+    // legacy DB again and the migration retries cleanly. Best-effort — if the restore itself fails, the
+    // normal open + recovery chain below still runs (no worse than before). Sidecars hold ciphertext, not
+    // the key.
+    if (existsSync(`${dbPath}.premigration`)) {
+      try {
+        for (const suffix of ["", "-wal", "-shm"]) {
+          const live = `${dbPath}${suffix}`;
+          const backup = `${live}.premigration`;
+          // Drop the possibly-half-rekeyed live file first, then restore the intact legacy original. A
+          // `-wal`/`-shm` present with no matching backup is stale half-rekey state — removing it keeps
+          // the restored set internally consistent (the legacy `.db` opens on its own).
+          rmSync(live, { force: true });
+          if (existsSync(backup)) {
+            renameSync(backup, live);
+          }
+        }
+        server.log.warn(
+          "Restored an interrupted DB key-migration from its pre-migration backup — the legacy-encrypted " +
+            "database is intact again and the migration will be retried this boot.",
+        );
+      } catch (error) {
+        server.log.error(
+          error,
+          "Failed to restore the pre-migration DB backup after an interrupted rekey — continuing to the " +
+            "normal open/recovery path",
+        );
+      }
+    }
+
     try {
       const opened = openLoamStore();
       if (keyWasResolved && options.dbEncryptionMigrateFromKey !== undefined) {
@@ -1347,20 +1383,59 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           encryptionKey: options.dbEncryptionMigrateFromKey,
           driver: options.dbDriver,
         });
+
+        // RF-b: back up the intact legacy-encrypted files BEFORE the in-place `PRAGMA rekey`. `rekey`
+        // rewrites pages under the new key in place and is NOT crash-atomic; an OS-kill mid-rekey could
+        // leave the DB openable under neither key, permanently losing pre-round-4 passphrase data. The
+        // legacy store is open but nothing has been written to it, so the on-disk set is consistent to
+        // copy. On rekey SUCCESS these sidecars are deleted (below); on FAILURE they're left, and Step 0b
+        // on a later boot restores them and retries. If the backup itself can't be taken, do NOT proceed
+        // with an unbackable non-atomic rekey — clean up any partial sidecars and fall through instead.
+        try {
+          for (const suffix of ["", "-wal", "-shm"]) {
+            const from = `${dbPath}${suffix}`;
+            if (existsSync(from)) {
+              copyFileSync(from, `${from}.premigration`);
+            }
+          }
+        } catch (backupError) {
+          for (const suffix of ["", "-wal", "-shm"]) {
+            rmSync(`${dbPath}${suffix}.premigration`, { force: true });
+          }
+          legacyStore.close();
+          server.log.error(
+            backupError,
+            "Could not back up the legacy database before rekey — skipping the in-place migration this " +
+              "boot rather than risk an unrecoverable interrupted rekey",
+          );
+          throw backupError;
+        }
+
         try {
           legacyStore.rekey(dbKey!);
         } catch (rekeyError) {
+          // Leave the `.premigration` sidecars in place — Step 0b on the next boot restores the intact
+          // legacy DB and retries. Only the store handle is released here.
           legacyStore.close();
           throw rekeyError;
         }
+
+        // Rekey committed the new-key pages — the pre-migration backup is no longer needed; drop the
+        // sidecars so a later boot doesn't mistake them for an interrupted migration to resume.
+        for (const suffix of ["", "-wal", "-shm"]) {
+          rmSync(`${dbPath}${suffix}.premigration`, { force: true });
+        }
+
         encryptionEnabled = true;
         const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
         server.log.warn(message);
         reportDbKeyMigrated();
         return legacyStore;
       } catch {
-        // The legacy key didn't open it either (or the rekey itself failed) — this isn't a stale-
-        // derivation DB after all; fall through to the plaintext fallback / recovery chain below.
+        // The legacy key didn't open it either (or the backup/rekey itself failed) — this isn't a stale-
+        // derivation DB after all; fall through to the plaintext fallback / recovery chain below. Any
+        // `.premigration` sidecars a FAILED rekey left behind are deliberately preserved for Step 0b to
+        // resume on the next boot.
       }
     }
 
@@ -3131,8 +3206,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
     const write = async (): Promise<void> => {
       const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-      await writeFile(tmpPath, JSON.stringify(sanitized, null, 2), "utf8");
-      await rename(tmpPath, configPath);
+      try {
+        await writeFile(tmpPath, JSON.stringify(sanitized, null, 2), "utf8");
+        await rename(tmpPath, configPath);
+      } catch (error) {
+        // RF-e: a failure after `writeFile` but before/at `rename` would otherwise leak the temp file in
+        // the data dir. Best-effort cleanup (ignore its own error) before rethrowing so the caller's
+        // retry/notice policy is unchanged.
+        await rm(tmpPath, { force: true }).catch(() => {});
+        throw error;
+      }
     };
 
     try {
@@ -3174,14 +3257,46 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const hook = wipeRestartHook();
 
       if (hook) {
-        // P1-4 (Sol round 5): persist config.json DURABLY *before* writing the wipe-pending marker or
-        // signaling the launcher at all. The OLD order did this AFTER both — so a kill in the window
-        // between "launcher signaled" and "config actually persisted" could let RN clear the Keystore key
-        // and restart while this write never completed, silently reverting admin settings (the armed
-        // kill switch itself included) to config.json/defaults on the fresh boot. `persistConfigForRestart`
-        // retries once internally; if it STILL fails, the kill switch's data-destruction priority wins —
-        // proceed with the wipe regardless — but that must never look like an ordinary success, hence the
-        // distinct log line (never silently continue as if config was preserved).
+        // RF-a (adversarial review, round 5): the synchronous in-memory lockdown MUST run BEFORE this
+        // function's FIRST `await`. P1-4 had made `await persistConfigForRestart(appConfig)` the first
+        // statement here — which reopened the confidentiality window RF1 closed: during the config-file
+        // write the RF1 503-gate (`awaitingWipeRestart`) wasn't set yet, so a concurrent request was
+        // served a normal 200 from the still-populated `data`/`sessions` on the kill-switch path. So lock
+        // everything down FIRST, synchronously, with NO await — even a request already queued behind this
+        // turn of the event loop then sees the 503, not stale content. `appConfig` is deliberately left
+        // intact by this block; it's persisted just below, still BEFORE the marker + hook, as P1-4 wants.
+        awaitingWipeRestart = true;
+        data = { users: [], channels: [], messages: [] };
+        attachmentOwners.clear();
+        sessions.clear();
+        identityTokens.clear();
+        claimAttempts.clear();
+        panicAttempts.clear();
+        transportSessions.clear();
+        peerTransportSessions.clear();
+
+        // Notify still-connected clients to purge their local caches BEFORE closing their sockets —
+        // closing first would leave the broadcast with no one left to reach.
+        broadcast({ type: "wipe" });
+
+        for (const { socket } of sockets) {
+          socket.close();
+        }
+        sockets.clear();
+        for (const pending of [...pendingSockets]) {
+          pending.close();
+        }
+
+        // P1-4 (Sol round 5): persist config.json DURABLY now — still BEFORE writing the wipe-pending
+        // marker or signaling the launcher (the order P1-4 requires), just AFTER the synchronous lockdown
+        // above (the order RF-a requires). A kill in the window between "launcher signaled" and "config
+        // actually persisted" could otherwise let RN clear the Keystore key and restart while this write
+        // never completed, silently reverting admin settings (the armed kill switch itself included) to
+        // config.json/defaults on the fresh boot. The lockdown above already closed the confidentiality
+        // window, so this await can no longer serve stale content. `persistConfigForRestart` retries once
+        // internally; if it STILL fails, the kill switch's data-destruction priority wins — proceed with
+        // the wipe regardless — but that must never look like an ordinary success, hence the distinct log
+        // line (never silently continue as if config was preserved).
         const configPersisted = await persistConfigForRestart(appConfig);
         if (!configPersisted) {
           server.log.error(
@@ -3196,93 +3311,59 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // not silently lost. main.js re-posts `loam-wipe-restart` on its NEXT boot for as long as this
         // marker is present, and deletes it itself only once it receives `loam-wipe-complete` — i.e.
         // only once `clearStoredDbKeys()` VERIFIED the key material is gone (see db-encryption.ts).
-        // Written synchronously, before any of the lockdown state below, which itself must land before
-        // this function's next `await`.
-        let markerWritten = false;
+        // Written synchronously; NOT fsync'd, so a hard power-loss in this window could in theory lose the
+        // marker on some filesystems (Sol round-4 #2, accepted low — the resumed handoff is a process-kill
+        // mechanism). We are already committed to the launcher handoff at this point (the lockdown above
+        // cleared in-memory state and 503'd every route), so a marker-write failure no longer falls back
+        // to a same-key logical wipe — it only means the handoff isn't RESUMABLE if this process is killed
+        // before the launcher acks; the ciphertext is deleted below regardless, so no data survives either
+        // way.
         try {
-          // Synchronous so it lands before the in-memory lockdown + the destructive deletes below. This
-          // guarantees durability against an OS-killed process (the real threat on Android — the app being
-          // backgrounded/reaped mid-wipe), which is what the resume-on-boot handoff recovers from; it is
-          // NOT fsync'd, so a hard power-loss in this window could in theory lose the marker on some
-          // filesystems (Sol round-4 #2, accepted low — the resumed handoff is a process-kill mechanism).
           writeFileSync(wipePendingMarkerPath, String(Date.now()), "utf8");
-          markerWritten = true;
         } catch (error) {
           server.log.error(
             error,
-            "Kill switch: failed to write the wipe-pending marker — falling back to a same-key logical " +
-              "wipe rather than a launcher handoff with no durable resume record",
+            "Kill switch: failed to write the wipe-pending marker — the launcher handoff proceeds anyway " +
+              "(the ciphertext is still deleted below), but a process-kill before the launcher acks won't " +
+              "be resumable from a durable record",
           );
         }
 
-        if (markerWritten) {
-          // P1-2(a): close the confidentiality window. EVERY piece of in-memory lockdown below is
-          // synchronous and runs BEFORE this function's NEXT `await` (closing the store and deleting its
-          // files, further down — config.json is now already durably persisted ABOVE, before the marker
-          // write, per P1-4) — a concurrent request arriving while that later async work is still in
-          // flight must never observe stale in-memory data. `awaitingWipeRestart` is what the `onRequest`
-          // hook 503s on; setting it (and clearing `data` and every session/auth map) here, synchronously,
-          // means even a request already queued behind this turn of the event loop sees the lockdown, not
-          // a stale 200.
-          awaitingWipeRestart = true;
-          data = { users: [], channels: [], messages: [] };
-          attachmentOwners.clear();
-          sessions.clear();
-          identityTokens.clear();
-          claimAttempts.clear();
-          panicAttempts.clear();
-          transportSessions.clear();
-          peerTransportSessions.clear();
-
-          // Notify still-connected clients to purge their local caches BEFORE closing their sockets —
-          // closing first would leave the broadcast with no one left to reach.
-          broadcast({ type: "wipe" });
-
-          for (const { socket } of sockets) {
-            socket.close();
-          }
-          sockets.clear();
-          for (const pending of [...pendingSockets]) {
-            pending.close();
-          }
-
-          // Signal the launcher now that the durable marker is on disk and every reader of in-memory
-          // state is already locked out. This is NOT yet a confirmed cryptographic wipe from the
-          // operator's perspective — that's only true once the launcher acks with `loam-wipe-complete`
-          // and deletes the marker above (P1-2b); this process has no way to observe that ack (it may
-          // not even survive to see it), so the log line below deliberately describes the wipe as
-          // REQUESTED, not completed.
-          try {
-            hook();
-          } catch (error) {
-            server.log.error(error, "Kill switch: failed to signal the RN launcher for the wipe-restart handoff");
-          }
-
-          store.close();
-          for (const suffix of ["", "-wal", "-shm"]) {
-            await rm(`${dbPath}${suffix}`, { force: true });
-          }
-          await rm(avatarsDir, { recursive: true, force: true });
-          await rm(attachmentsDir, { recursive: true, force: true });
-
-          server.log.warn(
-            "Kill switch: persistent/passphrase-encrypted database deleted; a device-key-clear-and-restart " +
-              "was REQUESTED from the launcher (durable pending marker written) — the key rotation is only " +
-              "confirmed once the launcher acknowledges it cleared the Keystore key.",
-          );
-          return;
+        // Signal the launcher now that in-memory state is locked out and (best-effort) the durable marker
+        // is on disk. This is NOT yet a confirmed cryptographic wipe from the operator's perspective —
+        // that's only true once the launcher acks with `loam-wipe-complete` and deletes the marker above
+        // (P1-2b); this process has no way to observe that ack (it may not even survive to see it), so the
+        // log line below deliberately describes the wipe as REQUESTED, not completed.
+        try {
+          hook();
+        } catch (error) {
+          server.log.error(error, "Kill switch: failed to signal the RN launcher for the wipe-restart handoff");
         }
+
+        store.close();
+        for (const suffix of ["", "-wal", "-shm"]) {
+          await rm(`${dbPath}${suffix}`, { force: true });
+        }
+        await rm(avatarsDir, { recursive: true, force: true });
+        await rm(attachmentsDir, { recursive: true, force: true });
+
+        server.log.warn(
+          "Kill switch: persistent/passphrase-encrypted database deleted; a device-key-clear-and-restart " +
+            "was REQUESTED from the launcher (durable pending marker written) — the key rotation is only " +
+            "confirmed once the launcher acknowledges it cleared the Keystore key.",
+        );
+        return;
       }
 
-      // No launcher hook available (desktop/Pi/CI — not the Android host), or the durable marker
-      // couldn't be written: there is nowhere to get a NEW key from in-process, or no safe/resumable way
-      // to hand off for one. Fall through to the existing recreate-under-the-same-key behaviour rather
-      // than bricking the wipe entirely; this is a documented limitation; see docs/02.
+      // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a NEW
+      // key from in-process. Fall through to the existing recreate-under-the-same-key behaviour rather
+      // than bricking the wipe entirely; this is a documented limitation; see docs/02. (When a hook IS
+      // present the block above always returns — it commits to the handoff after the synchronous lockdown,
+      // even if the durable marker write happened to fail; RF-a.)
       server.log.warn(
-        "Kill switch: this node uses a fixed (persistent/passphrase) encryption key, but no safe launcher " +
-          "handoff is available (no restart hook installed, or the durable wipe-pending marker could not " +
-          "be written), so the key cannot be rotated in-process. Falling back to a logical wipe that " +
-          "recreates the database under the SAME key (documented limitation, docs/02).",
+        "Kill switch: this node uses a fixed (persistent/passphrase) encryption key, but no launcher " +
+          "restart hook is installed, so the key cannot be rotated in-process. Falling back to a logical " +
+          "wipe that recreates the database under the SAME key (documented limitation, docs/02).",
       );
     }
 
