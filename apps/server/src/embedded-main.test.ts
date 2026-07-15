@@ -204,3 +204,99 @@ describe("P1-1 end-to-end (Sol round 3): db_encryption_unreadable keeps the runt
     }
   });
 });
+
+describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let listenersBefore: readonly NodeJS.UnhandledRejectionListener[];
+  const envKeys = ["LOAM_DATA_DIR", "LOAM_CLIENT_DIST"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    vi.resetModules();
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    listenersBefore = process.listeners("unhandledRejection");
+    // The module-scope `void bootEmbeddedServer()` (embedded-main.ts's bottom) fires on import, using
+    // the REAL (unmocked) `startEmbeddedServer` as its default `start` argument — keep LOAM_DATA_DIR
+    // unset so that unrelated auto-boot attempt rejects fast (missing-env validation, no port ever
+    // touched) and its `bootInFlight` guard clears well before this test's own controlled scenario
+    // starts. Without this, that auto-boot's in-flight promise would swallow both of this test's calls
+    // (the guard is exactly what's under test) and `start` below would never even run.
+    for (const key of envKeys) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const listener of process.listeners("unhandledRejection")) {
+      if (!listenersBefore.includes(listener)) {
+        process.off("unhandledRejection", listener);
+      }
+    }
+    exitSpy.mockRestore();
+    uninstallFakeBridge();
+    for (const key of envKeys) {
+      if (savedEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it("a re-entrant call while a boot is already in flight does not start a second concurrent attempt (no double listen(), no process.exit killing the survivor)", async () => {
+    const reports = installFakeBridge();
+
+    const mod = await import("./embedded-main.js");
+    // Let the unrelated module-scope auto-boot (real startEmbeddedServer, missing LOAM_DATA_DIR) settle
+    // and clear `bootInFlight` before this test's own scenario begins.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    reports.length = 0;
+    exitSpy.mockClear();
+
+    let startCalls = 0;
+    let resolveStart!: (app: LoamApp) => void;
+    const gate = new Promise<LoamApp>((resolve) => {
+      resolveStart = resolve;
+    });
+    const start = async (): Promise<LoamApp> => {
+      startCalls += 1;
+      return gate;
+    };
+
+    // First call: begins a boot attempt and doesn't resolve yet (simulates `buildApp()`/`listen()`
+    // still mid-flight).
+    const first = mod.bootEmbeddedServer(start);
+
+    // Re-entrant call while the first is still pending — a double-tap of "start fresh" (main.js's
+    // `loam-db-start-fresh` listener calling `__loamBootEmbeddedServer()` again) reduces to exactly
+    // this. Without the guard this would invoke `start` a second time and race a second
+    // `buildApp()`/`listen()` against the first.
+    const second = mod.bootEmbeddedServer(start);
+
+    // Let both calls' synchronous/microtask work settle.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(startCalls).toBe(1); // the guard suppressed the second concurrent attempt
+    expect(exitSpy).not.toHaveBeenCalled(); // no EADDRINUSE-style loser being killed
+    expect(reports).toEqual([]);
+
+    // Resolve the one real attempt; both callers' promises settle together, since `second` is just the
+    // SAME in-flight promise as `first`.
+    const app = {} as LoamApp;
+    resolveStart(app);
+    await Promise.all([first, second]);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(reports).toEqual([]);
+
+    // The guard clears once the attempt settles: a later, genuinely separate call boots again rather
+    // than being stuck returning the same resolved promise forever.
+    let laterCalls = 0;
+    await mod.bootEmbeddedServer(async () => {
+      laterCalls += 1;
+      return app;
+    });
+    expect(laterCalls).toBe(1);
+  });
+});

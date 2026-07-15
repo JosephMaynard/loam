@@ -175,7 +175,11 @@ function waitForServer(attempt) {
 /** Retry the readiness probe with a fixed backoff, giving up after ~5 minutes. */
 function retry(attempt) {
   if (attempt > 600) {
-    notify('error', { message: 'Server did not become ready in time.' });
+    // RF3: an explicit code (rather than none at all) so index.tsx can tell THIS specific give-up apart
+    // from other generic errors — it's the one codeless-in-the-past case that used to silently clobber
+    // an active "Preserve old database & start fresh" recovery state (db_encryption_unreadable) whenever
+    // this timeout fired mid-retry.
+    notify('error', { message: 'Server did not become ready in time.', code: 'boot_timeout' });
     return;
   }
   setTimeout(() => waitForServer(attempt + 1), 500);
@@ -624,8 +628,30 @@ function clearEphemeralMarker() {
 // boot as proof a human actually chose this, not an automatic behaviour.
 var START_FRESH_MARKER_PATH = path.join(dataDir, '.loam-db-start-fresh');
 
+// RF2: true while a reboot THIS listener triggered is still running. `bootEmbeddedServer` itself is
+// now re-entrant-safe (embedded-main.ts ignores/joins a concurrent call rather than racing a second
+// `listen()`), but debouncing here too means a double-tap of the button doesn't even re-write the
+// marker or post a second `loam-db-start-fresh-result` — belt-and-suspenders against the exact bug a
+// re-entrant in-process reboot caused: two overlapping boots racing `EADDRINUSE` into `process.exit(1)`
+// and killing the recovered server.
+var startFreshRebootInFlight = false;
+
 rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   var requestId = payload && payload.requestId;
+
+  if (startFreshRebootInFlight) {
+    try {
+      rnBridge.channel.post('loam-db-start-fresh-result', {
+        requestId: requestId,
+        ok: false,
+        error: 'A start-fresh recovery is already in progress.',
+      });
+    } catch (postErr) {
+      // RN side isn't listening — nothing more to do.
+    }
+    return;
+  }
+
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(START_FRESH_MARKER_PATH, String(Date.now()), 'utf8');
@@ -655,11 +681,21 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   // will pick up the recovered server's readiness on its own; nothing else to wire up here.
   var reboot = global.__loamBootEmbeddedServer;
   if (typeof reboot === 'function') {
+    // Cleared once the retry's OUTCOME (resolve or reject) is actually observed — NOT synchronously
+    // after this call — so a duplicate message that arrives while the retry is still mid-flight hits
+    // the debounce above instead of triggering a second overlapping boot (RF2).
+    startFreshRebootInFlight = true;
     try {
-      reboot().catch(function (err) {
-        console.error('Retry boot after start-fresh confirmation failed', err);
-      });
+      reboot()
+        .then(function () {
+          startFreshRebootInFlight = false;
+        })
+        .catch(function (err) {
+          startFreshRebootInFlight = false;
+          console.error('Retry boot after start-fresh confirmation failed', err);
+        });
     } catch (err) {
+      startFreshRebootInFlight = false;
       console.error('Failed to invoke the retry-boot hook after start-fresh confirmation', err);
     }
   } else {

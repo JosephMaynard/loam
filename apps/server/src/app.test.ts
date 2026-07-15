@@ -23,6 +23,28 @@ import {
 
 import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.js";
 
+// RF4: a single-shot fault-injection seam for `node:fs`'s `renameSync`, used ONLY by the "marker-
+// confirmed recovery failure" test below to make `openInitialStore`'s rename-aside step throw
+// synthetically (there's no other way to force that specific failure deterministically — the real
+// call happens between two other `node:fs` calls in the same synchronous function, so OS-permission
+// tricks can't isolate it). `renameFailure.armed` defaults to `undefined` (pass straight through to the
+// real implementation) and self-disarms the instant it fires, so every other test in this file — which
+// never arms it — is completely unaffected; every other `node:fs` export is untouched (`...actual`).
+const renameFailure = vi.hoisted(() => ({ armed: false }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    renameSync: (...args: Parameters<typeof actual.renameSync>) => {
+      if (renameFailure.armed) {
+        renameFailure.armed = false;
+        throw new Error("simulated renameSync failure (RF4 test fault injection)");
+      }
+      return actual.renameSync(...args);
+    },
+  };
+});
+
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -1402,6 +1424,56 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
   });
 
+  it("RF1: persistent-mode wipe-restart takes effect immediately (503 on everything but /api/health) instead of leaving the running process serving stale in-memory content until a manual restart", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "still readable before the wipe?")).statusCode).toBe(201);
+
+    // Sanity: before the wipe, the admin's cookie sees the node's data as normal.
+    const before = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(before.statusCode).toBe(200);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+
+    // The SAME still-valid-looking cookie must not see any in-memory content: no stale 200 while this
+    // process waits for the launcher to actually restart it.
+    const afterWithCookie = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(afterWithCookie.statusCode).toBe(503);
+
+    // A brand-new (cookie-less) request is refused identically — it must not mint a fresh identity or
+    // see any re-seeded default content on this still-live process either.
+    const afterFreshSession = await app.server.inject({ method: "GET", url: "/api/channels" });
+    expect(afterFreshSession.statusCode).toBe(503);
+
+    // Posting is refused too — the process cannot accept new writes while it awaits its restart.
+    const afterPost = await post(app, admin.cookie, "should never be accepted");
+    expect(afterPost.statusCode).toBe(503);
+
+    // The one exception: the Android launcher's liveness probe still works, so it can tell the process
+    // is still alive (and eventually notice/trigger the actual restart).
+    const health = await app.server.inject({ method: "GET", url: "/api/health" });
+    expect(health.statusCode).toBe(200);
+  });
+
   it("P1-2: falls back to the existing recreate-under-the-SAME-key behaviour when no launcher restart hook is installed (desktop/CI — documented limitation)", async () => {
     // Deliberately NOT installing __loamRequestWipeRestart — simulates a non-Android host.
     const { app, dataDir } = await makeEncryptedApp(
@@ -1567,6 +1639,46 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect(recovered.store.loadMessages()).toEqual([]);
       const recoveredAdmin = await session(recovered);
       expect((await post(recovered, recoveredAdmin.cookie, "fresh after recovery")).statusCode).toBe(201);
+    });
+
+    it("RF4: a rename/open failure during marker-confirmed recovery is recast as a recoverable db_encryption_unreadable, not a generic throw that would kill the process", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "seed")).statusCode).toBe(201);
+      await original.close();
+
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+
+      // Force the marker-confirmed recovery's rename-aside step to throw AFTER the marker has already
+      // been consumed by step 0 — the exact scenario RF4 fixes (a failure here used to propagate as a
+      // generic, untyped error rather than the recoverable `db_encryption_unreadable` case). Single-shot:
+      // it fires on the very next `renameSync` call (the recovery block's — nothing else in this boot
+      // path calls it first) and immediately self-disarms.
+      renameFailure.armed = true;
+
+      await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" })).rejects.toThrow(
+        /Start-fresh recovery failed/,
+      );
+
+      // Recast as the SAME typed, recoverable error case 3 (no marker / genuinely unopenable) throws —
+      // NOT a generic error, which `embedded-main.ts` would treat as unrecoverable and `process.exit(1)`
+      // on instead of staying alive for a retry.
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+
+      // The marker was already consumed before the injected failure (step 0 runs first) — it must not
+      // linger to silently re-authorize some LATER, unrelated failure the operator never confirmed.
+      expect(existsSync(startFreshMarkerPath(dataDir))).toBe(false);
+
+      // A fresh confirmation lets the operator retry immediately and actually succeed this time — the
+      // fault injection was single-shot, so this second attempt hits the real (un-mocked) renameSync.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" });
+      cleanups.push(() => recovered.close());
+      expect(recovered.store.loadMessages()).toEqual([]);
+      const recoveredAdmin = await session(recovered);
+      expect((await post(recovered, recoveredAdmin.cookie, "after RF4 retry")).statusCode).toBe(201);
     });
 
     it("P1-3: two successive marker-confirmed recoveries each keep their OWN preserved copy — the second never overwrites the first", async () => {

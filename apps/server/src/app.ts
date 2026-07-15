@@ -1171,6 +1171,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // POST-bump generation and see no further change, so it needs its own explicit "don't start" guard
   // (SF3) — `retryMissingAttachments` checks this before doing any work.
   let wipeInProgress = false;
+  // RF1: set for the remainder of this process's life once a persistent/passphrase-encrypted node's
+  // kill switch hands off to the RN launcher for a key-rotation restart (executeKillSwitchBody). The
+  // ciphertext is already deleted and in-memory state is cleared at that point, but this process keeps
+  // running until the launcher actually restarts it — so every route except the liveness probe must
+  // refuse (503) rather than let a stale in-memory read or a surviving transport session serve content
+  // in the gap between "wipe requested" and "process restarted".
+  let awaitingWipeRestart = false;
   // SF3: single-flight guard for `retryMissingAttachments` — each work item's fetch can consume the
   // full 10s peer timeout, so without this an overlapping 30s reaper tick (a handful of unreachable
   // records outlasting the tick) would stack unbounded concurrent passes/requests.
@@ -1301,22 +1308,42 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw new DbEncryptionUnreadableError(message);
     }
 
-    // Unique per recovery (not just per-file) so a SECOND unopenable-DB recovery keeps its own set
-    // alongside the first, instead of renaming onto a fixed name and destroying the earlier copy (P1-3).
-    const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-    for (const suffix of ["", "-wal", "-shm"]) {
-      const from = `${dbPath}${suffix}`;
-      if (existsSync(from)) {
-        renameSync(from, `${from}.unreadable-${preservedSuffix}`);
+    // RF4: the marker was already consumed (step 0) by this point, so this block is wrapped — a
+    // `renameSync`/fresh-open failure HERE (permissions, disk full, a concurrent modification) used to
+    // propagate as a plain, untyped error. `buildApp` has no special handling for that, so it reached
+    // `embedded-main.ts`'s catch as a GENERIC failure, which `process.exit(1)`s — throwing away the
+    // stay-alive recovery path this whole function exists to provide, and forcing the operator to redo
+    // the "Preserve old database & start fresh" confirmation from scratch (the marker is already gone)
+    // just to get another attempt. Recast any failure here as the SAME typed, recoverable
+    // `DbEncryptionUnreadableError` case 3 above throws, so `embedded-main.ts` takes the stay-alive path
+    // and a fresh confirmation can retry immediately, in-process.
+    try {
+      // Unique per recovery (not just per-file) so a SECOND unopenable-DB recovery keeps its own set
+      // alongside the first, instead of renaming onto a fixed name and destroying the earlier copy (P1-3).
+      const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const from = `${dbPath}${suffix}`;
+        if (existsSync(from)) {
+          renameSync(from, `${from}.unreadable-${preservedSuffix}`);
+        }
       }
-    }
 
-    const message =
-      "The database could not be opened; an explicit start-fresh confirmation was present, so the " +
-      `previous files were preserved on disk (suffix "${preservedSuffix}") and a fresh database was started.`;
-    server.log.warn(message);
-    reportBootNotice(message, "db_encryption_recovered_fresh");
-    return openLoamStore();
+      const message =
+        "The database could not be opened; an explicit start-fresh confirmation was present, so the " +
+        `previous files were preserved on disk (suffix "${preservedSuffix}") and a fresh database was started.`;
+      server.log.warn(message);
+      reportBootNotice(message, "db_encryption_recovered_fresh");
+      return openLoamStore();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const message =
+        "Start-fresh recovery failed while renaming the previous database aside or opening a fresh " +
+        `one (${detail}). The start-fresh confirmation was already consumed, so boot failed as if it ` +
+        "were unopened again; the operator can confirm start-fresh again to retry.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
   }
 
   let store = openInitialStore();
@@ -3047,6 +3074,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           pending.close();
         }
 
+        // RF1: reads are served from these in-memory mirrors, NOT the (now-closed, now-deleted) store —
+        // without this the process keeps serving the pre-wipe content with 200 OK until the operator
+        // manually restarts it. Reset to empty rather than `loadData()`: the DB file is gone, so there
+        // is nothing on disk to reload.
+        data = { users: [], channels: [], messages: [] };
+        // Drop every live/cached transport session in memory (store is closed — no `setConfigValue`,
+        // so this is the in-memory-only equivalent of `rotateTransportIdentity()`, not a call to it).
+        transportSessions.clear();
+        peerTransportSessions.clear();
+
+        // Belt-and-suspenders (docs/15): don't rely on the launcher restart alone to stop this process
+        // from serving. Every route except the liveness probe 503s from here until the process actually
+        // restarts — see the `awaitingWipeRestart` check at the top of the transport `onRequest` hook.
+        awaitingWipeRestart = true;
+
         server.log.warn(
           "Kill switch: persistent/passphrase-encrypted database deleted; handed off to the launcher to " +
             "clear the device key and restart — the next boot creates a fresh key together with a fresh database.",
@@ -4489,6 +4531,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // ciphertext for message/DM/config CONTENT. GET request paths + query strings and image bytes remain
   // visible (metadata); that's the documented Layer-1 scope. All inert when the mode is `off`.
   server.addHook("onRequest", async (request, reply) => {
+    // RF1: once a persistent/passphrase kill switch has handed off to the launcher for a restart, this
+    // process must not serve anything from its (deliberately) stale in-memory mirrors while it waits to
+    // be torn down. Checked before EVERYTHING else, including the internal tunnel bypass — the only
+    // route that stays reachable is the liveness probe, so the Android launcher's readiness poll still
+    // works. See `executeKillSwitchBody`.
+    if (awaitingWipeRestart && request.routeOptions?.url !== "/api/health") {
+      return reply.code(503).send(errorBody("This node is restarting after a kill switch reset."));
+    }
     // An internal tunnel re-dispatch runs plaintext inside the process — never enforce/decrypt it
     // (its response is sealed by the outer tunnel request instead). Checked before anything else so
     // it holds in every mode.

@@ -237,7 +237,24 @@ export default function HostScreen() {
         nodeStatus = 'error';
         setStatus('error');
         setErrorMessage(payload.message);
-        setErrorCode(payload.code);
+        setErrorCode((current) => {
+          // RF3: a generic, codeless boot error — chiefly main.js's ~5-min readiness-poll give-up
+          // (`waitForServer`'s `retry`, which historically posted no `code` at all) — must not clobber
+          // an ACTIVE `db_encryption_unreadable` recovery state. Without this, that codeless error
+          // overwrote `errorCode` to `undefined`, `dbUnreadable` went false, and the "Preserve old
+          // database & start fresh" button silently vanished even though recovery was still possible
+          // (the operator would have to force-quit and reopen the app to see it again). `'boot_timeout'`
+          // is main.js's now-explicit code for that same give-up path — treated the same way here.
+          if (current === DB_UNREADABLE_CODE && (payload.code === undefined || payload.code === 'boot_timeout')) {
+            return current;
+          }
+          return payload.code;
+        });
+        // RF2: this is the retry's OUTCOME (see `handleStartFresh`, which now leaves `startFreshBusy`
+        // true past the marker-write ack specifically so a double-tap can't trigger a second overlapping
+        // in-process reboot) — release the busy state now that it's known, whether or not this error is
+        // start-fresh-related. Harmless when it isn't: `startFreshBusy` is already false in that case.
+        setStartFreshBusy(false);
       }
     };
 
@@ -381,11 +398,19 @@ export default function HostScreen() {
     setStartFreshBusy(true);
     setStartFreshMessage(undefined);
     const result = await requestDbStartFresh(nodejs.channel);
-    setStartFreshBusy(false);
     if (!result.ok) {
+      // The marker write itself failed — main.js never got to (re)invoke boot, so there is no retry in
+      // flight to wait for; safe to let the operator try again immediately.
+      setStartFreshBusy(false);
       setStartFreshMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
       return;
     }
+    // RF2: main.js's `loam-db-start-fresh` listener retries boot immediately after this ack. Leave
+    // `startFreshBusy` true past this point — NOT just until the ack returns — until that retry's
+    // OUTCOME is actually observed (`onStatus`'s `'ready'` or `'error'` branch above, both of which
+    // reset it). Otherwise the button re-enables while the retry is still mid-flight and a second tap
+    // could race a second in-process reboot attempt against the first — main.js and embedded-main.ts
+    // both now also guard against that directly, but the UI should never even offer the chance.
     setStartFreshMessage(
       'Confirmed — the old database is preserved on disk and a fresh one is starting now…',
     );

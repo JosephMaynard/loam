@@ -59,6 +59,17 @@ function hasDbEncryptionUnreadableCode(error: unknown): boolean {
   );
 }
 
+// RF2: guards against a re-entrant `bootEmbeddedServer()` call racing an already-in-flight one. Without
+// this, a double-tap of the RN launcher's "start fresh" button (or any duplicate `loam-db-start-fresh`
+// message — see main.js) could call `globalThis.__loamBootEmbeddedServer()` a second time while the
+// first retry's `buildApp()`/`server.listen()` is still mid-flight: two `listen()` calls race the same
+// port, the LOSER gets an untyped `EADDRINUSE` that falls through to the generic-failure branch below,
+// and `process.exit(1)` kills the whole process — including the FIRST attempt, even if it was about to
+// recover successfully. Tracking the in-flight promise (rather than a bare boolean) also means a
+// re-entrant caller still gets a promise that resolves/rejects in step with the attempt actually doing
+// the work, instead of resolving early and racing ahead of it.
+let bootInFlight: Promise<void> | undefined;
+
 /**
  * Boot the embedded server, reporting any async startup failure — a rejection from `start()` itself,
  * or one that escapes its promise chain entirely (e.g. an un-awaited fire-and-forget task started
@@ -72,8 +83,28 @@ function hasDbEncryptionUnreadableCode(error: unknown): boolean {
  * operator has confirmed the start-fresh marker. A prior attempt that failed with
  * `db_encryption_unreadable` never reached `app.server.listen()`, so nothing is bound/leaked to redo —
  * a later successful call just picks up where the first one left off.
+ *
+ * Re-entrant-safe (RF2): a call made while a previous call is still running does not start a second
+ * concurrent attempt — it just returns the SAME in-flight promise, so both callers observe the one
+ * attempt's real outcome. The guard clears once that attempt settles (success, the recoverable
+ * `db_encryption_unreadable` return, or the fatal `process.exit`), so a later, genuinely separate call
+ * (e.g. a second start-fresh confirmation after the first attempt already finished) still boots.
  */
-export async function bootEmbeddedServer(start: () => Promise<LoamApp> = startEmbeddedServer): Promise<void> {
+export function bootEmbeddedServer(start: () => Promise<LoamApp> = startEmbeddedServer): Promise<void> {
+  if (bootInFlight) {
+    return bootInFlight;
+  }
+
+  const attempt = runBootAttempt(start).finally(() => {
+    bootInFlight = undefined;
+  });
+  bootInFlight = attempt;
+  return attempt;
+}
+
+/** The actual boot attempt, split out so {@link bootEmbeddedServer} can guarantee `bootInFlight` is
+ *  cleared once it settles regardless of how this returns. */
+async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
   const onUnhandledDuringBoot = (reason: unknown): void => {
     console.error("Unhandled rejection during embedded server startup:", reason);
     reportBootError(messageOf(reason), "boot_unhandled_rejection");
