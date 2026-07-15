@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -640,6 +641,94 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
       fresh.close();
     }
 
+    expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
+  });
+
+  // P1-1 (Sol round 4): exercises the EXACT key-derivation formula `resolveDbKey` uses
+  // (apps/app/src/lib/db-encryption.ts) — reimplemented here with Node's own `crypto` (SHA-256,
+  // lowercase hex, identical output to `expo-crypto`'s `digestStringAsync`) since that module depends on
+  // expo-secure-store/expo-crypto and apps/app has no test runner. `deviceSecret` stands in for the
+  // Keystore-held `loam-db-encryption-device-secret` item; "wipe" is simulated by discarding secret-A
+  // and minting a fresh secret-B, exactly what `clearStoredDbKeys` + the next `resolveDbKey` call do.
+  function sha256Hex(input: string): string {
+    return createHash("sha256").update(input, "utf8").digest("hex");
+  }
+
+  it("P1-1 persistent mode: the key IS the device secret — wiping (discarding secret-A, minting secret-B) opens a fresh DB under key-B that key-A can never open, and no plaintext DB is ever created", () => {
+    const deviceSecretA = "device-secret-a-32-random-bytes-hex";
+    // 'persistent' mode: key = deviceSecret, verbatim (see resolveDbKey's 'persistent' branch).
+    const keyA = deviceSecretA;
+
+    const original = openStore(dbPath, { encryptionKey: keyA });
+    original.upsertUser(makeUser("user.doomed"));
+    original.insertMessage(makeChannelPost("msg_before_wipe"));
+    original.close();
+    // Sanity: the file that exists is genuinely encrypted, not a plaintext fallback.
+    expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+
+    // executeKillSwitchBody's fixed-key branch: delete the ciphertext, hand off for a restart.
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+    expect(existsSync(dbPath)).toBe(false);
+
+    // clearStoredDbKeys deletes the OLD device secret; the NEXT resolveDbKey('persistent') call mints a
+    // genuinely new one (getOrCreateDeviceSecret) — never reusing secret-A.
+    const deviceSecretB = "device-secret-b-a-totally-different-value";
+    expect(deviceSecretB).not.toBe(deviceSecretA);
+    const keyB = deviceSecretB;
+
+    const fresh = openStore(dbPath, { encryptionKey: keyB });
+    try {
+      expect(fresh.loadUsers()).toEqual([]); // no memory of the wiped data
+      expect(fresh.loadMessages()).toEqual([]);
+      fresh.upsertUser(makeUser("user.after"));
+      expect(fresh.loadUsers()).toEqual([makeUser("user.after")]);
+      // Still genuinely encrypted — NEVER a plaintext fallback for this mode.
+      expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+      expect(() => openStore(dbPath, { driver: "node-sqlite" })).toThrow(); // not openable plaintext either
+    } finally {
+      fresh.close();
+    }
+
+    // The OLD device-secret-derived key can never open the new (post-wipe) file.
+    expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
+  });
+
+  it("P1-1 passphrase mode: SAME passphrase + a freshly-minted device secret still yields a brand-new key — wiping opens a fresh DB the OLD passphrase-derived key can never open, and no plaintext DB is ever created", () => {
+    const passphrase = "the operator's unchanged passphrase";
+    const deviceSecretA = "device-secret-a-32-random-bytes-hex";
+    // 'passphrase' mode: key = SHA256(passphrase + ':' + deviceSecret) — see resolveDbKey's 'passphrase'
+    // branch. The passphrase itself is UNCHANGED across the wipe (clearStoredDbKeys never deletes it).
+    const keyA = sha256Hex(`${passphrase}:${deviceSecretA}`);
+
+    const original = openStore(dbPath, { encryptionKey: keyA });
+    original.upsertUser(makeUser("user.doomed"));
+    original.close();
+    expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+
+    // A wipe deletes ONLY the device secret (never the passphrase) — the very next boot's
+    // getOrCreateDeviceSecret mints a fresh one, and the SAME passphrase combined with it still
+    // produces a completely different digest.
+    const deviceSecretB = "device-secret-b-a-totally-different-value";
+    const keyB = sha256Hex(`${passphrase}:${deviceSecretB}`);
+    expect(keyB).not.toBe(keyA);
+
+    const fresh = openStore(dbPath, { encryptionKey: keyB });
+    try {
+      expect(fresh.loadUsers()).toEqual([]);
+      expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).not.toBe("SQLite format 3");
+      expect(() => openStore(dbPath, { driver: "node-sqlite" })).toThrow();
+    } finally {
+      fresh.close();
+    }
+
+    // The SAME passphrase alone (keyed to the OLD, now-discarded device secret) can never open the new
+    // (post-wipe) file — proving the wipe genuinely rotated the key even though the passphrase survived.
     expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
   });
 });

@@ -36,9 +36,9 @@ function notify(status, extra) {
 }
 
 // Boot-notice codes (P1-4 / AF2): these all mean the server DEGRADED but kept booting — a DB opened
-// unencrypted after a key mismatch, a fresh DB after an unreadable one, no key available yet, or the
-// encrypted driver being absent — never that boot failed. `waitForServer` below still runs and will
-// post 'ready' once the server actually answers. Reported as status 'notice', NOT 'error': the RN host
+// unencrypted after a key mismatch, a fresh DB after an unreadable one, or the encrypted driver being
+// absent — never that boot failed. The readiness probe below (`startReadinessProbe`/`probeServer`) still
+// runs and will post 'ready' once the server actually answers. Reported as status 'notice', NOT 'error': the RN host
 // screen must not treat these as fatal (they used to arrive as 'error' and then get silently clobbered
 // the moment 'ready' followed — see index.tsx's persistent notice state, AF2/P1-4). Any OTHER code
 // (e.g. `boot_failed`/`boot_unhandled_rejection` from embedded-main.ts, where the process exits and
@@ -52,12 +52,16 @@ function notify(status, extra) {
 // just a confusing double-report. It now arrives as a single 'error' with the specific code, the runtime
 // stays alive (embedded-main.ts no longer exits for this one), and index.tsx shows it as a persistent
 // FATAL state with the "Preserve old database & start fresh" action — see index.tsx's DB_UNREADABLE_CODE.
-const DB_ENCRYPTION_NOTICE_CODES = [
-  'db_encryption_open_failed',
-  'db_encryption_recovered_fresh',
-  'db_encryption_no_key',
-  'db_encryption_unavailable',
-];
+//
+// `db_encryption_locked` is ALSO deliberately not in this list (P1-1, Sol round 4): it means a
+// `persistent`/`passphrase` boot found no usable key and REFUSED to start the server at all — never a
+// "degraded but booted" case like the others here, so it must arrive as a real 'error' too. index.tsx
+// shows its own dedicated fatal block (boot-time passphrase-unlock / retry), keyed on this exact code.
+// (`db_encryption_no_key` — the PRE-P1-1-round-4 code for "encrypted mode, no key" — used to live here
+// too, back when that case silently downgraded to a plaintext boot instead of staying locked; it is no
+// longer emitted by this file at all, but `index.tsx`'s defensive fallback set still recognizes it in
+// case an older bundled build is ever paired with a newer one.)
+const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_open_failed', 'db_encryption_recovered_fresh', 'db_encryption_unavailable'];
 
 // embedded-main.ts (bundled into loam-server.js below) does the real startup work asynchronously —
 // require('./loam-server.js') returns long before a config-load or server.listen() failure would
@@ -65,7 +69,7 @@ const DB_ENCRYPTION_NOTICE_CODES = [
 // this hook, installed on `global` BEFORE requiring the bundle (same pattern as
 // global.__loamOnDeviceChat below), so a failure still reaches the host screen as a real error
 // instead of just the generic readiness-poll timeout. Also used directly, below, by this file's own
-// DB-encryption downgrade paths (db_encryption_no_key / db_encryption_unavailable) — same single
+// DB-encryption downgrade paths (db_encryption_locked / db_encryption_unavailable) — same single
 // choke point decides notice-vs-fatal for both callers.
 global.__loamReportBootError = function (message, code) {
   const isNotice = DB_ENCRYPTION_NOTICE_CODES.indexOf(code) !== -1;
@@ -140,12 +144,61 @@ function postHostInfo() {
 // hotspot AP address is picked up whenever the hotspot comes up, without the host screen polling.
 rnBridge.channel.on('loam-hostinfo-request', postHostInfo);
 
+// P2 (Sol round 4): true once 'ready' has actually been announced to the host screen — makes
+// `announceReady` idempotent so it's safe to call from BOTH the direct server-side signal
+// (`__loamReportBootReady`, fired the instant `server.listen()` succeeds — see embedded-main.ts) and
+// this file's own `/api/health` poll, whichever gets there first, without double-posting 'ready' or
+// re-arming the `postHostInfo` interval twice.
+let serverReadyAnnounced = false;
+
+/** Tell the host screen the embedded server is up, exactly once. */
+function announceReady() {
+  if (serverReadyAnnounced) {
+    return;
+  }
+  serverReadyAnnounced = true;
+  notify('ready', { port: PORT });
+  postHostInfo();
+  // Refresh addresses so the hotspot AP interface is reported once it appears (the user opens
+  // "Share · Host" after boot, which is when the hotspot starts).
+  setInterval(postHostInfo, 5000);
+}
+
+// P2 (Sol round 4): the DIRECT signal — embedded-main.ts calls this the instant `server.listen()`
+// succeeds, independent of (and not racing) this file's own poll below. Installed on `global` BEFORE
+// requiring the server bundle, same pattern as `__loamReportBootError`/`__loamRequestWipeRestart`.
+// Without this, `waitForServer`/`retry`'s poll giving up after ~5 minutes (see below) meant a LATER
+// successful boot — e.g. the in-process retry after a "Preserve old database & start fresh"
+// confirmation, possibly minutes after the original poll gave up — never told the host screen it was
+// ready: `startFreshBusy` stayed stuck true and the WebView never mounted, even though the server was
+// actually healthy.
+global.__loamReportBootReady = announceReady;
+
+// P2 (Sol round 4): a "singleton" generation counter for the readiness poll below — `startReadinessProbe`
+// bumps it and starts a FRESH polling chain every time it's called (once per boot attempt: the initial
+// boot, and again after every in-process retry — start-fresh recovery or a db-unlock retry), while any
+// OLDER chain still ticking away in the background self-cancels on its next tick instead of continuing
+// to run alongside the new one. Without this, a retry that starts its own poll while an earlier one
+// hasn't given up yet would leave two overlapping polling loops running concurrently.
+let readinessPollGeneration = 0;
+
+/** Start a brand-new readiness-poll chain (P2), superseding any still-running older one. */
+function startReadinessProbe() {
+  readinessPollGeneration += 1;
+  probeServer(readinessPollGeneration, 0);
+}
+
 /**
  * Poll the embedded server until it answers, then tell the host screen it can load the WebView.
  * The server listens asynchronously after require(), so we can't await it here — polling also
- * confirms the HTTP surface is actually serving before the WebView navigates to it.
+ * confirms the HTTP surface is actually serving before the WebView navigates to it. `generation` ties
+ * this chain to the `startReadinessProbe` call that started it (P2's singleton guard, see above) — a
+ * newer call bumps `readinessPollGeneration`, and this chain quietly stops the moment it notices.
  */
-function waitForServer(attempt) {
+function probeServer(generation, attempt) {
+  if (generation !== readinessPollGeneration) {
+    return; // superseded by a newer probe (a later retry) — this older chain has nothing left to do
+  }
   // Probe /api/health, NOT /api/config: config mints a session and, on a fresh node, grants the
   // first caller `firstUser` admin — a loopback probe would silently steal admin from the operator
   // (and its cookie is discarded here), disabling the kill switch and moderation. /api/health
@@ -154,35 +207,39 @@ function waitForServer(attempt) {
     { host: '127.0.0.1', port: PORT, path: '/api/health', timeout: 2000 },
     (response) => {
       response.resume();
+      if (generation !== readinessPollGeneration) {
+        return;
+      }
       if (response.statusCode && response.statusCode < 500) {
-        notify('ready', { port: PORT });
-        postHostInfo();
-        // Refresh addresses so the hotspot AP interface is reported once it appears (the user opens
-        // "Share · Host" after boot, which is when the hotspot starts).
-        setInterval(postHostInfo, 5000);
+        announceReady();
       } else {
-        retry(attempt);
+        retry(generation, attempt);
       }
     },
   );
-  request.on('error', () => retry(attempt));
+  request.on('error', () => retry(generation, attempt));
   request.on('timeout', () => {
     request.destroy();
-    retry(attempt);
+    retry(generation, attempt);
   });
 }
 
 /** Retry the readiness probe with a fixed backoff, giving up after ~5 minutes. */
-function retry(attempt) {
+function retry(generation, attempt) {
+  if (generation !== readinessPollGeneration) {
+    return;
+  }
   if (attempt > 600) {
     // RF3: an explicit code (rather than none at all) so index.tsx can tell THIS specific give-up apart
     // from other generic errors — it's the one codeless-in-the-past case that used to silently clobber
     // an active "Preserve old database & start fresh" recovery state (db_encryption_unreadable) whenever
-    // this timeout fired mid-retry.
+    // this timeout fired mid-retry. (P2: this give-up no longer matters for readiness itself — the direct
+    // `__loamReportBootReady` signal above doesn't depend on this poll at all — but it's still useful
+    // liveness diagnostics, and a fresh `startReadinessProbe()` call on the next retry supersedes it.)
     notify('error', { message: 'Server did not become ready in time.', code: 'boot_timeout' });
     return;
   }
-  setTimeout(() => waitForServer(attempt + 1), 500);
+  setTimeout(() => probeServer(generation, attempt + 1), 500);
 }
 
 // ---- On-device LLM bridge (optional) --------------------------------------------------------
@@ -422,7 +479,7 @@ rnBridge.channel.on('loam-mesh-error', (payload) => {
 // config.json ← DB admin edits, see CLAUDE.md). This is done over the rn-bridge channel and
 // deliberately NEVER over HTTP: any authenticated request from this process (even just
 // `/api/config`) would mint a session and, on a fresh node with `firstUser` bootstrap, silently
-// steal the one-time admin grant from the operator — exactly the trap `waitForServer` above avoids
+// steal the one-time admin grant from the operator — exactly the trap the readiness probe above avoids
 // by probing `/api/health` instead. nodejs-mobile can't restart in-process, so this takes effect the
 // NEXT time the app (re)starts the embedded server; the RN UI is expected to say so.
 //
@@ -676,9 +733,7 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   // stays alive specifically so it can receive this event and drive the retry; before that fix, the
   // process backing this listener was already dead by the time the operator could ever tap the button.
   // `global.__loamBootEmbeddedServer` is the hook loam-server.js (embedded-main.ts's bundle entry)
-  // installs on `global` — idempotent-safe to call again. `waitForServer` (kicked off after the
-  // original `require('./loam-server.js')` below) is still polling /api/health in the background and
-  // will pick up the recovered server's readiness on its own; nothing else to wire up here.
+  // installs on `global` — idempotent-safe to call again.
   var reboot = global.__loamBootEmbeddedServer;
   if (typeof reboot === 'function') {
     // Cleared once the retry's OUTCOME (resolve or reject) is actually observed — NOT synchronously
@@ -689,6 +744,13 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
       reboot()
         .then(function () {
           startFreshRebootInFlight = false;
+          // P2 (Sol round 4): start a FRESH readiness-probe chain for this retry — the original poll
+          // (from the very first boot attempt) may already have given up (~5 minutes) long before the
+          // operator got around to confirming "Preserve old database & start fresh", and it never
+          // restarts itself. Without this, a successful recovery here would never tell the host screen
+          // it's ready (embedded-main.ts's direct `__loamReportBootReady` signal covers the SAME case
+          // from the server side too — this is belt-and-suspenders on the client-poll side).
+          startReadinessProbe();
         })
         .catch(function (err) {
           startFreshRebootInFlight = false;
@@ -704,6 +766,93 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
     );
   }
 });
+
+// ---- `db_encryption_locked` unlock retry (P1-1, Sol round 4) -----------------------------------------
+// Mirrors the "Preserve old database & start fresh" listener above, but for the OTHER recoverable boot
+// state: `persistent`/`passphrase` mode found no usable key and `resolveDbEncryptionAndBoot` returned
+// without ever requiring the server bundle at all (see its 'locked' outcome) — so there is no running
+// server/listener to "reboot" here, just the whole key-resolution pipeline to re-run from scratch. RN
+// (index.tsx) posts this after the operator has done something that might now produce a key: for
+// passphrase mode, having just called `setStoredPassphrase`; for persistent mode, as a plain manual
+// retry (e.g. after a transient Keystore hiccup).
+var dbUnlockRetryInFlight = false;
+
+rnBridge.channel.on('loam-db-unlock', function (payload) {
+  var requestId = payload && payload.requestId;
+
+  if (dbUnlockRetryInFlight) {
+    try {
+      rnBridge.channel.post('loam-db-unlock-result', {
+        requestId: requestId,
+        ok: false,
+        error: 'An unlock retry is already in progress.',
+      });
+    } catch (postErr) {
+      // RN side isn't listening — nothing more to do.
+    }
+    return;
+  }
+
+  // Ack immediately that the retry was KICKED OFF — its real outcome (ready / still locked / any other
+  // boot error) arrives the normal way, via `loam-status`, exactly like the start-fresh flow above.
+  dbUnlockRetryInFlight = true;
+  try {
+    rnBridge.channel.post('loam-db-unlock-result', { requestId: requestId, ok: true });
+  } catch (postErr) {
+    // RN side isn't listening for the ack — still proceed with the retry itself below; the operator
+    // will see the outcome via the next `loam-status` regardless.
+  }
+
+  resolveDbEncryptionAndBoot().then(
+    function () {
+      dbUnlockRetryInFlight = false;
+    },
+    function (err) {
+      dbUnlockRetryInFlight = false;
+      console.error('db-unlock retry failed unexpectedly', err);
+    },
+  );
+});
+
+// ---- Wipe-restart handoff: durable resume (P1-2b, Sol round 4) ---------------------------------------
+// The server-side kill switch (executeKillSwitchBody, apps/server/src/app.ts) writes this marker BEFORE
+// signaling `loam-wipe-restart` for a `persistent`/`passphrase`-encrypted node — see `wipePendingMarkerPath`
+// there. If the app is suspended/backgrounded/killed before RN can VERIFY the Keystore key material is
+// actually cleared (or the clear itself fails), the marker survives on disk and this boot gets another
+// chance: re-post the SAME `loam-wipe-restart` event index.tsx's listener already handles (it doesn't
+// distinguish "live signal from the kill switch" from "resume repost from this boot") — it clears the
+// key, verifies, and on success posts `loam-wipe-complete` right back to the listener below, which is
+// the ONLY thing allowed to delete this marker.
+var WIPE_PENDING_MARKER_PATH = path.join(dataDir, '.loam-wipe-pending');
+
+function hasWipePendingMarker() {
+  try {
+    return fs.existsSync(WIPE_PENDING_MARKER_PATH);
+  } catch (err) {
+    return false;
+  }
+}
+
+function clearWipePendingMarker() {
+  try {
+    fs.unlinkSync(WIPE_PENDING_MARKER_PATH);
+  } catch (err) {
+    // best-effort — ENOENT is the expected/common case once already cleared
+  }
+}
+
+// P1-2(b): the ONLY place this marker is ever deleted — never on a bare signal, never speculatively.
+rnBridge.channel.on('loam-wipe-complete', function () {
+  clearWipePendingMarker();
+});
+
+if (hasWipePendingMarker()) {
+  try {
+    rnBridge.channel.post('loam-wipe-restart');
+  } catch (err) {
+    console.error('Failed to re-post loam-wipe-restart for a resumed wipe handoff', err);
+  }
+}
 
 /** Best-effort delete of a previous encrypted DB's files. Only called for 'ephemeral' mode, where a
  * fresh random key is generated every launch, so a DB encrypted under a PREVIOUS launch's key can never
@@ -729,13 +878,22 @@ function deleteStaleEphemeralDb() {
   writeEphemeralMarker();
 }
 
+// P2 (Sol round 4): the mesh-courier poll must only ever be armed ONCE per process — `resolveDbEncryptionAndBoot`
+// can now run more than once (a `db_encryption_locked` unlock retry, see `loam-db-unlock` below), and a
+// second `setInterval(refreshMesh, ...)` would stack a redundant concurrent poll rather than replacing
+// the first.
+let meshPollArmed = false;
+
 /**
- * Resolve process.env.LOAM_DB_KEY (or the plaintext driver fallback) from the RN key handoff, then
- * require + start the embedded server exactly as before. Never throws — any failure anywhere in this
- * resolution falls back to the existing plaintext better-sqlite3 driver so the host still boots.
+ * Resolve process.env.LOAM_DB_KEY from the RN key handoff, then require + start the embedded server —
+ * OR, for `persistent`/`passphrase` with no usable key, stay LOCKED and do neither (P1-1, Sol round 4:
+ * these two modes must never fall back to a plaintext boot). Returns a promise resolving once this
+ * attempt is fully settled (server required + readiness probe started, OR left locked) so callers —
+ * the initial boot at the bottom of this file, and the `loam-db-unlock` retry listener below — can tell
+ * when it's safe to retry again. Never rejects.
  */
 function resolveDbEncryptionAndBoot() {
-  requestDbKey(DB_KEY_TIMEOUT_MS)
+  return requestDbKey(DB_KEY_TIMEOUT_MS)
     .then(function (result) {
       var mode = result.mode;
       var key = result.key;
@@ -750,25 +908,30 @@ function resolveDbEncryptionAndBoot() {
         // not a downgrade, so it must never trigger a boot-error notice.
         process.env.LOAM_DB_DRIVER = 'better-sqlite3';
         clearEphemeralMarker();
-        return;
+        return 'proceed';
       }
 
       if (mode !== 'ephemeral' && !key) {
-        // An encrypted mode is selected but no key came back — e.g. passphrase mode with no
-        // passphrase entered yet, or a Keystore/RNG failure on the RN side. Unlike 'off' this IS a
-        // silent downgrade to plaintext unless reported (G5): the operator picked an encrypted mode
-        // and would otherwise have no idea their data is going in unencrypted. NEVER logs `key`
-        // (there isn't one) or any other secret material. Ephemeral mode is excluded from this branch
-        // entirely (see below) — db-encryption.ts's `resolveDbKey('ephemeral')` never returns a key any
-        // more by design, so it would otherwise ALWAYS hit this "no key" downgrade.
+        // P1-1 (Sol round 4): persistent/passphrase with no usable key — e.g. passphrase mode with no
+        // passphrase entered yet, or a Keystore/RNG failure on the RN side — must NEVER fall back to a
+        // plaintext boot (that used to happen here, silently discarding the operator's chosen
+        // protection the moment a key wasn't ready). Stay LOCKED instead: report the distinct
+        // `db_encryption_locked` code (a fatal-until-unlocked state, not a "degraded but booted"
+        // notice) and do not proceed to require the server bundle at all — see the caller below, which
+        // checks this return value before doing so. `index.tsx` shows a boot-time "enter passphrase to
+        // unlock" prompt (passphrase mode) or a plain Retry (persistent mode), both of which post
+        // `loam-db-unlock` to re-run this whole function. NEVER logs `key` (there isn't one) or any
+        // other secret material. Ephemeral mode is excluded from this branch entirely (see below) —
+        // db-encryption.ts's `resolveDbKey('ephemeral')` never returns a key any more by design, so it
+        // would otherwise ALWAYS hit this branch.
         global.__loamReportBootError(
-          'Encryption mode "' + mode + '" is selected but no key is available (e.g. no passphrase ' +
-            'entered yet, or a device Keystore/RNG failure) — starting UNENCRYPTED.',
-          'db_encryption_no_key',
+          'Encryption mode "' + mode + '" is selected but no key is available yet (no passphrase ' +
+            'entered, or a device Keystore/RNG failure) — refusing to start unencrypted.' +
+            (mode === 'passphrase' ? ' Enter the passphrase to unlock.' : ' Retry, or open Encryption settings.'),
+          'db_encryption_locked',
         );
-        process.env.LOAM_DB_DRIVER = 'better-sqlite3';
         clearEphemeralMarker();
-        return;
+        return 'locked';
       }
 
       // The encrypted driver (better-sqlite3-multiple-ciphers) isn't shipped in every build yet — only
@@ -779,7 +942,9 @@ function resolveDbEncryptionAndBoot() {
       // the native binding loads; a shipped-but-broken binding would pass a resolve-only guard and then
       // crash-loop server boot instead of failing here where it can be reported and downgraded cleanly.
       // Report the downgrade loudly (A8 boot-error bridge) instead of silently serving plaintext, or
-      // bricking boot.
+      // bricking boot. This is the ONE case where an encrypted mode still boots plaintext (see
+      // CLAUDE.md/docs/15) — the native module being absent is a build seam, not a missing key, and is
+      // deliberately distinct from the `db_encryption_locked` case above.
       var encryptedDriverAvailable = false;
       try {
         require('better-sqlite3-multiple-ciphers');
@@ -803,7 +968,7 @@ function resolveDbEncryptionAndBoot() {
         // unencrypted, for every mode, not just 'ephemeral'.
         process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
         clearEphemeralMarker();
-        return;
+        return 'proceed';
       }
 
       if (mode === 'ephemeral') {
@@ -814,26 +979,45 @@ function resolveDbEncryptionAndBoot() {
         // derived from RN's `resolveDbKey('ephemeral')` any more — that no longer returns a key at all
         // for this mode (see db-encryption.ts).
         process.env.LOAM_DB_KEY = 'ephemeral';
-        return;
+        return 'proceed';
       }
 
       clearEphemeralMarker();
       // openStore's encryptionKey path takes precedence over LOAM_DB_DRIVER (see db.ts) — leave the
       // driver env unset here. NEVER logged.
       process.env.LOAM_DB_KEY = key;
+      return 'proceed';
     })
     .catch(function () {
-      // Should be unreachable (requestDbKey never rejects), but keep the fallback total.
+      // Should be unreachable (requestDbKey never rejects), but keep the fallback total. 'off'-style
+      // plaintext, not 'locked' — an unexpected internal failure here is not the same signal as an
+      // operator's encrypted mode genuinely having no key.
       process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+      return 'proceed';
     })
-    .then(function () {
+    .then(function (outcome) {
+      if (outcome === 'locked') {
+        // Stay locked (P1-1): do NOT require the server bundle — no plaintext fallback for
+        // persistent/passphrase — and do NOT start the readiness probe, since there is no server to
+        // probe. `global.__loamReportBootError` above already told the host screen; the
+        // `loam-db-unlock` listener re-invokes this whole function once the operator retries.
+        return;
+      }
       try {
         require('./loam-server.js');
-        waitForServer(0);
+        // P2 (Sol round 4): a FRESH readiness-probe chain for every attempt that gets this far —
+        // including a retry after a `db_encryption_locked` unlock, mirroring the same fix applied to
+        // the `loam-db-start-fresh` retry below. Superseded automatically if this isn't the latest call
+        // (see `startReadinessProbe`'s doc comment).
+        startReadinessProbe();
         // Start the mesh courier poll once the server is required. refreshMesh no-ops (404) until an
-        // operator enables mesh, so this costs one cheap loopback GET per 30s while off.
-        setInterval(refreshMesh, MESH_POLL_MS);
-        setTimeout(refreshMesh, 5000);
+        // operator enables mesh, so this costs one cheap loopback GET per 30s while off. Armed at most
+        // once per process — see `meshPollArmed`'s doc comment.
+        if (!meshPollArmed) {
+          meshPollArmed = true;
+          setInterval(refreshMesh, MESH_POLL_MS);
+          setTimeout(refreshMesh, 5000);
+        }
       } catch (err) {
         console.error('Failed to start the embedded LOAM server', err);
         notify('error', { message: String((err && err.message) || err) });

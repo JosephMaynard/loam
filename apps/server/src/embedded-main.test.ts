@@ -290,13 +290,155 @@ describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(reports).toEqual([]);
 
-    // The guard clears once the attempt settles: a later, genuinely separate call boots again rather
-    // than being stuck returning the same resolved promise forever.
+    // P3 (Sol round 4): `bootInFlight` clears once the attempt settles, but the settled STATE is now
+    // "ready" — a later call must be a no-op, NOT boot again. Before this fix, `bootInFlight` alone was
+    // the only guard, so this exact call would have invoked `start` a second time and raced a second
+    // `buildApp()`/`listen()` against the server that just recovered (EADDRINUSE → process.exit(1),
+    // killing the healthy survivor). This was previously asserted the OTHER way (`laterCalls === 1`) —
+    // that assertion encoded the unsafe pre-P3 behaviour and has been flipped here.
     let laterCalls = 0;
     await mod.bootEmbeddedServer(async () => {
       laterCalls += 1;
       return app;
     });
-    expect(laterCalls).toBe(1);
+    expect(laterCalls).toBe(0);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("P3 (Sol round 4): a genuinely separate call still retries while the last settled state is recoverable (db_encryption_unreadable), not just while nothing has succeeded yet", async () => {
+    const reports = installFakeBridge();
+
+    const mod = await import("./embedded-main.js");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    reports.length = 0;
+    exitSpy.mockClear();
+
+    const unreadableError = Object.assign(new Error("wrong key"), { code: "db_encryption_unreadable" });
+    let attempts = 0;
+    const app = {} as LoamApp;
+
+    await mod.bootEmbeddedServer(async () => {
+      attempts += 1;
+      throw unreadableError;
+    });
+    expect(attempts).toBe(1);
+    expect(exitSpy).not.toHaveBeenCalled(); // recoverable — must not exit
+
+    // A later call (e.g. the operator's start-fresh confirmation) must still retry: the recoverable
+    // state is NOT "ready", so the P3 no-op gate above must not suppress it.
+    await mod.bootEmbeddedServer(async () => {
+      attempts += 1;
+      return app;
+    });
+    expect(attempts).toBe(2);
+    expect(exitSpy).not.toHaveBeenCalled();
+
+    // And once THAT attempt succeeds, state flips to "ready" and a further call is a no-op again.
+    await mod.bootEmbeddedServer(async () => {
+      attempts += 1;
+      return app;
+    });
+    expect(attempts).toBe(2);
+  });
+});
+
+describe("P2 (Sol round 4): boot-ready is reported directly to RN, independent of main.js's own readiness poll", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let listenersBefore: readonly NodeJS.UnhandledRejectionListener[];
+
+  function installFakeReadyBridge(): number[] {
+    const calls: number[] = [];
+    (globalThis as unknown as { __loamReportBootReady?: () => void }).__loamReportBootReady = () => {
+      calls.push(Date.now());
+    };
+    return calls;
+  }
+
+  function uninstallFakeReadyBridge(): void {
+    delete (globalThis as unknown as { __loamReportBootReady?: unknown }).__loamReportBootReady;
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    listenersBefore = process.listeners("unhandledRejection");
+  });
+
+  afterEach(() => {
+    for (const listener of process.listeners("unhandledRejection")) {
+      if (!listenersBefore.includes(listener)) {
+        process.off("unhandledRejection", listener);
+      }
+    }
+    exitSpy.mockRestore();
+    uninstallFakeBridge();
+    uninstallFakeReadyBridge();
+    vi.useRealTimers();
+    vi.doUnmock("./embedded.js");
+  });
+
+  it("reports ready on a plain successful boot", async () => {
+    installFakeBridge();
+    const readyCalls = installFakeReadyBridge();
+
+    vi.doMock("./embedded.js", () => ({
+      startEmbeddedServer: () => Promise.resolve({} as LoamApp),
+    }));
+
+    await import("./embedded-main.js");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(readyCalls.length).toBe(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("fake-timer test (Sol #4 / P2): exhausts the ~5-minute window main.js's own /api/health poll " +
+    "would have given up in, then a later in-process recovery still reports ready to RN", async () => {
+    const reports = installFakeBridge();
+    const readyCalls = installFakeReadyBridge();
+
+    // Real (unmocked) `startEmbeddedServer` for the unrelated module-scope auto-boot — kept out of this
+    // test's own controlled scenario by an explicit `start` function passed to every `globalBoot(...)`
+    // call below (mirroring the "P1-1 end-to-end"/"RF2" suites above), so the two never share state.
+    const mod = await import("./embedded-main.js");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    reports.length = 0;
+    exitSpy.mockClear();
+
+    const globalBoot = (globalThis as unknown as { __loamBootEmbeddedServer?: typeof mod.bootEmbeddedServer })
+      .__loamBootEmbeddedServer;
+    if (!globalBoot) {
+      throw new Error("globalThis.__loamBootEmbeddedServer was not installed");
+    }
+
+    // First attempt: fails with the recoverable `db_encryption_unreadable` code — it never reaches
+    // `server.listen()`, so main.js's own `/api/health` poll never has anything to succeed against and
+    // is left running (and eventually gives up ~5 minutes later, per `waitForServer`/`retry` in
+    // main.js — untestable here directly, since that poll lives in a plain CJS launcher script with no
+    // test harness; this simulates its outcome by advancing real elapsed time instead).
+    const unreadableError = Object.assign(new Error("wrong key"), { code: "db_encryption_unreadable" });
+    const failingStart = async (): Promise<LoamApp> => {
+      throw unreadableError;
+    };
+
+    await globalBoot(failingStart);
+    expect(exitSpy).not.toHaveBeenCalled(); // recoverable — the runtime stays alive
+    expect(readyCalls).toEqual([]); // not ready yet — nothing for RN to show
+
+    // Simulate main.js's own poll having already given up (~600 attempts * 500ms ≈ 5 minutes) before
+    // the operator confirms "Preserve old database & start fresh" and this retry runs.
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    vi.useRealTimers();
+
+    // The recovery retry — main.js's `loam-db-start-fresh` listener calling this same hook again —
+    // this time succeeding.
+    const succeedingStart = async (): Promise<LoamApp> => ({}) as LoamApp;
+    await globalBoot(succeedingStart);
+
+    // RN is told directly, regardless of how long (or whether) main.js's own poll was still running —
+    // this is the whole point of the direct signal: it doesn't depend on that poll's state at all.
+    expect(readyCalls.length).toBe(1);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 });

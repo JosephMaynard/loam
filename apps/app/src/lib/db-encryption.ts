@@ -28,6 +28,15 @@ export const DB_ENCRYPTION_MODE_DESCRIPTIONS: Record<DbEncryptionMode, string> =
 const MODE_ITEM = 'loam-db-encryption-mode';
 const PERSISTENT_KEY_ITEM = 'loam-db-encryption-persistent-key';
 const PASSPHRASE_ITEM = 'loam-db-encryption-passphrase';
+/**
+ * The one piece of key material a wipe can actually DISCARD (P1-1, Sol round 4). A user-chosen
+ * passphrase can never itself be made cryptographically discardable — the operator can always type it
+ * again — so `persistent`/`passphrase` mode both key off this random, device-generated secret instead:
+ * `persistent` uses it directly, `passphrase` mixes it into the passphrase's digest (see `resolveDbKey`
+ * below). Deleting THIS item (and minting a fresh one on next use) is what makes a wipe of either mode
+ * genuinely rotate the key, even though the passphrase itself survives the wipe unchanged.
+ */
+const DEVICE_SECRET_ITEM = 'loam-db-encryption-device-secret';
 
 export type ResolvedDbKey = { mode: DbEncryptionMode; key?: string };
 
@@ -99,31 +108,83 @@ export async function clearStoredPassphrase(): Promise<void> {
 }
 
 /**
- * Forget the persisted 'persistent'-mode key AND the passphrase (Sol P1-1, second half). `resolveDbKey`
- * only ever ROTATES the ephemeral key (a fresh one is generated server-side per boot, see above) —
- * 'persistent'/'passphrase' key material is designed to survive across boots, which also means it
- * survives a kill-switch wipe unless something explicitly clears it: without this, the very next boot
- * after a wipe would re-derive/reuse the SAME key for the brand-new (post-wipe) database, silently
- * defeating a real "rotate the key on a wipe" story for those two modes.
+ * Read (or mint) the device secret that makes `persistent`/`passphrase` mode's key genuinely
+ * discardable (P1-1, Sol round 4): 'persistent' uses it AS the key; 'passphrase' mixes it into the
+ * passphrase digest (see `resolveDbKey` below). A passphrase alone can never be made cryptographically
+ * discardable — the operator can always type it again — so the actual "rotate on wipe" property has to
+ * come from this random, device-generated value instead.
  *
- * Called from the WebView `onMessage` handler in `index.tsx` when the client posts `loam-wipe` (see
- * `apps/client/src/app.tsx`'s `wipe` WS-event handler) — i.e. only on an actual server-side kill-switch
- * wipe, never on an ordinary boot or a local "forget passphrase" action. Best-effort and never throws;
- * a failed delete just means the old key material stays around, exactly as it would have before this
- * function existed. Device-verify: exercised in code, but the end-to-end "wipe → next boot re-derives a
- * genuinely different key" path needs a real device to confirm (this repo has no on-device test harness).
+ * Migration (not a new mint): a device that already had a `persistent`-mode key from BEFORE this device-
+ * secret model (`PERSISTENT_KEY_ITEM`, generated directly as the key) reuses that value as its initial
+ * device secret, so an already-encrypted DB keeps opening under the same effective key — only a wipe
+ * (`clearStoredDbKeys`, which deletes both items) actually rotates it from here on. A device with
+ * neither item mints 32 fresh random bytes.
+ *
+ * Can throw (Keystore/RNG failure) — callers wrap this in `resolveDbKey`'s outer try/catch, which is
+ * the one place that must never let a Keystore failure propagate as a plaintext fallback for these modes.
  */
-export async function clearStoredDbKeys(): Promise<void> {
-  try {
-    await SecureStore.deleteItemAsync(PERSISTENT_KEY_ITEM);
-  } catch {
-    // best-effort
+async function getOrCreateDeviceSecret(): Promise<string> {
+  const existing = await SecureStore.getItemAsync(DEVICE_SECRET_ITEM);
+  if (typeof existing === 'string' && existing.length > 0) {
+    return existing;
   }
-  try {
-    await SecureStore.deleteItemAsync(PASSPHRASE_ITEM);
-  } catch {
-    // best-effort
+  const legacy = await SecureStore.getItemAsync(PERSISTENT_KEY_ITEM);
+  if (typeof legacy === 'string' && legacy.length > 0) {
+    await SecureStore.setItemAsync(DEVICE_SECRET_ITEM, legacy);
+    return legacy;
   }
+  const bytes = await Crypto.getRandomBytesAsync(32);
+  const generated = bytesToHex(bytes);
+  await SecureStore.setItemAsync(DEVICE_SECRET_ITEM, generated);
+  return generated;
+}
+
+/** Result of {@link clearStoredDbKeys} — P1-2(b), Sol round 4: a REAL success/failure, not a swallowed
+ *  best-effort, so `index.tsx` can only ever report the key as "cleared" once it's actually verified
+ *  gone, and shows a real failure + Retry otherwise. `error` is a human-readable summary (item names and
+ *  generic error messages only) — never the key/passphrase material itself. */
+export type ClearDbKeysResult = { ok: boolean; error?: string };
+
+/**
+ * Forget the device secret (P1-1, Sol round 4) AND the legacy persistent-mode key item, VERIFYING each
+ * is actually gone afterward — never the stored passphrase, which is designed to survive a wipe (see
+ * `getOrCreateDeviceSecret`'s doc comment: the passphrase + a freshly-minted device secret together
+ * still yield a brand-new key, so the passphrase itself has no reason to be forgotten). After this
+ * resolves `{ ok: true }`: 'persistent' mode's next `resolveDbKey` call mints a NEW device secret (a new
+ * key); 'passphrase' mode's next call combines the SAME passphrase with that new device secret (also a
+ * new key). Either way the OLD ciphertext — already deleted server-side by the kill switch before this
+ * is ever invoked — is undecryptable under the new key.
+ *
+ * Called from `index.tsx`'s `loam-wipe-restart` bridge listener (the server-side kill switch's
+ * fixed-key handoff, P1-2) and from its WebView `loam-wipe` message handler (the client's own `wipe`
+ * WS-event notice). Real success/failure, NOT swallowed (P1-2b): a delete or verify failure is reported
+ * back so the caller can keep its own durable wipe-pending marker around and let the operator retry,
+ * rather than silently claiming the key is gone when it might not be. Never logs `key`/passphrase
+ * material — only item names and generic error messages.
+ */
+export async function clearStoredDbKeys(): Promise<ClearDbKeysResult> {
+  const errors: string[] = [];
+
+  for (const item of [DEVICE_SECRET_ITEM, PERSISTENT_KEY_ITEM]) {
+    try {
+      await SecureStore.deleteItemAsync(item);
+    } catch (err) {
+      errors.push(`delete ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
+      continue; // no point verifying a delete that itself threw
+    }
+    try {
+      const remaining = await SecureStore.getItemAsync(item);
+      if (remaining !== null) {
+        errors.push(`${item} is still present after delete`);
+      }
+    } catch (err) {
+      // A failed verification READ is not proof the item is still there — but it's also not proof it's
+      // gone, so it can't be reported as a verified success either. Surface it as its own failure.
+      errors.push(`verifying ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return errors.length > 0 ? { ok: false, error: errors.join('; ') } : { ok: true };
 }
 
 /**
@@ -140,24 +201,32 @@ export async function clearStoredDbKeys(): Promise<void> {
  *                    next cold start. Returning no key keeps this module out of that loop entirely —
  *                    `resolveDbEncryptionAndBoot` in main.js special-cases 'ephemeral' and never
  *                    reaches the "no key" plaintext-downgrade path for it.
- *   - 'persistent' → a random 32-byte key, generated once and stored in the Keystore-backed secure
- *                    store; subsequent calls reuse the same key so the DB stays openable across boots.
- *   - 'passphrase' → derived from an operator-entered passphrase (Keystore-backed). This is a SIMPLE
- *                    KDF (single SHA-256 pass over the UTF-8 passphrase, hex-encoded) — a deliberate
- *                    v1 shortcut, not a hardened one; a proper scrypt/Argon2 derivation is a documented
+ *   - 'persistent' → the device secret itself (P1-1, Sol round 4 — see `getOrCreateDeviceSecret`),
+ *                    minted once and stored in the Keystore-backed secure store; subsequent calls reuse
+ *                    it so the DB stays openable across boots. A wipe (`clearStoredDbKeys`) deletes it,
+ *                    so the NEXT boot after a wipe mints a genuinely different one.
+ *   - 'passphrase' → `SHA256(passphrase + ':' + deviceSecret)` (Keystore-backed passphrase AND device
+ *                    secret). Mixing in the device secret is what makes THIS mode discardable too, even
+ *                    though the passphrase itself survives a wipe unchanged (P1-1): after a wipe, the
+ *                    SAME passphrase combined with the NEW device secret still yields a brand-new key.
+ *                    This is a SIMPLE KDF (a single SHA-256 pass, hex-encoded) — a deliberate v1
+ *                    shortcut, not a hardened one; a proper scrypt/Argon2 derivation is a documented
  *                    follow-up (see docs/21). Note this single SHA-256 pass is less weak than it sounds
  *                    in isolation: the resulting hex string is handed to SQLCipher as a `PRAGMA key`,
  *                    and SQLCipher does NOT use it directly as the DB key — it re-derives the actual
  *                    encryption key from that pragma string via its own salted PBKDF2 (64k+ iterations
- *                    by default), so there IS a real KDF between the passphrase and the on-disk key;
- *                    this module's SHA-256 pass just normalizes an arbitrary-length passphrase into a
+ *                    by default), so there IS a real KDF between this digest and the on-disk key; this
+ *                    module's SHA-256 pass just normalizes the passphrase+secret pair into a
  *                    fixed-length pragma value ahead of that. A stronger app-side KDF is still a
  *                    documented follow-up (docs/21), but "no KDF at all" would overstate the gap. If no
  *                    passphrase has been entered yet, resolves with no key (the UI must collect one
- *                    first via `setStoredPassphrase`).
+ *                    first via `setStoredPassphrase`) — this module NEVER falls back to plaintext for
+ *                    this mode itself; that decision belongs to main.js/index.tsx (see `resolveDbEncryptionAndBoot`'s
+ *                    `db_encryption_locked` handling), which must also refuse to boot plaintext here.
  *
  * Never throws — any failure (Keystore unavailable, RNG failure) resolves to `{ mode, key: undefined }`
- * so the caller can fall back to the safe unencrypted default.
+ * so the caller can decide how to handle a missing key (main.js: refuse to boot plaintext for
+ * 'persistent'/'passphrase', see `db_encryption_locked`).
  */
 export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKey> {
   try {
@@ -172,24 +241,20 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     }
 
     if (mode === 'persistent') {
-      const existing = await SecureStore.getItemAsync(PERSISTENT_KEY_ITEM);
-      if (typeof existing === 'string' && existing.length > 0) {
-        return { mode, key: existing };
-      }
-      const bytes = await Crypto.getRandomBytesAsync(32);
-      const generated = bytesToHex(bytes);
-      await SecureStore.setItemAsync(PERSISTENT_KEY_ITEM, generated);
-      return { mode, key: generated };
+      const deviceSecret = await getOrCreateDeviceSecret();
+      return { mode, key: deviceSecret };
     }
 
     // mode === 'passphrase'
     const passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
-      // No passphrase entered yet — the picker UI is responsible for collecting one. Returning no key
-      // here is what makes main.js fall back to the safe unencrypted default.
+      // No passphrase entered yet — the picker UI (or the boot-time unlock prompt, see index.tsx) is
+      // responsible for collecting one. Returning no key here is what makes main.js treat this as
+      // locked (db_encryption_locked) rather than silently booting plaintext.
       return { mode };
     }
-    const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, passphrase);
+    const deviceSecret = await getOrCreateDeviceSecret();
+    const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `${passphrase}:${deviceSecret}`);
     return { mode, key: digest };
   } catch {
     return { mode };
@@ -273,6 +338,58 @@ export function requestDbStartFresh(channel: BridgeChannel, timeoutMs = 5000): P
     channel.addListener('loam-db-start-fresh-result', onResult);
     try {
       channel.post('loam-db-start-fresh', { requestId });
+    } catch (err) {
+      finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+}
+
+export type DbUnlockResult = { ok: boolean; error?: string };
+
+/**
+ * Ask the launcher (main.js) to retry boot right now — `db_encryption_locked` recovery (P1-1, Sol round
+ * 4): a `persistent`/`passphrase` boot attempt found no usable key (typically passphrase mode before a
+ * passphrase was ever entered) and, per the "never boot plaintext for these modes" rule, refused to
+ * start the server at all rather than silently downgrade. `index.tsx` calls this after the operator has
+ * done something that might now produce a key — for passphrase mode, having just called
+ * `setStoredPassphrase`; for persistent mode, as a plain manual retry (e.g. after a transient Keystore
+ * hiccup). Mirrors `requestDbStartFresh`'s request/response round trip.
+ *
+ * This only ever ACKS that the retry was kicked off — the retry's real outcome (ready / still locked /
+ * `db_encryption_unreadable` / any other boot error) arrives the normal way, via `loam-status`. Never
+ * throws — a timeout, an old launcher build with no handler, or a thrown `post()` all resolve to
+ * `{ ok: false }` so the caller can tell the operator to retry rather than hang indefinitely.
+ */
+export function requestDbUnlock(channel: BridgeChannel, timeoutMs = 5000): Promise<DbUnlockResult> {
+  return new Promise((resolve) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+
+    const finish = (result: DbUnlockResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      channel.removeListener('loam-db-unlock-result', onResult);
+      resolve(result);
+    };
+
+    const onResult = (payload: unknown): void => {
+      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown } | undefined;
+      if (!result || result.requestId !== requestId) {
+        return;
+      }
+      finish({ ok: result.ok === true, error: typeof result.error === 'string' ? result.error : undefined });
+    };
+
+    const timer = setTimeout(() => {
+      finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
+    }, timeoutMs);
+
+    channel.addListener('loam-db-unlock-result', onResult);
+    try {
+      channel.post('loam-db-unlock', { requestId });
     } catch (err) {
       finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

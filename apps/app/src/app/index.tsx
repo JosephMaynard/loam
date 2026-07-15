@@ -1,7 +1,7 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Platform, Pressable, StyleSheet } from 'react-native';
+import { ActivityIndicator, Alert, Linking, Platform, Pressable, StyleSheet, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
@@ -11,7 +11,16 @@ import { ModelManagerOverlay } from '@/components/model-manager';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
-import { clearStoredDbKeys, registerDbEncryption, requestDbStartFresh } from '@/lib/db-encryption';
+import { useTheme } from '@/hooks/use-theme';
+import {
+  clearStoredDbKeys,
+  getDbEncryptionMode,
+  registerDbEncryption,
+  requestDbStartFresh,
+  requestDbUnlock,
+  setStoredPassphrase,
+  type DbEncryptionMode,
+} from '@/lib/db-encryption';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
@@ -42,6 +51,7 @@ const DB_ENCRYPTION_ERROR_CODES = new Set([
   'db_encryption_unreadable',
   'db_encryption_unavailable',
   'db_encryption_no_key',
+  'db_encryption_locked',
 ]);
 
 // The one DB-encryption code with a dedicated recovery action (AF8/design#1, docs/01, docs/15): an
@@ -55,6 +65,15 @@ const DB_ENCRYPTION_ERROR_CODES = new Set([
 // generic dismissible notice banner; a subsequent `'ready'` clears it (the `onStatus` 'ready' branch
 // already resets `errorCode`/`status`, which this block's visibility is keyed on).
 const DB_UNREADABLE_CODE = 'db_encryption_unreadable';
+
+// The OTHER DB-encryption code with a dedicated recovery action (P1-1, Sol round 4): a `persistent`/
+// `passphrase` boot found no usable key at all (typically passphrase mode before a passphrase was ever
+// entered, or a Keystore/RNG failure) and REFUSED to start the server — never a silent plaintext
+// fallback. Distinct from `DB_UNREADABLE_CODE`: there, a key WAS resolved but the on-disk DB couldn't be
+// opened with it (recoverable via "preserve & start fresh"); here, no key exists yet at all, so the
+// recovery is either entering a passphrase (passphrase mode) or a plain retry (persistent mode, e.g.
+// after a transient Keystore hiccup) — see the `dbLocked` block below.
+const DB_LOCKED_CODE = 'db_encryption_locked';
 
 /** A non-fatal boot-time notice (status `'notice'`, distinct from `'error'` — see `onStatus`). Kept in
  * its own state, separate from `status`/`errorMessage`/`errorCode`, specifically so it SURVIVES the
@@ -137,6 +156,19 @@ export default function HostScreen() {
   // "Preserve old database & start fresh" (AF8/design#1) in-flight state — see `handleStartFresh`.
   const [startFreshBusy, setStartFreshBusy] = useState(false);
   const [startFreshMessage, setStartFreshMessage] = useState<string | undefined>();
+  // `db_encryption_locked` unlock (P1-1, Sol round 4) in-flight state — see `handleUnlockWithPassphrase`/
+  // `handleRetryUnlock`. `lockedMode` is fetched once the locked state becomes active, purely to decide
+  // whether to show the passphrase input (only meaningful for 'passphrase' mode) or just a plain Retry.
+  const [lockedMode, setLockedMode] = useState<DbEncryptionMode | undefined>();
+  const [unlockPassphraseInput, setUnlockPassphraseInput] = useState('');
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [unlockMessage, setUnlockMessage] = useState<string | undefined>();
+  // P1-2(b): the durable, acked wipe-key-clear handoff. Set only on a VERIFIED clear FAILURE (never a
+  // blanket "cleared") — see `attemptWipeKeyClear`. The launcher's own durable `.loam-wipe-pending`
+  // marker (main.js) is the actual source of truth for whether the clear still needs retrying across an
+  // app restart; this state is just this screen's live view of the most recent attempt.
+  const [wipeClearFailure, setWipeClearFailure] = useState<string | undefined>();
+  const [wipeClearBusy, setWipeClearBusy] = useState(false);
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
   const [shareOpen, setShareOpen] = useState(false);
   // Whether the on-device LLM model manager overlay (docs/06) is open.
@@ -162,6 +194,67 @@ export default function HostScreen() {
   // other apps; exiting requires the device's own screen-lock PIN.
   const [kiosk, setKiosk] = useState(false);
   const webViewRef = useRef<WebView>(null);
+  const theme = useTheme();
+
+  // Derived, not stored: used both to gate a `useEffect` below (fetching `lockedMode`) and to drive the
+  // fatal block's visibility in the render. Computed here (rather than after the `status === 'ready'`
+  // early return) so the effect that depends on it obeys the Rules of Hooks.
+  const dbLocked = status === 'error' && errorCode === DB_LOCKED_CODE;
+
+  // Once the locked state becomes active, learn which mode is actually locked (purely to decide whether
+  // to show the passphrase input, which only makes sense for 'passphrase' mode).
+  useEffect(() => {
+    if (!dbLocked) {
+      return;
+    }
+    let cancelled = false;
+    void getDbEncryptionMode().then((mode) => {
+      if (!cancelled) {
+        setLockedMode(mode);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [dbLocked]);
+
+  // P1-2(b), Sol round 4: clear the device key material and, ONLY on a VERIFIED success, ack the
+  // launcher (`loam-wipe-complete`) so it deletes its durable `.loam-wipe-pending` marker. On ANY
+  // failure — a thrown delete, a failed verify, or the item still present afterward (see
+  // `clearStoredDbKeys`'s real success/failure return) — the marker is left exactly where it is (this
+  // screen has no way to touch it directly; main.js's marker stays until a verified ack arrives) and
+  // this screen shows the real failure with a Retry, never a blanket "cleared". Called from the
+  // `loam-wipe-restart` bridge listener below — fired both for a LIVE kill-switch signal and for
+  // main.js's own boot-time RESUME repost (a suspended/backgrounded/killed RN gets another chance).
+  const attemptWipeKeyClear = async () => {
+    setWipeClearBusy(true);
+    const result = await clearStoredDbKeys();
+    setWipeClearBusy(false);
+
+    if (!result.ok) {
+      setWipeClearFailure(result.error ?? 'Unknown error clearing the device encryption key.');
+      return;
+    }
+
+    setWipeClearFailure(undefined);
+    try {
+      // Tell main.js it can delete its durable marker — the key clear is VERIFIED, not just attempted.
+      nodejs.channel.post('loam-wipe-complete');
+    } catch {
+      // main.js isn't listening — its own boot-time resume check (re-posting `loam-wipe-restart` while
+      // the marker is still present) covers this; nothing more to do here.
+    }
+    try {
+      nodejs.start('main.js', { redirectOutputToLogcat: true });
+    } catch {
+      // Expected on today's nodejs-mobile (one runtime per process) — see the comment on the
+      // `loam-wipe-restart` listener below. The restart prompt is the real recovery path either way.
+    }
+    Alert.alert(
+      'Restart LOAM',
+      'The database encryption key was cleared for the emergency reset. Close and reopen the app now to finish starting a fresh database.',
+    );
+  };
 
   useEffect(() => {
     const tag = 'loam-host';
@@ -216,6 +309,10 @@ export default function HostScreen() {
         // and a stale "Confirmed. Close and reopen…" message must not resurface later out of context.
         setStartFreshBusy(false);
         setStartFreshMessage(undefined);
+        // P1-1 (Sol round 4): same reasoning, for the `db_encryption_locked` unlock state — its fatal
+        // block also only exists in the non-ready view (see `dbLocked`'s definition).
+        setUnlockBusy(false);
+        setUnlockMessage(undefined);
         // Deliberately NOT touching `notice`/`nodeNotice` here (AF2/P1-4) — a boot notice describes a
         // degraded DB-encryption posture that's still true once the host is up; clearing it just
         // because the server also became ready is exactly the bug this fix removes.
@@ -255,6 +352,10 @@ export default function HostScreen() {
         // in-process reboot) — release the busy state now that it's known, whether or not this error is
         // start-fresh-related. Harmless when it isn't: `startFreshBusy` is already false in that case.
         setStartFreshBusy(false);
+        // Same reasoning for the `db_encryption_locked` unlock retry (P1-1, Sol round 4) — this may be
+        // ITS outcome (still locked, or a different error entirely once the retry proceeds past
+        // locked), or unrelated; harmless either way since `unlockBusy` is already false when it is.
+        setUnlockBusy(false);
       }
     };
 
@@ -264,30 +365,23 @@ export default function HostScreen() {
       }
     };
 
-    // P1-2 (Sol round 3): the server's kill switch posts this when a `persistent`/`passphrase`-encrypted
-    // node is wiped — its key is FIXED (Keystore-held), so the server deleted the now-orphaned ciphertext
-    // and handed off HERE to clear the key material and restart. Unlike the P1-1 `db_encryption_unreadable`
-    // recovery above (which retries boot in the SAME still-alive Node runtime — a plain JS function call
-    // inside that process), this genuinely needs a NEW OS process: the OLD embedded server is still bound
-    // to port 3000 with its store already closed, and nodejs-mobile's native module only starts its
-    // runtime ONCE per process (`_startedNodeAlready` — a second `nodejs.start()` call is a silent no-op,
-    // not an error, so it can never be trusted to have actually restarted anything). The only reliable
-    // recovery is the operator closing and reopening the app, so this always shows that prompt — the
-    // `nodejs.start()` call below is a forward-compatible best-effort attempt only.
+    // P1-2 (Sol round 3/4): the server's kill switch posts this when a `persistent`/`passphrase`-
+    // encrypted node is wiped — its key is FIXED (Keystore-held), so the server deleted the now-orphaned
+    // ciphertext and handed off HERE to clear the key material and restart. Unlike the P1-1
+    // `db_encryption_unreadable` recovery above (which retries boot in the SAME still-alive Node runtime
+    // — a plain JS function call inside that process), this genuinely needs a NEW OS process: the OLD
+    // embedded server is still bound to port 3000 with its store already closed, and nodejs-mobile's
+    // native module only starts its runtime ONCE per process (`_startedNodeAlready` — a second
+    // `nodejs.start()` call is a silent no-op, not an error, so it can never be trusted to have actually
+    // restarted anything). The only reliable recovery is the operator closing and reopening the app; the
+    // `nodejs.start()` call inside `attemptWipeKeyClear` is a forward-compatible best-effort attempt only.
+    //
+    // main.js also re-fires this SAME event at ITS OWN boot time if its durable `.loam-wipe-pending`
+    // marker is still present (P1-2b) — i.e. an earlier clear attempt never got far enough to ack. This
+    // handler doesn't need to (and can't) distinguish that from a live signal; `attemptWipeKeyClear` is
+    // idempotent either way (clearing an already-cleared key just verifies clean and acks again).
     const onWipeRestart = () => {
-      void (async () => {
-        await clearStoredDbKeys();
-        try {
-          nodejs.start('main.js', { redirectOutputToLogcat: true });
-        } catch {
-          // Expected on today's nodejs-mobile — see the comment above. The restart prompt below is the
-          // real recovery path either way.
-        }
-        Alert.alert(
-          'Restart LOAM',
-          'The database encryption key was cleared for the emergency reset. Close and reopen the app now to finish starting a fresh database.',
-        );
-      })();
+      void attemptWipeKeyClear();
     };
 
     nodejs.channel.addListener('loam-status', onStatus);
@@ -416,12 +510,52 @@ export default function HostScreen() {
     );
   };
 
+  // `db_encryption_locked` recovery (P1-1, Sol round 4): store the entered passphrase, then ask main.js
+  // to retry the whole key-resolution-and-boot pipeline from scratch (`loam-db-unlock`) — there was no
+  // server to "reboot" here (unlike `handleStartFresh` above, this failure never even required the
+  // server bundle), just a key to try resolving again now that a passphrase exists.
+  const handleUnlockWithPassphrase = async () => {
+    const trimmed = unlockPassphraseInput;
+    if (!trimmed) {
+      return;
+    }
+    setUnlockBusy(true);
+    setUnlockMessage(undefined);
+    await setStoredPassphrase(trimmed);
+    setUnlockPassphraseInput('');
+    const result = await requestDbUnlock(nodejs.channel);
+    if (!result.ok) {
+      setUnlockBusy(false);
+      setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      return;
+    }
+    // The retry's OUTCOME (ready / still locked / a different boot error) arrives the normal way, via
+    // `loam-status` — see `onStatus`'s `'ready'`/`'error'` branches, both of which reset `unlockBusy`.
+    setUnlockMessage('Retrying with the new passphrase…');
+  };
+
+  // Persistent-mode `db_encryption_locked` recovery (e.g. after a transient Keystore hiccup) — no
+  // passphrase involved, just ask main.js to retry key resolution.
+  const handleRetryUnlock = async () => {
+    setUnlockBusy(true);
+    setUnlockMessage(undefined);
+    const result = await requestDbUnlock(nodejs.channel);
+    if (!result.ok) {
+      setUnlockBusy(false);
+      setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      return;
+    }
+    setUnlockMessage('Retrying…');
+  };
+
   // Bridge from the WebView's web content (the LOAM client) back to this native screen (AF1/Sol P1-1):
   // the client's `wipe` WS-event handler (apps/client/src/app.tsx) posts
   // `{"type":"loam-wipe"}` via `window.ReactNativeWebView.postMessage` whenever the SERVER announces a
-  // node wipe (kill switch), so the persistent/passphrase Keystore-held key material can be rotated
-  // here rather than silently surviving to "protect" the brand-new post-wipe database. Best-effort and
-  // defensive — a malformed/foreign message is just ignored, never thrown.
+  // node wipe (kill switch). This is a best-effort, UNACKED fallback clear — unlike `attemptWipeKeyClear`
+  // (the durable, acked `loam-wipe-restart`/`loam-wipe-complete` handoff, P1-2b), a failure here has no
+  // marker to keep it resumable, so it's deliberately not wired into that protocol; it exists mainly to
+  // still rotate the key promptly for OTHER wipe paths (e.g. an ephemeral/off-mode node) where no
+  // `loam-wipe-restart` signal fires at all. Defensive — a malformed/foreign message is just ignored.
   const handleWebViewMessage = (event: { nativeEvent: { data: string } }) => {
     try {
       const payload = JSON.parse(event.nativeEvent.data) as { type?: unknown };
@@ -499,6 +633,22 @@ export default function HostScreen() {
             </ThemedView>
           </ThemedView>
         ) : null}
+        {/* P1-2(b): a wipe-key-clear attempt failed and was NOT acked as complete — see the matching
+            block in the non-ready view below for the full explanation. Shown here too since the
+            `loam-wipe-restart` signal can arrive while `status` is still `'ready'` (the WebView usually
+            fails moments later once the server 503s everything, but this must not depend on that). */}
+        {wipeClearFailure ? (
+          <ThemedView type="backgroundSelected" style={styles.noticeBanner}>
+            <ThemedText type="small" style={styles.noticeBannerText}>
+              Couldn't clear the device encryption key: {wipeClearFailure}
+            </ThemedText>
+            <ThemedView style={styles.noticeBannerActions}>
+              <Pressable onPress={() => void attemptWipeKeyClear()} disabled={wipeClearBusy} accessibilityRole="button">
+                <ThemedText type="link">{wipeClearBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+              </Pressable>
+            </ThemedView>
+          </ThemedView>
+        ) : null}
         {webViewReady ? (
           <WebView
             ref={webViewRef}
@@ -571,10 +721,15 @@ export default function HostScreen() {
 
   // A boot failure that looks DB-encryption-related (G2): the operator needs a way to switch back to
   // Off and restart even though the host never became ready — surfaced below regardless of whether
-  // this is the plain "starting" spinner or the error screen. Excludes `DB_UNREADABLE_CODE`: that one
-  // gets its own dedicated, more specific fatal block (below) rather than this generic fallback one.
+  // this is the plain "starting" spinner or the error screen. Excludes `DB_UNREADABLE_CODE`/
+  // `DB_LOCKED_CODE`: both get their own dedicated, more specific fatal block (below) rather than this
+  // generic fallback one.
   const dbEncryptionSuspect =
-    status === 'error' && errorCode !== undefined && errorCode !== DB_UNREADABLE_CODE && DB_ENCRYPTION_ERROR_CODES.has(errorCode);
+    status === 'error' &&
+    errorCode !== undefined &&
+    errorCode !== DB_UNREADABLE_CODE &&
+    errorCode !== DB_LOCKED_CODE &&
+    DB_ENCRYPTION_ERROR_CODES.has(errorCode);
   // FATAL db_encryption_unreadable (P1-1, Sol round 3, AF8/design#1): boot genuinely failed and the
   // embedded runtime stayed alive specifically so this recovery can work — see DB_UNREADABLE_CODE's
   // comment. `status` can only be `'error'` while this is active (never `'ready'`), and a subsequent
@@ -631,6 +786,81 @@ export default function HostScreen() {
           ) : null}
         </ThemedView>
       ) : null}
+      {/* FATAL, NOT dismissible (P1-1, Sol round 4) — a `persistent`/`passphrase` boot found no usable
+          key at all and refused to start the server rather than silently fall back to plaintext.
+          Passphrase mode gets an inline "enter passphrase to unlock" input; persistent mode (or
+          passphrase mode too, e.g. after saving the passphrase) gets a plain Retry. A subsequent `ready`
+          clears this the same way it clears `dbUnreadable` above. */}
+      {dbLocked ? (
+        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+          <ThemedText type="smallBold">On-device encryption is locked.</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            {errorMessage ?? 'The selected encryption mode has no usable key yet.'}
+          </ThemedText>
+          {lockedMode === 'passphrase' ? (
+            <>
+              <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                Enter the passphrase to unlock and start the database.
+              </ThemedText>
+              <TextInput
+                value={unlockPassphraseInput}
+                onChangeText={setUnlockPassphraseInput}
+                placeholder="Enter the passphrase"
+                placeholderTextColor={theme.textSecondary}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
+              />
+              <ThemedView style={styles.noticeBannerActions}>
+                <Pressable
+                  onPress={() => void handleUnlockWithPassphrase()}
+                  disabled={unlockBusy || !unlockPassphraseInput}
+                  accessibilityRole="button">
+                  <ThemedView type="backgroundElement" style={styles.retry}>
+                    <ThemedText type="link">{unlockBusy ? 'Unlocking…' : 'Unlock'}</ThemedText>
+                  </ThemedView>
+                </Pressable>
+              </ThemedView>
+            </>
+          ) : null}
+          <ThemedView style={styles.noticeBannerActions}>
+            <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+              </ThemedView>
+            </Pressable>
+          </ThemedView>
+          {unlockMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {unlockMessage}
+            </ThemedText>
+          ) : null}
+        </ThemedView>
+      ) : null}
+      {/* P1-2(b): a wipe-key-clear attempt failed and was NOT acked as complete — the launcher's durable
+          marker is still pending, so this must never look like a benign notice; it stays until a retry
+          succeeds. Shown in both the ready and non-ready views (see the matching block above) since a
+          wipe-restart signal can arrive at any time. */}
+      {wipeClearFailure ? (
+        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+          <ThemedText type="smallBold">Couldn't clear the device encryption key.</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            {wipeClearFailure}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            The old encrypted database was already deleted, but the emergency-reset key itself is still
+            on this device until this succeeds.
+          </ThemedText>
+          <ThemedView style={styles.noticeBannerActions}>
+            <Pressable onPress={() => void attemptWipeKeyClear()} disabled={wipeClearBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">{wipeClearBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+              </ThemedView>
+            </Pressable>
+          </ThemedView>
+        </ThemedView>
+      ) : null}
       {status === 'starting' ? (
         <>
           <ActivityIndicator size="large" style={styles.spinner} />
@@ -667,12 +897,12 @@ export default function HostScreen() {
                 <ThemedText type="link">Retry</ThemedText>
               </ThemedView>
             </Pressable>
-          ) : dbUnreadable ? null : (
+          ) : dbUnreadable || dbLocked ? null : (
             // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process) —
-            // except for `dbUnreadable` (P1-1, Sol round 3), which has its own in-app recovery above and
-            // deliberately does NOT show this text: closing/reopening WITHOUT using that button first
-            // would just hit the identical failure again (nothing changed), so this generic instruction
-            // would be actively misleading for this one specific error.
+            // except for `dbUnreadable` (P1-1, Sol round 3) and `dbLocked` (P1-1, Sol round 4), both of
+            // which have their own in-app recovery above and deliberately do NOT show this text:
+            // closing/reopening WITHOUT using that recovery first would just hit the identical failure
+            // again (nothing changed), so this generic instruction would be actively misleading.
             <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
               Close and reopen the app to try again.
             </ThemedText>
@@ -729,6 +959,12 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
     padding: Spacing.three,
     borderRadius: Spacing.three,
+  },
+  textInput: {
+    borderWidth: 1,
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.two,
   },
   noticeBanner: {
     gap: Spacing.one,

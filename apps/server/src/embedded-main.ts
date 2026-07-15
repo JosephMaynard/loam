@@ -17,6 +17,7 @@ import { startEmbeddedServer } from "./embedded.js";
 // bundle (same pattern as `globalThis.__loamOnDeviceChat`), so the RN host screen gets a real error.
 
 export type BootErrorReporter = (message: string, code: string) => void;
+export type BootReadyReporter = () => void;
 
 /**
  * Best-effort: post a boot failure to the RN host screen. Must never itself throw — this only runs
@@ -29,6 +30,25 @@ function reportBootError(message: string, code: string): void {
     reporter?.(message, code);
   } catch (reportError) {
     console.error("Failed to report boot error to the RN host:", reportError);
+  }
+}
+
+/**
+ * Best-effort: tell the RN host screen that boot succeeded, directly — independent of main.js's own
+ * `/api/health` readiness poll (`waitForServer`/`retry`, P2, Sol round 4), which gives up after ~5
+ * minutes and never restarts itself. Without a direct signal, a LATER successful boot (this file's own
+ * in-process retry after a `db_encryption_unreadable` recovery, possibly minutes after the original poll
+ * gave up) would never tell RN it's ready: `startFreshBusy` stays stuck true and the WebView never
+ * mounts, even though the server is actually healthy. Same install pattern as `__loamReportBootError`
+ * (main.js sets it on `global` before requiring this bundle) — absent on every other host (desktop/Pi/
+ * CI), where it's simply undefined. Never throws.
+ */
+function reportBootReady(): void {
+  try {
+    const reporter = (globalThis as { __loamReportBootReady?: BootReadyReporter }).__loamReportBootReady;
+    reporter?.();
+  } catch (reportError) {
+    console.error("Failed to report boot-ready to the RN host:", reportError);
   }
 }
 
@@ -70,6 +90,19 @@ function hasDbEncryptionUnreadableCode(error: unknown): boolean {
 // the work, instead of resolving early and racing ahead of it.
 let bootInFlight: Promise<void> | undefined;
 
+// P3 (Sol round 4): RF2's `bootInFlight` guard only protects against a re-entrant call while an attempt
+// is ACTUALLY running — it says nothing about what happened once that attempt settled. After a
+// successful recovery, `bootInFlight` clears (as it must, so a LATER genuinely-new failure can still
+// retry), but a DELAYED duplicate `loam-db-start-fresh` (e.g. two taps whose second message is still in
+// flight over the bridge when the first attempt's retry already finished and started listening) would
+// then invoke `bootEmbeddedServer()` again with nothing left to stop it — a second `buildApp()`/
+// `listen()` against the now-occupied port EADDRINUSEs into the generic-failure branch and
+// `process.exit(1)`s the very server that just recovered. Tracking the last SETTLED state (not just
+// "is an attempt in flight right now") closes this: once `bootState` is `"ready"`, a further call is a
+// pure no-op — there is nothing left to retry, healthy or not.
+type BootState = "idle" | "booting" | "ready" | "db_encryption_unreadable" | "failed";
+let bootState: BootState = "idle";
+
 /**
  * Boot the embedded server, reporting any async startup failure — a rejection from `start()` itself,
  * or one that escapes its promise chain entirely (e.g. an un-awaited fire-and-forget task started
@@ -88,11 +121,18 @@ let bootInFlight: Promise<void> | undefined;
  * concurrent attempt — it just returns the SAME in-flight promise, so both callers observe the one
  * attempt's real outcome. The guard clears once that attempt settles (success, the recoverable
  * `db_encryption_unreadable` return, or the fatal `process.exit`), so a later, genuinely separate call
- * (e.g. a second start-fresh confirmation after the first attempt already finished) still boots.
+ * (e.g. a second start-fresh confirmation after the first attempt already finished) still boots — UNLESS
+ * (P3) the settled state is already `"ready"`, in which case this no-ops instead: a server is already up
+ * and healthy, and a second `listen()` against its own port can only ever fail destructively.
  */
 export function bootEmbeddedServer(start: () => Promise<LoamApp> = startEmbeddedServer): Promise<void> {
   if (bootInFlight) {
     return bootInFlight;
+  }
+
+  if (bootState === "ready") {
+    // No-op (P3): already healthy — nothing to retry, and retrying would only risk killing it.
+    return Promise.resolve();
   }
 
   const attempt = runBootAttempt(start).finally(() => {
@@ -105,6 +145,7 @@ export function bootEmbeddedServer(start: () => Promise<LoamApp> = startEmbedded
 /** The actual boot attempt, split out so {@link bootEmbeddedServer} can guarantee `bootInFlight` is
  *  cleared once it settles regardless of how this returns. */
 async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
+  bootState = "booting";
   const onUnhandledDuringBoot = (reason: unknown): void => {
     console.error("Unhandled rejection during embedded server startup:", reason);
     reportBootError(messageOf(reason), "boot_unhandled_rejection");
@@ -117,6 +158,14 @@ async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
 
   try {
     await start();
+    bootState = "ready";
+    // P2 (Sol round 4): tell RN directly, independent of main.js's own `/api/health` readiness poll
+    // (`waitForServer`/`retry`), which gives up after ~5 minutes and never restarts. Without this, a
+    // LATER successful boot (e.g. this very retry, minutes after the original poll gave up) would never
+    // tell RN it's ready — the WebView never mounts and the operator is stuck on a stale error screen
+    // even though the server is actually healthy. Idempotent on the RN side (see main.js's
+    // `announceReady`), so it's safe to fire on every successful attempt, not just the first.
+    reportBootReady();
   } catch (error) {
     console.error("Failed to start embedded LOAM server:", error);
 
@@ -129,9 +178,11 @@ async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
       // NOT process.exit() for this code: the `loam-db-start-fresh` bridge listener that can recover
       // from this lives in THIS process (main.js), so exiting here would kill it before it could ever
       // receive that message, permanently stranding the operator (the exact bug this redesign fixes).
+      bootState = "db_encryption_unreadable";
       return;
     }
 
+    bootState = "failed";
     reportBootError(messageOf(error), "boot_failed");
     process.exit(1);
   } finally {

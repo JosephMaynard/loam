@@ -1,5 +1,5 @@
-import { existsSync, renameSync, rmSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
@@ -1216,6 +1216,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Its mere presence is standing in for an operator's affirmative click — nothing else may substitute
   // for it (Sol's design review: an automatic replace on every unopenable DB is wrong).
   const dbStartFreshMarkerPath = join(dataDir, ".loam-db-start-fresh");
+
+  // Durable wipe-restart handoff marker (P1-2b, Sol round 4): written BEFORE the fixed-key kill-switch
+  // branch signals the RN launcher, deleted by the launcher only once it has VERIFIED the Keystore key
+  // material is actually gone (`loam-wipe-complete`, see main.js/db-encryption.ts). Its presence on a
+  // later boot means an earlier wipe's key-clear handoff never got acknowledged — main.js re-signals
+  // `loam-wipe-restart` at startup so a suspended/backgrounded/killed RN gets another chance to finish
+  // clearing the key it's still holding. Never itself gates store-open behaviour (unlike the start-fresh
+  // marker above) — the wipe already deleted the ciphertext; this marker is purely about making sure the
+  // Keystore-side key-clear eventually happens, not about deciding what `openInitialStore` does.
+  const wipePendingMarkerPath = join(dataDir, ".loam-wipe-pending");
 
   /**
    * Boot-time store open, tolerant of an unopenable DB (F4/SF2, docs/15). A failure here used to reject
@@ -3018,18 +3028,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Best-effort request to the RN launcher (P1-2, docs/15) asking it to clear the Keystore-held DB
-   * key material and restart the embedded runtime. Installed by `nodejs-project-template/main.js`
-   * on `globalThis` before requiring the server bundle, same pattern as `__loamReportBootError` and
-   * `__loamOnDeviceChat` — absent on every other host (desktop/Pi/CI), where it's simply undefined.
+   * The RN launcher's wipe-restart hook (P1-2, docs/15), if installed. `nodejs-project-template/main.js`
+   * sets this on `globalThis` before requiring the server bundle, same pattern as `__loamReportBootError`
+   * and `__loamOnDeviceChat` — absent on every other host (desktop/Pi/CI), where it's simply undefined.
+   * Exposed as a getter rather than an eager call so the caller can decide whether it's even worth
+   * writing the durable handoff marker (P1-2b) BEFORE actually signaling.
    */
-  function requestWipeRestart(): boolean {
-    const hook = (globalThis as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart;
-    if (!hook) {
-      return false;
-    }
-    hook();
-    return true;
+  function wipeRestartHook(): (() => void) | undefined {
+    return (globalThis as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart;
+  }
+
+  /**
+   * Persist `config` to `configPath` (P1-3, Sol round 4): the fixed-key kill-switch branch below deletes
+   * the whole DB — and with it, its `config` table — without ever recreating one in-process; the fresh
+   * DB only exists once the NEXT boot resolves a rotated key. Without this, admin-set values (an armed
+   * kill switch, the panic token, the security profile, retention, sync/mesh, feature flags…) would
+   * silently revert to config.json/defaults on that next boot, DISARMING the kill switch along with
+   * everything else. Writes atomically (temp file + rename) so a crash mid-write can never leave
+   * `config.json` truncated/corrupt and brick the next boot — `loadAppConfig` fails CLOSED on an
+   * unparseable file. Blanks `sync.token`, the one plaintext bearer secret in `LoamConfig`
+   * (`admin.passphrase`/`killSwitch.panicToken` are already scrypt-hashed and safe to persist as-is) —
+   * `config.json` is a plain, unprotected file, unlike the DB `config` table it would otherwise only
+   * ever have lived in.
+   */
+  async function persistConfigForRestart(config: LoamConfig): Promise<void> {
+    const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
+    const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile(tmpPath, JSON.stringify(sanitized, null, 2), "utf8");
+    await rename(tmpPath, configPath);
   }
 
   /** The actual kill-switch work, split out so {@link executeKillSwitch} can guarantee `wipeInProgress`
@@ -3045,64 +3071,105 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const fixedKeyMode = options.dbEncryptionMode === "persistent" || options.dbEncryptionMode === "passphrase";
 
     if (encryptionEnabled && fixedKeyMode) {
-      const restarting = requestWipeRestart();
+      const hook = wipeRestartHook();
 
-      if (restarting) {
-        store.close();
-        for (const suffix of ["", "-wal", "-shm"]) {
-          await rm(`${dbPath}${suffix}`, { force: true });
-        }
-        await rm(avatarsDir, { recursive: true, force: true });
-        await rm(attachmentsDir, { recursive: true, force: true });
-
-        // The rest of this function only touches in-memory state (no `store` access), so it's still
-        // safe to run — it tells any still-connected client to purge its local cache right away
-        // instead of waiting for the whole app to restart.
-        attachmentOwners.clear();
-        sessions.clear();
-        identityTokens.clear();
-        claimAttempts.clear();
-        panicAttempts.clear();
-
-        broadcast({ type: "wipe" });
-
-        for (const { socket } of sockets) {
-          socket.close();
-        }
-        sockets.clear();
-        for (const pending of [...pendingSockets]) {
-          pending.close();
+      if (hook) {
+        // P1-2(b): a durable marker written BEFORE signaling the launcher — a crash/kill anywhere
+        // between "signaled" and "the launcher confirms the key is actually cleared" must be resumable,
+        // not silently lost. main.js re-posts `loam-wipe-restart` on its NEXT boot for as long as this
+        // marker is present, and deletes it itself only once it receives `loam-wipe-complete` — i.e.
+        // only once `clearStoredDbKeys()` VERIFIED the key material is gone (see db-encryption.ts).
+        // Written synchronously, before any of the lockdown state below, which itself must land before
+        // this function's first `await`.
+        let markerWritten = false;
+        try {
+          writeFileSync(wipePendingMarkerPath, String(Date.now()), "utf8");
+          markerWritten = true;
+        } catch (error) {
+          server.log.error(
+            error,
+            "Kill switch: failed to write the wipe-pending marker — falling back to a same-key logical " +
+              "wipe rather than a launcher handoff with no durable resume record",
+          );
         }
 
-        // RF1: reads are served from these in-memory mirrors, NOT the (now-closed, now-deleted) store —
-        // without this the process keeps serving the pre-wipe content with 200 OK until the operator
-        // manually restarts it. Reset to empty rather than `loadData()`: the DB file is gone, so there
-        // is nothing on disk to reload.
-        data = { users: [], channels: [], messages: [] };
-        // Drop every live/cached transport session in memory (store is closed — no `setConfigValue`,
-        // so this is the in-memory-only equivalent of `rotateTransportIdentity()`, not a call to it).
-        transportSessions.clear();
-        peerTransportSessions.clear();
+        if (markerWritten) {
+          // P1-2(a): close the confidentiality window. EVERY piece of in-memory lockdown below is
+          // synchronous and runs BEFORE the first `await` in this function (persisting config.json,
+          // closing the store, and deleting its files, further down) — a concurrent request arriving
+          // while that later async work is still in flight must never observe stale in-memory data.
+          // `awaitingWipeRestart` is what the `onRequest` hook 503s on; setting it (and clearing `data`
+          // and every session/auth map) here, synchronously, means even a request already queued behind
+          // this turn of the event loop sees the lockdown, not a stale 200.
+          awaitingWipeRestart = true;
+          data = { users: [], channels: [], messages: [] };
+          attachmentOwners.clear();
+          sessions.clear();
+          identityTokens.clear();
+          claimAttempts.clear();
+          panicAttempts.clear();
+          transportSessions.clear();
+          peerTransportSessions.clear();
 
-        // Belt-and-suspenders (docs/15): don't rely on the launcher restart alone to stop this process
-        // from serving. Every route except the liveness probe 503s from here until the process actually
-        // restarts — see the `awaitingWipeRestart` check at the top of the transport `onRequest` hook.
-        awaitingWipeRestart = true;
+          // Notify still-connected clients to purge their local caches BEFORE closing their sockets —
+          // closing first would leave the broadcast with no one left to reach.
+          broadcast({ type: "wipe" });
 
-        server.log.warn(
-          "Kill switch: persistent/passphrase-encrypted database deleted; handed off to the launcher to " +
-            "clear the device key and restart — the next boot creates a fresh key together with a fresh database.",
-        );
-        return;
+          for (const { socket } of sockets) {
+            socket.close();
+          }
+          sockets.clear();
+          for (const pending of [...pendingSockets]) {
+            pending.close();
+          }
+
+          // Signal the launcher now that the durable marker is on disk and every reader of in-memory
+          // state is already locked out. This is NOT yet a confirmed cryptographic wipe from the
+          // operator's perspective — that's only true once the launcher acks with `loam-wipe-complete`
+          // and deletes the marker above (P1-2b); this process has no way to observe that ack (it may
+          // not even survive to see it), so the log line below deliberately describes the wipe as
+          // REQUESTED, not completed.
+          try {
+            hook();
+          } catch (error) {
+            server.log.error(error, "Kill switch: failed to signal the RN launcher for the wipe-restart handoff");
+          }
+
+          try {
+            await persistConfigForRestart(appConfig);
+          } catch (error) {
+            server.log.error(
+              error,
+              "Kill switch: failed to persist config.json ahead of the encrypted wipe — admin settings " +
+                "(e.g. an armed kill switch) may revert to config.json/defaults on the next boot",
+            );
+          }
+
+          store.close();
+          for (const suffix of ["", "-wal", "-shm"]) {
+            await rm(`${dbPath}${suffix}`, { force: true });
+          }
+          await rm(avatarsDir, { recursive: true, force: true });
+          await rm(attachmentsDir, { recursive: true, force: true });
+
+          server.log.warn(
+            "Kill switch: persistent/passphrase-encrypted database deleted; a device-key-clear-and-restart " +
+              "was REQUESTED from the launcher (durable pending marker written) — the key rotation is only " +
+              "confirmed once the launcher acknowledges it cleared the Keystore key.",
+          );
+          return;
+        }
       }
 
-      // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a
-      // NEW key from in-process. Fall through to the existing recreate-under-the-same-key behaviour
-      // rather than bricking the wipe entirely; this is a documented limitation; see docs/02.
+      // No launcher hook available (desktop/Pi/CI — not the Android host), or the durable marker
+      // couldn't be written: there is nowhere to get a NEW key from in-process, or no safe/resumable way
+      // to hand off for one. Fall through to the existing recreate-under-the-same-key behaviour rather
+      // than bricking the wipe entirely; this is a documented limitation; see docs/02.
       server.log.warn(
-        "Kill switch: this node uses a fixed (persistent/passphrase) encryption key and no launcher " +
-          "restart hook is available, so the key cannot be rotated in-process. Falling back to a logical " +
-          "wipe that recreates the database under the SAME key (documented limitation, docs/02).",
+        "Kill switch: this node uses a fixed (persistent/passphrase) encryption key, but no safe launcher " +
+          "handoff is available (no restart hook installed, or the durable wipe-pending marker could not " +
+          "be written), so the key cannot be rotated in-process. Falling back to a logical wipe that " +
+          "recreates the database under the SAME key (documented limitation, docs/02).",
       );
     }
 
@@ -4500,6 +4567,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   void reapOrphanedAttachments();
 
   const reaperTimer = setInterval(() => {
+    // P1-2(c): once a fixed-key kill switch has handed off to the launcher for a restart, `store` is
+    // closed and its files are being (or already are) deleted — every one of these calls touches the
+    // store or the in-memory mirrors that `awaitingWipeRestart` deliberately froze at `{}` (RF1). A tick
+    // that lands in the gap between "wipe requested" and "process actually restarted" must be a pure
+    // no-op, not a crash against a closed handle or a resurrection of the frozen (empty) in-memory state.
+    if (awaitingWipeRestart) {
+      return;
+    }
+
     try {
       reapExpiredMessages();
     } catch (error) {
@@ -4517,6 +4593,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Sync ticker: a fixed 5s heartbeat; runSyncLoop itself enforces the configured interval (so an
   // admin shortening sync.intervalMs takes effect without re-arming a timer).
   const syncTimer = setInterval(() => {
+    // P1-2(c): same reasoning as the reaper gate above — a sync round touches the store and peer
+    // sessions, neither of which this process may read/write once a wipe-restart is pending.
+    if (awaitingWipeRestart) {
+      return;
+    }
     void runSyncLoop().catch((error: unknown) => server.log.error(error));
   }, 5_000);
 

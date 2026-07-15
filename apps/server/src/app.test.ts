@@ -45,6 +45,26 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+// P1-2(a): a fault/delay-injection seam for `node:fs/promises`'s `rm`, used ONLY by the "confidentiality
+// window" test below to hold the fixed-key kill-switch's file-deletion awaits open while concurrent
+// requests are issued — there's no other reliable way to observe what a request sees DURING that async
+// window. `rmGate.promise` defaults to `undefined` (pass straight through to the real implementation),
+// so every other test — which never sets it — is unaffected; every other `node:fs/promises` export is
+// untouched (`...actual`).
+const rmGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      if (rmGate.promise) {
+        await rmGate.promise;
+      }
+      return actual.rm(...args);
+    },
+  };
+});
+
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -53,6 +73,9 @@ afterEach(async () => {
   // Restore real timers before tearing anything down, so a test that installed fake timers can't
   // leave `app.close()` (which awaits Fastify shutdown) or the next test running on a frozen clock.
   vi.useRealTimers();
+  // Belt-and-suspenders: a test that armed the P1-2(a) `rm()` gate but failed before releasing it must
+  // never leave a later, unrelated test's own `rm()` calls hanging on a promise nobody will resolve.
+  rmGate.promise = undefined;
   while (cleanups.length) {
     await cleanups.pop()?.();
   }
@@ -1496,6 +1519,153 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(app.store.loadMessages()).toEqual([]);
     expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
     expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
+  });
+
+  it("P1-2(b): a durable wipe-pending marker is written before signaling the launcher, and this process never deletes it itself (only a verified `loam-wipe-complete` ack may)", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+
+    // This process signaled the launcher but has no way to observe whether it actually cleared the
+    // Keystore key — the marker MUST still be on disk. Only main.js's `loam-wipe-complete` handler
+    // (after a VERIFIED `clearStoredDbKeys()`) is allowed to delete it, and that never happens here
+    // (the fake hook is a bare recorder, not a real launcher).
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(true);
+  });
+
+  it("P1-2(a): a concurrent request during the slow file-deletion await already sees the lockdown (503), never stale in-memory data", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "must not leak out mid-deletion")).statusCode).toBe(201);
+
+    let release!: () => void;
+    rmGate.promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const wipePromise = app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+
+    // Let the handler's synchronous lockdown, broadcast, launcher signal, and config.json persist all
+    // run and reach the gated `rm()` call, without letting that call resolve yet — this is the window
+    // the OLD code left unprotected (the lockdown used to run AFTER these awaits, not before them).
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const concurrentRead = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(concurrentRead.statusCode).toBe(503);
+
+    const concurrentWrite = await post(app, admin.cookie, "must never be accepted mid-deletion");
+    expect(concurrentWrite.statusCode).toBe(503);
+
+    const freshSession = await app.server.inject({ method: "GET", url: "/api/channels" });
+    expect(freshSession.statusCode).toBe(503);
+
+    release();
+    const wipe = await wipePromise;
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+  });
+
+  describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {
+    async function expectConfigSurvivesFixedKeyWipe(dbEncryptionMode: "persistent" | "passphrase"): Promise<void> {
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp({
+        dbEncryptionKey: `key A (${dbEncryptionMode})`,
+        dbEncryptionMode,
+      });
+      const admin = await session(app);
+
+      // Change settings ONLY via the admin API (never the initial config file) — exactly the scenario
+      // the fix targets: an armed kill switch and a sync token that only ever lived in the DB `config`
+      // table, which the fixed-key wipe branch deletes without ever recreating one in-process.
+      const patch = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: {
+          killSwitch: { enabled: true },
+          sync: { enabled: true, token: "a-plaintext-bearer-sync-token-9" },
+        },
+      });
+      expect(patch.statusCode).toBe(200);
+
+      const wipe = await app.server.inject({
+        method: "POST",
+        url: "/api/admin/kill-switch",
+        headers: { cookie: admin.cookie },
+        payload: { confirm: "wipe" },
+      });
+      expect(wipe.statusCode).toBe(200);
+      expect(hook.calls).toBe(1);
+
+      // config.json — the only surviving file — carries the effective config, with the plaintext sync
+      // token blanked (unlike the already-scrypt-hashed admin.passphrase/killSwitch.panicToken, which
+      // are safe to persist as-is and are NOT asserted away here).
+      const rawConfig = readFileSync(join(dataDir, "config.json"), "utf8");
+      expect(rawConfig).not.toContain("a-plaintext-bearer-sync-token-9");
+      const configOnDisk = JSON.parse(rawConfig) as { killSwitch: { enabled: boolean }; sync: { token?: string } };
+      expect(configOnDisk.killSwitch.enabled).toBe(true);
+      expect(configOnDisk.sync.token).toBeUndefined();
+
+      // Simulate the launcher's actual restart: a fresh boot, same dataDir, a NEW (rotated) key — the
+      // whole point of the P1-2 handoff. The fresh DB's config table starts empty, so config.json is
+      // the ONLY thing carrying the admin's settings forward into the new boot.
+      const restarted = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: `key B (${dbEncryptionMode}, rotated)`,
+        dbEncryptionMode,
+      });
+      try {
+        const restartedAdmin = await session(restarted);
+        const config = (
+          await restarted.server.inject({
+            method: "GET",
+            url: "/api/admin/config",
+            headers: { cookie: restartedAdmin.cookie },
+          })
+        ).json() as { killSwitch: { enabled: boolean }; sync: { enabled: boolean; token?: string } };
+
+        // Not silently reverted to config.json-absent/defaults — the armed kill switch survives.
+        expect(config.killSwitch.enabled).toBe(true);
+        expect(config.sync.enabled).toBe(true);
+        expect(config.sync.token).toBeUndefined();
+      } finally {
+        await restarted.close();
+      }
+    }
+
+    it("persistent mode", async () => {
+      await expectConfigSurvivesFixedKeyWipe("persistent");
+    });
+
+    it("passphrase mode", async () => {
+      await expectConfigSurvivesFixedKeyWipe("passphrase");
+    });
   });
 
   /** Install the `globalThis.__loamReportBootError` bridge (the same one `embedded-main.ts` uses for
