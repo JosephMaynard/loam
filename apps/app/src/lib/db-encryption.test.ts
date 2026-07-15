@@ -30,6 +30,7 @@ const {
   markPassphraseKeyMigrated,
   mayBootPlaintextOnLockedError,
   registerDbEncryption,
+  requestDbStartFresh,
   resolveDbKey,
   setDbEncryptionMode,
   setDbModeHint,
@@ -484,6 +485,68 @@ describe("setDbModeHint (P1-b, Sol round 6)", () => {
     channel.emit("loam-db-set-mode-hint-result", { requestId: "not-mine", ok: true });
     // Still pending → falls through to the timeout as ok:false.
     await expect(promise).resolves.toEqual({ ok: false, error: expect.any(String) });
+  });
+});
+
+describe("requestDbStartFresh intent threading (Sol P1 / release blocker)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("posts intent 'delete' in the loam-db-start-fresh payload (deliberate destructive mode change)", async () => {
+    const channel = makeFakeChannel();
+    const promise = requestDbStartFresh(channel, "delete");
+
+    const request = channel.posted.find((p) => p.name === "loam-db-start-fresh");
+    expect(request).toBeTruthy();
+    const payload = request!.payload as { requestId: string; intent: string };
+    expect(payload.intent).toBe("delete");
+    expect(typeof payload.requestId).toBe("string");
+
+    // The launcher acks only after durably writing the marker; a matching ack resolves the round trip.
+    channel.emit("loam-db-start-fresh-result", { requestId: payload.requestId, ok: true });
+    await expect(promise).resolves.toEqual({ ok: true });
+  });
+
+  it("posts intent 'preserve' in the loam-db-start-fresh payload (accidental wrong/lost-key recovery)", async () => {
+    const channel = makeFakeChannel();
+    const promise = requestDbStartFresh(channel, "preserve");
+
+    const request = channel.posted.find((p) => p.name === "loam-db-start-fresh");
+    expect(request).toBeTruthy();
+    const payload = request!.payload as { requestId: string; intent: string };
+    expect(payload.intent).toBe("preserve");
+    expect(typeof payload.requestId).toBe("string");
+
+    channel.emit("loam-db-start-fresh-result", { requestId: payload.requestId, ok: true });
+    await expect(promise).resolves.toEqual({ ok: true });
+  });
+
+  it("keeps the requestId round-trip: a result for a different requestId is ignored (falls through to timeout)", async () => {
+    const channel = makeFakeChannel();
+    const promise = requestDbStartFresh(channel, "delete", 20);
+    channel.emit("loam-db-start-fresh-result", { requestId: "not-mine", ok: true });
+    await expect(promise).resolves.toEqual({ ok: false, error: expect.any(String) });
+  });
+
+  it("resolves ok:false (never throws) when post() throws", async () => {
+    const channel = makeFakeChannel();
+    const throwing: typeof channel = {
+      ...channel,
+      post: () => {
+        throw new Error("bridge down");
+      },
+    };
+    const result = await requestDbStartFresh(throwing, "delete");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("bridge down");
+  });
+
+  it("resolves ok:false on a timeout (host never answered)", async () => {
+    const channel = makeFakeChannel();
+    const result = await requestDbStartFresh(channel, "preserve", 5);
+    expect(result.ok).toBe(false);
   });
 });
 

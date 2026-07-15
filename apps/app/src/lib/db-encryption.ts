@@ -516,19 +516,46 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
 export type StartFreshResult = { ok: boolean; error?: string };
 
 /**
+ * The two DISTINCT intents the `.loam-db-start-fresh` marker can record (Sol P1 / release blocker). The
+ * SAME marker was previously used for both, but the server only ever PRESERVED the old ciphertext — so a
+ * deliberate "Delete & start fresh" left the old (still key-recoverable) database renamed aside on disk,
+ * silently contradicting the confirmation the operator agreed to. The intent is now written INTO the
+ * marker so the server can honour the operator's actual choice:
+ *   - `'delete'`   → a DELIBERATE destructive mode transition the operator explicitly confirmed (e.g.
+ *                    off→encrypted, persistent→passphrase, passphrase→persistent, encrypted→ephemeral).
+ *                    The server DELETES the existing database on the next boot, proving the old data is
+ *                    genuinely gone rather than merely inaccessible under the new key. Retaining the old
+ *                    ciphertext would leave it recoverable under the retained device secret even though
+ *                    the operator was told the data would be deleted.
+ *   - `'preserve'` → an ACCIDENTAL wrong/lost-key lockout (`db_encryption_unreadable`): the operator
+ *                    can't open the existing encrypted DB but wants a working node, so the server RENAMES
+ *                    the old (unopenable) ciphertext ASIDE (`*.unreadable-*`) and starts a fresh DB. This
+ *                    is recovery, not a deliberate discard, so the old data is kept for a later attempt.
+ */
+export type StartFreshIntent = 'delete' | 'preserve';
+
+/**
  * Ask the launcher (main.js) to write the `.loam-db-start-fresh` confirmation marker into its data
- * directory (design#1 / AF8, docs/01, docs/15). When boot fails with `db_encryption_unreadable` (an
- * encrypted DB that the current key can't open), the operator can explicitly choose "preserve the old
- * database as-is and start a fresh one" — the server consumes and deletes this marker on the next boot
- * as confirmation that a human actually asked for that, rather than the app silently doing it on its
- * own. This module has no direct filesystem access to main.js's `dataDir`
+ * directory (design#1 / AF8, docs/01, docs/15). The server consumes and deletes this marker on the next
+ * boot as confirmation that a human actually asked for a fresh database, rather than the app silently
+ * doing it on its own. This module has no direct filesystem access to main.js's `dataDir`
  * (`rnBridge.app.datadir()/loam`), so the write has to happen over there — this is a request/response
  * round trip over the bridge, mirroring `model-manager-bridge.ts`'s `roundTrip` helper.
+ *
+ * `intent` (REQUIRED) records WHY the fresh start was requested (see {@link StartFreshIntent}) and is
+ * threaded into the marker so the server either DELETES the existing database (`'delete'` — a deliberate
+ * destructive mode change; deletion proves absence of the old data) or PRESERVES it aside (`'preserve'` —
+ * accidental wrong/lost-key lockout recovery; the old ciphertext is renamed aside for a later attempt).
+ * The launcher only acks AFTER durably writing the marker.
  *
  * Never throws — a timeout, an old launcher build with no handler, or a thrown `post()` all resolve to
  * `{ ok: false }` so the caller can tell the operator to retry rather than hang indefinitely.
  */
-export function requestDbStartFresh(channel: BridgeChannel, timeoutMs = 5000): Promise<StartFreshResult> {
+export function requestDbStartFresh(
+  channel: BridgeChannel,
+  intent: StartFreshIntent,
+  timeoutMs = 5000,
+): Promise<StartFreshResult> {
   return new Promise((resolve) => {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let settled = false;
@@ -557,7 +584,7 @@ export function requestDbStartFresh(channel: BridgeChannel, timeoutMs = 5000): P
 
     channel.addListener('loam-db-start-fresh-result', onResult);
     try {
-      channel.post('loam-db-start-fresh', { requestId });
+      channel.post('loam-db-start-fresh', { requestId, intent });
     } catch (err) {
       finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
