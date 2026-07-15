@@ -10,8 +10,18 @@
 // authenticated server route. Instead it asks the launcher (which already knows its own on-device
 // `dataDir`/`config.json` path) to merge `llm.onDevice` into that file directly — the same boot-time
 // config layer an operator would otherwise hand-edit (see CLAUDE.md: "layered defaults ← config.json
-// ← DB-persisted admin edits"). A later admin-UI PATCH still wins on top of this, same as any other
-// config.json setting.
+// ← DB-persisted admin edits").
+//
+// IMPORTANT — what config.json's `llm.onDevice` actually drives, and what it doesn't: the server only
+// reads `enabled` (whether the on-device assistant appears as a DM contact at all) and `model` (a
+// cosmetic label shown to the operator). It does NOT read `modelPath`/`contextSize` to pick or
+// configure the model that actually runs inference — the RN/native side is authoritative there:
+// `on-device-llm.ts`'s `activeModelPath()` loads whatever the model manager's OWN local
+// `model-manager-store.json` currently marks as `activeId`, entirely independent of this file (n_ctx
+// is likewise a fixed constant in `on-device-llm.ts`, not read from `contextSize`). So an admin
+// `POST /api/admin/config` PATCH of `llm.onDevice.modelPath`/`contextSize` has NO effect on which
+// model actually loads or how — those fields are written here purely for operator visibility/
+// debugging; only toggling `enabled`/`model` (the label) has any real effect server-side.
 //
 // Because nodejs-mobile can't restart its runtime in-process (see index.tsx), this takes effect the
 // NEXT time the app (re)starts the embedded server — the caller is expected to say so in the UI.

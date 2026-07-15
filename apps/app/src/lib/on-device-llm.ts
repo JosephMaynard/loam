@@ -5,13 +5,12 @@
 // tokens back as `loam-llm-delta` / `loam-llm-end` / `loam-llm-error`, which the server turns into
 // the same `StreamEvent`s the laptop-Ollama path uses. Nothing else in the LLM path changes.
 //
-// IMPORTANT — the actual inference engine is intentionally NOT wired here. `runInference` is a
-// graceful stub that reports "no model configured", so enabling the backend on a device without a
-// model is a harmless no-op error, never a crash, and crisis messaging is never affected. Turning it
-// into a real model (e.g. Gemma) is the one step that cannot be built or verified without a physical
-// arm64 phone and a GGUF file, so it's left as a single, clearly-marked seam — see docs/06,
-// "Wiring on-device inference": add `llama.rn`, load the GGUF at the configured `modelPath`, run a
-// streaming completion, and forward each token to `onDelta`, then `onEnd`.
+// `runInference` is now wired to a real engine via `llama.rn`: it loads the operator's active GGUF
+// (from the model manager) and streams a completion, offloading to the GPU/DSP where available. It
+// stays fully defensive — no active model, or any load/inference failure, surfaces as a graceful
+// assistant error (never a crash), so crisis messaging is unaffected. The remaining DEVICE SEAM is
+// only actual on-device token generation (needs a physical arm64 phone + a downloaded GGUF);
+// everything up to and including the llama.rn call is built and type-checked.
 
 import { initLlama, type LlamaContext } from 'llama.rn';
 
@@ -71,6 +70,12 @@ async function ensureContext(modelPath: string): Promise<LlamaContext> {
     loadedContext = null;
     loadedModelPath = null;
   }
+  // n_ctx is a fixed constant, not read from config.json's llm.onDevice.contextSize: this module reads
+  // the active model from its OWN local model-manager-store.json (see activeModelPath above), not from
+  // config.json, and nothing in the RN model-manager UI currently collects a context-size choice from
+  // the operator — threading contextSize through would need new UI + storage plumbing, not just
+  // reading a field (see model-manager-bridge.ts's header comment for the full config.json story).
+  // Left as a documented follow-up rather than half-wired.
   const context = await initLlama({ model: modelPath, n_ctx: 4096, n_gpu_layers: 99 });
   loadedContext = context;
   loadedModelPath = modelPath;
@@ -135,6 +140,17 @@ function isChatMessage(value: unknown): value is ChatMessage {
   );
 }
 
+/** `channel.post` can throw (e.g. the bridge is torn down mid-stream, screen unmounted) — called from
+ * inside `runInference`'s callbacks, that throw would otherwise become an unhandled rejection deep in
+ * a promise chain instead of a harmless no-op (mirrors `db-encryption.ts`'s `registerDbEncryption`). */
+function safePost(channel: BridgeChannel, name: string, payload: unknown): void {
+  try {
+    channel.post(name, payload);
+  } catch {
+    // the RN bridge isn't listening any more — nothing more to do.
+  }
+}
+
 export function registerOnDeviceLlm(channel: BridgeChannel): () => void {
   const onRequest = (payload: LlmRequest): void => {
     const id = payload?.id;
@@ -146,11 +162,11 @@ export function registerOnDeviceLlm(channel: BridgeChannel): () => void {
     const messages: ChatMessage[] = (Array.isArray(payload?.messages) ? payload.messages : []).filter(isChatMessage);
 
     void runInference(messages, {
-      onDelta: (text) => channel.post('loam-llm-delta', { id, text }),
-      onEnd: () => channel.post('loam-llm-end', { id }),
-      onError: (message) => channel.post('loam-llm-error', { id, error: message }),
+      onDelta: (text) => safePost(channel, 'loam-llm-delta', { id, text }),
+      onEnd: () => safePost(channel, 'loam-llm-end', { id }),
+      onError: (message) => safePost(channel, 'loam-llm-error', { id, error: message }),
     }).catch((error: unknown) => {
-      channel.post('loam-llm-error', { id, error: error instanceof Error ? error.message : String(error) });
+      safePost(channel, 'loam-llm-error', { id, error: error instanceof Error ? error.message : String(error) });
     });
   };
 

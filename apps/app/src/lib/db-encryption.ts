@@ -108,8 +108,16 @@ export async function clearStoredPassphrase(): Promise<void> {
  *   - 'passphrase' → derived from an operator-entered passphrase (Keystore-backed). This is a SIMPLE
  *                    KDF (single SHA-256 pass over the UTF-8 passphrase, hex-encoded) — a deliberate
  *                    v1 shortcut, not a hardened one; a proper scrypt/Argon2 derivation is a documented
- *                    follow-up (see docs/21). If no passphrase has been entered yet, resolves with no
- *                    key (the UI must collect one first via `setStoredPassphrase`).
+ *                    follow-up (see docs/21). Note this single SHA-256 pass is less weak than it sounds
+ *                    in isolation: the resulting hex string is handed to SQLCipher as a `PRAGMA key`,
+ *                    and SQLCipher does NOT use it directly as the DB key — it re-derives the actual
+ *                    encryption key from that pragma string via its own salted PBKDF2 (64k+ iterations
+ *                    by default), so there IS a real KDF between the passphrase and the on-disk key;
+ *                    this module's SHA-256 pass just normalizes an arbitrary-length passphrase into a
+ *                    fixed-length pragma value ahead of that. A stronger app-side KDF is still a
+ *                    documented follow-up (docs/21), but "no KDF at all" would overstate the gap. If no
+ *                    passphrase has been entered yet, resolves with no key (the UI must collect one
+ *                    first via `setStoredPassphrase`).
  *
  * Never throws — any failure (Keystore unavailable, RNG failure) resolves to `{ mode, key: undefined }`
  * so the caller can fall back to the safe unencrypted default.

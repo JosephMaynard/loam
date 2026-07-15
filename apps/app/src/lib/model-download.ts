@@ -22,14 +22,64 @@ export type DownloadProgressCallback = (writtenBytes: number, totalBytes: number
 export type DownloadOutcome = { ok: true; uri: string; sizeBytes: number } | { ok: false; error: string };
 
 /**
+ * Reject (rather than silently mangle) any candidate model file name that isn't a plain basename.
+ * `name` is expected to already be decoded (e.g. via `decodeURIComponent`) — this is the LAST line of
+ * defense before it's concatenated into `${MODELS_DIR}${fileName}`, so it rejects `/`, `\`, and `..`
+ * outright rather than trying to strip them (stripping could still leave a crafted name that
+ * reassembles into a traversal once combined with the caller's own prefix/suffix). Returns the
+ * trimmed name, or `null` when unsafe or empty — callers must refuse the operation on `null`, never
+ * fall back to a default silently.
+ */
+export function sanitizeModelFileName(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === '.' || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('..')) {
+    return null;
+  }
+  return trimmed;
+}
+
+/**
+ * Defense in depth for `downloadModel` below: independent of any caller-side sanitization, verify the
+ * resolved destination path still lands inside `MODELS_DIR` before anything is written there. Manually
+ * resolves `.`/`..` segments (no Node `path` module available in this RN runtime) rather than trusting
+ * a string-prefix check alone, which a crafted `..`-laden name could otherwise defeat.
+ */
+function isWithinModelsDir(uri: string): boolean {
+  if (!uri.startsWith(MODELS_DIR)) {
+    return false;
+  }
+  const resolved: string[] = [];
+  for (const segment of uri.slice(MODELS_DIR.length).split('/')) {
+    if (segment === '' || segment === '.') {
+      continue;
+    }
+    if (segment === '..') {
+      if (resolved.length === 0) {
+        return false; // would escape MODELS_DIR
+      }
+      resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return resolved.length > 0;
+}
+
+/**
  * Download `url` into `<MODELS_DIR><fileName>` and verify the result.
+ *
+ * `fileName` MUST already be a sanitized basename (see `sanitizeModelFileName`) — this function also
+ * independently re-verifies the resolved path never escapes `MODELS_DIR` (defense in depth; see
+ * `isWithinModelsDir`) before writing anything, and refuses the download otherwise.
  *
  * Integrity check order:
  *   1. Exact byte size against `expectedSizeBytes` — cheap, always run, and the primary check. Catches
  *      truncated downloads and "the upstream file silently changed" just as well as a hash would.
  *   2. SHA-256 against `expectedSha256` — best-effort only, and only attempted when the file is small
  *      enough to safely hash in RN JS (see `verifySha256BestEffort`). Every catalog GGUF is far above
- *      that cap, so this step is effectively inert today; the plumbing exists for smaller future models.
+ *      that cap, so this step is effectively inert today (see model-catalog.ts's `sha256` doc comment)
+ *      — size-check + TLS are the real integrity story today; the hashing plumbing exists for smaller
+ *      future models.
  *
  * Either a fresh `createDownloadResumable` failure or a failed verification deletes the partial/bad
  * file before returning, so a rejected download never leaves junk behind.
@@ -43,6 +93,9 @@ export async function downloadModel(
 ): Promise<DownloadOutcome> {
   await ensureModelsDir();
   const destUri = `${MODELS_DIR}${fileName}`;
+  if (!isWithinModelsDir(destUri)) {
+    return { ok: false, error: 'Refusing to download: the resolved file name would escape the models directory.' };
+  }
 
   const resumable = FileSystem.createDownloadResumable(url, destUri, {}, (data) => {
     onProgress(data.totalBytesWritten, data.totalBytesExpectedToWrite);

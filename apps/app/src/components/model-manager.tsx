@@ -13,7 +13,7 @@ import {
   storageFit,
   type DeviceCapabilities,
 } from '@/lib/device-capabilities';
-import { deleteModelFile, downloadModel } from '@/lib/model-download';
+import { deleteModelFile, downloadModel, sanitizeModelFileName } from '@/lib/model-download';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
@@ -103,9 +103,16 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
 
   /** Download one curated catalog entry into `<id>.gguf`, verifying size (+ hash when small enough). */
   const handleDownloadCatalogEntry = async (entry: ModelCatalogEntry) => {
+    // Catalog ids are hardcoded, known-safe strings — this can't actually fail — but sanitize anyway
+    // for consistency with the pasted-URL path and as defense in depth (see model-download.ts).
+    const fileName = sanitizeModelFileName(`${entry.id}.gguf`);
+    if (!fileName) {
+      setStatusMessage(`${entry.displayName}: invalid catalog file name.`);
+      return;
+    }
     setBusy(entry.id, true);
     setModelProgress(entry.id, 0, entry.sizeBytes);
-    const outcome = await downloadModel(entry.url, `${entry.id}.gguf`, entry.sizeBytes, entry.sha256, (written, total) =>
+    const outcome = await downloadModel(entry.url, fileName, entry.sizeBytes, entry.sha256, (written, total) =>
       setModelProgress(entry.id, written, total > 0 ? total : entry.sizeBytes),
     );
     clearModelProgress(entry.id);
@@ -150,8 +157,27 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       return;
     }
 
+    // Free-storage gate (G9): a pasted URL has no known size ahead of time (unlike a catalog entry),
+    // so RAM can't be checked and the exact-size storage check can't run either — but we can still
+    // refuse when the device is already below the headroom floor `storageFit` uses for catalog
+    // downloads, rather than skipping the gate entirely for custom URLs.
+    if (capabilities && storageFit(capabilities, 0) === 'insufficient') {
+      setStatusMessage(
+        `Not enough free storage to download a model (only ${formatBytes(capabilities.freeStorageBytes)} free).`,
+      );
+      return;
+    }
+
     const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const guessedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
+    // decodeURIComponent must run BEFORE sanitizing — an encoded `%2F`/`%2E%2E` only becomes a real
+    // `/`/`..` after decoding, and a naive split-then-decode order is exactly what lets a crafted URL
+    // (e.g. `.../foo%2F..%2F..%2Fbar.gguf`) smuggle a path-traversal segment past a pre-decode split.
+    const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
+    const guessedName = sanitizeModelFileName(decodedName);
+    if (!guessedName) {
+      setStatusMessage("That URL's file name isn't safe to use — try a direct link with a plain file name.");
+      return;
+    }
     const fileName = `${id}-${guessedName.toLowerCase().endsWith('.gguf') ? guessedName : `${guessedName}.gguf`}`;
 
     setBusy(id, true);
