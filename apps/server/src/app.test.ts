@@ -57,6 +57,12 @@ const backupCapture = vi.hoisted(() => ({ dir: undefined as string | undefined }
 // removes `loam.db-journal` before restoring — an end-to-end "no journal after boot" check can't, since
 // any successful DB open also cleans a hot journal, so it would pass even WITHOUT the fix.
 const rmSyncCapture = vi.hoisted(() => ({ paths: undefined as string[] | undefined }));
+// P2-2 (Sol round 7): a single-shot fault-injection seam for `node:fs`'s `rmSync` targeting ONLY the
+// migration's POST-REKEY cleanup of the committed `loam.db.premigration` backup (exact `.premigration`
+// path — never the `.tmp`/`-wal`/`-shm`/`-journal` sidecars, which Step 0b deletes first for a clean
+// migration). Used to prove that a cleanup failure AFTER a successful rekey does NOT fail the boot / leak
+// the migrated handle. Defaults disarmed (pass through) and self-disarms on fire.
+const postRekeyCleanupFailure = vi.hoisted(() => ({ armed: false }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
@@ -64,6 +70,10 @@ vi.mock("node:fs", async (importOriginal) => {
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
       if (rmSyncCapture.paths) {
         rmSyncCapture.paths.push(String(args[0]));
+      }
+      if (postRekeyCleanupFailure.armed && String(args[0]).endsWith("loam.db.premigration")) {
+        postRekeyCleanupFailure.armed = false;
+        throw new Error("simulated post-rekey cleanup rmSync failure (P2-2 test fault injection)");
       }
       return actual.rmSync(...args);
     },
@@ -147,6 +157,8 @@ afterEach(async () => {
   configWriteFailures.remaining = 0;
   wipeMarkerWriteFailure.armed = false;
   backupCapture.dir = undefined;
+  postRekeyCleanupFailure.armed = false;
+  rmSyncCapture.paths = undefined;
   while (cleanups.length) {
     await cleanups.pop()?.();
   }
@@ -1900,6 +1912,167 @@ describe("encryption at rest + key-discard kill switch", () => {
     });
   });
 
+  describe("P1-2 (Sol round 7): the kill switch wipes EVERY DB artifact (migration/recovery sidecars), not just the 3 live files", () => {
+    const SENTINEL = "PREMIGRATION_LEGACY_SECRET";
+    // Every NON-live artifact `dbArtifactPaths()` must reach: the DELETE-mode rollback journal, the full
+    // `.premigration` snapshot family (+ the legacy multi-file `-wal`/`-shm` sidecars), and the
+    // timestamped `*.unreadable-<ts>` recovery renames.
+    const STALE_NAMES = [
+      "loam.db-journal",
+      "loam.db.premigration.tmp",
+      "loam.db.premigration-wal",
+      "loam.db.premigration-shm",
+      "loam.db.premigration-journal",
+      "loam.db-wal.premigration",
+      "loam.db-shm.premigration",
+      "loam.db.unreadable-1700000000000-abc123",
+      "loam.db-wal.unreadable-1700000000000-abc123",
+      "loam.db-journal.unreadable-1700000000000-abc123",
+    ];
+
+    /** Seed a REAL legacy-key-encrypted `loam.db.premigration` (openable with `legacyKey`, which has no
+     *  discardable device secret — THE crypto-wipe hole) plus every other stale DB artifact into
+     *  `dataDir`, alongside a running app's live DB. */
+    function seedStaleDbArtifacts(dataDir: string, legacyKey: string): void {
+      const seedDir = mkdtempSync(join(tmpdir(), "loam-legacy-premig-"));
+      cleanups.push(() => rmSync(seedDir, { recursive: true, force: true }));
+      const seedDb = join(seedDir, "legacy.db");
+      const legacy = openStore(seedDb, { encryptionKey: legacyKey });
+      legacy.setConfigValue("legacy-sentinel", SENTINEL);
+      legacy.checkpoint();
+      legacy.close();
+      // Sanity: it really IS a legacy-key DB — anyone with the passphrase can still open it, which is
+      // exactly why leaving `.premigration` behind (encrypted under the legacy key, not a discardable
+      // device secret) breaks the cryptographic-wipe guarantee.
+      const verify = openStore(seedDb, { encryptionKey: legacyKey });
+      expect(verify.getConfigValue("legacy-sentinel")).toBe(SENTINEL);
+      verify.checkpoint();
+      verify.close();
+      copyFileSync(seedDb, join(dataDir, "loam.db.premigration"));
+      for (const name of STALE_NAMES) {
+        writeFileSync(join(dataDir, name), Buffer.from(`stale artifact: ${name}`));
+      }
+    }
+
+    /** Every stale DB artifact still on disk (empty = a clean wipe). Excludes the LIVE `loam.db`/`-wal`/
+     *  `-shm`, which the ephemeral/same-key/off paths legitimately recreate/keep open. */
+    function staleArtifactsRemaining(dataDir: string): string[] {
+      if (!existsSync(dataDir)) return [];
+      const liveNames = new Set(["loam.db", "loam.db-wal", "loam.db-shm"]);
+      return readdirSync(dataDir).filter(
+        (n) =>
+          !liveNames.has(n) &&
+          (n.includes(".premigration") || n.includes(".unreadable-") || n === "loam.db-journal"),
+      );
+    }
+
+    async function fireKillSwitch(app: LoamApp, cookie: string): Promise<InjectResponse> {
+      return app.server.inject({
+        method: "POST",
+        url: "/api/admin/kill-switch",
+        headers: { cookie },
+        payload: { confirm: "wipe" },
+      });
+    }
+
+    it("marker-SUCCESS branch (fixed-key + launcher hook): deletes the legacy .premigration + journal + unreadable renames, not just the live files", async () => {
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+      expect(hook.calls).toBe(1);
+
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+      // The legacy-key backup (and every other sidecar) is physically gone — no passphrase can open it.
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+    });
+
+    it("marker-FAILURE fail-closed branch (fixed-key, marker write fails): synchronously deletes AND verifies EVERY artifact before signaling the launcher", async () => {
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+
+      let artifactsPresentAtHook: string[] | undefined;
+      (globalThis as unknown as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart = () => {
+        artifactsPresentAtHook = staleArtifactsRemaining(dataDir);
+      };
+      cleanups.push(() => {
+        delete (globalThis as unknown as { __loamRequestWipeRestart?: unknown }).__loamRequestWipeRestart;
+      });
+
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      wipeMarkerWriteFailure.armed = true;
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      // Fail-closed: by the time the launcher was signaled EVERY stale artifact was already gone (not
+      // just the 3 live files) — a kill right after the hook can't recover the legacy-key ciphertext.
+      expect(artifactsPresentAtHook).toEqual([]);
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+      expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+    });
+
+    it("ephemeral branch: deletes stale migration/recovery artifacts before rotating to a fresh key", async () => {
+      const { app, dataDir } = await makeEncryptedApp(
+        { ephemeralDbKey: true, dbEncryptionMode: "ephemeral" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      // The live DB is recreated under a fresh key (loam.db exists), but every stale artifact is gone.
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(app.store.loadMessages()).toEqual([]);
+      expect((await post(app, (await session(app)).cookie, "after wipe")).statusCode).toBe(201);
+    });
+
+    it("same-key fallback branch (fixed-key, NO launcher hook): deletes stale artifacts before recreating under the same key", async () => {
+      // Deliberately NOT installing __loamRequestWipeRestart — the desktop/CI same-key fallback.
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed passphrase key", dbEncryptionMode: "passphrase" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(true); // recreated under the same key
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(app.store.loadMessages()).toEqual([]);
+    });
+
+    it("off/wipeAll branch (unencrypted): removes stale encrypted-era artifacts while keeping the live plaintext DB open", async () => {
+      const { app, dataDir } = await makeEncryptedApp({}, { killSwitch: { enabled: true } });
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(true); // live plaintext DB stays open (wipeAll)
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(app.store.loadMessages()).toEqual([]);
+    });
+  });
+
   /** Install the `globalThis.__loamReportBootError` bridge (the same one `embedded-main.ts` uses for
    *  fatal boot errors — see its own test suite) and capture every report. Auto-uninstalled. */
   function installFakeBootBridge(): { message: string; code: string }[] {
@@ -2039,6 +2212,65 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect(
         reopened.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_INTERRUPTED_REKEY"),
       ).toBe(true);
+      await reopened.close();
+    });
+
+    it("P2-2 (Sol round 7): a post-rekey CLEANUP failure does NOT fail the boot — the current boot returns a ready, migrated store with data intact (not a plaintext/unreadable fallback)", async () => {
+      const migrated = installFakeMigratedHook();
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-p22-cleanup-fail-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      const original = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      const admin = await session(original);
+      expect((await post(original, admin.cookie, "SURVIVE_CLEANUP_FAILURE")).statusCode).toBe(201);
+      await original.close();
+
+      // Force the POST-rekey cleanup `rmSync(loam.db.premigration)` to throw. Before the fix that jumped to
+      // the outer migration `catch` and fell through as if the rekey had FAILED — leaking the already-
+      // rekeyed handle and running the plaintext/recovery chain against a DB already valid under the current
+      // key. The fix treats the rekey as the commit point, so the cleanup failure is swallowed best-effort.
+      postRekeyCleanupFailure.armed = true;
+
+      const migratedApp = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMigrateFromKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+
+      // The rekey is the commit point: the boot returns the LIVE migrated store — the launcher is told it
+      // migrated and the row survives (NOT a plaintext/unreadable fallback that would lose or expose data).
+      expect(migrated.calls).toBe(1);
+      expect(
+        migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_CLEANUP_FAILURE"),
+      ).toBe(true);
+      // Genuinely encrypted under the current key (not the plaintext fallback) — no plaintext on disk.
+      expect(dataDirHasPlaintext(dataDir, "SURVIVE_CLEANUP_FAILURE")).toBe(false);
+      // The cleanup failed, so the stale backup is INTENTIONALLY left behind for the next boot's Step-0b.
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+      await migratedApp.close();
+
+      // A later boot with ONLY the current key opens directly (the rekey took) AND Step-0b discards the
+      // stale backup the failed cleanup left — proving the cleanup failure never corrupted the migration.
+      const reopened = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(
+        reopened.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_CLEANUP_FAILURE"),
+      ).toBe(true);
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
       await reopened.close();
     });
 

@@ -1,8 +1,8 @@
-import { copyFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
@@ -1239,6 +1239,70 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const openLoamStore = (): LoamStore =>
     openStore(dbPath, { encryptionKey: dbKey, driver: options.dbDriver });
 
+  /**
+   * EVERY on-disk artifact of the SQLite/SQLCipher database (P1-2, Sol round 7) — the single source of
+   * truth for exhaustive kill-switch deletion. Deleting only the three live files (`loam.db`/`-wal`/
+   * `-shm`) is a crypto-wipe hole: it leaves the DELETE-mode rollback `-journal`, the rekey-migration
+   * `.premigration` snapshot (+ its `.tmp`/`-wal`/`-shm`/`-journal` and the legacy multi-file
+   * `-wal.premigration`/`-shm.premigration` sidecars), and the timestamped `*.unreadable-<ts>` recovery
+   * renames. CRITICALLY, `.premigration` is copied BEFORE the rekey (see `openInitialStore`), so it is
+   * encrypted under the LEGACY `SHA256(passphrase)` derivation (no discardable device secret) — clearing
+   * the device secret does NOT cryptographically erase it; anyone with the passphrase could still open it.
+   * Only physically deleting it satisfies the "wipe all persisted data" + cryptographic-wipe guarantees.
+   * Returns absolute paths (static names first, then the globbed recovery renames enumerated from the data
+   * dir). Callers `rmSync` + `existsSync`-verify each before declaring the wipe complete.
+   */
+  function dbArtifactPaths(): string[] {
+    const paths = [
+      dbPath,
+      `${dbPath}-wal`,
+      `${dbPath}-shm`,
+      `${dbPath}-journal`,
+      `${dbPath}.premigration`,
+      `${dbPath}.premigration.tmp`,
+      `${dbPath}.premigration-wal`,
+      `${dbPath}.premigration-shm`,
+      `${dbPath}.premigration-journal`,
+      `${dbPath}-wal.premigration`,
+      `${dbPath}-shm.premigration`,
+    ];
+    // The marker-gated fresh-start recovery renames unopenable files aside as `<name>.unreadable-<ts>`
+    // (openInitialStore case 3, timestamp+random suffix). Those are still-readable ciphertext under a
+    // possibly-legacy key, so a wipe must remove them too — enumerate them by prefix from the data dir.
+    const base = basename(dbPath);
+    try {
+      for (const entry of readdirSync(dataDir)) {
+        if (entry.startsWith(base) && entry.includes(".unreadable-")) {
+          paths.push(join(dataDir, entry));
+        }
+      }
+    } catch {
+      // The data dir is unreadable/gone — nothing to enumerate; the static paths are still returned.
+    }
+    return paths;
+  }
+
+  /**
+   * Delete every {@link dbArtifactPaths} entry and `existsSync`-verify each is gone (P1-2). Best-effort
+   * per file (a delete failure is caught, then re-checked for existence — an undeletable file surfaces
+   * via the return, not a throw). Returns the paths that STILL remain afterward, so a caller on a
+   * launcher-handoff path can refuse to signal while recoverable ciphertext survives.
+   */
+  function deleteAndVerifyDbArtifacts(): string[] {
+    const undeleted: string[] = [];
+    for (const file of dbArtifactPaths()) {
+      try {
+        rmSync(file, { force: true });
+      } catch {
+        // Fall through to the existence check — an undeletable file is caught there, not here.
+      }
+      if (existsSync(file)) {
+        undeleted.push(file);
+      }
+    }
+    return undeleted;
+  }
+
   // Operator "start fresh" confirmation marker (shared launcher contract, SF2/docs/15): the RN host's
   // explicit start-fresh UI writes this file BEFORE restarting the server; `openInitialStore` below
   // consumes (deletes) it as the ONLY thing allowed to trigger an automatic destructive DB replace.
@@ -1486,20 +1550,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           throw rekeyError;
         }
 
-        // Rekey committed the new-key pages — the pre-migration backup is no longer needed; drop it (and
-        // any stray tmp) so a later boot doesn't mistake it for an interrupted migration to resume. RF6-a:
-        // also clear any `loam.db-journal` the DELETE-mode rekey may have left — a successful rekey folds
-        // WAL back on and SQLCipher deletes its rollback journal on commit, so this is normally a no-op,
-        // but removing it defensively guarantees the freshly-rekeyed single file is never left paired with
-        // a foreign rollback journal.
-        rmSync(committedBackup, { force: true });
-        rmSync(backupTmp, { force: true });
-        rmSync(`${dbPath}-journal`, { force: true });
-
+        // P2-2 (Sol round 7): the rekey is the COMMIT point of the migration. From here `loam.db` is a
+        // valid database under the CURRENT key and `legacyStore` is its live, migrated handle — the
+        // migration has SUCCEEDED regardless of whether the post-success sidecar cleanup below works. So
+        // COMMIT FIRST — flip `encryptionEnabled`, report the migration to the launcher, and return the
+        // live store — and treat the `.premigration` cleanup as strictly best-effort in its OWN
+        // try/catch. Previously that cleanup sat inside the broad outer migration `try`, so a throwing
+        // `rmSync` (read-only dir, locked file) jumped to the outer `catch` and fell through as if the
+        // legacy key / rekey had FAILED — leaking this already-rekeyed handle and running the plaintext/
+        // recovery chain against a DB that is ALREADY valid under the current key. A stale backup left
+        // behind is harmless: the next boot's Step-0b probe finds the live DB opens under the current key
+        // and discards it (RF6-b). NEVER let a cleanup failure fail this boot.
         encryptionEnabled = true;
         const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
         server.log.warn(message);
         reportDbKeyMigrated();
+
+        // Best-effort post-commit cleanup: drop the pre-migration backup (and any stray tmp) so a later
+        // boot doesn't mistake it for an interrupted migration to resume. RF6-a: also clear any
+        // `loam.db-journal` the DELETE-mode rekey may have left — a successful rekey folds WAL back on and
+        // SQLCipher deletes its rollback journal on commit, so this is normally a no-op, but removing it
+        // defensively guarantees the freshly-rekeyed single file is never left paired with a foreign
+        // rollback journal.
+        try {
+          rmSync(committedBackup, { force: true });
+          rmSync(backupTmp, { force: true });
+          rmSync(`${dbPath}-journal`, { force: true });
+        } catch (cleanupError) {
+          server.log.warn(
+            cleanupError,
+            "Post-migration cleanup of the pre-migration DB backup failed — the migration itself already " +
+              "SUCCEEDED and is committed (the live DB is valid under the current key); the stale backup " +
+              "will be discarded by the next boot's Step-0b probe. Continuing this boot with the migrated store.",
+          );
+        }
+
         return legacyStore;
       } catch {
         // The legacy key didn't open it either (or the backup/rekey itself failed) — this isn't a stale-
@@ -3411,20 +3496,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           // window. Plaintext user media (avatars/attachments) is data too — remove it synchronously here as
           // well, so nothing sensitive survives a kill right after the signal.
           store.close();
-          const undeleted: string[] = [];
-          for (const suffix of ["", "-wal", "-shm"]) {
-            const file = `${dbPath}${suffix}`;
+          // P1-2 (Sol round 7): destroy AND verify EVERY DB artifact — not just the three live files.
+          // The `.premigration` snapshot is legacy-key ciphertext (no discardable device secret), so
+          // leaving it behind here would leave recoverable data with no marker to resume the wipe.
+          const undeleted = deleteAndVerifyDbArtifacts();
+          // Plaintext user media is data too — remove AND verify the avatars/attachments dirs as well, so
+          // this fail-closed check gates on the FULL inventory (not only the DB files) before any signal.
+          for (const dir of [avatarsDir, attachmentsDir]) {
             try {
-              rmSync(file, { force: true });
+              rmSync(dir, { recursive: true, force: true });
             } catch {
-              // Fall through to the existence check — an undeletable file is caught there, not here.
+              // Fall through to the existence check.
             }
-            if (existsSync(file)) {
-              undeleted.push(file);
+            if (existsSync(dir)) {
+              undeleted.push(dir);
             }
           }
-          rmSync(avatarsDir, { recursive: true, force: true });
-          rmSync(attachmentsDir, { recursive: true, force: true });
 
           if (undeleted.length > 0) {
             // Could not even delete the ciphertext synchronously. Do NOT signal the launcher — doing so
@@ -3432,7 +3519,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             // while readable ciphertext with no marker remains). Stay locked down (503 everywhere) and
             // surface a hard notice so the operator can retry.
             const message =
-              "KILL SWITCH NOTICE: the wipe-pending marker could NOT be written AND the ciphertext could " +
+              "KILL SWITCH NOTICE: the wipe-pending marker could NOT be written AND some persisted data could " +
               `not be synchronously deleted (${undeleted.join(", ")}). The launcher was NOT signaled, to ` +
               "avoid clearing the key while recoverable ciphertext with no resume marker remains. The node " +
               "is locked down (503) — reopen it to retry the wipe.";
@@ -3473,11 +3560,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
 
         store.close();
-        for (const suffix of ["", "-wal", "-shm"]) {
-          await rm(`${dbPath}${suffix}`, { force: true });
-        }
+        // P1-2 (Sol round 7): delete AND verify EVERY DB artifact (including the legacy-key-encrypted
+        // `.premigration` snapshot, `-journal`, and `*.unreadable-<ts>` recovery renames), not just the
+        // three live files. The durable marker makes an interrupted handoff resumable, so any straggler
+        // logged here is retried by the next boot rather than blocking — but it must still be surfaced.
+        const undeleted = deleteAndVerifyDbArtifacts();
         await rm(avatarsDir, { recursive: true, force: true });
         await rm(attachmentsDir, { recursive: true, force: true });
+        if (undeleted.length > 0) {
+          server.log.error(
+            `KILL SWITCH NOTICE: some DB artifacts could not be deleted after the launcher handoff (${undeleted.join(", ")}). ` +
+              "The wipe-pending marker will make the next boot re-attempt the handoff; remove these files if they persist.",
+          );
+        }
 
         server.log.warn(
           "Kill switch: persistent/passphrase-encrypted database deleted; a device-key-clear-and-restart " +
@@ -3501,12 +3596,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     if (encryptionEnabled) {
-      // Cryptographic wipe: destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh
-      // key, so any bytes a forensic tool recovers from flash are unreadable — stronger than a
-      // logical DELETE, which leaves recoverable pages behind. See docs/02-kill-switch.md.
+      // Cryptographic wipe (ephemeral rotation, OR the same-key fallback when a fixed-key node has no
+      // launcher hook): destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh key, so any
+      // bytes a forensic tool recovers from flash are unreadable — stronger than a logical DELETE, which
+      // leaves recoverable pages behind. See docs/02-kill-switch.md.
       store.close();
-      for (const suffix of ["", "-wal", "-shm"]) {
-        await rm(`${dbPath}${suffix}`, { force: true });
+      // P1-2 (Sol round 7): delete EVERY DB artifact while the store is closed and BEFORE reopening a
+      // fresh one below — the legacy-key `.premigration` snapshot, `-journal`, and `*.unreadable-<ts>`
+      // recovery renames are all recoverable ciphertext and must go too, not only the three live files.
+      // (Deletion precedes the reopen, so the freshly created live files are never touched.)
+      const undeleted = deleteAndVerifyDbArtifacts();
+      if (undeleted.length > 0) {
+        server.log.error(
+          `KILL SWITCH NOTICE: some DB artifacts could not be deleted during the cryptographic wipe (${undeleted.join(", ")}) — ` +
+            "recoverable ciphertext may remain on disk; remove these files manually.",
+        );
       }
 
       if (ephemeralDbKey) {
@@ -3524,6 +3628,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     } else {
       // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
       store.wipeAll();
+      // P1-2 (Sol round 7): wipeAll keeps the live plaintext DB open (and its config), but stale
+      // migration/recovery artifacts from a PRIOR encrypted era — the legacy-key `.premigration` snapshot
+      // (still-readable ciphertext!), its sidecars, a leftover `-journal`, and `*.unreadable-<ts>`
+      // renames — are NOT part of that open DB and must still be removed. Skip only the three live WAL
+      // files the open store owns.
+      const liveFiles = new Set([dbPath, `${dbPath}-wal`, `${dbPath}-shm`]);
+      for (const file of dbArtifactPaths()) {
+        if (liveFiles.has(file)) {
+          continue;
+        }
+        try {
+          rmSync(file, { force: true });
+        } catch {
+          // Best-effort — a leftover artifact here is stale metadata, not the live DB.
+        }
+      }
     }
 
     await rm(avatarsDir, { recursive: true, force: true });
