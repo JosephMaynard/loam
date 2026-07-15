@@ -252,17 +252,29 @@ const STALE_PARTIAL_AGE_MS = 60 * 60 * 1000;
  * `.partial` is only ever reclaimed once it's old enough (`STALE_PARTIAL_AGE_MS`) that it cannot
  * possibly still be an in-flight download.
  *
- * Best-effort: `model-manager.tsx` awaits this once per process lifetime, before enabling any download
- * controls (so no `.partial` from *this* session can exist yet when it runs) — see its call site. Any
- * failure here is swallowed, since this is opportunistic cleanup, not a correctness requirement.
+ * `pendingReferencedUris` (P2-b) is a SECOND do-not-sweep set, for files a durable pending action still
+ * references even though they're no longer in `referencedUris` (the `downloaded` list): most critically
+ * a pending `'delete'`'s `fileUri`, whose bytes were deliberately kept because the launcher clear was
+ * never confirmed. Sweeping such a file is exactly the dangling-pointer bug this guards against — the
+ * launcher's config.json may STILL point at it. A pending `'setActive'`'s file is normally still in
+ * `downloaded` too, but is included here for good measure. Bytes are only ever reclaimed once the
+ * corresponding clear/activate is CONFIRMED (reconciliation drops the pending entry then).
+ *
+ * Best-effort: `model-manager.tsx` awaits this once per process lifetime, AFTER reconciling the pending
+ * set and before enabling any download controls (so no `.partial` from *this* session can exist yet when
+ * it runs) — see its call site. Any failure here is swallowed, since this is opportunistic cleanup, not a
+ * correctness requirement.
  */
-export async function sweepOrphanedModelFiles(referencedUris: readonly string[]): Promise<void> {
+export async function sweepOrphanedModelFiles(
+  referencedUris: readonly string[],
+  pendingReferencedUris: readonly string[] = [],
+): Promise<void> {
   try {
     const info = await FileSystem.getInfoAsync(MODELS_DIR);
     if (!info.exists) {
       return;
     }
-    const referenced = new Set(referencedUris);
+    const referenced = new Set([...referencedUris, ...pendingReferencedUris]);
     const entries = await FileSystem.readDirectoryAsync(MODELS_DIR);
     const now = Date.now();
     await Promise.all(

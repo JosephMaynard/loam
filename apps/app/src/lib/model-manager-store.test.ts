@@ -8,7 +8,9 @@ import { fileSystemMock, resetFileSystemMock, seedFile } from "@/test-utils/mock
 
 vi.mock("expo-file-system/legacy", () => fileSystemMock);
 
-const { loadModelManagerState, saveModelManagerState } = await import("@/lib/model-manager-store");
+const { loadModelManagerState, saveModelManagerState, recordPending, pendingProtectedUris, POINTER_PENDING_ID } =
+  await import("@/lib/model-manager-store");
+type PendingAction = import("@/lib/model-manager-store").PendingAction;
 
 const STATE_PATH = `${fileSystemMock.documentDirectory}loam-model-manager.json`;
 const BAK_PATH = `${STATE_PATH}.bak`;
@@ -129,5 +131,142 @@ describe("saveModelManagerState — corrupt primary not rotated over a good back
 
     const loaded = await loadModelManagerState();
     expect(loaded).toEqual(GOOD_BACKUP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-b: durable pending actions — persistence, strict validation, helpers.
+// ---------------------------------------------------------------------------
+
+const PENDING_DELETE: PendingAction = {
+  id: "delete:file:///models/m1.gguf",
+  kind: "delete",
+  desired: { enabled: false },
+  fileUri: "file:///models/m1.gguf",
+};
+const PENDING_SET_ACTIVE: PendingAction = {
+  id: POINTER_PENDING_ID,
+  kind: "setActive",
+  desired: { enabled: true, modelPath: "file:///models/m2.gguf", model: "Model m2" },
+};
+
+describe("pending actions — persistence + strict validation (P2-b)", () => {
+  beforeEach(() => {
+    resetFileSystemMock();
+    vi.restoreAllMocks();
+  });
+
+  it("round-trips a state carrying valid pending actions through save + load (survives reload)", async () => {
+    const state = {
+      downloaded: [model("m1"), model("m2")],
+      activeId: "m2",
+      pending: [PENDING_DELETE, PENDING_SET_ACTIVE],
+    };
+    expect(await saveModelManagerState(state)).toBe(true);
+
+    const loaded = await loadModelManagerState();
+    expect(loaded).toEqual(state);
+    expect(loaded.pending).toHaveLength(2);
+  });
+
+  it("drops the pending key entirely once it's empty (settled state stays minimal)", async () => {
+    expect(await saveModelManagerState({ downloaded: [model("m1")], activeId: "m1", pending: [] })).toBe(true);
+    const loaded = await loadModelManagerState();
+    expect(loaded).toEqual({ downloaded: [model("m1")], activeId: "m1" });
+    expect("pending" in loaded).toBe(false);
+  });
+
+  it("treats a slot with a malformed pending entry as INVALID and falls through to .bak", async () => {
+    // `kind` present but `desired` missing — not a well-formed PendingAction.
+    seedFile(
+      STATE_PATH,
+      JSON.stringify({ downloaded: [model("m1")], activeId: "m1", pending: [{ id: "x", kind: "clear" }] }),
+    );
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP));
+
+    const loaded = await loadModelManagerState();
+    expect(loaded).toEqual(GOOD_BACKUP);
+  });
+
+  it("rejects a 'setActive' pending without an enabled modelPath (kind-specific invariant)", async () => {
+    seedFile(
+      STATE_PATH,
+      JSON.stringify({
+        downloaded: [model("m1")],
+        activeId: "m1",
+        pending: [{ id: POINTER_PENDING_ID, kind: "setActive", desired: { enabled: false } }],
+      }),
+    );
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP));
+
+    const loaded = await loadModelManagerState();
+    expect(loaded).toEqual(GOOD_BACKUP);
+  });
+
+  it("rejects a 'delete' pending with no fileUri (nothing to reclaim = corrupt)", async () => {
+    seedFile(
+      STATE_PATH,
+      JSON.stringify({
+        downloaded: [model("m1")],
+        activeId: "m1",
+        pending: [{ id: "delete:x", kind: "delete", desired: { enabled: false } }],
+      }),
+    );
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP));
+
+    const loaded = await loadModelManagerState();
+    expect(loaded).toEqual(GOOD_BACKUP);
+  });
+
+  it("rejects a non-array pending", async () => {
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [model("m1")], activeId: "m1", pending: "nope" }));
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP));
+
+    const loaded = await loadModelManagerState();
+    expect(loaded).toEqual(GOOD_BACKUP);
+  });
+});
+
+describe("recordPending — supersede rules (P2-b)", () => {
+  it("supersedes an older pointer intent (setActive -> clear share POINTER_PENDING_ID)", () => {
+    const afterSet = recordPending(undefined, PENDING_SET_ACTIVE);
+    const afterClear = recordPending(afterSet, {
+      id: POINTER_PENDING_ID,
+      kind: "clear",
+      desired: { enabled: false },
+    });
+    expect(afterClear).toHaveLength(1);
+    expect(afterClear[0]!.kind).toBe("clear");
+  });
+
+  it("keeps independent per-file delete entries but drops a stale pointer pending when a delete lands", () => {
+    const withPointer = recordPending(undefined, PENDING_SET_ACTIVE);
+    const withDelete = recordPending(withPointer, PENDING_DELETE);
+    // The pointer pending is dropped (a delete also clears the launcher pointer); the delete remains.
+    expect(withDelete.map((p) => p.id)).toEqual([PENDING_DELETE.id]);
+
+    const secondDelete: PendingAction = {
+      id: "delete:file:///models/other.gguf",
+      kind: "delete",
+      desired: { enabled: false },
+      fileUri: "file:///models/other.gguf",
+    };
+    const bothDeletes = recordPending(withDelete, secondDelete);
+    expect(bothDeletes.map((p) => p.id).sort()).toEqual([PENDING_DELETE.id, secondDelete.id].sort());
+  });
+});
+
+describe("pendingProtectedUris — do-not-sweep set (P2-b)", () => {
+  it("returns a delete's fileUri and a setActive's modelPath, but nothing for a clear", () => {
+    const uris = pendingProtectedUris([
+      PENDING_DELETE,
+      PENDING_SET_ACTIVE,
+      { id: "ignored", kind: "clear", desired: { enabled: false } },
+    ]);
+    expect(uris.sort()).toEqual(["file:///models/m1.gguf", "file:///models/m2.gguf"].sort());
+  });
+
+  it("returns an empty list for no pending", () => {
+    expect(pendingProtectedUris(undefined)).toEqual([]);
   });
 });

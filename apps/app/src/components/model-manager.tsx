@@ -16,6 +16,7 @@ import {
 import {
   deactivateAction,
   deleteAction,
+  reconcilePendingActions,
   setActiveAction,
   type ModelActionDeps,
 } from '@/lib/model-manager-actions';
@@ -25,6 +26,7 @@ import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
   loadModelManagerState,
   mutateModelManagerState,
+  pendingProtectedUris,
   type DownloadedModel,
   type ModelManagerState,
 } from '@/lib/model-manager-store';
@@ -84,9 +86,27 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * transactions can't be started concurrently (P2-2) — a UI-level complement to the mutex in
    * `model-manager-actions.ts` that serializes them even if they somehow both start. */
   const [operationInFlight, setOperationInFlight] = useState(false);
+  /** True while durable pending actions (P2-b) remain unsettled after a reconciliation pass — the
+   * launcher couldn't be reached to confirm one or more earlier writes. Disables the action controls
+   * (like `operationInFlight`) and surfaces a banner, until a later reopen's reconcile settles them. */
+  const [pendingUnsettled, setPendingUnsettled] = useState(false);
   // Every in-flight download/verify's `AbortController`, keyed by the same id used in `busyIds`/
   // `progress` — lets the AppState listener below cancel everything at once on backgrounding.
   const activeDownloads = useRef<Map<string, AbortController>>(new Map());
+
+  /** The store + bridge + filesystem operations the activate/deactivate/delete/reconcile transactions
+   * need, bound to the real implementations (the bridge fns partially applied with this overlay's
+   * `channel`). Declared before the open-effect below so that effect can reconcile pending actions with
+   * it. Memoized on `channel` so the transaction module sees a stable dependency object. */
+  const actionDeps = useMemo<ModelActionDeps>(
+    () => ({
+      mutate: mutateModelManagerState,
+      setActiveModel: (request) => setActiveModel(channel, request),
+      clearActiveModel: () => clearActiveModel(channel),
+      deleteModelFile,
+    }),
+    [channel],
+  );
 
   // Refresh the probe + persisted state every time the manager is opened — storage/RAM and the
   // downloaded-file list can both change between visits.
@@ -101,13 +121,38 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         setCapabilities(caps);
         setManagerState(loaded);
       }
+
+      // Reconcile durable pending actions FIRST (P2-b), before the orphan sweep runs or any control is
+      // enabled: re-send each unconfirmed launcher write (idempotent) and settle it. If every retry
+      // still times out, the pending set survives and the affected files stay protected below. `current`
+      // is the post-reconcile state the sweep and UI must use.
+      let current = loaded;
+      if ((loaded.pending ?? []).length > 0) {
+        const { state: reconciled, settled, message } = await reconcilePendingActions(actionDeps);
+        current = reconciled;
+        if (!cancelled) {
+          setManagerState(reconciled);
+          setPendingUnsettled(!settled);
+          if (message) {
+            setStatusMessage(message);
+          }
+        }
+      } else if (!cancelled) {
+        setPendingUnsettled(false);
+      }
+
       if (!orphanSweepDone) {
         // AWAITED (P2-7 round 4, was fire-and-forget `void`): reclaim any `.gguf` left behind by a
         // download whose verify/registration never finished because the app process was killed
         // mid-way (hash-performance device-verify note — see model-download.ts). Download controls
         // stay disabled (see `sweepReady` below) until this resolves, so nothing can start a download
-        // whose destination this sweep pass might treat as unreferenced.
-        await sweepOrphanedModelFiles(loaded.downloaded.map((model) => model.uri));
+        // whose destination this sweep pass might treat as unreferenced. The second arg (P2-b) keeps any
+        // file a still-unsettled pending action references — most critically a pending `delete`'s
+        // kept-for-now bytes — from being swept while the launcher may still point at it.
+        await sweepOrphanedModelFiles(
+          current.downloaded.map((model) => model.uri),
+          pendingProtectedUris(current.pending),
+        );
         orphanSweepDone = true;
       }
       if (!cancelled) {
@@ -117,7 +162,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     return () => {
       cancelled = true;
     };
-  }, [visible]);
+  }, [visible, actionDeps]);
 
   // Cancel every in-flight download/verify when the app is backgrounded, rather than letting it keep
   // running unattended (hash-performance device-verify note): Android can suspend or kill a
@@ -188,19 +233,6 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     return persisted;
   };
 
-  /** The store + bridge + filesystem operations the activate/deactivate/delete transactions need,
-   * bound to the real implementations (the bridge fns partially applied with this overlay's `channel`).
-   * Memoized on `channel` so the transaction module sees a stable dependency object. */
-  const actionDeps = useMemo<ModelActionDeps>(
-    () => ({
-      mutate: mutateModelManagerState,
-      setActiveModel: (request) => setActiveModel(channel, request),
-      clearActiveModel: () => clearActiveModel(channel),
-      deleteModelFile,
-    }),
-    [channel],
-  );
-
   /** Run one serialized activate/deactivate/delete transaction (see `model-manager-actions.ts`),
    * flipping `operationInFlight` (and the acting row's `busy`) around it and adopting the resulting
    * state + status message. All rollback / timeout-ambiguity handling lives in the transaction; here we
@@ -214,6 +246,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       const outcome = await action();
       if (outcome.state) {
         setManagerState(outcome.state);
+        // An ambiguous op leaves a durable pending action (P2-b); reflect that so the controls gate and
+        // the next reopen reconciles it. A clean op (`state.pending` empty) clears the gate.
+        setPendingUnsettled((outcome.state.pending ?? []).length > 0);
       }
       setStatusMessage(outcome.message);
     } finally {
@@ -377,6 +412,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const handleDeactivate = () => runOperation(undefined, () => deactivateAction(actionDeps));
 
   const customModels = managerState.downloaded.filter((model) => model.isCustom);
+  /** Activate/deactivate/delete + download controls are disabled while an op is in flight (P2-2) OR
+   * while durable pending actions remain unsettled (P2-b) — reconciliation couldn't reach the launcher,
+   * so starting a NEW change (which could contradict an unconfirmed one) is gated until a reopen settles
+   * them. */
+  const actionsBlocked = operationInFlight || pendingUnsettled;
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -422,9 +462,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                   </ThemedText>
                   <Pressable
                     onPress={() => void handleDeactivate()}
-                    disabled={operationInFlight}
+                    disabled={actionsBlocked}
                     accessibilityRole="button"
-                    style={operationInFlight ? styles.buttonDisabled : undefined}>
+                    style={actionsBlocked ? styles.buttonDisabled : undefined}>
                     <ThemedText type="link">Deactivate</ThemedText>
                   </Pressable>
                 </ThemedView>
@@ -447,8 +487,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                   isActive={managerState.activeId === entry.id}
                   isBusy={busyIds.has(entry.id)}
                   progress={progress[entry.id]}
-                  downloadDisabled={!sweepReady || operationInFlight}
-                  opInFlight={operationInFlight}
+                  downloadDisabled={!sweepReady || actionsBlocked}
+                  opInFlight={actionsBlocked}
                   onDownload={() => void handleDownloadCatalogEntry(entry)}
                   onDelete={(model) => void handleDelete(model)}
                   onSetActive={(model) => void handleSetActive(model)}
@@ -474,9 +514,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
               />
               <Pressable
                 onPress={() => void handleAddCustomUrl()}
-                disabled={!customUrl.trim() || !sweepReady || operationInFlight}
+                disabled={!customUrl.trim() || !sweepReady || actionsBlocked}
                 accessibilityRole="button"
-                style={[styles.button, (!customUrl.trim() || !sweepReady || operationInFlight) && styles.buttonDisabled]}>
+                style={[styles.button, (!customUrl.trim() || !sweepReady || actionsBlocked) && styles.buttonDisabled]}>
                 <ThemedText type="smallBold" style={styles.buttonLabel}>
                   Add &amp; download
                 </ThemedText>
@@ -493,7 +533,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                       model={model}
                       isActive={managerState.activeId === model.id}
                       isBusy={busyIds.has(model.id)}
-                      opInFlight={operationInFlight}
+                      opInFlight={actionsBlocked}
                       onDelete={() => void handleDelete(model)}
                       onSetActive={() => void handleSetActive(model)}
                     />

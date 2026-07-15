@@ -7,6 +7,14 @@
 //   - delete never deletes the file bytes unless the launcher clear is confirmed.
 import { describe, expect, it, vi } from "vitest";
 
+import { fileSystemMock } from "@/test-utils/mocks";
+
+// The actions module now imports a value (`POINTER_PENDING_ID`/`recordPending`) from the store module,
+// which imports `expo-file-system/legacy` (→ react-native) at module load. These tests drive an
+// in-memory store double, never the real persistence, so the fake just keeps the real native module
+// (and its Flow-typed react-native transitive) from being loaded under Vitest's node environment.
+vi.mock("expo-file-system/legacy", () => fileSystemMock);
+
 import type { ActiveModelResult, SetActiveModelRequest } from "@/lib/model-manager-bridge";
 import {
   deactivateAction,
@@ -14,10 +22,12 @@ import {
   performDeactivate,
   performDelete,
   performSetActive,
+  reconcilePendingActions,
   setActiveAction,
   type ModelActionDeps,
 } from "@/lib/model-manager-actions";
-import type { DownloadedModel, ModelManagerState } from "@/lib/model-manager-store";
+import { POINTER_PENDING_ID } from "@/lib/model-manager-store";
+import type { DownloadedModel, ModelManagerState, PendingAction } from "@/lib/model-manager-store";
 
 function model(id: string): DownloadedModel {
   return {
@@ -293,5 +303,145 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
     await pDeactivate;
     await pDelete;
     expect(deleteFileCalled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-b: durable pending actions are recorded on ambiguity and reconciled later.
+// ---------------------------------------------------------------------------
+
+const TIMEOUT: ActiveModelResult = { status: "timeout", error: "no response" };
+const FAILED: ActiveModelResult = { status: "failed", error: "boom" };
+
+/** deps whose bridge fns return whatever the scripted queues hand back (defaulting to the last value). */
+function scriptedDeps(
+  store: ReturnType<typeof makeStore>,
+  overrides: Partial<ModelActionDeps> = {},
+): ModelActionDeps {
+  return {
+    mutate: store.mutate,
+    setActiveModel: async () => OK,
+    clearActiveModel: async () => OK,
+    deleteModelFile: vi.fn(async () => {}),
+    ...overrides,
+  };
+}
+
+describe("recording pending on ambiguity (P2-b)", () => {
+  it("performSetActive TIMEOUT records a durable setActive pending (state stays ahead, to be reconciled)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" });
+    const deps = scriptedDeps(store, { setActiveModel: async () => TIMEOUT });
+
+    const result = await performSetActive(deps, A);
+
+    expect(result.kind).toBe("ambiguous");
+    expect(store.get().activeId).toBe("A");
+    const pending = store.get().pending ?? [];
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      id: POINTER_PENDING_ID,
+      kind: "setActive",
+      desired: { enabled: true, modelPath: A.uri, model: A.displayName },
+    });
+  });
+
+  it("performDeactivate TIMEOUT records a durable clear pending", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const deps = scriptedDeps(store, { clearActiveModel: async () => TIMEOUT });
+
+    const result = await performDeactivate(deps);
+
+    expect(result.kind).toBe("ambiguous");
+    expect((store.get().pending ?? [])[0]).toMatchObject({ id: POINTER_PENDING_ID, kind: "clear" });
+  });
+
+  it("performDelete active-model TIMEOUT records a delete pending with fileUri and does NOT delete bytes", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const deleteFile = vi.fn(async () => {});
+    const deps = scriptedDeps(store, { clearActiveModel: async () => TIMEOUT, deleteModelFile: deleteFile });
+
+    const result = await performDelete(deps, A);
+
+    expect(result.kind).toBe("ambiguous");
+    expect(deleteFile).not.toHaveBeenCalled();
+    expect(store.get().downloaded.map((m) => m.id)).toEqual(["B"]);
+    expect(store.get().pending ?? []).toEqual([
+      { id: `delete:${A.uri}`, kind: "delete", desired: { enabled: false }, fileUri: A.uri },
+    ]);
+  });
+});
+
+describe("reconcilePendingActions — RESTART-level: all attempts timed out, nothing applied (P2-b)", () => {
+  it("re-sends a pending delete; while still timing out keeps the pending entry and NEVER deletes the bytes", async () => {
+    // Simulates a next-process load where a prior session's active-delete timed out on every retry: the
+    // GGUF is still on disk, metadata removed, and a durable delete pending recorded.
+    const pending: PendingAction = { id: `delete:${A.uri}`, kind: "delete", desired: { enabled: false }, fileUri: A.uri };
+    const store = makeStore({ downloaded: [B], activeId: undefined, pending: [pending] });
+    const deleteFile = vi.fn(async () => {});
+    const clear = vi.fn(async () => TIMEOUT);
+    const deps = scriptedDeps(store, { clearActiveModel: clear, deleteModelFile: deleteFile });
+
+    const first = await reconcilePendingActions(deps);
+
+    expect(clear).toHaveBeenCalledTimes(1); // it RE-SENT the idempotent clear
+    expect(first.settled).toBe(false); // still ambiguous
+    expect(deleteFile).not.toHaveBeenCalled(); // bytes preserved — launcher may still reference the file
+    expect(store.get().pending).toEqual([pending]); // pending kept for the next pass
+
+    // A subsequent pass where the launcher finally confirms the clear: pending clears AND the bytes are
+    // now (and only now) deleted.
+    clear.mockResolvedValue(OK);
+    const second = await reconcilePendingActions(deps);
+
+    expect(second.settled).toBe(true);
+    expect(deleteFile).toHaveBeenCalledWith(A.uri);
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+
+  it("a settled reconcile of a setActive pending confirms and clears it", async () => {
+    const pending: PendingAction = {
+      id: POINTER_PENDING_ID,
+      kind: "setActive",
+      desired: { enabled: true, modelPath: A.uri, model: A.displayName },
+    };
+    const store = makeStore({ downloaded: [A, B], activeId: "A", pending: [pending] });
+    const setActive = vi.fn(async () => OK);
+    const deps = scriptedDeps(store, { setActiveModel: setActive });
+
+    const result = await reconcilePendingActions(deps);
+
+    expect(setActive).toHaveBeenCalledWith({ modelPath: A.uri, model: A.displayName });
+    expect(result.settled).toBe(true);
+    expect(store.get().activeId).toBe("A");
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+
+  it("a DEFINITE failure of a setActive pending clears activeId (still ours) and drops the pending", async () => {
+    const pending: PendingAction = {
+      id: POINTER_PENDING_ID,
+      kind: "setActive",
+      desired: { enabled: true, modelPath: A.uri, model: A.displayName },
+    };
+    const store = makeStore({ downloaded: [A, B], activeId: "A", pending: [pending] });
+    const deps = scriptedDeps(store, { setActiveModel: async () => FAILED });
+
+    const result = await reconcilePendingActions(deps);
+
+    expect(result.settled).toBe(true);
+    expect(store.get().activeId).toBeUndefined(); // launcher didn't apply it — stop claiming it locally
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+
+  it("no pending → settles immediately without touching the bridge", async () => {
+    const store = makeStore({ downloaded: [A], activeId: "A" });
+    const setActive = vi.fn(async () => OK);
+    const clear = vi.fn(async () => OK);
+    const deps = scriptedDeps(store, { setActiveModel: setActive, clearActiveModel: clear });
+
+    const result = await reconcilePendingActions(deps);
+
+    expect(result.settled).toBe(true);
+    expect(setActive).not.toHaveBeenCalled();
+    expect(clear).not.toHaveBeenCalled();
   });
 });

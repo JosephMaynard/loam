@@ -24,7 +24,8 @@
 // bridge's `setActiveModel`/`clearActiveModel`, and `deleteModelFile`) and calls the wrappers below.
 
 import type { ActiveModelResult, SetActiveModelRequest } from './model-manager-bridge';
-import type { DownloadedModel, ModelManagerState, MutateResult } from './model-manager-store';
+import type { DownloadedModel, ModelManagerState, MutateResult, PendingAction } from './model-manager-store';
+import { POINTER_PENDING_ID, recordPending } from './model-manager-store';
 
 /** The store + bridge + filesystem operations each transaction needs, injected so the logic is pure
  * and testable. `model-manager.tsx` binds these to the real implementations (the bridge fns are
@@ -119,10 +120,17 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     });
   }
   // Timeout — AMBIGUOUS. The write may already have landed, so leave the local `activeId` set rather
-  // than reverting it (a wrong rollback is exactly the divergence P2-1 prevents).
+  // than reverting it (a wrong rollback is exactly the divergence P2-1 prevents). Record a DURABLE
+  // pending action (P2-b) so the launcher write is actually RE-SENT and settled on the next open/
+  // restart — the round-5 "reconciled next time" message was previously backed by no code at all.
+  const pendingState = await recordPendingAction(deps, {
+    id: POINTER_PENDING_ID,
+    kind: 'setActive',
+    desired: { enabled: true, modelPath: model.uri, model: model.displayName },
+  });
   return {
     kind: 'ambiguous',
-    state,
+    state: pendingState,
     message: `Set ${model.displayName} active, but couldn't confirm the host app applied it (${result.error ?? 'no response'}). It'll be reconciled next time you open the model manager or restart the host.`,
   };
 }
@@ -155,9 +163,14 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
           : `Couldn't deactivate the on-device model, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
     });
   }
+  const pendingState = await recordPendingAction(deps, {
+    id: POINTER_PENDING_ID,
+    kind: 'clear',
+    desired: { enabled: false },
+  });
   return {
     kind: 'ambiguous',
-    state,
+    state: pendingState,
     message: `Deactivated the on-device model, but couldn't confirm the host app applied it (${result.error ?? 'no response'}). It'll be reconciled next time you open the model manager or restart the host.`,
   };
 }
@@ -215,11 +228,19 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
     }
     if (result.status === 'timeout') {
       // Ambiguous: don't roll back (P2-1) and — critically — don't delete the bytes, since we can't
-      // confirm the launcher released the file. Leave the metadata removed; the orphan sweep reclaims
-      // the leftover file on a later launch.
+      // confirm the launcher released the file. Leave the metadata removed and record a DURABLE pending
+      // `delete` (P2-b): its `fileUri` is now a do-not-sweep reference (so the next process's orphan
+      // sweep can't remove a `.gguf` the launcher may STILL point at — the dangling-pointer bug), and
+      // reconciliation re-sends the clear, only deleting the bytes once it's CONFIRMED.
+      const pendingState = await recordPendingAction(deps, {
+        id: `delete:${model.uri}`,
+        kind: 'delete',
+        desired: { enabled: false },
+        fileUri: model.uri,
+      });
       return {
         kind: 'ambiguous',
-        state,
+        state: pendingState,
         message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
       };
     }
@@ -243,6 +264,116 @@ async function rollbackActiveId(
     current.activeId === opts.expected ? { ...current, activeId: opts.restoreTo } : current,
   );
   return { kind: 'rolled-back', state, message: opts.failedMessage(persisted) };
+}
+
+/** Durably record a pending action on top of whatever is currently persisted, superseding stale
+ * entries via `recordPending`. Returns the resulting state so the ambiguous caller can adopt it. */
+async function recordPendingAction(deps: ModelActionDeps, action: PendingAction): Promise<ModelManagerState> {
+  const { state } = await deps.mutate((current) => ({ ...current, pending: recordPending(current.pending, action) }));
+  return state;
+}
+
+// ---------------------------------------------------------------------------
+// Durable pending-action reconciliation (P2-b).
+// ---------------------------------------------------------------------------
+
+/** Outcome of a reconciliation pass. `settled` is true only when NO pending actions remain (every one
+ * was confirmed or definitively resolved) — the manager keeps action controls (and the orphan sweep,
+ * for the affected files) gated until then. `message` is a non-fatal summary to surface when unsettled. */
+export type ReconcileResult = {
+  state: ModelManagerState;
+  settled: boolean;
+  message?: string;
+};
+
+function dropPending(pending: PendingAction[] | undefined, id: string): PendingAction[] {
+  return (pending ?? []).filter((entry) => entry.id !== id);
+}
+
+async function clearPendingEntry(deps: ModelActionDeps, id: string): Promise<ModelManagerState> {
+  const { state } = await deps.mutate((current) => ({ ...current, pending: dropPending(current.pending, id) }));
+  return state;
+}
+
+/**
+ * Re-send ONE pending action's idempotent bridge write and resolve it:
+ *   - `ok`      — confirmed. For a `'delete'`, the launcher has now released the file, so (and ONLY
+ *                 now) delete its bytes; then clear the pending entry.
+ *   - `timeout` — still ambiguous. KEEP the entry (and its file protection) untouched for the next pass.
+ *   - `failed`  — a DEFINITE answer:
+ *       · `'delete'`   — the launcher still references the file, so the bytes must NOT be deleted; keep
+ *                        the entry so the file stays sweep-protected and the clear is retried later.
+ *       · `'setActive'`— the launcher did NOT activate the model; conditionally clear `activeId` (only if
+ *                        it still names this model, so a newer selection isn't clobbered) and drop it.
+ *       · `'clear'`    — nothing on disk to protect; stop retrying and drop it.
+ */
+async function reconcileOne(
+  deps: ModelActionDeps,
+  action: PendingAction,
+  state: ModelManagerState,
+): Promise<ModelManagerState> {
+  const result =
+    action.kind === 'setActive'
+      ? await deps.setActiveModel({ modelPath: action.desired.modelPath ?? '', model: action.desired.model })
+      : await deps.clearActiveModel();
+
+  if (result.status === 'timeout') {
+    return state; // still ambiguous — leave the pending entry (and file protection) in place
+  }
+
+  if (result.status === 'ok') {
+    if (action.kind === 'delete' && action.fileUri) {
+      await deps.deleteModelFile(action.fileUri);
+    }
+    return clearPendingEntry(deps, action.id);
+  }
+
+  // Definite failure.
+  if (action.kind === 'delete') {
+    return state; // launcher still references the file — keep it protected, never delete the bytes
+  }
+  if (action.kind === 'setActive') {
+    const { state: next } = await deps.mutate((current) => {
+      const stillOurs =
+        current.downloaded.find((model) => model.id === current.activeId)?.uri === action.desired.modelPath;
+      return {
+        ...current,
+        activeId: stillOurs ? undefined : current.activeId,
+        pending: dropPending(current.pending, action.id),
+      };
+    });
+    return next;
+  }
+  return clearPendingEntry(deps, action.id);
+}
+
+/**
+ * Reconcile the durable pending set (P2-b): re-send each unconfirmed launcher write and settle it. Runs
+ * under the global operation mutex so it can't interleave with an activate/deactivate/delete, and reads
+ * the FRESHLY-persisted pending set (via a `mutate` identity read) so it picks up entries written by a
+ * previous process. The manager calls this on open BEFORE enabling controls or running the orphan sweep.
+ */
+export function reconcilePendingActions(deps: ModelActionDeps): Promise<ReconcileResult> {
+  return runExclusive(async () => {
+    const { state: initial } = await deps.mutate((current) => current);
+    const pending = initial.pending ?? [];
+    if (pending.length === 0) {
+      return { state: initial, settled: true };
+    }
+    let state = initial;
+    for (const action of pending) {
+      state = await reconcileOne(deps, action, state);
+    }
+    const remaining = state.pending ?? [];
+    return {
+      state,
+      settled: remaining.length === 0,
+      message:
+        remaining.length === 0
+          ? undefined
+          : `${remaining.length} change${remaining.length === 1 ? '' : 's'} still pending — the host app is unreachable. They'll retry the next time you open this.`,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

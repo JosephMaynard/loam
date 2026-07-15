@@ -18,10 +18,42 @@ export type DownloadedModel = {
   downloadedAt: number;
 };
 
+/** The launcher-facing intent of a pending action — the state config.json should converge to once the
+ * bridge write is finally confirmed. `enabled:true` carries the `modelPath` (+ cosmetic `model` label)
+ * to (re)activate; `enabled:false` is a cleared pointer. */
+export type PendingDesiredState = { enabled: boolean; modelPath?: string; model?: string };
+
+/**
+ * A durable record of a bridge write that resolved AMBIGUOUS (timed out after every idempotent retry —
+ * see model-manager-bridge.ts): the launcher never confirmed it, so RN-local state may be ahead of the
+ * launcher's config.json. Persisted in `model-manager-store.json` (P2-b) so it can be RE-SENT and
+ * settled on the next manager-open / app restart — the round-5 "reconciled next time" promise was
+ * previously never backed by any code. `kind`:
+ *   - `'setActive'` — re-send `setActiveModel(desired.modelPath, desired.model)`.
+ *   - `'clear'`     — re-send `clearActiveModel()`.
+ *   - `'delete'`    — re-send `clearActiveModel()`, then (only once CONFIRMED `ok`) delete `fileUri`'s
+ *                     bytes. Until then `fileUri` is a do-not-sweep reference so the orphan sweep can't
+ *                     remove a `.gguf` the launcher might still point at (the dangling-pointer bug).
+ */
+export type PendingAction = {
+  id: string;
+  kind: 'setActive' | 'clear' | 'delete';
+  desired: PendingDesiredState;
+  /** For a `'delete'`: the GGUF whose bytes must be kept until the launcher clear is confirmed. */
+  fileUri?: string;
+};
+
+/** Stable id for the single "launcher active-pointer" intent (`setActive`/`clear` are mutually
+ * exclusive — the newest supersedes the older). A `'delete'` is keyed per file instead. */
+export const POINTER_PENDING_ID = 'launcher-active-pointer';
+
 export type ModelManagerState = {
   downloaded: DownloadedModel[];
   /** id of the model currently pushed to `llm.onDevice` (see model-manager-bridge.ts), if any. */
   activeId?: string;
+  /** Durable, unconfirmed bridge writes awaiting reconciliation (P2-b). Absent/empty when nothing is
+   * pending — the common case, kept off the persisted shape so a settled state round-trips unchanged. */
+  pending?: PendingAction[];
 };
 
 const STATE_PATH = `${FileSystem.documentDirectory}loam-model-manager.json`;
@@ -75,7 +107,7 @@ function isValidState(value: unknown): value is ModelManagerState {
   if (!value || typeof value !== 'object') {
     return false;
   }
-  const record = value as { downloaded?: unknown; activeId?: unknown };
+  const record = value as { downloaded?: unknown; activeId?: unknown; pending?: unknown };
   if (!Array.isArray(record.downloaded) || !record.downloaded.every(isDownloadedModel)) {
     return false;
   }
@@ -88,6 +120,13 @@ function isValidState(value: unknown): value is ModelManagerState {
     if (!record.downloaded.some((entry) => (entry as DownloadedModel).id === record.activeId)) {
       return false;
     }
+  }
+  // Pending actions (P2-b) get the same strict, entry-by-entry validation as `downloaded`: a
+  // missing/wrong-typed `pending`, or a single malformed pending entry, makes the whole slot INVALID
+  // so `loadModelManagerState` falls through to a good `.bak` rather than silently dropping (and thus
+  // never reconciling) an unconfirmed launcher write. `pending` absent is fine (the settled state).
+  if (record.pending !== undefined && (!Array.isArray(record.pending) || !record.pending.every(isPendingAction))) {
+    return false;
   }
   return true;
 }
@@ -224,10 +263,93 @@ function normalizeState(value: unknown): ModelManagerState {
   if (!value || typeof value !== 'object') {
     return EMPTY_STATE;
   }
-  const record = value as { downloaded?: unknown; activeId?: unknown };
+  const record = value as { downloaded?: unknown; activeId?: unknown; pending?: unknown };
   const downloaded = Array.isArray(record.downloaded) ? record.downloaded.filter(isDownloadedModel) : [];
   const activeId = typeof record.activeId === 'string' ? record.activeId : undefined;
-  return { downloaded, activeId };
+  const pending = Array.isArray(record.pending) ? record.pending.filter(isPendingAction) : [];
+  // Keep the persisted shape minimal: only carry `pending` when there's actually something unconfirmed,
+  // so a fully-settled state round-trips as `{ downloaded, activeId }` (matching EMPTY_STATE and the
+  // pre-P2-b shape) rather than growing an always-`[]` key.
+  return pending.length > 0 ? { downloaded, activeId, pending } : { downloaded, activeId };
+}
+
+/**
+ * Strict validator for a single `PendingAction` (P2-b), mirroring `isDownloadedModel`: a well-formed
+ * `id`/`kind`/`desired`, with the kind-specific invariants that reconciliation relies on — a
+ * `'setActive'` MUST carry an enabled `desired.modelPath`, a `'clear'` MUST be `enabled:false`, and a
+ * `'delete'` MUST carry a `fileUri` (the bytes to reclaim once its clear is confirmed).
+ */
+function isPendingAction(value: unknown): value is PendingAction {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as { id?: unknown; kind?: unknown; desired?: unknown; fileUri?: unknown };
+  if (typeof record.id !== 'string') {
+    return false;
+  }
+  if (record.kind !== 'setActive' && record.kind !== 'clear' && record.kind !== 'delete') {
+    return false;
+  }
+  if (record.fileUri !== undefined && typeof record.fileUri !== 'string') {
+    return false;
+  }
+  if (!record.desired || typeof record.desired !== 'object') {
+    return false;
+  }
+  const desired = record.desired as { enabled?: unknown; modelPath?: unknown; model?: unknown };
+  if (typeof desired.enabled !== 'boolean') {
+    return false;
+  }
+  if (desired.modelPath !== undefined && typeof desired.modelPath !== 'string') {
+    return false;
+  }
+  if (desired.model !== undefined && typeof desired.model !== 'string') {
+    return false;
+  }
+  if (record.kind === 'setActive' && (desired.enabled !== true || typeof desired.modelPath !== 'string')) {
+    return false;
+  }
+  if (record.kind === 'clear' && desired.enabled !== false) {
+    return false;
+  }
+  if (record.kind === 'delete' && typeof record.fileUri !== 'string') {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Add `action` to `pending`, superseding any stale entry it replaces (P2-b). Two supersede rules:
+ *   - same `id` — a newer intent for the same target replaces the older (idempotent re-record).
+ *   - a new pointer action (`setActive`/`clear`, id `POINTER_PENDING_ID`) OR a `'delete'` (which also
+ *     clears the launcher pointer to its file) drops any existing pointer pending, since the launcher
+ *     has a single active-model pointer and the newest intent is authoritative.
+ * Per-file `'delete'` entries are otherwise independent and accumulate.
+ */
+export function recordPending(pending: PendingAction[] | undefined, action: PendingAction): PendingAction[] {
+  const base = (pending ?? []).filter((existing) => existing.id !== action.id);
+  const withoutStalePointer =
+    action.id === POINTER_PENDING_ID || action.kind === 'delete'
+      ? base.filter((existing) => existing.id !== POINTER_PENDING_ID)
+      : base;
+  return [...withoutStalePointer, action];
+}
+
+/**
+ * The set of on-disk `.gguf` uris a pending set still references, and which the orphan sweep must
+ * therefore NOT delete (P2-b): a `'delete'`'s `fileUri` (bytes kept until its clear is confirmed) and a
+ * `'setActive'`'s `desired.modelPath` (the file being activated). A `'clear'` references no file.
+ */
+export function pendingProtectedUris(pending: PendingAction[] | undefined): string[] {
+  const uris: string[] = [];
+  for (const action of pending ?? []) {
+    if (action.kind === 'delete' && action.fileUri) {
+      uris.push(action.fileUri);
+    } else if (action.kind === 'setActive' && action.desired.modelPath) {
+      uris.push(action.desired.modelPath);
+    }
+  }
+  return uris;
 }
 
 function isDownloadedModel(value: unknown): value is DownloadedModel {
