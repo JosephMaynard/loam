@@ -704,30 +704,61 @@ var DB_MODE_HINT_PATH = path.join(dataDir, '.loam-db-mode-hint');
 /** Persist the last-known mode NAME. Refuses to write anything that isn't a known mode string, so no
  *  key-shaped value can ever land here even by a caller mistake. Returns true only on a genuine write
  *  success (P1-b, Sol round 6): the `loam-db-set-mode-hint` handler below reports that back so the RN
- *  picker can warn when a transactional hint write failed. Existing callers ignore the return. */
+ *  picker can warn when a transactional hint write failed. Existing callers ignore the return.
+ *
+ *  P1-1 (Sol round 7): the write is ATOMIC — write to a temp file then rename over the target — so an
+ *  interrupted/partial write can never leave a TRUNCATED hint on disk (which `readDbModeHint` would treat
+ *  as a `status:'error'` and LOCK on). rename(2) is atomic on the same filesystem. */
 function writeDbModeHint(mode) {
   if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
     return false;
   }
+  var tmpPath = DB_MODE_HINT_PATH + '.tmp';
   try {
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(DB_MODE_HINT_PATH, mode, 'utf8');
+    fs.writeFileSync(tmpPath, mode, 'utf8');
+    fs.renameSync(tmpPath, DB_MODE_HINT_PATH);
     return true;
   } catch (err) {
     // best-effort — a missing hint only makes a future transient failure err toward locking when a secret
     // mode was previously recorded; an unwritten hint on a fresh/off node just keeps booting plaintext.
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (cleanupErr) {
+      // ENOENT is the common case (writeFileSync itself failed) — nothing to clean up.
+    }
     return false;
   }
 }
 
-/** Read the last-known mode NAME, or `undefined` if absent/unreadable/unrecognized. */
+/**
+ * Read the last-known mode NAME as a TRI-STATE result (P1-1, Sol round 7) — MIRROR of
+ * `DbModeHintResult` / the reader contract in apps/app/src/lib/db-encryption.ts (this CJS file can't
+ * import the TS module, so keep the two in sync by hand):
+ *   - `{ status: 'present', mode }` → the file held a recognized mode NAME.
+ *   - `{ status: 'absent' }`        → a CONFIRMED ENOENT (the file genuinely does not exist).
+ *   - `{ status: 'error' }`         → the read threw for any OTHER reason, OR the contents were
+ *     malformed/truncated/unrecognized. Deliberately NOT collapsed to `absent`: an unreadable/corrupt
+ *     hint tells us nothing, and treating it as absent would let an ephemeral node (no DB at boot) with a
+ *     hint read error boot PLAINTEXT (`absent + no DB → plaintext`), a confidentiality downgrade.
+ */
 function readDbModeHint() {
+  var raw;
   try {
-    var raw = fs.readFileSync(DB_MODE_HINT_PATH, 'utf8').trim();
-    return DB_ENCRYPTION_MODES.indexOf(raw) === -1 ? undefined : raw;
+    raw = fs.readFileSync(DB_MODE_HINT_PATH, 'utf8');
   } catch (err) {
-    return undefined;
+    if (err && err.code === 'ENOENT') {
+      return { status: 'absent' };
+    }
+    // Any other read failure (permissions, I/O, corruption) is NOT a confirmed absence — lock, don't guess.
+    return { status: 'error' };
   }
+  var trimmed = String(raw).trim();
+  if (DB_ENCRYPTION_MODES.indexOf(trimmed) === -1) {
+    // Malformed/truncated/unrecognized contents — treat as an error, never as a confirmed absence.
+    return { status: 'error' };
+  }
+  return { status: 'present', mode: trimmed };
 }
 
 // P1-b (Sol round 6): whether an on-disk DB file exists — the fail-closed input to the locked-error
@@ -1060,31 +1091,33 @@ function resolveDbEncryptionAndBoot() {
         // case. Consult the last successfully-resolved mode hint:
         var hint = readDbModeHint();
         var dbExists = dbFileExists();
-        // P1-b (Sol round 6): MIRROR of `mayBootPlaintextOnLockedError(hint, dbExists)` in
-        // apps/app/src/lib/db-encryption.ts (harness-tested there; this CJS file can't import the TS
-        // module, so the two copies are kept in sync by hand). Authorize a plaintext boot ONLY when the
-        // last-known mode was explicitly 'off', OR there is NO DB file AND no recorded mode choice at all
-        // (a genuinely fresh, never-configured node with nothing to protect). An ABSENT/unreadable/
-        // ENCRYPTED-mode hint with a DB PRESENT LOCKS — it must never silently downgrade an encrypted
-        // node on a transient failure. RF6-c (Sol round 6): a KNOWN encrypted-mode hint LOCKS even with NO
-        // DB file present — ephemeral mode wipes its DB every boot (so `dbExists` is legitimately false),
-        // and a freshly-selected persistent/passphrase mode has no DB yet either; booting plaintext in
-        // those cases would write an UNENCRYPTED loam.db, downgrading the operator's chosen mode. This
-        // closes three holes: (1) an existing encrypted install upgrading has no hint yet, (2) an
-        // off→encrypted selection whose transactional hint write was lost still had a stale 'off', and
-        // (3) an encrypted mode whose DB doesn't exist yet (ephemeral, or first boot of persistent/
-        // passphrase). Only `hint === 'off'` or the true "no hint AND no DB" case boots plaintext.
-        if (hint === 'off' || (dbExists === false && hint === undefined)) {
+        // P1-1 (Sol round 7, was P1-b round 6): MIRROR of `mayBootPlaintextOnLockedError(hint, dbExists)`
+        // in apps/app/src/lib/db-encryption.ts (harness-tested there; this CJS file can't import the TS
+        // module, so the two copies are kept in sync by hand). `hint` is now the TRI-STATE result of
+        // `readDbModeHint` above. Authorize a plaintext boot ONLY when:
+        //   - present AND mode 'off' → last-known mode was explicitly plaintext → safe; OR
+        //   - CONFIRMED-absent (ENOENT) AND no DB file → a genuinely fresh, never-configured node.
+        // Everything else LOCKS, never plaintext:
+        //   - status 'error' (read failure OR malformed/truncated/unrecognized) → LOCK regardless of the
+        //     DB, closing the ephemeral "no DB + hint read error → plaintext" hole (round 7 hole 1);
+        //   - absent WITH a DB present → LOCK (a DB exists but no mode recorded — don't downgrade it);
+        //   - a present ENCRYPTED-mode hint → LOCK even with NO DB (RF6-c): ephemeral wipes its DB every
+        //     boot, and a freshly-selected persistent/passphrase mode has no DB yet, but the operator
+        //     explicitly chose an encrypted mode, so a transient error must not write an UNENCRYPTED
+        //     loam.db. Only present-'off' or the true "confirmed-absent AND no DB" case boots plaintext.
+        var mayBootPlaintext =
+          (hint.status === 'present' && hint.mode === 'off') || (hint.status === 'absent' && dbExists === false);
+        if (mayBootPlaintext) {
           // No secret to protect: the last-known mode was plaintext 'off', or there's no database file at
-          // all. A transient key-request failure must NOT lock such a node — boot plaintext, exactly like
-          // a genuine 'off' reply. The hint is left untouched — this FAILED resolution is not
-          // authoritative enough to write one (only a real reply from RN is).
+          // all AND no mode was ever recorded. A transient key-request failure must NOT lock such a node —
+          // boot plaintext, exactly like a genuine 'off' reply. The hint is left untouched — this FAILED
+          // resolution is not authoritative enough to write one (only a real reply from RN is).
           console.warn(
             'Could not determine the on-device encryption mode this boot; last-known mode ' +
-              (hint === undefined ? 'unset' : "'" + hint + "'") +
+              (hint.status === 'present' ? "'" + hint.mode + "'" : hint.status) +
               ', DB file ' +
               (dbExists ? 'present' : 'absent') +
-              ' — booting plaintext (no secret to protect). Availability over a transient lock (RF-c/P1-b).',
+              ' — booting plaintext (no secret to protect). Availability over a transient lock (RF-c/P1-1).',
           );
           process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
           process.env.LOAM_DB_DRIVER = 'better-sqlite3';

@@ -942,7 +942,15 @@ export default function HostScreen() {
           <ThemedText type="link">Encryption settings</ThemedText>
         </ThemedView>
       </Pressable>
-      <DbEncryptionSettingsOverlay visible={dbEncryptionOpen} onClose={() => setDbEncryptionOpen(false)} />
+      {/* P1-1 (Sol round 7, hole 4): pass the bridge `channel` here too. Without it, a mode change made
+          through this LOCKED/error-screen recovery UI couldn't write the mode-NAME hint at all — so an
+          off→encrypted (or encrypted→off) change here left the hint stale and a later transient
+          key-request failure would resolve it the wrong way. */}
+      <DbEncryptionSettingsOverlay
+        visible={dbEncryptionOpen}
+        onClose={() => setDbEncryptionOpen(false)}
+        channel={nodejs.channel}
+      />
     </ThemedView>
   );
 }
