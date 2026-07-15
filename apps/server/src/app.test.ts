@@ -52,10 +52,21 @@ const wipeMarkerWriteFailure = vi.hoisted(() => ({ armed: false }));
 // `<dir>/captured-backup.db`, so a test can open that single-file snapshot under the legacy key and PROVE it
 // contains committed rows that were WAL-resident before the checkpoint folded them in. Inert by default.
 const backupCapture = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+// RF6-a (Sol round 6): a capture seam recording every `rmSync` PATH argument while `paths` is a live
+// array (default `undefined` = inert). Used by the foreign-`-journal` test to PROVE Step 0b explicitly
+// removes `loam.db-journal` before restoring — an end-to-end "no journal after boot" check can't, since
+// any successful DB open also cleans a hot journal, so it would pass even WITHOUT the fix.
+const rmSyncCapture = vi.hoisted(() => ({ paths: undefined as string[] | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (rmSyncCapture.paths) {
+        rmSyncCapture.paths.push(String(args[0]));
+      }
+      return actual.rmSync(...args);
+    },
     renameSync: (...args: Parameters<typeof actual.renameSync>) => {
       if (renameFailure.armed) {
         renameFailure.armed = false;
@@ -2184,6 +2195,80 @@ describe("encryption at rest + key-discard kill switch", () => {
         expect(restored.store.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(true);
         expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
         await restored.close();
+      });
+
+      it("RF6-a: an interrupted DELETE-mode rekey leaves a foreign `loam.db-journal` — Step 0b removes it so the restored single file is never paired with a hot rollback journal", async () => {
+        const dataDir = await makeLegacyDb("SURVIVES_FOREIGN_JOURNAL");
+        // Committed backup = the intact legacy DB. The live loam.db is half-rekeyed corruption (opens
+        // under no key) PLUS a `loam.db-journal` — the rollback journal a DELETE-mode rekey (the mode
+        // SQLCipher forces for rekey; it refuses under WAL) leaves when killed mid-way. This is NOT a
+        // `-wal`/`-shm` pair, which is exactly the state the old Step 0b failed to clean.
+        copyFileSync(join(dataDir, "loam.db"), join(dataDir, "loam.db.premigration"));
+        writeFileSync(join(dataDir, "loam.db"), Buffer.from("half-rekeyed corruption — opens under no key"));
+        writeFileSync(
+          join(dataDir, "loam.db-journal"),
+          Buffer.from("stale rollback journal left by the interrupted DELETE-mode rekey"),
+        );
+
+        // Capture rmSync paths so we can prove Step 0b EXPLICITLY removes the journal (not just that it
+        // happens to be gone after a successful open, which SQLite would do regardless of the fix).
+        rmSyncCapture.paths = [];
+        try {
+          await expectCleanMigration(dataDir, "SURVIVES_FOREIGN_JOURNAL");
+          expect(rmSyncCapture.paths.some((p) => p.endsWith("loam.db-journal"))).toBe(true);
+        } finally {
+          rmSyncCapture.paths = undefined;
+        }
+        // The foreign rollback journal must be gone — a restored self-consistent file paired with a hot
+        // journal violates the crash-atomic single-self-consistent-file invariant.
+        expect(existsSync(join(dataDir, "loam.db-journal"))).toBe(false);
+      });
+
+      it("RF6-b: a stale `.premigration` left by a SUCCESSFUL-but-uncleaned migration is DISCARDED (not restored), preserving the serving session's data", async () => {
+        // 1. A legacy DB with a pre-migration row; snapshot the intact legacy single file — this is what a
+        // stale, never-cleaned `.premigration` holds (it predates the migration, so ONLY the pre row).
+        const dataDir = await makeLegacyDb("PRE_MIGRATION_ROW");
+        const staleSnapshot = join(dataDir, "stale-legacy-snapshot.db");
+        copyFileSync(join(dataDir, "loam.db"), staleSnapshot);
+
+        // 2. Migrate cleanly to the current key, then write a NEW row during that serving session — the
+        // data a full session accrues AFTER a migration that already succeeded.
+        const migrated = installFakeMigratedHook();
+        const migratedApp = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated.calls).toBe(1);
+        const admin = await session(migratedApp);
+        expect((await post(migratedApp, admin.cookie, "POST_MIGRATION_SESSION_ROW")).statusCode).toBe(201);
+        await migratedApp.close();
+        // The clean migration removed its own backup.
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+
+        // 3. Simulate the post-success `rmSync(committedBackup)` cleanup having THROWN (read-only dir /
+        // locked file): the stale legacy snapshot survives as `loam.db.premigration` into the next boot.
+        copyFileSync(staleSnapshot, join(dataDir, "loam.db.premigration"));
+        rmSync(staleSnapshot, { force: true });
+
+        // 4. Boot again under the current key. Step 0b PROBES the live DB (it opens under the current key →
+        // the migration already succeeded) and DISCARDS the stale backup rather than restoring it. A blind
+        // restore would revert to the pre-migration snapshot and LOSE the session row.
+        const reopened = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        const bodies = reopened.store.loadMessages().flatMap((m) => ("body" in m ? [m.body] : []));
+        expect(bodies).toContain("PRE_MIGRATION_ROW");
+        // Preserved — proof the stale backup was discarded, not restored over the live DB.
+        expect(bodies).toContain("POST_MIGRATION_SESSION_ROW");
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await reopened.close();
       });
     });
 

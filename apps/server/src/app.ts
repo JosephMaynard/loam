@@ -1323,13 +1323,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // OS-kill mid-rekey can leave `loam.db` openable under NEITHER the legacy key nor the current one,
     // destroying pre-round-4 passphrase data. To make that recoverable the migration first COMMITS a
     // single-file, checkpoint-folded snapshot of the intact legacy DB to `loam.db.premigration` (copy →
-    // `.tmp` → atomic rename), then rekeys, then deletes it on success. So a COMMITTED `loam.db.premigration`
-    // present HERE means a migration was interrupted after the backup committed but before it finished:
-    // restore it. Because the snapshot is a SINGLE file, restore is ONE atomic `rename` — no multi-file
-    // race, and it can never install a partial backup. A leftover `.premigration.tmp` (a kill before the
-    // commit rename) is NOT a committed backup — discard it, never restore from it (the live DB is still
-    // intact; the migration just re-runs). Best-effort — a restore failure falls through to the normal
-    // open/recovery chain below (no worse than before). The backup holds ciphertext, not the key.
+    // `.tmp` → atomic rename), then rekeys, then deletes it on success. A COMMITTED `loam.db.premigration`
+    // present HERE is AMBIGUOUS (RF6-b): usually an interrupted rekey (restore it), but possibly a
+    // migration that already SUCCEEDED whose backup-cleanup `rmSync` threw — leaving the stale snapshot
+    // behind through a serving session whose new data now lives in `loam.db`. The two are disambiguated
+    // below by PROBING the live DB under the current key: opens → already migrated, discard the stale
+    // backup and preserve the live data; doesn't open → genuine interrupt, restore. Because the snapshot
+    // is a SINGLE file, restore is ONE atomic `rename` (RF6-a: after first clearing a FOREIGN `loam.db-wal`/
+    // `-shm`/`-journal` — the rekey runs under DELETE journal mode, so an interrupt leaves a `-journal`
+    // rollback journal, NOT a `-wal`/`-shm` pair) — no multi-file race, and it can never install a partial
+    // backup. A leftover `.premigration.tmp` (a kill before the commit rename) is NOT a committed backup —
+    // discard it, never restore from it (the live DB is still intact; the migration just re-runs).
+    // Best-effort — a restore failure falls through to the normal open/recovery chain below (no worse than
+    // before). The backup holds ciphertext, not the key.
     {
       const committedBackup = `${dbPath}.premigration`;
       const backupTmp = `${dbPath}.premigration.tmp`;
@@ -1342,18 +1348,60 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         rmSync(`${dbPath}-shm.premigration`, { force: true });
 
         if (existsSync(committedBackup)) {
-          // Drop the possibly-half-rekeyed live `-wal`/`-shm` first (stale half-rekey state), then a SINGLE
-          // atomic rename installs the intact single-file snapshot over the live DB. The snapshot folded its
-          // own WAL in before it was copied, so the restored `loam.db` opens standalone with no WAL of its
-          // own. Killed between the rm and the rename? The committed backup is still present, so the next
-          // boot repeats this idempotently.
-          rmSync(`${dbPath}-wal`, { force: true });
-          rmSync(`${dbPath}-shm`, { force: true });
-          renameSync(committedBackup, dbPath);
-          server.log.warn(
-            "Restored an interrupted DB key-migration from its committed single-file pre-migration backup — " +
-              "the legacy-encrypted database is intact again and the migration will be retried this boot.",
-          );
+          // RF6-b (Sol round 6): a committed `.premigration` present here is AMBIGUOUS. Normally it is the
+          // intact legacy snapshot left by an INTERRUPTED rekey (restore is correct) — UNLESS a PRIOR
+          // migration actually SUCCEEDED and its post-success `rmSync(committedBackup)` cleanup threw
+          // (read-only dir, locked file), leaving the stale backup behind through a whole serving session.
+          // In THAT case the live `loam.db` holds the migrated data (plus a `-wal` of un-checkpointed
+          // messages from the session that just ran), and a BLIND restore would delete that WAL and rename
+          // the stale pre-migration snapshot over the live DB — losing data and re-migrating every boot.
+          // Disambiguate by PROBING: open the live `loam.db` under the CURRENT key (`dbKey`). If it opens,
+          // the migration already committed and this backup is stale garbage → delete it (and any sidecars/
+          // journal) and leave the live DB and its `-wal`/`-shm` untouched. Only if the live DB does NOT
+          // open under the current key is this a genuine interrupted rekey → restore. With no key this boot
+          // (plaintext — can't probe an encrypted DB) keep the conservative restore.
+          let liveOpensUnderCurrentKey = false;
+          if (dbKey !== undefined && existsSync(dbPath)) {
+            try {
+              const probe = openLoamStore();
+              probe.close();
+              liveOpensUnderCurrentKey = true;
+            } catch {
+              liveOpensUnderCurrentKey = false;
+            }
+          }
+
+          if (liveOpensUnderCurrentKey) {
+            // The owning migration already SUCCEEDED — the leftover backup is stale. Preserve the serving
+            // session's live data (do NOT touch `loam.db`/`-wal`/`-shm`); just delete the stale backup and
+            // any of its own sidecars/journal.
+            rmSync(committedBackup, { force: true });
+            rmSync(`${dbPath}-wal.premigration`, { force: true });
+            rmSync(`${dbPath}-shm.premigration`, { force: true });
+            rmSync(`${committedBackup}-journal`, { force: true });
+            server.log.warn(
+              "Found a leftover pre-migration DB backup whose owning migration already SUCCEEDED (the live " +
+                "database opens under the current key) — discarding the stale backup and preserving the live " +
+                "database and its WAL rather than restoring the stale snapshot over it (RF6-b).",
+            );
+          } else {
+            // Genuine interrupted rekey (or a plaintext boot that can't probe): restore the intact single-
+            // file snapshot. RF6-a: the rekey runs under DELETE journal mode (SQLCipher refuses to rekey
+            // under WAL), so an interrupted rekey leaves a `loam.db-journal` ROLLBACK journal — NOT a
+            // `-wal`/`-shm` pair. Drop `-wal`/`-shm`/`-journal` first so the restored single self-consistent
+            // file can never be paired with a FOREIGN hot journal, then a SINGLE atomic rename installs the
+            // snapshot over the live DB. The snapshot folded its own WAL in before it was copied, so the
+            // restored `loam.db` opens standalone with no journal of its own. Killed between the rm and the
+            // rename? The committed backup is still present, so the next boot repeats this idempotently.
+            rmSync(`${dbPath}-wal`, { force: true });
+            rmSync(`${dbPath}-shm`, { force: true });
+            rmSync(`${dbPath}-journal`, { force: true });
+            renameSync(committedBackup, dbPath);
+            server.log.warn(
+              "Restored an interrupted DB key-migration from its committed single-file pre-migration backup — " +
+                "the legacy-encrypted database is intact again and the migration will be retried this boot.",
+            );
+          }
         }
       } catch (error) {
         server.log.error(
@@ -1439,9 +1487,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
 
         // Rekey committed the new-key pages — the pre-migration backup is no longer needed; drop it (and
-        // any stray tmp) so a later boot doesn't mistake it for an interrupted migration to resume.
+        // any stray tmp) so a later boot doesn't mistake it for an interrupted migration to resume. RF6-a:
+        // also clear any `loam.db-journal` the DELETE-mode rekey may have left — a successful rekey folds
+        // WAL back on and SQLCipher deletes its rollback journal on commit, so this is normally a no-op,
+        // but removing it defensively guarantees the freshly-rekeyed single file is never left paired with
+        // a foreign rollback journal.
         rmSync(committedBackup, { force: true });
         rmSync(backupTmp, { force: true });
+        rmSync(`${dbPath}-journal`, { force: true });
 
         encryptionEnabled = true;
         const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
@@ -1492,7 +1545,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // Unique per recovery (not just per-file) so a SECOND unopenable-DB recovery keeps its own set
       // alongside the first, instead of renaming onto a fixed name and destroying the earlier copy (P1-3).
       const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-      for (const suffix of ["", "-wal", "-shm"]) {
+      // RF6-a: `-journal` is included alongside `-wal`/`-shm` so a FOREIGN rollback journal (left by an
+      // interrupted DELETE-mode rekey) is moved aside too — otherwise the fresh DB opened below could be
+      // paired with a hot journal that references the now-renamed-away file, corrupting the fresh start.
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
         const from = `${dbPath}${suffix}`;
         if (existsSync(from)) {
           renameSync(from, `${from}.unreadable-${preservedSuffix}`);

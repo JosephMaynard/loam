@@ -1063,13 +1063,18 @@ function resolveDbEncryptionAndBoot() {
         // P1-b (Sol round 6): MIRROR of `mayBootPlaintextOnLockedError(hint, dbExists)` in
         // apps/app/src/lib/db-encryption.ts (harness-tested there; this CJS file can't import the TS
         // module, so the two copies are kept in sync by hand). Authorize a plaintext boot ONLY when the
-        // last-known mode was explicitly 'off', OR no DB file exists at all (a fresh node with nothing to
-        // protect). An ABSENT/unreadable/ENCRYPTED-mode hint with a DB PRESENT now LOCKS — it must never
-        // silently downgrade an encrypted node on a transient failure. This closes two holes the old
-        // `hint === undefined || hint === 'off'` check left open: (1) an existing encrypted install
-        // upgrading has no hint yet, and (2) an off→encrypted selection whose transactional hint write
-        // was lost still had a stale 'off' — both would otherwise boot plaintext over an encrypted DB.
-        if (hint === 'off' || dbExists === false) {
+        // last-known mode was explicitly 'off', OR there is NO DB file AND no recorded mode choice at all
+        // (a genuinely fresh, never-configured node with nothing to protect). An ABSENT/unreadable/
+        // ENCRYPTED-mode hint with a DB PRESENT LOCKS — it must never silently downgrade an encrypted
+        // node on a transient failure. RF6-c (Sol round 6): a KNOWN encrypted-mode hint LOCKS even with NO
+        // DB file present — ephemeral mode wipes its DB every boot (so `dbExists` is legitimately false),
+        // and a freshly-selected persistent/passphrase mode has no DB yet either; booting plaintext in
+        // those cases would write an UNENCRYPTED loam.db, downgrading the operator's chosen mode. This
+        // closes three holes: (1) an existing encrypted install upgrading has no hint yet, (2) an
+        // off→encrypted selection whose transactional hint write was lost still had a stale 'off', and
+        // (3) an encrypted mode whose DB doesn't exist yet (ephemeral, or first boot of persistent/
+        // passphrase). Only `hint === 'off'` or the true "no hint AND no DB" case boots plaintext.
+        if (hint === 'off' || (dbExists === false && hint === undefined)) {
           // No secret to protect: the last-known mode was plaintext 'off', or there's no database file at
           // all. A transient key-request failure must NOT lock such a node — boot plaintext, exactly like
           // a genuine 'off' reply. The hint is left untouched — this FAILED resolution is not

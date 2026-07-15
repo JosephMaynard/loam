@@ -224,7 +224,10 @@ export interface LoamStore {
    * pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
    * transactions still resident in the WAL — this makes the snapshot single-file-consistent first.
    * Only meaningful on a SQLCipher (encrypted) connection, the only path that migrates; throws on a
-   * plaintext store (no `pragma` handle), mirroring {@link rekey}. Never logs any key material.
+   * plaintext store (no `pragma` handle), mirroring {@link rekey}. Also throws if the checkpoint comes
+   * back `busy` (RF6-e, Sol round 6) — a non-zero `busy` means the WAL wasn't fully truncated (the
+   * sole-connection invariant is broken), so the file is NOT a complete snapshot and must not be copied
+   * as a backup. Never logs any key material.
    */
   checkpoint(): void;
   /**
@@ -646,7 +649,21 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       // bytes. This store is the sole open connection when the migration calls it (nothing else can
       // hold a read lock), so the checkpoint can't be blocked/partial — the single `loam.db` is a
       // complete snapshot afterward.
-      pragma("wal_checkpoint(TRUNCATE)");
+      //
+      // RF6-e (Sol round 6): DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
+      // `(busy, log, checkpointed)` row; `busy !== 0` means another connection held a lock and the WAL
+      // was NOT fully folded/truncated — i.e. the sole-connection invariant this migration relies on is
+      // broken and the raw file copy that follows would MISS WAL-resident committed rows. Fail loudly
+      // instead of committing an incomplete pre-migration backup: the caller (`openInitialStore`) then
+      // skips the unbackable in-place rekey rather than risk an unrecoverable interrupted migration.
+      const rows = pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }> | undefined;
+      const busy = Array.isArray(rows) && rows.length > 0 ? rows[0]?.busy : undefined;
+      if (busy !== 0) {
+        throw new Error(
+          `wal_checkpoint(TRUNCATE) did not fully truncate the WAL (busy=${String(busy)}) — the ` +
+            "sole-connection invariant is broken, so this DB file is NOT a complete standalone snapshot.",
+        );
+      }
     },
     rekey(newKey) {
       if (!pragma) {

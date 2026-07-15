@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -772,6 +772,36 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
       const plain = openStore(dbPath);
       try {
         expect(() => plain.rekey("anything")).toThrow();
+      } finally {
+        plain.close();
+      }
+    });
+  });
+
+  describe("checkpoint (RF6-e, Sol round 6 — verify the WAL was actually truncated)", () => {
+    it("folds committed WAL frames into the main file and truncates the WAL to zero (busy=0, no throw)", () => {
+      const store = openStore(dbPath, { encryptionKey: KEY });
+      try {
+        store.insertMessage(makeChannelPost("msg_wal_resident"));
+        // Precondition: the write lives in a non-empty -wal sidecar before the checkpoint.
+        expect(existsSync(`${dbPath}-wal`)).toBe(true);
+        expect(statSync(`${dbPath}-wal`).size).toBeGreaterThan(0);
+
+        // Sole connection → TRUNCATE returns busy=0 and this returns normally (does not throw).
+        expect(() => store.checkpoint()).not.toThrow();
+
+        // TRUNCATE reset the WAL to zero bytes; the row is now folded into the main file.
+        expect(statSync(`${dbPath}-wal`).size).toBe(0);
+        expect(store.loadMessages()).toEqual([makeChannelPost("msg_wal_resident")]);
+      } finally {
+        store.close();
+      }
+    });
+
+    it("throws when called on a plaintext (unencrypted) store — no pragma handle to checkpoint through", () => {
+      const plain = openStore(dbPath);
+      try {
+        expect(() => plain.checkpoint()).toThrow(/encryptionKey|plaintext/);
       } finally {
         plain.close();
       }

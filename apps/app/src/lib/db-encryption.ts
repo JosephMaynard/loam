@@ -651,10 +651,15 @@ export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, ti
  * plaintext boot (availability) or LOCK (confidentiality) turns on whether this node actually has a
  * secret to protect:
  *   - `hint === 'off'` → the last-known mode was explicitly plaintext → plaintext is safe.
- *   - `dbExists === false` → no on-disk database at all (a fresh node) → nothing to protect → plaintext.
- *   - otherwise (a DB file EXISTS and the hint is absent / unreadable / an ENCRYPTED mode) → LOCK, never
- *     plaintext. An ABSENT hint no longer authorizes plaintext when a DB is present — that was the
- *     upgrade-with-no-hint and off→encrypted-then-timeout downgrade hole.
+ *   - `dbExists === false` AND `hint === undefined` → no on-disk database AND no recorded mode choice (a
+ *     genuinely fresh, never-configured node) → nothing to protect → plaintext.
+ *   - otherwise → LOCK, never plaintext. This now includes RF6-c (Sol round 6): a KNOWN encrypted-mode
+ *     hint (`ephemeral`/`persistent`/`passphrase`) LOCKS even with NO DB file present. Ephemeral mode
+ *     wipes its DB every boot (so `dbExists` is legitimately false at boot time), and a freshly-selected
+ *     persistent/passphrase mode has no DB yet either — in both cases the operator has explicitly chosen
+ *     an encrypted mode, so a transient error must not boot plaintext and write an UNENCRYPTED `loam.db`,
+ *     a confidentiality downgrade vs. the chosen mode. Only the true "no choice recorded at all AND no
+ *     DB" case (`hint === undefined && !dbExists`) still boots plaintext.
  *
  * @param hint the last-known mode NAME, or `undefined` when absent/unreadable/unrecognized.
  * @param dbExists whether an on-disk DB file exists.
@@ -663,7 +668,7 @@ export function mayBootPlaintextOnLockedError(hint: string | undefined, dbExists
   if (hint === 'off') {
     return true;
   }
-  if (dbExists === false) {
+  if (dbExists === false && hint === undefined) {
     return true;
   }
   return false;

@@ -246,10 +246,18 @@ describe("mayBootPlaintextOnLockedError (P1-b, Sol round 6)", () => {
     expect(mayBootPlaintextOnLockedError("ephemeral", true)).toBe(false);
   });
 
-  it("a fresh node with no DB file at all + timeout → plaintext is safe (true)", () => {
+  it("a genuinely fresh node — no DB file AND no recorded mode choice — + timeout → plaintext is safe (true)", () => {
     expect(mayBootPlaintextOnLockedError(undefined, false)).toBe(true);
-    // Even an encrypted hint can't strand data when there is no database to protect.
-    expect(mayBootPlaintextOnLockedError("persistent", false)).toBe(true);
+  });
+
+  it("RF6-c: a KNOWN encrypted-mode hint with NO DB file still LOCKS (false)", () => {
+    // Ephemeral mode wipes its DB every boot (dbExists=false), and a freshly-selected persistent/
+    // passphrase mode has no DB yet — but the operator explicitly chose an encrypted mode, so a
+    // transient error must NOT boot plaintext and write an unencrypted loam.db (a confidentiality
+    // downgrade vs. the chosen mode).
+    expect(mayBootPlaintextOnLockedError("ephemeral", false)).toBe(false);
+    expect(mayBootPlaintextOnLockedError("persistent", false)).toBe(false);
+    expect(mayBootPlaintextOnLockedError("passphrase", false)).toBe(false);
   });
 
   it("an explicit 'off' hint authorizes plaintext regardless of whether a DB exists (true)", () => {

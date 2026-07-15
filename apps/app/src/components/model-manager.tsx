@@ -116,47 +116,62 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
     let cancelled = false;
     void (async () => {
-      const [caps, loaded] = await Promise.all([probeDeviceCapabilities(), loadModelManagerState()]);
-      if (!cancelled) {
-        setCapabilities(caps);
-        setManagerState(loaded);
-      }
-
-      // Reconcile durable pending actions FIRST (P2-b), before the orphan sweep runs or any control is
-      // enabled: re-send each unconfirmed launcher write (idempotent) and settle it. If every retry
-      // still times out, the pending set survives and the affected files stay protected below. `current`
-      // is the post-reconcile state the sweep and UI must use.
-      let current = loaded;
-      if ((loaded.pending ?? []).length > 0) {
-        const { state: reconciled, settled, message } = await reconcilePendingActions(actionDeps);
-        current = reconciled;
+      // RF6-d (Sol round 6): the whole open-effect body is wrapped so a rejection from ANY of
+      // `probeDeviceCapabilities`/`loadModelManagerState`/`reconcilePendingActions`/
+      // `sweepOrphanedModelFiles` can't skip the `setSweepReady(true)` below — which would leave every
+      // download/action control permanently disabled AND surface an unhandled promise rejection. The
+      // `finally` always flips `sweepReady` (the `.partial`-suffix staging fix in model-download.ts is
+      // the independent guard that keeps enabling controls after a FAILED sweep safe).
+      try {
+        const [caps, loaded] = await Promise.all([probeDeviceCapabilities(), loadModelManagerState()]);
         if (!cancelled) {
-          setManagerState(reconciled);
-          setPendingUnsettled(!settled);
-          if (message) {
-            setStatusMessage(message);
-          }
+          setCapabilities(caps);
+          setManagerState(loaded);
         }
-      } else if (!cancelled) {
-        setPendingUnsettled(false);
-      }
 
-      if (!orphanSweepDone) {
-        // AWAITED (P2-7 round 4, was fire-and-forget `void`): reclaim any `.gguf` left behind by a
-        // download whose verify/registration never finished because the app process was killed
-        // mid-way (hash-performance device-verify note — see model-download.ts). Download controls
-        // stay disabled (see `sweepReady` below) until this resolves, so nothing can start a download
-        // whose destination this sweep pass might treat as unreferenced. The second arg (P2-b) keeps any
-        // file a still-unsettled pending action references — most critically a pending `delete`'s
-        // kept-for-now bytes — from being swept while the launcher may still point at it.
-        await sweepOrphanedModelFiles(
-          current.downloaded.map((model) => model.uri),
-          pendingProtectedUris(current.pending),
-        );
-        orphanSweepDone = true;
-      }
-      if (!cancelled) {
-        setSweepReady(true);
+        // Reconcile durable pending actions FIRST (P2-b), before the orphan sweep runs or any control is
+        // enabled: re-send each unconfirmed launcher write (idempotent) and settle it. If every retry
+        // still times out, the pending set survives and the affected files stay protected below. `current`
+        // is the post-reconcile state the sweep and UI must use.
+        let current = loaded;
+        if ((loaded.pending ?? []).length > 0) {
+          const { state: reconciled, settled, message } = await reconcilePendingActions(actionDeps);
+          current = reconciled;
+          if (!cancelled) {
+            setManagerState(reconciled);
+            setPendingUnsettled(!settled);
+            if (message) {
+              setStatusMessage(message);
+            }
+          }
+        } else if (!cancelled) {
+          setPendingUnsettled(false);
+        }
+
+        if (!orphanSweepDone) {
+          // AWAITED (P2-7 round 4, was fire-and-forget `void`): reclaim any `.gguf` left behind by a
+          // download whose verify/registration never finished because the app process was killed
+          // mid-way (hash-performance device-verify note — see model-download.ts). Download controls
+          // stay disabled (see `sweepReady` below) until this resolves, so nothing can start a download
+          // whose destination this sweep pass might treat as unreferenced. The second arg (P2-b) keeps any
+          // file a still-unsettled pending action references — most critically a pending `delete`'s
+          // kept-for-now bytes — from being swept while the launcher may still point at it.
+          await sweepOrphanedModelFiles(
+            current.downloaded.map((model) => model.uri),
+            pendingProtectedUris(current.pending),
+          );
+          orphanSweepDone = true;
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setStatusMessage(
+            `Could not fully prepare the model manager: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setSweepReady(true);
+        }
       }
     })();
     return () => {
