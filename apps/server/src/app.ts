@@ -3910,6 +3910,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   /** The actual kill-switch work, split out so {@link executeKillSwitch} can guarantee `wipeInProgress`
    *  is cleared via `finally` regardless of how this returns. */
   async function executeKillSwitchBody(): Promise<KillSwitchResult> {
+    /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
+     *  tell clients to purge, close sockets, then report the distinct incomplete notice. Used by the
+     *  no-hook fail-closed paths (a phase-write failure and a deletion failure) so nothing stale is served
+     *  while the node is stuck; the fixed-key hook branch does its own equivalent lockdown up front (RF-a). */
+    function lockDownAndReportIncomplete(message: string): KillSwitchResult {
+      awaitingWipeRestart = true;
+      data = { users: [], channels: [], messages: [] };
+      attachmentOwners.clear();
+      sessions.clear();
+      identityTokens.clear();
+      claimAttempts.clear();
+      panicAttempts.clear();
+      transportSessions.clear();
+      peerTransportSessions.clear();
+      broadcast({ type: "wipe" });
+      for (const { socket } of sockets) {
+        socket.close();
+      }
+      sockets.clear();
+      for (const pending of [...pendingSockets]) {
+        pending.close();
+      }
+      server.log.error(message);
+      reportBootNotice(message, "kill_switch_wipe_incomplete");
+      return { complete: false };
+    }
+
     // A `persistent`/`passphrase` key is FIXED (Keystore-held on Android, config-held on desktop) —
     // this process has no way to mint a new one. Recreating the encrypted DB in-process (as the
     // ephemeral/off branches below do) would just re-key the fresh database under the SAME key that
@@ -3963,6 +3990,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // no wipe to forget) or AFTER it (intent on disk → next boot resumes deletion). Config preservation
         // is deliberately SUBORDINATE to this: recorded next, best-effort, never at the cost of the wipe
         // intent.
+        // Whether the durable intent write landed. A `false` does NOT abort the wipe: the kill switch keeps
+        // its CONFIDENTIALITY-first posture (Sol round-8 P1-d) — a degraded FS that can't write a 13-byte
+        // marker must NOT mean the operator's emergency wipe silently does nothing. The deletion below still
+        // runs (rmSync can succeed even when a create failed, e.g. by freeing space) and, when it verifies
+        // gone, the launcher is still signaled — a kill AFTER that finds nothing to recover. The only residual
+        // is the compound case (intent write fails AND a crash lands MID-deletion): no phase file + a partial
+        // DB → the next boot could forget the wipe. That confidentiality-vs-integrity tradeoff on a degraded
+        // FS is flagged for Sol rather than silently flipped to integrity-first (which would leave the data
+        // intact on a panic). See the round-9 brief.
         const phasePending = writeWipePhase("delete-pending");
 
         // P1-4 (Sol round 5): persist config.json DURABLY now — AFTER the durable wipe intent (P1-3) and the
@@ -4082,6 +4118,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // risk a benign re-wipe of the already-fresh ephemeral DB.
       const fixedKeyNoHookWipe = fixedKeyMode;
       if (fixedKeyNoHookWipe && !writeWipePhase("delete-pending")) {
+        // Confidentiality-first, consistent with the hook branch (Sol round-8 P1-d): a phase-write failure
+        // does NOT abort the wipe — the deletion below still runs. The residual (intent-write fails AND a
+        // crash lands mid-deletion → the next boot cannot auto-resume) is logged and flagged for Sol.
         server.log.error(
           "Kill switch (no-hook fixed key): could NOT durably record the delete-pending phase before deletion — " +
             "if deletion also fails, a restart cannot auto-resume the wipe; reopen promptly.",
@@ -4097,33 +4136,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // P1-2 (Sol round 8): FAIL CLOSED — a survivor or an UNVERIFIABLE path (stat/enumeration error,
         // NOT proof of absence). Do NOT rotate the key / reopen a fresh DB: that would present a clean,
         // usable node while recoverable ciphertext may still be on disk. Lock down (503) and report; a
-        // restart retries. Mirrors the fixed-key branch's RF-a synchronous in-memory lockdown so nothing
-        // stale is served while the node is stuck.
-        awaitingWipeRestart = true;
-        data = { users: [], channels: [], messages: [] };
-        attachmentOwners.clear();
-        sessions.clear();
-        identityTokens.clear();
-        claimAttempts.clear();
-        panicAttempts.clear();
-        transportSessions.clear();
-        peerTransportSessions.clear();
-        broadcast({ type: "wipe" });
-        for (const { socket } of sockets) {
-          socket.close();
-        }
-        sockets.clear();
-        for (const pending of [...pendingSockets]) {
-          pending.close();
-        }
+        // restart retries (the durable `delete-pending` phase recorded above drives the resume). Mirrors the
+        // fixed-key branch's RF-a synchronous in-memory lockdown so nothing stale is served while stuck.
         const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
-        const message =
+        return lockDownAndReportIncomplete(
           `KILL SWITCH NOTICE: the cryptographic wipe could not delete and VERIFY every DB artifact (${remaining}) — ` +
-          "refusing to rotate the key / reopen while recoverable ciphertext may remain. The node is locked " +
-          "down (503); restart it to retry the wipe.";
-        server.log.error(message);
-        reportBootNotice(message, "kill_switch_wipe_incomplete");
-        return { complete: false };
+            "refusing to rotate the key / reopen while recoverable ciphertext may remain. The node is locked " +
+            "down (503); restart it to retry the wipe.",
+        );
       }
 
       if (ephemeralDbKey) {
