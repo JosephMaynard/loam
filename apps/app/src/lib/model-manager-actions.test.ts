@@ -5,9 +5,9 @@
 //   - a bridge TIMEOUT is left in place (ambiguous, no rollback — P2-1), while an explicit FAILURE
 //     rolls back cleanly;
 //   - delete never deletes the file bytes unless the launcher clear is confirmed.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fileSystemMock } from "@/test-utils/mocks";
+import { fileSystemMock, resetFileSystemMock, seedFile } from "@/test-utils/mocks";
 
 // The actions module now imports a value (`POINTER_PENDING_ID`/`recordPending`) from the store module,
 // which imports `expo-file-system/legacy` (→ react-native) at module load. These tests drive an
@@ -26,7 +26,12 @@ import {
   setActiveAction,
   type ModelActionDeps,
 } from "@/lib/model-manager-actions";
-import { MODEL_LIST_UNREADABLE_MESSAGE, POINTER_PENDING_ID } from "@/lib/model-manager-store";
+import {
+  loadModelManagerState,
+  MODEL_LIST_UNREADABLE_MESSAGE,
+  mutateModelManagerState,
+  POINTER_PENDING_ID,
+} from "@/lib/model-manager-store";
 import type { DownloadedModel, ModelManagerState, PendingAction } from "@/lib/model-manager-store";
 
 function model(id: string): DownloadedModel {
@@ -45,11 +50,14 @@ const A = model("A");
 const B = model("B");
 
 /** An in-memory stand-in for the serialized store. Each `mutate` does an atomic read-modify-write
- * after a microtask, mirroring `mutateModelManagerState` closely enough for these tests. On a failed
- * write it returns the UNCHANGED state with `persisted:false` — the same "the mutation didn't land, so
- * disk still holds the old value" contract callers rely on (P2-1). `failWriteAt(n)` fails the n-th mutate
- * (1-based) so a test can fail a SECOND write mid-transaction (e.g. a clear-pending after a durable
- * write-ahead), which `failNextWrite` (fails the very next one) can't target. */
+ * after a microtask, mirroring `mutateModelManagerState` EXACTLY on the save-failure return contract
+ * (P2-1 round 8): on a failed write it returns the DISK-CONFIRMED (unchanged) state with
+ * `persisted:false` — NOT the attempted `next`. Production returns `current` (the pre-mutation on-disk
+ * state) on a failed save for the same reason; the `real-store integration` block below pins that the
+ * REAL `mutateModelManagerState` honours the identical contract, so this fake is faithful and not just
+ * asserted to be. `failWriteAt(n)` fails the n-th mutate (1-based) so a test can fail a SECOND write
+ * mid-transaction (e.g. a clear-pending after a durable write-ahead), which `failNextWrite` (fails the
+ * very next one) can't target. */
 function makeStore(initial: ModelManagerState) {
   let state: ModelManagerState = initial;
   let failNext = false;
@@ -516,6 +524,10 @@ describe("write-ahead intent is atomic and durable (P2-1)", () => {
     expect(result.kind).toBe("ambiguous");
     expect(store.get().activeId).toBe("A");
     expect((store.get().pending ?? []).map((p) => p.id)).toEqual([POINTER_PENDING_ID]);
+    // The action must hand the component the DISK-CONFIRMED state (pending STILL present), not an
+    // attempted state with the pending dropped (P2-1 round 8) — this `state.pending` is exactly what the
+    // component derives `pendingUnsettled` from, so a non-empty pending keeps the controls blocked.
+    expect((result.state?.pending ?? []).map((p) => p.id)).toEqual([POINTER_PENDING_ID]);
   });
 
   it("performDelete PRESERVES an unrelated pending array (P2-1: the old reconstruction dropped it)", async () => {
@@ -637,5 +649,98 @@ describe("reconcile refuses to settle (or let the caller sweep) when its state r
 
     expect(result.unreadable).toBeUndefined();
     expect(result.settled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-1 round 8: a failed pending-CLEAR must not re-enable controls while stale intent is on disk.
+// Driven against the REAL store (`mutateModelManagerState` + the filesystem mock), NOT the in-memory
+// fake, so the save-failure return contract the fake asserts is verified end-to-end: after a SUCCEEDED
+// bridge op, if clearing its pending record fails to persist, the action must hand back the
+// DISK-CONFIRMED state (pending STILL present) — never an attempted state with the pending dropped —
+// so the component's `pendingUnsettled` derivation keeps the controls blocked and the durable journal
+// is honoured.
+// ---------------------------------------------------------------------------
+
+const STATE_PATH = `${fileSystemMock.documentDirectory}loam-model-manager.json`;
+
+/** Mirrors the component's `runOperation` control-enablement derivation
+ * (model-manager.tsx: `setPendingUnsettled((outcome.state.pending ?? []).length > 0)`): controls stay
+ * blocked whenever the state the component would adopt still carries a pending action. */
+function componentControlsBlocked(result: { state?: ModelManagerState }): boolean {
+  return (result.state?.pending ?? []).length > 0;
+}
+
+describe("real-store integration: a failed pending-clear keeps controls blocked (P2-1 round 8)", () => {
+  beforeEach(() => {
+    resetFileSystemMock();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("bridge OK but the pending-clear save FAILS → on-disk pending survives, action AMBIGUOUS, controls stay blocked", async () => {
+    // Seed a real, valid persisted state so `mutateModelManagerState` reads/writes it for real.
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [A, B], activeId: "B" }));
+
+    // Fail ONLY the SECOND save's temp-file write. Save #1 is the atomic write-ahead (activeId=A + the
+    // setActive pending — must LAND); save #2 is `clearPendingEntry` after the ok bridge (must FAIL, so
+    // the on-disk pending survives). Each `saveModelManagerState` performs exactly one
+    // `writeAsStringAsync` (its randomly-named temp file), so the 2nd write call is the clear.
+    const realWrite = fileSystemMock.writeAsStringAsync.bind(fileSystemMock);
+    let writeCalls = 0;
+    vi.spyOn(fileSystemMock, "writeAsStringAsync").mockImplementation(async (uri: string, contents: string) => {
+      writeCalls += 1;
+      if (writeCalls === 2) {
+        throw new Error("ENOSPC: no space left on device (pending-clear save)");
+      }
+      return realWrite(uri, contents);
+    });
+
+    const setActive = vi.fn(async () => OK);
+    const deps: ModelActionDeps = {
+      mutate: mutateModelManagerState, // the REAL serialized store, not the in-memory fake
+      setActiveModel: setActive,
+      clearActiveModel: async () => OK,
+      deleteModelFile: vi.fn(async () => {}),
+    };
+
+    const result = await performSetActive(deps, A);
+
+    // The launcher confirmed the write, but the durable pending-clear didn't land — so NOT a clean `ok`.
+    expect(result.kind).toBe("ambiguous");
+    expect(setActive).toHaveBeenCalledTimes(1);
+
+    // The action hands the component the DISK-CONFIRMED state: the setActive pending is STILL present,
+    // NOT dropped by the unpersisted clear. This is what the component adopts.
+    expect((result.state?.pending ?? []).map((p) => p.id)).toEqual([POINTER_PENDING_ID]);
+    // …so the component keeps the destructive controls blocked (no further op while stale intent persists).
+    expect(componentControlsBlocked(result)).toBe(true);
+
+    // And the durable on-disk journal genuinely still holds the pending — proven by reloading from the
+    // real filesystem (the clear never touched disk).
+    const onDisk = await loadModelManagerState();
+    expect(onDisk.activeId).toBe("A");
+    expect((onDisk.pending ?? []).map((p) => p.id)).toEqual([POINTER_PENDING_ID]);
+  });
+
+  it("control case: when the pending-clear save SUCCEEDS the pending is gone and controls re-enable", async () => {
+    // The same flow with no injected failure settles cleanly — guards against the P2-1 fix over-blocking.
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [A, B], activeId: "B" }));
+    const deps: ModelActionDeps = {
+      mutate: mutateModelManagerState,
+      setActiveModel: async () => OK,
+      clearActiveModel: async () => OK,
+      deleteModelFile: vi.fn(async () => {}),
+    };
+
+    const result = await performSetActive(deps, A);
+
+    expect(result.kind).toBe("ok");
+    expect(result.state?.pending ?? []).toEqual([]);
+    expect(componentControlsBlocked(result)).toBe(false);
+    const onDisk = await loadModelManagerState();
+    expect(onDisk.activeId).toBe("A");
+    expect("pending" in onDisk).toBe(false);
   });
 });
