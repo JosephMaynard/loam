@@ -19,7 +19,8 @@ import {
   registerDbEncryption,
   requestDbStartFresh,
   requestDbUnlock,
-  setStoredPassphrase,
+  setDbModeHint,
+  setPassphraseCandidate,
   type DbEncryptionMode,
 } from '@/lib/db-encryption';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
@@ -524,7 +525,16 @@ export default function HostScreen() {
     }
     setUnlockBusy(true);
     setUnlockMessage(undefined);
-    await setStoredPassphrase(trimmed);
+    // P2-a (Sol round 6): store the entry as an unverified CANDIDATE, NOT as the committed passphrase.
+    // resolveDbKey tries the candidate (only when nothing is committed) and it's promoted to the stored
+    // passphrase only once the DB actually opens under it (markPassphraseKeyMigrated). So a wrong guess
+    // here can never overwrite an intact stored passphrase and strand the database — it stays recoverable
+    // for another attempt.
+    await setPassphraseCandidate(trimmed);
+    // P1-b (Sol round 6): transactionally record the mode-name hint so a later transient key-request
+    // failure locks (rather than plaintext-boots) this passphrase-mode node. Best-effort — the mode is
+    // already persisted in SecureStore regardless.
+    void setDbModeHint(nodejs.channel, lockedMode ?? 'passphrase');
     setUnlockPassphraseInput('');
     const result = await requestDbUnlock(nodejs.channel);
     if (!result.ok) {
@@ -542,6 +552,12 @@ export default function HostScreen() {
   const handleRetryUnlock = async () => {
     setUnlockBusy(true);
     setUnlockMessage(undefined);
+    // P1-b (Sol round 6): re-assert the mode-name hint for the known locked mode so a subsequent transient
+    // key-request failure locks rather than downgrading to plaintext. Best-effort; skipped if the mode
+    // couldn't be read (a transient read-error leaves `lockedMode` undefined — see the effect above).
+    if (lockedMode) {
+      void setDbModeHint(nodejs.channel, lockedMode);
+    }
     const result = await requestDbUnlock(nodejs.channel);
     if (!result.ok) {
       setUnlockBusy(false);
@@ -717,7 +733,11 @@ export default function HostScreen() {
           onClose={() => setModelManagerOpen(false)}
           channel={nodejs.channel}
         />
-        <DbEncryptionSettingsOverlay visible={dbEncryptionOpen} onClose={() => setDbEncryptionOpen(false)} />
+        <DbEncryptionSettingsOverlay
+          visible={dbEncryptionOpen}
+          onClose={() => setDbEncryptionOpen(false)}
+          channel={nodejs.channel}
+        />
       </SafeAreaView>
     );
   }

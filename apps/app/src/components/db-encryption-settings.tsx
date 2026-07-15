@@ -13,14 +13,20 @@ import {
   clearStoredPassphrase,
   getDbEncryptionMode,
   hasStoredPassphrase,
+  pickerModeAfterWrite,
   setDbEncryptionMode,
+  setDbModeHint,
   setStoredPassphrase,
+  type BridgeChannel,
   type DbEncryptionMode,
 } from '@/lib/db-encryption';
 
 type DbEncryptionSettingsOverlayProps = {
   visible: boolean;
   onClose: () => void;
+  // The nodejs-mobile bridge channel (from index.tsx). Used only to write the mode-NAME hint
+  // transactionally with a selection (P1-b) — optional so the overlay still renders without it.
+  channel?: BridgeChannel;
 };
 
 const MODE_LABELS: Record<DbEncryptionMode, string> = {
@@ -49,7 +55,7 @@ const DESTRUCTIVE_MODES: ReadonlySet<DbEncryptionMode> = new Set(['ephemeral', '
  * (nodejs-project-template/main.js's request/response handoff) and nodejs-mobile can't restart its
  * runtime in-process.
  */
-export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSettingsOverlayProps) {
+export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEncryptionSettingsOverlayProps) {
   const theme = useTheme();
   const [mode, setMode] = useState<DbEncryptionMode>('off');
   const [hasPassphrase, setHasPassphrase] = useState(false);
@@ -89,18 +95,30 @@ export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSe
   /** Actually persist the mode choice — the part `handleSelect` gates behind a destructive-action
    * confirmation for the modes that can wipe or strand existing data (G4). */
   const applyModeChange = async (next: DbEncryptionMode) => {
-    setMode(next);
+    const previous = mode;
     const result = await setDbEncryptionMode(next);
-    // P1-3 (Sol round 5): setDbEncryptionMode now reports real success/failure — a failed write must
-    // never be presented as "applied" (the picker's next read would fall back to 'off', which may not
-    // be what the operator just thought they set).
-    setStatusMessage(
-      !result.ok
-        ? `Couldn't save — ${result.error ?? 'unknown error'}. The change was NOT applied; try again.`
-        : next === 'off'
-          ? 'Encryption off. Takes effect next time the host app is restarted.'
-          : `${MODE_LABELS[next]} selected. Takes effect next time the host app is restarted.`,
-    );
+    // P2-c (Sol round 6): update the DISPLAYED selection ONLY after a successful write — the radio, the
+    // SecureStore value, and the status message must never disagree. Previously the mode was set
+    // optimistically BEFORE awaiting the write, so a failed write left the radio showing `next` while the
+    // message said "NOT applied". `pickerModeAfterWrite` returns `next` on success, `previous` on failure.
+    setMode(pickerModeAfterWrite(previous, next, result.ok));
+    // P1-3 (Sol round 5): setDbEncryptionMode reports real success/failure — a failed write must never be
+    // presented as "applied" (the picker's next read would fall back to 'off', which may not be what the
+    // operator just thought they set).
+    if (!result.ok) {
+      setStatusMessage(`Couldn't save — ${result.error ?? 'unknown error'}. The change was NOT applied; try again.`);
+      return;
+    }
+    // P1-b (Sol round 6): write the mode-NAME hint TRANSACTIONALLY with the selection (before any boot),
+    // so an off→encrypted change updates the launcher's fail-closed hint immediately — a later transient
+    // key-request failure then locks rather than downgrading to plaintext. Best-effort: the mode itself is
+    // already saved in SecureStore, so a hint round-trip failure only earns a soft "sync pending" note.
+    const hintResult = channel ? await setDbModeHint(channel, next) : { ok: true as const };
+    const base =
+      next === 'off'
+        ? 'Encryption off. Takes effect next time the host app is restarted.'
+        : `${MODE_LABELS[next]} selected. Takes effect next time the host app is restarted.`;
+    setStatusMessage(hintResult.ok ? base : `${base} (Note: the encryption-state hint could not be synced to the host; it will self-correct on the next successful start.)`);
   };
 
   const handleSelect = (next: DbEncryptionMode) => {
@@ -123,6 +141,9 @@ export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSe
     );
   };
 
+  // P2-a (Sol round 6): only reachable for a FIRST-time passphrase entry (the input is hidden once one is
+  // set — there is no in-place replace), so committing directly is safe: there is no existing database
+  // encrypted under a DIFFERENT passphrase for this write to strand.
   const handleSavePassphrase = async () => {
     const trimmed = passphraseInput;
     if (!trimmed) {
@@ -197,37 +218,56 @@ export function DbEncryptionSettingsOverlay({ visible, onClose }: DbEncryptionSe
               {mode === 'passphrase' ? (
                 <ThemedView type="backgroundElement" style={styles.passphraseCard}>
                   <ThemedText type="smallBold">Passphrase</ThemedText>
-                  <ThemedText type="small" themeColor="textSecondary">
-                    {hasPassphrase
-                      ? 'A passphrase is set. Enter a new one below to replace it, or forget it.'
-                      : 'No passphrase set yet — encryption stays off until one is entered.'}
-                  </ThemedText>
-                  <TextInput
-                    value={passphraseInput}
-                    onChangeText={setPassphraseInput}
-                    placeholder="Enter a passphrase"
-                    placeholderTextColor={theme.textSecondary}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    secureTextEntry
-                    style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
-                  />
-                  <View style={styles.passphraseActions}>
-                    <Pressable
-                      onPress={() => void handleSavePassphrase()}
-                      disabled={!passphraseInput}
-                      accessibilityRole="button"
-                      style={[styles.button, !passphraseInput && styles.buttonDisabled]}>
-                      <ThemedText type="smallBold" style={styles.buttonLabel}>
-                        Save passphrase
+                  {hasPassphrase ? (
+                    // P2-a (Sol round 6): a passphrase is already set — do NOT offer to REPLACE it here.
+                    // There is no in-place passphrase rekey, so overwriting the stored passphrase would
+                    // leave the existing database encrypted under the OLD key and unreadable. Changing a
+                    // passphrase must go through the explicit destructive start-fresh flow, which discards
+                    // the existing encrypted data. "Forget" disables passphrase mode (no key until a new
+                    // one is entered) and is likewise destructive to access of the existing DB.
+                    <>
+                      <ThemedText type="small" themeColor="textSecondary">
+                        A passphrase is set. It can&apos;t be changed here: there is no in-place passphrase
+                        rekey, so replacing it would make the existing encrypted database permanently
+                        unreadable. To change the passphrase you must start fresh (from the boot Encryption
+                        recovery screen), which discards the existing encrypted data — this cannot be
+                        undone. &quot;Forget&quot; disables passphrase mode and also leaves the existing
+                        database inaccessible until a passphrase is re-entered.
                       </ThemedText>
-                    </Pressable>
-                    {hasPassphrase ? (
-                      <Pressable onPress={() => void handleForgetPassphrase()} accessibilityRole="button" style={styles.buttonSecondary}>
-                        <ThemedText type="smallBold">Forget</ThemedText>
-                      </Pressable>
-                    ) : null}
-                  </View>
+                      <View style={styles.passphraseActions}>
+                        <Pressable onPress={() => void handleForgetPassphrase()} accessibilityRole="button" style={styles.buttonSecondary}>
+                          <ThemedText type="smallBold">Forget</ThemedText>
+                        </Pressable>
+                      </View>
+                    </>
+                  ) : (
+                    <>
+                      <ThemedText type="small" themeColor="textSecondary">
+                        No passphrase set yet — encryption stays off until one is entered.
+                      </ThemedText>
+                      <TextInput
+                        value={passphraseInput}
+                        onChangeText={setPassphraseInput}
+                        placeholder="Enter a passphrase"
+                        placeholderTextColor={theme.textSecondary}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        secureTextEntry
+                        style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
+                      />
+                      <View style={styles.passphraseActions}>
+                        <Pressable
+                          onPress={() => void handleSavePassphrase()}
+                          disabled={!passphraseInput}
+                          accessibilityRole="button"
+                          style={[styles.button, !passphraseInput && styles.buttonDisabled]}>
+                          <ThemedText type="smallBold" style={styles.buttonLabel}>
+                            Save passphrase
+                          </ThemedText>
+                        </Pressable>
+                      </View>
+                    </>
+                  )}
                 </ThemedView>
               ) : null}
             </ScrollView>

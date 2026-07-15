@@ -29,6 +29,20 @@ const MODE_ITEM = 'loam-db-encryption-mode';
 const PERSISTENT_KEY_ITEM = 'loam-db-encryption-persistent-key';
 const PASSPHRASE_ITEM = 'loam-db-encryption-passphrase';
 /**
+ * A boot-time unlock CANDIDATE passphrase (P2-a, Sol round 6). Entered on the `db_encryption_locked`
+ * screen and stored HERE — deliberately separate from {@link PASSPHRASE_ITEM} — so it is TRIED without
+ * being COMMITTED as the stored passphrase: `resolveDbKey('passphrase')` falls back to it only when no
+ * passphrase is committed, and it is promoted to {@link PASSPHRASE_ITEM} by
+ * {@link markPassphraseKeyMigrated} ONLY once the DB actually opens under it. That is what lets a WRONG
+ * guess leave an intact stored passphrase (and its database) untouched and recoverable for another
+ * attempt, instead of overwriting the stored passphrase and stranding the DB under the old key. NOTE:
+ * an authenticated, in-place passphrase-REKEY transaction — atomically changing the stored passphrase
+ * AND `PRAGMA rekey`ing the existing DB so its data survives the change — is a documented FUTURE
+ * enhancement (docs/21); it does not exist today, so CHANGING a passphrase is only possible via the
+ * explicit destructive start-fresh flow (which discards the existing encrypted data).
+ */
+const PASSPHRASE_CANDIDATE_ITEM = 'loam-db-encryption-passphrase-candidate';
+/**
  * The one piece of key material a wipe can actually DISCARD (P1-1, Sol round 4). A user-chosen
  * passphrase can never itself be made cryptographically discardable — the operator can always type it
  * again — so `persistent`/`passphrase` mode both key off this random, device-generated secret instead:
@@ -138,17 +152,39 @@ export async function hasStoredPassphrase(): Promise<boolean> {
 }
 
 /** Store (or overwrite) the operator's passphrase in the Keystore-backed secure store. Never written
- * anywhere else — no AsyncStorage, no plain file, no log line. */
+ * anywhere else — no AsyncStorage, no plain file, no log line.
+ *
+ * P2-a (Sol round 6): this COMMITS the passphrase directly and is only used for a FIRST-time entry (no
+ * passphrase set yet), where there is no existing DB encrypted under a different passphrase to strand.
+ * It is deliberately NOT used to REPLACE an existing passphrase (that would leave the DB under the old
+ * key → `db_encryption_unreadable`) — changing a passphrase requires the destructive start-fresh flow.
+ * The boot-time unlock GUESS path uses {@link setPassphraseCandidate} instead, so a wrong guess never
+ * overwrites a committed passphrase. */
 export async function setStoredPassphrase(passphrase: string): Promise<void> {
   await SecureStore.setItemAsync(PASSPHRASE_ITEM, passphrase);
 }
 
-/** Forget the stored passphrase (e.g. the operator switches away from passphrase mode). Best-effort. */
+/**
+ * Store a boot-time unlock CANDIDATE passphrase (P2-a, Sol round 6) — see {@link PASSPHRASE_CANDIDATE_ITEM}.
+ * Kept separate from {@link setStoredPassphrase}: the candidate is TRIED by `resolveDbKey('passphrase')`
+ * (only when no passphrase is committed) but NOT treated as the stored passphrase until the DB actually
+ * opens under it, at which point {@link markPassphraseKeyMigrated} promotes it. A wrong guess therefore
+ * leaves any intact stored passphrase — and its database — untouched and recoverable for another attempt.
+ * Never logged; never written anywhere but the Keystore-backed secure store.
+ */
+export async function setPassphraseCandidate(passphrase: string): Promise<void> {
+  await SecureStore.setItemAsync(PASSPHRASE_CANDIDATE_ITEM, passphrase);
+}
+
+/** Forget the stored passphrase AND any pending unlock candidate (e.g. the operator switches away from
+ * passphrase mode). Best-effort. */
 export async function clearStoredPassphrase(): Promise<void> {
-  try {
-    await SecureStore.deleteItemAsync(PASSPHRASE_ITEM);
-  } catch {
-    // best-effort
+  for (const item of [PASSPHRASE_ITEM, PASSPHRASE_CANDIDATE_ITEM]) {
+    try {
+      await SecureStore.deleteItemAsync(item);
+    } catch {
+      // best-effort
+    }
   }
 }
 
@@ -164,6 +200,21 @@ export async function clearStoredPassphrase(): Promise<void> {
  */
 export async function markPassphraseKeyMigrated(): Promise<void> {
   try {
+    // P2-a (Sol round 6): a DB open under the current key is PROOF the passphrase used to derive it is
+    // correct. If the open used an uncommitted boot-time CANDIDATE (which `resolveDbKey` only falls back
+    // to when nothing is committed), promote it to the stored passphrase now — it's verified. Guard on
+    // "nothing committed" so a stale/wrong leftover candidate can never clobber a committed passphrase
+    // that itself opened the DB (resolveDbKey prefers the committed one, so a committed value is what
+    // actually opened it in that case). Clear the candidate either way — a successful open means any
+    // pending guess is resolved.
+    const candidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      const committed = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
+      if (typeof committed !== 'string' || committed.length === 0) {
+        await SecureStore.setItemAsync(PASSPHRASE_ITEM, candidate);
+      }
+      await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+    }
     await SecureStore.setItemAsync(PASSPHRASE_KEY_VERSION_ITEM, CURRENT_PASSPHRASE_KEY_VERSION);
   } catch {
     // best-effort — see doc comment above.
@@ -337,11 +388,22 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     }
 
     // mode === 'passphrase'
-    const passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
+    let passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
-      // No passphrase entered yet — the picker UI (or the boot-time unlock prompt, see index.tsx) is
-      // responsible for collecting one. Returning no key here is what makes main.js treat this as
-      // locked (db_encryption_locked) rather than silently booting plaintext.
+      // P2-a (Sol round 6): no COMMITTED passphrase — fall back to a boot-time unlock CANDIDATE if one is
+      // pending (entered on the locked screen). It is tried WITHOUT being committed; only once the DB
+      // opens under it does `markPassphraseKeyMigrated` promote it. So a wrong guess can't overwrite an
+      // intact stored passphrase.
+      const candidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+      if (typeof candidate === 'string' && candidate.length > 0) {
+        passphrase = candidate;
+      }
+    }
+    if (typeof passphrase !== 'string' || passphrase.length === 0) {
+      // No passphrase entered yet (neither committed nor a pending candidate) — the picker UI (or the
+      // boot-time unlock prompt, see index.tsx) is responsible for collecting one. Returning no key here
+      // is what makes main.js treat this as locked (db_encryption_locked) rather than silently booting
+      // plaintext.
       return { mode };
     }
     const deviceSecret = await getOrCreateDeviceSecret();
@@ -520,4 +582,104 @@ export function requestDbUnlock(channel: BridgeChannel, timeoutMs = 5000): Promi
       finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });
+}
+
+export type SetDbModeHintResult = { ok: boolean; error?: string };
+
+/**
+ * Ask the launcher (main.js) to persist the last-known mode-NAME hint TRANSACTIONALLY with a mode
+ * SELECTION (P1-b, Sol round 6). main.js otherwise only wrote the hint when it SUCCESSFULLY resolved a
+ * mode at boot, which left two holes a transient `requestDbKey` failure could exploit: (1) an existing
+ * encrypted install upgrading has no hint yet, and (2) an off→encrypted selection leaves the stale `off`
+ * hint until the next successful encrypted boot — either way a boot-time timeout could trust the
+ * absent/stale hint and downgrade to plaintext. Calling this right AFTER `setDbEncryptionMode` succeeds
+ * updates the hint immediately, BEFORE any boot, so the launcher's fail-closed gate sees the real mode.
+ *
+ * Writes only the mode NAME — NEVER key/passphrase material (there is none to write; the hint is the same
+ * non-secret mode string already sent in the clear over the bridge). This module has no filesystem access
+ * to main.js's `dataDir`, so it's a request/response round trip mirroring {@link requestDbUnlock}. Never
+ * throws — a timeout, an old launcher with no handler, or a thrown `post()` all resolve to `{ ok: false }`,
+ * which the caller surfaces as a soft warning (the mode itself is still persisted in SecureStore).
+ */
+export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, timeoutMs = 5000): Promise<SetDbModeHintResult> {
+  return new Promise((resolve) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+
+    const finish = (result: SetDbModeHintResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      channel.removeListener('loam-db-set-mode-hint-result', onResult);
+      resolve(result);
+    };
+
+    const onResult = (payload: unknown): void => {
+      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown } | undefined;
+      if (!result || result.requestId !== requestId) {
+        return;
+      }
+      finish({ ok: result.ok === true, error: typeof result.error === 'string' ? result.error : undefined });
+    };
+
+    const timer = setTimeout(() => {
+      finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
+    }, timeoutMs);
+
+    channel.addListener('loam-db-set-mode-hint-result', onResult);
+    try {
+      channel.post('loam-db-set-mode-hint', { requestId, mode });
+    } catch (err) {
+      finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+}
+
+/**
+ * P1-b (Sol round 6): the PURE "may a plaintext boot be authorized after a locked-error?" decision.
+ *
+ * This is MIRRORED inline in `nodejs-project-template/main.js`'s `resolveDbEncryptionAndBoot` — main.js
+ * is CJS on the embedded Node runtime and cannot import this TS module, so the two copies must be kept in
+ * sync by hand (the main.js copy carries a comment pointing here). It lives here because it's the one
+ * place in this codebase whose Vitest harness can exercise it directly; main.js itself is not
+ * harness-loadable (it pulls in `rn-bridge` and boots as a side effect on require).
+ *
+ * A `locked-error` means main.js could not determine the operator's real mode this boot (a SecureStore
+ * read failure, a `requestDbKey` timeout, or a malformed reply). Whether that should fall back to a
+ * plaintext boot (availability) or LOCK (confidentiality) turns on whether this node actually has a
+ * secret to protect:
+ *   - `hint === 'off'` → the last-known mode was explicitly plaintext → plaintext is safe.
+ *   - `dbExists === false` → no on-disk database at all (a fresh node) → nothing to protect → plaintext.
+ *   - otherwise (a DB file EXISTS and the hint is absent / unreadable / an ENCRYPTED mode) → LOCK, never
+ *     plaintext. An ABSENT hint no longer authorizes plaintext when a DB is present — that was the
+ *     upgrade-with-no-hint and off→encrypted-then-timeout downgrade hole.
+ *
+ * @param hint the last-known mode NAME, or `undefined` when absent/unreadable/unrecognized.
+ * @param dbExists whether an on-disk DB file exists.
+ */
+export function mayBootPlaintextOnLockedError(hint: string | undefined, dbExists: boolean): boolean {
+  if (hint === 'off') {
+    return true;
+  }
+  if (dbExists === false) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * P2-c (Sol round 6): which mode the picker should DISPLAY after a `setDbEncryptionMode` write attempt —
+ * the `requested` mode ONLY once the write actually succeeded, otherwise the `previous` (unchanged)
+ * selection. Pure and harness-tested. Its whole point is that the radio, the SecureStore value, and the
+ * status message can never disagree: previously the picker set the selected mode optimistically BEFORE
+ * awaiting the write, so a failed write left the radio showing a mode that was never persisted.
+ */
+export function pickerModeAfterWrite(
+  previous: DbEncryptionMode,
+  requested: DbEncryptionMode,
+  writeSucceeded: boolean,
+): DbEncryptionMode {
+  return writeSucceeded ? requested : previous;
 }
