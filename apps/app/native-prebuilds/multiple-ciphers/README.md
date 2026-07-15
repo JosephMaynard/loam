@@ -74,20 +74,26 @@ The claim "every build input is pinned" would be too strong, so here is the accu
 
 - **Direct** inputs above are exact-pinned (npm version or commit SHA) and installed **locally** —
   no global/`@latest` install remains.
-- **Transitive** dependencies are **not** lockfile-pinned: the `npm install` of the MC package's own
-  deps and of the cmake tooling resolve their transitive graph fresh, and there is **no committed
-  `package-lock.json`** in this directory, so those can drift within semver. Committing a
-  `package-lock.json` and installing via `npm ci` is the robust follow-up; it was left out here to
-  keep the recipe self-contained.
+- **Transitive** dependencies are **not** lockfile-pinned — an **open rebuild-reproducibility gap**,
+  not a "self-contained" convenience. The `npm install` of the MC package's own deps and of the cmake
+  tooling resolve their transitive graph fresh, and there is **no committed `package-lock.json`** in
+  this directory, so those can drift within semver between rebuilds. This directory has no persistent
+  `package.json` (the build script `npm pack`s + `npm install`s into an ephemeral work dir), so
+  closing the gap properly means restructuring the recipe around a committed `package.json` +
+  `package-lock.json` consumed via `npm ci`, with the lock generated from a real run of the pinned
+  cross-compile toolchain. That is the tracked follow-up; **do not treat the current recipe as
+  sufficient for a byte-trusted independent rebuild.**
 - The **host toolchain** (cmake / binutils / bash) is the caller's, **except** the NDK revision and
   the cmake minimum, which the script now **asserts up front** and aborts on mismatch — so a
   caller-supplied wrong NDK/CMake is caught, not silently used.
 - The raw `.node` is **not** byte-identical across machines regardless (embedded build-id).
 
-Why this residual is acceptable: bit-for-bit reproducibility is neither achievable nor the authority
-here. The authority is (1) the **sha256 pin** on the committed tarball and (2) the **hard ABI/symbol
-gate** in step 6 of the build script (below) — any transitive drift that changed the binary's shape
-would fail that gate.
+Scope of this residual: it is a gap in **rebuild** reproducibility, **not** in the trust of the
+**shipped** artifact. What ships is the committed, **sha256-pinned** tarball, and its trust rests on
+(1) that **sha256 pin** and (2) the **hard ABI/symbol gate** in step 6 of the build script (below) —
+any transitive drift that changed the binary's shape would fail that gate. The missing lockfile
+weakens an auditor's ability to *independently reproduce* the binary, which the sha256 pin does not
+claim to provide; it does not weaken the integrity of the vendored binary that the APK actually loads.
 
 ## Reproducibility — what a rebuild reproduces (and what it doesn't)
 
@@ -149,8 +155,9 @@ Two separate things must hold, and only one is proven today:
 1. **The native binary is a correct ABI-108 aarch64 module** — proven as **build evidence**: it's a
    valid ELF64 / AArch64 shared object at Node ABI 108 (now enforced by the hard ABI/symbol gate —
    `node_register_module_v108` + the MC encryption exports + a clean `NEEDED` set), so the APK ships
-   the exact vendored binary with the right symbols and it will *load* on nodejs-mobile's Node 18.
-   This is a statement about the compiled artifact, **not** about runtime behaviour. The gate is now
+   the exact vendored binary with the right symbols and the **expected shape to *load*** on
+   nodejs-mobile's Node 18. Static inspection proves the artifact is shaped to load; it does **not**
+   prove `require()`/`dlopen` actually succeeds at runtime — that is point 2 below. The gate is now
    fail-closed rather than advisory, but **build inspection still cannot replace the device runtime
    gate below** — proving the binary is shaped correctly is not proving it runs correctly.
 

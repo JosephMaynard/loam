@@ -337,15 +337,19 @@ export async function saveModelManagerState(state: ModelManagerState): Promise<b
 let mutationChain: Promise<unknown> = Promise.resolve();
 
 /**
- * Result of a serialized read-modify-write. `state` is ALWAYS the DISK-CONFIRMED state — the value a
- * caller can trust reflects what is actually on disk (P2-1 round 8):
- *   - `persisted: true`  — the mutation landed, so `state` is the newly-persisted (`next`) state.
- *   - `persisted: false` — the save FAILED (or the pre-read refused), so the attempted `next` never
- *     reached disk and `state` is the PREVIOUS on-disk state, unchanged. Crucially it is NOT the
- *     attempted-but-unpersisted `next`: a caller that derives pending/settled/control-enablement from
- *     `state` must see disk truth, so e.g. a failed pending-clear leaves the pending STILL PRESENT in
- *     `state` (controls stay blocked) rather than reporting a settled state that isn't on disk.
- * Callers must never treat a `persisted: false` `state` as anything other than "disk is unchanged".
+ * Result of a serialized read-modify-write (P2-1 round 8). Read `state` ONLY when `persisted` is true:
+ *   - `persisted: true`  — the mutation landed; `state` is the newly-persisted (`next`) state, disk-confirmed.
+ *   - `persisted: false` — nothing changed on disk, and `state` MUST NOT be trusted as disk truth. Two
+ *     distinct sub-cases both report this, and they differ in what `state` holds:
+ *       * a SAVE failure — the attempted `next` never reached disk, so `state` is the PREVIOUS on-disk
+ *         state (unchanged). NOT the attempted `next`: a caller deriving pending/settled/control-enablement
+ *         from it (only valid to do when `persisted`) would otherwise see e.g. a failed pending-clear as
+ *         settled and re-enable controls while the durable journal still holds the pending.
+ *       * a PRE-READ refusal (the current state couldn't be read reliably) — `state` is `EMPTY_STATE`, a
+ *         SAFE PLACEHOLDER, NOT a claim that the disk is empty (the disk may hold existing-but-unreadable
+ *         downloads that must not be clobbered). This is why callers must treat any `persisted: false`
+ *         result as "disk state unknown/unchanged — do not adopt `state`", never as "disk is empty".
+ * In short: on `persisted: false`, surface a failure and leave prior in-memory state as-is; do not adopt `state`.
  */
 export type MutateResult = { state: ModelManagerState; persisted: boolean };
 

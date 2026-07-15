@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
@@ -1438,8 +1438,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function writeWipePhase(phase: WipePhase): boolean {
     const tmpPath = `${wipePhaseMarkerPath}.tmp-${process.pid}-${Date.now()}`;
     try {
+      // fsync the temp file's BYTES to stable storage BEFORE the rename, then fsync the parent DIRECTORY
+      // AFTER the rename, so the marker is durable across power-loss — not merely atomic. A bare
+      // writeFileSync+rename is atomic (a reader sees old-or-new, never a torn file) but the OS may still
+      // hold both the bytes and the rename in the page cache; a power-loss before flush could lose the
+      // whole marker, forgetting the wipe. The phase file exists precisely to survive a crash mid-wipe, so
+      // it must be fsync'd. The bytes are written by PATH (not by fd) so the write stays a single
+      // interceptable call; fsync then reopens the file read-only purely to flush it (fsync operates on the
+      // inode, not the fd's mode). A file-fsync failure routes to the fallback write below; the directory
+      // fsync is best-effort (the rename already landed, and some filesystems reject directory fsync).
       writeFileSync(tmpPath, phase, "utf8");
+      const fd = openSync(tmpPath, "r");
+      try {
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
       renameSync(tmpPath, wipePhaseMarkerPath);
+      try {
+        const dirFd = openSync(dataDir, "r");
+        try {
+          fsyncSync(dirFd);
+        } finally {
+          closeSync(dirFd);
+        }
+      } catch (dirError) {
+        server.log.warn(dirError, "Kill switch: could not fsync the data directory after the wipe-phase rename (marker is written; the rename may be less durable)");
+      }
       return true;
     } catch (error) {
       try {
@@ -1485,15 +1510,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return "delete-pending";
   }
 
-  /** Delete the durable wipe-phase file. The ONLY places allowed to call this: the launcher's verified
-   *  `loam-wipe-complete` handoff (via main.js, not here) after a `key-clear-ready` wipe, and the desktop/
-   *  no-hook fallback below where the key cannot be rotated in-process anyway. */
-  function clearWipePhase(): void {
+  /** Delete the durable wipe-phase file, returning whether it is now PROVEN gone (removed, or confirmed
+   *  absent). The ONLY places allowed to call this: the launcher's verified `loam-wipe-complete` handoff
+   *  (via main.js, not here) after a `key-clear-ready` wipe, and the desktop/no-hook fallback below where
+   *  the key cannot be rotated in-process anyway. A `false` return means the marker may still be on disk,
+   *  so the caller must NOT treat the wipe as finished (else the next boot re-reads it and re-wipes). */
+  function clearWipePhase(): boolean {
     try {
       rmSync(wipePhaseMarkerPath, { force: true });
     } catch (error) {
       server.log.warn(error, "Kill switch: failed to delete the wipe-phase file (a later boot re-reads it)");
     }
+    // `rmSync{force:true}` swallows ENOENT, so a throw here is a real removal failure — re-verify absence.
+    return provenAbsence(wipePhaseMarkerPath) === "absent";
   }
 
   /**
@@ -1796,15 +1825,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           // The operator confirmed the destructive "delete data and start encrypted" flow. DELETE the
           // plaintext DB (not rename-aside — leaving readable plaintext on disk would defeat the very
           // switch to an encrypted mode) so the fresh open below creates a FRESH encrypted database.
-          for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-            rmSync(`${dbPath}${suffix}`, { force: true });
+          // The one-shot start-fresh marker was already consumed above, so a throw in the delete/open here
+          // must NOT fall through to the generic `boot_failed` (process exit): convert it to the recognized
+          // `db_encryption_unreadable` recovery, so the runtime stays alive and the operator can re-confirm
+          // start-fresh to retry — matching the unreadable-recovery path below (CodeRabbit MAJOR).
+          try {
+            for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+              rmSync(`${dbPath}${suffix}`, { force: true });
+            }
+            const message =
+              "An existing PLAINTEXT database was found under a configured encryption mode; an explicit " +
+              "start-fresh confirmation was present, so it was deleted and a fresh ENCRYPTED database was started.";
+            server.log.warn(message);
+            reportBootNotice(message, "db_encryption_recovered_fresh");
+            return openLoamStore();
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            const message =
+              "Start-fresh recovery failed while deleting the existing plaintext database or opening a fresh " +
+              `encrypted one (${detail}). The start-fresh confirmation was already consumed, so boot failed as ` +
+              "if the database were still unopened; the operator can confirm start-fresh again to retry.";
+            server.log.error(message);
+            reportBootNotice(message, "db_encryption_unreadable");
+            throw new DbEncryptionUnreadableError(message);
           }
-          const message =
-            "An existing PLAINTEXT database was found under a configured encryption mode; an explicit " +
-            "start-fresh confirmation was present, so it was deleted and a fresh ENCRYPTED database was started.";
-          server.log.warn(message);
-          reportBootNotice(message, "db_encryption_recovered_fresh");
-          return openLoamStore();
         }
 
         // No confirmation → do NOT silently serve plaintext. Report the distinct code and LOCK (typed error,
@@ -1899,23 +1943,45 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (!deletion.ok) {
       // Deletion still incomplete/unverifiable — stay `delete-pending` and do NOT clear the key. Refuse to
       // serve the surviving DB (it may hold pre-wipe data under the old key). A later reopen re-runs this.
-      writeWipePhase("delete-pending");
+      // The downgrade write matters when we ENTERED at `key-clear-ready` (a defensive re-verify that just
+      // failed): if the file can't be rewritten to `delete-pending`, it lingers as `key-clear-ready` and the
+      // launcher's next-boot gate could clear the key while artifacts survive. We can't force a broken FS to
+      // accept the write, but we surface it loudly and stay locked THIS boot regardless (CodeRabbit CRITICAL).
+      const downgraded = writeWipePhase("delete-pending");
       const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+      const durability = downgraded
+        ? "the durable `delete-pending` phase is recorded, so the next boot re-runs deletion under the old key"
+        : "AND the phase file could NOT be rewritten to `delete-pending` — if it entered at `key-clear-ready`, " +
+          "reopen the node PROMPTLY so the server re-runs deletion before any launcher key-clear";
       const message =
         "Resuming an interrupted emergency wipe: artifact deletion is still incomplete or unverifiable " +
-        `(${remaining}). The database was NOT opened and the device key was NOT cleared — reopen the node to retry.`;
+        `(${remaining}) — ${durability}. The database was NOT opened and the device key was NOT cleared.`;
       server.log.error(message);
       reportBootNotice(message, "kill_switch_wipe_incomplete");
       throw new WipeResumeInProgressError(message);
     }
 
     // Every artifact + media path is PROVEN gone. Advance to `key-clear-ready` durably, THEN hand off.
-    writeWipePhase("key-clear-ready");
+    // A failed write here self-heals: the phase stays `delete-pending`, so a next boot (should the key-clear
+    // also be interrupted) re-enters this resume, re-verifies deletion (idempotent — all already gone), and
+    // re-advances. So we record but don't block on it — deletion being proven gone is the real safety gate.
+    const phaseReady = writeWipePhase("key-clear-ready");
 
     if (!hook) {
       // Desktop/CI (no launcher): the device key can't be rotated in-process. The wipe already deleted the
-      // ciphertext; clear the phase and boot a fresh (same-key) DB — the documented desktop limitation.
-      clearWipePhase();
+      // ciphertext; clear the phase and boot a fresh (same-key) DB — the documented desktop limitation. If the
+      // phase file can't be removed, do NOT open a fresh store: the next boot would re-read `key-clear-ready`
+      // and re-wipe the fresh DB on every launch. Stay locked (fail-closed) so a persistent FS fault surfaces
+      // as a stuck node rather than a silent perpetual-wipe loop (CodeRabbit MAJOR).
+      if (!clearWipePhase()) {
+        const message =
+          "Resuming an interrupted emergency wipe: artifacts are deleted, but the durable wipe-phase file could " +
+          "NOT be removed on a node with no launcher hook — refusing to open a fresh database (it would be " +
+          "re-wiped on the next boot). The node is locked; resolve the filesystem fault and reopen.";
+        server.log.error(message);
+        reportBootNotice(message, "kill_switch_wipe_incomplete");
+        throw new WipeResumeInProgressError(message);
+      }
       server.log.warn(
         "Resuming an interrupted emergency wipe: artifacts are deleted, but no launcher hook is installed to " +
           "clear the device key — booting a fresh database under the existing key (documented limitation, docs/02).",
@@ -1924,15 +1990,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     awaitingWipeRestart = true;
+    let signaled = true;
     try {
       hook();
     } catch (error) {
+      signaled = false;
       server.log.error(error, "Kill switch resume: failed to signal the RN launcher for the wipe-restart handoff");
     }
-    const message =
-      "Resuming an interrupted emergency wipe: every persisted artifact is deleted and VERIFIED gone; a " +
-      "device-key-clear-and-restart was REQUESTED from the launcher (durable key-clear-ready phase written). " +
-      "The database was not opened under the old key.";
+    // Be honest about what actually happened: if the hook threw, the launcher was NOT signaled this run. The
+    // durable `key-clear-ready` phase (when it wrote) still lets a later app restart's main.js re-drive the
+    // key-clear on its own gate, so recovery converges either way — but the notice must not claim a signal we
+    // didn't send (CodeRabbit MAJOR).
+    const phaseNote = phaseReady
+      ? "durable `key-clear-ready` phase written"
+      : "the `key-clear-ready` phase could NOT be written durably (a later boot re-verifies deletion and retries)";
+    const message = signaled
+      ? "Resuming an interrupted emergency wipe: every persisted artifact is deleted and VERIFIED gone; a " +
+        `device-key-clear-and-restart was REQUESTED from the launcher (${phaseNote}). The database was not opened.`
+      : "Resuming an interrupted emergency wipe: every persisted artifact is deleted and VERIFIED gone, but " +
+        `signaling the launcher for the key-clear FAILED (${phaseNote}) — restart the app to finish clearing the ` +
+        "device key. The database was not opened.";
     server.log.warn(message);
     reportBootNotice(message, "kill_switch_wipe_resumed");
     throw new WipeResumeInProgressError(message);

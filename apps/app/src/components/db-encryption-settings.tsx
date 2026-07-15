@@ -150,27 +150,30 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
         return;
       }
       // P1-4-RN (Sol round 8): an encrypted mode can only apply to a FRESH database — there is no in-place
-      // plaintext→encrypted conversion. When switching FROM plaintext ('off'), ask the launcher to start
-      // fresh so the next boot creates a fresh ENCRYPTED database instead of the server hitting a
-      // plaintext-under-encrypted boot error. This is safe from 'off' specifically: the only DB that can
-      // exist is plaintext (which the operator just confirmed clearing), so there's no encrypted data to
-      // destroy. Switching between encrypted modes is NOT auto-started-fresh here — the existing DB is
-      // handled by the boot Encryption-recovery screen (a different key can't open it), and the server's
-      // `db_encryption_plaintext_unconverted` recovery is the backstop for any case this misses.
+      // conversion. EVERY confirmed destructive transition (any encrypted `next`, from ANY source mode)
+      // must schedule the launcher's start-fresh, else the next boot surfaces a db_encryption boot error and
+      // drops the operator into the recovery screen unexpectedly (CodeRabbit MAJOR — previously this was
+      // gated on `previousDisplayed === 'off'`, so encrypted→encrypted and encrypted→ephemeral scheduled
+      // nothing). What the server does with the existing DB depends on what's on disk: from plaintext ('off')
+      // it DELETES the plaintext file; from another encrypted mode the new key can't open the old DB, so it's
+      // set ASIDE (preserved as unreadable ciphertext) and a fresh DB is started. The messaging below is
+      // branched to reflect that difference honestly rather than uniformly promising permanent deletion.
       let startFreshNote = '';
-      if (previousDisplayed === 'off') {
-        if (channel) {
-          const fresh = await requestDbStartFresh(channel);
-          if (!fresh.ok) {
-            startFreshNote = ` (Couldn't schedule the fresh encrypted database: ${fresh.error ?? 'unknown error'}. If existing data blocks startup, use the boot Encryption-recovery screen.)`;
-          }
-        } else {
-          startFreshNote =
-            " (No connection to the host to clear existing data now; if a plaintext database exists it will be cleared from the boot Encryption-recovery screen on the next start.)";
+      if (channel) {
+        const fresh = await requestDbStartFresh(channel);
+        if (!fresh.ok) {
+          startFreshNote = ` (Couldn't schedule the fresh encrypted database: ${fresh.error ?? 'unknown error'}. If existing data blocks startup, use the boot Encryption-recovery screen.)`;
         }
+      } else {
+        startFreshNote =
+          ' (No connection to the host to reset now; if an existing database blocks startup it will be handled from the boot Encryption-recovery screen on the next start.)';
       }
+      const clearedPhrase =
+        previousDisplayed === 'off'
+          ? 'any existing messages are permanently deleted'
+          : 'the existing encrypted database cannot be reopened with the new key, so your existing messages will no longer be accessible';
       setStatusMessage(
-        `${MODE_LABELS[next]} selected. Encryption applies to a fresh database — any existing messages are cleared when the host app is next restarted.${startFreshNote}`,
+        `${MODE_LABELS[next]} selected. Encryption applies to a fresh database — ${clearedPhrase} when the host app is next restarted.${startFreshNote}`,
       );
     } finally {
       transitionInFlight.current = false;
@@ -204,11 +207,15 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
       next === 'ephemeral' ? 'Switch to Ephemeral?' : 'Start a fresh encrypted database?',
       next === 'ephemeral'
         ? 'Ephemeral mode starts a fresh on-device database on every app restart and holds the key only in ' +
-            'memory — nothing survives a reboot. Any existing messages are permanently deleted on the next ' +
-            'restart. This cannot be undone.'
-        : 'Encryption can only apply to a fresh database — existing data cannot be converted in place. ' +
-            'Continuing deletes all existing messages and starts a fresh encrypted database the next time ' +
-            'the host app is restarted. This cannot be undone.',
+            'memory — nothing survives a reboot. Any existing messages will no longer be accessible after the ' +
+            'next restart. This cannot be undone.'
+        : mode === 'off'
+          ? 'Encryption can only apply to a fresh database — existing data cannot be converted in place. ' +
+              'Continuing permanently deletes all existing messages and starts a fresh encrypted database the ' +
+              'next time the host app is restarted. This cannot be undone.'
+          : 'Encryption can only apply to a fresh database — an existing encrypted database cannot be reopened ' +
+              'with a new key. Continuing starts a fresh encrypted database the next time the host app is ' +
+              'restarted; your existing messages will no longer be accessible. This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel', onPress: release },
         {
