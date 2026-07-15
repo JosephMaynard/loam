@@ -336,6 +336,17 @@ export async function saveModelManagerState(state: ModelManagerState): Promise<b
  */
 let mutationChain: Promise<unknown> = Promise.resolve();
 
+/**
+ * Result of a serialized read-modify-write. `state` is ALWAYS the DISK-CONFIRMED state — the value a
+ * caller can trust reflects what is actually on disk (P2-1 round 8):
+ *   - `persisted: true`  — the mutation landed, so `state` is the newly-persisted (`next`) state.
+ *   - `persisted: false` — the save FAILED (or the pre-read refused), so the attempted `next` never
+ *     reached disk and `state` is the PREVIOUS on-disk state, unchanged. Crucially it is NOT the
+ *     attempted-but-unpersisted `next`: a caller that derives pending/settled/control-enablement from
+ *     `state` must see disk truth, so e.g. a failed pending-clear leaves the pending STILL PRESENT in
+ *     `state` (controls stay blocked) rather than reporting a settled state that isn't on disk.
+ * Callers must never treat a `persisted: false` `state` as anything other than "disk is unchanged".
+ */
 export type MutateResult = { state: ModelManagerState; persisted: boolean };
 
 export function mutateModelManagerState(
@@ -353,7 +364,12 @@ export function mutateModelManagerState(
     const current = loaded.status === 'ok' ? loaded.state : EMPTY_STATE;
     const next = mutate(current);
     const persisted = await saveModelManagerState(next);
-    return { state: next, persisted };
+    // On a FAILED save, `next` never reached disk — return the DISK-CONFIRMED `current` (P2-1 round 8),
+    // NOT the attempted `next`. Returning `next` here was the bug: a failed pending-clear adopted a
+    // state with the pending already dropped, derived `pendingUnsettled=false`, and re-enabled the
+    // controls even though the durable on-disk journal still held the pending — permitting another op
+    // while stale intent persisted. Callers derive pending/settled ONLY from this confirmed `state`.
+    return { state: persisted ? next : current, persisted };
   });
   // Keep the chain alive regardless of outcome — a rejected mutation must not wedge every later one
   // behind a permanently-broken promise.
