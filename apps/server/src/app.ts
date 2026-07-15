@@ -3083,6 +3083,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // this function's first `await`.
         let markerWritten = false;
         try {
+          // Synchronous so it lands before the in-memory lockdown + the destructive deletes below. This
+          // guarantees durability against an OS-killed process (the real threat on Android — the app being
+          // backgrounded/reaped mid-wipe), which is what the resume-on-boot handoff recovers from; it is
+          // NOT fsync'd, so a hard power-loss in this window could in theory lose the marker on some
+          // filesystems (Sol round-4 #2, accepted low — the resumed handoff is a process-kill mechanism).
           writeFileSync(wipePendingMarkerPath, String(Date.now()), "utf8");
           markerWritten = true;
         } catch (error) {

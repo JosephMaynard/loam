@@ -846,13 +846,12 @@ rnBridge.channel.on('loam-wipe-complete', function () {
   clearWipePendingMarker();
 });
 
-if (hasWipePendingMarker()) {
-  try {
-    rnBridge.channel.post('loam-wipe-restart');
-  } catch (err) {
-    console.error('Failed to re-post loam-wipe-restart for a resumed wipe handoff', err);
-  }
-}
+// NOTE (Sol round-4 finding #1): the wipe-restart re-post is intentionally NOT fired here as a bare,
+// unsequenced signal. On a resumed-wipe boot the device secret MUST be cleared BEFORE any DB key is
+// resolved for this boot — otherwise resolveDbKey races the clear on the same SecureStore item and can
+// encrypt the fresh DB under the very secret we're destroying (or brick it). The re-post + the
+// wait-for-clear-before-boot are handled together in `bootWithWipeResume()` at the bottom of this file.
+var WIPE_RESUME_TIMEOUT_MS = 20000;
 
 /** Best-effort delete of a previous encrypted DB's files. Only called for 'ephemeral' mode, where a
  * fresh random key is generated every launch, so a DB encrypted under a PREVIOUS launch's key can never
@@ -1026,4 +1025,55 @@ function resolveDbEncryptionAndBoot() {
 }
 
 notify('starting');
-resolveDbEncryptionAndBoot();
+
+// Sol round-4 finding #1: on a boot where a wipe handoff was interrupted (the `.loam-wipe-pending` marker
+// survived), let the RN host clear the device secret BEFORE resolving a DB key for this boot. Re-post the
+// clear, wait for `loam-wipe-complete` (the marker-delete handler above confirms the key is verifiably
+// gone), and only THEN resolve the key + boot — resolveDbKey will mint a NEW device secret since the old
+// one is gone. On timeout we do NOT boot under the un-cleared key: surface a locked state and keep the
+// listener, so a late completion still boots and reopening the app retries (the marker persists).
+function bootWithWipeResume() {
+  if (!hasWipePendingMarker()) {
+    resolveDbEncryptionAndBoot();
+    return;
+  }
+
+  var proceeded = false;
+  var timer;
+  function proceed() {
+    if (proceeded) {
+      return;
+    }
+    proceeded = true;
+    clearTimeout(timer);
+    rnBridge.channel.removeListener('loam-wipe-complete', proceed);
+    resolveDbEncryptionAndBoot();
+  }
+
+  timer = setTimeout(function () {
+    if (proceeded) {
+      return;
+    }
+    // The clear didn't complete in time — do NOT boot under the un-destroyed key. The marker persists, so
+    // reopening the app re-attempts; the listener stays armed in case RN completes late.
+    notify('error', {
+      message:
+        'A security reset is still finishing on this device — reopen the app to complete it. The database was not reopened.',
+      code: 'db_encryption_locked',
+    });
+  }, WIPE_RESUME_TIMEOUT_MS);
+
+  // `proceed` also runs once the marker-delete handler above has cleared the marker on the SAME event.
+  rnBridge.channel.on('loam-wipe-complete', proceed);
+  try {
+    rnBridge.channel.post('loam-wipe-restart');
+  } catch (err) {
+    console.error('Failed to post loam-wipe-restart for a resumed wipe handoff', err);
+    notify('error', {
+      message: 'A security reset could not be completed on this device — reopen the app to retry.',
+      code: 'db_encryption_locked',
+    });
+  }
+}
+
+bootWithWipeResume();

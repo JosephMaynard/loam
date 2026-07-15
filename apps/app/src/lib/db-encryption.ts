@@ -123,7 +123,26 @@ export async function clearStoredPassphrase(): Promise<void> {
  * Can throw (Keystore/RNG failure) — callers wrap this in `resolveDbKey`'s outer try/catch, which is
  * the one place that must never let a Keystore failure propagate as a plaintext fallback for these modes.
  */
-async function getOrCreateDeviceSecret(): Promise<string> {
+// Serialize ALL access to the device secret (mint/read in getOrCreateDeviceSecret vs. delete in
+// clearStoredDbKeys) so a wipe's clear can never interleave with a key resolution on the same SecureStore
+// item (Sol round-4 finding #1 defense-in-depth — the primary ordering guarantee, "clear before resolve on
+// a resumed wipe boot", lives in main.js's bootWithWipeResume; this covers any OTHER overlap, e.g. the
+// client `wipe` WS-event firing clearStoredDbKeys while a DM concurrently drives resolveDbKey).
+let deviceSecretLock: Promise<unknown> = Promise.resolve();
+function withDeviceSecretLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = deviceSecretLock.then(fn, fn);
+  deviceSecretLock = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+function getOrCreateDeviceSecret(): Promise<string> {
+  return withDeviceSecretLock(getOrCreateDeviceSecretUnlocked);
+}
+
+async function getOrCreateDeviceSecretUnlocked(): Promise<string> {
   const existing = await SecureStore.getItemAsync(DEVICE_SECRET_ITEM);
   if (typeof existing === 'string' && existing.length > 0) {
     return existing;
@@ -162,7 +181,11 @@ export type ClearDbKeysResult = { ok: boolean; error?: string };
  * rather than silently claiming the key is gone when it might not be. Never logs `key`/passphrase
  * material — only item names and generic error messages.
  */
-export async function clearStoredDbKeys(): Promise<ClearDbKeysResult> {
+export function clearStoredDbKeys(): Promise<ClearDbKeysResult> {
+  return withDeviceSecretLock(clearStoredDbKeysUnlocked);
+}
+
+async function clearStoredDbKeysUnlocked(): Promise<ClearDbKeysResult> {
   const errors: string[] = [];
 
   for (const item of [DEVICE_SECRET_ITEM, PERSISTENT_KEY_ITEM]) {
