@@ -1,3 +1,10 @@
+# digidem's better-sqlite3 nodejs-mobile CMakeLists, used AS-IS for the
+# multiple-ciphers build. The SQLITE_* defines below are the STOCK better-sqlite3
+# set — this file intentionally adds NO MultipleCiphers-specific SQL feature
+# toggles. In particular it does NOT define SQLITE_ENABLE_PERCENTILE or
+# SQLITE_USER_AUTHENTICATION (crypto-irrelevant, unused by LOAM); the vendored
+# binary was built without them. Do not add them without rebuilding + re-pinning
+# the tarball (see build-mc-android-arm64.sh / README.md).
 cmake_minimum_required(VERSION 3.25)
 
 find_package(cmake-bare REQUIRED PATHS node_modules/cmake-bare)

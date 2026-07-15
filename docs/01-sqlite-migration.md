@@ -221,9 +221,14 @@ this process" rule the model manager follows, to avoid stealing the one-time `fi
 - ~~The `better-sqlite3-multiple-ciphers` ABI-108 android-arm64 prebuild does not exist yet.~~
   **BUILT & vendored:** it's been cross-compiled from the recipe below and lives at
   `apps/app/native-prebuilds/multiple-ciphers/` (sha256-pinned), and `fetch:native` now places it in
-  the embedded project. Verified to be a correct aarch64 / ABI-108 ELF; the availability guard in
-  main.js therefore now succeeds. What remains is confirming its **`PRAGMA key`/rekey** behaviour
-  actually round-trips on device (next bullet but one), not that the module loads.
+  the embedded project. Verified (via `readelf`) to be a correct aarch64 / ABI-108 ELF; the
+  availability guard in main.js therefore now succeeds. That is **build evidence** (the APK ships the
+  exact vendored binary with the right symbols, and it will *load*), **not runtime proof**. What
+  remains is confirming its **`PRAGMA key`/rekey** behaviour actually round-trips on device (next
+  bullet but one), not that the module loads. Note the MC JS wrapper's `package.json` declares
+  `engines: node 20.x || 22.x || …` (**not** Node 18), so ABI-108 symbol compatibility alone does not
+  prove the wrapper ↔ runtime path holds on the embedded Node 18 — which is exactly why the on-device
+  round trip is a **release gate**, not a formality.
 - A live Keystore round trip for `persistent` mode (`expo-secure-store` write/read surviving an actual
   app restart) — the code path is the same one CoMapeo/comapeo-mobile use in production, but LOAM
   itself hasn't run it on hardware yet.

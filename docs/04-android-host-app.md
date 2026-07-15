@@ -328,8 +328,12 @@ workspace install (Expo/RN toolchain); gating its install remains an open nicety
    `better-sqlite3-multiple-ciphers` ABI-108 android-arm64 prebuild has been cross-compiled (fork of
    `digidem/better-sqlite3-nodejs-mobile`'s recipe with the MultipleCiphers amalgamation swapped in),
    vendored at `apps/app/native-prebuilds/multiple-ciphers/`, and wired into `fetch:native` so both
-   drivers ship. What's left is verifying `PRAGMA key`/rekey **on physical hardware** (see
-   [01](01-sqlite-migration.md)). The plain-prebuild half is already proven on-device (phase 2 stretch goal).
+   drivers ship — the APK carries the exact vendored binary with the right symbols (build evidence,
+   `readelf`-verified). What's left is a **release gate**: the MC JS wrapper's declared `engines` are
+   Node 20.x/22.x (not the embedded Node 18), so ABI-108 load alone isn't proof — load the wrapper +
+   open/key + reopen (correct **and** wrong key) + `PRAGMA rekey` must be exercised **on physical
+   hardware** under the embedded Node 18.20.4 (see [01](01-sqlite-migration.md)). The plain-prebuild
+   half is already proven on-device (phase 2 stretch goal).
 4. ~~`LocalOnlyHotspot` native module returning SSID/password~~ — **done** (`apps/app/modules/loam-hotspot`);
    emulator-verified end to end (the API-35 emulator's virtual WiFi returned a real SSID/passphrase).
    Physical-device SoftAP behaviour may differ, so the two-phone join below remains the owner's test.

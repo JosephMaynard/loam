@@ -54,6 +54,15 @@ const PREBUILD_SHA256 = "00d84fcd41b80bbc910c0531320763f8f1a5c72a5638404ad9484f8
 // --- ENCRYPTED driver: better-sqlite3-multiple-ciphers, VENDORED in-repo -----------------------------
 // No upstream Android/ABI-108 release exists; the prebuild is self-built (recipe + tarball vendored
 // under apps/app/native-prebuilds/multiple-ciphers/). The JS wrapper is still installed from npm.
+//
+// RUNTIME-SUPPORT CAVEAT (release gate, not yet closed): this places a correct ABI-108 aarch64 binary
+// that LOADS on nodejs-mobile's Node 18 — that's build evidence, not runtime proof. The MC JS wrapper's
+// package.json declares `engines: node 20.x || 22.x || ...` (NOT Node 18), and ABI-108 symbol
+// compatibility does not by itself prove the wrapper<->runtime path works on Node 18. Loading the
+// wrapper + open/key + reopen(correct key)/reopen(wrong key) + rekey, under the EXACT embedded Node
+// 18.20.4 on a physical arm64 device, is the explicit remaining RELEASE GATE (device-runtime
+// verification — see the vendored README + docs/01). Desktop/CI covers the same ops but on host Node,
+// a different runtime.
 const MC_VERSION = "12.11.1";
 const MC_ASSET = `better-sqlite3-multiple-ciphers-${MC_VERSION}-node-${ABI}-${ARCH}.tar.gz`;
 // Pinned sha256 of the VENDORED tarball. Keep in lockstep with the README in that directory; update
