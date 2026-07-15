@@ -10,17 +10,20 @@
 > encrypted DB. **`LOAM_DB_KEY=ephemeral`** uses a random RAM-only key (never persisted), and the
 > **kill switch now does a cryptographic wipe** (delete files + rotate key) — see docs/02.
 > **Remaining:** passphrase key-derivation hardening, config/security-profile integration (docs/09),
-> RAM key-zeroing, and encryption at rest **on-device** (needs a multiple-ciphers ABI-108 android
-> prebuild). **Update (PR B):** the on-device *key handoff* is now wired — see
+> and RAM key-zeroing. **Update (PR B):** the on-device *key handoff* is now wired — see
 > ["On-device key handoff (Android host, PR B)"](#on-device-key-handoff-android-host-pr-b) below. RN
 > (`apps/app/src/lib/db-encryption.ts`) resolves/generates the key per `security.dbEncryption` mode,
 > stores it Keystore-backed (`expo-secure-store`), and hands it to the embedded launcher
 > (`nodejs-project-template/main.js`) over a race-free request/response on the nodejs-mobile bridge;
 > the launcher falls back to today's plaintext driver whenever no key comes back, and reports loudly
-> (never silently or by crashing boot) if the SQLCipher native module isn't in the build. **This is
-> wiring only** — the ABI-108 android-arm64 `better-sqlite3-multiple-ciphers` prebuild itself (the
-> device seam below) is still unbuilt, so encrypted modes currently downgrade to plaintext on every
-> real device build until that prebuild ships. Phase B (hot reads via SQL) deferred. **Update:** `openStore` now takes a
+> (never silently or by crashing boot) if the SQLCipher native module isn't in the build.
+> **Update: encryption at rest now ships on-device too.** The ABI-108 android-arm64
+> `better-sqlite3-multiple-ciphers` prebuild has been cross-compiled from the recipe below and is
+> **vendored in the repo** (`apps/app/native-prebuilds/multiple-ciphers/`, sha256-pinned);
+> `fetch:native` places it alongside the plain driver, so main.js's availability guard now succeeds
+> and `security.dbEncryption` modes take effect on a real device build — **subject to on-device
+> `PRAGMA key`/rekey runtime verification** (the module is a verified aarch64/ABI-108 ELF but hasn't
+> been exercised on physical hardware yet; see the device seam below). Phase B (hot reads via SQL) deferred. **Update:** `openStore` now takes a
 > `driver?: "node-sqlite" | "better-sqlite3"` option (threaded via `buildApp({ dbDriver })` ←
 > `LOAM_DB_DRIVER`), and the plain (unencrypted) **better-sqlite3** driver on the digidem ABI-108
 > android-arm64 prebuild now runs the **real server on-device** in the LOAM app (docs/04) —
@@ -168,9 +171,11 @@ launcher side) talk over the existing `nodejs.channel` bridge, mirroring the req
    `process.env.LOAM_DB_DRIVER = 'better-sqlite3'`, no `LOAM_DB_KEY`. Crisis messaging must always
    work; a stuck or missing key handoff can never block or crash boot.
 4. **Encrypted-driver-availability guard.** When a key *is* present, main.js first checks
-   `require.resolve('better-sqlite3-multiple-ciphers')` in a `try/catch` — that native module is **not
-   shipped on-device yet** (only plain `better-sqlite3` is, via `fetch:native` — see docs/04). If it's
-   missing, main.js does **not** set `LOAM_DB_KEY`; instead it calls the existing A8 boot-error bridge
+   `require.resolve('better-sqlite3-multiple-ciphers')` in a `try/catch` — that native module **now
+   ships on-device** alongside plain `better-sqlite3` (both placed by `fetch:native` from the
+   vendored ABI-108 prebuild — see docs/04), so this guard now succeeds on a real device build. If it
+   were ever missing (e.g. a build that skipped `fetch:native`), main.js does **not** set
+   `LOAM_DB_KEY`; instead it calls the existing A8 boot-error bridge
    (`global.__loamReportBootError('Encrypted storage needs the SQLCipher native module, which isn't in
    this build yet — starting UNENCRYPTED.', 'db_encryption_unavailable')`) and falls back to the
    plaintext driver. This surfaces the downgrade **loudly** to the host screen instead of silently
@@ -212,17 +217,30 @@ this process" rule the model manager follows, to avoid stealing the one-time `fi
   side, and manual trace of the request/response/timeout/fallback logic (no physical device needed to
   reason about the control flow — it's plain JS/TS on both ends of an event-emitter bridge).
 
-**Device seam (needs a physical arm64 device + the missing native module):**
-- The `better-sqlite3-multiple-ciphers` ABI-108 android-arm64 prebuild does not exist yet — see the
-  cross-compile recipe below. Until it ships, the availability guard in main.js means every encrypted
-  mode silently (but *loudly reported*) downgrades to plaintext on a real device build.
+**Device seam (needs a physical arm64 device to close):**
+- ~~The `better-sqlite3-multiple-ciphers` ABI-108 android-arm64 prebuild does not exist yet.~~
+  **BUILT & vendored:** it's been cross-compiled from the recipe below and lives at
+  `apps/app/native-prebuilds/multiple-ciphers/` (sha256-pinned), and `fetch:native` now places it in
+  the embedded project. Verified to be a correct aarch64 / ABI-108 ELF; the availability guard in
+  main.js therefore now succeeds. What remains is confirming its **`PRAGMA key`/rekey** behaviour
+  actually round-trips on device (next bullet but one), not that the module loads.
 - A live Keystore round trip for `persistent` mode (`expo-secure-store` write/read surviving an actual
   app restart) — the code path is the same one CoMapeo/comapeo-mobile use in production, but LOAM
   itself hasn't run it on hardware yet.
 - `PRAGMA key`/rekey behaviour of the multiple-ciphers driver specifically under nodejs-mobile's Node
   18.20.4 (ABI 108) runtime, once the prebuild exists (docs/04's spike list, item 3).
 
-### Cross-compile recipe: the missing `better-sqlite3-multiple-ciphers` ABI-108 android-arm64 prebuild
+### Cross-compile recipe: the `better-sqlite3-multiple-ciphers` ABI-108 android-arm64 prebuild
+
+> **Status: DONE & vendored.** This recipe has been executed; the resulting
+> `better-sqlite3-multiple-ciphers-12.11.1-node-108-android-arm64.tar.gz` (a flat tarball with a
+> single `better_sqlite3.node`) is committed at `apps/app/native-prebuilds/multiple-ciphers/`
+> together with the reproducible build script (`build-mc-android-arm64.sh`), its `CMakeLists.mc.txt`,
+> a `README.md`, and its sha256 pin. `fetch-native-modules.mjs` sha256-verifies and extracts it into
+> `node_modules/better-sqlite3-multiple-ciphers/build/Release/` (Step 5 below). The steps below are
+> retained as the audit/rebuild record. It's a **self-built** artifact pending an upstream release;
+> if digidem's plain-better-sqlite3 release matrix later adds a MultipleCiphers Android/ABI-108
+> prebuild, switch the script back to a hosted download+pin (as the plain driver already does).
 
 This mirrors how `apps/app/scripts/fetch-native-modules.mjs` fetches the **plain** `better-sqlite3`
 prebuild from `digidem/better-sqlite3-nodejs-mobile` (pinned version + sha256, downloaded into
@@ -247,21 +265,23 @@ prebuild from `digidem/better-sqlite3-nodejs-mobile` (pinned version + sha256, d
    `better-sqlite3-<version>-node-108-android-arm64.tar.gz` containing a single
    `better_sqlite3.node` at the tarball root (matching the layout `fetch-native-modules.mjs` already
    expects and extracts).
-5. **sha256-pin it and add it to `fetch-native-modules.mjs`**: add a second pinned
-   `{VERSION, ASSET, URL, SHA256}` tuple (mirroring `BETTER_SQLITE3_VERSION`/`PREBUILD_SHA256`) for the
-   multiple-ciphers artifact, fetched into a **separate** `node_modules/better-sqlite3-multiple-ciphers/
-   build/Release/` (not overwriting the plain driver — `apps/server/src/db.ts` lazy-`require`s
-   whichever one it actually needs, so both can be present in the bundle). Verify the tarball's sha256
-   before extracting, exactly as the existing script does for the plain driver — never install an
+5. **sha256-pin it and wire it into `fetch-native-modules.mjs`** *(done)*: the script installs the
+   MC JS wrapper from npm (`--ignore-scripts`, keeping `bindings`/`file-uri-to-path`), then reads the
+   **vendored** tarball, verifies it against `MC_PREBUILD_SHA256` **before** extracting, and places
+   `better_sqlite3.node` in a **separate** `node_modules/better-sqlite3-multiple-ciphers/build/Release/`
+   (not overwriting the plain driver — `apps/server/src/db.ts` lazy-`require`s whichever one it
+   actually needs, so both are present in the bundle). The plain driver stays a hosted download; only
+   the MC binary comes from the vendored file, since no upstream release exists yet. Never install an
    unverified native binary.
 6. **Verify on-device**: repeat the phase-2 spike's CREATE/INSERT/SELECT proof (docs/04), then
    specifically exercise `PRAGMA key`/rekey (matching what the desktop DAL test suite already covers)
    to confirm the compiled cipher actually round-trips on ABI 108 hardware, not just that the module
    loads.
 
-Once that prebuild exists and is wired into `fetch:native`, main.js's `require.resolve('better-
-sqlite3-multiple-ciphers')` availability check (above) starts succeeding and encrypted modes take
-effect for real, with no further changes needed to the key-handoff protocol itself.
+Now that the prebuild is vendored and wired into `fetch:native`, main.js's `require.resolve('better-
+sqlite3-multiple-ciphers')` availability check (above) succeeds and encrypted modes take effect on a
+real device build, with no further changes needed to the key-handoff protocol itself — the only thing
+left is on-device `PRAGMA key`/rekey runtime verification (Step 6).
 
 ## Open questions
 

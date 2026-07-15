@@ -101,17 +101,29 @@ The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi
 - **Client isolation.** A few hotspot stacks isolate connected clients from the host; if every
   address fails despite a good WiFi connection, that's the likely cause (device-dependent).
 
-### Native prebuild (better-sqlite3)
-`fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) pins `better-sqlite3@12.10.0` and downloads
-the matching ABI-108 (Node 18) android-arm64 binary from
-`digidem/better-sqlite3-nodejs-mobile` (tag `12.10.0`, asset
-`better-sqlite3-12.10.0-node-108-android-arm64.tar.gz`), placing `better_sqlite3.node` at
-`node_modules/better-sqlite3/build/Release/` where `bindings` resolves it. **Not committed** (native
-binary) — re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` verifies the
-tarball against a pinned sha256 before installing it. The JS-wrapper npm version and the `.node`
-release must stay in lockstep — if it ever fails to load, fall back to `11.10.0` (the version CoMapeo
-ships) by changing **both** the npm wrapper version and the digidem release tag together (and update
-the pinned `PREBUILD_SHA256`).
+### Native prebuild (SQLite drivers — plain + encrypted)
+`fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) places **both** SQLite native modules
+into the embedded project's `node_modules` (the DAL, `apps/server/src/db.ts`, lazy-`require`s whichever
+one it needs, so both ship):
+
+- **Plain `better-sqlite3`** (`@12.10.0`, the on-device default): the matching ABI-108 (Node 18)
+  android-arm64 binary is **downloaded** from `digidem/better-sqlite3-nodejs-mobile` (tag `12.10.0`,
+  asset `better-sqlite3-12.10.0-node-108-android-arm64.tar.gz`) and placed at
+  `node_modules/better-sqlite3/build/Release/`. If it ever fails to load, fall back to `11.10.0` (the
+  version CoMapeo ships) by changing **both** the npm wrapper version and the digidem release tag
+  together (and update `PREBUILD_SHA256`).
+- **Encrypted `better-sqlite3-multiple-ciphers`** (`@12.11.1`, SQLCipher; used when
+  `security.dbEncryption` is on and a key is handed across the bridge — docs/01): its android-arm64
+  ABI-108 binary has no upstream release, so it's a **self-built prebuild VENDORED in the repo** at
+  `apps/app/native-prebuilds/multiple-ciphers/` (tarball + reproducible build recipe + README, all
+  committed). `fetch:native` extracts it into `node_modules/better-sqlite3-multiple-ciphers/build/Release/`.
+  So the encrypted driver **now ships on-device** and `security.dbEncryption` modes take effect on a
+  real device build (subject to on-device `PRAGMA key` runtime verification — docs/01).
+
+The `.node` binaries themselves are **not committed** in `nodejs-assets/` (gitignored build output) —
+re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` sha256-verifies **each**
+tarball (downloaded and vendored alike) before installing it. Each JS-wrapper npm version and its
+`.node` source version must stay in lockstep (change both together).
 
 ### What's committed vs generated
 - **Committed (source):** `apps/server/src/db.ts` (`driver` option), `embedded.ts`
@@ -123,10 +135,13 @@ the pinned `PREBUILD_SHA256`).
   screen + "Share · Host" button + overlay), `apps/app/src/components/{host-panel,host-share-overlay,
   qr-code}.tsx`, `apps/app/src/hooks/use-hotspot.ts`, **`apps/app/modules/loam-hotspot/`** (the local
   Expo module: `expo-module.config.json`, `index.ts`, `src/*.ts`, `android/build.gradle` +
-  `LoamHotspotModule.kt`), `package.json` deps.
+  `LoamHotspotModule.kt`), `package.json` deps, **`apps/app/native-prebuilds/multiple-ciphers/`** (the
+  self-built encrypted-driver prebuild tarball + `build-mc-android-arm64.sh` + `CMakeLists.mc.txt` +
+  `README.md` — vendored because no upstream Android/ABI-108 release exists; sha256-pinned in
+  `fetch-native-modules.mjs`).
 - **Generated at build time (gitignored):** `apps/app/android/` (prebuild — local modules are
   autolinked into it, not committed), `apps/app/nodejs-assets/nodejs-project/` (bundle output + web
-  client + native prebuild), the APK.
+  client + **both** SQLite native prebuilds, plain + encrypted), the APK.
 
 ## Goal
 
@@ -309,10 +324,12 @@ workspace install (Expo/RN toolchain); gating its install remains an open nicety
 ## Suggested next spikes (de-risk before building UI)
 1. ~~nodejs-mobile viability~~ — **done, passed** (phase 1).
 2. ~~Real server on-device (Fastify 5 / bundling / static / WS)~~ — **done, passed** (phase 2).
-3. **Encrypted driver prebuilds**: fork `digidem/better-sqlite3-nodejs-mobile` CI, swap in the
-   better-sqlite3-multiple-ciphers amalgamation, produce ABI-108 android-arm64 prebuilds, verify
-   `PRAGMA key`/rekey on-device (see [01](01-sqlite-migration.md)). The plain-prebuild half is
-   already proven on-device (phase 2 stretch goal).
+3. **Encrypted driver prebuilds** — **build DONE, on-device verify pending.** The
+   `better-sqlite3-multiple-ciphers` ABI-108 android-arm64 prebuild has been cross-compiled (fork of
+   `digidem/better-sqlite3-nodejs-mobile`'s recipe with the MultipleCiphers amalgamation swapped in),
+   vendored at `apps/app/native-prebuilds/multiple-ciphers/`, and wired into `fetch:native` so both
+   drivers ship. What's left is verifying `PRAGMA key`/rekey **on physical hardware** (see
+   [01](01-sqlite-migration.md)). The plain-prebuild half is already proven on-device (phase 2 stretch goal).
 4. ~~`LocalOnlyHotspot` native module returning SSID/password~~ — **done** (`apps/app/modules/loam-hotspot`);
    emulator-verified end to end (the API-35 emulator's virtual WiFi returned a real SSID/passphrase).
    Physical-device SoftAP behaviour may differ, so the two-phone join below remains the owner's test.
