@@ -30,8 +30,9 @@ export type IdentityTokenRecord = {
  * A work item recording that a peer's attachment file failed to copy during a node-to-node sync
  * import (docs/15 A6): the message itself still imported (best-effort), but without this record a
  * later sync digest would see the message id as already-known and never re-offer the attachment,
- * stranding it image-less forever. `attempts` bounds the independent retry pass that re-fetches just
- * this file from `peerUrl` without re-importing the message.
+ * stranding it image-less forever. `attempts` counts retries (used for backoff — see
+ * `retryMissingAttachments` in `app.ts`); `lastAttemptAt` (0 = never attempted) is what that backoff
+ * is measured from, so the reaper's 30s tick doesn't hammer an unreachable peer every cycle.
  */
 export type MissingAttachmentRecord = {
   messageId: string;
@@ -40,6 +41,7 @@ export type MissingAttachmentRecord = {
   peerUrl: string;
   attempts: number;
   createdAt: number;
+  lastAttemptAt: number;
 };
 
 /**
@@ -183,11 +185,12 @@ export interface LoamStore {
    * attempt counter at 0. A conflict (same message+attachment already tracked) is a no-op — it keeps
    * the original `attempts`/`createdAt` rather than resetting the retry clock.
    */
-  addMissingAttachment(record: Omit<MissingAttachmentRecord, "attempts" | "createdAt">): void;
+  addMissingAttachment(record: Omit<MissingAttachmentRecord, "attempts" | "createdAt" | "lastAttemptAt">): void;
   loadMissingAttachments(): MissingAttachmentRecord[];
   /** The attachment copy finally succeeded (or the message/work item it belonged to is gone) — drop it. */
   clearMissingAttachment(messageId: string, attachmentId: string): void;
-  /** Another retry against the peer failed — bump the counter the retry pass bounds against. */
+  /** Another retry against the peer failed — bump the attempt counter and stamp `lastAttemptAt` (now)
+   * so the retry pass's backoff has something to measure the next wait from. */
   bumpMissingAttachmentAttempts(messageId: string, attachmentId: string): void;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
@@ -248,6 +251,21 @@ function migrateTombstonesCreatedAt(db: SqliteConnection): void {
   if (!hasCreatedAt) {
     db.exec("ALTER TABLE tombstones ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
     db.prepare("UPDATE tombstones SET created_at = ? WHERE created_at = 0").run(Date.now());
+  }
+}
+
+/**
+ * Backfill the `missing_attachments.last_attempt_at` column onto a database created before
+ * retry-backoff existed (docs/15 A6 / F1). `0` (never attempted) is the correct backfill for
+ * existing rows — the retry pass treats it as "due immediately", which is the same behaviour those
+ * rows already had under the old no-backoff code.
+ */
+function migrateMissingAttachmentsLastAttempt(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(missing_attachments)").all() as { name: string }[];
+  const hasLastAttemptAt = columns.some((column) => column.name === "last_attempt_at");
+
+  if (!hasLastAttemptAt) {
+    db.exec("ALTER TABLE missing_attachments ADD COLUMN last_attempt_at INTEGER NOT NULL DEFAULT 0");
   }
 }
 
@@ -316,10 +334,12 @@ function buildStore(db: SqliteConnection): LoamStore {
       peer_url TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
+      last_attempt_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (message_id, attachment_id)
     );
   `);
   migrateTombstonesCreatedAt(db);
+  migrateMissingAttachmentsLastAttempt(db);
 
   const upsertUserStmt = db.prepare(
     "INSERT INTO users (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
@@ -369,13 +389,13 @@ function buildStore(db: SqliteConnection): LoamStore {
      VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(message_id, attachment_id) DO NOTHING`,
   );
   const loadMissingAttachmentsStmt = db.prepare(
-    "SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at FROM missing_attachments ORDER BY rowid",
+    "SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at, last_attempt_at FROM missing_attachments ORDER BY rowid",
   );
   const clearMissingAttachmentStmt = db.prepare(
     "DELETE FROM missing_attachments WHERE message_id = ? AND attachment_id = ?",
   );
   const bumpMissingAttachmentAttemptsStmt = db.prepare(
-    "UPDATE missing_attachments SET attempts = attempts + 1 WHERE message_id = ? AND attachment_id = ?",
+    "UPDATE missing_attachments SET attempts = attempts + 1, last_attempt_at = ? WHERE message_id = ? AND attachment_id = ?",
   );
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
@@ -497,13 +517,14 @@ function buildStore(db: SqliteConnection): LoamStore {
         peerUrl: row.peer_url as string,
         attempts: row.attempts as number,
         createdAt: row.created_at as number,
+        lastAttemptAt: row.last_attempt_at as number,
       }));
     },
     clearMissingAttachment(messageId, attachmentId) {
       clearMissingAttachmentStmt.run(messageId, attachmentId);
     },
     bumpMissingAttachmentAttempts(messageId, attachmentId) {
-      bumpMissingAttachmentAttemptsStmt.run(messageId, attachmentId);
+      bumpMissingAttachmentAttemptsStmt.run(Date.now(), messageId, attachmentId);
     },
     transaction(fn) {
       db.exec("BEGIN IMMEDIATE");

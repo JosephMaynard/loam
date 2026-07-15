@@ -393,8 +393,11 @@ describe("admin config API", () => {
     expect(response.statusCode).toBe(400);
   });
 
-  it("defaults dbEncryption to off and reflects a PATCHed value in /api/config, independent of the security profile", async () => {
-    const app = await makeApp();
+  it("defaults dbEncryption to off and reflects a PATCHed value in /api/config when the store is actually keyed, independent of the security profile", async () => {
+    // F5: `networkConfig.dbEncryption` now reports the EFFECTIVE posture, not the merely-configured
+    // value — so this round-trip only shows the PATCHed value while a real key is active. The `off` →
+    // false-report case (no real key) is covered separately below.
+    const app = await makeApp(undefined, { dbEncryptionKey: "a fixed host passphrase" });
     const admin = await newSession(app);
 
     const before = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
@@ -425,6 +428,37 @@ describe("admin config API", () => {
       payload: { security: { dbEncryption: "hardware-hsm" } },
     });
     expect(rejected.statusCode).toBe(400);
+  });
+
+  it("F5: reports the EFFECTIVE dbEncryption posture (off) when no real key is active, even after PATCHing a non-off value", async () => {
+    // No dbEncryptionKey/ephemeralDbKey passed — the store is genuinely unencrypted, whatever the
+    // config says. `security.dbEncryption` is a declarative admin setting decoupled from the real key
+    // (see the comment on `encryptionEnabled` in app.ts); the wire must never claim encryption that
+    // isn't active.
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { dbEncryption: "persistent" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(after.networkConfig.dbEncryption).toBe("off");
+
+    // The admin config view (the raw, redacted config) still reflects what was actually configured —
+    // only the client-facing networkConfig is truthed up to the effective posture.
+    const adminConfig = (await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+    })).json() as { security: { dbEncryption: string } };
+    expect(adminConfig.security.dbEncryption).toBe("persistent");
   });
 
   it("applies, enforces, broadcasts shape, and persists feature flag changes", async () => {
@@ -1242,6 +1276,88 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(wipe.statusCode).toBe(200);
     expect(app.store.loadMessages()).toEqual([]);
     expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
+  });
+
+  /** Install the `globalThis.__loamReportBootError` bridge (the same one `embedded-main.ts` uses for
+   *  fatal boot errors — see its own test suite) and capture every report. Auto-uninstalled. */
+  function installFakeBootBridge(): { message: string; code: string }[] {
+    const reports: { message: string; code: string }[] = [];
+    (
+      globalThis as unknown as { __loamReportBootError?: (message: string, code: string) => void }
+    ).__loamReportBootError = (message, code) => reports.push({ message, code });
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamReportBootError?: unknown }).__loamReportBootError;
+    });
+    return reports;
+  }
+
+  describe("resilient encrypted-DB open (F4, docs/15)", () => {
+    it("falls back to serving an existing PLAINTEXT database when the configured key can't open it, and reports db_encryption_open_failed", async () => {
+      const reports = installFakeBootBridge();
+
+      // A plaintext DB already on disk (no encryption ever configured) — simulates a node switched
+      // into an encrypted mode without a rekey of the existing data.
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-fallback-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+      const plain = await buildApp({ dataDir, logger: false });
+      const plainAdmin = await session(plain);
+      expect((await post(plain, plainAdmin.cookie, "PLAINTEXT_ALREADY_ON_DISK")).statusCode).toBe(201);
+      await plain.close();
+
+      // Reopen the SAME data dir with an encryption key configured — case 1 (keyed open) fails against
+      // the real plaintext file; case 2 (plaintext open) must succeed, and boot must not crash-loop.
+      const reopened = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" });
+      cleanups.push(() => reopened.close());
+
+      expect(reports).toEqual([
+        expect.objectContaining({ code: "db_encryption_open_failed" }),
+      ]);
+      // The key itself must never appear in the reported message.
+      expect(reports[0]?.message).not.toContain("a newly configured key");
+
+      // Data survived (it opened the SAME plaintext file, not a fresh one).
+      expect(reopened.store.loadMessages().some((m) => "body" in m && m.body === "PLAINTEXT_ALREADY_ON_DISK")).toBe(
+        true,
+      );
+
+      // The effective posture on the wire is "off" — F5 — even though a key was configured.
+      const config = (await reopened.server.inject({ method: "GET", url: "/api/config" })).json() as {
+        networkConfig: { dbEncryption: string };
+      };
+      expect(config.networkConfig.dbEncryption).toBe("off");
+
+      // The node still boots fully usable.
+      const reopenedAdmin = await session(reopened);
+      expect((await post(reopened, reopenedAdmin.cookie, "after fallback")).statusCode).toBe(201);
+    });
+
+    it("renames aside an unopenable encrypted database (wrong/lost key) and starts a fresh one, reporting db_encryption_unreadable", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the original key" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "LOCKED_BEHIND_KEY_A")).statusCode).toBe(201);
+      await original.close();
+
+      // Reopen with a DIFFERENT key — case 1 (keyed open under the new key) fails, and case 2
+      // (plaintext open) also fails because the file is genuinely SQLCipher ciphertext, not a valid
+      // plain SQLite header. Case 3 must still boot: rename the unreadable file aside and start fresh.
+      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" });
+      cleanups.push(() => recovered.close());
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+      expect(reports[0]?.message).not.toContain("the original key");
+      expect(reports[0]?.message).not.toContain("a completely different key");
+
+      // The old (unreadable) ciphertext is preserved on disk, not deleted.
+      expect(existsSync(join(dataDir, "loam.db.unreadable"))).toBe(true);
+
+      // The fresh DB has no memory of the old data, but is fully usable (and still encrypted — the
+      // effective posture wasn't downgraded, unlike the plaintext-fallback case above).
+      expect(recovered.store.loadMessages()).toEqual([]);
+      const recoveredAdmin = await session(recovered);
+      expect((await post(recovered, recoveredAdmin.cookie, "fresh after recovery")).statusCode).toBe(201);
+    });
   });
 });
 
@@ -3565,6 +3681,92 @@ describe("attachment + sync review hardening", () => {
     // The work item is cleared on success — a further retry pass is a no-op, not a repeated fetch.
     await puller.retryMissingAttachments();
     expect(existsSync(pullerFilePath)).toBe(true);
+  });
+
+  it("F1: backs off between attempts, so a work item survives far more than the old fixed attempt cap without hitting its age bound", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const attachment = await uploadAttachment(source, sourceAdmin.cookie);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+
+    // The peer's copy stays missing for the whole test — every retry attempt fails.
+    rmSync(join(source.dataDir, "attachments", `${attachment.id}.png`));
+
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    expect(puller.store.loadMissingAttachments()).toHaveLength(1);
+
+    // Simulate 25 reaper ticks back-to-back — more than the old fixed cap of 20 attempts, which used
+    // to exhaust (and drop) the work item well before its days-scale age bound. With backoff, almost
+    // all of these are throttled (skipped) instead of actually contacting the still-unreachable peer.
+    for (let i = 0; i < 25; i += 1) {
+      await puller.retryMissingAttachments();
+    }
+
+    const records = puller.store.loadMissingAttachments();
+    expect(records).toHaveLength(1); // NOT given up — only the age bound (days) governs give-up now
+    expect(records[0]?.attempts).toBeLessThan(5); // backoff meant most of the 25 ticks were skipped
+  });
+
+  it("F2: no-ops entirely when sync is disabled, without touching queued work items", async () => {
+    const app = await makeApp({ sync: { enabled: false, peers: [{ url: "http://peer.example" }] } });
+    app.store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://peer.example",
+    });
+
+    await app.retryMissingAttachments();
+
+    const [record] = app.store.loadMissingAttachments();
+    expect(record).toMatchObject({ messageId: "msg_1", attachmentId: "att_1", attempts: 0 });
+  });
+
+  it("F2: drops a queued retry immediately once its peer is removed from sync.peers, via the admin config PATCH", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://peer.example" }] } });
+    const admin = await newSession(app);
+    app.store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://peer.example",
+    });
+    expect(app.store.loadMissingAttachments()).toHaveLength(1);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { sync: { peers: [] } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    // Dropped immediately by the PATCH handler — no reaper tick needed.
+    expect(app.store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("F2: retryMissingAttachments also defensively drops a record for a peer that isn't in the current sync.peers (belt-and-suspenders)", async () => {
+    // A peer no longer in sync.peers — e.g. the config.json was edited between boots rather than via
+    // the admin PATCH, so the PATCH-handler cleanup above never ran.
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://still-active.example" }] } });
+    app.store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://long-gone.example",
+    });
+
+    await app.retryMissingAttachments();
+
+    expect(app.store.loadMissingAttachments()).toEqual([]);
   });
 
   it("blocks a banned user from editing or deleting their old messages", async () => {

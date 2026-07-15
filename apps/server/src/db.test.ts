@@ -221,6 +221,7 @@ describe("openStore", () => {
       mimeType: "image/png",
       peerUrl: "http://peer.example",
       attempts: 0,
+      lastAttemptAt: 0, // F1: 0 means "never attempted" — the retry pass treats this as due immediately
     });
     expect(typeof record?.createdAt).toBe("number");
 
@@ -234,9 +235,13 @@ describe("openStore", () => {
     expect(store.loadMissingAttachments()).toHaveLength(1);
     expect(store.loadMissingAttachments()[0]?.peerUrl).toBe("http://peer.example");
 
+    const beforeBump = Date.now();
     store.bumpMissingAttachmentAttempts("msg_1", "att_1");
     store.bumpMissingAttachmentAttempts("msg_1", "att_1");
-    expect(store.loadMissingAttachments()[0]?.attempts).toBe(2);
+    const bumped = store.loadMissingAttachments()[0];
+    expect(bumped?.attempts).toBe(2);
+    // F1: each bump also stamps lastAttemptAt (now) — what the retry pass's backoff measures from.
+    expect(bumped?.lastAttemptAt).toBeGreaterThanOrEqual(beforeBump);
 
     store.clearMissingAttachment("msg_1", "att_1");
     expect(store.loadMissingAttachments()).toEqual([]);
@@ -279,6 +284,55 @@ describe("openStore", () => {
         // Backfilled to "now", so it must not already be prunable with a past cutoff.
         expect(reopened.pruneTombstonesOlderThan(Date.now() - 60_000)).toEqual([]);
         expect(reopened.loadTombstones()).toEqual(["msg_legacy"]);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates a pre-backoff missing_attachments table by backfilling last_attempt_at (F1)", () => {
+    // Simulate a database created before retry-backoff existed: drop and re-create the bare-bones
+    // (pre-`last_attempt_at`) shape, write a row the old way, then reopen through `openStore` (which
+    // runs the migration) and confirm it's usable with the new column defaulted to 0 ("never
+    // attempted" — due immediately, matching the old no-backoff behaviour those rows already had).
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-db-migration-test-"));
+    const dbPath = join(dataDir, "loam.db");
+
+    try {
+      const initial = openStore(dbPath);
+      initial.close();
+
+      const raw = new DatabaseSync(dbPath);
+      raw.exec("DROP TABLE missing_attachments");
+      raw.exec(`
+        CREATE TABLE missing_attachments (
+          message_id TEXT NOT NULL,
+          attachment_id TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          peer_url TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (message_id, attachment_id)
+        )
+      `);
+      raw
+        .prepare(
+          "INSERT INTO missing_attachments (message_id, attachment_id, mime_type, peer_url, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run("msg_legacy", "att_legacy", "image/png", "http://peer.example", 3, Date.now());
+      raw.close();
+
+      const reopened = openStore(dbPath);
+      try {
+        const [record] = reopened.loadMissingAttachments();
+        expect(record).toMatchObject({
+          messageId: "msg_legacy",
+          attachmentId: "att_legacy",
+          attempts: 3,
+          lastAttemptAt: 0,
+        });
       } finally {
         reopened.close();
       }

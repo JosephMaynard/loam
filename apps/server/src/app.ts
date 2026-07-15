@@ -1,3 +1,4 @@
+import { existsSync, renameSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
@@ -190,6 +191,26 @@ export type OnDeviceChatHook = (
     onError: (message: string) => void;
   },
 ) => void;
+
+/**
+ * Best-effort report of a NON-FATAL boot notice to the RN host bridge (F4, docs/15). Reuses the same
+ * `globalThis.__loamReportBootError` hook `embedded-main.ts` uses for fatal startup failures — the
+ * launcher (`apps/app/nodejs-project-template/main.js`) installs it on `global` before requiring the
+ * server bundle, same pattern as {@link OnDeviceChatHook} above. Absent on every other host
+ * (desktop/Pi/CI, and most tests), so this is a silent no-op there. Used when the encrypted-DB open
+ * degrades instead of failing boot outright (`db_encryption_open_failed` / `db_encryption_unreadable`)
+ * so the RN host screen can still surface a "change encryption settings" action even though boot
+ * itself succeeded. Never pass the key or any derived secret in `message`.
+ */
+function reportBootNotice(message: string, code: string): void {
+  try {
+    const reporter = (globalThis as { __loamReportBootError?: (message: string, code: string) => void })
+      .__loamReportBootError;
+    reporter?.(message, code);
+  } catch (reportError) {
+    console.error("Failed to report boot notice to the RN host:", reportError);
+  }
+}
 
 export type AppOptions = {
   /** Directory holding the SQLite DB, avatars, and (by default) config.json. */
@@ -804,12 +825,26 @@ function parseAttachmentFileName(value: string): { id: string; mimeType: AvatarI
 
 const attachmentMaxBytes = 256 * 1024;
 
-// Bounded retry for a missing-attachment work item (docs/15 A6): `retryMissingAttachments` gives up
-// (and drops the work item) once either bound is hit, so an unreachable peer or a permanently-gone
-// file can't grow the `missing_attachments` table forever. Deliberately generous — a peer flapping
-// in and out over several reaper ticks, or even days, should still converge.
-const missingAttachmentMaxAttempts = 20;
+// Retry policy for a missing-attachment work item (docs/15 A6, F1). `retryMissingAttachments` runs on
+// the 30s reaper tick, but it must NOT actually contact the peer on every tick — that burned through
+// `attempts` in ~10 minutes with no backoff, making `missingAttachmentMaxAgeMs` (a days-scale bound)
+// dead: it could never be reached before attempts exhausted first. Instead, `attempts` only drives a
+// growing backoff (`missingAttachmentBackoffMs`) between actual fetch attempts, and the age bound
+// below is the sole thing that governs giving up — deliberately generous, so a peer flapping in and
+// out over several hours or even days still converges.
 const missingAttachmentMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
+const missingAttachmentRetryBaseMs = 60_000; // first backoff step: 1 minute
+const missingAttachmentRetryMaxIntervalMs = 6 * 3_600_000; // cap: retry at most every 6 hours
+
+/**
+ * Exponential backoff (capped) between retry attempts for one missing-attachment work item, keyed on
+ * its current `attempts` count. `attempts` 0 → 1 minute, doubling each attempt, capped at 6 hours —
+ * so a persistently-unreachable peer settles into a sane cadence instead of being hammered every 30s,
+ * while a briefly-flapping one still converges within a few ticks.
+ */
+function missingAttachmentBackoffMs(attempts: number): number {
+  return Math.min(missingAttachmentRetryBaseMs * 2 ** attempts, missingAttachmentRetryMaxIntervalMs);
+}
 
 /**
  * Map an avatar image MIME type to its canonical file extension.
@@ -1117,11 +1152,76 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   let dbKey: string | undefined = ephemeralDbKey
     ? randomBytes(32).toString("hex")
     : options.dbEncryptionKey;
-  const encryptionEnabled = dbKey !== undefined;
+  // Whether the store is ACTUALLY open with a key right now. Starts as "a key was resolved", but
+  // `openInitialStore` below can downgrade it to `false` (case 2) if that key turns out not to open
+  // what's on disk. `currentNetworkConfig()` reports THIS — not the merely-configured
+  // `appConfig.security.dbEncryption` — so the wire never claims encryption that isn't active (F5).
+  let encryptionEnabled = dbKey !== undefined;
 
   const openLoamStore = (): LoamStore =>
     openStore(dbPath, { encryptionKey: dbKey, driver: options.dbDriver });
-  let store = openLoamStore();
+
+  /**
+   * Boot-time store open, tolerant of an unopenable encrypted DB (F4, docs/15). Today, a failure here
+   * used to reject `buildApp` outright — and because the DB-encryption mode is persisted config, EVERY
+   * later boot hit the identical failure, permanently locking the operator out of their own node. The
+   * host must always boot (crisis-messaging priority), so this degrades in order instead of throwing:
+   *
+   *  1. Open with the resolved key, exactly as before.
+   *  2. On failure, try opening the SAME file with no key. This covers "the node was switched to an
+   *     encrypted mode but the DB already on disk is still plaintext" (there's no rekey path yet — see
+   *     the note below) — if that succeeds, boot continues serving plaintext and `encryptionEnabled` is
+   *     downgraded so F5's effective reporting doesn't lie about it.
+   *  3. If the plaintext attempt ALSO fails, the DB is genuinely encrypted under a wrong/lost key: the
+   *     unopenable files are renamed aside (never deleted — the ciphertext may still be recoverable
+   *     with the right key later) and a fresh database is opened under the resolved key, so the node's
+   *     configured posture is preserved going forward instead of silently downgrading.
+   *
+   * Both fallbacks log a warning/error and report a distinct, non-fatal notice over the same RN bridge
+   * `embedded-main.ts` uses for fatal boot errors (`db_encryption_open_failed` / `db_encryption_unreadable`)
+   * — never the key itself — so the host UI can offer a "change encryption settings" action. The real
+   * fix for case 2 is a genuine plaintext→encrypted REKEY (SQLCipher `sqlcipher_export` / `PRAGMA
+   * rekey`), which is unbuilt; this is a boot-time safety net, not a substitute for it.
+   */
+  function openInitialStore(): LoamStore {
+    if (!encryptionEnabled) {
+      return openLoamStore();
+    }
+
+    try {
+      return openLoamStore();
+    } catch {
+      // Fall through to the plaintext attempt below.
+    }
+
+    try {
+      const plainStore = openStore(dbPath, { driver: options.dbDriver });
+      encryptionEnabled = false;
+      const message =
+        "Could not open the database with the configured encryption — served UNENCRYPTED; a re-key is needed to encrypt existing data.";
+      server.log.warn(message);
+      reportBootNotice(message, "db_encryption_open_failed");
+      return plainStore;
+    } catch {
+      // Still unopenable without a key either — genuinely encrypted under a wrong/lost key. Fall
+      // through to the rename-aside-and-start-fresh path below.
+    }
+
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const from = `${dbPath}${suffix}`;
+      if (existsSync(from)) {
+        renameSync(from, `${from}.unreadable`);
+      }
+    }
+
+    const message =
+      "The encrypted database could not be opened with the current key; started a fresh database — the previous data is preserved on disk as loam.db.unreadable.";
+    server.log.error(message);
+    reportBootNotice(message, "db_encryption_unreadable");
+    return openLoamStore();
+  }
+
+  let store = openInitialStore();
 
   /**
    * Parse one PRESENT config layer, **aborting startup** if it's malformed or invalid. Silently ignoring
@@ -1403,7 +1503,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // can handshake + show the fingerprint. The client still prefers the QR-delivered key (docs/08).
       transportPublicKey:
         appConfig.security.transportEncryption === "off" ? undefined : transportIdentity?.publicKey,
-      dbEncryption: appConfig.security.dbEncryption,
+      // Report the EFFECTIVE posture, not the merely-configured one (F5): `security.dbEncryption` is a
+      // declarative admin setting, decoupled from whether the store actually got opened with a key —
+      // `encryptionEnabled` is boot-resolved truth (including the F4 fallback downgrade), so when it's
+      // false the wire must say "off" regardless of what's configured. Never claim encryption that
+      // isn't active.
+      dbEncryption: encryptionEnabled ? appConfig.security.dbEncryption : "off",
       locale: appConfig.node.locale,
     };
   }
@@ -3463,11 +3568,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * image-less; a later digest round sees the message id as already-known and never re-offers it, so
    * without this the image stays missing forever. This re-fetches just the missing file(s) from the
    * peer that had them (reusing `fetchPeerAttachmentBytes`, the same peer-fetch path the initial
-   * import used) — it never re-imports or otherwise touches the message. Runs on the reaper timer;
-   * gives up (drops the work item) past a bounded attempt count or age so an unreachable peer or a
+   * import used) — it never re-imports or otherwise touches the message. Runs on the reaper timer, but
+   * (F1) only actually contacts a peer once per record's backoff interval, and (F2) never contacts a
+   * peer sync is currently off, or one the operator has since removed from `sync.peers` — dropping
+   * that record instead. Gives up (drops the work item) past `missingAttachmentMaxAgeMs` so a
    * permanently-gone file can't grow the work-item table forever.
    */
   async function retryMissingAttachments(): Promise<void> {
+    // F2a: no live sync means no peer to fetch from at all — don't touch the table (and don't wake a
+    // node that has sync switched off just to no-op every record in it).
+    if (!appConfig.sync.enabled) {
+      return;
+    }
+
     const records = store.loadMissingAttachments();
 
     if (!records.length) {
@@ -3478,10 +3591,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // switch fires mid-pass, stop touching the store/disk it just wiped (docs/15 #2).
     const generation = wipeGeneration;
     const now = Date.now();
+    const activePeerUrls = new Set(appConfig.sync.peers.map((peer) => peer.url));
 
     for (const record of records) {
       if (wipeGeneration !== generation) {
         return;
+      }
+
+      // F2b: the peer was removed from sync.peers since this work item was recorded — never contact a
+      // peer the operator explicitly dropped. (The PATCH /api/admin/config handler also prunes these
+      // eagerly on removal; this is the belt-and-suspenders check for the config.json / boot-time path.)
+      if (!activePeerUrls.has(record.peerUrl)) {
+        store.clearMissingAttachment(record.messageId, record.attachmentId);
+        continue;
       }
 
       // The message this attachment belonged to is gone locally (deleted/tombstoned/expired since) —
@@ -3501,11 +3623,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // still missing — fall through to retry
       }
 
-      if (record.createdAt < now - missingAttachmentMaxAgeMs || record.attempts >= missingAttachmentMaxAttempts) {
+      if (record.createdAt < now - missingAttachmentMaxAgeMs) {
         store.clearMissingAttachment(record.messageId, record.attachmentId);
         server.log.warn(
           `Giving up on missing attachment ${record.attachmentId} for message ${record.messageId} (peer ${record.peerUrl})`,
         );
+        continue;
+      }
+
+      // F1: back off between actual fetch attempts (0 = never attempted, always due immediately) —
+      // this is what keeps a flapping/unreachable peer from burning through this reaper's every-30s
+      // tick, and what makes the age bound above the real "give up" governor.
+      if (record.lastAttemptAt !== 0 && now - record.lastAttemptAt < missingAttachmentBackoffMs(record.attempts)) {
         continue;
       }
 
@@ -3535,6 +3664,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         store.clearMissingAttachment(record.messageId, record.attachmentId);
       } catch {
+        // F6: match the wipeGeneration re-check every other write site in this function has — a kill
+        // switch that lands while `fetchPeerAttachmentBytes` was in flight must not re-persist a bumped
+        // attempt count onto the store it just wiped.
+        if (wipeGeneration !== generation) {
+          return;
+        }
+
         store.bumpMissingAttachmentAttempts(record.messageId, record.attachmentId);
       }
     }
@@ -5999,6 +6135,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     for (const url of [...peerSyncStatus.keys()]) {
       if (!activePeerUrls.has(url)) {
         peerSyncStatus.delete(url);
+      }
+    }
+    // Same cleanup for queued missing-attachment retries (F2, docs/15 A6): a removed peer's work items
+    // would otherwise sit in the table until `retryMissingAttachments`' own defensive check happened to
+    // run — drop them immediately so a peer the operator just removed is never contacted again.
+    for (const record of store.loadMissingAttachments()) {
+      if (!activePeerUrls.has(record.peerUrl)) {
+        store.clearMissingAttachment(record.messageId, record.attachmentId);
       }
     }
     // Drop every cached puller-side transport session (docs/08): a peer's URL, pinned transportKey, or
