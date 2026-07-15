@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
@@ -12,8 +12,10 @@ import {
   DB_ENCRYPTION_MODE_READ_ERROR,
   applyDbModeChange,
   clearStoredPassphrase,
+  dbModeSelectionIsDestructive,
   getDbEncryptionMode,
   hasStoredPassphrase,
+  requestDbStartFresh,
   setDbEncryptionMode,
   setDbModeHint,
   setPassphraseCandidate,
@@ -36,15 +38,6 @@ const MODE_LABELS: Record<DbEncryptionMode, string> = {
   persistent: 'Persistent',
   passphrase: 'Passphrase',
 };
-
-/** Modes whose selection needs an explicit confirmation before it's persisted (G4): `ephemeral` wipes
- * the on-device database on every restart by design, and `persistent`/`passphrase` can make an
- * EXISTING database (encrypted under a different key, or plaintext) permanently unreadable the next
- * time the host boots (see G2) — neither failure mode is recoverable, so the operator must opt in
- * knowingly rather than just seeing a "takes effect next restart" toast. `off` is exempt: it never
- * destroys data on its own (Encryption settings stays reachable from the boot-error screen either
- * way if a pre-existing encrypted database becomes unreadable — G2). */
-const DESTRUCTIVE_MODES: ReadonlySet<DbEncryptionMode> = new Set(['ephemeral', 'persistent', 'passphrase']);
 
 /**
  * The on-device DB-encryption mode picker (PR B — docs/01, docs/21): off / ephemeral / persistent /
@@ -70,6 +63,14 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
   const [passphraseInput, setPassphraseInput] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
   const [loaded, setLoaded] = useState(false);
+  // P1-3 (Sol round 8): a transition is in flight — drives the DISABLED state of every mode row.
+  const [transitioning, setTransitioning] = useState(false);
+  // P1-3 (Sol round 8): the SYNCHRONOUS in-flight guard. React `transitioning` state updates too late to
+  // block a second tap fired in the SAME tick (before the re-render disables the rows), so `handleSelect`
+  // reads/sets this ref synchronously to reject any concurrent selection immediately. The underlying
+  // `applyDbModeChange` also serializes the actual writes under a module-level mutex — this ref is the UI
+  // half (disable every control at once); the mutex is the correctness half (no interleaved writes).
+  const transitionInFlight = useRef(false);
 
   // Reload the persisted choice every time the overlay opens.
   useEffect(() => {
@@ -102,60 +103,124 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
   }, [visible]);
 
   /** Actually persist the mode choice — the part `handleSelect` gates behind a destructive-action
-   * confirmation for the modes that can wipe or strand existing data (G4). */
+   * confirmation for the modes that can wipe or strand existing data (G4). Owns the in-flight guard
+   * lifecycle (P1-3, Sol round 8): sets it on entry, clears it (and the disabled UI state) in `finally`. */
   const applyModeChange = async (next: DbEncryptionMode) => {
-    const previous = mode;
-    // P1-1 (Sol round 7, hole 3): the SecureStore mode and the mode-NAME hint must never diverge into the
-    // dangerous state (SecureStore encrypted + hint 'off'/absent → a transient boot-time key-request
-    // failure boots PLAINTEXT even WITH a DB). `applyDbModeChange` enforces that: for encrypted modes it
-    // writes the hint FIRST and only commits the SecureStore mode if that succeeds (rolling the hint back
-    // on a SecureStore failure); 'off' commits directly with a best-effort hint. An encrypted selection
-    // with no bridge `channel` (so the hint can't be recorded) reports NOT applied rather than committing
-    // an un-hinted encrypted mode.
-    const outcome = await applyDbModeChange(previous, next, {
-      writeMode: setDbEncryptionMode,
-      writeHint: (m) =>
-        channel
-          ? setDbModeHint(channel, m)
-          : Promise.resolve({
-              ok: false as const,
-              error: 'No connection to the host to record the encryption-state hint.',
-            }),
-    });
-    // Display the COMMITTED SecureStore value only — never a mode that wasn't actually persisted.
-    setMode(outcome.committedMode);
-    if (!outcome.applied) {
-      setStatusMessage(`Couldn't save — ${outcome.error ?? 'unknown error'}. The change was NOT applied; try again.`);
-      return;
+    // Snapshot what we're transitioning FROM (the displayed committed mode) before any await — used only
+    // to decide whether this is a plaintext→encrypted transition (P1-4-RN) that should schedule a fresh
+    // encrypted database. The authoritative rollback target is re-read inside `applyDbModeChange`'s lock.
+    const previousDisplayed = mode;
+    transitionInFlight.current = true;
+    setTransitioning(true);
+    try {
+      // P1-3 (Sol round 8): `applyDbModeChange` runs the whole hint+mode transaction under a single-flight
+      // mutex and RE-READS the committed mode inside it, so the SecureStore mode and the mode-NAME hint can
+      // never diverge into the dangerous state (SecureStore encrypted + hint 'off'/absent → a transient
+      // boot-time key-request failure boots PLAINTEXT even WITH a DB) even under concurrent taps. For
+      // encrypted modes it writes the hint FIRST and only commits SecureStore if that succeeds (rolling the
+      // hint back on a SecureStore failure); 'off' commits directly with a best-effort hint. An encrypted
+      // selection with no bridge `channel` (so the hint can't be recorded) reports NOT applied rather than
+      // committing an un-hinted encrypted mode.
+      const outcome = await applyDbModeChange(next, {
+        readMode: getDbEncryptionMode,
+        writeMode: setDbEncryptionMode,
+        writeHint: (m) =>
+          channel
+            ? setDbModeHint(channel, m)
+            : Promise.resolve({
+                ok: false as const,
+                error: 'No connection to the host to record the encryption-state hint.',
+              }),
+      });
+      // Display the COMMITTED SecureStore value only — never a mode that wasn't actually persisted. Left
+      // untouched when the committed mode couldn't be re-read (`committedMode` undefined).
+      if (outcome.committedMode !== undefined) {
+        setMode(outcome.committedMode);
+      }
+      if (!outcome.applied) {
+        setStatusMessage(`Couldn't save — ${outcome.error ?? 'unknown error'}. The change was NOT applied; try again.`);
+        return;
+      }
+      if (next === 'off') {
+        setStatusMessage(
+          outcome.hintWarning
+            ? 'Encryption off. Takes effect next time the host app is restarted. (Note: the encryption-state hint could not be synced to the host; it will self-correct on the next successful start.)'
+            : 'Encryption off. Takes effect next time the host app is restarted.',
+        );
+        return;
+      }
+      // P1-4-RN (Sol round 8): an encrypted mode can only apply to a FRESH database — there is no in-place
+      // plaintext→encrypted conversion. When switching FROM plaintext ('off'), ask the launcher to start
+      // fresh so the next boot creates a fresh ENCRYPTED database instead of the server hitting a
+      // plaintext-under-encrypted boot error. This is safe from 'off' specifically: the only DB that can
+      // exist is plaintext (which the operator just confirmed clearing), so there's no encrypted data to
+      // destroy. Switching between encrypted modes is NOT auto-started-fresh here — the existing DB is
+      // handled by the boot Encryption-recovery screen (a different key can't open it), and the server's
+      // `db_encryption_plaintext_unconverted` recovery is the backstop for any case this misses.
+      let startFreshNote = '';
+      if (previousDisplayed === 'off') {
+        if (channel) {
+          const fresh = await requestDbStartFresh(channel);
+          if (!fresh.ok) {
+            startFreshNote = ` (Couldn't schedule the fresh encrypted database: ${fresh.error ?? 'unknown error'}. If existing data blocks startup, use the boot Encryption-recovery screen.)`;
+          }
+        } else {
+          startFreshNote =
+            " (No connection to the host to clear existing data now; if a plaintext database exists it will be cleared from the boot Encryption-recovery screen on the next start.)";
+        }
+      }
+      setStatusMessage(
+        `${MODE_LABELS[next]} selected. Encryption applies to a fresh database — any existing messages are cleared when the host app is next restarted.${startFreshNote}`,
+      );
+    } finally {
+      transitionInFlight.current = false;
+      setTransitioning(false);
     }
-    const base =
-      next === 'off'
-        ? 'Encryption off. Takes effect next time the host app is restarted.'
-        : `${MODE_LABELS[next]} selected. Takes effect next time the host app is restarted.`;
-    setStatusMessage(
-      outcome.hintWarning
-        ? `${base} (Note: the encryption-state hint could not be synced to the host; it will self-correct on the next successful start.)`
-        : base,
-    );
   };
 
   const handleSelect = (next: DbEncryptionMode) => {
-    if (!DESTRUCTIVE_MODES.has(next)) {
+    // P1-3 (Sol round 8): reject a concurrent/same-tick selection IMMEDIATELY via the synchronous ref —
+    // the disabled UI state re-renders too late to stop a second tap fired before it lands.
+    if (transitionInFlight.current) {
+      return;
+    }
+    if (!dbModeSelectionIsDestructive(next)) {
       void applyModeChange(next);
       return;
     }
+    // Hold the guard from the moment the confirmation opens so a second tap can't stack another dialog.
+    // `proceeded` keeps `release` (fired by Cancel/back-dismiss) from clearing the guard out from under an
+    // in-flight `applyModeChange` when the operator confirmed — `applyModeChange`'s `finally` owns it then.
+    transitionInFlight.current = true;
+    setTransitioning(true);
+    let proceeded = false;
+    const release = () => {
+      if (!proceeded) {
+        transitionInFlight.current = false;
+        setTransitioning(false);
+      }
+    };
     Alert.alert(
-      `Switch to ${MODE_LABELS[next]}?`,
+      next === 'ephemeral' ? 'Switch to Ephemeral?' : 'Start a fresh encrypted database?',
       next === 'ephemeral'
-        ? 'Ephemeral mode wipes the on-device message database on every app restart. The next restart ' +
-            'will permanently delete any existing messages, and this cannot be undone.'
-        : 'Switching encryption modes can make the existing on-device message database unreadable — a ' +
-            'different (or missing) key can never decrypt data that was encrypted under another key. ' +
-            'Existing messages may become permanently inaccessible, and this cannot be undone.',
+        ? 'Ephemeral mode starts a fresh on-device database on every app restart and holds the key only in ' +
+            'memory — nothing survives a reboot. Any existing messages are permanently deleted on the next ' +
+            'restart. This cannot be undone.'
+        : 'Encryption can only apply to a fresh database — existing data cannot be converted in place. ' +
+            'Continuing deletes all existing messages and starts a fresh encrypted database the next time ' +
+            'the host app is restarted. This cannot be undone.',
       [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Continue', style: 'destructive', onPress: () => void applyModeChange(next) },
+        { text: 'Cancel', style: 'cancel', onPress: release },
+        {
+          text: next === 'ephemeral' ? 'Continue' : 'Delete & start fresh',
+          style: 'destructive',
+          onPress: () => {
+            proceeded = true;
+            void applyModeChange(next);
+          },
+        },
       ],
+      { onDismiss: release },
     );
   };
 
@@ -232,8 +297,9 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                 <ThemedText type="small" themeColor="textSecondary">
                   Encrypted modes (ephemeral/persistent/passphrase) need an app build that includes the
                   SQLCipher native module — not every build has it yet. If it&apos;s missing, the host
-                  starts unencrypted and shows a clear warning rather than failing to boot. Any change
-                  here takes effect the next time the host app is restarted.
+                  starts unencrypted and shows a clear warning rather than failing to boot. Encryption
+                  applies to a fresh database — there is no in-place conversion, so turning it on clears
+                  any existing messages. Changes take effect the next time the host app is restarted.
                 </ThemedText>
               </ThemedView>
 
@@ -248,9 +314,12 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                     <Pressable
                       key={entry}
                       onPress={() => handleSelect(entry)}
+                      // P1-3 (Sol round 8): disable EVERY mode row while a transition is in flight, so a
+                      // second selection can't start until the first fully commits/rolls back.
+                      disabled={transitioning}
                       accessibilityRole="radio"
-                      accessibilityState={{ checked: mode === entry }}
-                      style={styles.row}>
+                      accessibilityState={{ checked: mode === entry, disabled: transitioning }}
+                      style={[styles.row, transitioning && styles.rowDisabled]}>
                       <ThemedView type={mode === entry ? 'backgroundSelected' : 'backgroundElement'} style={styles.rowInner}>
                         <View style={styles.radioDot}>
                           <View style={[styles.radioDotInner, mode === entry && { backgroundColor: '#208AEF' }]} />
@@ -376,6 +445,9 @@ const styles = StyleSheet.create({
   },
   row: {
     marginTop: Spacing.one,
+  },
+  rowDisabled: {
+    opacity: 0.5,
   },
   rowInner: {
     flexDirection: 'row',

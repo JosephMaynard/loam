@@ -724,50 +724,102 @@ export function mayBootPlaintextOnLockedError(hint: DbModeHintResult, dbExists: 
   return false;
 }
 
-/** Dependencies for {@link applyDbModeChange} — the two authoritative writes a picker selection performs.
- * Injected so the sequencing can be harness-tested against scripted successes/failures (the React
- * component wires `writeMode = setDbEncryptionMode` and `writeHint = (m) => setDbModeHint(channel, m)`). */
+/** Dependencies for {@link applyDbModeChange} — the reads/writes a picker selection performs. Injected so
+ * the serialized sequencing can be harness-tested against scripted successes/failures (the React component
+ * wires `readMode = getDbEncryptionMode`, `writeMode = setDbEncryptionMode`, and
+ * `writeHint = (m) => setDbModeHint(channel, m)`). */
 export interface ApplyDbModeChangeDeps {
+  /**
+   * Re-read the ACTUALLY-committed SecureStore mode INSIDE the serialized transaction (P1-3, Sol round 8).
+   * The picker's captured React `mode` can be stale by the time a queued transition runs (another
+   * transition may have committed a different mode while this one waited on the mutex), so the rollback
+   * target and diff base MUST come from a fresh read here, not a value captured before the lock was held.
+   * A read error ({@link DB_ENCRYPTION_MODE_READ_ERROR}) aborts the transaction — we can't pick a safe
+   * rollback target without knowing the committed mode.
+   */
+  readMode: () => Promise<DbEncryptionModeOrError>;
   writeMode: (mode: DbEncryptionMode) => Promise<SetDbEncryptionModeResult>;
   writeHint: (mode: DbEncryptionMode) => Promise<SetDbModeHintResult>;
 }
 
 /** Outcome of {@link applyDbModeChange}: whether the change is safely applied, which mode the picker
  * radio should now DISPLAY (the committed SecureStore value — `next` only on a coherent apply, else the
- * unchanged `previous`), an `error` when not applied, and a soft `hintWarning` when an 'off' selection
+ * re-read `previous`; `undefined` when the committed mode could not be re-read, so the caller leaves its
+ * display untouched), an `error` when not applied, and a soft `hintWarning` when an 'off' selection
  * applied but its best-effort hint sync failed. */
 export interface ApplyDbModeChangeOutcome {
   applied: boolean;
-  committedMode: DbEncryptionMode;
+  committedMode?: DbEncryptionMode;
   error?: string;
   hintWarning?: boolean;
 }
 
 /**
- * P1-1 (Sol round 7, hole 3): the PURE, harness-tested sequencing for a mode-picker selection that
- * guarantees the SecureStore mode and the mode-NAME hint never diverge into the DANGEROUS state —
- * SecureStore committed to an ENCRYPTED mode while the hint still says `'off'`/absent, which a transient
- * boot-time key-request failure would then resolve as a PLAINTEXT downgrade even WITH a DB on disk.
+ * Single-flight mutex serializing the ENTIRE hint+mode transaction across ALL concurrent
+ * {@link applyDbModeChange} calls (P1-3, Sol round 8). Without it, the transaction was safe for ONE
+ * isolated call but NOT for interleaved ones: every caller captured the same stale React `mode`, and the
+ * hint/mode writes of two transitions could interleave into the exact fail-open state (SecureStore
+ * committed to an ENCRYPTED mode while the hint still says `'off'`). Chaining every transaction onto this
+ * promise guarantees only one runs at a time, and each re-reads the committed mode INSIDE its own turn.
+ * Same shape as {@link withDeviceSecretLock} above.
+ */
+let modeChangeLock: Promise<unknown> = Promise.resolve();
+function withModeChangeLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = modeChangeLock.then(fn, fn);
+  modeChangeLock = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * P1-3 (Sol round 8): the SERIALIZED, harness-tested sequencing for a mode-picker selection. Guarantees
+ * the SecureStore mode and the mode-NAME hint never diverge into the DANGEROUS state — SecureStore
+ * committed to an ENCRYPTED mode while the hint still says `'off'`/absent, which a transient boot-time
+ * key-request failure would then resolve as a PLAINTEXT downgrade even WITH a DB on disk — even under
+ * CONCURRENT picker taps.
  *
- * Previously the picker committed the SecureStore mode FIRST and treated a failed hint write as a soft
- * warning, so an off→encrypted selection whose hint write failed left exactly that dangerous divergence.
+ * Two guarantees on top of the round-7 ordering:
+ *   1. The whole transaction runs under a single-flight mutex ({@link withModeChangeLock}), so a second
+ *      selection cannot start until the first fully commits/rolls back — two transitions can never
+ *      interleave their writes into the fail-open state.
+ *   2. The rollback target / diff base comes from a FRESH read of the committed SecureStore mode
+ *      (`deps.readMode`) taken INSIDE the lock — never a captured/stale React `mode`. A read error aborts
+ *      (no safe rollback target).
  *
+ * Ordering within the transaction (unchanged from round 7):
  *   - `'off'`: committing plaintext is never a confidentiality risk (a stale ENCRYPTED hint only
  *     over-locks a later boot, fail-closed), so commit the SecureStore mode directly and treat the hint
  *     as best-effort — a hint failure is only a soft `hintWarning`.
- *   - ENCRYPTED modes: require BOTH writes. Write the HINT first (so a hint failure never touches
- *     SecureStore — nothing to roll back), then commit SecureStore; on a SecureStore failure, roll the
- *     hint back to `previous`. The only residual divergence ever left is the SAFE one (hint encrypted +
- *     SecureStore unchanged → over-locks, never downgrades). Only reports `applied` when the end state is
- *     coherent.
+ *   - ENCRYPTED modes: write the HINT first (so a hint failure never touches SecureStore — nothing to
+ *     roll back), then commit SecureStore; on a SecureStore failure, roll the hint back to the re-read
+ *     `previous`. The only residual divergence ever left is the SAFE one (hint encrypted + SecureStore
+ *     unchanged → over-locks, never downgrades).
  *
  * Never writes key/passphrase material anywhere — the hint carries only the non-secret mode NAME.
  */
-export async function applyDbModeChange(
-  previous: DbEncryptionMode,
+export function applyDbModeChange(
   next: DbEncryptionMode,
   deps: ApplyDbModeChangeDeps,
 ): Promise<ApplyDbModeChangeOutcome> {
+  return withModeChangeLock(() => applyDbModeChangeLocked(next, deps));
+}
+
+async function applyDbModeChangeLocked(
+  next: DbEncryptionMode,
+  deps: ApplyDbModeChangeDeps,
+): Promise<ApplyDbModeChangeOutcome> {
+  // Re-read the committed mode INSIDE the lock — the caller's captured value may be stale (a prior queued
+  // transition may have committed a different mode). This is the authoritative rollback target + diff base.
+  const previous = await deps.readMode();
+  if (previous === DB_ENCRYPTION_MODE_READ_ERROR) {
+    return {
+      applied: false,
+      error: 'Could not read the current encryption setting (a device security-store error). The change was NOT applied.',
+    };
+  }
+
   if (next === 'off') {
     const modeResult = await deps.writeMode('off');
     if (!modeResult.ok) {
@@ -784,10 +836,52 @@ export async function applyDbModeChange(
   }
   const modeResult = await deps.writeMode(next);
   if (!modeResult.ok) {
-    // Roll the hint back to `previous` so SecureStore (unchanged) and the hint agree again. Best-effort:
-    // a failed revert only leaves the SAFE over-locking divergence, never a plaintext downgrade.
+    // Roll the hint back to the re-read `previous` so SecureStore (unchanged) and the hint agree again.
+    // Best-effort: a failed revert only leaves the SAFE over-locking divergence, never a plaintext downgrade.
     await deps.writeHint(previous);
     return { applied: false, committedMode: previous, error: modeResult.error };
   }
   return { applied: true, committedMode: next };
+}
+
+/** The boot-status code the server reports when an ENCRYPTED mode is configured but the on-disk DB is
+ * still PLAINTEXT (P1-4-RN, Sol round 8) — there is no in-place plaintext→encrypted conversion, so the
+ * host must NEVER silently serve plaintext under an encrypted selection. `index.tsx` maps this to a
+ * DESTRUCTIVE recovery (delete the existing data and start a fresh encrypted DB, or switch encryption
+ * back off to keep the existing unencrypted data). A non-destructive in-place plaintext→encrypted
+ * CONVERSION is a documented FUTURE enhancement (docs/21) — not built. */
+export const DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE = 'db_encryption_plaintext_unconverted' as const;
+
+/**
+ * P1-4-RN (Sol round 8): whether SELECTING `next` is a destructive action that must be gated behind an
+ * explicit operator confirmation before it is persisted. Any encrypted mode
+ * (`ephemeral`/`persistent`/`passphrase`) is destructive: encryption can only apply to a FRESH database
+ * (no in-place plaintext→encrypted conversion), so choosing one clears or strands any existing on-device
+ * data. `'off'` never destroys data on its own.
+ *
+ * This module has no filesystem access to the launcher's data dir, so it cannot detect whether a DB
+ * actually exists — the confirmation is therefore gated on the MODE alone (an encrypted selection is
+ * treated as potentially destructive), and the server's {@link DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE}
+ * boot recovery is the backstop for a plaintext DB that reaches boot un-cleared.
+ */
+export function dbModeSelectionIsDestructive(next: DbEncryptionMode): boolean {
+  return next !== 'off';
+}
+
+/** The dedicated DB-encryption boot-recovery UI a given boot-error `code` maps to (P1-4-RN, Sol round 8),
+ * or `null` for codes with no dedicated recovery. Pure so `index.tsx`'s code→recovery mapping (which
+ * decides whether to show the destructive plaintext-unconverted / start-fresh / unlock UI) is
+ * harness-testable. */
+export type DbEncryptionRecovery = 'plaintext-unconverted' | 'unreadable' | 'locked';
+export function dbEncryptionRecoveryForCode(code: string | undefined): DbEncryptionRecovery | null {
+  switch (code) {
+    case DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE:
+      return 'plaintext-unconverted';
+    case 'db_encryption_unreadable':
+      return 'unreadable';
+    case 'db_encryption_locked':
+      return 'locked';
+    default:
+      return null;
+  }
 }
