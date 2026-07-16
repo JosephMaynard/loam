@@ -1236,6 +1236,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // POST-bump generation and see no further change, so it needs its own explicit "don't start" guard
   // (SF3) — `retryMissingAttachments` checks this before doing any work.
   let wipeInProgress = false;
+  // Single-flight guard for `executeKillSwitch` (CodeRabbit round-10): the in-flight wipe promise, so
+  // concurrent callers reuse it instead of racing a second destructive wipe. Cleared in its `finally`.
+  let wipeInFlight: Promise<KillSwitchResult> | undefined;
   // RF1: set for the remainder of this process's life once a persistent/passphrase-encrypted node's
   // kill switch hands off to the RN launcher for a key-rotation restart (executeKillSwitchBody). The
   // ciphertext is already deleted and in-memory state is cleared at that point, but this process keeps
@@ -1721,6 +1724,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             renameSync(from, `${from}.unreadable-${preservedSuffix}`);
           }
         }
+        // fsync the data dir so the aside-renames are DURABLE before we report "preserved" and open a fresh
+        // DB over them (CodeRabbit round-10): otherwise a power-loss could lose the renames, leaving the fresh
+        // open to collide with the old files. Recast a non-durable rename as the recoverable unreadable error.
+        if (!fsyncDir(dataDir)) {
+          throw new Error("preserved-aside renames could not be made durable (parent-directory fsync failed)");
+        }
         const message =
           "An explicit PRESERVE start-fresh confirmation was present, so the previous files were preserved on " +
           `disk (suffix "${preservedSuffix}") and a fresh database was started.`;
@@ -2058,9 +2067,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const hook = wipeRestartHook();
 
-    // Both phases need the artifacts PROVEN gone before any device-key clear. For `delete-pending` this is
-    // the retry the whole redesign hinges on; for `key-clear-ready` it's a cheap idempotent re-verify.
-    const deletion = deleteAndVerifyAllWipeArtifacts();
+    // Both phases need the artifacts PROVEN gone (and the deletion made DURABLE — dir fsync) before any
+    // device-key clear. For `delete-pending` this is the retry the whole redesign hinges on; for
+    // `key-clear-ready` it's a cheap idempotent re-verify. Durable so the deletions can't be lost by a
+    // power-loss between here and the key clear (CodeRabbit round-10).
+    const deletion = deleteAndVerifyAllWipeArtifactsDurable();
 
     if (!deletion.ok) {
       // Deletion still incomplete/unverifiable — stay `delete-pending` and do NOT clear the key. Refuse to
@@ -3794,6 +3805,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * see the branch at the top of {@link executeKillSwitchBody}.
    */
   async function executeKillSwitch(): Promise<KillSwitchResult> {
+    // SINGLE-FLIGHT (CodeRabbit round-10): two concurrent callers (the admin kill-switch endpoint + the panic
+    // token, or two same-tick requests that both cleared the 503 gate before the first raised it) must NOT
+    // each run a wipe — a second `store.close()`/delete/reopen racing the first is destructive. Reuse the
+    // in-flight attempt so every concurrent caller observes the SAME single wipe's outcome.
+    if (wipeInFlight) {
+      return wipeInFlight;
+    }
     // Invalidate any in-flight sync round up front (before the first await here): a pull that resumes
     // after this point will see the changed generation and bail instead of writing peer data back
     // onto the store we're about to wipe (docs/15 #2). `wipeInProgress` (SF3) additionally blocks a
@@ -3801,11 +3819,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     wipeGeneration += 1;
     wipeInProgress = true;
 
-    try {
-      return await executeKillSwitchBody();
-    } finally {
+    const attempt = executeKillSwitchBody().finally(() => {
       wipeInProgress = false;
-    }
+      wipeInFlight = undefined;
+    });
+    wipeInFlight = attempt;
+    return attempt;
   }
 
   /**
@@ -3993,8 +4012,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // Close the store so its files can be deleted.
         store.close();
 
-        // Step 2: fail-closed deletion + proof of absence for the FULL inventory (DB artifacts + media).
-        const deletion = deleteAndVerifyAllWipeArtifacts();
+        // Step 2: fail-closed deletion + proof of absence for the FULL inventory (DB artifacts + media),
+        // made DURABLE (dir fsync) so the deletions survive a power-loss before the launcher key-clear
+        // (CodeRabbit round-10).
+        const deletion = deleteAndVerifyAllWipeArtifactsDurable();
 
         if (!deletion.ok) {
           // Deletion incomplete/unverifiable — a survivor (e.g. a legacy-key `.premigration` snapshot that

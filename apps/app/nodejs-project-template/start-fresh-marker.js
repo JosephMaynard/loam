@@ -72,9 +72,12 @@ function installStartFreshMarker(options) {
   var dir = options.dir;
   var contents = options.contents;
 
-  // Phase 1 — stage the bytes, fsync the file inode, then atomically rename onto the marker path. Any
-  // failure here happens BEFORE the marker is installed, so the marker is provably absent: clean up the
-  // staging file and report "not-installed".
+  // Phase 1 — stage the bytes, fsync the file inode, then atomically rename onto the marker path. A failure
+  // here means THIS call did not install a new marker. But the atomic rename leaves any PRE-EXISTING marker
+  // (from an earlier unconsumed request) untouched, so "this write failed" does NOT prove the marker path is
+  // absent (CodeRabbit round-10 CRITICAL). Clean up the staging file, then PROVE absence (lstat, ENOENT-only)
+  // before reporting `not-installed`; if a marker still exists — or absence can't be verified — report
+  // `indeterminate` so the caller never claims "nothing was written" while a consumable marker is on disk.
   try {
     fs.writeFileSync(tmpPath, contents, 'utf8');
     var fd = fs.openSync(tmpPath, 'r');
@@ -90,7 +93,12 @@ function installStartFreshMarker(options) {
     } catch (cleanupErr) {
       // ENOENT is the common case (the staging write itself failed) — nothing to clean up.
     }
-    return 'not-installed';
+    try {
+      fs.lstatSync(markerPath);
+      return 'indeterminate'; // a marker (this call's or a prior one's) is still on disk
+    } catch (statErr) {
+      return statErr && statErr.code === 'ENOENT' ? 'not-installed' : 'indeterminate';
+    }
   }
 
   // Phase 2 — the marker is now installed. A successful parent-dir fsync makes the rename durable.

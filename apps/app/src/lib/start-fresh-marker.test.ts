@@ -191,4 +191,20 @@ describe("installStartFreshMarker", () => {
     const fs = makeFs({ failDirOpenOn: [1, 2] });
     expect(install(fs)).toBe("indeterminate");
   });
+
+  it("returns 'not-installed' when the RENAME fails and NO marker exists on disk (provably absent)", () => {
+    const fs = makeFs({ failRename: true });
+    expect(install(fs)).toBe("not-installed");
+    expect(fs._has(MARKER)).toBe(false);
+  });
+
+  it("returns 'indeterminate' (NOT 'not-installed') when the rename fails but a PRE-EXISTING marker is still on disk", () => {
+    // CodeRabbit round-10 CRITICAL: the atomic rename leaves a prior unconsumed marker untouched, so a
+    // Phase-1 failure does NOT prove the marker path is absent. Reporting 'not-installed' here would let the
+    // caller claim "nothing was written" while a consumable (possibly destructive) marker remains.
+    const fs = makeFs({ failRename: true });
+    fs.writeFileSync(MARKER); // a stale marker from an earlier unconsumed request
+    expect(install(fs)).toBe("indeterminate");
+    expect(fs._has(MARKER)).toBe(true);
+  });
 });
