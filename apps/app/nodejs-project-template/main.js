@@ -27,7 +27,7 @@ const { durableWriteConfig } = require('./config-write');
 // Sol Fable-round-3 P1: the pure per-attempt boot-env decision (clear-all-then-set-branch), split out so the
 // "every attempt is a FRESH boot configuration — no stale LOAM_DB_KEY leaks across in-process retries" rule
 // is unit-testable (see boot-config.js's doc comment).
-const { DB_KEY_LOCKED_ERROR, ENV_KEYS, computeDbBootEnv } = require('./boot-config');
+const { DB_KEY_LOCKED_ERROR, computeDbBootEnv, applyBootEnvTo } = require('./boot-config');
 
 const PORT = 3000;
 const projectDir = __dirname;
@@ -1246,17 +1246,10 @@ let meshPollArmed = false;
  * when it's safe to retry again. Never rejects.
  */
 /** Reset EVERY per-attempt boot env var (so nothing from a prior attempt leaks in), then set only the ones
- * this attempt selected (Sol Fable-round-3 P1). `env` holds ONLY the values to set; `undefined` values are
- * skipped. */
-function applyBootEnv(env) {
-  ENV_KEYS.forEach(function (k) {
-    delete process.env[k];
-  });
-  Object.keys(env).forEach(function (k) {
-    if (env[k] !== undefined) {
-      process.env[k] = env[k];
-    }
-  });
+ * this attempt selected (Sol Fable-round-3 P1) — the shared `applyBootEnvTo` in boot-config.js is the single
+ * production implementation (unit-tested), applied here to the real `process.env`. */
+function applyBootEnv(values) {
+  applyBootEnvTo(process.env, values);
 }
 
 /** Whether the SQLCipher native module actually LOADS (not just resolves) in this build — injected into

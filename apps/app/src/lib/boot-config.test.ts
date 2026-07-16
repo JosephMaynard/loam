@@ -11,23 +11,17 @@
 import { describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { computeDbBootEnv, ENV_KEYS, DB_KEY_LOCKED_ERROR } = require("../../nodejs-project-template/boot-config.js");
+const { computeDbBootEnv, applyBootEnvTo, DB_KEY_LOCKED_ERROR } = require("../../nodejs-project-template/boot-config.js");
 
 const withDriver = () => ({ probeEncryptedDriver: () => true });
 const noDriver = () => ({ probeEncryptedDriver: () => false });
 const absentHint = { status: "absent" as const };
 
-/** Replicate main.js's `applyBootEnv`: delete every per-attempt var, then set only the ones in `env`.
- * Proves the "no stale key survives" contract end-to-end against a seeded environment. */
+/** Exercise the PRODUCTION `applyBootEnvTo` (the same clear-then-apply main.js uses on `process.env`, per
+ * CodeRabbit) against a seeded environment, so the "no stale key survives" contract is verified end-to-end
+ * with no duplicated test logic. */
 function applyContract(seed: Record<string, string>, env: Record<string, string>): Record<string, string | undefined> {
-  const result: Record<string, string | undefined> = { ...seed };
-  for (const k of ENV_KEYS) {
-    delete result[k];
-  }
-  for (const k of Object.keys(env)) {
-    result[k] = env[k];
-  }
-  return result;
+  return applyBootEnvTo({ ...seed }, env);
 }
 
 describe("computeDbBootEnv — no stale key leaks across attempts (Sol Fable-round-3 P1)", () => {

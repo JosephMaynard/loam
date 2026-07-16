@@ -202,38 +202,77 @@ async function stopCompletionWithinBudget(context: LlamaContext): Promise<void> 
  * (`void`). The signature stays `(): Promise<void>` for the `model-manager.tsx` call sites.
  */
 export function releaseActiveModelContext(): Promise<void> {
-  const run = inferenceChain.then(() => {
-    beginRelease();
-  });
-  inferenceChain = run.catch(() => undefined);
-  return run;
+  // SCHEDULE the release behind any in-flight inference, but return PROMPTLY (don't await the chain): a
+  // deactivate doesn't unlink bytes, so it needs no confirmation, and awaiting `inferenceChain` here would
+  // couple the caller (the operation mutex) to whatever is currently on the chain — including a not-timeout-
+  // wrapped `initLlama` load. `beginRelease` detaches synchronously when it runs; the engine state gates any
+  // later load. Never throws.
+  inferenceChain = inferenceChain
+    .then(() => {
+      beginRelease();
+    })
+    .catch(() => undefined);
+  return Promise.resolve();
 }
 
+/** How long the delete BARRIER (`releaseModelContextIfLoaded`) waits for the native `release()` to CONFIRM
+ * before giving up and deferring the byte deletion to reconciliation (CodeRabbit). Bounds the operation mutex
+ * so a slow/hung native release (or a long in-flight completion the release queues behind) can never wedge a
+ * delete — the durable delete-pending simply retries the release+unlink on a later reconcile pass. */
+const RELEASE_CONFIRM_BUDGET_MS = 5 * 1000;
+
 /**
- * PATH-AWARE release used when a SPECIFIC model is being cleared/deleted (Finding 1): initiate the tracked
- * release of the loaded context ONLY if the currently-loaded model is `modelPath`. This is what lets the
- * action layer drive a release on EVERY confirmed launcher clear — including reconciliation of an OLD delete
- * from a previous process — without ever tearing down a DIFFERENT, newly-loaded model: reconciling a stale
- * delete for model A while B is loaded must not release B. `modelPath` is compared after stripping the
- * `file://` scheme the same way `activeModelPath` does before it stores `loadedModelPath`, so a caller can
- * pass a raw `model.uri` (`file:///…`) and it still matches the bare path we loaded with.
+ * PATH-AWARE release BARRIER used before the byte deletion of a SPECIFIC model (Finding 1 / CodeRabbit):
+ * release the loaded context ONLY if the currently-loaded model is `modelPath`, and CONFIRM the outcome so
+ * the caller can gate the irreversible unlink on the native `release()` actually completing — the file must
+ * never be removed while the native side may still map it. Returns:
+ *   - `'released'`    — the native release RESOLVED, or the model wasn't loaded (nothing maps the file) →
+ *                       safe to unlink now.
+ *   - `'unconfirmed'` — still releasing when the `budgetMs` window elapsed → the caller keeps the durable
+ *                       delete-pending and retries at reconciliation (never blocks on a slow/hung release).
+ *   - `'poisoned'`    — a native release rejected → keep the pending until an app restart.
  *
- * Like `releaseActiveModelContext`, it runs SERIALIZED behind `inferenceChain` (so it can't release a
- * context out from under a running completion), only INITIATES the release (`beginRelease` — never `await`s
- * the native `release()`, preserving the Sol P1 state-machine contract that nothing on this path can wedge
- * the chain), and never throws — safe to `await` from the delete transaction without risking a hang. The
- * path check runs INSIDE the serialized step, against the state that exists once any in-flight inference has
- * drained, so it reflects what's actually loaded at release time.
+ * The release is SERIALIZED behind `inferenceChain` (so it can't tear a context out from under a running
+ * completion), and the whole confirmation is BOUNDED by `budgetMs` — so even a hung `initLlama` load ahead of
+ * it on the chain, or a native `release()` that never settles, can't wedge the operation mutex (the Sol P1
+ * contract). `modelPath` is compared after stripping the `file://` scheme, the same way `activeModelPath`
+ * does before storing `loadedModelPath`, so a caller may pass a raw `model.uri`. Never throws.
  */
-export function releaseModelContextIfLoaded(modelPath: string): Promise<void> {
+export function releaseModelContextIfLoaded(
+  modelPath: string,
+  budgetMs: number = RELEASE_CONFIRM_BUDGET_MS,
+): Promise<'released' | 'unconfirmed' | 'poisoned'> {
   const target = modelPath.replace(/^file:\/\//, '');
-  const run = inferenceChain.then(() => {
+  // Schedule the path-aware release behind any in-flight inference. CRITICAL: `inferenceChain` must advance
+  // after the synchronous DETACH (which `beginRelease` does before it awaits the native `release()`), NOT
+  // after the release COMPLETES — otherwise a hung `release()` would wedge the chain (every later request
+  // would block on it). So the step returns nothing (resolves post-detach); the native release is tracked
+  // SEPARATELY in `tracked` for the confirmation below.
+  let tracked: Promise<void> = Promise.resolve();
+  const step = inferenceChain.then(() => {
     if (loadedContext && loadedModelPath === target) {
-      beginRelease();
+      tracked = beginRelease(); // detaches synchronously; resolves when release() settles; never rejects
     }
   });
-  inferenceChain = run.catch(() => undefined);
-  return run;
+  inferenceChain = step.catch(() => undefined);
+
+  // Confirm the NATIVE release completion (via `tracked`), BOUNDED so a slow/hung release can't block the
+  // caller (the operation mutex) forever — on timeout the caller keeps the delete-pending and reconciles later.
+  let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<'unconfirmed'>((resolve) => {
+    budgetTimer = setTimeout(() => resolve('unconfirmed'), budgetMs);
+  });
+  const confirmed = step
+    .then(() => tracked)
+    .then(
+      () => (engineStatus === 'poisoned' ? 'poisoned' : 'released'),
+      () => (engineStatus === 'poisoned' ? 'poisoned' : 'released'),
+    );
+  return Promise.race([confirmed, budget]).finally(() => {
+    if (budgetTimer !== undefined) {
+      clearTimeout(budgetTimer);
+    }
+  });
 }
 
 /**

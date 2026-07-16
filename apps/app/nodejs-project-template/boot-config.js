@@ -160,9 +160,28 @@ function computeDbBootEnv(result, ctx) {
   };
 }
 
+/**
+ * Apply one attempt's boot config to an env object: DELETE every per-attempt boot var first (so nothing
+ * from a prior attempt survives), then set ONLY the values this attempt selected (`undefined` skipped).
+ * The single production implementation of the "every attempt is a fresh configuration" contract — main.js
+ * calls it with `process.env`, the tests with a seeded object, so there is no duplicated logic to drift.
+ */
+function applyBootEnvTo(env, values) {
+  ENV_KEYS.forEach(function (k) {
+    delete env[k];
+  });
+  Object.keys(values).forEach(function (k) {
+    if (values[k] !== undefined) {
+      env[k] = values[k];
+    }
+  });
+  return env;
+}
+
 module.exports = {
   DB_KEY_LOCKED_ERROR: DB_KEY_LOCKED_ERROR,
   ENV_KEYS: ENV_KEYS,
   computeDbBootEnv: computeDbBootEnv,
+  applyBootEnvTo: applyBootEnvTo,
   mayBootPlaintextOnLockedError: mayBootPlaintextOnLockedError,
 };

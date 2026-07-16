@@ -314,7 +314,9 @@ describe("on-device-llm inference", () => {
     // Operator taps Deactivate/Delete, but the native release() never settles. releaseActiveModelContext
     // must return PROMPTLY (initiate the tracked release, don't await it) so it can't wedge `inferenceChain`.
     mocks.release.mockImplementationOnce(() => new Promise(() => {}));
+    // Returns PROMPTLY (schedules the release behind the chain); flush so the scheduled beginRelease runs.
     await releaseActiveModelContext();
+    await flush();
     expect(mocks.release).toHaveBeenCalledTimes(1);
     const contextsWhileReleasing = mocks.contextsCreated;
 
@@ -397,30 +399,56 @@ describe("on-device-llm inference", () => {
     expect(mocks.release).toHaveBeenCalledTimes(1);
   });
 
-  it("releaseModelContextIfLoaded is a no-op that never throws when nothing is loaded (Finding 1)", async () => {
-    await expect(releaseModelContextIfLoaded("file:///models/m.gguf")).resolves.toBeUndefined();
+  it("releaseModelContextIfLoaded resolves 'released' and never releases when nothing is loaded (Finding 1)", async () => {
+    await expect(releaseModelContextIfLoaded("file:///models/m.gguf")).resolves.toBe("released");
     expect(mocks.release).not.toHaveBeenCalled();
   });
 
-  it("releaseModelContextIfLoaded whose native release HANGS returns promptly and doesn't wedge the chain (Finding 1 / Sol P1)", async () => {
+  it("releaseModelContextIfLoaded whose native release HANGS resolves 'unconfirmed' after the budget without wedging the chain (Finding 1 / Sol P1)", async () => {
+    vi.useFakeTimers();
     const channel = makeChannel();
     registerOnDeviceLlm(channel);
 
     channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
-    await flush();
+    await vi.advanceTimersByTimeAsync(1);
     expect(endedFor(channel, "1")).toBe(true);
 
-    // The native release() never settles — the path-aware release must still return promptly (initiate-only).
+    // The native release() never settles: the BARRIER (CodeRabbit) must not report 'released' (which would
+    // let the caller unlink a still-mapped file) and must not block forever — it resolves 'unconfirmed' once
+    // the bounded confirmation budget (5s) elapses, so the caller keeps the delete-pending and reconciles later.
     mocks.release.mockImplementationOnce(() => new Promise(() => {}));
-    await releaseModelContextIfLoaded("file:///models/m.gguf");
-    expect(mocks.release).toHaveBeenCalledTimes(1);
+    const relPromise = releaseModelContextIfLoaded("file:///models/m.gguf");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.release).toHaveBeenCalledTimes(1); // the release WAS initiated
     const contextsWhileReleasing = mocks.contextsCreated;
+
+    await vi.advanceTimersByTimeAsync(5000); // past the confirmation budget
+    await expect(relPromise).resolves.toBe("unconfirmed");
 
     // A following request fails FAST (engine `releasing`) rather than hanging, and builds no second context.
     channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
-    await flush();
+    await vi.advanceTimersByTimeAsync(1);
     expect(mocks.contextsCreated).toBe(contextsWhileReleasing);
     expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/still recovering/i);
+  });
+
+  it("releaseModelContextIfLoaded resolves 'released' once the native release CONFIRMS (Finding 1 / CodeRabbit)", async () => {
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    // Default release resolves → the barrier confirms disposal, so the caller may safely unlink the file.
+    await expect(releaseModelContextIfLoaded("file:///models/m.gguf")).resolves.toBe("released");
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("releaseModelContextIfLoaded resolves 'poisoned' when the native release REJECTS (Finding 1)", async () => {
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    mocks.release.mockRejectedValueOnce(new Error("native release blew up"));
+    await expect(releaseModelContextIfLoaded("file:///models/m.gguf")).resolves.toBe("poisoned");
   });
 
   it("does not throw (and never crashes) when release fails on the no-active-model path", async () => {

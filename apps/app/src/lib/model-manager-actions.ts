@@ -51,13 +51,21 @@ export interface ModelActionDeps {
    * INITIATES the release and returns PROMPTLY (never blocks on the native `release()`), so awaiting it
    * here can't wedge the operation mutex; and it never throws. */
   releaseActiveContext(): Promise<void>;
-  /** Release the loaded native context ONLY IF the currently-loaded model is `modelPath` (bound to
-   * `releaseModelContextIfLoaded`) — used before the IRREVERSIBLE byte deletion of a DELETED model so the
-   * GGUF is never unlinked while the native context may still map it (Finding 1). PATH-AWARE so reconciling
-   * an old delete for one model never tears down a different, newly-loaded one. Like `releaseActiveContext`
-   * it only initiates the release, returns promptly, and never throws. */
-  releaseModelContext(modelPath: string): Promise<void>;
+  /** Release the loaded native context ONLY IF the currently-loaded model is `modelPath`, and CONFIRM the
+   * outcome (bound to `releaseModelContextIfLoaded`) — the BARRIER before the IRREVERSIBLE byte deletion of a
+   * DELETED model (CodeRabbit): the GGUF must never be unlinked while the native side may still map it. The
+   * prompt-only release contract can't be that barrier, so this instead RETURNS whether the native
+   * `release()` actually completed, BOUNDED so it never blocks the operation mutex forever on a release that
+   * may never settle: `'released'` (confirmed disposed — or the model wasn't loaded, so nothing maps the
+   * file) → safe to unlink; `'unconfirmed'` (still releasing when the budget elapsed) → KEEP the durable
+   * delete-pending and retry the delete at reconciliation; `'poisoned'` (a native release rejected) → keep
+   * the pending until an app restart. PATH-AWARE, so reconciling an old delete for one model never tears down
+   * a different, newly-loaded one. Never throws. */
+  releaseModelContext(modelPath: string): Promise<ContextReleaseOutcome>;
 }
+
+/** The confirmed outcome of a path-aware context release barrier — see `ModelActionDeps.releaseModelContext`. */
+export type ContextReleaseOutcome = 'released' | 'unconfirmed' | 'poisoned';
 
 /** How a transaction ended, so `model-manager.tsx` can adopt the resulting state and show a message:
  *   - `'ok'`           — persisted + confirmed by the launcher.
@@ -336,16 +344,15 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
         message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
       };
     }
-    // Confirmed `ok` — the launcher released the file. Release the native context FIRST (path-aware —
-    // Finding 1) so the GGUF isn't unlinked while the native side may still have it mapped, THEN delete the
-    // bytes (CHECKED) and clear the journal. Prompt-returning, so it never blocks the mutex.
-    await deps.releaseModelContext(model.uri);
+    // Confirmed `ok` — the launcher released the file. `commitByteDeletion` now runs the CONFIRMED-release
+    // barrier itself (path-aware, bounded) before the checked byte delete, so the GGUF is never unlinked while
+    // the native context may still map it, and an unconfirmed/poisoned release defers the delete to
+    // reconciliation instead of blocking (CodeRabbit).
     return commitByteDeletion(deps, model, state);
   }
 
-  // Inactive: no launcher clear needed — delete the bytes (CHECKED) then clear the journal (Finding 1).
-  // No context release: an inactive model isn't the loaded one, and `releaseModelContext` is path-aware
-  // anyway, so a release here would be a guaranteed no-op.
+  // Inactive: no launcher clear needed. `commitByteDeletion`'s release barrier is a path-aware no-op here
+  // (an inactive model isn't the loaded one → 'released' immediately), then the checked byte delete + journal.
   return commitByteDeletion(deps, model, state);
 }
 
@@ -365,6 +372,22 @@ async function commitByteDeletion(
   model: DownloadedModel,
   writeAheadState: ModelManagerState,
 ): Promise<ModelActionResult> {
+  // BARRIER (CodeRabbit): CONFIRM the native context is released (path-aware, bounded) BEFORE unlinking the
+  // GGUF, so the file is never removed while the native side may still map it. An unconfirmed/poisoned
+  // release keeps the durable delete-pending and defers the byte delete to reconciliation — never blocking
+  // the operation mutex on a release that may never settle. For an inactive (not-loaded) model this returns
+  // 'released' immediately, so the barrier is a cheap no-op there.
+  const released = await deps.releaseModelContext(model.uri);
+  if (released !== 'released') {
+    return {
+      kind: 'ambiguous',
+      state: writeAheadState,
+      message:
+        released === 'poisoned'
+          ? `Removed ${model.displayName} from the list, but the on-device engine needs a restart before its file can be safely deleted — it'll be cleared after you restart the LOAM host app.`
+          : `Removed ${model.displayName} from the list; its file will be deleted once the on-device engine finishes releasing it (reconciled next time you open the model manager or restart the host).`,
+    };
+  }
   try {
     await deps.deleteModelFile(model.uri);
   } catch (error) {
@@ -540,14 +563,15 @@ async function reconcileDelete(
       return state;
     }
   }
-  if (requiresLauncherClear && action.fileUri) {
-    // Active delete whose launcher clear is now confirmed (or was SKIPPED above because a newer model took
-    // the pointer, `state.activeId` set): release the native context BEFORE unlinking the bytes (Finding 1),
-    // so reconciling a delete that only settled this pass still reclaims the context and never unlinks a
-    // still-mapped file. PATH-AWARE, so an OLD delete for model A never releases a newly-loaded B.
-    await deps.releaseModelContext(action.fileUri);
-  }
   if (action.fileUri) {
+    // CONFIRMED-release barrier before the unlink (CodeRabbit): reconciling a delete that only settled this
+    // pass still reclaims the context AND never unlinks a still-mapped file. PATH-AWARE, so an OLD delete for
+    // model A never releases a newly-loaded B (returns 'released' immediately when A isn't loaded). An
+    // unconfirmed/poisoned release keeps the pending for the next pass rather than unlinking a mapped file.
+    const released = await deps.releaseModelContext(action.fileUri);
+    if (released !== 'released') {
+      return state;
+    }
     try {
       await deps.deleteModelFile(action.fileUri);
     } catch {
