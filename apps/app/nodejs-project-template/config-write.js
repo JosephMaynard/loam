@@ -44,20 +44,22 @@ function fsyncDirWith(fs, dir) {
  * strings documented above. `contents` is the already-serialized config text.
  */
 function durableWriteConfig(fs, dataDir, configPath, contents) {
-  fs.mkdirSync(dataDir, { recursive: true });
   var tmpPath = configPath + '.tmp-' + process.pid + '-' + Date.now();
-  fs.writeFileSync(tmpPath, contents, 'utf8');
-
-  // Flush the temp file's CONTENTS before the rename. If this fails we have NOT achieved durability, so do
-  // NOT rename (a crash could otherwise expose a present-but-empty config): clean up the temp and report a
-  // definite failure. The existing config.json is untouched.
+  // The ENTIRE pre-publication flow (dir prep → staging write → CONTENTS fsync → rename) is a single
+  // definite-failure boundary (CodeRabbit): a throw from ANY step means we have NOT durably published, so we
+  // best-effort unlink the temp and report 'failed' — never rename over a good config with an unflushed one,
+  // and never leave a `.tmp-*` sidecar behind. The existing config.json is untouched on every failure here
+  // (the rename is the only step that could replace it, and a failed rename leaves the original in place).
   try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(tmpPath, contents, 'utf8');
     var fd = fs.openSync(tmpPath, 'r+');
     try {
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
     }
+    fs.renameSync(tmpPath, configPath);
   } catch (err) {
     try {
       fs.unlinkSync(tmpPath);
@@ -66,8 +68,6 @@ function durableWriteConfig(fs, dataDir, configPath, contents) {
     }
     return 'failed';
   }
-
-  fs.renameSync(tmpPath, configPath);
 
   // The new file is now visible. Flush the directory so the rename itself survives a power loss. If THIS
   // fails the write may or may not survive — INDETERMINATE (definitely not a clean failure: the new config

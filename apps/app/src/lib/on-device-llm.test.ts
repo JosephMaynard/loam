@@ -213,6 +213,58 @@ describe("on-device-llm inference", () => {
     expect(channel.posts.some((p) => p.name === "loam-llm-delta" && p.payload.id === "a")).toBe(false);
   });
 
+  it("a completion that RESOLVES during cleanup still times out — it cannot win the race (Fix 1, CodeRabbit)", async () => {
+    vi.useFakeTimers();
+    // Request A's completion is pending until we resolve it BY HAND, mid-cleanup. This is the critical race:
+    // the timeout sentinel must have already won the `Promise.race`, so A finishing during cleanup can NOT
+    // settle the run via `onEnd` and advance the chain onto the still-live (about-to-be-released) context.
+    let resolveA: ((value: unknown) => void) | undefined;
+    mocks.completionImpl = () =>
+      new Promise((resolve) => {
+        resolveA = resolve;
+      });
+    // A hung stop keeps cleanup in progress across the window where we resolve A, so the ordering is forced.
+    mocks.stopCompletion.mockImplementationOnce(() => new Promise(() => {}));
+
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "a", messages: [{ role: "user", content: "hi" }] });
+    // Fire A's inference timeout: the sentinel wins the race, cleanup begins (stop pending, release pending).
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    expect(mocks.stopCompletion).toHaveBeenCalledTimes(1);
+    expect(mocks.release).not.toHaveBeenCalled();
+    const contextsBeforeB = mocks.contextsCreated;
+
+    // A's native completion FINISHES now, during cleanup. With the pre-fix code this would win the race and
+    // emit `loam-llm-end` for A; with the sentinel already resolved it must be ignored.
+    resolveA?.({ text: "finished late" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "a")).toBe(false);
+    // Cleanup is still in progress (bounded stop budget not elapsed) — B has not started, A not yet errored.
+    channel.emit("loam-llm-request", { id: "b", messages: [{ role: "user", content: "yo" }] });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mocks.contextsCreated).toBe(contextsBeforeB);
+    expect(channel.posts.some((p) => p.name === "loam-llm-error" && p.payload.id === "a")).toBe(false);
+
+    // Elapse the stop budget → context released → A rejects (timed out) → chain advances → B runs fresh.
+    mocks.completionImpl = async (_params, onToken) => {
+      onToken?.({ token: "ok" });
+      return { text: "ok" };
+    };
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+    const aError = channel.posts.find((p) => p.name === "loam-llm-error" && p.payload.id === "a");
+    expect(String(aError?.payload.error)).toMatch(/timed out/i);
+    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "a")).toBe(false);
+    // Release happened before B ever entered completion — B ran on a DIFFERENT, freshly-built context.
+    expect(mocks.contextsCreated).toBe(contextsBeforeB + 1);
+    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "b")).toBe(true);
+  });
+
   it("releaseActiveModelContext releases the loaded context and forces a fresh one next time (Fix 2)", async () => {
     const channel = makeChannel();
     registerOnDeviceLlm(channel);

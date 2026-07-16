@@ -109,13 +109,14 @@ describe("durableWriteConfig three outcomes (Sol Fable-round P1-4)", () => {
     expect(fs._tmpFilesRemaining()).toEqual([]);
   });
 
-  it("returns 'failed' when the rename itself fails (old config untouched)", () => {
+  it("returns 'failed' when the rename itself fails (old config untouched, temp cleaned)", () => {
     const fs = makeFs({ failRename: true });
     fs.writeFileSync(CONFIG, '{"old":true}');
-    // A rename failure throws out of the helper; the caller's try/catch reports failure. Assert it throws
-    // rather than silently claiming success, and the old config survives.
-    expect(() => write(fs, '{"new":true}')).toThrow();
+    // A rename failure is a definite failure: the helper reports 'failed' (not a throw), cleans the temp,
+    // and leaves the old config intact — never a half-published state.
+    expect(write(fs, '{"new":true}')).toBe("failed");
     expect(fs._get(CONFIG)).toBe('{"old":true}');
+    expect(fs._tmpFilesRemaining()).toEqual([]);
   });
 
   it("returns 'indeterminate' when the post-rename directory fsync fails (new config already visible)", () => {
