@@ -2392,30 +2392,37 @@ describe("encryption at rest + key-discard kill switch", () => {
     it("truncated JSON", () => expectJournalLocks('{"phase":"delete-pen'));
     it("JSON null", () => expectJournalLocks("null"));
     it("JSON array", () => expectJournalLocks("[1,2,3]"));
+    it("JSON object with no phase", () => expectJournalLocks("{}"));
+    it("JSON object with an unrecognized phase", () => expectJournalLocks('{"phase":"unknown"}'));
     it("unrecognized non-JSON string", () => expectJournalLocks("garbage-not-a-recognized-phase"));
     it("non-ENOENT read error", () => expectJournalLocks('{"phase":"delete-pending"}', { unreadable: true }));
   });
 
-  it("P1-3 (Sol round 12): EXACT legacy plain-string journals (delete-pending / key-clear-ready) stay valid no-config journals — the no-hook resume proceeds and completes, not a corrupt lock", async () => {
-    const { app, dataDir } = await makeEncryptedApp(
-      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
-      { killSwitch: { enabled: true } },
-    );
-    const admin = await session(app);
-    expect((await post(app, admin.cookie, "LEGACY_STRING_SECRET")).statusCode).toBe(201);
-    await app.close();
+  describe("P1-3 (Sol round 12): EXACT legacy plain-string journals stay valid no-config journals — the no-hook resume proceeds and completes, not a corrupt lock", () => {
+    async function expectLegacyStringProceeds(legacyPhase: "delete-pending" | "key-clear-ready"): Promise<void> {
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "LEGACY_STRING_SECRET")).statusCode).toBe(201);
+      await app.close();
 
-    writeFileSync(join(dataDir, ".loam-wipe-phase"), "delete-pending"); // EXACT legacy plain string
-    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
-    cleanups.push(() => boot2.close());
-    // Proceeded (not a corrupt lock): the no-hook resume deleted + cleared the journal + opened fresh.
-    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
-    const search = await boot2.server.inject({
-      method: "GET",
-      url: "/api/search?q=LEGACY_STRING_SECRET",
-      headers: { cookie: (await session(boot2)).cookie },
-    });
-    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+      writeFileSync(join(dataDir, ".loam-wipe-phase"), legacyPhase); // EXACT legacy plain string (no config)
+      const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+      cleanups.push(() => boot2.close());
+      // Proceeded (not a corrupt lock): the no-hook resume deleted + cleared the journal + opened fresh.
+      expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+      const search = await boot2.server.inject({
+        method: "GET",
+        url: "/api/search?q=LEGACY_STRING_SECRET",
+        headers: { cookie: (await session(boot2)).cookie },
+      });
+      expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+    }
+
+    it("delete-pending", () => expectLegacyStringProceeds("delete-pending"));
+    it("key-clear-ready", () => expectLegacyStringProceeds("key-clear-ready"));
   });
 
   it("RF-a extended (Sol round 10 review): an in-process wipe (ephemeral) 503-gates concurrent requests throughout the shared-tail media-deletion awaits, then serves the fresh state once complete", async () => {

@@ -1525,6 +1525,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
       }
     }
+    // COMPLETENESS verification (CodeRabbit round-12): the ACTIVE namespace must now hold NO `loam.db*` artifact
+    // and NO media directory — if one does (a rename silently didn't take, or a stat became unverifiable), the
+    // snapshot is INCOMPLETE, so fail closed rather than clear the anchor / open fresh over a partial preserve.
+    // Because renames are ATOMIC (a file is never lost — it is either here in the active namespace or already
+    // in the snapshot), an empty active namespace PROVES a complete snapshot; that is why no separate per-entry
+    // inventory needs to be recorded and re-verified.
+    for (const dir of [avatarsDir, attachmentsDir]) {
+      if (provenAbsence(dir) !== "absent") {
+        server.log.error(`Preserve recovery: ${dir} still present after the move — snapshot incomplete, failing closed`);
+        return false;
+      }
+    }
+    let remaining: string[];
+    try {
+      remaining = readdirSync(dataDir);
+    } catch (error) {
+      server.log.error(error, "Preserve recovery: could not re-verify the data directory is clean — failing closed");
+      return false;
+    }
+    if (remaining.some((entry) => entry.startsWith(base))) {
+      server.log.error("Preserve recovery: a `loam.db*` artifact still remains active after the move — snapshot incomplete");
+      return false;
+    }
     // Both parents must be durable (cross-directory rename changes both) before we report success.
     return fsyncDir(recoveryDir) && fsyncDir(dataDir);
   }
@@ -1751,7 +1774,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { phase: "delete-pending", corrupt: true };
     }
     const obj = parsed as { phase?: unknown; config?: unknown };
-    const phase: WipePhase = obj.phase === "key-clear-ready" ? "key-clear-ready" : "delete-pending";
+    // Only the two recognized phases are valid. A missing or unrecognized `phase` is a malformed journal →
+    // CORRUPT (lock), NOT silently coerced to `delete-pending` (which would clear it, losing config) — CodeRabbit.
+    if (obj.phase !== "delete-pending" && obj.phase !== "key-clear-ready") {
+      return { phase: "delete-pending", corrupt: true };
+    }
+    const phase: WipePhase = obj.phase;
     let config: LoamConfig | undefined;
     let configInvalid = false;
     if (obj.config !== undefined) {
@@ -1954,12 +1982,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         if (!clearRecoveryState()) {
           throw new Error("could not durably clear the preserve-recovery anchor");
         }
+        // Open the fresh store BEFORE reporting success (CodeRabbit): a fresh-open failure must surface as the
+        // recoverable `db_encryption_unreadable` (via the catch below), not a false `db_encryption_recovered_fresh`.
+        const store = openLoamStore();
         const message =
           "An explicit PRESERVE start-fresh confirmation was present, so the previous database and all user media " +
           `were moved into a recovery snapshot ("${recoveryDirName}/") and a fresh database was started.`;
         server.log.warn(message);
         reportBootNotice(message, "db_encryption_recovered_fresh");
-        return openLoamStore();
+        return store;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         const message =
