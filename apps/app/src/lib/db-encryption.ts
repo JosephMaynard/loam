@@ -237,7 +237,11 @@ export async function hasStoredPassphrase(): Promise<PassphrasePresence> {
  * flow for anything reachable while a DB may exist. */
 export async function setStoredPassphrase(passphrase: string): Promise<void> {
   await runPassphraseExclusive(async () => {
+    // Commit FIRST, then invalidate every outstanding issued attempt (CodeRabbit): once a committed
+    // passphrase replacement has landed, a delayed ack for a prior attempt must not promote/clear against the
+    // newer state. A thrown write skips the invalidation, so prior attempts survive if nothing actually changed.
     await SecureStore.setItemAsync(PASSPHRASE_ITEM, passphrase);
+    invalidatePassphraseAttempts();
   });
 }
 
@@ -331,12 +335,15 @@ export async function markPassphraseKeyMigrated(requestId?: string): Promise<voi
   // first `await`, let a Forget complete and report the passphrase absent, then resume and write it back.
   await runPassphraseExclusive(async () => {
     try {
-      // The exact candidate the ACCEPTED attempt used (if the open used a boot candidate rather than a
-      // committed passphrase). Consumed here so a duplicate ack can't act on it twice.
-      const openedWith = requestId !== undefined ? pendingPassphraseAttempts.get(requestId) : undefined;
-      if (requestId !== undefined) {
-        pendingPassphraseAttempts.delete(requestId);
+      // Act ONLY on a request THIS process actually issued (CodeRabbit): a migration ack whose id matches no
+      // outstanding attempt — a delayed/duplicate/unknown ack, or one already invalidated by a candidate
+      // replacement / Forget / committed replacement — changes nothing (no promote, no candidate clear, no
+      // version marker). Consume the entry so a duplicate ack can't act on it twice.
+      if (requestId === undefined || !pendingPassphraseAttempts.has(requestId)) {
+        return;
       }
+      const openedWith = pendingPassphraseAttempts.get(requestId);
+      pendingPassphraseAttempts.delete(requestId);
       const committed = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
       const hadCommitted = typeof committed === 'string' && committed.length > 0;
       if (typeof openedWith === 'string' && openedWith.length > 0 && !hadCommitted) {
@@ -616,8 +623,12 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
           // deliberately NOT copied into the bridge payload below (only the derived key/legacyKey cross).
           response = await runPassphraseExclusive(async () => {
             const resolved = await resolveDbKey(mode);
-            if (requestId !== undefined && resolved.attemptCandidate) {
-              rememberPassphraseAttempt(requestId, resolved.attemptCandidate);
+            // Record EVERY issued passphrase request (CodeRabbit) — a candidate open stores the candidate to
+            // promote, a COMMITTED open stores the empty sentinel (nothing to promote, but a matching entry
+            // still authorizes the migration marker). `markPassphraseKeyMigrated` then acts ONLY on a request
+            // it actually issued, so a delayed/unknown ack can never touch newer state.
+            if (requestId !== undefined && mode === 'passphrase') {
+              rememberPassphraseAttempt(requestId, resolved.attemptCandidate ?? '');
             }
             return resolved;
           });

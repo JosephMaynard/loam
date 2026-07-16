@@ -41,6 +41,13 @@ export type PendingAction = {
   desired: PendingDesiredState;
   /** For a `'delete'`: the GGUF whose bytes must be kept until the launcher clear is confirmed. */
   fileUri?: string;
+  /** For a `'delete'` (CodeRabbit): whether this delete requires clearing the launcher's active pointer —
+   * `true` when the DELETED model was the active one, `false` for an inactive delete (the launcher never
+   * referenced the file, so reconciliation must go straight to the byte deletion without a launcher round
+   * trip that a hiccup could otherwise wrongly block on). ABSENT on legacy journal entries written before
+   * this field existed — those were only ever recorded for ACTIVE deletes, so an absent value defaults to
+   * `true` (see `reconcileDelete`). */
+  requiresLauncherClear?: boolean;
 };
 
 /** Stable id for the single "launcher active-pointer" intent (`setActive`/`clear` are mutually
@@ -405,7 +412,13 @@ function isPendingAction(value: unknown): value is PendingAction {
   if (!value || typeof value !== 'object') {
     return false;
   }
-  const record = value as { id?: unknown; kind?: unknown; desired?: unknown; fileUri?: unknown };
+  const record = value as {
+    id?: unknown;
+    kind?: unknown;
+    desired?: unknown;
+    fileUri?: unknown;
+    requiresLauncherClear?: unknown;
+  };
   if (typeof record.id !== 'string') {
     return false;
   }
@@ -413,6 +426,9 @@ function isPendingAction(value: unknown): value is PendingAction {
     return false;
   }
   if (record.fileUri !== undefined && typeof record.fileUri !== 'string') {
+    return false;
+  }
+  if (record.requiresLauncherClear !== undefined && typeof record.requiresLauncherClear !== 'boolean') {
     return false;
   }
   if (!record.desired || typeof record.desired !== 'object') {

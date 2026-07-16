@@ -64,6 +64,15 @@ type ProgressMap = Record<string, { written: number; total: number; phase: 'down
  * is cleanest (per the round-4 review note). */
 let orphanSweepDone = false;
 
+// A custom download whose file succeeded but then failed BOTH to persist AND to be checked-deleted leaves a
+// multi-GB orphan on disk. Its URI is retained at MODULE level (CodeRabbit), not in component state, so it
+// SURVIVES the overlay unmounting/remounting — otherwise closing and reopening the model manager would lose
+// the reference and strand the orphan until an app restart. While it's set, every download entry point
+// (custom AND catalog) must re-attempt the checked delete FIRST and abort the new download if it still can't
+// be removed, so orphans can never accumulate. The per-process orphan sweep (`orphanSweepDone`) only runs
+// once at first open, so it can't catch an orphan created afterward — this is that safety net.
+let retainedCustomOrphanUri: string | undefined;
+
 type ModelManagerOverlayProps = {
   visible: boolean;
   onClose: () => void;
@@ -97,12 +106,6 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * multi-GB downloads in parallel. This ref is checked-and-set at the very top of the handler and
    * cleared in its `finally`, so the second synchronous tap short-circuits before starting anything. */
   const customDownloadInFlightRef = useRef(false);
-  /** The URI of a fully-downloaded custom model that could NOT be saved to the list AND whose CHECKED
-   * cleanup ALSO failed (Finding 1) — a real, still-on-disk orphan. Retained so the next add attempt
-   * re-runs a checked delete of it BEFORE starting any new download: a new download would mint a fresh
-   * id/filename and, if left unchecked, could pile up a SECOND multi-GB orphan before an app restart.
-   * Cleared once the checked delete finally confirms the file is gone. */
-  const [orphanedCustomUri, setOrphanedCustomUri] = useState<string | undefined>();
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
   /** Gates every download-start control (P2-7 round 4) until the orphan sweep below has actually
    * finished — initialized from the module-level flag so a remount after the sweep already ran once
@@ -350,7 +353,31 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
 
   /** Download one curated catalog entry into `<id>.gguf`, verifying size + (now real — P2-4/AF7)
    * streaming SHA-256, fail-closed on a mismatch or a hashing failure. */
+  /** Before starting ANY new download, clear a retained custom-download orphan (CodeRabbit): re-attempt its
+   * CHECKED delete and only proceed once it's confirmed gone. Returns false (and sets an honest status) if an
+   * orphan is retained and still can't be removed — the caller MUST abort, so orphans never accumulate. */
+  const clearRetainedOrphanOrAbort = async (): Promise<boolean> => {
+    if (!retainedCustomOrphanUri) {
+      return true;
+    }
+    try {
+      await deleteModelFileChecked(retainedCustomOrphanUri);
+      retainedCustomOrphanUri = undefined;
+      return true;
+    } catch (cleanupErr) {
+      const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+      setStatusMessage(
+        `A previous custom download left a file that still can't be removed (${cleanupMessage}). Restart the app to clear it before downloading another model.`,
+      );
+      return false;
+    }
+  };
+
   const handleDownloadCatalogEntry = async (entry: ModelCatalogEntry) => {
+    // Block a catalog download too while a custom orphan is retained — clean it first or abort (CodeRabbit).
+    if (!(await clearRetainedOrphanOrAbort())) {
+      return;
+    }
     // Catalog ids are hardcoded, known-safe strings — this can't actually fail — but sanitize anyway
     // for consistency with the pasted-URL path and as defense in depth (see model-download.ts).
     const fileName = sanitizeModelFileName(`${entry.id}.gguf`);
@@ -416,23 +443,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
     customDownloadInFlightRef.current = true;
     try {
-      // Finding 1: if a PRIOR custom download succeeded-then-failed-to-persist and its CHECKED cleanup
-      // also failed, an orphan is still on disk. Before starting ANY new download (which would mint a new
-      // id/filename and could accumulate a SECOND multi-GB orphan), re-attempt the checked delete of it.
-      // Only once it's confirmed gone do we proceed; if it STILL can't be removed, abort with an honest
-      // status rather than piling on another orphan. (This handler is the retry path — the button stays
-      // enabled so the operator can trigger it; disabling it would strand the orphan until an app restart.)
-      if (orphanedCustomUri) {
-        try {
-          await deleteModelFileChecked(orphanedCustomUri);
-          setOrphanedCustomUri(undefined);
-        } catch (cleanupErr) {
-          const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
-          setStatusMessage(
-            `A previous custom download left a file that still can't be removed (${cleanupMessage}). Restart the app to clear it before adding another custom model.`,
-          );
-          return;
-        }
+      // If a PRIOR custom download succeeded-then-failed-to-persist and its CHECKED cleanup also failed, an
+      // orphan is still on disk (retained at module level so it survives an overlay remount). Re-attempt its
+      // checked delete FIRST and abort if it still can't be removed, rather than minting a new id/filename
+      // and piling on a SECOND multi-GB orphan.
+      if (!(await clearRetainedOrphanOrAbort())) {
+        return;
       }
 
       // Finding 2: all URL parsing/authorization/redaction lives in the pure `prepareCustomModelDownload`
@@ -510,7 +526,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
             setStatusMessage(`${prepared.displayName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`);
           } catch (cleanupErr) {
             const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
-            setOrphanedCustomUri(outcome.uri);
+            // Retain at MODULE level so it survives an overlay remount and blocks EVERY later download until
+            // cleared (via `clearRetainedOrphanOrAbort`).
+            retainedCustomOrphanUri = outcome.uri;
             setStatusMessage(
               `${prepared.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${cleanupMessage}). It'll be cleared on your next attempt, or restart the app to clear it.`,
             );

@@ -256,18 +256,20 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
           kind: 'delete',
           desired: { enabled: false },
           fileUri: model.uri,
+          requiresLauncherClear: true, // active delete — the launcher pointer must be cleared
         }),
       };
     }
     // Inactive delete: leave `activeId` (and any launcher-pointer pending for ANOTHER model) untouched,
     // and append the delete-pending as a pure byte-deletion journal (Finding 1) — superseding only an
-    // existing same-file entry, never the pointer — so a failed byte delete is durably retryable.
+    // existing same-file entry, never the pointer — so a failed byte delete is durably retryable. Records
+    // `requiresLauncherClear: false` so reconciliation never issues a launcher clear the file never needed.
     return {
       ...current,
       downloaded: remaining,
       pending: [
         ...(current.pending ?? []).filter((existing) => existing.id !== pendingId),
-        { id: pendingId, kind: 'delete', desired: { enabled: false }, fileUri: model.uri },
+        { id: pendingId, kind: 'delete', desired: { enabled: false }, fileUri: model.uri, requiresLauncherClear: false },
       ],
     };
   });
@@ -482,12 +484,13 @@ async function reconcileOne(
 /**
  * Reconcile ONE durable `delete` pending (P2-b + Finding 1). Ordered CHECKED-delete-then-clear, and
  * gated so it never wrongly touches the launcher pointer:
- *   - It clears the launcher's active pointer ONLY when local truth (`state.activeId`) says NOTHING
- *     should be active — i.e. this delete was of the active model, which set `activeId = undefined`. If a
- *     DIFFERENT model is currently active, the launcher must keep pointing at it: an inactive model's
- *     delete never moved the pointer (Finding 1 records a delete-pending for those too now), so clearing
- *     it here would wrongly disable the live model. In that case we skip the bridge and go straight to the
- *     byte deletion (the launcher never referenced this file, so there is no dangling-pointer risk).
+ *   - It clears the launcher's active pointer ONLY when this delete recorded `requiresLauncherClear` (the
+ *     deleted model WAS active — CodeRabbit) AND local truth (`state.activeId`) still says nothing should be
+ *     active. An INACTIVE delete (`requiresLauncherClear: false`) never touches the launcher — the file was
+ *     never referenced, so it goes straight to the byte deletion and can't be wrongly blocked by a launcher
+ *     hiccup. A legacy entry with the field ABSENT defaults to `true` (those were only ever active deletes).
+ *     And if a DIFFERENT model is currently active (`activeId` set), the clear is skipped regardless, so an
+ *     active-delete whose pointer a newer `setActive` already took over never disables the live model.
  *   - A launcher clear that TIMES OUT (ambiguous) or FAILS (launcher still references the file) keeps the
  *     pending and its bytes for the next pass.
  *   - On a confirmed release, the bytes are deleted with the CHECKED delete FIRST (keep the pending on a
@@ -500,7 +503,9 @@ async function reconcileDelete(
   action: PendingAction,
   state: ModelManagerState,
 ): Promise<ModelManagerState> {
-  if (state.activeId === undefined) {
+  // Legacy entries (field absent) were only ever recorded for ACTIVE deletes → default true.
+  const requiresLauncherClear = action.requiresLauncherClear ?? true;
+  if (requiresLauncherClear && state.activeId === undefined) {
     const result = await deps.clearActiveModel();
     if (result.status !== 'ok') {
       // timeout (ambiguous) or failed (launcher still references it) — keep the pending + bytes untouched.

@@ -27,7 +27,6 @@ const {
   dbModeSelectionIsDestructive,
   getDbEncryptionMode,
   hasStoredPassphrase,
-  markPassphraseKeyMigrated,
   mayBootPlaintextOnLockedError,
   registerDbEncryption,
   requestDbStartFresh,
@@ -57,6 +56,24 @@ function sha256Hex(input: string): string {
  * happens to have. */
 async function flushMicrotasks(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Drive a full launcher key-handoff for `requestId` through a fresh responder: the request (which the
+ * responder records as an issued attempt for the CURRENT stored mode) then the migration ack. Migration
+ * state now changes ONLY for a request the responder actually issued (CodeRabbit), so tests exercise the
+ * realistic bridge path rather than calling `markPassphraseKeyMigrated` with no issued attempt. The caller
+ * must have set the encryption mode to `passphrase` (via `setDbEncryptionMode`) first. */
+async function runMigrationHandoff(requestId: string): Promise<void> {
+  const channel = makeFakeChannel();
+  const cleanup = registerDbEncryption(channel);
+  try {
+    channel.emit("loam-db-key-request", { requestId });
+    await flushMicrotasks();
+    channel.emit("loam-db-key-migrated", { requestId });
+    await flushMicrotasks();
+  } finally {
+    cleanup();
+  }
 }
 
 /** Minimal in-memory `BridgeChannel` test double — an event-name -> handler-set map, matching the
@@ -128,25 +145,27 @@ describe("resolveDbKey", () => {
       expect(result.key).toBe(sha256Hex(`hunter2:${deviceSecret}`));
     });
 
-    it("omits legacyKey once markPassphraseKeyMigrated has been called", async () => {
+    it("omits legacyKey once a migration handoff completes", async () => {
+      await setDbEncryptionMode("passphrase");
       await setStoredPassphrase("hunter2");
       // Sanity: legacyKey is offered before migration is recorded.
       expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
 
-      await markPassphraseKeyMigrated();
+      await runMigrationHandoff("r1");
 
       const migrated = await resolveDbKey("passphrase");
       expect(migrated.legacyKey).toBeUndefined();
       expect(migrated.key).toBeTruthy();
     });
 
-    it("a fresh install (passphrase set, migration never needed) still offers legacyKey until markPassphraseKeyMigrated is called — mirrors the server's 'never needed but still confirms' path", async () => {
+    it("a fresh install (passphrase set, migration never needed) still offers legacyKey until a migration handoff completes — mirrors the server's 'never needed but still confirms' path", async () => {
       // No pre-existing DB simulation needed here — this module has no DB awareness; it just reflects
       // whether ITS OWN migration marker has been recorded, regardless of whether a legacy key would
       // ever actually be useful server-side.
+      await setDbEncryptionMode("passphrase");
       await setStoredPassphrase("a brand new passphrase");
       expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
-      await markPassphraseKeyMigrated();
+      await runMigrationHandoff("r1");
       expect((await resolveDbKey("passphrase")).legacyKey).toBeUndefined();
     });
   });
@@ -240,16 +259,24 @@ describe("registerDbEncryption", () => {
     }
   });
 
-  it("P1-1: records a confirmed migration when the launcher signals loam-db-key-migrated", async () => {
+  it("P1-1: records a confirmed migration for an ISSUED request's ack, and ignores an ack with no matching request", async () => {
+    await setDbEncryptionMode("passphrase");
     await setStoredPassphrase("hunter2");
     expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
 
     const channel = makeFakeChannel();
     const cleanup = registerDbEncryption(channel);
     try {
-      channel.emit("loam-db-key-migrated");
+      // An ack with NO issued request (no prior loam-db-key-request) changes nothing (CodeRabbit).
+      channel.emit("loam-db-key-migrated", { requestId: "never-issued" });
       await flushMicrotasks();
+      expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
 
+      // A real handoff — request then ack for the same id — records the migration.
+      channel.emit("loam-db-key-request", { requestId: "r1" });
+      await flushMicrotasks();
+      channel.emit("loam-db-key-migrated", { requestId: "r1" });
+      await flushMicrotasks();
       expect((await resolveDbKey("passphrase")).legacyKey).toBeUndefined();
     } finally {
       cleanup();
@@ -631,12 +658,14 @@ describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
     }
   });
 
-  it("markPassphraseKeyMigrated never CLOBBERS a committed passphrase with a stale candidate", async () => {
+  it("a migration handoff never CLOBBERS a committed passphrase, and drops a stale candidate", async () => {
+    await setDbEncryptionMode("passphrase");
     await setStoredPassphrase("correct");
     await setPassphraseCandidate("wrong-leftover");
-    await markPassphraseKeyMigrated();
+    // The committed passphrase opened the DB (the responder records the empty sentinel for r1), so the ack
+    // promotes nothing but still confirms migration and drops the now-moot candidate.
+    await runMigrationHandoff("r1");
 
-    // The committed passphrase that actually opened the DB is preserved; the stale candidate is dropped.
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("correct");
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
   });

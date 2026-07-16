@@ -465,7 +465,8 @@ describe("recording pending on ambiguity (P2-b)", () => {
     expect(deleteFile).not.toHaveBeenCalled();
     expect(store.get().downloaded.map((m) => m.id)).toEqual(["B"]);
     expect(store.get().pending ?? []).toEqual([
-      { id: `delete:${A.uri}`, kind: "delete", desired: { enabled: false }, fileUri: A.uri },
+      // Active delete → requiresLauncherClear:true (the launcher pointer must be cleared before byte delete).
+      { id: `delete:${A.uri}`, kind: "delete", desired: { enabled: false }, fileUri: A.uri, requiresLauncherClear: true },
     ]);
   });
 });
@@ -731,6 +732,48 @@ describe("reconcile refuses to settle (or let the caller sweep) when its state r
     const result = await reconcilePendingActions(scriptedDeps(store));
 
     expect(result.unreadable).toBeUndefined();
+    expect(result.settled).toBe(true);
+  });
+});
+
+describe("inactive-model delete never issues a launcher clear (CodeRabbit Finding 3)", () => {
+  it("reconciles an inactive delete by deleting bytes WITHOUT clearActiveModel, even with another model active", async () => {
+    const pending: PendingAction = {
+      id: `delete:${B.uri}`,
+      kind: "delete",
+      desired: { enabled: false },
+      fileUri: B.uri,
+      requiresLauncherClear: false,
+    };
+    const store = makeStore({ downloaded: [A], activeId: "A", pending: [pending] });
+    const clear = vi.fn(async () => OK);
+    const deleteFile = vi.fn(async () => {});
+    const result = await reconcilePendingActions(scriptedDeps(store, { clearActiveModel: clear, deleteModelFile: deleteFile }));
+
+    // The launcher never referenced B — reconciliation must not clear the pointer (it would disable live A).
+    expect(clear).not.toHaveBeenCalled();
+    expect(deleteFile).toHaveBeenCalledWith(B.uri);
+    expect(result.settled).toBe(true);
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+
+  it("a launcher-clear FAILURE cannot block an inactive delete — it goes straight to the checked byte delete", async () => {
+    const pending: PendingAction = {
+      id: `delete:${B.uri}`,
+      kind: "delete",
+      desired: { enabled: false },
+      fileUri: B.uri,
+      requiresLauncherClear: false,
+    };
+    // Nothing active: the OLD `activeId === undefined` gate would have issued a clear here and, on FAILED,
+    // returned early WITHOUT deleting the bytes — wrongly blocking an inactive delete on the launcher.
+    const store = makeStore({ downloaded: [], activeId: undefined, pending: [pending] });
+    const clear = vi.fn(async () => FAILED);
+    const deleteFile = vi.fn(async () => {});
+    const result = await reconcilePendingActions(scriptedDeps(store, { clearActiveModel: clear, deleteModelFile: deleteFile }));
+
+    expect(clear).not.toHaveBeenCalled();
+    expect(deleteFile).toHaveBeenCalledWith(B.uri);
     expect(result.settled).toBe(true);
   });
 });
