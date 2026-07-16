@@ -61,8 +61,8 @@ let orphanSweepDone = false;
  * node's OWN embedded server — the codebase deliberately never issues HTTP from the bridge to the local
  * server (it probes `/api/health`, which mints no identity) precisely because such a request could
  * consume the one-time `firstUser` admin grant. Covers `localhost`, IPv4 loopback (127.0.0.0/8), the
- * unspecified address (0.0.0.0 / ::), IPv6 loopback (::1), IPv4-mapped forms, and link-local
- * (169.254.0.0/16). Best-effort string matching — a real model download never needs a loopback or
+ * unspecified address (0.0.0.0 / ::), IPv6 loopback (::1), IPv4-mapped forms, IPv4 link-local
+ * (169.254.0.0/16), and IPv6 link-local (fe80::/10). Best-effort string matching — a real model download never needs a loopback or
  * link-local host, so erring toward rejection here is safe. */
 function isLoopbackOrLinkLocalHost(hostname: string): boolean {
   // URL.hostname keeps IPv6 in brackets (e.g. `[::1]`); strip them for a bare comparison.
@@ -71,6 +71,10 @@ function isLoopbackOrLinkLocalHost(hostname: string): boolean {
     return true;
   }
   if (host === '0.0.0.0' || host === '::' || host === '::0' || host === '::1') {
+    return true;
+  }
+  // IPv6 link-local fe80::/10 (fe80.. through febf..), e.g. `fe80::1`, `[fe80::1%eth0]`.
+  if (/^fe[89ab][0-9a-f]:/.test(host)) {
     return true;
   }
   // IPv4 loopback 127.0.0.0/8 and link-local 169.254.0.0/16.
@@ -479,10 +483,20 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         downloadedAt: Date.now(),
       };
       const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
-      setCustomUrl('');
       if (persisted) {
+        // Clear the input only on a fully successful download+persist — a persistence failure keeps the
+        // entered URL so the operator can retry without re-typing it (CodeRabbit).
+        setCustomUrl('');
         setStatusMessage(`${guessedName} downloaded.`);
+      } else {
+        setStatusMessage(`${guessedName} downloaded but could not be saved to the model list — try again.`);
       }
+    } catch (err) {
+      // A thrown download/persist (network stack error, storage failure) must surface a failure status,
+      // not silently reject the promise and leave the operator staring at a cleared-but-unexplained row
+      // (CodeRabbit). Aborts (the operator cancelled) are reported neutrally.
+      const message = err instanceof Error ? err.message : String(err);
+      setStatusMessage(`Custom model download failed — ${message}`);
     } finally {
       activeDownloads.current.delete(id);
       clearModelProgress(id);
