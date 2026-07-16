@@ -425,11 +425,38 @@ describe("on-device-llm inference", () => {
     await vi.advanceTimersByTimeAsync(5000); // past the confirmation budget
     await expect(relPromise).resolves.toBe("unconfirmed");
 
-    // A following request fails FAST (engine `releasing`) rather than hanging, and builds no second context.
+    // A RETRY for the SAME model (the context is already detached, but its native release is still in flight)
+    // must ALSO resolve 'unconfirmed' — NOT 'released' (CodeRabbit): unlinking now would remove a file the
+    // still-disposing native context may map. It builds no new context (engine stays `releasing`).
+    const retry = releaseModelContextIfLoaded("file:///models/m.gguf");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.contextsCreated).toBe(contextsWhileReleasing);
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect(retry).resolves.toBe("unconfirmed");
+
+    // A following inference request fails FAST (engine `releasing`) rather than hanging, and builds no context.
     channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
     await vi.advanceTimersByTimeAsync(1);
     expect(mocks.contextsCreated).toBe(contextsWhileReleasing);
     expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/still recovering/i);
+  });
+
+  it("releaseModelContextIfLoaded retry resolves 'released' once the in-flight release CONFIRMS (CodeRabbit)", async () => {
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+
+    // A controllable native release: still in flight during the first barrier call.
+    let finishRelease!: () => void;
+    mocks.release.mockImplementationOnce(() => new Promise<void>((resolve) => (finishRelease = resolve)));
+    const first = await releaseModelContextIfLoaded("file:///models/m.gguf", 20);
+    expect(first).toBe("unconfirmed"); // release hasn't settled within the budget
+
+    // Now the native release completes; a RETRY for the same model confirms 'released' (safe to unlink).
+    finishRelease();
+    await flush();
+    await expect(releaseModelContextIfLoaded("file:///models/m.gguf", 20)).resolves.toBe("released");
   });
 
   it("releaseModelContextIfLoaded resolves 'released' once the native release CONFIRMS (Finding 1 / CodeRabbit)", async () => {

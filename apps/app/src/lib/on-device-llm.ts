@@ -60,6 +60,13 @@ let inferenceChain: Promise<void> = Promise.resolve();
 //                  safely `initLlama` again in this process. Terminal until app restart.
 type EngineStatus = 'ready' | 'releasing' | 'poisoned';
 let engineStatus: EngineStatus = 'ready';
+// The bare path of the context whose native `release()` is CURRENTLY in flight, and its tracking promise
+// (CodeRabbit). After `beginRelease` detaches the context, `loadedContext` is null — so a RETRY of the delete
+// barrier for that same model would otherwise see "nothing loaded" and wrongly report 'released' while the
+// native disposal is still ongoing, letting the caller unlink a still-mapped file. These let the barrier
+// recognise "this model is still releasing" and await/inspect that release instead. Cleared when it settles.
+let releasingPath: string | null = null;
+let releasingPromise: Promise<void> | null = null;
 
 /** Shown when a request arrives while a previous context is still being disposed (`releasing`). Transient —
  * a moment later the release resolves and the engine is usable again; the restart hint covers the rare case
@@ -137,13 +144,17 @@ function beginRelease(): Promise<void> {
     return Promise.resolve();
   }
   const context = loadedContext;
-  // Phase 1 — detach synchronously (separate from, and before, confirming native disposal below).
+  const path = loadedModelPath;
+  // Phase 1 — detach synchronously (separate from, and before, confirming native disposal below). Record the
+  // model being released + its tracking promise so a barrier RETRY for this same model (after the detach)
+  // recognises it's still disposing rather than seeing "nothing loaded" and reporting 'released'.
   loadedContext = null;
   loadedModelPath = null;
   engineStatus = 'releasing';
+  releasingPath = path;
   // Phase 2 — track the native release. `Promise.resolve().then(...)` funnels even a SYNCHRONOUS throw from
   // `release()` into the reject arm, so a synchronously-failing release poisons the engine like an async one.
-  return Promise.resolve()
+  const track: Promise<void> = Promise.resolve()
     .then(() => context.release())
     .then(
       () => {
@@ -152,12 +163,21 @@ function beginRelease(): Promise<void> {
         if (engineStatus === 'releasing') {
           engineStatus = 'ready';
         }
+        if (releasingPromise === track) {
+          releasingPath = null;
+          releasingPromise = null;
+        }
       },
       (error: unknown) => {
         engineStatus = 'poisoned';
+        if (releasingPromise === track) {
+          releasingPromise = null; // poison is terminal — the path no longer matters, but stop pointing at it
+        }
         console.warn('LOAM on-device LLM: native context release() rejected — engine poisoned until app restart', error);
       },
     );
+  releasingPromise = track;
+  return track;
 }
 
 /**
@@ -246,28 +266,36 @@ export function releaseModelContextIfLoaded(
   // Schedule the path-aware release behind any in-flight inference. CRITICAL: `inferenceChain` must advance
   // after the synchronous DETACH (which `beginRelease` does before it awaits the native `release()`), NOT
   // after the release COMPLETES — otherwise a hung `release()` would wedge the chain (every later request
-  // would block on it). So the step returns nothing (resolves post-detach); the native release is tracked
-  // SEPARATELY in `tracked` for the confirmation below.
-  let tracked: Promise<void> = Promise.resolve();
+  // would block on it). So the step returns nothing (resolves post-detach); the native release is inspected
+  // SEPARATELY for the confirmation below.
   const step = inferenceChain.then(() => {
     if (loadedContext && loadedModelPath === target) {
-      tracked = beginRelease(); // detaches synchronously; resolves when release() settles; never rejects
+      beginRelease(); // detaches synchronously; sets releasingPath/Promise; resolves when release() settles
     }
   });
   inferenceChain = step.catch(() => undefined);
 
-  // Confirm the NATIVE release completion (via `tracked`), BOUNDED so a slow/hung release can't block the
-  // caller (the operation mutex) forever — on timeout the caller keeps the delete-pending and reconciles later.
+  // Confirm NATIVE disposal, BOUNDED so a slow/hung release can't block the caller (the operation mutex)
+  // forever — on timeout the caller keeps the delete-pending and reconciles later. Crucially, this inspects
+  // the RELEASING state, not just `loadedContext`: on a retry the context is already detached (null), but if
+  // THIS model's release is still in flight we must await it (→ 'unconfirmed' on timeout, 'poisoned' if it
+  // rejected), never report 'released' and let the caller unlink a still-mapped file (CodeRabbit).
+  const confirmed = step.then(async (): Promise<'released' | 'poisoned'> => {
+    // If THIS model's native release is still in flight (e.g. a barrier RETRY after the context was already
+    // detached), await it — bounded by the outer budget race. Otherwise nothing maps this model's file.
+    if (releasingPath === target && releasingPromise) {
+      await releasingPromise; // resolves when release() settles; never rejects
+    }
+    // Single classification point. `as EngineStatus` re-widens past TS's stale flow-narrowing (the value can
+    // have flipped to 'poisoned' during the await — a module-level mutation the analysis doesn't model).
+    // Poison is terminal → never unlink; anything else means this model's context is gone → safe to unlink.
+    return (engineStatus as EngineStatus) === 'poisoned' ? 'poisoned' : 'released';
+  });
+
   let budgetTimer: ReturnType<typeof setTimeout> | undefined;
   const budget = new Promise<'unconfirmed'>((resolve) => {
     budgetTimer = setTimeout(() => resolve('unconfirmed'), budgetMs);
   });
-  const confirmed = step
-    .then(() => tracked)
-    .then(
-      () => (engineStatus === 'poisoned' ? 'poisoned' : 'released'),
-      () => (engineStatus === 'poisoned' ? 'poisoned' : 'released'),
-    );
   return Promise.race([confirmed, budget]).finally(() => {
     if (budgetTimer !== undefined) {
       clearTimeout(budgetTimer);
