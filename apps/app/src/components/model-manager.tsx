@@ -22,7 +22,6 @@ import {
   type ModelActionResult,
 } from '@/lib/model-manager-actions';
 import {
-  clearRetainedOrphans,
   deleteModelFileChecked,
   discardUnregisteredDownload,
   downloadModel,
@@ -30,6 +29,12 @@ import {
   sanitizeModelFileName,
   sweepOrphanedModelFiles,
 } from '@/lib/model-download';
+import {
+  abortActiveDownload,
+  isDownloadActive,
+  runDownload,
+  subscribeDownloadActive,
+} from '@/lib/download-coordinator';
 import { releaseActiveModelContext, releaseModelContextIfLoaded } from '@/lib/on-device-llm';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
@@ -88,18 +93,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const [progress, setProgress] = useState<ProgressMap>({});
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set());
   const [customUrl, setCustomUrl] = useState('');
-  /** True while ANY download (catalog OR custom) is running (Finding 2: downloads are globally serialized).
-   * Disables EVERY download entry point — all catalog rows AND the "Add & download" button — for its
-   * duration, so two downloads can never run against the same stale free-space snapshot or race the
-   * clean-first orphan guard. RENDER-only — the synchronous re-entry guard is `downloadInFlightRef` below
-   * (a state update doesn't disable the buttons until the next render, a tick too late). */
-  const [downloadInFlight, setDownloadInFlight] = useState(false);
-  /** Synchronous mirror of `downloadInFlight` (Finding 2, promoted from the old custom-only ref): two taps
-   * in the SAME tick — on two catalog rows, or a catalog row + the custom button — both enter the download
-   * path before the disabled state re-renders. This module-scoped-per-instance ref is checked-and-set at the
-   * very top of `runDownloadTransaction` and cleared in its `finally`, so the second synchronous entry
-   * short-circuits before starting anything, GLOBALLY serializing all downloads to one at a time. */
-  const downloadInFlightRef = useRef(false);
+  /** True while ANY download (catalog OR custom) is running ANYWHERE in the process (Sol P2: downloads are
+   * serialized by the MODULE-LEVEL `download-coordinator`, not by this component instance). Disables EVERY
+   * download entry point — all catalog rows AND the "Add & download" button — for its duration, so two
+   * downloads can never run against the same stale free-space snapshot or race the clean-first orphan guard.
+   * Seeded from — and kept in sync with — the coordinator (see the subscribe effect below) so a freshly
+   * MOUNTED overlay (after a `ready → error → ready` host transition unmounted the previous one) reflects a
+   * download a PRIOR overlay instance started and that is still settling, rather than a stale instance-local
+   * `false` that would let it start a second concurrent download. */
+  const [downloadInFlight, setDownloadInFlight] = useState(isDownloadActive);
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
   /** Gates every download-start control (P2-7 round 4) until the orphan sweep below has actually
    * finished — initialized from the module-level flag so a remount after the sweep already ran once
@@ -120,9 +122,19 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * / download) are BLOCKED, with a recovery banner — a transient read failure must never let the sweep
    * delete every downloaded `.gguf`. A later reopen retries the read and clears this. */
   const [loadFailed, setLoadFailed] = useState(false);
-  // Every in-flight download/verify's `AbortController`, keyed by the same id used in `busyIds`/
-  // `progress` — lets the AppState listener below cancel everything at once on backgrounding.
-  const activeDownloads = useRef<Map<string, AbortController>>(new Map());
+  /** False once THIS overlay instance has unmounted (Sol P2). The download callbacks below `await`
+   * network/hash/persist work that can outlive the overlay — the host can transition `ready → error`
+   * and tear this component down mid-download. Every setState reached AFTER an `await` in an async path
+   * is guarded on this, so no state update ever runs against an unmounted overlay (React would warn, and
+   * more importantly the write is meaningless). */
+  const mountedRef = useRef(true);
+  /** True ONLY while a download transaction THIS instance started is the one currently holding the
+   * coordinator's process-global mutex (Sol P2). Set at the top of the coordinated `run` body (which the
+   * coordinator invokes only for the call that actually acquired the mutex) and cleared in its `finally`.
+   * The unmount effect uses it to `abortActiveDownload()` for a transaction this instance owns — and only
+   * that one — so tearing down the overlay cancels its own in-flight download (the mutex then releases when
+   * the aborted transaction settles), without ever aborting a download some other instance owns. */
+  const ownsActiveDownloadRef = useRef(false);
 
   /** The store + bridge + filesystem operations the activate/deactivate/delete/reconcile transactions
    * need, bound to the real implementations (the bridge fns partially applied with this overlay's
@@ -252,24 +264,54 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     };
   }, [visible, actionDeps]);
 
-  // Cancel every in-flight download/verify when the app is backgrounded, rather than letting it keep
+  // Cancel the in-flight download/verify when the app is backgrounded, rather than letting it keep
   // running unattended (hash-performance device-verify note): Android can suspend or kill a
   // backgrounded app's JS thread at any time, and a multi-GB hash left running unobserved is exactly
   // the "corrupt state mid-verify" scenario Sol flagged. Aborting routes through the same fail-closed
   // path as a checksum mismatch (see model-download.ts), so it always deletes the partial file rather
-  // than leaving something half-verified.
+  // than leaving something half-verified. Routed through the coordinator (Sol P2) so it aborts the one
+  // process-global transaction — without releasing the mutex, which frees only when the aborted
+  // transaction settles.
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'background') {
-        for (const controller of activeDownloads.current.values()) {
-          controller.abort();
-        }
+        abortActiveDownload();
       }
     });
     return () => subscription.remove();
   }, []);
 
+  // Keep `downloadInFlight` in sync with the MODULE-LEVEL coordinator (Sol P2) so this overlay's download
+  // controls reflect the true process-wide in-flight state — including a transaction a PRIOR overlay
+  // instance started and that is still settling after this instance mounted. Reconcile once on mount (the
+  // subscription can't replay an event that fired before it existed), then on every change.
+  useEffect(() => {
+    const sync = () => setDownloadInFlight(isDownloadActive());
+    sync();
+    return subscribeDownloadActive(sync);
+  }, []);
+
+  // On unmount (a `ready → error` host transition tears the whole overlay down — see app/index.tsx),
+  // stop guarding-off further setState AND abort a download THIS instance owns (Sol P2). Aborting does
+  // NOT release the coordinator mutex — it frees only when the aborted transaction's own `finally`
+  // settles — so a freshly-mounted overlay still can't start a second concurrent download until the old
+  // one has fully torn down its file/progress state.
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      if (ownsActiveDownloadRef.current) {
+        abortActiveDownload();
+      }
+    };
+  }, []);
+
+  // These three are called from the async download path AFTER `await`s (progress ticks, busy toggles),
+  // so each is guarded on `mountedRef` (Sol P2) — a download that outlives the overlay must not push
+  // state into an unmounted component.
   const setBusy = (id: string, isBusy: boolean) => {
+    if (!mountedRef.current) {
+      return;
+    }
     setBusyIds((prev) => {
       const next = new Set(prev);
       if (isBusy) {
@@ -282,10 +324,16 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   };
 
   const setModelProgress = (id: string, written: number, total: number, phase: 'download' | 'verify' = 'download') => {
+    if (!mountedRef.current) {
+      return;
+    }
     setProgress((prev) => ({ ...prev, [id]: { written, total, phase } }));
   };
 
   const clearModelProgress = (id: string) => {
+    if (!mountedRef.current) {
+      return;
+    }
     setProgress((prev) => {
       if (!(id in prev)) {
         return prev;
@@ -294,6 +342,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       delete next[id];
       return next;
     });
+  };
+
+  /** Guarded `setStatusMessage` for the async download paths (Sol P2): a status update reached after an
+   * `await` must no-op once the overlay has unmounted. Synchronous (pre-await) status sets call
+   * `setStatusMessage` directly — the overlay is definitionally still mounted then. */
+  const setStatusMessageIfMounted = (message: string) => {
+    if (mountedRef.current) {
+      setStatusMessage(message);
+    }
   };
 
   /**
@@ -313,10 +370,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    */
   const persist = async (mutate: (current: ModelManagerState) => ModelManagerState): Promise<boolean> => {
     const { state, persisted } = await mutateModelManagerState(mutate);
-    if (persisted) {
-      setManagerState(state);
-    } else {
-      setStatusMessage("Couldn't save that change to the model list — it may not survive an app restart. Try again.");
+    // Guarded on `mountedRef` (Sol P2): `persist` is only ever called from the async download bodies, which
+    // can outlive this overlay if the host tears it down mid-download — the write still lands on disk
+    // (`mutateModelManagerState` is process-global), we just don't push it into an unmounted component.
+    if (mountedRef.current) {
+      if (persisted) {
+        setManagerState(state);
+      } else {
+        setStatusMessage("Couldn't save that change to the model list — it may not survive an app restart. Try again.");
+      }
     }
     return persisted;
   };
@@ -353,67 +415,72 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   };
 
   /**
-   * Shared download transaction (Finding 2) for BOTH the catalog and custom paths. It GLOBALLY serializes
-   * downloads and guarantees the busy/progress/controller state is always torn down:
-   *   1. Synchronous re-entry guard (`downloadInFlightRef`) — a second tap in the SAME tick (another catalog
-   *      row, or the custom button) short-circuits, so at most ONE download runs at a time. This is what
-   *      stops two downloads from both passing the same stale free-space snapshot or both racing the
-   *      clean-first orphan guard.
-   *   2. Clean EVERY retained orphan FIRST (`clearRetainedOrphans`) and ABORT if any still can't be removed,
-   *      so a prior failed-cleanup orphan can never accumulate a second.
-   *   3. RE-PROBE free storage right now (not the stale overlay-open snapshot) and refuse if below the floor
-   *      for `sizeForStorageCheck` (the exact size for a catalog entry; 0 = the headroom floor for a custom
-   *      URL whose size isn't known ahead of time).
-   *   4. Run `body` (the actual download + registration) inside try/catch/finally so ANY throw still clears
-   *      the busy row, progress, the AbortController, AND both in-flight guards — the catalog path previously
-   *      had NO surrounding try/finally, so a throw from dir-prep/stat/rename left its state stuck.
-   * `body` receives the transaction's `AbortController`; it does the download + registration and returns
-   * nothing. A short-circuited second tap does nothing (no state to tear down, so it skips the `finally`).
+   * Shared download transaction for BOTH the catalog and custom paths (Sol P2). Serialization now lives in
+   * the MODULE-LEVEL `download-coordinator` (`runDownload`) rather than in this component instance, so it
+   * survives a `ready → error → ready` host transition that unmounts and remounts the overlay mid-download:
+   *   1. `runDownload` REFUSES a second transaction process-wide — a same-tick double tap (another catalog
+   *      row, or the custom button) AND a freshly-mounted overlay both get `'busy'` and start nothing, so at
+   *      most ONE download ever runs. This is what stops two downloads from passing the same stale free-space
+   *      snapshot or racing the clean-first orphan guard.
+   *   2. The coordinator cleans EVERY retained orphan FIRST (`clearRetainedOrphans`) inside the coordinated
+   *      region and refuses the download (`'orphan-blocked'`) if any still can't be removed — so a prior
+   *      failed-cleanup orphan, even one created by an OLDER transaction after this overlay mounted, is
+   *      cleaned before this download begins and can never accumulate a second.
+   *   3. This `run` body RE-PROBES free storage right now (not the stale overlay-open snapshot) and refuses
+   *      if below the floor for `sizeForStorageCheck` (the exact size for a catalog entry; 0 = the headroom
+   *      floor for a custom URL whose size isn't known ahead of time).
+   *   4. `body` (the actual download + registration) runs inside try/catch/finally so ANY throw still clears
+   *      the busy row and progress — the catalog path had no such guard before.
+   * `body` receives the transaction's `AbortSignal`; it does the download + registration and returns nothing.
+   * `ownsActiveDownloadRef` is set for the lifetime of the coordinated body so the unmount effect aborts only
+   * a transaction THIS instance owns.
    */
   const runDownloadTransaction = async (
     id: string,
     sizeForStorageCheck: number,
-    body: (controller: AbortController) => Promise<void>,
+    body: (signal: AbortSignal) => Promise<void>,
   ): Promise<void> => {
-    if (downloadInFlightRef.current) {
+    const outcome = await runDownload(async (signal) => {
+      // This body runs ONLY when this call acquired the coordinator's mutex — mark ownership so the unmount
+      // effect aborts this (and only this) transaction, and clear it once the body settles.
+      ownsActiveDownloadRef.current = true;
+      try {
+        // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
+        // snapshot, which other app activity could have invalidated.
+        const caps = await probeDeviceCapabilities();
+        if (mountedRef.current) {
+          setCapabilities(caps);
+        }
+        if (storageFit(caps, sizeForStorageCheck) === 'insufficient') {
+          setStatusMessageIfMounted(
+            `Not enough free storage to download a model (only ${formatBytes(caps.freeStorageBytes)} free).`,
+          );
+          return;
+        }
+        setBusy(id, true);
+        try {
+          await body(signal);
+        } catch (err) {
+          // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
+          // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
+          setStatusMessageIfMounted(`Model download failed — ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          clearModelProgress(id);
+          setBusy(id, false);
+        }
+      } finally {
+        ownsActiveDownloadRef.current = false;
+      }
+    });
+    // A second entry point (same-tick double tap, or a remounted overlay) was refused globally — nothing to
+    // tear down here, since this call never acquired the mutex or touched any per-download state.
+    if (outcome.status === 'busy') {
       return;
     }
-    downloadInFlightRef.current = true;
-    setDownloadInFlight(true);
-    const controller = new AbortController();
-    try {
-      // Clean any retained orphan(s) from an earlier failed registration+cleanup BEFORE minting a new file,
-      // and abort if one still can't be removed (Finding 2) — never pile a second orphan on the first.
-      const cleared = await clearRetainedOrphans();
-      if (!cleared.ok) {
-        setStatusMessage(
-          `A previous download left a file that still can't be removed (${cleared.error}). Restart the app to clear it before downloading another model.`,
-        );
-        return;
-      }
-      // Re-probe free storage immediately before the download (Finding 2) rather than trusting the
-      // open-time snapshot, which a concurrent download or other app activity could have invalidated.
-      const caps = await probeDeviceCapabilities();
-      setCapabilities(caps);
-      if (storageFit(caps, sizeForStorageCheck) === 'insufficient') {
-        setStatusMessage(
-          `Not enough free storage to download a model (only ${formatBytes(caps.freeStorageBytes)} free).`,
-        );
-        return;
-      }
-      activeDownloads.current.set(id, controller);
-      setBusy(id, true);
-      await body(controller);
-    } catch (err) {
-      // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
-      // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
-      setStatusMessage(`Model download failed — ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      activeDownloads.current.delete(id);
-      clearModelProgress(id);
-      setBusy(id, false);
-      setDownloadInFlight(false);
-      downloadInFlightRef.current = false;
+    if (outcome.status === 'orphan-blocked') {
+      setStatusMessageIfMounted(
+        `A previous download left a file that still can't be removed (${outcome.error}). Restart the app to clear it before downloading another model.`,
+      );
     }
   };
 
@@ -424,12 +491,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * guard before). On a registration failure the just-downloaded file is CHECKED-deleted
    * (`discardUnregisteredDownload`), retaining its URI only if that cleanup itself fails. */
   const handleDownloadCatalogEntry = (entry: ModelCatalogEntry) =>
-    runDownloadTransaction(entry.id, entry.sizeBytes, async (controller) => {
+    runDownloadTransaction(entry.id, entry.sizeBytes, async (signal) => {
       // Catalog ids are hardcoded, known-safe strings — this can't actually fail — but sanitize anyway
       // for consistency with the pasted-URL path and as defense in depth (see model-download.ts).
       const fileName = sanitizeModelFileName(`${entry.id}.gguf`);
       if (!fileName) {
-        setStatusMessage(`${entry.displayName}: invalid catalog file name.`);
+        setStatusMessageIfMounted(`${entry.displayName}: invalid catalog file name.`);
         return;
       }
       setModelProgress(entry.id, 0, entry.sizeBytes, 'download');
@@ -442,10 +509,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         // Hashing a multi-GB file is slow — show its own progress rather than looking hung once the
         // download bar completes (P2-4/AF7).
         (hashed, total) => setModelProgress(entry.id, hashed, total, 'verify'),
-        controller.signal,
+        signal,
       );
       if (!outcome.ok) {
-        setStatusMessage(`${entry.displayName}: download failed — ${outcome.error}`);
+        setStatusMessageIfMounted(`${entry.displayName}: download failed — ${outcome.error}`);
         return;
       }
       const model: DownloadedModel = {
@@ -463,7 +530,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         downloaded: [...current.downloaded.filter((existing) => existing.id !== entry.id), model],
       }));
       if (persisted) {
-        setStatusMessage(`${entry.displayName} downloaded.`);
+        setStatusMessageIfMounted(`${entry.displayName} downloaded.`);
         return;
       }
       // Registration failed and the one-per-process orphan sweep already ran, so the just-downloaded file is
@@ -471,7 +538,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // fails, its URI is retained for the next attempt to clean first (Finding 2) — this closes the gap
       // where a catalog persist-failure did no cleanup and retained nothing, orphaning the file.
       const discard = await discardUnregisteredDownload(outcome.uri);
-      setStatusMessage(
+      setStatusMessageIfMounted(
         discard.removed
           ? `${entry.displayName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`
           : `${entry.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${discard.error}). It'll be cleared on your next attempt, or restart the app to clear it.`,
@@ -481,13 +548,13 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   /** Download a user-pasted URL — no size/hash to verify against, so it's always best-effort + warned.
    * URL parsing/authorization/redaction is the pure `prepareCustomModelDownload` (Finding 2 — malformed
    * percent-escapes, userinfo, and credential/token redaction of the persisted `sourceUrl`); the shared
-   * `runDownloadTransaction` provides the synchronous same-tick double-tap guard, the clean-first orphan
-   * guard, the storage re-probe, and the always-torn-down busy/progress/controller state. A persist failure
+   * `runDownloadTransaction` provides the process-global single-download guard (Sol P2), the clean-first
+   * orphan guard, the storage re-probe, and the always-torn-down busy/progress state. A persist failure
    * after a successful download discards the orphaned file with a CHECKED delete
    * (`discardUnregisteredDownload`), retaining its URI to block another download only if that cleanup fails. */
   const handleAddCustomUrl = () => {
     // Validate + mint the id BEFORE entering the transaction: an invalid URL never starts a transaction, and
-    // a same-tick double-tap on a valid URL is serialized by `runDownloadTransaction`'s ref guard (only the
+    // a same-tick double-tap on a valid URL is serialized by the coordinator's process-global mutex (only the
     // first proceeds). All parsing/authorization/redaction lives in the pure `prepareCustomModelDownload`.
     const prepared = prepareCustomModelDownload(customUrl);
     if (!prepared.ok) {
@@ -497,7 +564,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const fileName = `${id}-${prepared.fileName}`;
     // Custom URLs have no known size ahead of time, so the storage gate is the headroom FLOOR (size 0).
-    void runDownloadTransaction(id, 0, async (controller) => {
+    void runDownloadTransaction(id, 0, async (signal) => {
       setModelProgress(id, 0, 0);
       const outcome = await downloadModel(
         prepared.downloadUrl,
@@ -506,10 +573,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         undefined,
         (written, total) => setModelProgress(id, written, total),
         undefined,
-        controller.signal,
+        signal,
       );
       if (!outcome.ok) {
-        setStatusMessage(`Custom model download failed — ${outcome.error}`);
+        setStatusMessageIfMounted(`Custom model download failed — ${outcome.error}`);
         return;
       }
       const model: DownloadedModel = {
@@ -525,16 +592,19 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
       if (persisted) {
         // Clear the input only on a fully successful download+persist — a persistence failure keeps the
-        // entered URL so the operator can retry without re-typing it (CodeRabbit).
-        setCustomUrl('');
-        setStatusMessage(`${prepared.displayName} downloaded.`);
+        // entered URL so the operator can retry without re-typing it (CodeRabbit). Guarded: this runs after
+        // the download `await`, which can outlive the overlay (Sol P2).
+        if (mountedRef.current) {
+          setCustomUrl('');
+        }
+        setStatusMessageIfMounted(`${prepared.displayName} downloaded.`);
         return;
       }
       // Registration failed: discard the orphaned final `.gguf` (CHECKED) BEFORE offering retry so no
       // unreferenced model accumulates; if the checked cleanup itself fails the URI is retained to block
       // (and be cleaned first by) the next download (Finding 2).
       const discard = await discardUnregisteredDownload(outcome.uri);
-      setStatusMessage(
+      setStatusMessageIfMounted(
         discard.removed
           ? `${prepared.displayName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`
           : `${prepared.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${discard.error}). It'll be cleared on your next attempt, or restart the app to clear it.`,
