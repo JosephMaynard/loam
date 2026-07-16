@@ -128,6 +128,11 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     dbEncryptionMigrateFromKey: process.env.LOAM_DB_KEY_MIGRATE_FROM || undefined,
     ephemeralDbKey,
     dbEncryptionMode,
+    // The launcher's immutable per-boot key-handoff id (Sol Fable-round-2 P1-B), captured ONCE here so the
+    // passphrase-migration ack this boot emits is correlated to the exact attempt that opened the DB — never
+    // a mutable launcher global a later/duplicate unlock overwrote. `undefined` when unset (non-passphrase
+    // boots, non-launcher hosts).
+    dbKeyRequestId: process.env.LOAM_DB_KEY_REQUEST_ID || undefined,
     dbDriver: parseDbDriver(process.env.LOAM_DB_DRIVER),
     // The Android host / npm CLI inject the app version via LOAM_VERSION (no package.json on the
     // bundle path); "dev" if unset.

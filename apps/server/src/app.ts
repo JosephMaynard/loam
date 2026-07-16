@@ -221,11 +221,17 @@ function reportBootNotice(message: string, code: string): void {
  * forwards to `db-encryption.ts`'s `markPassphraseKeyMigrated()` so future boots stop offering the
  * legacy key. Absent (a silent no-op) on every other host and in tests that don't install it. Never
  * passes any key material — this is a bare signal, not a payload.
+ *
+ * `requestId` is the launcher's IMMUTABLE per-boot key-handoff id (Sol Fable-round-2 P1-B), threaded from
+ * `AppOptions.dbKeyRequestId` (which `embedded.ts` reads from `LOAM_DB_KEY_REQUEST_ID` once at boot). The RN
+ * side promotes only the candidate bound to THIS id, so a duplicate/later unlock can't mis-tag the report.
+ * It is NOT key material — just the correlation id already visible in the clear on the bridge.
  */
-function reportDbKeyMigrated(): void {
+function reportDbKeyMigrated(requestId?: string): void {
   try {
-    const reporter = (globalThis as { __loamReportDbKeyMigrated?: () => void }).__loamReportDbKeyMigrated;
-    reporter?.();
+    const reporter = (globalThis as { __loamReportDbKeyMigrated?: (requestId?: string) => void })
+      .__loamReportDbKeyMigrated;
+    reporter?.(requestId);
   } catch (reportError) {
     console.error("Failed to report DB key migration to the RN host:", reportError);
   }
@@ -285,6 +291,14 @@ export type AppOptions = {
    * used — only `dbEncryptionKey`/`ephemeralDbKey` do that.
    */
   dbEncryptionMode?: DbEncryptionMode;
+  /**
+   * The launcher's IMMUTABLE per-boot key-handoff request id (Sol Fable-round-2 P1-B) — `embedded.ts`
+   * reads it from `LOAM_DB_KEY_REQUEST_ID` once at boot. Captured here at buildApp time and forwarded in
+   * the passphrase-migration ack ({@link reportDbKeyMigrated}) so the RN side promotes only the candidate
+   * bound to the attempt that actually opened THIS DB, never a mutable global a later attempt overwrote.
+   * Absent on non-launcher hosts (desktop/Pi CLI, tests) — the ack is then an un-correlated no-op RN-side.
+   */
+  dbKeyRequestId?: string;
   /**
    * Plaintext SQLite backend to use when no encryption key is set. Defaults to `node:sqlite`; the
    * Android host passes `"better-sqlite3"` because its embedded Node 18 lacks `node:sqlite`
@@ -2135,7 +2149,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // launcher offered a legacy key because it hasn't recorded a confirmed migration yet (see
         // db-encryption.ts's passphrase key-version marker) — tell it to stop, so later boots skip this
         // extra key entirely.
-        reportDbKeyMigrated();
+        reportDbKeyMigrated(options.dbKeyRequestId);
       }
       return opened;
     } catch {
@@ -2215,7 +2229,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         encryptionEnabled = true;
         const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
         server.log.warn(message);
-        reportDbKeyMigrated();
+        reportDbKeyMigrated(options.dbKeyRequestId);
 
         // Best-effort post-commit cleanup: drop the pre-migration backup (and any stray tmp) so a later
         // boot doesn't mistake it for an interrupted migration to resume. RF6-a: also clear any

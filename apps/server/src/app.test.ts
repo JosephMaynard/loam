@@ -2718,11 +2718,13 @@ describe("encryption at rest + key-discard kill switch", () => {
   describe("P1-1 (Sol round 5): passphrase key-derivation migration (dbEncryptionMigrateFromKey / PRAGMA rekey)", () => {
     /** Install the `globalThis.__loamReportDbKeyMigrated` bridge (main.js's migration-confirmed signal,
      *  see db-encryption.ts's `markPassphraseKeyMigrated`) and count every invocation. Auto-uninstalled. */
-    function installFakeMigratedHook(): { calls: number } {
-      const state = { calls: 0 };
-      (globalThis as unknown as { __loamReportDbKeyMigrated?: () => void }).__loamReportDbKeyMigrated = () => {
-        state.calls += 1;
-      };
+    function installFakeMigratedHook(): { calls: number; requestIds: (string | undefined)[] } {
+      const state: { calls: number; requestIds: (string | undefined)[] } = { calls: 0, requestIds: [] };
+      (globalThis as unknown as { __loamReportDbKeyMigrated?: (requestId?: string) => void }).__loamReportDbKeyMigrated =
+        (requestId?: string) => {
+          state.calls += 1;
+          state.requestIds.push(requestId);
+        };
       cleanups.push(() => {
         delete (globalThis as unknown as { __loamReportDbKeyMigrated?: unknown }).__loamReportDbKeyMigrated;
       });
@@ -2758,9 +2760,13 @@ describe("encryption at rest + key-discard kill switch", () => {
         dbEncryptionKey: currentKey,
         dbEncryptionMigrateFromKey: legacyKey,
         dbEncryptionMode: "passphrase",
+        // Sol Fable-round-2 P1-B: the launcher's immutable per-boot handoff id must be forwarded VERBATIM in
+        // the migration ack (so RN promotes the exact attempt that opened THIS DB, not a mutable global).
+        dbKeyRequestId: "dbkey-boot-7",
       });
 
       expect(migrated.calls).toBe(1);
+      expect(migrated.requestIds).toEqual(["dbkey-boot-7"]);
       expect(migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "MIGRATE_ME")).toBe(true);
       // RF-b: a CLEAN migration deletes the pre-migration backup sidecars — none must be left behind (a
       // leftover would be misread as an interrupted migration on the next boot and trigger a restore).

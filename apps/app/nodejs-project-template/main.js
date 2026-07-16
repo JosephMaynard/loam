@@ -110,12 +110,15 @@ global.__loamRequestWipeRestart = function () {
 // it to RN so `db-encryption.ts`'s `registerDbEncryption` can call `markPassphraseKeyMigrated()`, which
 // stops future boots from offering the legacy key at all. Best-effort, same pattern as every other
 // global.__loam* hook here — installed BEFORE requiring the server bundle. Never carries any key material.
-global.__loamReportDbKeyMigrated = function () {
+global.__loamReportDbKeyMigrated = function (requestId) {
   try {
-    // Carry the id of the key-handoff attempt whose DB open the server just confirmed (Sol Fable-round
-    // P1-1), so RN promotes the EXACT candidate that attempt used — not a different, overlapping attempt's
-    // unverified guess. `null` (no handoff recorded, e.g. a non-passphrase mode) makes the RN side a no-op.
-    rnBridge.channel.post('loam-db-key-migrated', { requestId: lastAcceptedDbKeyRequestId });
+    // Carry the id of the key-handoff attempt whose DB open the server just confirmed (Sol Fable-round-2
+    // P1-B), so RN promotes the EXACT candidate that attempt used — not a different, overlapping attempt's
+    // unverified guess. The server passes the IMMUTABLE per-boot id it captured at buildApp time (from
+    // `LOAM_DB_KEY_REQUEST_ID`), NEVER a mutable launcher global. Missing/undefined (a non-passphrase boot)
+    // makes the RN side a no-op.
+    var id = typeof requestId === 'string' && requestId.length > 0 ? requestId : null;
+    rnBridge.channel.post('loam-db-key-migrated', { requestId: id });
   } catch (err) {
     console.error('Failed to post loam-db-key-migrated to the RN host', err);
   }
@@ -661,12 +664,6 @@ const DB_KEY_LOCKED_ERROR = 'locked-error';
  * resolves to `{ mode: 'locked-error' }` (P1-3, Sol round 5) so the caller locks rather than silently
  * falls back to plaintext. Only a genuinely successful `{mode:'off'}` reply resolves to `'off'`. */
 var dbKeyRequestCounter = 0;
-// The request id of the LAST response `requestDbKey` accepted (Sol Fable-round P1-1). The DB open that
-// follows a successful handoff is what the server later confirms via `__loamReportDbKeyMigrated`; forwarding
-// THIS id in that ack lets the RN side promote the exact candidate the accepted attempt used, never a
-// different (overlapping/late) attempt's guess. Boot/unlock is single-flight, so this is the attempt whose
-// key actually opened the DB.
-var lastAcceptedDbKeyRequestId = null;
 function requestDbKey(timeoutMs) {
   // Correlate each request with its response (Sol Fable-round P1-1): a request that TIMED OUT removes its
   // listener, but RN may still answer it late; without a correlation id that late answer would be caught by
@@ -695,8 +692,6 @@ function requestDbKey(timeoutMs) {
         // waiting for ours. Strict match: RN always echoes the id, so a legitimate answer always matches.
         return;
       }
-      // Remember the accepted id so the migration ack that follows a successful open can carry it back to RN.
-      lastAcceptedDbKeyRequestId = requestId;
       var mode = payload && payload.mode;
       if (mode === DB_MODE_READ_ERROR) {
         // RN successfully answered, but told us ITS read of the stored mode failed — not the same as
@@ -713,7 +708,10 @@ function requestDbKey(timeoutMs) {
       var key = payload && typeof payload.key === 'string' && payload.key.length > 0 ? payload.key : undefined;
       var legacyKey =
         payload && typeof payload.legacyKey === 'string' && payload.legacyKey.length > 0 ? payload.legacyKey : undefined;
-      finish({ mode: mode, key: key, legacyKey: legacyKey });
+      // Return THIS request's id (Sol Fable-round-2 P1-B): the boot that follows threads it into the embedded
+      // server as an IMMUTABLE per-boot value, so the migration ack the server later emits carries the id of
+      // the attempt that actually opened the DB — never a mutable launcher global a later attempt overwrote.
+      finish({ mode: mode, key: key, legacyKey: legacyKey, requestId: requestId });
     }
 
     var timer = setTimeout(function () {
@@ -1250,6 +1248,14 @@ function resolveDbEncryptionAndBoot() {
       var mode = result.mode;
       var key = result.key;
       var legacyKey = result.legacyKey;
+      var acceptedRequestId = result.requestId;
+
+      // Thread the accepted attempt's id into the embedded boot as an IMMUTABLE per-boot value (Sol
+      // Fable-round-2 P1-B): the server reads `LOAM_DB_KEY_REQUEST_ID` once at buildApp time and passes it
+      // back in the migration ack, so a later/duplicate unlock can't mis-tag this boot's report. Set only in
+      // the resolved-key paths below; CLEARED here for every path that resolves NO promotable key (off /
+      // locked / ephemeral / plaintext downgrade), so a stale id can never leak into a subsequent boot.
+      delete process.env.LOAM_DB_KEY_REQUEST_ID;
 
       if (mode === DB_KEY_LOCKED_ERROR) {
         // P1-3 (Sol round 5): RN couldn't tell us its actual mode selection at all — a Keystore/
@@ -1409,6 +1415,11 @@ function resolveDbEncryptionAndBoot() {
       // openStore's encryptionKey path takes precedence over LOAM_DB_DRIVER (see db.ts) — leave the
       // driver env unset here. NEVER logged.
       process.env.LOAM_DB_KEY = key;
+      // The one path with a promotable key (passphrase) — thread this attempt's id so the migration ack is
+      // correlated to it (Sol Fable-round-2 P1-B). Harmless for persistent mode (its report is a no-op RN-side).
+      if (acceptedRequestId) {
+        process.env.LOAM_DB_KEY_REQUEST_ID = acceptedRequestId;
+      }
       // P1-1 (Sol round 5): a pre-round-4 passphrase key derivation, offered ONLY when RN hasn't
       // recorded a confirmed migration yet (db-encryption.ts's `resolveDbKey('passphrase')`). Threaded
       // to the server as LOAM_DB_KEY_MIGRATE_FROM so `openInitialStore` can fall back to it and rekey in
@@ -1454,6 +1465,18 @@ function resolveDbEncryptionAndBoot() {
           meshPollArmed = true;
           setInterval(refreshMesh, MESH_POLL_MS);
           setTimeout(refreshMesh, 5000);
+        }
+        // JOIN the embedded server's REAL boot promise (Sol Fable-round-2 P1-B) so this — and therefore
+        // `bootInFlight`/`dbUnlockRetryInFlight` — stays in flight until the DB open/listen has actually
+        // SETTLED, not merely until the synchronous `require` returns. Without this the single-flight guard
+        // clears while `buildApp`/`openInitialStore` are still async, so a duplicate/later unlock could
+        // accept another attempt and overwrite the boot's `LOAM_DB_KEY_REQUEST_ID` before R1's open finishes.
+        // `__loamBootEmbeddedServer` is re-entrant-safe (embedded-main.ts RF2): the module-scope boot fired
+        // on first require, so this returns that same in-flight promise (and drives a fresh boot on a cached
+        // retry). It never rejects (its own boot errors are reported + swallowed inside).
+        var bootHook = global.__loamBootEmbeddedServer;
+        if (typeof bootHook === 'function') {
+          return bootHook();
         }
       } catch (err) {
         console.error('Failed to start the embedded LOAM server', err);

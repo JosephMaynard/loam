@@ -716,6 +716,75 @@ describe("correlated passphrase attempts (Sol Fable-round P1-1)", () => {
   });
 });
 
+describe("passphrase-state linearizability under the mutex (Sol Fable-round-2 P1)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("a candidate replacement that FULLY resolves before a stale ack prevents the old candidate's promotion", async () => {
+    await setDbEncryptionMode("passphrase");
+    await setPassphraseCandidate("A");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "r1" }); // r1 → A
+      await flushMicrotasks();
+      await setPassphraseCandidate("B"); // fully resolves → invalidates r1's attempt (under the lock)
+      channel.emit("loam-db-key-migrated", { requestId: "r1" });
+      await flushMicrotasks();
+      // r1's attempt was invalidated before its ack ran; A is never committed (B is only a candidate).
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("Forget and a stale migration ack fired CONCURRENTLY never resurrect the passphrase (either serialization)", async () => {
+    await setDbEncryptionMode("passphrase");
+    await setPassphraseCandidate("A");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "r1" }); // r1 → A
+      await flushMicrotasks();
+      // Fire Forget and r1's ack concurrently — both queue on the passphrase-state lock, in some order.
+      const forget = clearStoredPassphrase();
+      channel.emit("loam-db-key-migrated", { requestId: "r1" });
+      const forgetResult = await forget;
+      await flushMicrotasks();
+      expect(forgetResult.ok).toBe(true);
+      // mark-then-Forget deletes the just-promoted value; Forget-then-mark finds no attempt — either way absent.
+      expect(await hasStoredPassphrase()).toBe("absent");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a candidate-replacement WRITE FAILURE preserves the prior attempt (no invalidation without a landed replacement)", async () => {
+    await setDbEncryptionMode("passphrase");
+    await setPassphraseCandidate("A");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "r1" }); // r1 → A
+      await flushMicrotasks();
+      // The replacement's write to the candidate item fails: it must NOT invalidate the still-valid r1 → A
+      // (write-before-invalidate), since no replacement actually landed.
+      failSecureStoreItem(PASSPHRASE_CANDIDATE_ITEM, new Error("Keystore busy"));
+      await expect(setPassphraseCandidate("B")).rejects.toThrow();
+      clearSecureStoreFailure(PASSPHRASE_CANDIDATE_ITEM);
+      // r1's attempt survives, so its legitimate ack still promotes the value the DB actually opened under.
+      channel.emit("loam-db-key-migrated", { requestId: "r1" });
+      await flushMicrotasks();
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("A");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("hasStoredPassphrase tri-state (P1-3, Sol round 7)", () => {
   beforeEach(() => {
     resetSecureStoreMock();
