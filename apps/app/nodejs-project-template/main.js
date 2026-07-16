@@ -866,36 +866,6 @@ function fsyncDir(dir) {
   }
 }
 
-// Durable file write (Sol round-8 P1-5/P2-2): staging write + file-bytes fsync + atomic rename + parent-dir
-// fsync. Returns true ONLY when every step succeeds, so a caller may treat the write as power-loss-durable
-// strictly on true — a bare writeFileSync+rename is atomic but the OS may still hold the bytes and/or the
-// rename in the page cache and lose them on power-loss (for the start-fresh marker that means the operator's
-// confirmed destructive action is silently forgotten). fsync reopens the temp read-only purely to flush the
-// inode. Mirrors the server's `durableWriteFileSync` (apps/server/src/app.ts).
-function durableWriteFileSync(filePath, contents) {
-  var tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
-  try {
-    fs.writeFileSync(tmpPath, contents, 'utf8');
-    var fd = fs.openSync(tmpPath, 'r');
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(tmpPath, filePath);
-  } catch (err) {
-    try {
-      fs.rmSync(tmpPath, { force: true });
-    } catch (cleanupErr) {
-      // ENOENT is the common case (the staging write itself failed) — nothing to clean up.
-    }
-    return false;
-  }
-  // Parent-directory fsync is REQUIRED, not best-effort: without it the rename itself can be lost on
-  // power-loss (resurrecting stale contents), so a failure here means "not durable" → false.
-  return fsyncDir(path.dirname(filePath));
-}
-
 // RF2: true while a reboot THIS listener triggered is still running. `bootEmbeddedServer` itself is
 // now re-entrant-safe (embedded-main.ts ignores/joins a concurrent call rather than racing a second
 // `listen()`), but debouncing here too means a double-tap of the button doesn't even re-write the
