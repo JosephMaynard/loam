@@ -63,11 +63,38 @@ const DEVICE_SECRET_ITEM = 'loam-db-encryption-device-secret';
 const PASSPHRASE_KEY_VERSION_ITEM = 'loam-db-passphrase-key-version';
 const CURRENT_PASSPHRASE_KEY_VERSION = '2';
 
-// The boot-time unlock CANDIDATE value that `resolveDbKey` actually used to derive the key THIS boot (or
-// undefined if the committed passphrase was used / none). `markPassphraseKeyMigrated` promotes THIS value —
-// the one a successful DB open verified — never whatever is stored NOW, which a concurrent "replace the
-// pending passphrase" in Settings could have swapped to an unverified value (TOCTOU, Fable review).
-let candidateUsedForOpen: string | undefined;
+// Boot-time unlock CANDIDATE passphrases keyed by the launcher's opaque per-request id, so a promotion
+// commits the EXACT value the accepted DB open verified — never a process-global "last resolve" that a
+// later/overlapping/late resolve could have overwritten (Sol Fable-round P1-1). The flow is fully
+// correlated end-to-end: main.js posts `loam-db-key-request { requestId }`; `resolveDbKey` records the
+// candidate it actually used under that id here; main.js accepts exactly the response whose id matches,
+// remembers it, and echoes it back in the `loam-db-key-migrated { requestId }` ack; `markPassphraseKeyMigrated`
+// then promotes ONLY `pendingPassphraseAttempts.get(requestId)` — the candidate the open under this exact
+// attempt verified. A candidate replacement (`setPassphraseCandidate`) or a forget (`clearStoredPassphrase`)
+// INVALIDATES every outstanding attempt, so a stale/late migration ack can neither commit an old guess nor
+// resurrect a forgotten passphrase. Bounded so a run of timed-out attempts can't grow it without limit.
+const pendingPassphraseAttempts = new Map<string, string>();
+const MAX_PENDING_PASSPHRASE_ATTEMPTS = 16;
+
+/** Record the candidate a resolve used, keyed by its request id, evicting the oldest if over the cap. */
+function rememberPassphraseAttempt(requestId: string, candidate: string): void {
+  // Re-inserting refreshes recency (delete-then-set moves it to the end of the Map's insertion order).
+  pendingPassphraseAttempts.delete(requestId);
+  pendingPassphraseAttempts.set(requestId, candidate);
+  while (pendingPassphraseAttempts.size > MAX_PENDING_PASSPHRASE_ATTEMPTS) {
+    const oldest = pendingPassphraseAttempts.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    pendingPassphraseAttempts.delete(oldest);
+  }
+}
+
+/** Invalidate every outstanding boot attempt — called whenever the pending candidate is replaced or the
+ * passphrase is forgotten, so no in-flight/late attempt can be promoted after the operator moved on. */
+function invalidatePassphraseAttempts(): void {
+  pendingPassphraseAttempts.clear();
+}
 
 export type ResolvedDbKey = {
   mode: DbEncryptionMode;
@@ -80,6 +107,14 @@ export type ResolvedDbKey = {
    * success. Never present for any other mode.
    */
   legacyKey?: string;
+  /**
+   * The exact boot-time CANDIDATE passphrase this resolve used to derive `key` (Sol Fable-round P1-1),
+   * present ONLY when `resolveDbKey('passphrase')` fell back to an uncommitted candidate. It is RN-side
+   * bookkeeping — the responder records it against the request id so `markPassphraseKeyMigrated` can promote
+   * the verified value, and NEVER puts it in the bridge payload (raw passphrases don't cross the bridge; only
+   * the derived `key`/`legacyKey` do). Absent when a committed passphrase (or no passphrase) was used.
+   */
+  attemptCandidate?: string;
 };
 
 /** The subset of the nodejs-mobile bridge channel this module uses (kept loose, matching the other
@@ -189,6 +224,9 @@ export async function setStoredPassphrase(passphrase: string): Promise<void> {
  * Never logged; never written anywhere but the Keystore-backed secure store.
  */
 export async function setPassphraseCandidate(passphrase: string): Promise<void> {
+  // Replacing the pending candidate INVALIDATES every outstanding boot attempt (Sol Fable-round P1-1): a
+  // late response for a PRIOR candidate must never be promotable once the operator has entered a new one.
+  invalidatePassphraseAttempts();
   await SecureStore.setItemAsync(PASSPHRASE_CANDIDATE_ITEM, passphrase);
 }
 
@@ -203,6 +241,10 @@ export async function setPassphraseCandidate(passphrase: string): Promise<void> 
  * generic error messages, NEVER the passphrase material itself. */
 export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
   const errors: string[] = [];
+
+  // Invalidate every outstanding boot attempt (Sol Fable-round P1-1): without this, a delayed migration
+  // ack for an in-flight attempt could RE-CREATE a passphrase moments after Forget reported it gone.
+  invalidatePassphraseAttempts();
 
   // Also delete the key-VERSION marker (Fable review MEDIUM-1): without this, "Forget" leaves the marker at
   // the current version, so a re-entered passphrase (as a boot candidate) is never re-offered with its legacy
@@ -240,33 +282,44 @@ export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
  * getting offered unnecessarily on later boots — self-healing (the current key still opens the DB first
  * every time, and `openInitialStore` re-signals migrated again) rather than a correctness problem, so
  * this deliberately does not surface a failure the way {@link setDbEncryptionMode} does.
+ *
+ * `requestId` is the launcher's opaque id for the key-handoff attempt whose DB open THIS ack confirms
+ * (Sol Fable-round P1-1). Promotion commits ONLY the candidate `resolveDbKey` recorded under that exact id
+ * — never a process-global "last resolve" that an overlapping/late/timed-out attempt could have overwritten,
+ * and never a value a concurrent Settings edit swapped in. A missing/unknown id (older launcher, or an
+ * attempt invalidated by a candidate replacement / forget) promotes nothing — fail-safe.
  */
-export async function markPassphraseKeyMigrated(): Promise<void> {
+export async function markPassphraseKeyMigrated(requestId?: string): Promise<void> {
   try {
-    // P2-a (Sol round 6): a DB open under the current key is PROOF the passphrase used to derive it is
-    // correct. If the open used an uncommitted boot-time CANDIDATE, promote THAT EXACT value — the one
-    // `resolveDbKey` recorded in `candidateUsedForOpen` and the DB open just verified — never whatever is
-    // stored NOW (a concurrent "replace the pending passphrase" in Settings could have swapped it to an
-    // unverified value between resolve and this promote: TOCTOU, Fable review). Guard on "nothing committed"
-    // so this can never clobber a committed passphrase that itself opened the DB.
-    const openedWith = candidateUsedForOpen;
+    // The exact candidate the ACCEPTED attempt used (if the open used a boot candidate rather than a
+    // committed passphrase). Consumed here so a duplicate ack can't act on it twice.
+    const openedWith = requestId !== undefined ? pendingPassphraseAttempts.get(requestId) : undefined;
+    if (requestId !== undefined) {
+      pendingPassphraseAttempts.delete(requestId);
+    }
     const committed = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
-    const hasCommitted = typeof committed === 'string' && committed.length > 0;
-    if (typeof openedWith === 'string' && openedWith.length > 0 && !hasCommitted) {
-      // Promote the VERIFIED candidate (the one the DB open used), never the value stored NOW.
+    const hadCommitted = typeof committed === 'string' && committed.length > 0;
+    if (typeof openedWith === 'string' && openedWith.length > 0 && !hadCommitted) {
+      // A DB open under the current key is PROOF this exact passphrase is correct — promote the VERIFIED
+      // candidate. Guarded on "nothing committed" so it can never clobber a committed passphrase that
+      // itself opened the DB.
       await SecureStore.setItemAsync(PASSPHRASE_ITEM, openedWith);
     }
-    // Resolve the pending candidate: drop it when a committed passphrase now exists (it is moot —
-    // `resolveDbKey` always prefers the committed one) OR when it equals the verified value we opened with.
-    // NEVER drop a candidate that differs from `openedWith` while nothing is committed — it may be a newer
-    // pending guess (TOCTOU) that deserves its own boot attempt.
-    const storedCandidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
-    if (typeof storedCandidate === 'string' && storedCandidate.length > 0) {
-      if (hasCommitted || (typeof openedWith === 'string' && storedCandidate === openedWith)) {
+    // Whether a passphrase is committed AFTER this call: either one already was, or we just promoted the
+    // verified candidate. Only then is the DB confirmed migrated and a pending candidate moot — so gate BOTH
+    // the candidate cleanup AND the version marker on it. This makes a stale/forgotten-race ack (no attempt,
+    // nothing committed) a complete no-op: it can't drop a candidate, resurrect a passphrase, or falsely
+    // mark migrated.
+    const committedNow = hadCommitted || (typeof openedWith === 'string' && openedWith.length > 0);
+    if (committedNow) {
+      const storedCandidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+      if (typeof storedCandidate === 'string' && storedCandidate.length > 0) {
+        // The open succeeded, so `resolveDbKey` will prefer the committed passphrase from now on — the
+        // pending candidate is moot; clear it.
         await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
       }
+      await SecureStore.setItemAsync(PASSPHRASE_KEY_VERSION_ITEM, CURRENT_PASSPHRASE_KEY_VERSION);
     }
-    await SecureStore.setItemAsync(PASSPHRASE_KEY_VERSION_ITEM, CURRENT_PASSPHRASE_KEY_VERSION);
   } catch {
     // best-effort — see doc comment above.
   }
@@ -441,8 +494,10 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     }
 
     // mode === 'passphrase'
-    candidateUsedForOpen = undefined; // reset per boot; set below only if we fall back to a candidate
     let passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
+    // The exact candidate this resolve uses (if it falls back to one) — returned so the responder can map it
+    // to the request id and `markPassphraseKeyMigrated` promotes THIS verified value, never a global.
+    let attemptCandidate: string | undefined;
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
       // P2-a (Sol round 6): no COMMITTED passphrase — fall back to a boot-time unlock CANDIDATE if one is
       // pending (entered on the locked screen). It is tried WITHOUT being committed; only once the DB
@@ -451,7 +506,7 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
       const candidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
       if (typeof candidate === 'string' && candidate.length > 0) {
         passphrase = candidate;
-        candidateUsedForOpen = candidate;
+        attemptCandidate = candidate;
       }
     }
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
@@ -466,7 +521,7 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
 
     const migratedVersion = await SecureStore.getItemAsync(PASSPHRASE_KEY_VERSION_ITEM);
     if (migratedVersion === CURRENT_PASSPHRASE_KEY_VERSION) {
-      return { mode, key: digest };
+      return { mode, key: digest, attemptCandidate };
     }
 
     // P1-1 (Sol round 5): no confirmed migration recorded yet — this could be an existing pre-round-4
@@ -476,7 +531,7 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     // in place on success and signalling back so `markPassphraseKeyMigrated` sets this marker and future
     // boots skip the extra key entirely.
     const legacyKey = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, passphrase);
-    return { mode, key: digest, legacyKey };
+    return { mode, key: digest, legacyKey, attemptCandidate };
   } catch {
     return { mode };
   }
@@ -501,9 +556,9 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
  */
 export function registerDbEncryption(channel: BridgeChannel): () => void {
   const onRequest = (payload: unknown): void => {
-    // Echo main.js's correlation id (Fable review LOW-6) so a late answer to an already-timed-out request
-    // can't be mistaken for the answer to a subsequent one. Absent on an older launcher — then we simply
-    // don't echo, and the launcher's tolerant match still accepts the response.
+    // Echo main.js's correlation id (Sol Fable-round P1-1) so a late answer to an already-timed-out
+    // request can't be mistaken for the answer to a subsequent one, AND so the candidate this resolve used
+    // is bound to THIS attempt for `markPassphraseKeyMigrated` to promote by id.
     const rawId = (payload as { requestId?: unknown } | undefined)?.requestId;
     const requestId = typeof rawId === 'string' ? rawId : undefined;
     void (async () => {
@@ -513,6 +568,12 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
         response = mode === DB_ENCRYPTION_MODE_READ_ERROR ? { mode } : await resolveDbKey(mode);
       } catch {
         response = { mode: DB_ENCRYPTION_MODE_READ_ERROR };
+      }
+      // Bind the exact candidate this resolve used to the request id, so a promotion later commits THIS
+      // verified value (not a global that an overlapping/late resolve overwrote). The raw candidate stays
+      // RN-side — it is deliberately NOT copied into the bridge payload below.
+      if (requestId !== undefined && 'attemptCandidate' in response && response.attemptCandidate) {
+        rememberPassphraseAttempt(requestId, response.attemptCandidate);
       }
       try {
         const payload: { mode: DbEncryptionModeOrError; key?: string; legacyKey?: string; requestId?: string } = {
@@ -534,8 +595,12 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
     })();
   };
 
-  const onMigrated = (): void => {
-    void markPassphraseKeyMigrated();
+  const onMigrated = (payload: unknown): void => {
+    // The launcher echoes the request id of the accepted key handoff whose DB open this ack confirms
+    // (Sol Fable-round P1-1) — promote ONLY that exact attempt's candidate.
+    const rawId = (payload as { requestId?: unknown } | undefined)?.requestId;
+    const requestId = typeof rawId === 'string' ? rawId : undefined;
+    void markPassphraseKeyMigrated(requestId);
   };
 
   channel.addListener('loam-db-key-request', onRequest);

@@ -21,6 +21,9 @@ const { mayResolveDbKeyThisBoot } = require('./db-key-gate');
 // a durable install from a provably-absent write and from an INDETERMINATE post-rename commit, which a
 // bare `durableWriteFileSync` boolean conflates with "nothing was written".
 const { installStartFreshMarker } = require('./start-fresh-marker');
+// Sol Fable-round P1-4: the three-outcome durable config.json write (durable / failed / indeterminate),
+// split out for the same unit-testability reason (injected `fs` — see config-write.js's doc comment).
+const { durableWriteConfig } = require('./config-write');
 
 const PORT = 3000;
 const projectDir = __dirname;
@@ -109,7 +112,10 @@ global.__loamRequestWipeRestart = function () {
 // global.__loam* hook here — installed BEFORE requiring the server bundle. Never carries any key material.
 global.__loamReportDbKeyMigrated = function () {
   try {
-    rnBridge.channel.post('loam-db-key-migrated');
+    // Carry the id of the key-handoff attempt whose DB open the server just confirmed (Sol Fable-round
+    // P1-1), so RN promotes the EXACT candidate that attempt used — not a different, overlapping attempt's
+    // unverified guess. `null` (no handoff recorded, e.g. a non-passphrase mode) makes the RN side a no-op.
+    rnBridge.channel.post('loam-db-key-migrated', { requestId: lastAcceptedDbKeyRequestId });
   } catch (err) {
     console.error('Failed to post loam-db-key-migrated to the RN host', err);
   }
@@ -555,30 +561,12 @@ function isValidSetPayload(payload) {
   return true;
 }
 
-/** Write `next` to config.json atomically (temp file + rename) so a mid-write crash can never leave a
- * half-written, unparseable file behind — that would strand the operator with a server that refuses
- * to boot and no in-app way to fix it. */
+/** Write `next` to config.json DURABLY, returning `'durable' | 'failed' | 'indeterminate'` (Sol Fable-round
+ * P1-4) — the three-outcome contract lives in the injected-`fs`, unit-tested `config-write.js` helper. A
+ * bare atomic temp+rename only orders metadata; without the contents/dir fsyncs a power loss can still leave
+ * a half-written config.json that strands the operator with a host that refuses to boot. */
 function writeConfigFile(next) {
-  fs.mkdirSync(dataDir, { recursive: true });
-  const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf8');
-  // fsync the temp file's contents before the rename, then the directory after it (Fable review LOW-4).
-  // Without this the atomic rename only orders the metadata: a power loss right after `renameSync` can
-  // still surface an empty/short config.json (the rename is durable but the data blocks aren't), which
-  // would strand the operator with an unparseable config on the next cold boot. Best-effort — a
-  // filesystem that rejects fsync must not fail the (already atomic) write.
-  try {
-    const fd = fs.openSync(tmpPath, 'r+');
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch (err) {
-    // Contents-fsync unsupported/failed — the temp+rename is still atomic; proceed.
-  }
-  fs.renameSync(tmpPath, configPath);
-  fsyncDir(dataDir);
+  return durableWriteConfig(fs, dataDir, configPath, JSON.stringify(next, null, 2));
 }
 
 rnBridge.channel.on('loam-model-set-active', (payload) => {
@@ -618,8 +606,21 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
     }
 
     const next = Object.assign({}, current, { llm: Object.assign({}, current.llm, { onDevice: onDevice }) });
-    writeConfigFile(next);
-    reply(true);
+    const outcome = writeConfigFile(next);
+    if (outcome === 'durable') {
+      reply(true);
+    } else if (outcome === 'failed') {
+      // Definite failure BEFORE the rename — config.json is untouched. Report it so the model-manager
+      // conditionally rolls its local change back rather than believing it committed (Sol Fable-round P1-4).
+      reply(false, 'Could not durably save the model configuration; the previous configuration is unchanged.');
+    } else {
+      // 'indeterminate': the new config is visible but its survival across power loss is unconfirmed. Do
+      // NOT claim durable success (the model-manager would treat it as committed) and do NOT report a plain
+      // failure (which would trigger a rollback that could conflict with a write that actually landed).
+      // WITHHOLD the ack — the RN bridge's timeout path then treats it as AMBIGUOUS: the durable write-ahead
+      // pending stays in place and reconciliation settles it on the next open/restart. See
+      // model-manager-actions.ts's `'ambiguous'` handling. (No reply posted.)
+    }
   } catch (err) {
     reply(false, String((err && err.message) || err));
   }
@@ -660,13 +661,19 @@ const DB_KEY_LOCKED_ERROR = 'locked-error';
  * resolves to `{ mode: 'locked-error' }` (P1-3, Sol round 5) so the caller locks rather than silently
  * falls back to plaintext. Only a genuinely successful `{mode:'off'}` reply resolves to `'off'`. */
 var dbKeyRequestCounter = 0;
+// The request id of the LAST response `requestDbKey` accepted (Sol Fable-round P1-1). The DB open that
+// follows a successful handoff is what the server later confirms via `__loamReportDbKeyMigrated`; forwarding
+// THIS id in that ack lets the RN side promote the exact candidate the accepted attempt used, never a
+// different (overlapping/late) attempt's guess. Boot/unlock is single-flight, so this is the attempt whose
+// key actually opened the DB.
+var lastAcceptedDbKeyRequestId = null;
 function requestDbKey(timeoutMs) {
-  // Correlate each request with its response (Fable review LOW-6): a request that TIMED OUT removes its
-  // listener, but RN may still answer it late; without a correlation id that late answer would be caught
-  // by the NEXT request's freshly-registered listener and satisfy it with stale mode/key state (e.g. a
-  // pre-passphrase "locked" answer landing on the post-passphrase unlock retry). The id is echoed back by
-  // RN's responder; a response is accepted only when it matches (a response with no id at all is still
-  // accepted, for tolerance against an older RN build that doesn't echo).
+  // Correlate each request with its response (Sol Fable-round P1-1): a request that TIMED OUT removes its
+  // listener, but RN may still answer it late; without a correlation id that late answer would be caught by
+  // the NEXT request's freshly-registered listener and satisfy it with stale mode/key state (e.g. a
+  // pre-passphrase "locked" answer landing on the post-passphrase unlock retry). RN always echoes the id
+  // now (same bundle ships both sides), so the match is STRICT: a response whose id is missing or differs is
+  // ignored. Accepting an untagged response would reopen the exact stale-response bug this closes.
   var requestId = 'dbkey-' + (++dbKeyRequestCounter);
   return new Promise(function (resolve) {
     var settled = false;
@@ -683,10 +690,13 @@ function requestDbKey(timeoutMs) {
 
     function onResponse(payload) {
       var responseId = payload && payload.requestId;
-      if (typeof responseId === 'string' && responseId !== requestId) {
-        // A late answer to a PRIOR, already-settled request — ignore it and keep waiting for ours.
+      if (responseId !== requestId) {
+        // Not the answer to THIS request (a late/foreign response, or an untagged one) — ignore it and keep
+        // waiting for ours. Strict match: RN always echoes the id, so a legitimate answer always matches.
         return;
       }
+      // Remember the accepted id so the migration ack that follows a successful open can carry it back to RN.
+      lastAcceptedDbKeyRequestId = requestId;
       var mode = payload && payload.mode;
       if (mode === DB_MODE_READ_ERROR) {
         // RN successfully answered, but told us ITS read of the stored mode failed — not the same as

@@ -611,14 +611,24 @@ describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
   });
 
   it("markPassphraseKeyMigrated PROMOTES a verified candidate to the committed passphrase and clears it", async () => {
+    // Drive the FULL correlated handoff (Sol Fable-round P1-1): the responder records the candidate under
+    // the request id; the migration ack for that same id promotes exactly it.
+    await setDbEncryptionMode("passphrase");
     await setPassphraseCandidate("verified-guess");
-    // Simulate main.js resolving the key from the candidate, then the server confirming the DB opened.
-    await resolveDbKey("passphrase");
-    await markPassphraseKeyMigrated();
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "r1" });
+      await flushMicrotasks();
+      channel.emit("loam-db-key-migrated", { requestId: "r1" });
+      await flushMicrotasks();
 
-    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("verified-guess");
-    expect(await hasStoredPassphrase()).toBe("present");
-    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("verified-guess");
+      expect(await hasStoredPassphrase()).toBe("present");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+    } finally {
+      cleanup();
+    }
   });
 
   it("markPassphraseKeyMigrated never CLOBBERS a committed passphrase with a stale candidate", async () => {
@@ -629,6 +639,80 @@ describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
     // The committed passphrase that actually opened the DB is preserved; the stale candidate is dropped.
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("correct");
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+  });
+});
+
+describe("correlated passphrase attempts (Sol Fable-round P1-1)", () => {
+  beforeEach(() => {
+    resetSecureStoreMock();
+    resetCryptoMock();
+  });
+
+  it("promotes ONLY the accepted attempt's candidate when two overlap with different candidates", async () => {
+    await setDbEncryptionMode("passphrase");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      // R1 resolves candidate A (records r1→A).
+      await setPassphraseCandidate("A");
+      channel.emit("loam-db-key-request", { requestId: "r1" });
+      await flushMicrotasks();
+      // The operator replaces the pending candidate with B (invalidates r1's attempt) and R2 resolves B.
+      await setPassphraseCandidate("B");
+      channel.emit("loam-db-key-request", { requestId: "r2" });
+      await flushMicrotasks();
+
+      // The server confirms the ACCEPTED attempt R2 → commit B, the value that actually opened the DB.
+      channel.emit("loam-db-key-migrated", { requestId: "r2" });
+      await flushMicrotasks();
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("B");
+
+      // A LATE migration ack for the ignored R1 must NOT overwrite B with A (or resurrect A).
+      channel.emit("loam-db-key-migrated", { requestId: "r1" });
+      await flushMicrotasks();
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("B");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a migration ack with an unknown/mismatched id promotes nothing", async () => {
+    await setDbEncryptionMode("passphrase");
+    await setPassphraseCandidate("guess");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "r1" });
+      await flushMicrotasks();
+      // An ack for a DIFFERENT request id (or none) never promotes r1's candidate.
+      channel.emit("loam-db-key-migrated", { requestId: "not-r1" });
+      await flushMicrotasks();
+      expect(await hasStoredPassphrase()).toBe("absent");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("Forget racing a delayed migration ack does NOT re-create the passphrase", async () => {
+    await setDbEncryptionMode("passphrase");
+    await setPassphraseCandidate("guess");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "r1" });
+      await flushMicrotasks();
+      // The operator forgets the passphrase BEFORE the (delayed) migration ack for r1 arrives.
+      expect((await clearStoredPassphrase()).ok).toBe(true);
+      channel.emit("loam-db-key-migrated", { requestId: "r1" });
+      await flushMicrotasks();
+
+      // The forgotten passphrase stays forgotten — the invalidated attempt can't resurrect it.
+      expect(await hasStoredPassphrase()).toBe("absent");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    } finally {
+      cleanup();
+    }
   });
 });
 
