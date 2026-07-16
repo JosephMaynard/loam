@@ -13,6 +13,7 @@ const {
   clearRetainedOrphans,
   deleteModelFileChecked,
   discardUnregisteredDownload,
+  downloadModel,
   prepareCustomModelDownload,
   retainedOrphanCount,
   sweepOrphanedModelFiles,
@@ -116,6 +117,19 @@ describe("deleteModelFileChecked — strict, verified deletion (Finding 1)", () 
     await expect(deleteModelFileChecked(target)).rejects.toThrow(/still exists/);
     // The file really is still there — proving the check caught a silent no-op delete.
     expect((await fileSystemMock.getInfoAsync(target)).exists).toBe(true);
+  });
+
+  // Finding C: a path outside MODELS_DIR (a corrupted persisted-state file routing an arbitrary path
+  // here) must be REFUSED before `deleteAsync` is ever called — never unlink an unrelated file.
+  it("refuses to delete a path outside MODELS_DIR without ever calling deleteAsync (Finding C)", async () => {
+    const outside = `${fileSystemMock.documentDirectory}secrets/passwords.txt`;
+    seedFile(outside, "sensitive");
+    const deleteSpy = vi.spyOn(fileSystemMock, "deleteAsync");
+
+    await expect(deleteModelFileChecked(outside)).rejects.toThrow(/outside the models directory/);
+    expect(deleteSpy).not.toHaveBeenCalled();
+    // The unrelated file is untouched.
+    expect((await fileSystemMock.getInfoAsync(outside)).exists).toBe(true);
   });
 });
 
@@ -260,5 +274,110 @@ describe("retained-orphan registry — discard + clear-first guard (Finding 2)",
     clearFileSystemFailure(orphan1);
     expect(await clearRetainedOrphans()).toEqual({ ok: true });
     expect(retainedOrphanCount()).toBe(0);
+  });
+});
+
+// Finding B: a custom (unpinned) download is bounded by `maxBytes` (free space minus headroom). The
+// resumable is stopped — and the file rejected — the moment its DECLARED size or its CUMULATIVE written
+// bytes cross the limit, with a final on-disk size check as a backstop. Within the limit it succeeds.
+// The mock has no `createDownloadResumable`, so each test installs a minimal fake for it.
+describe("downloadModel — bounded by remaining free space (Finding B)", () => {
+  const fileName = "custom-model.gguf";
+  const destUri = `${MODELS_DIR}${fileName}.partial`;
+  const finalUri = `${MODELS_DIR}${fileName}`;
+
+  type ProgressData = { totalBytesWritten: number; totalBytesExpectedToWrite: number };
+
+  /** Install a fake `createDownloadResumable` that replays `progress` ticks (each of which may trip the
+   * limit and call `cancelAsync`), and — unless cancelled — seeds `fileSize` bytes at the staging path
+   * and resolves with `status`. */
+  function installFakeResumable(behavior: { progress?: ProgressData[]; fileSize?: number; status?: number }) {
+    (fileSystemMock as unknown as { createDownloadResumable: unknown }).createDownloadResumable = (
+      _url: string,
+      dest: string,
+      _options: unknown,
+      onProgress: (data: ProgressData) => void,
+    ) => {
+      let cancelled = false;
+      return {
+        async downloadAsync() {
+          for (const tick of behavior.progress ?? []) {
+            onProgress(tick);
+          }
+          if (cancelled) {
+            return undefined;
+          }
+          seedFile(dest, "x".repeat(behavior.fileSize ?? 0));
+          return { status: behavior.status ?? 200, uri: dest };
+        },
+        async cancelAsync() {
+          cancelled = true;
+        },
+      };
+    };
+  }
+
+  beforeEach(() => {
+    resetFileSystemMock();
+  });
+  afterEach(() => {
+    delete (fileSystemMock as unknown as { createDownloadResumable?: unknown }).createDownloadResumable;
+    vi.restoreAllMocks();
+  });
+
+  it("stops and rejects when the DECLARED size exceeds maxBytes (streaming guard)", async () => {
+    // The very first progress tick declares 5000 bytes against a 100-byte budget → cancel + reject.
+    installFakeResumable({ progress: [{ totalBytesWritten: 0, totalBytesExpectedToWrite: 5000 }], fileSize: 5000 });
+
+    const outcome = await downloadModel("https://huggingface.co/x.gguf", fileName, undefined, undefined, () => {}, undefined, undefined, 100);
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toMatch(/free space/);
+    // No partial or final file is left behind.
+    expect((await fileSystemMock.getInfoAsync(destUri)).exists).toBe(false);
+    expect((await fileSystemMock.getInfoAsync(finalUri)).exists).toBe(false);
+  });
+
+  it("rejects when the WRITTEN bytes cross maxBytes even if the declared total stayed small", async () => {
+    installFakeResumable({
+      progress: [
+        { totalBytesWritten: 50, totalBytesExpectedToWrite: 0 },
+        { totalBytesWritten: 250, totalBytesExpectedToWrite: 0 }, // crosses the 100-byte budget
+      ],
+      fileSize: 250,
+    });
+
+    const outcome = await downloadModel("https://huggingface.co/x.gguf", fileName, undefined, undefined, () => {}, undefined, undefined, 100);
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toMatch(/free space/);
+  });
+
+  it("rejects via the final on-disk size backstop when progress never reported the overage", async () => {
+    // No progress tick ever crosses the limit, but the finished file is larger than maxBytes.
+    installFakeResumable({ progress: [{ totalBytesWritten: 10, totalBytesExpectedToWrite: 10 }], fileSize: 5000 });
+
+    const outcome = await downloadModel("https://huggingface.co/x.gguf", fileName, undefined, undefined, () => {}, undefined, undefined, 100);
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toMatch(/free space/);
+    expect((await fileSystemMock.getInfoAsync(destUri)).exists).toBe(false);
+  });
+
+  it("succeeds and finalizes the file when it stays within maxBytes", async () => {
+    installFakeResumable({ progress: [{ totalBytesWritten: 500, totalBytesExpectedToWrite: 500 }], fileSize: 500 });
+
+    const outcome = await downloadModel("https://huggingface.co/x.gguf", fileName, undefined, undefined, () => {}, undefined, undefined, 1_000_000);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.uri).toBe(finalUri);
+    expect(outcome.sizeBytes).toBe(500);
+    // Promoted from `.partial` to its final name.
+    expect((await fileSystemMock.getInfoAsync(finalUri)).exists).toBe(true);
+    expect((await fileSystemMock.getInfoAsync(destUri)).exists).toBe(false);
   });
 });

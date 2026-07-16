@@ -753,7 +753,12 @@ var DB_MODE_HINT_PATH = path.join(dataDir, '.loam-db-mode-hint');
  *
  *  P1-1 (Sol round 7): the write is ATOMIC — write to a temp file then rename over the target — so an
  *  interrupted/partial write can never leave a TRUNCATED hint on disk (which `readDbModeHint` would treat
- *  as a `status:'error'` and LOCK on). rename(2) is atomic on the same filesystem. */
+ *  as a `status:'error'` and LOCK on). rename(2) is atomic on the same filesystem.
+ *
+ *  Durability (CodeRabbit): atomic is not power-loss durable. RN commits an encrypted SecureStore mode only
+ *  AFTER this returns `true`; a crash before the bytes + directory entry reach stable storage could restore
+ *  the old `off`/absent hint and permit a later PLAINTEXT boot under a now-encrypted node. So fsync the
+ *  staged file, rename it, then fsync `dataDir` — and only report success once all three have completed. */
 function writeDbModeHint(mode) {
   if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
     return false;
@@ -762,7 +767,19 @@ function writeDbModeHint(mode) {
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(tmpPath, mode, 'utf8');
+    var fd = fs.openSync(tmpPath, 'r');
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(tmpPath, DB_MODE_HINT_PATH);
+    if (!fsyncDir(dataDir)) {
+      // The rename landed but the directory entry isn't provably durable — a power loss could still lose it.
+      // Report failure so the caller (the picker's transactional hint write) doesn't treat the hint as safely
+      // persisted; the mode itself is still applied, and a later successful write reconciles the hint.
+      return false;
+    }
     return true;
   } catch (err) {
     // best-effort — a missing hint only makes a future transient failure err toward locking when a secret

@@ -185,6 +185,13 @@ describe("getDbEncryptionMode (P1-3, Sol round 5)", () => {
     failSecureStoreItem("loam-db-encryption-mode", new Error("Keystore unavailable"));
     await expect(getDbEncryptionMode()).resolves.toBe(DB_ENCRYPTION_MODE_READ_ERROR);
   });
+
+  it("resolves to the read-error sentinel — NOT 'off' — for a non-null but corrupted/unrecognized value (CodeRabbit)", async () => {
+    // A tampered or garbled stored value must FAIL CLOSED: authorizing plaintext ('off') on an indeterminate
+    // selection would silently downgrade an operator who chose an encrypted mode. Only a genuine null is 'off'.
+    await secureStoreMock.setItemAsync("loam-db-encryption-mode", "not-a-real-mode");
+    await expect(getDbEncryptionMode()).resolves.toBe(DB_ENCRYPTION_MODE_READ_ERROR);
+  });
 });
 
 describe("setDbEncryptionMode (P1-3, Sol round 5)", () => {

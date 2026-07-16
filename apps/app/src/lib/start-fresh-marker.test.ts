@@ -52,13 +52,22 @@ interface MockOptions {
   markerLingersAfterUnlink?: boolean;
   /** make `lstatSync(MARKER)` throw a non-ENOENT error (the absence proof is unverifiable). */
   failLstatUnverifiable?: boolean;
+  /** seed a PRE-EXISTING (unconsumed) marker on disk before the install runs. */
+  priorMarker?: boolean;
 }
 
 /** An in-memory `fs` exposing only the calls `installStartFreshMarker` makes, with injectable faults. */
 function makeFs(opts: MockOptions) {
   const files = new Set<string>();
+  if (opts.priorMarker) {
+    files.add(MARKER);
+  }
   let nextFd = 10;
   let dirOpenCount = 0;
+  // The `markerLingersAfterUnlink` / `failLstatUnverifiable` faults target the ABSENCE-PROOF `lstat(MARKER)`
+  // calls (the Phase-1 catch and the Phase-2 rollback). The NEW start-of-install prior-marker probe
+  // (CodeRabbit) is the FIRST `lstat(MARKER)` call and must reflect real on-disk state, so it is exempt.
+  let startCheckDone = false;
   const fdPath = new Map<number, string>();
 
   const fs = {
@@ -113,6 +122,15 @@ function makeFs(opts: MockOptions) {
       files.delete(pathArg);
     },
     lstatSync(pathArg: string) {
+      if (pathArg === MARKER && !startCheckDone) {
+        // The install's initial prior-marker probe — reflect real on-disk state (faults target the later
+        // absence-proof lstat calls, not this one).
+        startCheckDone = true;
+        if (!files.has(pathArg)) {
+          throw enoent();
+        }
+        return {};
+      }
       if (pathArg === MARKER && opts.failLstatUnverifiable) {
         throw ioError("lstat failed", "EACCES"); // cannot prove absence
       }
@@ -202,6 +220,16 @@ describe("installStartFreshMarker", () => {
     // the removal itself is not proven durable → indeterminate (never a false 'not scheduled').
     const fs = makeFs({ failDirOpenOn: [1, 2] });
     expect(install(fs)).toBe("indeterminate");
+  });
+
+  it("PRESERVES a pre-existing marker on a dir-fsync rollback instead of deleting it (CodeRabbit)", () => {
+    // A reset was ALREADY scheduled (a prior unconsumed marker). This install's atomic rename overwrites it,
+    // then the phase-2 durability fsync fails. The rollback must NOT unlink — that would drop the
+    // previously-scheduled reset AND falsely report 'not-installed'. Keep the (superseding) marker on disk
+    // and report the honest uncertainty.
+    const fs = makeFs({ priorMarker: true, failDirOpenOn: [1] });
+    expect(install(fs)).toBe("indeterminate");
+    expect(fs._has(MARKER)).toBe(true); // the reset request survives
   });
 
   it("returns 'not-installed' when the RENAME fails and NO marker exists on disk (provably absent)", () => {

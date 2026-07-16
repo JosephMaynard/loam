@@ -172,11 +172,12 @@ function bytesToHex(bytes: Uint8Array): string {
 export const DB_ENCRYPTION_MODE_READ_ERROR = 'error' as const;
 export type DbEncryptionModeOrError = DbEncryptionMode | typeof DB_ENCRYPTION_MODE_READ_ERROR;
 
-/** Read the operator's persisted mode choice. Returns `'off'` only after a SUCCESSFUL read that came
- * back null/absent/unrecognized (genuinely "nothing selected yet" — the safe default); returns
- * {@link DB_ENCRYPTION_MODE_READ_ERROR} on a thrown read (P1-3, Sol round 5) — that failure must never
- * be silently reported as `'off'`, since a caller feeding a boot decision would then downgrade an
- * operator's encrypted mode to plaintext on a mere transient Keystore hiccup. */
+/** Read the operator's persisted mode choice. Returns `'off'` ONLY after a successful read that came back
+ * genuinely absent (`null` — "nothing selected yet", the safe default); returns
+ * {@link DB_ENCRYPTION_MODE_READ_ERROR} on a thrown read (P1-3, Sol round 5) AND on a non-null but
+ * corrupted/unrecognized stored value (CodeRabbit) — neither must be silently reported as `'off'`, since a
+ * caller feeding a boot decision would then downgrade an operator's encrypted mode to plaintext on a mere
+ * transient Keystore hiccup OR a tampered/garbled item. Only confirmed absence is treated as "off". */
 export async function getDbEncryptionMode(): Promise<DbEncryptionModeOrError> {
   let raw: string | null;
   try {
@@ -184,7 +185,10 @@ export async function getDbEncryptionMode(): Promise<DbEncryptionModeOrError> {
   } catch {
     return DB_ENCRYPTION_MODE_READ_ERROR;
   }
-  return isDbEncryptionMode(raw) ? raw : 'off';
+  if (raw === null) {
+    return 'off';
+  }
+  return isDbEncryptionMode(raw) ? raw : DB_ENCRYPTION_MODE_READ_ERROR;
 }
 
 /** Result of {@link setDbEncryptionMode} — P1-3, Sol round 5: a REAL success/failure, not a swallowed

@@ -5,6 +5,8 @@ import { ActivityIndicator, Alert, Linking, Platform, Pressable, StyleSheet, Tex
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
+import { NetworkConfigSchema } from '@loam/schema';
+
 import { DbEncryptionSettingsOverlay } from '@/components/db-encryption-settings';
 import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
@@ -171,7 +173,16 @@ export async function clearWipeKeyAndAck(
   clear: () => Promise<{ ok: boolean; error?: string }>,
   postComplete: () => void,
 ): Promise<WipeKeyClearOutcome> {
-  const result = await clear();
+  let result: { ok: boolean; error?: string };
+  try {
+    result = await clear();
+  } catch (error) {
+    // A REJECTED clear (a thrown Keystore/SecureStore failure, not just an `{ ok: false }` return) is a
+    // durable, RETRYABLE wipe failure — never an ack. Acknowledging a clear that didn't happen would let
+    // the wipe be reported complete while the device key survives, so treat the throw as a failure outcome
+    // and fall through WITHOUT posting the completion ack (the launcher keeps its marker for a retry).
+    return { ok: false, error: error instanceof Error ? error.message : 'Failed to clear the device encryption key.' };
+  }
   if (!result.ok) {
     return { ok: false, error: result.error };
   }
@@ -209,11 +220,6 @@ type HostStatus = 'starting' | 'ready' | 'error';
 // to a spinner/error screen, and — unlike 'error' before this fix — is never cleared by a later 'ready'.
 type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string };
 type HostInfoPayload = { port?: number; addresses?: string[] };
-// The subset of GET /api/bootstrap this screen reads (docs/20 — cookie-free, mints no session, so
-// it's safe to poll from the host's own WebView client before any identity exists).
-type BootstrapPayload = {
-  networkConfig?: { transportEncryption?: string; transportPublicKey?: string };
-};
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
 // and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
@@ -283,6 +289,14 @@ export default function HostScreen() {
   // `required` — otherwise the WebView loads a bare URL, gets blocked, then reloads with the fragment,
   // flashing a blocked page. Set once per "become ready" transition.
   const [webViewReady, setWebViewReady] = useState(false);
+  // A bootstrap that couldn't learn the host's transport posture — the loopback GET /api/bootstrap timed
+  // out, errored, or answered non-2xx (G7/security). In `required` transport mode mounting the WebView
+  // anyway would load an UNKEYED `LOAM_URL` (no `#k=` fragment) and defeat the MITM protection the whole
+  // fetch exists to provide, so instead of mounting we keep the WebView GATED and surface a retryable
+  // error here. A late/slow fetch result can never clear this (the effect's `settled` guard), and Retry
+  // bumps `bootstrapAttempt` to re-run the effect from scratch.
+  const [bootstrapError, setBootstrapError] = useState(false);
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
   const [keepAwake, setKeepAwake] = useState(false);
   // Optional kiosk mode — pin the app (Android screen pinning) so a passer-by can't wander off into
@@ -432,13 +446,18 @@ export default function HostScreen() {
         setErrorCode((current) => {
           // RF3: a generic, codeless boot error — chiefly main.js's ~5-min readiness-poll give-up
           // (`waitForServer`'s `retry`, which historically posted no `code` at all) — must not clobber
-          // an ACTIVE `db_encryption_unreadable` recovery state. Without this, that codeless error
-          // overwrote `errorCode` to `undefined`, `dbUnreadable` went false, and the "Preserve old
-          // database & start fresh" button silently vanished even though recovery was still possible
-          // (the operator would have to force-quit and reopen the app to see it again). `'boot_timeout'`
-          // is main.js's now-explicit code for that same give-up path — treated the same way here.
+          // an ACTIVE recovery state: `db_encryption_unreadable` (preserve-and-start-fresh),
+          // `db_encryption_plaintext_unconverted` (delete/switch-off), or `db_encryption_locked`
+          // (passphrase/retry unlock). Without this, that codeless error overwrote `errorCode` to
+          // `undefined`, the code-keyed flag (e.g. `dbUnreadable`/`dbLocked`) went false, and the still-live
+          // recovery controls (the passphrase input, "Preserve old database & start fresh", etc.) silently
+          // vanished even though recovery was still possible (the operator would have to force-quit and
+          // reopen the app to see them again). `'boot_timeout'` is main.js's now-explicit code for that
+          // same give-up path — treated the same way here.
           if (
-            (current === DB_UNREADABLE_CODE || current === DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE) &&
+            (current === DB_UNREADABLE_CODE ||
+              current === DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE ||
+              current === DB_LOCKED_CODE) &&
             (payload.code === undefined || payload.code === 'boot_timeout')
           ) {
             return current;
@@ -520,49 +539,96 @@ export default function HostScreen() {
   // Once the host is ready, learn its transport-encryption posture from the cookie-free bootstrap
   // endpoint (never /api/config — that mints a session and would steal the one-time `firstUser` admin
   // grant from the operator). The key is stable for the life of the boot, so this fires once per
-  // "become ready" transition, not on a poll.
+  // "become ready" transition (and on an explicit `bootstrapAttempt` retry), not on a poll.
   useEffect(() => {
     if (Platform.OS !== 'android' || status !== 'ready') {
       return;
     }
     let cancelled = false;
-    // Gate WebView mounting on this fetch settling (or the timeout below) — see `webViewReady`'s
-    // comment (G7). `finish` fires exactly once regardless of which path (success/no-payload/error/
-    // timeout) gets there first.
+    // This fetch is the SOLE gate on mounting the WebView (see `webViewReady`/`bootstrapError`). Exactly
+    // one of `mount`/`gate` wins, once — a `settled` latch keeps a late/slow fetch result from clobbering
+    // the timeout's decision (or vice-versa), so a required-mode host can never end up mounting unkeyed
+    // after having already surfaced the retryable error.
     let settled = false;
-    const finish = () => {
+    // Success: mount the WebView with the resolved `#k=` fragment (empty for `off`/`optional`-without-key,
+    // or when the config couldn't be validated — see below). Clears any prior retryable error.
+    const mount = (fragment: string) => {
       if (cancelled || settled) {
         return;
       }
       settled = true;
+      setTransportKeyFragment(fragment);
+      setBootstrapError(false);
       setWebViewReady(true);
     };
-    const timeoutId = setTimeout(finish, BOOTSTRAP_KEY_TIMEOUT_MS);
+    // Failure: we never learned the transport posture (timeout / network error / non-2xx). Keep the
+    // WebView GATED — mounting an unkeyed URL in `required` mode would defeat the `#k=` MITM protection —
+    // and surface a retryable error instead. Deliberately does NOT weaken `off`/`optional`: those mount
+    // normally on the success path; only a genuine bootstrap FAILURE lands here.
+    const gate = () => {
+      if (cancelled || settled) {
+        return;
+      }
+      settled = true;
+      setBootstrapError(true);
+    };
+    // Derive the URL fragment from a validated bootstrap body. A body that fails `NetworkConfigSchema`
+    // validation falls through safely to no fragment (treated as `off`) rather than trusting unvalidated
+    // shape; a validated `optional`/`required` config with a non-empty key yields the `#k=` fragment.
+    const fragmentFor = (body: unknown): string => {
+      const parsed = NetworkConfigSchema.safeParse((body as { networkConfig?: unknown } | null)?.networkConfig);
+      if (!parsed.success) {
+        return '';
+      }
+      const { transportEncryption, transportPublicKey } = parsed.data;
+      if (transportEncryption !== 'off' && typeof transportPublicKey === 'string' && transportPublicKey.length > 0) {
+        // Defensive: the fragment gets embedded straight into a URL string below (G10c) — encode it so a
+        // key value that somehow contained a fragment-breaking character can't malform the URL.
+        return `#k=${encodeURIComponent(transportPublicKey)}`;
+      }
+      return '';
+    };
+    const timeoutId = setTimeout(gate, BOOTSTRAP_KEY_TIMEOUT_MS);
     fetch(`${LOAM_URL}/api/bootstrap`, { credentials: 'omit' })
-      .then((response) => (response.ok ? (response.json() as Promise<BootstrapPayload>) : null))
-      .then((payload) => {
-        if (cancelled || !payload) {
+      .then(async (response) => {
+        if (!response.ok) {
+          // A non-2xx from the just-booted loopback server — we couldn't learn the posture, so gate.
+          return { gated: true } as const;
+        }
+        return { gated: false, fragment: fragmentFor((await response.json()) as unknown) } as const;
+      })
+      .then((outcome) => {
+        if (cancelled || settled) {
           return;
         }
-        const { transportEncryption, transportPublicKey } = payload.networkConfig ?? {};
-        if (transportEncryption && transportEncryption !== 'off' && typeof transportPublicKey === 'string' && transportPublicKey.length > 0) {
-          // Defensive: the fragment gets embedded straight into a URL string below (G10c) — encode it
-          // so a key value that somehow contained a fragment-breaking character can't malform the URL.
-          setTransportKeyFragment(`#k=${encodeURIComponent(transportPublicKey)}`);
+        clearTimeout(timeoutId);
+        if (outcome.gated) {
+          gate();
+        } else {
+          mount(outcome.fragment);
         }
       })
       .catch(() => {
-        // Best-effort: the host still loads over a plain URL, same as transport encryption being off.
-      })
-      .finally(() => {
+        if (cancelled || settled) {
+          return;
+        }
+        // A network error or a malformed-JSON body — same as any other failure to learn the posture: gate.
         clearTimeout(timeoutId);
-        finish();
+        gate();
       });
     return () => {
       cancelled = true;
       clearTimeout(timeoutId);
     };
-  }, [status]);
+  }, [status, bootstrapAttempt]);
+
+  // Retry a gated bootstrap (see `bootstrapError`): clear the error and bump `bootstrapAttempt` so the
+  // effect above re-runs its /api/bootstrap fetch from scratch. The WebView stays gated until that
+  // re-attempt actually succeeds, so a required-mode host never mounts unkeyed on the retry path either.
+  const retryBootstrap = () => {
+    setBootstrapError(false);
+    setBootstrapAttempt((attempt) => attempt + 1);
+  };
 
   // Ask the launcher for fresh addresses whenever the Share overlay opens — that's when the hotspot
   // starts and its AP interface (and address) appears.
@@ -858,6 +924,23 @@ export default function HostScreen() {
               }
             }}
           />
+        ) : bootstrapError ? (
+          // The bootstrap key fetch failed, so the WebView stays GATED rather than mounting an unkeyed URL
+          // (see `bootstrapError` — this is the required-mode MITM protection). Offer a retry; the host is
+          // otherwise up (`status === 'ready'`), so a re-attempt against the loopback server normally
+          // succeeds immediately.
+          <ThemedView style={styles.webViewLoading}>
+            <ThemedText type="subtitle">Couldn’t finish starting LOAM</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              The host started, but couldn’t confirm its secure-connection settings. Retry to finish
+              loading.
+            </ThemedText>
+            <Pressable onPress={retryBootstrap} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">Retry</ThemedText>
+              </ThemedView>
+            </Pressable>
+          </ThemedView>
         ) : (
           // Held back until the bootstrap key fetch settles (G7) — see `webViewReady`'s comment. This
           // window is normally sub-second (a loopback fetch to the just-booted server).

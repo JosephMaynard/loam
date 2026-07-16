@@ -34,11 +34,15 @@ import {
 } from "@/lib/model-manager-store";
 import type { DownloadedModel, ModelManagerState, PendingAction } from "@/lib/model-manager-store";
 
+// Mirror of `model-download.ts`'s `MODELS_DIR` for this mock's document directory: persisted model paths
+// must live under it or the store's validators reject them (Finding C path-traversal defense, CodeRabbit).
+const MODELS_DIR = `${fileSystemMock.documentDirectory}models/`;
+
 function model(id: string): DownloadedModel {
   return {
     id,
     displayName: `Model ${id}`,
-    uri: `file:///models/${id}.gguf`,
+    uri: `${MODELS_DIR}${id}.gguf`,
     sizeBytes: 1024,
     isCustom: false,
     sourceUrl: `https://example.test/${id}.gguf`,
@@ -618,6 +622,20 @@ describe("reconcilePendingActions — RESTART-level: all attempts timed out, not
     // Sol round-6 P2#1: clearing activeId must ALSO sync the engine to the resulting DURABLE target (here
     // nothing active → null), so A's abandoned load/loaded context can't still publish and run.
     expect(reconcileActiveModel).toHaveBeenCalledWith(null);
+  });
+
+  it("a DEFINITE failure of a clear pending KEEPS the pending for retry (launcher still holds the old pointer) (CodeRabbit)", async () => {
+    const pending: PendingAction = { id: POINTER_PENDING_ID, kind: "clear", desired: { enabled: false } };
+    const store = makeStore({ downloaded: [A], activeId: undefined, pending: [pending] });
+    const deps = scriptedDeps(store, { clearActiveModel: async () => FAILED });
+
+    const result = await reconcilePendingActions(deps);
+
+    // The launcher DEFINITELY refused the clear, so it still points at the old model while local `activeId`
+    // is unset — a divergence. Dropping the journal would strand it forever (the launcher keeps feeding the
+    // LLM the old model); keep the pending so a later pass re-sends the clear until it confirms.
+    expect(result.settled).toBe(false);
+    expect((store.get().pending ?? []).map((p) => p.kind)).toEqual(["clear"]);
   });
 
   it("no pending → settles immediately without touching the bridge", async () => {

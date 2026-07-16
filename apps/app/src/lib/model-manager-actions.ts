@@ -589,8 +589,11 @@ async function reconcileOne(
     deps.reconcileActiveModel(resultingUri);
     return next;
   }
-  const cleared = await clearPendingEntry(deps, action.id);
-  return cleared.persisted ? cleared.state : state;
+  // A definite-failure `clear` (CodeRabbit): `clearActiveModel()` returned failed, so the launcher STILL
+  // holds its old active pointer while local `activeId` is already unset — a divergence. Dropping the journal
+  // here would stop retrying and leave that divergence permanent (the launcher keeps feeding the LLM the old
+  // model). KEEP the pending untouched so a later reconcile pass re-sends the clear until it confirms.
+  return state;
 }
 
 /**

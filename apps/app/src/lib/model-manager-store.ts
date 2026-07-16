@@ -5,6 +5,8 @@
 // JSON file is enough here (small, infrequently written); no AsyncStorage dependency needed.
 import * as FileSystem from 'expo-file-system/legacy';
 
+import { isWithinModelsDir, redactCustomSourceUrl } from '@/lib/model-download';
+
 export type DownloadedModel = {
   /** Catalog id for a curated pick, or a generated id for a pasted-URL custom model. */
   id: string;
@@ -393,13 +395,78 @@ function normalizeState(value: unknown): ModelManagerState {
     return EMPTY_STATE;
   }
   const record = value as { downloaded?: unknown; activeId?: unknown; pending?: unknown };
-  const downloaded = Array.isArray(record.downloaded) ? record.downloaded.filter(isDownloadedModel) : [];
+  const downloaded = (Array.isArray(record.downloaded) ? record.downloaded.filter(isDownloadedModel) : []).map(
+    // Migrate/redact legacy custom `sourceUrl`s (Finding D): older builds persisted the pasted URL
+    // verbatim, which could carry credentials or a `?token=…`. Strip them to `origin + pathname` on read
+    // (only for CUSTOM models — a catalog `sourceUrl` is a fixed public URL and left untouched). Reuses
+    // the same helper the live download path applies. `migrateLegacyCustomSourceUrls` writes this back
+    // durably so the plaintext secret is actually removed from disk on upgrade.
+    (model) => (model.isCustom ? { ...model, sourceUrl: redactCustomSourceUrl(model.sourceUrl) } : model),
+  );
   const activeId = typeof record.activeId === 'string' ? record.activeId : undefined;
   const pending = Array.isArray(record.pending) ? record.pending.filter(isPendingAction) : [];
   // Keep the persisted shape minimal: only carry `pending` when there's actually something unconfirmed,
   // so a fully-settled state round-trips as `{ downloaded, activeId }` (matching EMPTY_STATE and the
   // pre-P2-b shape) rather than growing an always-`[]` key.
   return pending.length > 0 ? { downloaded, activeId, pending } : { downloaded, activeId };
+}
+
+/**
+ * Read the RAW (pre-normalization) `downloaded` array from a slot on disk (Finding D). Deliberately
+ * side-steps `normalizeState`/`tryReadState`, both of which already redact custom `sourceUrl`s — the
+ * migration needs to see the UNREDACTED persisted value to decide whether a durable rewrite is actually
+ * required. Returns `undefined` on a missing/unreadable/unparseable slot (the caller falls back to the
+ * next slot). Never throws.
+ */
+async function readRawDownloadedEntries(path: string): Promise<unknown[] | undefined> {
+  try {
+    const info = await FileSystem.getInfoAsync(path);
+    if (!info.exists) {
+      return undefined;
+    }
+    const parsed: unknown = JSON.parse(await FileSystem.readAsStringAsync(path));
+    if (!parsed || typeof parsed !== 'object') {
+      return undefined;
+    }
+    const downloaded = (parsed as { downloaded?: unknown }).downloaded;
+    return Array.isArray(downloaded) ? downloaded : [];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * One-time upgrade migration (Finding D): older builds persisted a custom model's `sourceUrl` verbatim,
+ * so a credential (`user:pass@`) or `?token=…` could sit in plaintext in the store. `normalizeState`
+ * redacts these on READ, but that only fixes the in-memory copy — this durably REWRITES the store so the
+ * secret is actually removed from disk. It inspects the raw persisted value first and only writes when a
+ * redaction is genuinely needed (no churn otherwise), then persists through the normal serialized
+ * mutation flow (whose read already redacts via `normalizeState`, so an identity mutation is enough).
+ * Never throws — a failed/refused write just leaves the (already in-memory-redacted) state as-is for a
+ * later attempt.
+ */
+export async function migrateLegacyCustomSourceUrls(): Promise<void> {
+  const raw = (await readRawDownloadedEntries(STATE_PATH)) ?? (await readRawDownloadedEntries(BAK_PATH));
+  if (!raw) {
+    return;
+  }
+  const needsRedaction = raw.some((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return false;
+    }
+    const record = entry as { isCustom?: unknown; sourceUrl?: unknown };
+    return (
+      record.isCustom === true &&
+      typeof record.sourceUrl === 'string' &&
+      redactCustomSourceUrl(record.sourceUrl) !== record.sourceUrl
+    );
+  });
+  if (!needsRedaction) {
+    return;
+  }
+  // `mutateModelManagerState` reloads through `normalizeState` (which redacts), so an identity mutation
+  // persists the redacted `sourceUrl`s — serialized against every other in-flight mutation.
+  await mutateModelManagerState((current) => current);
 }
 
 /**
@@ -425,7 +492,10 @@ function isPendingAction(value: unknown): value is PendingAction {
   if (record.kind !== 'setActive' && record.kind !== 'clear' && record.kind !== 'delete') {
     return false;
   }
-  if (record.fileUri !== undefined && typeof record.fileUri !== 'string') {
+  // A `fileUri`, when present, is a model file the sweep protects and reconciliation may DELETE — so
+  // constrain it to MODELS_DIR too (Finding C, path-traversal defense in depth). An out-of-dir path is
+  // treated as corrupt, invalidating the slot.
+  if (record.fileUri !== undefined && (typeof record.fileUri !== 'string' || !isWithinModelsDir(record.fileUri))) {
     return false;
   }
   if (record.requiresLauncherClear !== undefined && typeof record.requiresLauncherClear !== 'boolean') {
@@ -498,7 +568,11 @@ function isDownloadedModel(value: unknown): value is DownloadedModel {
   return (
     typeof record.id === 'string' &&
     typeof record.displayName === 'string' &&
+    // Path-traversal defense in depth (Finding C): a persisted `uri` that doesn't resolve inside
+    // MODELS_DIR is corrupt — reject the whole entry (and thus the slot) rather than later routing an
+    // arbitrary path into a delete. A legitimately-downloaded model's `uri` is always `<MODELS_DIR><name>`.
     typeof record.uri === 'string' &&
+    isWithinModelsDir(record.uri) &&
     typeof record.sizeBytes === 'number' &&
     typeof record.isCustom === 'boolean' &&
     typeof record.sourceUrl === 'string' &&

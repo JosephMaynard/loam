@@ -18,6 +18,7 @@ const {
   loadModelManagerState,
   readModelManagerState,
   dispositionFromLoad,
+  migrateLegacyCustomSourceUrls,
   mutateModelManagerState,
   saveModelManagerState,
   recordPending,
@@ -30,18 +31,27 @@ type ModelManagerState = import("@/lib/model-manager-store").ModelManagerState;
 
 const STATE_PATH = `${fileSystemMock.documentDirectory}loam-model-manager.json`;
 const BAK_PATH = `${STATE_PATH}.bak`;
+/** Mirror of `model-download.ts`'s `MODELS_DIR` for this mock's document directory. A persisted model
+ * `uri`/`fileUri` MUST resolve inside this dir now (Finding C, path-traversal defense), so the test
+ * fixtures below build their paths from it. */
+const MODELS_DIR = `${fileSystemMock.documentDirectory}models/`;
 
-/** A well-formed `DownloadedModel` (passes `isDownloadedModel`). */
+/** A well-formed `DownloadedModel` (passes `isDownloadedModel`) — `uri` under MODELS_DIR (Finding C). */
 function model(id: string) {
   return {
     id,
     displayName: `Model ${id}`,
-    uri: `file:///models/${id}.gguf`,
+    uri: `${MODELS_DIR}${id}.gguf`,
     sizeBytes: 1024,
     isCustom: false,
     sourceUrl: `https://example.test/${id}.gguf`,
     downloadedAt: 123,
   };
+}
+
+/** A well-formed CUSTOM `DownloadedModel` with a caller-supplied `sourceUrl` (Finding D redaction). */
+function customModel(id: string, sourceUrl: string) {
+  return { ...model(id), isCustom: true, sourceUrl };
 }
 
 const GOOD_BACKUP = { downloaded: [model("m1"), model("m2")], activeId: "m1" };
@@ -155,15 +165,15 @@ describe("saveModelManagerState — corrupt primary not rotated over a good back
 // ---------------------------------------------------------------------------
 
 const PENDING_DELETE: PendingAction = {
-  id: "delete:file:///models/m1.gguf",
+  id: `delete:${MODELS_DIR}m1.gguf`,
   kind: "delete",
   desired: { enabled: false },
-  fileUri: "file:///models/m1.gguf",
+  fileUri: `${MODELS_DIR}m1.gguf`,
 };
 const PENDING_SET_ACTIVE: PendingAction = {
   id: POINTER_PENDING_ID,
   kind: "setActive",
-  desired: { enabled: true, modelPath: "file:///models/m2.gguf", model: "Model m2" },
+  desired: { enabled: true, modelPath: `${MODELS_DIR}m2.gguf`, model: "Model m2" },
 };
 
 describe("pending actions — persistence + strict validation (P2-b)", () => {
@@ -262,10 +272,10 @@ describe("recordPending — supersede rules (P2-b)", () => {
     expect(withDelete.map((p) => p.id)).toEqual([PENDING_DELETE.id]);
 
     const secondDelete: PendingAction = {
-      id: "delete:file:///models/other.gguf",
+      id: `delete:${MODELS_DIR}other.gguf`,
       kind: "delete",
       desired: { enabled: false },
-      fileUri: "file:///models/other.gguf",
+      fileUri: `${MODELS_DIR}other.gguf`,
     };
     const bothDeletes = recordPending(withDelete, secondDelete);
     expect(bothDeletes.map((p) => p.id).sort()).toEqual([PENDING_DELETE.id, secondDelete.id].sort());
@@ -279,11 +289,115 @@ describe("pendingProtectedUris — do-not-sweep set (P2-b)", () => {
       PENDING_SET_ACTIVE,
       { id: "ignored", kind: "clear", desired: { enabled: false } },
     ]);
-    expect(uris.sort()).toEqual(["file:///models/m1.gguf", "file:///models/m2.gguf"].sort());
+    expect(uris.sort()).toEqual([`${MODELS_DIR}m1.gguf`, `${MODELS_DIR}m2.gguf`].sort());
   });
 
   it("returns an empty list for no pending", () => {
     expect(pendingProtectedUris(undefined)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding C: a persisted `uri`/`fileUri` that doesn't resolve inside MODELS_DIR is corrupt — the whole
+// slot is INVALID so it can never route an arbitrary path into a delete (path-traversal defense in depth).
+// ---------------------------------------------------------------------------
+
+describe("persisted-path validation — MODELS_DIR containment (Finding C)", () => {
+  beforeEach(() => {
+    resetFileSystemMock();
+  });
+
+  it("treats a downloaded entry whose uri escapes MODELS_DIR as INVALID and falls through to .bak", async () => {
+    const escaping = { ...model("m1"), uri: `${fileSystemMock.documentDirectory}evil.gguf` };
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [escaping], activeId: "m1" }));
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP));
+
+    expect(await loadModelManagerState()).toEqual(GOOD_BACKUP);
+  });
+
+  it("rejects a traversal uri that tries to climb out of MODELS_DIR with `..`", async () => {
+    const traversal = { ...model("m1"), uri: `${MODELS_DIR}../../evil.gguf` };
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [traversal], activeId: "m1" }));
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP));
+
+    expect(await loadModelManagerState()).toEqual(GOOD_BACKUP);
+  });
+
+  it("treats a 'delete' pending whose fileUri escapes MODELS_DIR as INVALID (never deletes an arbitrary path)", async () => {
+    seedFile(
+      STATE_PATH,
+      JSON.stringify({
+        downloaded: [model("m1")],
+        activeId: "m1",
+        pending: [
+          {
+            id: "delete:x",
+            kind: "delete",
+            desired: { enabled: false },
+            fileUri: `${fileSystemMock.documentDirectory}secrets/passwords.txt`,
+          },
+        ],
+      }),
+    );
+    seedFile(BAK_PATH, JSON.stringify(GOOD_BACKUP));
+
+    expect(await loadModelManagerState()).toEqual(GOOD_BACKUP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding D: legacy custom `sourceUrl`s (older builds persisted the pasted URL verbatim, possibly with
+// credentials/query tokens) are redacted to origin+pathname on read AND durably rewritten to disk.
+// ---------------------------------------------------------------------------
+
+describe("custom sourceUrl redaction + migration (Finding D)", () => {
+  beforeEach(() => {
+    resetFileSystemMock();
+    vi.restoreAllMocks();
+  });
+
+  it("redacts credentials/query/fragment from a custom sourceUrl on load (catalog models untouched)", async () => {
+    const legacy = customModel("c1", "https://user:pass@huggingface.co/repo/m.gguf?token=secret#frag");
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [model("m1"), legacy], activeId: "c1" }));
+
+    const loaded = await loadModelManagerState();
+    const custom = loaded.downloaded.find((m) => m.id === "c1")!;
+    const catalog = loaded.downloaded.find((m) => m.id === "m1")!;
+
+    expect(custom.sourceUrl).toBe("https://huggingface.co/repo/m.gguf");
+    expect(custom.sourceUrl).not.toContain("secret");
+    expect(custom.sourceUrl).not.toContain("pass");
+    // A non-custom (catalog) model's sourceUrl is left exactly as persisted.
+    expect(catalog.sourceUrl).toBe("https://example.test/m1.gguf");
+  });
+
+  it("migrateLegacyCustomSourceUrls durably rewrites the plaintext secret out of the store", async () => {
+    const legacy = customModel("c1", "https://huggingface.co/repo/m.gguf?token=secret");
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [legacy], activeId: "c1" }));
+
+    await migrateLegacyCustomSourceUrls();
+
+    // The RAW persisted primary no longer carries the token — the plaintext secret is gone from disk.
+    const raw = await fileSystemMock.readAsStringAsync(STATE_PATH);
+    expect(raw).not.toContain("token");
+    expect(raw).not.toContain("secret");
+    expect(JSON.parse(raw).downloaded[0].sourceUrl).toBe("https://huggingface.co/repo/m.gguf");
+  });
+
+  it("is a no-op (no write) when nothing needs redacting", async () => {
+    const clean = customModel("c1", "https://huggingface.co/repo/m.gguf");
+    seedFile(STATE_PATH, JSON.stringify({ downloaded: [clean], activeId: "c1" }));
+
+    const writeSpy = vi.spyOn(fileSystemMock, "writeAsStringAsync");
+    await migrateLegacyCustomSourceUrls();
+
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when there is no persisted state at all", async () => {
+    const writeSpy = vi.spyOn(fileSystemMock, "writeAsStringAsync");
+    await expect(migrateLegacyCustomSourceUrls()).resolves.toBeUndefined();
+    expect(writeSpy).not.toHaveBeenCalled();
   });
 });
 

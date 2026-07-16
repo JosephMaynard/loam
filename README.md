@@ -257,7 +257,7 @@ against a local cache. The **server** is a single [Fastify](https://fastify.dev)
 **schema** package is the single source of truth for what a message, channel, or user looks like;
 because both sides import it and validate against it, the wire format cannot drift. The **helper
 libraries** are deliberately tiny and dependency-free: one turns an id into a memorable name, one turns
-an id into an avatar, one draws QR codes, and one does the mesh cryptography.
+an id into an avatar, one draws QR codes, and one implements the (experimental) mesh cryptography.
 
 ### Identities and sessions
 
@@ -428,9 +428,10 @@ flowchart LR
 
 The sealing uses per-user mesh identities and a self-certifying address, so a carrier cannot read the
 message and a swapped key is rejected. It is delivered by relaying sealed blobs with limits on how far
-and how long they travel. This is a phased, security-first effort; the cryptography and addressing are
-built and tested, while the device-to-device radio transport is still in progress. See
-[docs/16](docs/16-opportunistic-mesh.md).
+and how long they travel. This is a phased, security-first effort and the whole mesh capability is still
+experimental: the cryptography and addressing are implemented and unit-tested on the server side, and the
+device-to-device radio transport is scaffolded but not yet verified on real radios. Please do not rely on
+it as a production security guarantee yet. See [docs/16](docs/16-opportunistic-mesh.md).
 
 ### The Emergency Reset
 

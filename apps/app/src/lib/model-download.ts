@@ -48,7 +48,7 @@ export function sanitizeModelFileName(name: string): string | null {
  * resolves `.`/`..` segments (no Node `path` module available in this RN runtime) rather than trusting
  * a string-prefix check alone, which a crafted `..`-laden name could otherwise defeat.
  */
-function isWithinModelsDir(uri: string): boolean {
+export function isWithinModelsDir(uri: string): boolean {
   if (!uri.startsWith(MODELS_DIR)) {
     return false;
   }
@@ -108,6 +108,15 @@ const PARTIAL_SUFFIX = '.partial';
  * Either a fresh `createDownloadResumable` failure or a failed verification deletes the partial/bad
  * file before returning, so a rejected download never leaves junk behind.
  *
+ * `maxBytes` (optional) BOUNDS the download by the free space that must remain (Finding B): custom
+ * (pasted-URL) downloads have no `expectedSizeBytes` to pin against, so without this a large — or
+ * dishonest — response could keep streaming until the device is nearly full. The caller passes a limit
+ * computed from a FRESH free-space probe minus the required headroom (see `model-manager.tsx`); the
+ * download is aborted and rejected the moment its declared size OR its cumulative written byte count
+ * exceeds the limit (a final on-disk size check catches anything the progress callback missed). Absent
+ * (`undefined`) leaves the download unbounded — the pre-Finding-B behaviour — but every caller now
+ * passes one.
+ *
  * `signal` (optional) makes both phases CANCELLABLE (Sol's hash-performance/device-gate note): abort
  * it to stop an in-flight download outright, or to break out of the streaming hash loop between
  * chunks. Either way the outcome is treated exactly like a checksum mismatch — fail closed, delete
@@ -126,6 +135,7 @@ export async function downloadModel(
   onProgress: DownloadProgressCallback,
   onHashProgress?: HashProgressCallback,
   signal?: AbortSignal,
+  maxBytes?: number,
 ): Promise<DownloadOutcome> {
   await ensureModelsDir();
   const finalUri = `${MODELS_DIR}${fileName}`;
@@ -137,8 +147,27 @@ export async function downloadModel(
     return { ok: false, error: 'Cancelled before the download started.' };
   }
 
+  /** Uniform message when `maxBytes` is breached (Finding B) — the file was/would be too large for the
+   * free space that must remain after headroom. */
+  const overLimitError = () =>
+    `The download exceeded the ${maxBytes} bytes of free space available (after reserving headroom) and ` +
+    'was stopped before it could fill the device.';
+
+  // Set once the download's declared or written size crosses `maxBytes` (Finding B). Checked BEFORE the
+  // generic cancel/`!result` handling below so the failure reports the size limit, not a bare "cancelled".
+  let exceededMax = false;
   const resumable = FileSystem.createDownloadResumable(url, destUri, {}, (data) => {
     onProgress(data.totalBytesWritten, data.totalBytesExpectedToWrite);
+    if (
+      maxBytes !== undefined &&
+      !exceededMax &&
+      (data.totalBytesExpectedToWrite > maxBytes || data.totalBytesWritten > maxBytes)
+    ) {
+      // Stop the resumable the moment the response declares — or streams past — more than the caller's
+      // free-space budget. `cancelAsync` resolves `downloadAsync()` falsy (or throws); both are handled.
+      exceededMax = true;
+      resumable.cancelAsync().catch(() => undefined);
+    }
   });
 
   // Wire cancellation into the download phase: `resumable.downloadAsync()` otherwise has no way to
@@ -155,9 +184,15 @@ export async function downloadModel(
   } catch (error) {
     signal?.removeEventListener('abort', onAbort);
     await safeDelete(destUri);
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    // A `cancelAsync` triggered by the size limit can surface as a throw rather than a falsy resolve —
+    // report the size limit, not the raw stack (Finding B).
+    return { ok: false, error: exceededMax ? overLimitError() : error instanceof Error ? error.message : String(error) };
   }
   signal?.removeEventListener('abort', onAbort);
+  if (exceededMax) {
+    await safeDelete(destUri);
+    return { ok: false, error: overLimitError() };
+  }
   if (!result || signal?.aborted) {
     await safeDelete(destUri);
     return { ok: false, error: 'The download was cancelled.' };
@@ -173,6 +208,13 @@ export async function downloadModel(
     return { ok: false, error: 'The downloaded file is missing.' };
   }
   const sizeBytes = info.size;
+
+  // Final backstop for the free-space bound (Finding B): if the file on disk is somehow larger than the
+  // limit despite the streaming guard above (e.g. the progress callback never fired), refuse it too.
+  if (maxBytes !== undefined && sizeBytes > maxBytes) {
+    await safeDelete(destUri);
+    return { ok: false, error: overLimitError() };
+  }
 
   if (expectedSizeBytes !== undefined && sizeBytes !== expectedSizeBytes) {
     await safeDelete(destUri);
@@ -314,6 +356,12 @@ export async function sweepOrphanedModelFiles(
  * and settles.
  */
 export async function deleteModelFileChecked(uri: string): Promise<void> {
+  // Path-traversal defense in depth (Finding C): never route a path outside MODELS_DIR into
+  // `deleteAsync`. A corrupted persisted-state file (or a bug upstream) must not be able to make this
+  // unlink an unrelated file elsewhere in the app's document directory — refuse rather than delete.
+  if (!isWithinModelsDir(uri)) {
+    throw new Error(`Refusing to delete a path outside the models directory: ${uri}`);
+  }
   await FileSystem.deleteAsync(uri, { idempotent: true });
   const info = await FileSystem.getInfoAsync(uri);
   if (info.exists) {
@@ -436,6 +484,24 @@ export type CustomModelUrlResult =
   | { ok: false; error: string };
 
 /**
+ * Redact a custom model's `sourceUrl` down to `origin + pathname` (Finding 2 / Finding D). `URL.origin`
+ * for an http(s) URL is `https://<host>[:port]` with NO userinfo, so this strips any embedded
+ * credential (`user:pass@`), query string (`?token=…`), and fragment — leaving only a safe, display-
+ * worthy path. This is the SINGLE source of truth for that redaction: `prepareCustomModelDownload`
+ * applies it to a freshly-pasted URL before persisting, and `normalizeState` (model-manager-store.ts)
+ * reuses it to migrate legacy records that pre-date the redaction. Returns the input unchanged when it
+ * can't be parsed as a URL (nothing to safely redact).
+ */
+export function redactCustomSourceUrl(sourceUrl: string): string {
+  try {
+    const parsed = new URL(sourceUrl);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return sourceUrl;
+  }
+}
+
+/**
  * Parse, authorize, and redact a user-pasted custom-model URL (Finding 2) — a PURE function extracted
  * out of `model-manager.tsx`'s async press handler so its edge cases are unit-testable (the component's
  * `.tsx` isn't mounted by the node-only vitest harness). Fixes two bugs the inline version had:
@@ -502,10 +568,10 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
   return {
     ok: true,
     downloadUrl: trimmed,
-    // REDACTED persisted metadata: origin + pathname only. `URL.origin` for an https URL is
-    // `https://<host>[:port]` with no trailing slash, so this is `https://huggingface.co/path/model.gguf`
-    // — never a `?token=…`, `#fragment`, or `user:pass@`.
-    sourceUrl: `${parsed.origin}${parsed.pathname}`,
+    // REDACTED persisted metadata: origin + pathname only, via the shared `redactCustomSourceUrl` —
+    // never a `?token=…`, `#fragment`, or `user:pass@`. `trimmed` already parsed above, so this is
+    // lossless here; the same helper migrates legacy stored values in `normalizeState`.
+    sourceUrl: redactCustomSourceUrl(trimmed),
     displayName: guessedName,
     fileName: guessedName.toLowerCase().endsWith('.gguf') ? guessedName : `${guessedName}.gguf`,
   };

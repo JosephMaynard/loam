@@ -131,6 +131,9 @@ let loadEpoch = 0;
 /** The most recent load's hardware-acceleration outcome, as REPORTED BY llama.rn itself (never assumed).
  * `undefined` until a model has actually loaded once. */
 let lastAccelerationInfo: { gpu: boolean; reasonNoGPU: string; devices?: string[] } | undefined;
+/** Whether the one-shot `getBackendDevicesInfo()` diagnostic has been fired (after the first successful
+ * load, so it can't race the first load's JSI install — CodeRabbit). */
+let backendProbed = false;
 
 // ── The serialized command queue + drain loop ───────────────────────────────────────────────────────
 const queue: Array<() => Promise<void>> = [];
@@ -276,12 +279,6 @@ async function loadTarget(target: string): Promise<LlamaContext> {
   );
   inFlightOp = op;
 
-  // Diagnostics ONLY — fire-and-forget, NEVER awaited (a hung probe must not gate the load). n_ctx is a
-  // fixed constant (nothing in the model-manager UI collects a context-size choice yet).
-  void getBackendDevicesInfo()
-    .then((devices) => console.log('LOAM on-device LLM: detected backend devices', JSON.stringify(devices)))
-    .catch((error) => console.warn('LOAM on-device LLM: getBackendDevicesInfo() failed', error));
-
   let loadTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
@@ -328,6 +325,16 @@ function onLoadResolved(ctx: LlamaContext, myEpoch: number, target: string, op: 
     // The acceleration read + log are best-effort and wrapped so they can't affect ownership or reject
     // `op.settled` (its never-reject contract).
     loaded = { path: target, ctx };
+    // Diagnostics probe (CodeRabbit): `getBackendDevicesInfo()` also drives llama.rn's `installJsi()`, whose
+    // ready-guard is only set once its async install finishes — firing it ALONGSIDE the first `initLlama()`
+    // (as loadTarget used to) can race cold-start JSI setup. Run it once here, after a load has completed, so
+    // JSI is guaranteed installed. Fire-and-forget; never awaited; failures are swallowed.
+    if (!backendProbed) {
+      backendProbed = true;
+      void getBackendDevicesInfo()
+        .then((devices) => console.log('LOAM on-device LLM: detected backend devices', JSON.stringify(devices)))
+        .catch((error) => console.warn('LOAM on-device LLM: getBackendDevicesInfo() failed', error));
+    }
     try {
       lastAccelerationInfo = { gpu: ctx.gpu, reasonNoGPU: ctx.reasonNoGPU, devices: ctx.devices };
       console.log(

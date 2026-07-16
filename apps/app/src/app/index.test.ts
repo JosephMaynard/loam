@@ -136,6 +136,24 @@ describe('clearWipeKeyAndAck (the acked loam-wipe-restart path)', () => {
     expect(outcome).toEqual({ ok: false, error: 'device key still present' });
   });
 
+  it('does NOT ack the launcher when the clear REJECTS, and returns a failure outcome', async () => {
+    // Security-critical: a thrown clear (a rejected Keystore/SecureStore delete) must be a durable,
+    // retryable wipe FAILURE — never acked as complete. Acking a clear that never happened would report
+    // the wipe done while the device key still survives on disk, so the completion post must not fire and
+    // the outcome must represent failure so the caller keeps the recovery UI up for a retry.
+    const clear = vi.fn(async () => {
+      throw new Error('keystore delete failed');
+    });
+    const postComplete = vi.fn();
+
+    const outcome = await clearWipeKeyAndAck(clear, postComplete);
+
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(postComplete).not.toHaveBeenCalled();
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toBe('keystore delete failed');
+  });
+
   it('still reports success when the clear is verified but the launcher ack throws', async () => {
     // The launcher not listening (post throws) is covered by its own boot-time resume repost, so a
     // verified clear must still count as success.

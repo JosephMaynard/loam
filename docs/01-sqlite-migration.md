@@ -140,14 +140,20 @@ below.**
 | Mode | Key material | Survives restart? | Where it lives |
 |------|---------------|-------------------|-----------------|
 | `off` | none | — | n/a — plaintext DB (today's default) |
-| `ephemeral` | random 32-byte key, generated fresh **every launch** | No — see "ephemeral wipe" below | RAM only, for the life of one key-handoff round trip; never written to disk |
-| `persistent` | random 32-byte key, generated **once** | Yes | `expo-secure-store` (Android Keystore-backed) |
-| `passphrase` | SHA-256 of an operator-entered passphrase, hex-encoded | Yes | the passphrase itself lives in `expo-secure-store`; the derived key is recomputed each boot, never stored |
+| `ephemeral` | random 32-byte key, generated fresh **every launch** | No — see "ephemeral wipe" below | RAM only, held in the RN/embedded process for the life of the process; never written to disk |
+| `persistent` | the random 32-byte **device secret** itself | Yes | `expo-secure-store` (Android Keystore-backed) |
+| `passphrase` | `SHA-256(passphrase + ":" + deviceSecret)`, hex-encoded | Yes | the passphrase and the device secret both live in `expo-secure-store`; the derived key is recomputed each boot, never stored |
 
-The passphrase KDF is deliberately simple (a single SHA-256 pass, no salt, no iteration count) — a v1
-shortcut documented as such, not a hardened design. A proper scrypt/Argon2 derivation (matching the
-approach used for `admin.passphrase`/`killSwitch.panicToken` server-side, see CLAUDE.md) is a follow-up
-once the on-device crypto primitives for it are worth the dependency weight.
+The passphrase pre-key is `SHA-256(passphrase + ":" + deviceSecret)` — it mixes the operator's passphrase
+with a random 32-byte **device secret** held in the Keystore (introduced in the Sol round-4 redesign). Two
+consequences worth documenting: an attacker needs the Keystore-held device secret, not just the passphrase,
+to even attempt derivation; and rotating the device secret (which is what a wipe does) rotates the derived
+key even when the passphrase is unchanged, so old ciphertext becomes unreadable. This pre-key is not the
+key-stretching step: it is handed to SQLCipher as a passphrase, and **SQLCipher applies its own
+PBKDF2-HMAC-SHA512 (256k iterations by default)** as the actual KDF. The single SHA-256 pre-mix (no separate
+salt/iteration count of its own) is therefore a deliberate v1 shape, not the security-critical work factor;
+a dedicated scrypt/Argon2 pre-derivation is a possible follow-up if the on-device dependency weight is ever
+judged worthwhile.
 
 ### The handoff protocol (race-free request/response)
 

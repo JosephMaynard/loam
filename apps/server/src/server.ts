@@ -48,8 +48,18 @@ const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
 // posture (`networkConfig.dbEncryption`) reflects the ACTUAL key path, not just `security.dbEncryption`
 // in config — same contract the embedded/Android launcher uses (embedded.ts). Unset on the CLI = fall
 // back to the configured value; `ephemeral` is inferred from the `LOAM_DB_KEY === "ephemeral"` literal.
-const dbEncryptionMode =
-  parseDbEncryptionMode(process.env.LOAM_DB_ENCRYPTION_MODE) ?? (ephemeralDbKey ? "ephemeral" : undefined);
+// Fail startup (CodeRabbit) rather than silently falling back on a garbled value or a contradiction: a typo
+// must not quietly disable encryption, and an ephemeral key paired with a non-ephemeral declared mode would
+// misreport the effective posture.
+const rawDbEncryptionMode = process.env.LOAM_DB_ENCRYPTION_MODE;
+const parsedDbEncryptionMode = parseDbEncryptionMode(rawDbEncryptionMode);
+if (rawDbEncryptionMode !== undefined && parsedDbEncryptionMode === undefined) {
+  throw new Error(`Invalid LOAM_DB_ENCRYPTION_MODE: ${rawDbEncryptionMode}`);
+}
+if (ephemeralDbKey && parsedDbEncryptionMode !== undefined && parsedDbEncryptionMode !== "ephemeral") {
+  throw new Error('LOAM_DB_KEY="ephemeral" requires LOAM_DB_ENCRYPTION_MODE=ephemeral (or unset)');
+}
+const dbEncryptionMode = parsedDbEncryptionMode ?? (ephemeralDbKey ? "ephemeral" : undefined);
 
 const app = await buildApp({
   dataDir,

@@ -80,6 +80,18 @@ function installStartFreshMarker(options) {
   var dir = options.dir;
   var contents = options.contents;
 
+  // CodeRabbit: detect a PRE-EXISTING (unconsumed) marker BEFORE Phase 1's atomic rename overwrites it. If
+  // that rename then succeeds but the Phase-2 durability fsync fails, the rollback must NOT unlink the marker
+  // — doing so would delete a reset request that was ALREADY pending and falsely report 'not-installed'.
+  // lstat; treat any non-ENOENT stat error as "possibly present" so we fail safe toward preserving.
+  var hadPriorMarker;
+  try {
+    fs.lstatSync(markerPath);
+    hadPriorMarker = true;
+  } catch (statErr) {
+    hadPriorMarker = !(statErr && statErr.code === 'ENOENT');
+  }
+
   // Phase 1 — prepare the parent directory, stage the bytes, fsync the file inode, then atomically rename
   // onto the marker path. A failure here (INCLUDING the directory preparation) means THIS call did not
   // install a new marker. But the atomic rename leaves any PRE-EXISTING marker (from an earlier unconsumed
@@ -122,6 +134,13 @@ function installStartFreshMarker(options) {
   // reported outcome matches on-disk reality — unlink the marker, PROVE it's gone, and fsync the dir to
   // make that removal durable. Only a fully proven rollback downgrades to 'not-installed'; any step we
   // cannot prove leaves the marker possibly-consumable, which is 'indeterminate'.
+  //
+  // BUT (CodeRabbit): if a marker was ALREADY pending before this call, the just-installed marker supersedes
+  // it — unlinking would delete a real, previously-scheduled reset and lie 'not-installed'. Keep the marker
+  // (a reset is genuinely pending; only its durability is unproven) and report the honest uncertainty.
+  if (hadPriorMarker) {
+    return 'indeterminate';
+  }
   try {
     fs.unlinkSync(markerPath);
   } catch (unlinkErr) {

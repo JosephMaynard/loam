@@ -11,6 +11,7 @@ import {
   probeDeviceCapabilities,
   ramFit,
   storageFit,
+  STORAGE_HEADROOM_BYTES,
   type DeviceCapabilities,
 } from '@/lib/device-capabilities';
 import {
@@ -45,6 +46,7 @@ import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/mode
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
   dispositionFromLoad,
+  migrateLegacyCustomSourceUrls,
   MODEL_LIST_UNREADABLE_MESSAGE,
   mutateModelManagerState,
   pendingProtectedUris,
@@ -75,6 +77,11 @@ type ProgressMap = Record<string, { written: number; total: number; phase: 'down
  * of `model-download.ts`'s `.partial`-suffix staging fix — either alone closes the race; both together
  * is cleanest (per the round-4 review note). */
 let orphanSweepDone = false;
+
+/** Runs the legacy custom-`sourceUrl` redaction migration (Finding D) at most once per process — like
+ * `orphanSweepDone`, module-level so a remount doesn't re-run it. Strips any credential/`?token=…` an
+ * older build persisted verbatim; a no-op when there's nothing to redact. */
+let legacyRedactionDone = false;
 
 type ModelManagerOverlayProps = {
   visible: boolean;
@@ -206,6 +213,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           return;
         }
 
+        // Finding D: durably strip any credential/`?token=…` an older build persisted verbatim in a
+        // custom model's `sourceUrl`. Once per process, and a no-op (no write) when nothing needs
+        // redacting. `normalizeState` already redacted the in-memory `disposition.state` shown above;
+        // this is purely the durable disk rewrite so the plaintext secret is removed on upgrade.
+        if (!legacyRedactionDone) {
+          legacyRedactionDone = true;
+          await migrateLegacyCustomSourceUrls();
+        }
+
         // Reconcile durable pending actions FIRST (P2-b), before the orphan sweep runs or any control is
         // enabled: re-send each unconfirmed launcher write (idempotent) and settle it. If every retry
         // still times out, the pending set survives and the affected files stay protected below. `current`
@@ -255,6 +271,14 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         }
       } catch (error) {
         if (!cancelled) {
+          // Finding A: preparation failed (probe / read / pending reconciliation / sweep rejected). The
+          // `finally` below still flips `sweepReady` true so the "Preparing…" note clears, but a
+          // reconciliation that couldn't confirm durable pending intent means destructive operations
+          // (activate/deactivate/delete/download) must stay BLOCKED — otherwise they'd become available
+          // on top of unresolved intent. Stay FAIL-CLOSED by keeping `pendingUnsettled` true; a later
+          // reopen whose reconciliation SUCCEEDS resets it (see the success path above) and restores the
+          // ready state.
+          setPendingUnsettled(true);
           setStatusMessage(
             `Could not fully prepare the model manager: ${error instanceof Error ? error.message : String(error)}`,
           );
@@ -449,7 +473,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const runDownloadTransaction = async (
     id: string,
     sizeForStorageCheck: number,
-    body: (signal: AbortSignal) => Promise<void>,
+    body: (signal: AbortSignal, maxBytes: number) => Promise<void>,
   ): Promise<void> => {
     const outcome = await runDownload(downloadOwnerRef.current, async (signal) => {
       // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
@@ -464,9 +488,14 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         );
         return;
       }
+      // Bound the download by the free space that must remain AFTER the required headroom (Finding B):
+      // passed into `downloadModel` so a custom (unpinned) URL — or any oversized/lying response — is
+      // stopped before it can fill the device, not just gated up front. `storageFit` already rejected a
+      // null `freeStorageBytes` above, so the `?? 0` is a type guard, not a real fallback.
+      const maxBytes = Math.max(0, (caps.freeStorageBytes ?? 0) - STORAGE_HEADROOM_BYTES);
       setBusy(id, true);
       try {
-        await body(signal);
+        await body(signal, maxBytes);
       } catch (err) {
         // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
         // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
@@ -496,7 +525,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * guard before). On a registration failure the just-downloaded file is CHECKED-deleted
    * (`discardUnregisteredDownload`), retaining its URI only if that cleanup itself fails. */
   const handleDownloadCatalogEntry = (entry: ModelCatalogEntry) =>
-    runDownloadTransaction(entry.id, entry.sizeBytes, async (signal) => {
+    runDownloadTransaction(entry.id, entry.sizeBytes, async (signal, maxBytes) => {
       // Catalog ids are hardcoded, known-safe strings — this can't actually fail — but sanitize anyway
       // for consistency with the pasted-URL path and as defense in depth (see model-download.ts).
       const fileName = sanitizeModelFileName(`${entry.id}.gguf`);
@@ -515,6 +544,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         // download bar completes (P2-4/AF7).
         (hashed, total) => setModelProgress(entry.id, hashed, total, 'verify'),
         signal,
+        // Bound by remaining free space (Finding B). `storageFit` above already guaranteed
+        // `entry.sizeBytes + headroom` fits, so this never wrongly caps a legit catalog download.
+        maxBytes,
       );
       if (!outcome.ok) {
         setStatusMessageIfMounted(`${entry.displayName}: download failed — ${outcome.error}`);
@@ -569,7 +601,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const fileName = `${id}-${prepared.fileName}`;
     // Custom URLs have no known size ahead of time, so the storage gate is the headroom FLOOR (size 0).
-    void runDownloadTransaction(id, 0, async (signal) => {
+    void runDownloadTransaction(id, 0, async (signal, maxBytes) => {
       setModelProgress(id, 0, 0);
       const outcome = await downloadModel(
         prepared.downloadUrl,
@@ -579,6 +611,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         (written, total) => setModelProgress(id, written, total),
         undefined,
         signal,
+        // Custom URLs have no pinned size, so this free-space bound is the ONLY upper limit on how much
+        // a large/dishonest response can write (Finding B).
+        maxBytes,
       );
       if (!outcome.ok) {
         setStatusMessageIfMounted(`Custom model download failed — ${outcome.error}`);
