@@ -1,8 +1,12 @@
-// on-device-llm.ts guards two failure modes that would otherwise only surface on-device (docs/06):
+// on-device-llm.ts guards several failure modes that would otherwise only surface on-device (docs/06):
 //   1. A native `completion()` that never settles must not wedge the serialized inference chain
-//      forever — it's raced against a bounded timeout that calls `stopCompletion()` and advances the
-//      chain, so later DMs still run.
-//   2. When no model is active (Deactivate / the active model deleted) the loaded multi-GB context is
+//      forever — it's raced against a bounded timeout that calls `stopCompletion()`, INITIATES the
+//      context release, and advances the chain, so later DMs aren't blocked behind the wedge.
+//   2. Sol P1 (this file's focus): timeout recovery must never double-load native contexts and OOM. A
+//      new native context is NEVER created while an older context's `release()` is still unresolved
+//      (`releasing`) or has FAILED (`poisoned`) — instead the request fails fast with a recovery /
+//      restart error. Only once the old `release()` actually RESOLVES does a later request build fresh.
+//   3. When no model is active (Deactivate / the active model deleted) the loaded multi-GB context is
 //      released so its RAM is reclaimed rather than left resident until app restart.
 // Both are exercised here through the bridge's public `registerOnDeviceLlm` surface, with `llama.rn`
 // and the model-manager store replaced by in-memory fakes (no native module runs under Vitest).
@@ -28,8 +32,9 @@ const mocks = vi.hoisted(() => ({
   }) as CompletionImpl,
   stopCompletion: vi.fn(async () => {}),
   release: vi.fn(async () => {}),
-  // How many native contexts `initLlama` has built this test — lets Fix 1/Fix 2 assert that a released
-  // context is REBUILT fresh (a different native context) rather than the old one being reused.
+  // How many native contexts `initLlama` has built this test — lets the P1 tests assert that a released
+  // context is REBUILT fresh (a different native context) only after the old release resolved, and that
+  // NO fresh context is built while the engine is `releasing`/`poisoned`.
   contextsCreated: 0,
 }));
 
@@ -82,8 +87,15 @@ const flush = async () => {
   await new Promise((resolve) => setImmediate(resolve));
 };
 
-// Re-import the module under test per test so its module-level state (the loaded context + the
-// inference chain) is fresh — a wedged run in one test must not chain into the next.
+/** Find the `loam-llm-error` posted for a request id (or undefined). */
+const errorFor = (channel: FakeChannel, id: string) =>
+  channel.posts.find((p) => p.name === "loam-llm-error" && p.payload.id === id);
+/** Did the request id post a `loam-llm-end` (a clean success)? */
+const endedFor = (channel: FakeChannel, id: string) =>
+  channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === id);
+
+// Re-import the module under test per test so its module-level state (the loaded context, the engine
+// state machine, and the inference chain) is fresh — a wedged run in one test must not chain into the next.
 let registerOnDeviceLlm: typeof import("@/lib/on-device-llm").registerOnDeviceLlm;
 let releaseActiveModelContext: typeof import("@/lib/on-device-llm").releaseActiveModelContext;
 
@@ -102,6 +114,9 @@ beforeEach(async () => {
   mocks.stopCompletion.mockClear();
   mocks.stopCompletion.mockImplementation(async () => {});
   mocks.release.mockClear();
+  // Reset the base implementation too (not just call history): several tests install a persistent /
+  // once hang or reject on `release`, and `mockClear` alone would leave that implementation in place.
+  mocks.release.mockImplementation(async () => {});
   mocks.contextsCreated = 0;
   ({ registerOnDeviceLlm, releaseActiveModelContext } = await import("@/lib/on-device-llm"));
 });
@@ -126,91 +141,115 @@ describe("on-device-llm inference", () => {
 
     const deltas = channel.posts.filter((p) => p.name === "loam-llm-delta" && p.payload.id === "x").map((p) => p.payload.text);
     expect(deltas).toEqual(["Hel", "lo"]);
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "x")).toBe(true);
+    expect(endedFor(channel, "x")).toBe(true);
     expect(channel.posts.some((p) => p.name === "loam-llm-error")).toBe(false);
   });
 
-  it("times out a wedged completion, calls stopCompletion, and advances the chain (Fix 1)", async () => {
+  it("times out a wedged completion, calls stopCompletion, and reports a timeout error (Fix 1)", async () => {
     vi.useFakeTimers();
-    // First run's completion never settles — the exact wedge that would otherwise block every later DM.
+    // The completion never settles — the exact wedge that would otherwise block every later DM.
     mocks.completionImpl = () => new Promise(() => {});
     const channel = makeChannel();
     registerOnDeviceLlm(channel);
 
     channel.emit("loam-llm-request", { id: "a", messages: [{ role: "user", content: "hi" }] });
     // Advance past the module's INFERENCE_TIMEOUT_MS (3 min); advanceTimersByTimeAsync flushes the
-    // intervening microtasks (activeModelPath / initLlama) before firing the timeout timer.
+    // intervening microtasks (activeModelPath / initLlama / bounded stop / release) around the timer.
     await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
 
     expect(mocks.stopCompletion).toHaveBeenCalledTimes(1);
-    const errored = channel.posts.find((p) => p.name === "loam-llm-error" && p.payload.id === "a");
+    const errored = errorFor(channel, "a");
     expect(errored).toBeDefined();
     expect(String(errored?.payload.error)).toMatch(/timed out/i);
-
-    // The chain advanced: a subsequent DM runs to completion rather than queuing behind the wedge.
-    mocks.completionImpl = async (_params, onToken) => {
-      onToken?.({ token: "ok" });
-      return { text: "ok" };
-    };
-    channel.emit("loam-llm-request", { id: "b", messages: [{ role: "user", content: "yo" }] });
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "b")).toBe(true);
+    // The wedged context was torn down (its release was initiated + resolved with the default mock).
+    expect(mocks.release).toHaveBeenCalledTimes(1);
   });
 
-  it("holds request B off the wedged context until it is released, and drops A's late tokens (Fix 1)", async () => {
+  it("release() that NEVER settles: a later request gets a recovery error and builds NO new context (Sol P1 OOM guard)", async () => {
     vi.useFakeTimers();
-    // Request A's completion never settles; capture its token callback so we can fire a LATE token after A
-    // has already timed out — it must be dropped, not posted as a delta after `onError`.
-    let aTokens: TokenCallback | undefined;
-    mocks.completionImpl = (_params, onToken) => {
-      aTokens = onToken;
-      return new Promise(() => {});
-    };
-    // stopCompletion ALSO stays pending — proving it's the BOUNDED budget (not stopCompletion resolving)
-    // that lets the cleanup proceed and the context get released, so a hung stop can't wedge the chain.
-    mocks.stopCompletion.mockImplementationOnce(() => new Promise(() => {}));
+    mocks.completionImpl = () => new Promise(() => {}); // request A wedges
+    // The native release() never resolves — the engine stays `releasing`, so a fresh context must never load.
+    mocks.release.mockImplementationOnce(() => new Promise(() => {}));
 
     const channel = makeChannel();
     registerOnDeviceLlm(channel);
 
     channel.emit("loam-llm-request", { id: "a", messages: [{ role: "user", content: "hi" }] });
-    // Fire A's inference timeout (3 min). Cleanup begins: deltas disabled, stopCompletion started (pending),
-    // context NOT yet released (it's awaiting the bounded stop budget).
-    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
-    expect(mocks.stopCompletion).toHaveBeenCalledTimes(1);
-    expect(mocks.release).not.toHaveBeenCalled();
-    const contextsBeforeB = mocks.contextsCreated; // A's one context, not yet torn down
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000); // A times out → beginRelease → release hangs → `releasing`
+    expect(String(errorFor(channel, "a")?.payload.error)).toMatch(/timed out/i);
+    const contextsAfterA = mocks.contextsCreated; // A's one context — never to be torn down (release hung)
 
-    // Queue B while A's context is still winding down: it must NOT build/enter a completion yet (it's
-    // serialized behind A's still-unsettled run).
+    // Request B arrives while the engine is still `releasing`: it must NOT call initLlama (no second
+    // multi-GB context alongside the un-disposed one) and must get an immediate recovery error, not a hang.
     channel.emit("loam-llm-request", { id: "b", messages: [{ role: "user", content: "yo" }] });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(mocks.contextsCreated).toBe(contextsBeforeB);
-    expect(channel.posts.some((p) => p.name === "loam-llm-error" && p.payload.id === "a")).toBe(false);
+    await vi.advanceTimersByTimeAsync(10);
 
-    // A late token from A's still-running native completion is dropped (no delta after its onError).
-    aTokens?.({ token: "late" });
-    await Promise.resolve();
-    expect(channel.posts.some((p) => p.name === "loam-llm-delta" && p.payload.id === "a")).toBe(false);
+    expect(mocks.contextsCreated).toBe(contextsAfterA);
+    expect(String(errorFor(channel, "b")?.payload.error)).toMatch(/still recovering/i);
+    expect(endedFor(channel, "b")).toBe(false);
+  });
 
-    // Let the stop budget elapse: cleanup finishes → context released → A rejects (timed out) → the chain
-    // advances → B builds a FRESH context and completes.
+  it("release() that resolves AFTER the UI budget: no fresh context until it resolves, then a later request builds fresh (Sol P1)", async () => {
+    vi.useFakeTimers();
+    mocks.completionImpl = () => new Promise(() => {}); // request A wedges
+    // Hold the native release() open until we resolve it BY HAND, well after the 2s stop budget.
+    let resolveRelease: (() => void) | undefined;
+    mocks.release.mockImplementationOnce(() => new Promise<void>((resolve) => (resolveRelease = () => resolve())));
+
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "a", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000); // A times out → beginRelease → release pending → `releasing`
+    expect(String(errorFor(channel, "a")?.payload.error)).toMatch(/timed out/i);
+    const contextsWhileReleasing = mocks.contextsCreated;
+
+    // B, submitted while the old release is still in flight, gets the recovery error and builds nothing.
+    channel.emit("loam-llm-request", { id: "b", messages: [{ role: "user", content: "yo" }] });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mocks.contextsCreated).toBe(contextsWhileReleasing);
+    expect(String(errorFor(channel, "b")?.payload.error)).toMatch(/still recovering/i);
+
+    // The native release finally resolves → engine returns to `ready`.
     mocks.completionImpl = async (_params, onToken) => {
       onToken?.({ token: "ok" });
       return { text: "ok" };
     };
-    await vi.advanceTimersByTimeAsync(5000);
+    resolveRelease?.();
+    await vi.advanceTimersByTimeAsync(10);
 
-    expect(mocks.release).toHaveBeenCalledTimes(1);
-    const aError = channel.posts.find((p) => p.name === "loam-llm-error" && p.payload.id === "a");
-    expect(String(aError?.payload.error)).toMatch(/timed out/i);
-    // B ran on a DIFFERENT, freshly-built context — release happened before B ever entered completion.
-    expect(mocks.contextsCreated).toBe(contextsBeforeB + 1);
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "b")).toBe(true);
-    // A's late token never reached the client.
-    expect(channel.posts.some((p) => p.name === "loam-llm-delta" && p.payload.id === "a")).toBe(false);
+    // C, submitted AFTER the release resolved, recovers: it builds a fresh context and completes.
+    channel.emit("loam-llm-request", { id: "c", messages: [{ role: "user", content: "again" }] });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mocks.contextsCreated).toBe(contextsWhileReleasing + 1);
+    expect(endedFor(channel, "c")).toBe(true);
+  });
+
+  it("release() that REJECTS poisons the engine: no second context in-process, later requests get a restart error (Sol P1)", async () => {
+    vi.useFakeTimers();
+    mocks.completionImpl = () => new Promise(() => {}); // request A wedges
+    // The native release() REJECTS — the context may still be resident, so we can never safely build another.
+    mocks.release.mockImplementationOnce(() => Promise.reject(new Error("native release blew up")));
+
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "a", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000); // A times out → beginRelease → release rejects → `poisoned`
+    expect(String(errorFor(channel, "a")?.payload.error)).toMatch(/timed out/i);
+    const contextsAtPoison = mocks.contextsCreated;
+
+    // B gets the restart error and builds nothing.
+    channel.emit("loam-llm-request", { id: "b", messages: [{ role: "user", content: "yo" }] });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mocks.contextsCreated).toBe(contextsAtPoison);
+    expect(String(errorFor(channel, "b")?.payload.error)).toMatch(/needs a restart/i);
+
+    // Poison is terminal until process restart: a much later request still refuses, never re-`initLlama`.
+    channel.emit("loam-llm-request", { id: "c", messages: [{ role: "user", content: "again" }] });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mocks.contextsCreated).toBe(contextsAtPoison);
+    expect(String(errorFor(channel, "c")?.payload.error)).toMatch(/needs a restart/i);
   });
 
   it("a completion that RESOLVES during cleanup still times out — it cannot win the race (Fix 1, CodeRabbit)", async () => {
@@ -223,33 +262,27 @@ describe("on-device-llm inference", () => {
       new Promise((resolve) => {
         resolveA = resolve;
       });
-    // A hung stop keeps cleanup in progress across the window where we resolve A, so the ordering is forced.
+    // A hung stop keeps cleanup in progress across the window where we resolve A, so the ordering is forced
+    // (and proves it's the BOUNDED stop budget, not stopCompletion resolving, that drives cleanup forward).
     mocks.stopCompletion.mockImplementationOnce(() => new Promise(() => {}));
 
     const channel = makeChannel();
     registerOnDeviceLlm(channel);
 
     channel.emit("loam-llm-request", { id: "a", messages: [{ role: "user", content: "hi" }] });
-    // Fire A's inference timeout: the sentinel wins the race, cleanup begins (stop pending, release pending).
+    // Fire A's inference timeout: the sentinel wins the race, cleanup begins (stop pending, release not yet).
     await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
     expect(mocks.stopCompletion).toHaveBeenCalledTimes(1);
     expect(mocks.release).not.toHaveBeenCalled();
-    const contextsBeforeB = mocks.contextsCreated;
 
     // A's native completion FINISHES now, during cleanup. With the pre-fix code this would win the race and
     // emit `loam-llm-end` for A; with the sentinel already resolved it must be ignored.
     resolveA?.({ text: "finished late" });
     await Promise.resolve();
     await Promise.resolve();
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "a")).toBe(false);
-    // Cleanup is still in progress (bounded stop budget not elapsed) — B has not started, A not yet errored.
-    channel.emit("loam-llm-request", { id: "b", messages: [{ role: "user", content: "yo" }] });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(mocks.contextsCreated).toBe(contextsBeforeB);
-    expect(channel.posts.some((p) => p.name === "loam-llm-error" && p.payload.id === "a")).toBe(false);
+    expect(endedFor(channel, "a")).toBe(false);
 
-    // Elapse the stop budget → context released → A rejects (timed out) → chain advances → B runs fresh.
+    // Elapse the stop budget → beginRelease → context released → A rejects (timed out).
     mocks.completionImpl = async (_params, onToken) => {
       onToken?.({ token: "ok" });
       return { text: "ok" };
@@ -257,12 +290,40 @@ describe("on-device-llm inference", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(mocks.release).toHaveBeenCalledTimes(1);
-    const aError = channel.posts.find((p) => p.name === "loam-llm-error" && p.payload.id === "a");
-    expect(String(aError?.payload.error)).toMatch(/timed out/i);
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "a")).toBe(false);
-    // Release happened before B ever entered completion — B ran on a DIFFERENT, freshly-built context.
+    expect(String(errorFor(channel, "a")?.payload.error)).toMatch(/timed out/i);
+    expect(endedFor(channel, "a")).toBe(false);
+
+    // The default release resolved → engine is `ready` again → a later request builds a FRESH context.
+    const contextsBeforeB = mocks.contextsCreated;
+    channel.emit("loam-llm-request", { id: "b", messages: [{ role: "user", content: "yo" }] });
+    await vi.advanceTimersByTimeAsync(10);
     expect(mocks.contextsCreated).toBe(contextsBeforeB + 1);
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "b")).toBe(true);
+    expect(endedFor(channel, "b")).toBe(true);
+  });
+
+  it("releaseActiveModelContext whose release HANGS does not wedge the chain — a later request fails promptly (Sol P1)", async () => {
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    // Load + use the context once.
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "1")).toBe(true);
+
+    // Operator taps Deactivate/Delete, but the native release() never settles. releaseActiveModelContext
+    // must return PROMPTLY (initiate the tracked release, don't await it) so it can't wedge `inferenceChain`.
+    mocks.release.mockImplementationOnce(() => new Promise(() => {}));
+    await releaseActiveModelContext();
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+    const contextsWhileReleasing = mocks.contextsCreated;
+
+    // A following inference request fails FAST with the recovery error (gated on `releasing`) rather than
+    // hanging behind the never-settling release — and builds no second context.
+    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(mocks.contextsCreated).toBe(contextsWhileReleasing);
+    expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/still recovering/i);
+    expect(endedFor(channel, "2")).toBe(false);
   });
 
   it("releaseActiveModelContext releases the loaded context and forces a fresh one next time (Fix 2)", async () => {
@@ -272,19 +333,21 @@ describe("on-device-llm inference", () => {
     // Load + use the context once.
     channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
     await flush();
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "1")).toBe(true);
+    expect(endedFor(channel, "1")).toBe(true);
     expect(mocks.release).not.toHaveBeenCalled();
 
-    // Operator taps Deactivate (or deletes the active model): the component calls this directly.
+    // Operator taps Deactivate (or deletes the active model): the component calls this directly. The default
+    // release resolves, so the engine returns to `ready`.
     await releaseActiveModelContext();
+    await flush();
     expect(mocks.release).toHaveBeenCalledTimes(1);
 
-    // A later inference rebuilds a fresh context (the cached one was nulled on release).
+    // A later inference rebuilds a fresh context (the cached one was released and the engine is ready again).
     const contextsBefore = mocks.contextsCreated;
     channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
     await flush();
     expect(mocks.contextsCreated).toBe(contextsBefore + 1);
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "2")).toBe(true);
+    expect(endedFor(channel, "2")).toBe(true);
   });
 
   it("releaseActiveModelContext is a no-op that never throws when no context is loaded (Fix 2)", async () => {
@@ -299,7 +362,7 @@ describe("on-device-llm inference", () => {
     // First DM loads + uses the context; nothing is released yet.
     channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
     await flush();
-    expect(channel.posts.some((p) => p.name === "loam-llm-end" && p.payload.id === "1")).toBe(true);
+    expect(endedFor(channel, "1")).toBe(true);
     expect(mocks.release).not.toHaveBeenCalled();
 
     // Operator deactivates (or deletes the active model): the next request resolves no active path.
@@ -308,8 +371,7 @@ describe("on-device-llm inference", () => {
     await flush();
 
     expect(mocks.release).toHaveBeenCalledTimes(1);
-    const errored = channel.posts.find((p) => p.name === "loam-llm-error" && p.payload.id === "2");
-    expect(String(errored?.payload.error)).toMatch(/No on-device model is selected/i);
+    expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/No on-device model is selected/i);
   });
 
   it("does not throw (and never crashes) when release fails on the no-active-model path", async () => {
@@ -325,8 +387,8 @@ describe("on-device-llm inference", () => {
     channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
     await flush();
 
-    // A throwing release is swallowed; the caller still gets the graceful "no model" error.
-    const errored = channel.posts.find((p) => p.name === "loam-llm-error" && p.payload.id === "2");
-    expect(String(errored?.payload.error)).toMatch(/No on-device model is selected/i);
+    // A throwing release is swallowed (it poisons the engine, but that's off the no-model path here); the
+    // caller still gets the graceful "no model" error rather than a crash.
+    expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/No on-device model is selected/i);
   });
 });

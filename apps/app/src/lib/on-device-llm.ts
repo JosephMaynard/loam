@@ -43,18 +43,48 @@ let loadedModelPath: string | null = null;
 // A llama.cpp context can't run concurrent completions; serialize DMs through a promise chain.
 let inferenceChain: Promise<void> = Promise.resolve();
 
+// ── Engine cleanup state machine (Sol P1: timeout recovery could double-load native contexts and OOM) ──
+// A fresh native llama.rn context must NEVER be created while an OLDER context's `release()` is still
+// unresolved. In llama.rn, `release()` waits for outstanding native tasks before it actually deletes the
+// context, so calling `initLlama` in that window loads a second multi-GB model while the first is still
+// resident — an OOM/crash on the constrained devices this targets, strictly worse than a temporary LLM
+// error. So ALL context teardown funnels through one path (`beginRelease`) that drives this state, and
+// `ensureContext` refuses to load unless the engine is `ready`:
+//
+//   'ready'      — no release outstanding; `ensureContext` may reuse or build a context.
+//   'releasing'  — an old context's `release()` is in flight; `ensureContext` refuses (fail-fast recovery
+//                  error) until it RESOLVES, which returns the engine to `ready` so a later request builds
+//                  fresh. The next request gates on THIS state, not on awaiting the release — so nothing
+//                  the timeout/cleanup path does can wedge the serialized inference chain.
+//   'poisoned'   — an old `release()` REJECTED; the native context may still be resident and we can never
+//                  safely `initLlama` again in this process. Terminal until app restart.
+type EngineStatus = 'ready' | 'releasing' | 'poisoned';
+let engineStatus: EngineStatus = 'ready';
+
+/** Shown when a request arrives while a previous context is still being disposed (`releasing`). Transient —
+ * a moment later the release resolves and the engine is usable again; the restart hint covers the rare case
+ * where a native release is pathologically slow. */
+const ENGINE_RECOVERING_MESSAGE =
+  'The on-device model engine is still recovering — try again in a moment, or restart the LOAM host app if this persists.';
+/** Shown once the engine is `poisoned` (a native `release()` rejected). We refuse to build another context
+ * this process, so only an app restart can recover — say so plainly rather than implying a retry will help. */
+const ENGINE_POISONED_MESSAGE =
+  'The on-device model engine needs a restart — close and reopen the LOAM host app to use on-device AI again.';
+
 // A generous but bounded ceiling on a single on-device completion. A slow phone can legitimately take
 // a while to generate 512 tokens, so this is deliberately long — but a native `completion()` that
 // never settles (a wedged/crashed generation) would otherwise wedge `inferenceChain` forever: every
 // later DM queues behind the unresolved run and eventually errors, until app restart. On timeout we
-// ask the native side to stop (best-effort), DROP the context, and reject — all BEFORE the run settles —
-// so the chain advances onto a FRESH context and the next DM runs (see `runInference`).
+// ask the native side to stop (best-effort), INITIATE the tracked release (see `beginRelease`), and
+// reject — all BEFORE the run settles — so the chain advances; the NEXT request then gates on the
+// engine state (`releasing`) rather than reusing the wedged context (see `runInference`).
 const INFERENCE_TIMEOUT_MS = 3 * 60 * 1000;
 
 // On a timeout we ask the native side to `stopCompletion()`, but that call itself could hang (the same
 // wedged native state that caused the timeout). Bound it so the timeout cleanup can never itself stall
-// the inference chain: if `stopCompletion` hasn't settled within this budget we stop waiting and drop
-// the context anyway (`releaseLoadedContext` rebuilds a fresh one on the next request regardless).
+// the inference chain: if `stopCompletion` hasn't settled within this budget we stop waiting and start
+// the (tracked) context release anyway — the engine state machine, not this budget, is what prevents a
+// fresh context from loading before the native release actually resolves.
 const STOP_COMPLETION_BUDGET_MS = 2 * 1000;
 
 /** The active downloaded model's local filesystem path (from the model manager), or null if none is
@@ -83,25 +113,51 @@ export function getLastAccelerationInfo(): { gpu: boolean; reasonNoGPU: string; 
 }
 
 /**
- * Release the currently-loaded llama.rn context (best-effort) and clear the cached context/path, so its
- * (multi-GB) RAM is reclaimed. Called both when SWITCHING models (see `ensureContext`) and when the
- * active model becomes null — Deactivate, or deleting the active model — so the context doesn't stay
- * resident until app restart (RAM pressure on a device also running the embedded server). The cached
- * references are cleared BEFORE awaiting `release()` so a throwing release still can't leave a stale
- * context that a later call would wrongly reuse.
+ * The SINGLE context-teardown path (Sol P1). Every release — the timeout cleanup, an explicit
+ * Deactivate/Delete, a model SWITCH, and the no-active-model path — funnels through here so a fresh native
+ * context can never be built alongside an old one that's still disposing.
+ *
+ * Two phases, deliberately separated:
+ *   1. DETACH synchronously — capture the context, then null `loadedContext`/`loadedModelPath` and move the
+ *      engine to `releasing` right now, so no concurrent/later `ensureContext` can reuse a context that is
+ *      being torn down. This is the correctness-relevant step and it completes before we return.
+ *   2. CONFIRM native disposal asynchronously — track the REAL `release()` promise and let its outcome drive
+ *      the state machine: RESOLVE → back to `ready` (safe to build fresh); REJECT → `poisoned` (terminal:
+ *      a failed release may have left the native context resident, so we must never `initLlama` again this
+ *      process). The rejection is RECORDED in the state before it is swallowed, so it neither poisons
+ *      silently nor escapes as an unhandled rejection.
+ *
+ * Returns the (always-settled, never-throwing) tracking promise so a caller MAY await disposal — but it is
+ * the engine STATE, never this promise, that gates future context creation, so a caller that skips the await
+ * (or awaits it under a budget) can never wedge the serialized `inferenceChain`. No-op (`ready`) when nothing
+ * is loaded.
  */
-async function releaseLoadedContext(): Promise<void> {
+function beginRelease(): Promise<void> {
   if (!loadedContext) {
-    return;
+    return Promise.resolve();
   }
   const context = loadedContext;
+  // Phase 1 — detach synchronously (separate from, and before, confirming native disposal below).
   loadedContext = null;
   loadedModelPath = null;
-  try {
-    await context.release();
-  } catch {
-    // best-effort — a failed release must never block the caller; the cached references are already clear.
-  }
+  engineStatus = 'releasing';
+  // Phase 2 — track the native release. `Promise.resolve().then(...)` funnels even a SYNCHRONOUS throw from
+  // `release()` into the reject arm, so a synchronously-failing release poisons the engine like an async one.
+  return Promise.resolve()
+    .then(() => context.release())
+    .then(
+      () => {
+        // Native context actually disposed. Only clear `releasing` if we're still in it — a concurrent
+        // poisoning (another release that rejected) must not be overwritten back to `ready`.
+        if (engineStatus === 'releasing') {
+          engineStatus = 'ready';
+        }
+      },
+      (error: unknown) => {
+        engineStatus = 'poisoned';
+        console.warn('LOAM on-device LLM: native context release() rejected — engine poisoned until app restart', error);
+      },
+    );
 }
 
 /**
@@ -109,8 +165,8 @@ async function releaseLoadedContext(): Promise<void> {
  * stop request can't itself hang the timeout cleanup (the wedged native state that triggered the timeout
  * could just as easily wedge `stopCompletion`). Races the (possibly-never-settling) native call against a
  * short timer and returns once either wins. Fully defensive: a synchronous throw or a rejected promise
- * from `stopCompletion` is swallowed — the caller drops the context regardless, so a failed stop can only
- * cost us the old context, never correctness.
+ * from `stopCompletion` is swallowed — the caller initiates the context release regardless, so a failed
+ * stop can only cost us the old context, never correctness.
  */
 async function stopCompletionWithinBudget(context: LlamaContext): Promise<void> {
   let budgetTimer: ReturnType<typeof setTimeout> | undefined;
@@ -122,31 +178,7 @@ async function stopCompletionWithinBudget(context: LlamaContext): Promise<void> 
       }),
     ]);
   } catch {
-    // stopCompletion threw synchronously / isn't available — nothing more we can do; drop the context.
-  } finally {
-    if (budgetTimer !== undefined) {
-      clearTimeout(budgetTimer);
-    }
-  }
-}
-
-/**
- * Drop the loaded context, BOUNDED by `STOP_COMPLETION_BUDGET_MS` (CodeRabbit): `release()` on a wedged
- * native context can itself hang, and the timeout-cleanup path must never stall the inference chain forever.
- * `releaseLoadedContext` nulls `loadedContext`/`loadedModelPath` SYNCHRONOUSLY before it awaits `release()`,
- * so even when the budget wins and we stop waiting on the native release, the next request already sees no
- * cached context and rebuilds a fresh one — the only correctness-relevant effect (the invariant) is done
- * synchronously; only the RAM reclaim is best-effort.
- */
-async function releaseLoadedContextWithinBudget(): Promise<void> {
-  let budgetTimer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      releaseLoadedContext(),
-      new Promise<void>((resolve) => {
-        budgetTimer = setTimeout(resolve, STOP_COMPLETION_BUDGET_MS);
-      }),
-    ]);
+    // stopCompletion threw synchronously / isn't available — nothing more we can do; release the context.
   } finally {
     if (budgetTimer !== undefined) {
       clearTimeout(budgetTimer);
@@ -160,19 +192,30 @@ async function releaseLoadedContextWithinBudget(): Promise<void> {
  * happens to notice there's no active model — so a Deactivate followed by no further DM would leave it
  * resident indefinitely, and deleting the file could unlink bytes the old context still has mapped. Runs
  * SERIALIZED behind any in-flight inference (chained onto `inferenceChain`, the same lock `runInference`
- * uses) so it can't release a context out from under a running completion. The chain is kept alive across
- * a rejection so one failure can't wedge every later run; `releaseLoadedContext` swallows its own errors,
- * so this never throws and is safe to call fire-and-forget (`void`).
+ * uses) so it can't release a context out from under a running completion.
+ *
+ * It only INITIATES the tracked release (`beginRelease`) and returns PROMPTLY — it must NOT `await release()`,
+ * because a native release that never settles would otherwise wedge `inferenceChain` and hang every later
+ * request before its own timeout is even installed (the Sol P1 second failure mode). The engine is left in
+ * `releasing`; a later request gates on that state and recovers once the release actually resolves. The chain
+ * is kept alive across a rejection, and `beginRelease` never throws, so this is safe to call fire-and-forget
+ * (`void`). The signature stays `(): Promise<void>` for the `model-manager.tsx` call sites.
  */
 export function releaseActiveModelContext(): Promise<void> {
-  const run = inferenceChain.then(() => releaseLoadedContext());
+  const run = inferenceChain.then(() => {
+    beginRelease();
+  });
   inferenceChain = run.catch(() => undefined);
   return run;
 }
 
 /**
- * Load (or reuse) the llama.rn context for `modelPath`, releasing a previously-loaded different model
- * first.
+ * Load (or reuse) the llama.rn context for `modelPath`. Refuses to build a fresh context unless the engine
+ * is `ready`: while an older context is still `releasing` (or the engine is `poisoned` by a failed release)
+ * building a new multi-GB context would double native residency and likely OOM (Sol P1) — so those states
+ * fail fast with a recovery/restart error instead. A request for a DIFFERENT model than the one loaded
+ * routes the old context through the SAME teardown path (`beginRelease`) and defers to a later request,
+ * rather than releasing-and-reloading in one shot alongside the still-disposing old context.
  *
  * Hardware acceleration (Sol P2-5): this ATTEMPTS acceleration, but never claims it's delivered.
  * `devices` is intentionally left unset — per llama.rn 0.12.6's own `ContextParams` doc comment, an
@@ -191,10 +234,23 @@ export function releaseActiveModelContext(): Promise<void> {
  * `lastAccelerationInfo` (see `getLastAccelerationInfo`) rather than assumed from any of this.
  */
 async function ensureContext(modelPath: string): Promise<LlamaContext> {
+  // Engine-state gate (Sol P1) — never `initLlama` while an old context is disposing or failed to dispose.
+  if (engineStatus === 'poisoned') {
+    throw new Error(ENGINE_POISONED_MESSAGE);
+  }
+  if (engineStatus === 'releasing') {
+    throw new Error(ENGINE_RECOVERING_MESSAGE);
+  }
   if (loadedContext && loadedModelPath === modelPath) {
     return loadedContext;
   }
-  await releaseLoadedContext();
+  if (loadedContext) {
+    // Model SWITCH: tear the old context down through the shared path and refuse THIS request until the
+    // release resolves — a later request (engine `ready` again) loads the new model. We never build the new
+    // context alongside the still-releasing old one (P1 OOM).
+    beginRelease();
+    throw new Error(ENGINE_RECOVERING_MESSAGE);
+  }
   try {
     const devices = await getBackendDevicesInfo();
     console.log('LOAM on-device LLM: detected backend devices', JSON.stringify(devices));
@@ -225,18 +281,20 @@ async function ensureContext(modelPath: string): Promise<LlamaContext> {
  * Run the on-device model over `messages`, streaming reply text through the callbacks. Loads the
  * operator's active GGUF (from the model manager) via llama.rn, reusing the context across calls, and
  * serializes concurrent DMs (one llama.cpp context can't run parallel completions). Any failure — no
- * active model, a load error, an inference error — is reported via `onError`; this never throws, so a
- * missing/broken model degrades to a graceful assistant error and never affects crisis messaging.
+ * active model, a load error, an inference error, the engine still recovering from a prior release — is
+ * reported via `onError`; this never throws, so a missing/broken model degrades to a graceful assistant
+ * error and never affects crisis messaging.
  */
 async function runInference(messages: ChatMessage[], callbacks: InferenceCallbacks): Promise<void> {
   const run = inferenceChain.then(async () => {
     try {
       const modelPath = await activeModelPath();
       if (!modelPath) {
-        // No active model (Deactivate, or the active model was deleted): release the loaded context so
-        // its RAM is reclaimed rather than left resident until app restart (it's otherwise only released
-        // on a model SWITCH). Best-effort — a release failure must not prevent surfacing the error below.
-        await releaseLoadedContext();
+        // No active model (Deactivate, or the active model was deleted): initiate release of the loaded
+        // context through the shared path so its RAM is reclaimed rather than left resident until app
+        // restart (it's otherwise only released on a model SWITCH). Not awaited — a hung release must not
+        // prevent surfacing the error below (and the engine state, not this call, gates any later load).
+        beginRelease();
         callbacks.onError('No on-device model is selected. Download and activate one from the AI model manager.');
         return;
       }
@@ -253,8 +311,9 @@ async function runInference(messages: ChatMessage[], callbacks: InferenceCallbac
       // request while `loadedContext` was still the live (about-to-be-released) context — a release racing a
       // fresh completion on the SAME native context. With the sentinel winning first, the race is decided at
       // timer-fire; cleanup then runs in the awaited branch below, BEFORE this run settles, so the serialized
-      // `inferenceChain` cannot reach the next request until the context is dropped. `releaseLoadedContext`
-      // nulls `loadedContext` synchronously, so the next request's `ensureContext` then builds a FRESH one.
+      // `inferenceChain` cannot reach the next request until the release has been INITIATED and the engine
+      // moved to `releasing` (Sol P1) — the next request then gates on that state instead of reusing the
+      // wedged context or building a fresh one before the old release resolves.
       const TIMED_OUT = Symbol('on-device-inference-timeout');
       let deltasEnabled = true;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
@@ -292,12 +351,14 @@ async function runInference(messages: ChatMessage[], callbacks: InferenceCallbac
           timeout,
         ]);
         if (outcome === TIMED_OUT) {
-          // The generation is wedged. Bounded best-effort stop, THEN drop the possibly-still-busy context so
-          // it can never be reused — both bounded so a hung native call can't stall the chain. Only after the
-          // context is gone do we throw: the serialized chain advances on THIS run settling, so the next
-          // request can't start (and `ensureContext` rebuilds a fresh context) until cleanup has finished.
+          // The generation is wedged. Bounded best-effort stop, THEN INITIATE the tracked release of the
+          // possibly-still-busy context (Sol P1: `beginRelease` detaches synchronously and moves the engine
+          // to `releasing`, but does NOT block on the native `release()` resolving). Throw promptly right
+          // after: the serialized chain advances on THIS run settling, and because the engine is now
+          // `releasing`, the next request's `ensureContext` fails fast (recovery error) — it will not reuse
+          // the wedged context nor build a fresh one until the old release actually resolves.
           await stopCompletionWithinBudget(context);
-          await releaseLoadedContextWithinBudget();
+          beginRelease();
           throw new Error(`On-device inference timed out after ${Math.round(INFERENCE_TIMEOUT_MS / 1000)}s.`);
         }
       } finally {
