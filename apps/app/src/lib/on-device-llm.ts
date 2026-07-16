@@ -47,8 +47,15 @@ let inferenceChain: Promise<void> = Promise.resolve();
 // a while to generate 512 tokens, so this is deliberately long — but a native `completion()` that
 // never settles (a wedged/crashed generation) would otherwise wedge `inferenceChain` forever: every
 // later DM queues behind the unresolved run and eventually errors, until app restart. On timeout we
-// ask the native side to stop (best-effort) and reject, so the chain advances and the next DM runs.
+// ask the native side to stop (best-effort), DROP the context, and reject — all BEFORE the run settles —
+// so the chain advances onto a FRESH context and the next DM runs (see `runInference`).
 const INFERENCE_TIMEOUT_MS = 3 * 60 * 1000;
+
+// On a timeout we ask the native side to `stopCompletion()`, but that call itself could hang (the same
+// wedged native state that caused the timeout). Bound it so the timeout cleanup can never itself stall
+// the inference chain: if `stopCompletion` hasn't settled within this budget we stop waiting and drop
+// the context anyway (`releaseLoadedContext` rebuilds a fresh one on the next request regardless).
+const STOP_COMPLETION_BUDGET_MS = 2 * 1000;
 
 /** The active downloaded model's local filesystem path (from the model manager), or null if none is
  * selected. Strips the `file://` scheme expo-file-system uses — llama.rn wants a bare path. */
@@ -95,6 +102,48 @@ async function releaseLoadedContext(): Promise<void> {
   } catch {
     // best-effort — a failed release must never block the caller; the cached references are already clear.
   }
+}
+
+/**
+ * Ask the native side to abandon the current completion, BOUNDED by `STOP_COMPLETION_BUDGET_MS` so the
+ * stop request can't itself hang the timeout cleanup (the wedged native state that triggered the timeout
+ * could just as easily wedge `stopCompletion`). Races the (possibly-never-settling) native call against a
+ * short timer and returns once either wins. Fully defensive: a synchronous throw or a rejected promise
+ * from `stopCompletion` is swallowed — the caller drops the context regardless, so a failed stop can only
+ * cost us the old context, never correctness.
+ */
+async function stopCompletionWithinBudget(context: LlamaContext): Promise<void> {
+  let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve(context.stopCompletion()).catch(() => undefined),
+      new Promise<void>((resolve) => {
+        budgetTimer = setTimeout(resolve, STOP_COMPLETION_BUDGET_MS);
+      }),
+    ]);
+  } catch {
+    // stopCompletion threw synchronously / isn't available — nothing more we can do; drop the context.
+  } finally {
+    if (budgetTimer !== undefined) {
+      clearTimeout(budgetTimer);
+    }
+  }
+}
+
+/**
+ * Explicitly release the loaded context when the operator DEACTIVATES the on-device model, or DELETES the
+ * model that was active (Fix 2). Without this the multi-GB context is only reclaimed when a LATER inference
+ * happens to notice there's no active model — so a Deactivate followed by no further DM would leave it
+ * resident indefinitely, and deleting the file could unlink bytes the old context still has mapped. Runs
+ * SERIALIZED behind any in-flight inference (chained onto `inferenceChain`, the same lock `runInference`
+ * uses) so it can't release a context out from under a running completion. The chain is kept alive across
+ * a rejection so one failure can't wedge every later run; `releaseLoadedContext` swallows its own errors,
+ * so this never throws and is safe to call fire-and-forget (`void`).
+ */
+export function releaseActiveModelContext(): Promise<void> {
+  const run = inferenceChain.then(() => releaseLoadedContext());
+  inferenceChain = run.catch(() => undefined);
+  return run;
 }
 
 /**
@@ -171,18 +220,31 @@ async function runInference(messages: ChatMessage[], callbacks: InferenceCallbac
       // Race the native completion against a bounded timeout so a wedged generation can't stall the
       // inference chain forever (see INFERENCE_TIMEOUT_MS). The completion callback still streams each
       // token to `onDelta` on the success path — unchanged; only the never-settles case is bounded.
+      //
+      // Fix 1: a timed-out completion must NOT let a SECOND completion run on the same native context.
+      // `stopCompletion()` is best-effort and the original native `completion()` may keep running after
+      // it, so we (a) flip `deltasEnabled` false so the wedged run's late tokens are dropped rather than
+      // posted after `onError`, and (b) do the stop + `releaseLoadedContext()` BEFORE the timeout promise
+      // rejects. Because the serialized `inferenceChain` only advances once THIS run settles, and because
+      // `releaseLoadedContext` nulls `loadedContext` before awaiting `release()`, the next request's
+      // `ensureContext` builds a FRESH native context — so "no two completions on the same context" holds
+      // even while the old native completion is still winding down, and only one context is ever resident.
+      let deltasEnabled = true;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {
         timeoutTimer = setTimeout(() => {
-          // Best-effort: ask the native side to abandon the wedged generation so the reused context
-          // isn't left mid-completion. Guard both a synchronous throw and a rejected promise so neither
-          // masks the timeout error below nor surfaces as an unhandled rejection.
-          try {
-            void Promise.resolve(context.stopCompletion()).catch(() => undefined);
-          } catch {
-            // stopCompletion threw synchronously / isn't available — nothing more we can do.
-          }
-          reject(new Error(`On-device inference timed out after ${Math.round(INFERENCE_TIMEOUT_MS / 1000)}s.`));
+          // Drop any further tokens from the still-running native completion (no late `onDelta` after the
+          // `onError` below).
+          deltasEnabled = false;
+          // Do the async cleanup BEFORE settling: bounded best-effort stop, THEN drop the possibly-still-
+          // busy context so it can never be reused. Only after both does the timeout reject — so the chain
+          // (which advances on this run settling) cannot reach the next request until the context is gone.
+          // Neither helper rejects (both swallow their own errors), so `reject` is always reached.
+          void (async () => {
+            await stopCompletionWithinBudget(context);
+            await releaseLoadedContext();
+            reject(new Error(`On-device inference timed out after ${Math.round(INFERENCE_TIMEOUT_MS / 1000)}s.`));
+          })();
         }, INFERENCE_TIMEOUT_MS);
       });
       try {
@@ -195,6 +257,11 @@ async function runInference(messages: ChatMessage[], callbacks: InferenceCallbac
               stop: ['<end_of_turn>', '<eos>'],
             },
             (data) => {
+              // After a timeout the original completion can still fire callbacks while it winds down —
+              // drop them so no token is posted after the run already reported `onError` (Fix 1).
+              if (!deltasEnabled) {
+                return;
+              }
               const token = data?.token;
               if (typeof token === 'string' && token.length > 0) {
                 callbacks.onDelta(token);

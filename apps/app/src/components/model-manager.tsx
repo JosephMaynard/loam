@@ -19,8 +19,10 @@ import {
   reconcilePendingActions,
   setActiveAction,
   type ModelActionDeps,
+  type ModelActionResult,
 } from '@/lib/model-manager-actions';
 import { deleteModelFile, downloadModel, sanitizeModelFileName, sweepOrphanedModelFiles } from '@/lib/model-download';
+import { releaseActiveModelContext } from '@/lib/on-device-llm';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
@@ -56,36 +58,32 @@ type ProgressMap = Record<string, { written: number; total: number; phase: 'down
  * is cleanest (per the round-4 review note). */
 let orphanSweepDone = false;
 
-/** Reject a pasted custom-URL host that points at the device itself or a link-local address. Loopback
- * is the important case: a `http://127.0.0.1:<port>/…` URL would aim a GET from the RN process at the
- * node's OWN embedded server — the codebase deliberately never issues HTTP from the bridge to the local
- * server (it probes `/api/health`, which mints no identity) precisely because such a request could
- * consume the one-time `firstUser` admin grant. Covers `localhost`, IPv4 loopback (127.0.0.0/8), the
- * unspecified address (0.0.0.0 / ::), IPv6 loopback (::1), IPv4-mapped forms, IPv4 link-local
- * (169.254.0.0/16), and IPv6 link-local (fe80::/10). Best-effort string matching — a real model download never needs a loopback or
- * link-local host, so erring toward rejection here is safe. */
-function isLoopbackOrLinkLocalHost(hostname: string): boolean {
-  // URL.hostname keeps IPv6 in brackets (e.g. `[::1]`); strip them for a bare comparison.
+/** The one trusted public host custom (pasted-URL) downloads are allowed to reach. The curated catalog
+ * only ever uses `huggingface.co` (see model-catalog.ts), so this is the whole allowlist. */
+const CUSTOM_DOWNLOAD_ALLOWED_HOST = 'huggingface.co';
+
+/**
+ * Whether a pasted custom-URL host is on the allowlist (Fix 3). The previous approach — reject textual
+ * loopback/link-local hosts — was NOT a real boundary: it was bypassed by the device's OWN LAN/hotspot
+ * RFC1918 address (192.168.x.x, 10.x.x.x, 172.16/12), IPv6 ULA (fc00::/7), IPv4-mapped hex forms that
+ * WHATWG URL normalization produces (`[::ffff:7f00:1]`), a public hostname that RESOLVES to a private
+ * address (DNS rebinding), and a public URL that REDIRECTS to a local address (`createDownloadResumable`
+ * follows redirects; validation only ever sees the original URL). The embedded server listens on
+ * non-loopback interfaces, so any of those could aim a GET at `http://<device-lan-ip>/api/config` and
+ * consume the one-time `firstUser` admin grant exactly like a loopback URL. The Expo downloader can't
+ * enforce the final destination or redirect chain, so — per Sol's blessed fallback — we PIN custom
+ * downloads to an explicit HTTPS allowlist of trusted model hosts instead. Redirect-to-local is then out
+ * of scope because the initial host is a trusted public domain, not because we inspect the hops.
+ *
+ * Case-insensitive exact-or-subdomain match (`huggingface.co`, `cdn-lfs.huggingface.co`, …) using a
+ * proper suffix check — never a bare `includes`, which `evil-huggingface.co` or
+ * `huggingface.co.attacker.example` would slip past.
+ */
+function isAllowedCustomDownloadHost(hostname: string): boolean {
+  // URL.hostname keeps IPv6 in brackets (e.g. `[::1]`); strip them for a bare comparison. An IP literal
+  // can never match a DNS host suffix, so this also rejects every raw-address form implicitly.
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host.endsWith('.localhost')) {
-    return true;
-  }
-  if (host === '0.0.0.0' || host === '::' || host === '::0' || host === '::1') {
-    return true;
-  }
-  // IPv6 link-local fe80::/10 (fe80.. through febf..), e.g. `fe80::1`, `[fe80::1%eth0]`.
-  if (/^fe[89ab][0-9a-f]:/.test(host)) {
-    return true;
-  }
-  // IPv4 loopback 127.0.0.0/8 and link-local 169.254.0.0/16.
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) || /^169\.254\.\d{1,3}\.\d{1,3}$/.test(host)) {
-    return true;
-  }
-  // IPv4-mapped IPv6 forms of the same (e.g. `::ffff:127.0.0.1`).
-  if (/^::ffff:127\./.test(host) || /^::ffff:169\.254\./.test(host)) {
-    return true;
-  }
-  return false;
+  return host === CUSTOM_DOWNLOAD_ALLOWED_HOST || host.endsWith(`.${CUSTOM_DOWNLOAD_ALLOWED_HOST}`);
 }
 
 type ModelManagerOverlayProps = {
@@ -112,8 +110,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const [customUrl, setCustomUrl] = useState('');
   /** True while a pasted-URL download is running. Disables the "Add & download" button for its duration
    * so a second tap can't start a duplicate parallel download under a fresh id (the custom id is
-   * generated per-call, so `busyIds` alone wouldn't gate the button). */
+   * generated per-call, so `busyIds` alone wouldn't gate the button). RENDER-only — the synchronous
+   * re-entry guard is `customDownloadInFlightRef` below (state updates don't disable the button until the
+   * next render, which is a tick too late; Fix 4). */
   const [customDownloadInFlight, setCustomDownloadInFlight] = useState(false);
+  /** Synchronous mirror of `customDownloadInFlight` (Fix 4): two taps in the SAME tick both enter
+   * `handleAddCustomUrl` before the disabled state re-renders, each minting a different id → two
+   * multi-GB downloads in parallel. This ref is checked-and-set at the very top of the handler and
+   * cleared in its `finally`, so the second synchronous tap short-circuits before starting anything. */
+  const customDownloadInFlightRef = useRef(false);
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
   /** Gates every download-start control (P2-7 round 4) until the orphan sweep below has actually
    * finished — initialized from the module-level flag so a remount after the sweep already ran once
@@ -328,8 +333,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   /** Run one serialized activate/deactivate/delete transaction (see `model-manager-actions.ts`),
    * flipping `operationInFlight` (and the acting row's `busy`) around it and adopting the resulting
    * state + status message. All rollback / timeout-ambiguity handling lives in the transaction; here we
-   * only surface its outcome. */
-  const runOperation = async (busyId: string | undefined, action: () => Promise<{ state?: ModelManagerState; message: string }>) => {
+   * only surface its outcome. Returns the transaction's `ModelActionResult` so callers can react to the
+   * confirmed-`'ok'` outcome — e.g. releasing the native context after a deactivate/active-delete (Fix 2). */
+  const runOperation = async (
+    busyId: string | undefined,
+    action: () => Promise<ModelActionResult>,
+  ): Promise<ModelActionResult> => {
     setOperationInFlight(true);
     if (busyId) {
       setBusy(busyId, true);
@@ -343,6 +352,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         setPendingUnsettled((outcome.state.pending ?? []).length > 0);
       }
       setStatusMessage(outcome.message);
+      return outcome;
     } finally {
       if (busyId) {
         setBusy(busyId, false);
@@ -403,105 +413,139 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
   };
 
-  /** Download a user-pasted URL — no size/hash to verify against, so it's always best-effort + warned. */
+  /** Download a user-pasted URL — no size/hash to verify against, so it's always best-effort + warned.
+   * The host is pinned to the HTTPS allowlist (`isAllowedCustomDownloadHost`, Fix 3), a synchronous
+   * `useRef` guards against a same-tick double-tap (Fix 4), and a persist failure after a successful
+   * download deletes the orphaned file before offering retry (Fix 5). */
   const handleAddCustomUrl = async () => {
-    const trimmed = customUrl.trim();
-    if (!trimmed) {
+    // Fix 4: synchronous re-entry guard. Two taps in the SAME tick both reach here before the disabled
+    // state re-renders; the ref is set/read synchronously so the second tap short-circuits immediately
+    // instead of minting a second id and a second multi-GB download. The `finally` at the very bottom
+    // clears it, so a validation early-return below re-enables the button just as a completed download does.
+    if (customDownloadInFlightRef.current) {
       return;
     }
-    let parsed: URL;
+    customDownloadInFlightRef.current = true;
     try {
-      parsed = new URL(trimmed);
-    } catch {
-      setStatusMessage("That doesn't look like a valid URL.");
-      return;
-    }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      setStatusMessage('Only http/https URLs are supported.');
-      return;
-    }
-    if (isLoopbackOrLinkLocalHost(parsed.hostname)) {
-      setStatusMessage(
-        'That address points at this device or a local network address — enter a public link to a .gguf file.',
-      );
-      return;
-    }
-
-    // Free-storage gate (G9): a pasted URL has no known size ahead of time (unlike a catalog entry),
-    // so RAM can't be checked and the exact-size storage check can't run either — but we can still
-    // refuse when the device is already below the headroom floor `storageFit` uses for catalog
-    // downloads, rather than skipping the gate entirely for custom URLs.
-    if (capabilities && storageFit(capabilities, 0) === 'insufficient') {
-      setStatusMessage(
-        `Not enough free storage to download a model (only ${formatBytes(capabilities.freeStorageBytes)} free).`,
-      );
-      return;
-    }
-
-    const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    // decodeURIComponent must run BEFORE sanitizing — an encoded `%2F`/`%2E%2E` only becomes a real
-    // `/`/`..` after decoding, and a naive split-then-decode order is exactly what lets a crafted URL
-    // (e.g. `.../foo%2F..%2F..%2Fbar.gguf`) smuggle a path-traversal segment past a pre-decode split.
-    const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
-    const guessedName = sanitizeModelFileName(decodedName);
-    if (!guessedName) {
-      setStatusMessage("That URL's file name isn't safe to use — try a direct link with a plain file name.");
-      return;
-    }
-    const fileName = `${id}-${guessedName.toLowerCase().endsWith('.gguf') ? guessedName : `${guessedName}.gguf`}`;
-
-    setCustomDownloadInFlight(true);
-    setBusy(id, true);
-    setModelProgress(id, 0, 0);
-    const controller = new AbortController();
-    activeDownloads.current.set(id, controller);
-    // try/finally so a throw anywhere in the download (e.g. `downloadModel`'s dir-prep/stat before it
-    // returns its `{ ok }` outcome) still clears the busy row, progress, and the AbortController rather
-    // than leaving the row stuck busy + leaking the controller.
-    try {
-      const outcome = await downloadModel(
-        trimmed,
-        fileName,
-        undefined,
-        undefined,
-        (written, total) => setModelProgress(id, written, total),
-        undefined,
-        controller.signal,
-      );
-
-      if (!outcome.ok) {
-        setStatusMessage(`Custom model download failed — ${outcome.error}`);
+      const trimmed = customUrl.trim();
+      if (!trimmed) {
         return;
       }
-      const model: DownloadedModel = {
-        id,
-        displayName: guessedName,
-        uri: outcome.uri,
-        sizeBytes: outcome.sizeBytes,
-        isCustom: true,
-        sourceUrl: trimmed,
-        downloadedAt: Date.now(),
-      };
-      const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
-      if (persisted) {
-        // Clear the input only on a fully successful download+persist — a persistence failure keeps the
-        // entered URL so the operator can retry without re-typing it (CodeRabbit).
-        setCustomUrl('');
-        setStatusMessage(`${guessedName} downloaded.`);
-      } else {
-        setStatusMessage(`${guessedName} downloaded but could not be saved to the model list — try again.`);
+      let parsed: URL;
+      try {
+        parsed = new URL(trimmed);
+      } catch {
+        setStatusMessage("That doesn't look like a valid URL.");
+        return;
       }
-    } catch (err) {
-      // A thrown download/persist (network stack error, storage failure) must surface a failure status,
-      // not silently reject the promise and leave the operator staring at a cleared-but-unexplained row
-      // (CodeRabbit). Aborts (the operator cancelled) are reported neutrally.
-      const message = err instanceof Error ? err.message : String(err);
-      setStatusMessage(`Custom model download failed — ${message}`);
+      // Fix 3: require HTTPS AND an allowlisted host. Textual loopback/link-local filtering was NOT a real
+      // boundary (bypassable via the device's own LAN/hotspot RFC1918 address, IPv6 ULA, IPv4-mapped hex,
+      // DNS rebinding, or redirect-to-local); pinning to a trusted public host is. `http:` is dropped
+      // entirely for custom URLs.
+      if (parsed.protocol !== 'https:') {
+        setStatusMessage('Only https:// links are supported for custom models.');
+        return;
+      }
+      if (!isAllowedCustomDownloadHost(parsed.hostname)) {
+        setStatusMessage(
+          `Custom downloads are limited to ${CUSTOM_DOWNLOAD_ALLOWED_HOST} (and its subdomains). Host the .gguf there, or request it be added to the catalog.`,
+        );
+        return;
+      }
+
+      // Free-storage gate (G9): a pasted URL has no known size ahead of time (unlike a catalog entry),
+      // so RAM can't be checked and the exact-size storage check can't run either — but we can still
+      // refuse when the device is already below the headroom floor `storageFit` uses for catalog
+      // downloads, rather than skipping the gate entirely for custom URLs.
+      if (capabilities && storageFit(capabilities, 0) === 'insufficient') {
+        setStatusMessage(
+          `Not enough free storage to download a model (only ${formatBytes(capabilities.freeStorageBytes)} free).`,
+        );
+        return;
+      }
+
+      const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // decodeURIComponent must run BEFORE sanitizing — an encoded `%2F`/`%2E%2E` only becomes a real
+      // `/`/`..` after decoding, and a naive split-then-decode order is exactly what lets a crafted URL
+      // (e.g. `.../foo%2F..%2F..%2Fbar.gguf`) smuggle a path-traversal segment past a pre-decode split.
+      const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
+      const guessedName = sanitizeModelFileName(decodedName);
+      if (!guessedName) {
+        setStatusMessage("That URL's file name isn't safe to use — try a direct link with a plain file name.");
+        return;
+      }
+      const fileName = `${id}-${guessedName.toLowerCase().endsWith('.gguf') ? guessedName : `${guessedName}.gguf`}`;
+
+      setCustomDownloadInFlight(true);
+      setBusy(id, true);
+      setModelProgress(id, 0, 0);
+      const controller = new AbortController();
+      activeDownloads.current.set(id, controller);
+      // try/finally so a throw anywhere in the download (e.g. `downloadModel`'s dir-prep/stat before it
+      // returns its `{ ok }` outcome) still clears the busy row, progress, and the AbortController rather
+      // than leaving the row stuck busy + leaking the controller.
+      try {
+        const outcome = await downloadModel(
+          trimmed,
+          fileName,
+          undefined,
+          undefined,
+          (written, total) => setModelProgress(id, written, total),
+          undefined,
+          controller.signal,
+        );
+
+        if (!outcome.ok) {
+          setStatusMessage(`Custom model download failed — ${outcome.error}`);
+          return;
+        }
+        const model: DownloadedModel = {
+          id,
+          displayName: guessedName,
+          uri: outcome.uri,
+          sizeBytes: outcome.sizeBytes,
+          isCustom: true,
+          sourceUrl: trimmed,
+          downloadedAt: Date.now(),
+        };
+        const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
+        if (persisted) {
+          // Clear the input only on a fully successful download+persist — a persistence failure keeps the
+          // entered URL so the operator can retry without re-typing it (CodeRabbit).
+          setCustomUrl('');
+          setStatusMessage(`${guessedName} downloaded.`);
+        } else {
+          // Fix 5: the final `.gguf` is on disk but NOT in `managerState`, and the one-per-process orphan
+          // sweep already ran — so a retry (which mints a NEW id → a new file name) would download a
+          // SECOND copy and leave this one orphaned until app restart. Delete the just-downloaded file
+          // BEFORE offering retry so no unreferenced final model can accumulate. If the cleanup itself
+          // fails, say so honestly rather than implying the disk is clean.
+          try {
+            await deleteModelFile(outcome.uri);
+            setStatusMessage(`${guessedName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`);
+          } catch (cleanupErr) {
+            const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+            setStatusMessage(
+              `${guessedName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${cleanupMessage}). Restart the app to clear it, then try again.`,
+            );
+          }
+        }
+      } catch (err) {
+        // A thrown download/persist (network stack error, storage failure) must surface a failure status,
+        // not silently reject the promise and leave the operator staring at a cleared-but-unexplained row
+        // (CodeRabbit). Aborts (the operator cancelled) are reported neutrally.
+        const message = err instanceof Error ? err.message : String(err);
+        setStatusMessage(`Custom model download failed — ${message}`);
+      } finally {
+        activeDownloads.current.delete(id);
+        clearModelProgress(id);
+        setBusy(id, false);
+        setCustomDownloadInFlight(false);
+      }
     } finally {
-      activeDownloads.current.delete(id);
-      clearModelProgress(id);
-      setBusy(id, false);
-      setCustomDownloadInFlight(false);
+      // Fix 4: always release the synchronous re-entry guard — on a validation early-return, a completed
+      // download, or a thrown error alike — so the next tap can start a fresh download.
+      customDownloadInFlightRef.current = false;
     }
   };
 
@@ -513,7 +557,18 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * launcher clear (checked), and the IRREVERSIBLE byte delete so a failure at any step leaves a safe,
    * recoverable state — and never deletes the bytes when the launcher clear couldn't be confirmed.
    */
-  const handleDelete = (model: DownloadedModel) => runOperation(model.id, () => deleteAction(actionDeps, model));
+  const handleDelete = async (model: DownloadedModel) => {
+    // Capture whether THIS is the active model before the transaction clears `activeId`, so a confirmed
+    // delete of the active model releases the (multi-GB) native context (Fix 2). A stale metadata snapshot
+    // is fine here — `managerState.activeId` is exactly what the operator sees when tapping Delete.
+    const wasActive = managerState.activeId === model.id;
+    const outcome = await runOperation(model.id, () => deleteAction(actionDeps, model));
+    // Only on a CONFIRMED delete of the active model — never on `'rolled-back'`/`'ambiguous'`/
+    // `'persist-failed'`, where the model may still be active. Fire-and-forget; it never throws.
+    if (outcome.kind === 'ok' && wasActive) {
+      void releaseActiveModelContext();
+    }
+  };
 
   /**
    * Make `model` the active on-device model. Delegates to `setActiveAction` (P2-2): persist the durable
@@ -524,8 +579,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const handleSetActive = (model: DownloadedModel) => runOperation(model.id, () => setActiveAction(actionDeps, model));
 
   /** Clear the active model — `deactivateAction` (P2-2), same serialized persist-then-mirror
-   * transaction with conditional rollback on a definite failure and no rollback on a timeout. */
-  const handleDeactivate = () => runOperation(undefined, () => deactivateAction(actionDeps));
+   * transaction with conditional rollback on a definite failure and no rollback on a timeout. On a
+   * CONFIRMED deactivate, release the native context so it doesn't stay resident until app restart
+   * (Fix 2); never on `'rolled-back'`/`'ambiguous'`/`'persist-failed'`, where the model may still be active. */
+  const handleDeactivate = async () => {
+    const outcome = await runOperation(undefined, () => deactivateAction(actionDeps));
+    if (outcome.kind === 'ok') {
+      void releaseActiveModelContext();
+    }
+  };
 
   const customModels = managerState.downloaded.filter((model) => model.isCustom);
   /** Activate/deactivate/delete + download controls are disabled while an op is in flight (P2-2) OR
