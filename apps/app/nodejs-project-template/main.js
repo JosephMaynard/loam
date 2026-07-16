@@ -24,6 +24,10 @@ const { installStartFreshMarker } = require('./start-fresh-marker');
 // Sol Fable-round P1-4: the three-outcome durable config.json write (durable / failed / indeterminate),
 // split out for the same unit-testability reason (injected `fs` — see config-write.js's doc comment).
 const { durableWriteConfig } = require('./config-write');
+// Sol Fable-round-3 P1: the pure per-attempt boot-env decision (clear-all-then-set-branch), split out so the
+// "every attempt is a FRESH boot configuration — no stale LOAM_DB_KEY leaks across in-process retries" rule
+// is unit-testable (see boot-config.js's doc comment).
+const { DB_KEY_LOCKED_ERROR, ENV_KEYS, computeDbBootEnv } = require('./boot-config');
 
 const PORT = 3000;
 const projectDir = __dirname;
@@ -656,8 +660,7 @@ const DB_ENCRYPTION_MODES = ['off', 'ephemeral', 'persistent', 'passphrase'];
 const DB_MODE_READ_ERROR = 'error';
 // This file's own sentinel (never sent over the bridge) for "do not resolve a real mode/key this call —
 // treat exactly like db_encryption_locked" — covers RN's read-error reply, a timeout, a malformed/
-// unrecognized payload, and a thrown post().
-const DB_KEY_LOCKED_ERROR = 'locked-error';
+// unrecognized payload, and a thrown post(). Imported from boot-config.js so both agree (see top of file).
 
 /** Ask the RN host for the DB-encryption mode/key, waiting up to `timeoutMs`. Never rejects — any
  * FAILURE (timeout, malformed/unrecognized payload, a post() throw, or RN's own reported read error)
@@ -1242,206 +1245,69 @@ let meshPollArmed = false;
  * the initial boot at the bottom of this file, and the `loam-db-unlock` retry listener below — can tell
  * when it's safe to retry again. Never rejects.
  */
+/** Reset EVERY per-attempt boot env var (so nothing from a prior attempt leaks in), then set only the ones
+ * this attempt selected (Sol Fable-round-3 P1). `env` holds ONLY the values to set; `undefined` values are
+ * skipped. */
+function applyBootEnv(env) {
+  ENV_KEYS.forEach(function (k) {
+    delete process.env[k];
+  });
+  Object.keys(env).forEach(function (k) {
+    if (env[k] !== undefined) {
+      process.env[k] = env[k];
+    }
+  });
+}
+
+/** Whether the SQLCipher native module actually LOADS (not just resolves) in this build — injected into
+ * `computeDbBootEnv` so the encrypted→plaintext downgrade decision stays pure/testable. */
+function probeEncryptedDriver() {
+  try {
+    require('better-sqlite3-multiple-ciphers');
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
 function resolveDbEncryptionAndBoot() {
   return requestDbKey(DB_KEY_TIMEOUT_MS)
     .then(function (result) {
-      var mode = result.mode;
-      var key = result.key;
-      var legacyKey = result.legacyKey;
-      var acceptedRequestId = result.requestId;
-
-      // Thread the accepted attempt's id into the embedded boot as an IMMUTABLE per-boot value (Sol
-      // Fable-round-2 P1-B): the server reads `LOAM_DB_KEY_REQUEST_ID` once at buildApp time and passes it
-      // back in the migration ack, so a later/duplicate unlock can't mis-tag this boot's report. Set only in
-      // the resolved-key paths below; CLEARED here for every path that resolves NO promotable key (off /
-      // locked / ephemeral / plaintext downgrade), so a stale id can never leak into a subsequent boot.
-      delete process.env.LOAM_DB_KEY_REQUEST_ID;
-
-      if (mode === DB_KEY_LOCKED_ERROR) {
-        // P1-3 (Sol round 5): RN couldn't tell us its actual mode selection at all — a Keystore/
-        // SecureStore read failure, a timeout, or a malformed/unrecognized response. This is NOT the
-        // same signal as an operator genuinely choosing 'off'. RF-c (adversarial review, round 5): but
-        // whether it should BLOCK boot depends on whether this node has a secret to protect. `off` is the
-        // default for most hosts, and a 5s requestDbKey timeout (the RN screen not mounted yet) must not
-        // lock a node that has no secret — that would hurt crisis-messaging availability for the common
-        // case. Consult the last successfully-resolved mode hint:
-        var hint = readDbModeHint();
-        var dbExists = dbFileExists();
-        // P1-1 (Sol round 7, was P1-b round 6): MIRROR of `mayBootPlaintextOnLockedError(hint, dbExists)`
-        // in apps/app/src/lib/db-encryption.ts (harness-tested there; this CJS file can't import the TS
-        // module, so the two copies are kept in sync by hand). `hint` is now the TRI-STATE result of
-        // `readDbModeHint` above. Authorize a plaintext boot ONLY when:
-        //   - present AND mode 'off' → last-known mode was explicitly plaintext → safe; OR
-        //   - CONFIRMED-absent (ENOENT) AND no DB file → a genuinely fresh, never-configured node.
-        // Everything else LOCKS, never plaintext:
-        //   - status 'error' (read failure OR malformed/truncated/unrecognized) → LOCK regardless of the
-        //     DB, closing the ephemeral "no DB + hint read error → plaintext" hole (round 7 hole 1);
-        //   - absent WITH a DB present → LOCK (a DB exists but no mode recorded — don't downgrade it);
-        //   - a present ENCRYPTED-mode hint → LOCK even with NO DB (RF6-c): ephemeral wipes its DB every
-        //     boot, and a freshly-selected persistent/passphrase mode has no DB yet, but the operator
-        //     explicitly chose an encrypted mode, so a transient error must not write an UNENCRYPTED
-        //     loam.db. Only present-'off' or the true "confirmed-absent AND no DB" case boots plaintext.
-        var mayBootPlaintext =
-          (hint.status === 'present' && hint.mode === 'off') || (hint.status === 'absent' && dbExists === false);
-        if (mayBootPlaintext) {
-          // No secret to protect: the last-known mode was plaintext 'off', or there's no database file at
-          // all AND no mode was ever recorded. A transient key-request failure must NOT lock such a node —
-          // boot plaintext, exactly like a genuine 'off' reply. The hint is left untouched — this FAILED
-          // resolution is not authoritative enough to write one (only a real reply from RN is).
-          console.warn(
-            'Could not determine the on-device encryption mode this boot; last-known mode ' +
-              (hint.status === 'present' ? "'" + hint.mode + "'" : hint.status) +
-              ', DB file ' +
-              (dbExists ? 'present' : 'absent') +
-              ' — booting plaintext (no secret to protect). Availability over a transient lock (RF-c/P1-1).',
-          );
-          process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
-          process.env.LOAM_DB_DRIVER = 'better-sqlite3';
-          delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
-          clearEphemeralMarker();
-          return 'proceed';
-        }
-        // A DB file exists and the hint is absent/unreadable or a secret-based mode (persistent/
-        // passphrase/ephemeral) — do NOT silently downgrade to plaintext on a transient failure. Stay
-        // locked, exactly like the "no usable key" case below — `index.tsx` shows the same Retry recovery
-        // (`loam-db-unlock`), which re-runs this function once the app is responsive.
-        global.__loamReportBootError(
-          'Could not determine the on-device encryption mode this boot (a device security-store read ' +
-            'failed, the request timed out, or the response was malformed) — refusing to start ' +
-            'unencrypted. Retry once the app is responsive.',
-          'db_encryption_locked',
-        );
-        clearEphemeralMarker();
-        return 'locked';
-      }
-
-      // Threaded to the embedded server for EVERY boot (AF1/shared contract), 'off' included — so
-      // anything downstream that cares about the operator's CONFIGURED mode (as opposed to whether a
-      // key happened to come back) doesn't have to re-derive it from LOAM_DB_KEY's shape/value.
-      process.env.LOAM_DB_ENCRYPTION_MODE = mode;
-
-      if (mode === 'off') {
-        // Safe default: today's plaintext behaviour, unchanged. Silent — 'off' is the true default,
-        // not a downgrade, so it must never trigger a boot-error notice.
-        process.env.LOAM_DB_DRIVER = 'better-sqlite3';
-        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
-        clearEphemeralMarker();
-        writeDbModeHint('off'); // RF-c: a later transient key-request failure may boot plaintext.
-        return 'proceed';
-      }
-
-      if (mode !== 'ephemeral' && !key) {
-        // P1-1 (Sol round 4): persistent/passphrase with no usable key — e.g. passphrase mode with no
-        // passphrase entered yet, or a Keystore/RNG failure on the RN side — must NEVER fall back to a
-        // plaintext boot (that used to happen here, silently discarding the operator's chosen
-        // protection the moment a key wasn't ready). Stay LOCKED instead: report the distinct
-        // `db_encryption_locked` code (a fatal-until-unlocked state, not a "degraded but booted"
-        // notice) and do not proceed to require the server bundle at all — see the caller below, which
-        // checks this return value before doing so. `index.tsx` shows a boot-time "enter passphrase to
-        // unlock" prompt (passphrase mode) or a plain Retry (persistent mode), both of which post
-        // `loam-db-unlock` to re-run this whole function. NEVER logs `key` (there isn't one) or any
-        // other secret material. Ephemeral mode is excluded from this branch entirely (see below) —
-        // db-encryption.ts's `resolveDbKey('ephemeral')` never returns a key any more by design, so it
-        // would otherwise ALWAYS hit this branch.
-        global.__loamReportBootError(
-          'Encryption mode "' + mode + '" is selected but no key is available yet (no passphrase ' +
-            'entered, or a device Keystore/RNG failure) — refusing to start unencrypted.' +
-            (mode === 'passphrase' ? ' Enter the passphrase to unlock.' : ' Retry, or open Encryption settings.'),
-          'db_encryption_locked',
-        );
-        clearEphemeralMarker();
-        // RF-c: record the operator's REAL secret-based selection even though no key is available yet, so
-        // a later transient key-request failure LOCKS (not plaintext-boots) this node. Not key material.
-        writeDbModeHint(mode);
-        return 'locked';
-      }
-
-      // The encrypted driver (better-sqlite3-multiple-ciphers) isn't shipped in every build yet — only
-      // plain better-sqlite3 always is (docs/01 "Native prebuild", docs/04). Check availability BEFORE
-      // trusting the key: openStore would otherwise throw deep inside server startup the first time an
-      // operator picks an encrypted mode on a build that lacks the module. This actually REQUIRES the
-      // module (not just require.resolve) — resolving only proves the JS entry point exists, not that
-      // the native binding loads; a shipped-but-broken binding would pass a resolve-only guard and then
-      // crash-loop server boot instead of failing here where it can be reported and downgraded cleanly.
-      // Report the downgrade loudly (A8 boot-error bridge) instead of silently serving plaintext, or
-      // bricking boot. This is the ONE case where an encrypted mode still boots plaintext (see
-      // CLAUDE.md/docs/15) — the native module being absent is a build seam, not a missing key, and is
-      // deliberately distinct from the `db_encryption_locked` case above.
-      var encryptedDriverAvailable = false;
-      try {
-        require('better-sqlite3-multiple-ciphers');
-        encryptedDriverAvailable = true;
-      } catch (err) {
-        encryptedDriverAvailable = false;
-      }
-
-      if (!encryptedDriverAvailable) {
-        global.__loamReportBootError(
-          "Encrypted storage needs the SQLCipher native module, which isn't in this build yet — starting UNENCRYPTED.",
-          'db_encryption_unavailable',
-        );
-        process.env.LOAM_DB_DRIVER = 'better-sqlite3';
-        // P1-3 (Sol round 3): also downgrade the DECLARED mode to 'off', not just the driver. Leaving
-        // LOAM_DB_ENCRYPTION_MODE at 'ephemeral' here used to make embedded.ts's resolveEphemeralDbKey
-        // (which used to also check the mode, not just the LOAM_DB_KEY literal) generate an ephemeral
-        // key and set `ephemeralDbKey`, so the server tried to require the very
-        // better-sqlite3-multiple-ciphers module this branch just proved was MISSING — crash-looping
-        // boot instead of degrading. Posture reporting must match reality too: this boot really is
-        // unencrypted, for every mode, not just 'ephemeral'.
-        process.env.LOAM_DB_ENCRYPTION_MODE = 'off';
-        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
-        clearEphemeralMarker();
-        // RF-c: this build can only ever run plaintext (no SQLCipher module), and this boot IS plaintext,
-        // so record 'off' — a later transient failure should stay available, not lock. Self-corrects to
-        // the real mode on the first successful encrypted boot once the module ships.
-        writeDbModeHint('off');
-        return 'proceed';
-      }
-
-      if (mode === 'ephemeral') {
+      // Every attempt is a FRESH boot configuration (Sol Fable-round-3 P1): decide the env purely, DELETE
+      // every per-attempt boot var, then apply ONLY this attempt's — so a stale LOAM_DB_KEY / migrate-from /
+      // request-id from an earlier (e.g. encrypted) attempt can never leak into an off/locked/downgrade retry
+      // in the SAME process (db.ts gives encryptionKey precedence over the plaintext driver, so a leaked key
+      // would silently keep an "off" retry on SQLCipher, mis-report posture, and mislead the mode hint).
+      var cfg = computeDbBootEnv(result, {
+        hint: readDbModeHint(),
+        dbExists: dbFileExists(),
+        probeEncryptedDriver: probeEncryptedDriver,
+      });
+      applyBootEnv(cfg.env);
+      if (cfg.deleteStaleEphemeralDb) {
         deleteStaleEphemeralDb();
-        // The LITERAL string 'ephemeral' — NOT a generated key (Sol P1-1). The embedded server
-        // (apps/server/src/embedded.ts) recognizes this exact value and generates + holds its OWN
-        // random RAM-only key, which `executeKillSwitch` can then ROTATE in place on a wipe. Never
-        // derived from RN's `resolveDbKey('ephemeral')` any more — that no longer returns a key at all
-        // for this mode (see db-encryption.ts).
-        process.env.LOAM_DB_KEY = 'ephemeral';
-        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
-        writeDbModeHint('ephemeral'); // RF-c: secret-based mode → a later transient failure LOCKS.
-        return 'proceed';
       }
-
-      clearEphemeralMarker();
-      // openStore's encryptionKey path takes precedence over LOAM_DB_DRIVER (see db.ts) — leave the
-      // driver env unset here. NEVER logged.
-      process.env.LOAM_DB_KEY = key;
-      // The one path with a promotable key (passphrase) — thread this attempt's id so the migration ack is
-      // correlated to it (Sol Fable-round-2 P1-B). Harmless for persistent mode (its report is a no-op RN-side).
-      if (acceptedRequestId) {
-        process.env.LOAM_DB_KEY_REQUEST_ID = acceptedRequestId;
+      if (cfg.clearEphemeralMarker) {
+        clearEphemeralMarker();
       }
-      // P1-1 (Sol round 5): a pre-round-4 passphrase key derivation, offered ONLY when RN hasn't
-      // recorded a confirmed migration yet (db-encryption.ts's `resolveDbKey('passphrase')`). Threaded
-      // to the server as LOAM_DB_KEY_MIGRATE_FROM so `openInitialStore` can fall back to it and rekey in
-      // place — see embedded.ts. Never logged.
-      if (legacyKey) {
-        process.env.LOAM_DB_KEY_MIGRATE_FROM = legacyKey;
-      } else {
-        delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
+      if (cfg.writeHint) {
+        writeDbModeHint(cfg.writeHint);
       }
-      // RF-c: a real persistent/passphrase key resolved — record the secret-based mode so a later
-      // transient key-request failure LOCKS rather than downgrading to plaintext. Only the mode NAME is
-      // written; `key`/`legacyKey` never touch this file (or any file) here.
-      writeDbModeHint(mode);
-      return 'proceed';
+      if (cfg.bootError) {
+        global.__loamReportBootError(cfg.bootError.message, cfg.bootError.code);
+      }
+      return cfg.outcome;
     })
-    .catch(function () {
-      // Should be unreachable (requestDbKey never rejects), but keep the fallback total. 'off'-style
-      // plaintext, not 'locked' — an unexpected internal failure here is not the same signal as an
-      // operator's encrypted mode genuinely having no key.
-      process.env.LOAM_DB_DRIVER = 'better-sqlite3';
-      delete process.env.LOAM_DB_KEY_MIGRATE_FROM;
-      return 'proceed';
+    .catch(function (err) {
+      // FAIL CLOSED (Sol Fable-round-3 P1): an unexpected error must NOT proceed under whatever key a prior
+      // attempt happened to leave installed. Clear EVERY boot var and lock; the operator retries.
+      applyBootEnv({});
+      console.error('Unexpected error resolving DB encryption for boot', err);
+      global.__loamReportBootError(
+        'An unexpected error occurred while preparing on-device encryption — refusing to start. Retry once the app is responsive.',
+        'db_encryption_locked',
+      );
+      return 'locked';
     })
     .then(function (outcome) {
       if (outcome === 'locked') {
