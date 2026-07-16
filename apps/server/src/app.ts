@@ -1540,7 +1540,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    *  between "record intent" and "persist config.json" can then no longer either FORGET the wipe or LOSE the
    *  current admin config — a boot-time resume restores config.json from this snapshot before it clears the
    *  journal, so config is durable the instant the intent is. */
-  type WipeJournal = { phase: WipePhase; config?: LoamConfig };
+  // `configInvalid` distinguishes a genuinely ABSENT config snapshot (legacy wipe / no snapshot → proceed)
+  // from one that is PRESENT but fails schema validation (corrupt on disk → do NOT silently drop it and lose
+  // config: the resume stays locked without clearing the journal, so the config bytes survive for repair).
+  type WipeJournal = { phase: WipePhase; config?: LoamConfig; configInvalid?: boolean };
 
   /** Strip the one plaintext bearer secret (`sync.token`) before it is written to `.loam-wipe-phase` or
    *  config.json — both are plain, unprotected files (scrypt-hashed secrets are safe to persist as-is). */
@@ -1583,11 +1586,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (parsed && typeof parsed === "object") {
         const phase: WipePhase = parsed.phase === "key-clear-ready" ? "key-clear-ready" : "delete-pending";
         let config: LoamConfig | undefined;
+        let configInvalid = false;
         if (parsed.config !== undefined) {
           const validated = LoamConfigSchema.safeParse(parsed.config);
-          config = validated.success ? validated.data : undefined;
+          if (validated.success) {
+            config = validated.data;
+          } else {
+            // Present but invalid (disk corruption) — flag it so the resume fails closed rather than silently
+            // dropping it and reverting config to defaults.
+            configInvalid = true;
+          }
         }
-        return { phase, config };
+        return { phase, config, configInvalid };
       }
     } catch {
       // Not JSON — fall through to the legacy plain-string format below.
@@ -1757,20 +1767,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
         const recoveryDir = join(dataDir, `.loam-recovery-${preservedSuffix}`);
         mkdirSync(recoveryDir, { recursive: true });
-        // Move every `loam.db*` artifact (live set + `.premigration` sidecars + any prior `.unreadable-*`).
         const base = basename(dbPath);
-        for (const entry of readdirSync(dataDir)) {
-          if (entry.startsWith(base)) {
-            renameSync(join(dataDir, entry), join(recoveryDir, entry));
-          }
-        }
-        // Move the user-media directories in too, so the reaper never sees them and the fresh node starts empty.
+        // CRASH-ATOMICITY (CodeRabbit round-11 CRITICAL): the moves are not one atomic op, so ORDER them so the
+        // `loam.db` MAIN-file rename is the single COMMIT point, and never leave a fresh DB paired with stale
+        // sidecars. FIRST move the media + the DB SIDECARS (`-wal`/`-shm`/`-journal`/`.premigration`/prior
+        // `.unreadable-*`) into the snapshot and fsync the recovery dir so its contents are durable; THEN move
+        // `loam.db` itself (the commit) and fsync the data dir. A crash BEFORE the loam.db move leaves the old
+        // DB still openable in place → wrong-key → `db_encryption_unreadable` lock (recoverable, no fresh DB
+        // opened over a partial snapshot); a crash AFTER it leaves the data dir clean for the fresh open.
+        // Move the user-media directories (so the reaper never sees them and the fresh node starts empty).
         for (const [name, dir] of [
           ["avatars", avatarsDir],
           ["attachments", attachmentsDir],
         ] as const) {
           if (existsSync(dir)) {
             renameSync(dir, join(recoveryDir, name));
+          }
+        }
+        // Move every `loam.db*` artifact EXCEPT the main `loam.db` file (sidecars + snapshots) first.
+        for (const entry of readdirSync(dataDir)) {
+          if (entry.startsWith(base) && entry !== base) {
+            renameSync(join(dataDir, entry), join(recoveryDir, entry));
           }
         }
         // A small manifest describing the snapshot (informational; recovery does not depend on it).
@@ -1783,8 +1800,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         } catch (manifestError) {
           server.log.warn(manifestError, "Preserve recovery: could not write the snapshot manifest (informational only)");
         }
-        // fsync the data dir so the moves are DURABLE before we report "preserved" and open a fresh DB
-        // (CodeRabbit round-10): otherwise a power-loss could lose them and the fresh open could collide.
+        // Make the snapshot's own contents durable BEFORE the commit rename below.
+        if (!fsyncDir(recoveryDir)) {
+          throw new Error("preserved recovery snapshot could not be made durable (recovery-directory fsync failed)");
+        }
+        // COMMIT: move the main `loam.db` file last. Before this the old DB is still in place (recoverable);
+        // after it the data dir is clean.
+        if (existsSync(dbPath)) {
+          renameSync(dbPath, join(recoveryDir, base));
+        }
+        // fsync the data dir so the removals (media + loam.db + sidecars) are DURABLE before the fresh open.
         if (!fsyncDir(dataDir)) {
           throw new Error("preserved recovery snapshot could not be made durable (parent-directory fsync failed)");
         }
@@ -2124,7 +2149,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     // The resume treats `delete-pending` and `key-clear-ready` identically — both re-verify deletion and
     // (re-)advance — so only the config snapshot is read here; the phase is fail-safe either way.
-    const { config } = journal;
+    const { config, configInvalid } = journal;
+
+    // CodeRabbit round-11 MAJOR: a PRESENT-but-INVALID config snapshot (journal corrupted on disk) must NOT be
+    // silently dropped — that would revert admin config to defaults. Fail closed: do NOT clear the journal or
+    // proceed (either would lose the config bytes); lock so the operator can inspect/repair `.loam-wipe-phase`.
+    if (configInvalid) {
+      const message =
+        "Resuming an interrupted emergency wipe: the config snapshot in the wipe journal is PRESENT but INVALID " +
+        "(the journal file may be corrupt). Refusing to proceed — clearing the journal would lose the admin " +
+        "config. The node is locked; inspect or repair `.loam-wipe-phase` and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "kill_switch_wipe_incomplete");
+      throw new WipeResumeInProgressError(message);
+    }
 
     // P1-4 (Sol round-10): RESTORE config.json FROM THE JOURNAL SNAPSHOT FIRST — before any deletion or phase
     // advance, and before the journal is ever cleared. The live wipe committed the effective config INTO the

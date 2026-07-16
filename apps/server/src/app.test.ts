@@ -1894,6 +1894,28 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(hook2.calls).toBe(1);
   });
 
+  it("P1-4 (Sol round 11 / CodeRabbit): a wipe journal with a PRESENT but INVALID config snapshot fails closed (locks + retains the journal) instead of silently dropping config and reverting to defaults", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // Seed a journal whose config field is PRESENT but schema-invalid (simulating on-disk corruption of the
+    // snapshot). Distinct from an absent config (legacy), which is allowed to proceed.
+    writeFileSync(
+      join(dataDir, ".loam-wipe-phase"),
+      JSON.stringify({ phase: "delete-pending", config: { not: "a valid LoamConfig" } }),
+    );
+    const reports = installFakeBootBridge();
+
+    // The resume refuses to proceed (which would clear the journal and lose the config bytes) — it locks.
+    await expect(
+      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+    ).rejects.toThrow();
+    // The journal is RETAINED (not cleared), so the config bytes survive for inspection/repair.
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+  });
+
   it("P1-1/P1-d (Sol round 8): when the durable wipe-phase file CANNOT be written, the ciphertext is deleted and VERIFIED gone SYNCHRONOUSLY before the launcher is signaled (fail closed) — a kill right after the hook cannot recover the data", async () => {
     // A launcher hook that records, at the moment it is called, whether ANY ciphertext file still exists.
     // The fix's guarantee is that by the time the launcher is signaled, the ciphertext is already gone —
