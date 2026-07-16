@@ -191,11 +191,11 @@ describe("P1-1 end-to-end (Sol round 3): db_encryption_unreadable keeps the runt
       await globalBoot(start);
 
       // Recovered: a fresh (empty) DB opened under key B, no exit, and the old ciphertext preserved on
-      // disk under a unique suffix rather than deleted (P1-3's collision-proof rename).
+      // disk in a unique recovery-snapshot directory rather than deleted (Sol round-11 preserve recovery).
       expect(exitSpy).not.toHaveBeenCalled();
       expect(builtApp).toBeDefined();
       expect(builtApp?.store.getConfigValue("seed")).toBeUndefined();
-      const preserved = readdirSync(dataDir).filter((name) => name.startsWith("loam.db.unreadable-"));
+      const preserved = readdirSync(dataDir).filter((name) => name.startsWith(".loam-recovery-"));
       expect(preserved.length).toBeGreaterThan(0);
 
       await builtApp?.close();

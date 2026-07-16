@@ -902,16 +902,13 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   // until the NEXT real app restart; a non-durable write that a power-loss then discarded would report a
   // false "scheduled" success and force the operator to repeat the destructive confirmation.
   //
-  // We use `installStartFreshMarker` rather than the shared `durableWriteFileSync` because the boolean the
-  // latter returns CONFLATES two very different failures for THIS marker: a parent-dir fsync that fails
-  // AFTER the rename has already installed the marker leaves it live in the current namespace even though
-  // the write reported false — so acking a flat "not scheduled" would tell the operator a 'delete' reset
-  // was cancelled while it could still be consumed (destructively) on a later restart. The three-outcome
-  // install distinguishes a durable install, a PROVABLY-absent write (safe to call unscheduled), and an
-  // INDETERMINATE commit (may still take effect) — see start-fresh-marker.js.
+  // `installStartFreshMarker` is a TOTAL three-outcome function that also prepares the directory itself and
+  // proves marker absence on every failure path (Sol P2, round-11): a durable install, a PROVABLY-absent
+  // write (safe to call unscheduled), or an INDETERMINATE commit (a post-rename fsync failure could leave a
+  // live marker that a later restart consumes destructively). We do NOT wrap it in a catch that manufactures
+  // 'not-installed' — that would let a directory-prep failure claim "nothing was written" without proof.
   var outcome;
   try {
-    fs.mkdirSync(dataDir, { recursive: true });
     outcome = installStartFreshMarker({
       fs: fs,
       markerPath: START_FRESH_MARKER_PATH,
@@ -920,8 +917,9 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
       contents: intent,
     });
   } catch (err) {
-    // mkdir (or an unexpected throw before any staging write) — nothing was installed on disk.
-    outcome = 'not-installed';
+    // The helper is total and should not throw. If it somehow does, default to the SAFE outcome —
+    // 'indeterminate', NEVER 'not-installed': we cannot claim absence without proving it.
+    outcome = 'indeterminate';
   }
 
   if (outcome !== 'durable') {
@@ -1092,6 +1090,16 @@ function readWipePhase() {
       }
     }
     return 'delete-pending';
+  }
+  // New JSON journal format (round-10+): `{ phase, config? }`. The launcher only needs the PHASE string
+  // (it ignores the config snapshot — that is the server's to restore). MIRRORS `readWipeJournal` in app.ts.
+  try {
+    var parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      return parsed.phase === 'key-clear-ready' ? 'key-clear-ready' : 'delete-pending';
+    }
+  } catch (parseErr) {
+    // Not JSON — fall through to the legacy pre-round-10 plain-string format below.
   }
   var trimmed = String(raw).trim();
   if (trimmed === 'key-clear-ready') {

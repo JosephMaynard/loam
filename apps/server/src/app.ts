@@ -1,4 +1,4 @@
-import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
@@ -1394,7 +1394,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const db = deleteAndVerifyDbArtifacts();
     const survivors = [...db.survivors];
     const errors = [...db.errors];
-    for (const dir of [avatarsDir, attachmentsDir]) {
+    // The media dirs, PLUS any preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol
+    // round-11): those hold an old, still-readable (under the prior key) DB set + avatars + attachments moved
+    // aside by a `preserve` start-fresh, so an emergency wipe must remove them too. A `readdir` failure here
+    // is surfaced as an error (fail closed) — "can't enumerate" is not "nothing to remove".
+    const dirsToRemove = [avatarsDir, attachmentsDir];
+    try {
+      for (const entry of readdirSync(dataDir)) {
+        if (entry.startsWith(".loam-recovery-")) {
+          dirsToRemove.push(join(dataDir, entry));
+        }
+      }
+    } catch (error) {
+      errors.push(`readdir ${dataDir} (recovery snapshots): ${error instanceof Error ? error.message : String(error)}`);
+    }
+    for (const dir of dirsToRemove) {
       try {
         rmSync(dir, { recursive: true, force: true });
       } catch {
@@ -1521,61 +1535,79 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return fsyncDir(dirname(filePath));
   }
 
-  /**
-   * Durably record the wipe phase (P1-1; durability hardened Sol round-8 P1-5). Returns whether a genuinely
-   * DURABLE write of THIS exact phase succeeded — `true` only after file + parent-directory fsync. A `false`
-   * means the caller must NOT treat the intent as recorded (fail closed). The atomic temp+rename means an
-   * interrupted write never leaves a TRUNCATED phase a reader mis-parses; `readWipePhase` additionally
-   * fail-safes any ambiguous content to `delete-pending`.
-   */
-  function writeWipePhase(phase: WipePhase): boolean {
-    return durableWriteFileSync(wipePhaseMarkerPath, phase);
+  /** The durable wipe JOURNAL (Sol round-10 P1-4): `.loam-wipe-phase` now carries the wipe PHASE *and* a
+   *  sanitized snapshot of the effective config, committed together in ONE atomic durable write. A SIGKILL
+   *  between "record intent" and "persist config.json" can then no longer either FORGET the wipe or LOSE the
+   *  current admin config — a boot-time resume restores config.json from this snapshot before it clears the
+   *  journal, so config is durable the instant the intent is. */
+  type WipeJournal = { phase: WipePhase; config?: LoamConfig };
+
+  /** Strip the one plaintext bearer secret (`sync.token`) before it is written to `.loam-wipe-phase` or
+   *  config.json — both are plain, unprotected files (scrypt-hashed secrets are safe to persist as-is). */
+  function sanitizeConfigForRestart(config: LoamConfig): LoamConfig {
+    return { ...config, sync: { ...config.sync, token: undefined } };
   }
 
   /**
-   * Read the durable wipe phase (P1-1). A confirmed `ENOENT` → `undefined` (no wipe pending). A recognized
-   * value → that phase. ANY other state — an unreadable file, or malformed/truncated/unrecognized contents
-   * — resolves to `delete-pending`, NOT `undefined`: an ambiguous-but-present phase file means a wipe WAS
-   * in progress, so err toward re-running (idempotent) deletion rather than forgetting the wipe and serving
-   * a surviving DB under the old key.
+   * Durably write the wipe journal `{ phase, config? }` (Sol round-10 P1-4). Returns whether a genuinely
+   * DURABLE write succeeded — `true` only after file + parent-directory fsync (fail closed on `false`). The
+   * config snapshot (already sanitized) rides along so a resume can restore config.json from it. `readWipeJournal`
+   * fail-safes any ambiguous content to `{delete-pending}`.
    */
-  function readWipePhase(): WipePhase | undefined {
+  function writeWipeJournal(phase: WipePhase, config?: LoamConfig): boolean {
+    const payload = config === undefined ? { phase } : { phase, config };
+    return durableWriteFileSync(wipePhaseMarkerPath, JSON.stringify(payload));
+  }
+
+  /**
+   * Read the durable wipe journal. A confirmed `ENOENT` → check the legacy marker (→ `{delete-pending}` or
+   * undefined = no wipe). A well-formed `{ phase, config? }` → that (the config is validated against the
+   * schema; an invalid config is DROPPED, never trusted). Legacy pre-round-10 plain-string content
+   * (`key-clear-ready`/anything-else) is still recognized. ANY other state (unreadable / malformed) →
+   * `{delete-pending}` (fail-safe: an ambiguous-but-present journal means a wipe WAS in progress).
+   */
+  function readWipeJournal(): WipeJournal | undefined {
     let raw: string;
     try {
       raw = readFileSync(wipePhaseMarkerPath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        // No NEW phase file — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished
-        // wipe (P1-1, Sol round-8). Migrate it forward before concluding "no wipe".
+        // No NEW journal — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished wipe.
         return migrateLegacyWipeMarkerIfPresent();
       }
-      return "delete-pending";
+      return { phase: "delete-pending" };
     }
-    const trimmed = raw.trim();
-    if (trimmed === "key-clear-ready") {
-      return "key-clear-ready";
+    // New JSON journal format (round-10+).
+    try {
+      const parsed = JSON.parse(raw) as { phase?: unknown; config?: unknown };
+      if (parsed && typeof parsed === "object") {
+        const phase: WipePhase = parsed.phase === "key-clear-ready" ? "key-clear-ready" : "delete-pending";
+        let config: LoamConfig | undefined;
+        if (parsed.config !== undefined) {
+          const validated = LoamConfigSchema.safeParse(parsed.config);
+          config = validated.success ? validated.data : undefined;
+        }
+        return { phase, config };
+      }
+    } catch {
+      // Not JSON — fall through to the legacy plain-string format below.
     }
-    // `delete-pending`, or anything malformed/truncated/unrecognized → fail-safe to re-running deletion.
-    return "delete-pending";
+    // Legacy pre-round-10 plain-string content (no config snapshot).
+    return { phase: raw.trim() === "key-clear-ready" ? "key-clear-ready" : "delete-pending" };
   }
 
   /**
    * P1-1 (Sol round-8) upgrade path: when there is NO new `.loam-wipe-phase`, a present (or unreadable)
    * legacy `.loam-wipe-pending` marker means a pre-round-8 wipe was still unfinished — treat it as
-   * `delete-pending` (NEVER `key-clear-ready`: the old marker cannot prove deletion completed, so deletion
-   * must be re-run first) and MIGRATE it durably to the new phase file so the resume path drives it forward.
-   * The legacy marker is NOT removed here — both names are cleared together only once the whole protocol
-   * completes (`clearWipePhase`), so an interrupted migration is retried on the next boot. Returns the phase
-   * verdict: `delete-pending` when a legacy wipe was pending, else `undefined` (genuinely no wipe).
+   * `delete-pending` (NEVER `key-clear-ready`: the old marker cannot prove deletion completed) and MIGRATE it
+   * durably to the new journal (no config snapshot exists for a legacy wipe). The legacy marker is NOT removed
+   * here — both names are cleared together only once the protocol completes (`clearWipePhase`).
    */
-  function migrateLegacyWipeMarkerIfPresent(): WipePhase | undefined {
+  function migrateLegacyWipeMarkerIfPresent(): WipeJournal | undefined {
     if (provenAbsence(legacyWipePendingMarkerPath) === "absent") {
       return undefined; // no wipe pending under EITHER name — a normal boot
     }
-    // present OR unverifiable ("unknown") → assume a wipe was pending and fail safe to re-running deletion.
-    if (!writeWipePhase("delete-pending")) {
-      // Could not durably migrate. Do NOT report `undefined` (that would forget the wipe) — the legacy
-      // marker is still on disk, so report `delete-pending` for THIS boot; a later boot retries the migration.
+    if (!writeWipeJournal("delete-pending")) {
       server.log.error(
         "Wipe resume: found a legacy `.loam-wipe-pending` marker but could NOT durably migrate it to " +
           "`.loam-wipe-phase` — treating as delete-pending for this boot; the legacy marker persists so a later boot retries.",
@@ -1586,7 +1618,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           "deletion will be re-run and verified before any device-key clear.",
       );
     }
-    return "delete-pending";
+    return { phase: "delete-pending" };
   }
 
   /** Delete the durable wipe-phase file, returning whether it is now PROVEN gone (removed, or confirmed
@@ -1713,26 +1745,52 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
       }
 
-      // preserve: rename the whole set aside under a UNIQUE suffix (so a second recovery keeps its own copy
-      // rather than overwriting the first), including `-journal` so a foreign rollback journal is moved aside
-      // too, then open fresh. Any failure after the consumed marker is recast as the recoverable unreadable.
+      // preserve: move the WHOLE snapshot — the DB set AND the user media (avatars + attachments) — into a
+      // UNIQUE recovery DIRECTORY (P1, Sol round-10), not just rename the DB files aside. Leaving avatars/
+      // attachments in the ACTIVE namespace let the boot-time orphan reaper (`reapOrphanedAttachments`, which
+      // scans the live `attachments/`) delete them — the fresh DB references none of the old attachment ids —
+      // so "preserve" silently DESTROYED the very files the preserved messages point at, and left avatars where
+      // a fresh node could collide with them. A dedicated `.loam-recovery-<suffix>/` directory keeps the
+      // snapshot coherent and OUT of both the reaper's path and the fresh node's active media dirs; a kill
+      // switch still wipes it (see `recoveryDirPaths` in the deletion inventory). Fail on a non-durable move.
       try {
         const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-        for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-          const from = `${dbPath}${suffix}`;
-          if (existsSync(from)) {
-            renameSync(from, `${from}.unreadable-${preservedSuffix}`);
+        const recoveryDir = join(dataDir, `.loam-recovery-${preservedSuffix}`);
+        mkdirSync(recoveryDir, { recursive: true });
+        // Move every `loam.db*` artifact (live set + `.premigration` sidecars + any prior `.unreadable-*`).
+        const base = basename(dbPath);
+        for (const entry of readdirSync(dataDir)) {
+          if (entry.startsWith(base)) {
+            renameSync(join(dataDir, entry), join(recoveryDir, entry));
           }
         }
-        // fsync the data dir so the aside-renames are DURABLE before we report "preserved" and open a fresh
-        // DB over them (CodeRabbit round-10): otherwise a power-loss could lose the renames, leaving the fresh
-        // open to collide with the old files. Recast a non-durable rename as the recoverable unreadable error.
+        // Move the user-media directories in too, so the reaper never sees them and the fresh node starts empty.
+        for (const [name, dir] of [
+          ["avatars", avatarsDir],
+          ["attachments", attachmentsDir],
+        ] as const) {
+          if (existsSync(dir)) {
+            renameSync(dir, join(recoveryDir, name));
+          }
+        }
+        // A small manifest describing the snapshot (informational; recovery does not depend on it).
+        try {
+          writeFileSync(
+            join(recoveryDir, "manifest.json"),
+            JSON.stringify({ preservedAt: preservedSuffix, reason: "start-fresh preserve recovery (unopenable DB)" }),
+            "utf8",
+          );
+        } catch (manifestError) {
+          server.log.warn(manifestError, "Preserve recovery: could not write the snapshot manifest (informational only)");
+        }
+        // fsync the data dir so the moves are DURABLE before we report "preserved" and open a fresh DB
+        // (CodeRabbit round-10): otherwise a power-loss could lose them and the fresh open could collide.
         if (!fsyncDir(dataDir)) {
-          throw new Error("preserved-aside renames could not be made durable (parent-directory fsync failed)");
+          throw new Error("preserved recovery snapshot could not be made durable (parent-directory fsync failed)");
         }
         const message =
-          "An explicit PRESERVE start-fresh confirmation was present, so the previous files were preserved on " +
-          `disk (suffix "${preservedSuffix}") and a fresh database was started.`;
+          "An explicit PRESERVE start-fresh confirmation was present, so the previous database and all user media " +
+          `were moved into a recovery snapshot (".loam-recovery-${preservedSuffix}/") and a fresh database was started.`;
         server.log.warn(message);
         reportBootNotice(message, "db_encryption_recovered_fresh");
         return openLoamStore();
@@ -2060,9 +2118,28 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * Returns the store to serve from when there is NOTHING to resume (`undefined` phase); otherwise throws.
    */
   function resumeWipePhaseThenOpenStore(): LoamStore {
-    const phase = readWipePhase();
-    if (phase === undefined) {
+    const journal = readWipeJournal();
+    if (journal === undefined) {
       return openInitialStore();
+    }
+    // The resume treats `delete-pending` and `key-clear-ready` identically — both re-verify deletion and
+    // (re-)advance — so only the config snapshot is read here; the phase is fail-safe either way.
+    const { config } = journal;
+
+    // P1-4 (Sol round-10): RESTORE config.json FROM THE JOURNAL SNAPSHOT FIRST — before any deletion or phase
+    // advance, and before the journal is ever cleared. The live wipe committed the effective config INTO the
+    // journal atomically with the intent, so even if its live config.json write never landed (or a crash hit
+    // before it), the current admin config (armed kill switch, panic token, security profile, retention…) is
+    // recovered here rather than reverting to defaults. If we can't persist it yet, do NOT proceed (a later
+    // clear would lose the only copy) — stay locked; a later boot retries from the still-intact journal.
+    if (config !== undefined && !persistConfigForRestart(config)) {
+      const message =
+        "Resuming an interrupted emergency wipe: the config snapshot in the wipe journal could NOT be persisted " +
+        "to config.json yet — refusing to proceed (a later journal clear would lose the current admin config). " +
+        "The node is locked; resolve the filesystem fault and reopen to retry.";
+      server.log.error(message);
+      reportBootNotice(message, "kill_switch_wipe_incomplete");
+      throw new WipeResumeInProgressError(message);
     }
 
     const hook = wipeRestartHook();
@@ -2080,7 +2157,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // failed): if the file can't be rewritten to `delete-pending`, it lingers as `key-clear-ready` and the
       // launcher's next-boot gate could clear the key while artifacts survive. We can't force a broken FS to
       // accept the write, but we surface it loudly and stay locked THIS boot regardless (CodeRabbit CRITICAL).
-      const downgraded = writeWipePhase("delete-pending");
+      const downgraded = writeWipeJournal("delete-pending", config);
       const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
       const durability = downgraded
         ? "the durable `delete-pending` phase is recorded, so the next boot re-runs deletion under the old key"
@@ -2094,11 +2171,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw new WipeResumeInProgressError(message);
     }
 
-    // Every artifact + media path is PROVEN gone. Advance to `key-clear-ready` durably, THEN hand off.
-    // A failed write here self-heals: the phase stays `delete-pending`, so a next boot (should the key-clear
-    // also be interrupted) re-enters this resume, re-verifies deletion (idempotent — all already gone), and
-    // re-advances. So we record but don't block on it — deletion being proven gone is the real safety gate.
-    const phaseReady = writeWipePhase("key-clear-ready");
+    // Every artifact + media path is PROVEN gone. Advance to `key-clear-ready` durably (carrying the config
+    // snapshot forward), THEN hand off. A failed write here self-heals: the phase stays `delete-pending`, so a
+    // next boot re-enters this resume, re-verifies deletion (idempotent), and re-advances.
+    const phaseReady = writeWipeJournal("key-clear-ready", config);
 
     if (!hook) {
       // Desktop/CI (no launcher): the device key can't be rotated in-process. The wipe already deleted the
@@ -3974,73 +4050,60 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           pending.close();
         }
 
-        // P1-4 (Sol round 9): PERSIST CONFIG DURABLY BEFORE THE PHASE. The whole critical section is now
-        // await-free (persistConfigForRestart + writeWipePhase are both synchronous durable writes, run right
-        // after the synchronous lockdown), so there is no interleaving window at all. Config MUST land before
-        // the `delete-pending` phase: a boot-time resume DELETES the DB (and its `config` table), so the
-        // current effective config has to already be on config.json for the fresh boot to recover it —
-        // otherwise a crash after the phase but before config would revert the armed kill switch / panic
-        // token / security profile / retention to defaults. `persistConfigForRestart` retries once; if it
-        // STILL fails, the kill switch's data-destruction priority wins (proceed regardless), but never
-        // silently — a distinct log line marks the degraded config case.
-        const configPersisted = persistConfigForRestart(appConfig);
-        if (!configPersisted) {
+        // P1-4 (Sol round-10): commit the wipe INTENT and the effective CONFIG together, atomically, as the
+        // FIRST durable action — the wipe journal `{ phase: "delete-pending", config }`. A SIGKILL after this
+        // single write leaves BOTH on disk, so a boot-time resume can restore config.json from the snapshot
+        // before it clears the journal; a kill BEFORE it destroys nothing (no journal → wipe forgotten, but
+        // nothing lost). This is why config can no longer revert on a crash: it rides with the intent, not in
+        // a separate later write. A `false` does NOT abort the wipe (confidentiality-first, Sol round-8 P1-d /
+        // round-9 decision): deletion still runs; the only residual is the degraded-FS compound case.
+        const sanitized = sanitizeConfigForRestart(appConfig);
+        const journalWritten = writeWipeJournal("delete-pending", sanitized);
+        if (!journalWritten) {
           server.log.error(
-            "KILL SWITCH NOTICE: config.json could NOT be durably persisted before this fixed-key wipe, " +
-              "even after a retry — proceeding with the wipe regardless (kill-switch priority), but admin " +
-              "settings (e.g. the armed kill switch itself) may revert to config.json/defaults on the next boot.",
+            "KILL SWITCH NOTICE: could NOT durably write the wipe journal (intent + config) before this fixed-key " +
+              "wipe — proceeding with deletion regardless (confidentiality-first), but a crash mid-deletion could " +
+              "then forget the wipe and admin config may revert; reopen promptly.",
           );
         }
 
-        // P1-3 (Sol round 8): record the durable wipe INTENT before any destruction (store.close/deletion).
-        // A `false` does NOT abort the wipe (confidentiality-first, Sol round-8 P1-d): the deletion below
-        // still runs, and the compound residual (intent write fails AND a crash lands mid-deletion → the next
-        // boot could forget the wipe) is the documented confidentiality-vs-integrity boundary on a filesystem
-        // too degraded to write a marker — Sol confirmed keeping destroy-anyway here (round-9 decision).
-        const phasePending = writeWipePhase("delete-pending");
-
-        // P1-1 (Sol round 8): DURABLE PHASE STATE MACHINE — the old single `.loam-wipe-pending` marker
-        // conflated "deletion still pending" with "safe to clear the key", so any surviving marker
-        // authorized a key-clear on the next boot WITHOUT re-verifying deletion (a legacy-key
-        // `.premigration` survivor stayed recoverable; Step-0b could restore it). The intent (phase=
-        // `delete-pending`) is already recorded above (P1-3). Now:
-        //   2. Delete + PROVE-gone EVERY artifact + media (P1-2, fail-closed).
-        //   3. ONLY when every path is PROVEN absent, advance to phase=`key-clear-ready` DURABLY, and ONLY
-        //      THEN signal the launcher to clear the device key + restart.
-        // If deletion is incomplete/unverifiable → stay `delete-pending`, do NOT signal, stay 503-locked;
-        // the next boot's server-side resume re-runs deletion under the OLD key before serving.
-        // Close the store so its files can be deleted.
+        // Close the store so its files can be deleted, then delete + PROVE-gone the FULL inventory (DB + media)
+        // DURABLY (fail closed on any survivor/unverifiable path). Only after that may the key-clear be signaled.
         store.close();
-
-        // Step 2: fail-closed deletion + proof of absence for the FULL inventory (DB artifacts + media),
-        // made DURABLE (dir fsync) so the deletions survive a power-loss before the launcher key-clear
-        // (CodeRabbit round-10).
         const deletion = deleteAndVerifyAllWipeArtifactsDurable();
-
         if (!deletion.ok) {
-          // Deletion incomplete/unverifiable — a survivor (e.g. a legacy-key `.premigration` snapshot that
-          // Step-0b would restore) or an unverifiable path. Do NOT signal the launcher: clearing the device
-          // key while recoverable ciphertext remains — with the wipe never re-running deletion — would let
-          // it outlive the emergency reset. Stay 503-locked (`awaitingWipeRestart` is already set) at
-          // phase=`delete-pending`; the next boot's server-side resume re-runs deletion under the OLD key.
+          // Stay 503-locked at `delete-pending`; the resume re-runs deletion. The journal (with config) is
+          // intact, so config is safe regardless.
           const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
-          const durability = phasePending
-            ? "the durable `delete-pending` phase is recorded, so the next boot re-runs deletion under the old key"
-            : "AND the durable phase file could NOT be written either — reopen promptly; auto-resume is best-effort";
           const message =
             `KILL SWITCH NOTICE: some persisted data could not be deleted and VERIFIED gone (${remaining}). ` +
-            `The launcher was NOT signaled, to avoid clearing the device key while recoverable ciphertext ` +
-            `survives — ${durability}. The node is locked down (503); reopen it to retry the wipe.`;
+            "The launcher was NOT signaled, to avoid clearing the device key while recoverable ciphertext " +
+            "survives. The node is locked down (503); reopen it to retry the wipe.";
           server.log.error(message);
           reportBootNotice(message, "kill_switch_wipe_incomplete");
           return { complete: false, phase: "delete-pending" };
         }
 
-        // Step 3: every artifact + media path is PROVEN gone. Advance to `key-clear-ready` DURABLY, THEN
-        // hand off. A kill after the signal (with the launcher's key-clear also interrupted) is safe: the
-        // data is already unrecoverable, and the durable `key-clear-ready` phase makes the next boot's
-        // main.js re-drive the key-clear.
-        const phaseReady = writeWipePhase("key-clear-ready");
+        // Persist config.json from the snapshot NOW, and gate the launcher handoff on it (P1-4, Sol round-10):
+        // the launcher clears the journal after its key-clear, and the fresh server boot then reads config.json
+        // (the journal is gone), so config.json MUST be current before we ever signal. If it can't be written,
+        // do NOT signal — stay 503-locked at `delete-pending` (the journal retains the config); a resume
+        // persists config.json from the journal and re-advances. The DB is already deleted (confidentiality
+        // preserved), config is never lost — both invariants hold.
+        if (!persistConfigForRestart(sanitized)) {
+          const message =
+            "KILL SWITCH NOTICE: the database was deleted and VERIFIED gone, but config.json could NOT be " +
+            "durably persisted — refusing to signal the launcher (its key-clear would clear the journal before " +
+            "config could be recovered). The node is locked down (503); reopen it — the resume restores config " +
+            "from the wipe journal and completes the handoff.";
+          server.log.error(message);
+          reportBootNotice(message, "kill_switch_wipe_incomplete");
+          return { complete: false, phase: "delete-pending" };
+        }
+
+        // Every artifact + media path is PROVEN gone and config.json is current. Advance to `key-clear-ready`
+        // DURABLY (carrying the config snapshot), THEN hand off to the launcher.
+        const phaseReady = writeWipeJournal("key-clear-ready", sanitized);
         try {
           hook();
         } catch (error) {
@@ -4049,25 +4112,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         if (phaseReady) {
           server.log.warn(
-            "Kill switch: persistent/passphrase-encrypted database and media deleted and VERIFIED gone; a " +
-              "device-key-clear-and-restart was REQUESTED from the launcher (durable `key-clear-ready` phase " +
-              "written) — the key rotation is only confirmed once the launcher acknowledges it cleared the device key.",
+            "Kill switch: persistent/passphrase-encrypted database and media deleted and VERIFIED gone; config " +
+              "persisted; a device-key-clear-and-restart was REQUESTED from the launcher (durable `key-clear-ready` " +
+              "journal written) — the key rotation is only confirmed once the launcher acknowledges it cleared the key.",
           );
           return { complete: true, phase: "key-clear-ready" };
         }
 
-        // Data is already unrecoverable and the launcher was signaled, but the durable `key-clear-ready`
-        // phase could not be written. Auto-resume convergence depends on Step 1's `delete-pending` write
-        // having landed: if `phasePending` succeeded, that file survives, so a next boot (should the
-        // launcher's key-clear ALSO be interrupted) re-reads the phase as `delete-pending` (fail-safe),
-        // re-verifies deletion (idempotent — all already gone), and re-requests the key-clear. If BOTH
-        // writes failed (e.g. a full disk), no phase file exists, `readWipePhase`→`undefined`, and there is
-        // no auto-resume — benign here (the data is already proven gone; only an unused, uncleared device
-        // key lingers), but not a guaranteed re-signal. Surface a distinct notice either way.
+        // Data is unrecoverable, config.json is current, and the launcher was signaled, but the `key-clear-ready`
+        // journal could not be written durably. A next boot re-reads the (still-`delete-pending`) journal,
+        // re-verifies deletion (idempotent), re-persists config, and re-signals — so recovery converges.
         const noMarkerMessage =
-          "KILL SWITCH NOTICE: all data was deleted and VERIFIED gone and a device-key-clear-and-restart was " +
-          "REQUESTED, but the durable `key-clear-ready` phase could not be written — if the key-clear is " +
-          "interrupted, reopen the node to finish clearing the (now-unused) device key.";
+          "KILL SWITCH NOTICE: all data was deleted and VERIFIED gone, config persisted, and a device-key-clear-" +
+          "and-restart was REQUESTED, but the durable `key-clear-ready` journal could not be written — if the " +
+          "key-clear is interrupted, reopen the node to finish clearing the (now-unused) device key.";
         server.log.warn(noMarkerMessage);
         reportBootNotice(noMarkerMessage, "kill_switch_wipe_no_marker");
         return { complete: true, phase: "delete-pending" };
@@ -4093,17 +4151,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // DURABLY while the store is closed; (3) durably CLEAR the phase BEFORE opening the fresh store — fail
       // closed (503) on either — so a resurrected phase can never delete a freshly opened DB (incl. post-wipe
       // data written since a "success" response) and a crash can't forget still-pending media deletion.
-      if (!persistConfigForRestart(appConfig)) {
+      // P1-4 (Sol round-10): journal `{ delete-pending, config }` atomically FIRST (intent + config together).
+      // Confidentiality-first: a failed write does NOT abort the wipe.
+      const sanitized = sanitizeConfigForRestart(appConfig);
+      if (!writeWipeJournal("delete-pending", sanitized)) {
         server.log.error(
-          "KILL SWITCH NOTICE (no-hook fixed key): config.json could NOT be durably persisted before the wipe — " +
-            "proceeding regardless (kill-switch priority); admin settings may revert on the next boot.",
-        );
-      }
-      // Confidentiality-first (Sol round-9 decision): a phase-write failure does NOT abort the wipe.
-      if (!writeWipePhase("delete-pending")) {
-        server.log.error(
-          "Kill switch (no-hook fixed key): could NOT durably record the delete-pending phase before deletion — " +
-            "if deletion also fails, a restart cannot auto-resume the wipe; reopen promptly.",
+          "Kill switch (no-hook fixed key): could NOT durably write the wipe journal (intent + config) before " +
+            "deletion — if deletion also fails, a restart cannot auto-resume; reopen promptly.",
         );
       }
       store.close();
@@ -4117,9 +4171,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             "restart it to retry the wipe.",
         );
       }
-      // DURABLY clear the phase BEFORE opening the fresh store (P1-1). If the clear can't be made durable, do
+      // Persist config.json from the snapshot BEFORE clearing the journal (P1-4): the journal carries the only
+      // durable config copy until config.json lands, so if this fails, do NOT clear (a clear would lose it) —
+      // stay 503-locked; the resume restores config.json from the journal and re-clears.
+      if (!persistConfigForRestart(sanitized)) {
+        return lockDownAndReportIncomplete(
+          "KILL SWITCH NOTICE (no-hook fixed key): the database was deleted, but config.json could NOT be durably " +
+            "persisted — refusing to clear the wipe journal (its config snapshot is the only durable copy) or open a " +
+            "fresh DB. The node is locked down (503); reopen it — the resume restores config from the journal.",
+        );
+      }
+      // DURABLY clear the journal BEFORE opening the fresh store (P1-1). If the clear can't be made durable, do
       // NOT open a fresh DB: a power-loss-resurrected `delete-pending` would re-wipe it on the next boot. Stay
-      // 503-locked; a restart's resume re-runs the (idempotent) deletion and re-clears.
+      // 503-locked; a restart's resume re-runs the (idempotent) deletion and re-clears. (config.json is already
+      // current from the step above, so a resume also has config.)
       if (!clearWipePhase()) {
         return lockDownAndReportIncomplete(
           "KILL SWITCH NOTICE (no-hook fixed key): the full wipe completed but the durable phase clear could not be " +
@@ -4130,7 +4195,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       store = openLoamStore();
       // The wipe destroys data, not settings; the fresh encrypted DB starts with an empty config table, so
       // re-persist the effective config into it (config.json above is the crash-recovery copy).
-      store.setConfigValue("config", JSON.stringify(appConfig));
+      store.setConfigValue("config", JSON.stringify(sanitized));
     } else if (encryptionEnabled) {
       // Ephemeral (RAM-only key) OR a legacy keyed node with no declared mode: rotate the RAM key (only when
       // there IS one — never rotate a legacy FIXED key) and recreate. No durable phase: an ephemeral key is
