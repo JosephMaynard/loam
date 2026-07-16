@@ -1,5 +1,5 @@
 import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { basename, dirname, join } from "node:path";
@@ -1407,6 +1407,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return { ok: survivors.length === 0 && errors.length === 0, survivors, errors };
   }
 
+  /**
+   * {@link deleteAndVerifyAllWipeArtifacts} PLUS a parent-directory fsync so the deletions are DURABLE across
+   * power-loss (P1-1/P1-2, Sol round-9) before the caller opens a fresh DB or reports the wipe done — otherwise
+   * a "permanently deleted" result proves only current-namespace absence, not that the unlinks survived a crash.
+   * `ok` is true ONLY when every artifact + media path is proven gone AND the directory fsync succeeded (fail
+   * closed on either). The single destructive-recovery / no-hook-wipe helper Sol round-9 asked every branch to
+   * funnel through, so full-inventory + durable is enforced in one place.
+   */
+  function deleteAndVerifyAllWipeArtifactsDurable(): DeletionResult {
+    const result = deleteAndVerifyAllWipeArtifacts();
+    if (!result.ok) {
+      return result;
+    }
+    if (!fsyncDir(dataDir)) {
+      return {
+        ok: false,
+        survivors: result.survivors,
+        errors: [...result.errors, `${dataDir} (directory fsync failed — deletions not proven durable)`],
+      };
+    }
+    return result;
+  }
+
   // Operator "start fresh" confirmation marker (shared launcher contract, SF2/docs/15): the RN host's
   // explicit start-fresh UI writes this file BEFORE restarting the server; `openInitialStore` below
   // consumes (deletes) it as the ONLY thing allowed to trigger an automatic destructive DB replace.
@@ -1493,44 +1516,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // The parent-directory fsync is REQUIRED, not best-effort: without it the rename itself can be lost on
     // power-loss (resurrecting stale contents), so a failure here means "not durable" → return false.
     return fsyncDir(dirname(filePath));
-  }
-
-  /**
-   * Async sibling of {@link durableWriteFileSync} for the config-restart path (P2-1, Sol round-8), which is
-   * already on an async code path and must not block the event loop on fsync. Same durability contract: `true`
-   * only after staging write + file fsync + atomic rename + parent-directory fsync. Uses the module-level
-   * `writeFile` for the staging write (a single interceptable call), then a read-only FileHandle purely to
-   * `.sync()` its bytes, then `rename`, then a directory FileHandle `.sync()`.
-   */
-  async function durableWriteFileAsync(filePath: string, contents: string): Promise<boolean> {
-    const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-    try {
-      await writeFile(tmpPath, contents, "utf8");
-      const fh = await open(tmpPath, "r");
-      try {
-        await fh.sync();
-      } finally {
-        await fh.close();
-      }
-      await rename(tmpPath, filePath);
-    } catch (error) {
-      await rm(tmpPath, { force: true }).catch(() => {});
-      server.log.error(error, `Durable write failed for ${filePath}`);
-      return false;
-    }
-    // Parent-directory fsync REQUIRED (see the sync version) — a failure here means "not durable" → false.
-    try {
-      const dirFh = await open(dirname(filePath), "r");
-      try {
-        await dirFh.sync();
-      } finally {
-        await dirFh.close();
-      }
-    } catch (error) {
-      server.log.error(error, `Durable write: parent-directory fsync failed for ${filePath} (rename may not survive power-loss)`);
-      return false;
-    }
-    return true;
   }
 
   /**
@@ -1677,6 +1662,81 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function openInitialStore(): LoamStore {
     const keyWasResolved = dbKey !== undefined;
+
+    /**
+     * Execute a confirmed start-fresh honoring the operator's INTENT (P1-2, Sol round-9) — the SINGLE place
+     * every destructive/preservative start-fresh branch (plaintext-under-encrypted AND ciphertext-wrong-key)
+     * funnels through, so the full-inventory + durability rules are enforced once:
+     *   - `delete` (deliberate destructive mode change): delete + PROVE-gone the FULL inventory — every DB
+     *     artifact AND user media (attachments are message content, avatars are persisted user data) — DURABLY
+     *     (dir fsync), fail closed on any survivor/unverifiable path, then open fresh. A renamed-aside copy
+     *     would stay recoverable under the retained device secret, so a real, verified, durable delete is
+     *     required; "permanently deleted" must mean durable absence, not just current-namespace absence.
+     *   - `preserve` (accidental wrong/lost-key lockout): rename the whole DB set aside under a unique suffix
+     *     for a possible later attempt, then open fresh. NEVER reaches deletion.
+     * A failure after the (already consumed) one-shot marker is recast as the recognized
+     * `db_encryption_unreadable` recovery so the runtime stays alive and the operator can re-confirm, rather
+     * than a generic `boot_failed` process exit.
+     */
+    function startFreshWithIntent(intent: "delete" | "preserve"): LoamStore {
+      if (intent === "delete") {
+        const deletion = deleteAndVerifyAllWipeArtifactsDurable();
+        if (!deletion.ok) {
+          const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+          const message =
+            "Delete-and-start-fresh was confirmed, but the previous data could not be deleted and VERIFIED " +
+            `gone durably (${remaining}) — refusing to open a fresh database over recoverable data. Confirm ` +
+            "delete-and-start-fresh again to retry.";
+          server.log.error(message);
+          reportBootNotice(message, "db_encryption_unreadable");
+          throw new DbEncryptionUnreadableError(message);
+        }
+        try {
+          const store = openLoamStore();
+          const message =
+            "An explicit DELETE start-fresh confirmation was present, so the previous database and all user " +
+            "media were deleted and VERIFIED gone (durably) and a fresh database was started.";
+          server.log.warn(message);
+          reportBootNotice(message, "db_encryption_recovered_fresh");
+          return store;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const message =
+            `Delete-and-start-fresh deleted the previous data but then failed opening a fresh database (${detail}). ` +
+            "The confirmation was already consumed; the operator can confirm delete-and-start-fresh again to retry.";
+          server.log.error(message);
+          reportBootNotice(message, "db_encryption_unreadable");
+          throw new DbEncryptionUnreadableError(message);
+        }
+      }
+
+      // preserve: rename the whole set aside under a UNIQUE suffix (so a second recovery keeps its own copy
+      // rather than overwriting the first), including `-journal` so a foreign rollback journal is moved aside
+      // too, then open fresh. Any failure after the consumed marker is recast as the recoverable unreadable.
+      try {
+        const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
+        for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+          const from = `${dbPath}${suffix}`;
+          if (existsSync(from)) {
+            renameSync(from, `${from}.unreadable-${preservedSuffix}`);
+          }
+        }
+        const message =
+          "An explicit PRESERVE start-fresh confirmation was present, so the previous files were preserved on " +
+          `disk (suffix "${preservedSuffix}") and a fresh database was started.`;
+        server.log.warn(message);
+        reportBootNotice(message, "db_encryption_recovered_fresh");
+        return openLoamStore();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const message =
+          "Start-fresh recovery failed while renaming the previous database aside or opening a fresh one " +
+          `(${detail}). The confirmation was already consumed; the operator can confirm start-fresh again to retry.`;
+        server.log.error(message);
+        reportBootNotice(message, "db_encryption_unreadable");
+        throw new DbEncryptionUnreadableError(message);
+      }
+    }
 
     // Step 0 (P2-3): consume the marker up front, unconditionally, before any open attempt — see the
     // doc comment above for why this can't wait until both opens have failed.
@@ -1939,33 +1999,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         plainStore.close();
 
         if (startFreshConfirmed) {
-          // The operator confirmed the destructive "delete data and start encrypted" flow. DELETE the
-          // plaintext DB (not rename-aside — leaving readable plaintext on disk would defeat the very
-          // switch to an encrypted mode) so the fresh open below creates a FRESH encrypted database.
-          // The one-shot start-fresh marker was already consumed above, so a throw in the delete/open here
-          // must NOT fall through to the generic `boot_failed` (process exit): convert it to the recognized
-          // `db_encryption_unreadable` recovery, so the runtime stays alive and the operator can re-confirm
-          // start-fresh to retry — matching the unreadable-recovery path below (CodeRabbit MAJOR).
-          try {
-            for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-              rmSync(`${dbPath}${suffix}`, { force: true });
-            }
-            const message =
-              "An existing PLAINTEXT database was found under a configured encryption mode; an explicit " +
-              "start-fresh confirmation was present, so it was deleted and a fresh ENCRYPTED database was started.";
-            server.log.warn(message);
-            reportBootNotice(message, "db_encryption_recovered_fresh");
-            return openLoamStore();
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            const message =
-              "Start-fresh recovery failed while deleting the existing plaintext database or opening a fresh " +
-              `encrypted one (${detail}). The start-fresh confirmation was already consumed, so boot failed as ` +
-              "if the database were still unopened; the operator can confirm start-fresh again to retry.";
-            server.log.error(message);
-            reportBootNotice(message, "db_encryption_unreadable");
-            throw new DbEncryptionUnreadableError(message);
-          }
+          // P1-2 (Sol round-9): HONOR THE INTENT even here. The old code deleted the plaintext DB regardless
+          // of intent, so a `preserve`/legacy/malformed marker (which defaults to `preserve`) could still
+          // authorize destruction — violating the "preserve never deletes" contract. Route through the single
+          // intent-aware helper: `delete` deletes + proves the FULL inventory (incl. media) gone durably;
+          // `preserve` renames the DB aside. (The plaintext-unconverted recovery button now sends `delete`.)
+          return startFreshWithIntent(startFreshIntent);
         }
 
         // No confirmation → do NOT silently serve plaintext. Report the distinct code and LOCK (typed error,
@@ -1990,85 +2029,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw new DbEncryptionUnreadableError(message);
     }
 
-    if (startFreshIntent === "delete") {
-      // P1-6 (Sol round 8): a DELIBERATE destructive mode change (the operator chose "Delete & start fresh"
-      // in Settings) reached here because the existing DB is genuine ciphertext the NEW key can't open. It
-      // must be DELETED and PROVEN gone — not renamed aside like the accidental-lockout path below: a
-      // renamed-aside encrypted DB stays fully recoverable under the RETAINED device secret (both encrypted
-      // modes share it), so "Delete & start fresh" would be a lie. Delete the FULL artifact inventory and
-      // fail CLOSED on any survivor/unverifiable path (like the kill-switch wipe), rather than opening a
-      // fresh, clean-looking node over still-recoverable ciphertext. `deleteAndVerifyDbArtifacts` never
-      // throws (it returns survivors/errors), so this fail-closed check runs outside the try below.
-      const deletion = deleteAndVerifyDbArtifacts();
-      if (!deletion.ok) {
-        const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
-        const message =
-          "Delete-and-start-fresh was confirmed for a deliberate encryption-mode change, but the previous " +
-          `database could not be deleted and VERIFIED gone (${remaining}) — refusing to open a fresh database ` +
-          "over recoverable data. The operator can confirm delete-and-start-fresh again to retry.";
-        server.log.error(message);
-        reportBootNotice(message, "db_encryption_unreadable");
-        throw new DbEncryptionUnreadableError(message);
-      }
-      try {
-        // Artifacts are proven gone; the rename loop below would be a no-op, so open a fresh DB directly.
-        const store = openLoamStore();
-        const message =
-          "The database could not be opened with the new key; a DELETE start-fresh confirmation was present, " +
-          "so the previous database was deleted and VERIFIED gone and a fresh ENCRYPTED database was started.";
-        server.log.warn(message);
-        reportBootNotice(message, "db_encryption_recovered_fresh");
-        return store;
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        const message =
-          "Delete-and-start-fresh deleted the previous database but then failed opening a fresh one " +
-          `(${detail}). The confirmation was already consumed; the operator can confirm again to retry.`;
-        server.log.error(message);
-        reportBootNotice(message, "db_encryption_unreadable");
-        throw new DbEncryptionUnreadableError(message);
-      }
-    }
-
-    // RF4: the marker was already consumed (step 0) by this point, so this block is wrapped — a
-    // `renameSync`/fresh-open failure HERE (permissions, disk full, a concurrent modification) used to
-    // propagate as a plain, untyped error. `buildApp` has no special handling for that, so it reached
-    // `embedded-main.ts`'s catch as a GENERIC failure, which `process.exit(1)`s — throwing away the
-    // stay-alive recovery path this whole function exists to provide, and forcing the operator to redo
-    // the "Preserve old database & start fresh" confirmation from scratch (the marker is already gone)
-    // just to get another attempt. Recast any failure here as the SAME typed, recoverable
-    // `DbEncryptionUnreadableError` case 3 above throws, so `embedded-main.ts` takes the stay-alive path
-    // and a fresh confirmation can retry immediately, in-process.
-    try {
-      // Unique per recovery (not just per-file) so a SECOND unopenable-DB recovery keeps its own set
-      // alongside the first, instead of renaming onto a fixed name and destroying the earlier copy (P1-3).
-      const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-      // RF6-a: `-journal` is included alongside `-wal`/`-shm` so a FOREIGN rollback journal (left by an
-      // interrupted DELETE-mode rekey) is moved aside too — otherwise the fresh DB opened below could be
-      // paired with a hot journal that references the now-renamed-away file, corrupting the fresh start.
-      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-        const from = `${dbPath}${suffix}`;
-        if (existsSync(from)) {
-          renameSync(from, `${from}.unreadable-${preservedSuffix}`);
-        }
-      }
-
-      const message =
-        "The database could not be opened; an explicit start-fresh confirmation was present, so the " +
-        `previous files were preserved on disk (suffix "${preservedSuffix}") and a fresh database was started.`;
-      server.log.warn(message);
-      reportBootNotice(message, "db_encryption_recovered_fresh");
-      return openLoamStore();
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      const message =
-        "Start-fresh recovery failed while renaming the previous database aside or opening a fresh " +
-        `one (${detail}). The start-fresh confirmation was already consumed, so boot failed as if it ` +
-        "were unopened again; the operator can confirm start-fresh again to retry.";
-      server.log.error(message);
-      reportBootNotice(message, "db_encryption_unreadable");
-      throw new DbEncryptionUnreadableError(message);
-    }
+    // The existing DB is genuine ciphertext the current key can't open. Route through the single intent-aware
+    // helper (P1-2/P1-6, Sol round-9): `delete` (deliberate mode change) deletes + proves the FULL inventory
+    // gone durably (a renamed-aside encrypted DB stays recoverable under the retained device secret, so a real
+    // delete is required); `preserve` (accidental lockout) renames the set aside for a later attempt.
+    return startFreshWithIntent(startFreshIntent);
   }
 
   /**
@@ -3868,28 +3833,28 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * ever have lived in.
    *
    * Retries once on failure (a transient fs error shouldn't cost the operator their config) and returns
-   * whether it EVENTUALLY succeeded — the caller (P1-4, `executeKillSwitchBody`) must call this and await
-   * its result BEFORE writing the wipe-pending marker or signaling the launcher, never after: signaling
-   * first meant a kill in the window between "launcher signaled" and "config persisted" could let RN
-   * clear the Keystore key and restart while this write never completed, silently reverting admin
-   * settings (the armed kill switch itself included) on the fresh boot.
+   * whether it EVENTUALLY succeeded. FULLY SYNCHRONOUS (P1-4, Sol round-9): the caller must persist config
+   * BEFORE writing the `delete-pending` phase and before any destruction — config.json must be durable ahead
+   * of the phase so that a boot-time resume (which DELETES the DB, and with it the DB `config` table) always
+   * has the CURRENT effective config to fall back to on config.json. Being sync (not async) also keeps the
+   * whole kill-switch critical section await-free, so there is no interleaving window between the in-memory
+   * lockdown and the phase write.
    */
-  async function persistConfigForRestart(config: LoamConfig): Promise<boolean> {
+  function persistConfigForRestart(config: LoamConfig): boolean {
     const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
     const contents = JSON.stringify(sanitized, null, 2);
     // DURABLE write (P2-1, Sol round-8): staging write + file fsync + atomic rename + parent-dir fsync, via
-    // `durableWriteFileAsync`. A bare writeFile+rename is atomic but NOT power-loss-durable — it could return
+    // `durableWriteFileSync`. A bare writeFile+rename is atomic but NOT power-loss-durable — it could return
     // "success" while a crash then discards the new bytes or the rename, silently reverting admin settings
     // (the armed kill switch, panic token, security profile…) to config.json/defaults after the wipe deletes
-    // the DB `config` table. Retries once (a transient fs error shouldn't cost the config) and returns whether
-    // it EVENTUALLY landed durably — the caller awaits this BEFORE deletion/handoff.
-    if (await durableWriteFileAsync(configPath, contents)) {
+    // the DB `config` table. Retries once (a transient fs error shouldn't cost the config).
+    if (durableWriteFileSync(configPath, contents)) {
       return true;
     }
     server.log.error(
       "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe (attempt 1 of 2) — retrying once",
     );
-    if (await durableWriteFileAsync(configPath, contents)) {
+    if (durableWriteFileSync(configPath, contents)) {
       return true;
     }
     server.log.error(
@@ -3980,35 +3945,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           pending.close();
         }
 
-        // P1-3 (Sol round 8): RECORD THE DURABLE WIPE INTENT BEFORE THE FIRST AWAIT. Previously the
-        // `delete-pending` phase was written only AFTER `await persistConfigForRestart(...)` below — a
-        // kill/power-loss DURING that async config write left NO phase file, an intact DB, and (unless the
-        // now-removed WebView fallback happened to run) the old key intact, so the next boot opened the
-        // pre-wipe database and FORGOT the emergency wipe. The only durable state now precedes every await:
-        // the synchronous lockdown above, then this phase write. `writeWipePhase` is fully synchronous
-        // (durable temp+fsync+rename+dir-fsync), so a kill can only land BEFORE it (nothing destroyed yet,
-        // no wipe to forget) or AFTER it (intent on disk → next boot resumes deletion). Config preservation
-        // is deliberately SUBORDINATE to this: recorded next, best-effort, never at the cost of the wipe
-        // intent.
-        // Whether the durable intent write landed. A `false` does NOT abort the wipe: the kill switch keeps
-        // its CONFIDENTIALITY-first posture (Sol round-8 P1-d) — a degraded FS that can't write a 13-byte
-        // marker must NOT mean the operator's emergency wipe silently does nothing. The deletion below still
-        // runs (rmSync can succeed even when a create failed, e.g. by freeing space) and, when it verifies
-        // gone, the launcher is still signaled — a kill AFTER that finds nothing to recover. The only residual
-        // is the compound case (intent write fails AND a crash lands MID-deletion): no phase file + a partial
-        // DB → the next boot could forget the wipe. That confidentiality-vs-integrity tradeoff on a degraded
-        // FS is flagged for Sol rather than silently flipped to integrity-first (which would leave the data
-        // intact on a panic). See the round-9 brief.
-        const phasePending = writeWipePhase("delete-pending");
-
-        // P1-4 (Sol round 5): persist config.json DURABLY now — AFTER the durable wipe intent (P1-3) and the
-        // synchronous lockdown (RF-a), still BEFORE any deletion or launcher signal. A kill in the window
-        // between "launcher signaled" and "config actually persisted" could otherwise let RN clear the
-        // Keystore key and restart while this write never completed, silently reverting admin settings (the
-        // armed kill switch itself included) to config.json/defaults on the fresh boot. `persistConfigForRestart`
-        // retries once internally; if it STILL fails, the kill switch's data-destruction priority wins —
-        // proceed with the wipe regardless — but that must never look like an ordinary success (distinct log).
-        const configPersisted = await persistConfigForRestart(appConfig);
+        // P1-4 (Sol round 9): PERSIST CONFIG DURABLY BEFORE THE PHASE. The whole critical section is now
+        // await-free (persistConfigForRestart + writeWipePhase are both synchronous durable writes, run right
+        // after the synchronous lockdown), so there is no interleaving window at all. Config MUST land before
+        // the `delete-pending` phase: a boot-time resume DELETES the DB (and its `config` table), so the
+        // current effective config has to already be on config.json for the fresh boot to recover it —
+        // otherwise a crash after the phase but before config would revert the armed kill switch / panic
+        // token / security profile / retention to defaults. `persistConfigForRestart` retries once; if it
+        // STILL fails, the kill switch's data-destruction priority wins (proceed regardless), but never
+        // silently — a distinct log line marks the degraded config case.
+        const configPersisted = persistConfigForRestart(appConfig);
         if (!configPersisted) {
           server.log.error(
             "KILL SWITCH NOTICE: config.json could NOT be durably persisted before this fixed-key wipe, " +
@@ -4016,6 +3962,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
               "settings (e.g. the armed kill switch itself) may revert to config.json/defaults on the next boot.",
           );
         }
+
+        // P1-3 (Sol round 8): record the durable wipe INTENT before any destruction (store.close/deletion).
+        // A `false` does NOT abort the wipe (confidentiality-first, Sol round-8 P1-d): the deletion below
+        // still runs, and the compound residual (intent write fails AND a crash lands mid-deletion → the next
+        // boot could forget the wipe) is the documented confidentiality-vs-integrity boundary on a filesystem
+        // too degraded to write a marker — Sol confirmed keeping destroy-anyway here (round-9 decision).
+        const phasePending = writeWipePhase("delete-pending");
 
         // P1-1 (Sol round 8): DURABLE PHASE STATE MACHINE — the old single `.loam-wipe-pending` marker
         // conflated "deletion still pending" with "safe to clear the key", so any surviving marker
@@ -4089,55 +4042,72 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return { complete: true, phase: "delete-pending" };
       }
 
-      // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a NEW
-      // key from in-process. Fall through to the existing recreate-under-the-same-key behaviour rather
-      // than bricking the wipe entirely; this is a documented limitation; see docs/02. (When a hook IS
-      // present the block above always returns — after the synchronous lockdown it destroys the ciphertext
-      // and hands off to the launcher; a marker-write failure switches it to a fail-closed synchronous
-      // ciphertext destruction BEFORE the handoff rather than falling back here; P1-d/RF-a.)
+      // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a NEW key
+      // from in-process. Fall through to the durable no-hook fixed-key wipe below (full-inventory delete +
+      // durable phase clear + recreate under the SAME key) rather than bricking the wipe entirely; the key
+      // cannot be rotated without a launcher (documented limitation, docs/02). (When a hook IS present the
+      // block above always returns after the launcher handoff.)
       server.log.warn(
         "Kill switch: this node uses a fixed (persistent/passphrase) encryption key, but no launcher " +
-          "restart hook is installed, so the key cannot be rotated in-process. Falling back to a logical " +
-          "wipe that recreates the database under the SAME key (documented limitation, docs/02).",
+          "restart hook is installed, so the key cannot be rotated in-process. Performing a full durable " +
+          "wipe and recreating the database under the SAME key (documented limitation, docs/02).",
       );
     }
 
-    if (encryptionEnabled) {
-      // Cryptographic wipe (ephemeral rotation, OR the same-key fallback when a fixed-key node has no
-      // launcher hook): destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh key, so any
-      // bytes a forensic tool recovers from flash are unreadable — stronger than a logical DELETE, which
-      // leaves recoverable pages behind. See docs/02-kill-switch.md.
-      //
-      // P1-4 (Sol round 8): a NO-LAUNCHER fixed-key wipe (desktop persistent/passphrase) previously deleted
-      // in-process with NO durable record — so a deletion failure locked the process (503) but left nothing
-      // for a restart to resume, and the next boot opened the surviving DB under the same fixed key and served
-      // the supposedly-wiped data. Record `delete-pending` DURABLY BEFORE deletion so a failure is picked up
-      // by the boot-time wipe resume (which re-deletes and, for the no-hook case, clears the phase + recreates
-      // under the same key). Ephemeral wipes deliberately do NOT get a phase: their key is RAM-only and
-      // regenerated on restart, so a surviving file is unreadable regardless, and a lingering phase would only
-      // risk a benign re-wipe of the already-fresh ephemeral DB.
-      const fixedKeyNoHookWipe = fixedKeyMode;
-      if (fixedKeyNoHookWipe && !writeWipePhase("delete-pending")) {
-        // Confidentiality-first, consistent with the hook branch (Sol round-8 P1-d): a phase-write failure
-        // does NOT abort the wipe — the deletion below still runs. The residual (intent-write fails AND a
-        // crash lands mid-deletion → the next boot cannot auto-resume) is logged and flagged for Sol.
+    if (encryptionEnabled && fixedKeyMode) {
+      // NO-LAUNCHER fixed-key wipe (desktop persistent/passphrase — the hooked Android path returned above):
+      // can't rotate a fixed key in-process, so delete + recreate under the SAME key (documented limitation,
+      // docs/02). P1-1/P1-4 (Sol round-9): (1) persist config BEFORE the phase so a boot-time resume that
+      // deletes the DB still has current config; (2) delete + prove the FULL inventory (DB + media) gone
+      // DURABLY while the store is closed; (3) durably CLEAR the phase BEFORE opening the fresh store — fail
+      // closed (503) on either — so a resurrected phase can never delete a freshly opened DB (incl. post-wipe
+      // data written since a "success" response) and a crash can't forget still-pending media deletion.
+      if (!persistConfigForRestart(appConfig)) {
+        server.log.error(
+          "KILL SWITCH NOTICE (no-hook fixed key): config.json could NOT be durably persisted before the wipe — " +
+            "proceeding regardless (kill-switch priority); admin settings may revert on the next boot.",
+        );
+      }
+      // Confidentiality-first (Sol round-9 decision): a phase-write failure does NOT abort the wipe.
+      if (!writeWipePhase("delete-pending")) {
         server.log.error(
           "Kill switch (no-hook fixed key): could NOT durably record the delete-pending phase before deletion — " +
             "if deletion also fails, a restart cannot auto-resume the wipe; reopen promptly.",
         );
       }
       store.close();
-      // P1-2 (Sol round 7/8): delete EVERY DB artifact while the store is closed and BEFORE reopening a
-      // fresh one below — the legacy-key `.premigration` snapshot, `-journal`, and `*.unreadable-<ts>`
-      // recovery renames are all recoverable ciphertext and must go too, not only the three live files.
-      // (Deletion precedes the reopen, so the freshly created live files are never touched.)
+      // Full inventory (every DB artifact + user media) + proof of absence + parent-dir fsync, fail closed.
+      const deletion = deleteAndVerifyAllWipeArtifactsDurable();
+      if (!deletion.ok) {
+        const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+        return lockDownAndReportIncomplete(
+          `KILL SWITCH NOTICE (no-hook fixed key): could not delete and VERIFY every artifact + media gone durably ` +
+            `(${remaining}) — refusing to reopen while recoverable data may remain. The node is locked down (503); ` +
+            "restart it to retry the wipe.",
+        );
+      }
+      // DURABLY clear the phase BEFORE opening the fresh store (P1-1). If the clear can't be made durable, do
+      // NOT open a fresh DB: a power-loss-resurrected `delete-pending` would re-wipe it on the next boot. Stay
+      // 503-locked; a restart's resume re-runs the (idempotent) deletion and re-clears.
+      if (!clearWipePhase()) {
+        return lockDownAndReportIncomplete(
+          "KILL SWITCH NOTICE (no-hook fixed key): the full wipe completed but the durable phase clear could not be " +
+            "confirmed — refusing to open a fresh database (a resurrected phase would re-wipe it). The node is locked " +
+            "down (503); restart it to retry the wipe.",
+        );
+      }
+      store = openLoamStore();
+      // The wipe destroys data, not settings; the fresh encrypted DB starts with an empty config table, so
+      // re-persist the effective config into it (config.json above is the crash-recovery copy).
+      store.setConfigValue("config", JSON.stringify(appConfig));
+    } else if (encryptionEnabled) {
+      // Ephemeral (RAM-only key) OR a legacy keyed node with no declared mode: rotate the RAM key (only when
+      // there IS one — never rotate a legacy FIXED key) and recreate. No durable phase: an ephemeral key is
+      // regenerated on restart, so any surviving file is unreadable regardless. Media is deleted in the shared
+      // tail below. A cryptographic wipe destroys the ciphertext, stronger than a logical DELETE (docs/02).
+      store.close();
       const deletion = deleteAndVerifyDbArtifacts();
       if (!deletion.ok) {
-        // P1-2 (Sol round 8): FAIL CLOSED — a survivor or an UNVERIFIABLE path (stat/enumeration error,
-        // NOT proof of absence). Do NOT rotate the key / reopen a fresh DB: that would present a clean,
-        // usable node while recoverable ciphertext may still be on disk. Lock down (503) and report; a
-        // restart retries (the durable `delete-pending` phase recorded above drives the resume). Mirrors the
-        // fixed-key branch's RF-a synchronous in-memory lockdown so nothing stale is served while stuck.
         const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
         return lockDownAndReportIncomplete(
           `KILL SWITCH NOTICE: the cryptographic wipe could not delete and VERIFY every DB artifact (${remaining}) — ` +
@@ -4145,30 +4115,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             "down (503); restart it to retry the wipe.",
         );
       }
-
       if (ephemeralDbKey) {
         // Drop the old key by overwriting the reference; a fresh random key encrypts the new DB.
         // (Node strings can't be reliably zeroed in RAM — documented as a known limitation.)
         dbKey = randomBytes(32).toString("hex");
       }
-
       store = openLoamStore();
-      // The wipe destroys data, not settings — but the fresh encrypted DB starts with an empty
-      // config table, unlike wipeAll() below which preserves it. Re-persist the effective config
-      // so admin edits (an armed kill switch, the panic token, feature flags) survive a restart
-      // instead of silently reverting to config.json/defaults.
       store.setConfigValue("config", JSON.stringify(appConfig));
-      if (fixedKeyNoHookWipe) {
-        // Deletion succeeded and the DB was recreated under the same key IN-PROCESS — the wipe is complete,
-        // so clear the durable phase (both names). A clear failure leaves the phase in place; the next boot's
-        // resume re-runs the (idempotent) deletion and clears again, so this is best-effort, not fatal.
-        if (!clearWipePhase()) {
-          server.log.warn(
-            "Kill switch (no-hook fixed key): completed the in-process wipe but could not durably clear the wipe " +
-              "phase — the next boot re-runs the (idempotent) deletion and clears it.",
-          );
-        }
-      }
     } else {
       // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
       store.wipeAll();

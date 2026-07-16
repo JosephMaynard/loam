@@ -135,10 +135,17 @@ vi.mock("node:fs", async (importOriginal) => {
       return actual.renameSync(...args);
     },
     writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      const target = String(args[0]);
       // Match the durable phase file's atomic `.tmp-*` staging path AND its direct fallback write, and stay
       // armed (both `writeWipePhase` calls must fail to simulate "no durable phase") — P1-1, Sol round 8.
-      if (wipeMarkerWriteFailure.armed && String(args[0]).includes(".loam-wipe-phase")) {
+      if (wipeMarkerWriteFailure.armed && target.includes(".loam-wipe-phase")) {
         throw new Error("simulated wipe-phase write failure (P1-1 test fault injection)");
+      }
+      // P1-4 (Sol round 9): `persistConfigForRestart` is now SYNC (durableWriteFileSync), so the config-persist
+      // fault injection moved here from the async `writeFile` mock. Targets ONLY the config.json staging path.
+      if (configWriteFailures.remaining > 0 && target.includes("config.json.tmp-")) {
+        configWriteFailures.remaining -= 1;
+        throw new Error("simulated config.json write failure (P1-4 test fault injection)");
       }
       return actual.writeFileSync(...args);
     },
@@ -159,13 +166,10 @@ vi.mock("node:fs", async (importOriginal) => {
 // so every other test — which never sets it — is unaffected; every other `node:fs/promises` export is
 // untouched (`...actual`).
 const rmGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
-// P1-4: a matching fault/delay-injection seam, but for `writeFile` calls that target the kill switch's
-// `persistConfigForRestart` tmp file specifically (`config.json.tmp-...` — never any other `writeFile`
-// caller, e.g. avatar/attachment uploads) — used to prove config.json is durably persisted BEFORE the
-// wipe-pending marker is written and the launcher hook is signaled (the ordering P1-4 fixes), and to
-// simulate a config-persist failure (`configWriteFailures.remaining`) to exercise the retry-once +
-// proceed-with-the-wipe-regardless policy. Both default to inert (`undefined`/`0`) for every other test.
-const configWriteGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
+// P1-4 (Sol round 9): a config-persist fault-injection counter. `persistConfigForRestart` is now SYNCHRONOUS
+// (durableWriteFileSync), so the injection lives in the SYNC `writeFileSync` mock above (matching the
+// `config.json.tmp-...` staging path only) — used to exercise the retry-once + proceed-with-the-wipe policy.
+// Inert (`0`) for every other test.
 const configWriteFailures = vi.hoisted(() => ({ remaining: 0 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -176,19 +180,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         await rmGate.promise;
       }
       return actual.rm(...args);
-    },
-    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
-      const target = String(args[0]);
-      if (target.includes("config.json.tmp-")) {
-        if (configWriteFailures.remaining > 0) {
-          configWriteFailures.remaining -= 1;
-          throw new Error("simulated config.json write failure (P1-4 test fault injection)");
-        }
-        if (configWriteGate.promise) {
-          await configWriteGate.promise;
-        }
-      }
-      return actual.writeFile(...args);
     },
   };
 });
@@ -204,7 +195,6 @@ afterEach(async () => {
   // Belt-and-suspenders: a test that armed the P1-2(a) `rm()` gate but failed before releasing it must
   // never leave a later, unrelated test's own `rm()` calls hanging on a promise nobody will resolve.
   rmGate.promise = undefined;
-  configWriteGate.promise = undefined;
   configWriteFailures.remaining = 0;
   openSyncFailure.path = undefined;
   wipeMarkerWriteFailure.armed = false;
@@ -1730,53 +1720,98 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(hook.calls).toBe(1);
   });
 
-  it("P1-3 (Sol round 8): the durable delete-pending phase is written BEFORE the first await (config persist); the launcher hook still fires only after deletion, and a concurrent request sees 503 throughout", async () => {
+  it("P1-4 (Sol round 9): config is persisted DURABLY BEFORE the phase in the HOOK fixed-key wipe (config.json exists whenever the phase does), and a DB-only admin change survives the launcher restart", async () => {
     const hook = installFakeWipeRestartHook();
     const { app, dataDir } = await makeEncryptedApp(
-      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
       { killSwitch: { enabled: true } },
     );
     const admin = await session(app);
+    // A DB-ONLY admin change (lives only in the DB `config` table, never the initial config.json).
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { sync: { enabled: true, token: "a-plaintext-bearer-sync-token-x" } },
+        })
+      ).statusCode,
+    ).toBe(200);
 
-    let release!: () => void;
-    configWriteGate.promise = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-
-    const wipePromise = app.server.inject({
+    const wipe = await app.server.inject({
       method: "POST",
       url: "/api/admin/kill-switch",
       headers: { cookie: admin.cookie },
       payload: { confirm: "wipe" },
     });
-
-    // Give the handler a turn to run its synchronous lockdown (RF-a) + the durable phase write (P1-3), then
-    // reach (and block on) the gated config.json write.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // P1-3: the durable wipe INTENT is now recorded BEFORE the first await — so while the config write is
-    // blocked, the `delete-pending` phase file ALREADY exists on disk (a kill during the config write can no
-    // longer forget the wipe). The launcher signal still has NOT happened (it comes only after verified
-    // deletion, which is after this config write).
-    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
-    expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8").trim()).toBe("delete-pending");
-    expect(hook.calls).toBe(0);
-
-    // RF-a (adversarial review): a request landing DURING the persistConfigForRestart await must ALREADY
-    // see the 503 lockdown, never a stale 200 from the still-populated `data`/`sessions`.
-    const duringConfigWrite = await app.server.inject({
-      method: "GET",
-      url: "/api/channels",
-      headers: { cookie: admin.cookie },
-    });
-    expect(duringConfigWrite.statusCode).toBe(503);
-
-    release();
-    const wipe = await wipePromise;
     expect(wipe.statusCode).toBe(200);
     expect(hook.calls).toBe(1);
-    // After a verified deletion the phase advanced to key-clear-ready.
+
+    // P1-4: config.json was written BEFORE the phase, so it exists whenever the phase file does — a resume
+    // that deletes the DB always has the CURRENT effective config (including the DB-only sync change) to fall
+    // back to. The phase reached key-clear-ready.
     expect(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8").trim()).toBe("key-clear-ready");
+    const persisted = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
+      sync: { enabled: boolean; token?: string };
+    };
+    expect(persisted.sync.enabled).toBe(true);
+    expect(persisted.sync.token).toBeUndefined(); // plaintext bearer secret blanked
+
+    // Simulate the launcher's verified restart with a rotated key: the fresh DB's config table is empty, so
+    // config.json is the ONLY carrier of the DB-only sync change into the new boot.
+    rmSync(join(dataDir, ".loam-wipe-phase"), { force: true });
+    const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => restarted.close());
+    const restartedAdmin = await session(restarted);
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
+    ).json() as { sync: { enabled: boolean } };
+    expect(config.sync.enabled).toBe(true);
+  });
+
+  it("P1-4 (Sol round 9): the NO-HOOK fixed-key wipe persists config.json (with DB-only admin changes) BEFORE the phase, so it survives even though the wipe deletes the DB", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    // DB-only admin change: retention TTL, which lives in the DB config table.
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { retention: { messageTtlMs: 3_600_000 } },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    // No hook installed → the in-process no-hook fixed-key wipe runs: persist config.json BEFORE the phase,
+    // delete + recreate under the same key.
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    // config.json carries the DB-only retention change forward.
+    const persisted = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
+      retention: { messageTtlMs?: number };
+    };
+    expect(persisted.retention.messageTtlMs).toBe(3_600_000);
+
+    // Restart under the same key (no-hook can't rotate): the fresh DB's config table is empty, so config.json
+    // is the source — the retention change survives.
+    const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    cleanups.push(() => restarted.close());
+    const restartedAdmin = await session(restarted);
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
+    ).json() as { retention: { messageTtlMs?: number } };
+    expect(config.retention.messageTtlMs).toBe(3_600_000);
   });
 
   it("P1-4 (Sol round 5): retries a failed config.json persist once, and on a SECOND failure still proceeds with the wipe (reporting a distinct notice, never silently continuing as if config were preserved)", async () => {
@@ -2071,6 +2106,70 @@ describe("encryption at rest + key-discard kill switch", () => {
     const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     cleanups.push(() => boot2.close());
     expect(readdirSync(dataDir).filter((n) => n.includes(".unreadable-")).length).toBeGreaterThan(0);
+  });
+
+  it("P1-2 (Sol round 9): a DELETE start-fresh also removes USER MEDIA (avatars + attachments), not just the DB files", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // Seed user media alongside the encrypted DB — attachments are message content, avatars are user data.
+    const avatarsDir = join(dataDir, "avatars");
+    const attachmentsDir = join(dataDir, "attachments");
+    mkdirSync(avatarsDir, { recursive: true });
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(join(avatarsDir, "avt_deadbeefdeadbeef.webp"), "avatar bytes");
+    writeFileSync(join(attachmentsDir, "att_00000000000000ff.png"), "attachment bytes");
+
+    // Deliberate delete-and-start-fresh (the new key can't open the old ciphertext).
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+
+    // The DB was deleted (no `.unreadable-*` copy) AND the media directories are gone.
+    expect(readdirSync(dataDir).filter((n) => n.includes(".unreadable-"))).toEqual([]);
+    expect(existsSync(avatarsDir)).toBe(false);
+    expect(existsSync(attachmentsDir)).toBe(false);
+  });
+
+  it("P1-2 (Sol round 9): a PRESERVE start-fresh marker on a PLAINTEXT database under an encrypted mode does NOT delete it — it is renamed aside (preserve never escalates to destruction)", async () => {
+    // A plaintext DB (no encryption key).
+    const { app, dataDir } = await makeEncryptedApp({});
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "PLAINTEXT_PRESERVE_SECRET")).statusCode).toBe(201);
+    await app.close();
+
+    // An encrypted mode is now configured, but the marker intent is `preserve` (e.g. a legacy/mis-routed
+    // marker). The plaintext DB must NOT be deleted — it is renamed aside, honoring the intent.
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
+    const encrypted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a key", dbEncryptionMode: "persistent" });
+    cleanups.push(() => encrypted.close());
+    expect(readdirSync(dataDir).filter((n) => n.includes(".unreadable-")).length).toBeGreaterThan(0);
+  });
+
+  it("P1-1 (Sol round 9): a LIVE no-hook fixed-key wipe whose deletion cannot be made DURABLE (parent-dir fsync fails) returns 503 and does NOT open a fresh store", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "LIVE_NOHOOK_SECRET")).statusCode).toBe(201);
+
+    // No launcher hook. Make every parent-directory fsync on the data dir fail so the durable deletion (and
+    // durable phase clear) can never be confirmed — the wipe must fail closed (503), not reopen a fresh DB.
+    openSyncFailure.path = dataDir;
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(503);
+    // The node stays locked (nothing served) rather than exposing a fresh store while durability is uncertain.
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+    ).toBe(503);
+    openSyncFailure.path = undefined;
   });
 
   describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {
@@ -2813,9 +2912,10 @@ describe("encryption at rest + key-discard kill switch", () => {
       // Nothing on disk was touched — the plaintext file is still there, still plaintext.
       expect(readFileSync(join(dataDir, "loam.db")).subarray(0, 15).toString("ascii")).toBe("SQLite format 3");
 
-      // The operator confirms "delete data and start encrypted": the RN start-fresh marker is written.
+      // The operator confirms "delete data and start encrypted": the RN start-fresh marker is written with
+      // the DELETE intent (the plaintext-unconverted recovery is a deliberate destructive action, P1-2 round-9).
       reports.length = 0;
-      writeFileSync(join(dataDir, ".loam-db-start-fresh"), "");
+      writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
 
       const encrypted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" });
       cleanups.push(() => encrypted.close());
