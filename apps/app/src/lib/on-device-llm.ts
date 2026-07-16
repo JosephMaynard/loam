@@ -363,6 +363,38 @@ export function releaseModelContextIfLoaded(
 }
 
 /**
+ * Synchronise the native engine to a newly-selected active model (Sol Fable-round-5 P2): call this
+ * immediately after every successful durable `activeId` transition — a model SWITCH (set-active) and any
+ * successful ROLLBACK to the previous active model. Target-AWARE so it never touches the model that is now
+ * active:
+ *   - a load of a DIFFERENT model is invalidated SYNCHRONOUSLY, so a native load that resolves after the
+ *     operator switched away is disposed, never published or run (the round-4 guarantee, extended to the
+ *     switch path that previously lacked an engine notification);
+ *   - a LOADED context for a now-inactive model is released (serialized behind inference so it can't tear a
+ *     context out from under a running completion);
+ *   - a load/loaded context that MATCHES `nextPath` is left alone — so a concurrent inference that has
+ *     already started loading the new model is NOT torn down.
+ * `nextPath` is a raw `file://` uri or the bare path, or null (nothing active). Never throws.
+ */
+export function syncNativeContextToActiveModel(nextPath: string | null): void {
+  const target = nextPath === null ? null : nextPath.replace(/^file:\/\//, '');
+  if (loadingPath !== null && loadingPath !== target) {
+    invalidateLoad();
+  }
+  if (loadedContext && loadedModelPath !== target) {
+    inferenceChain = inferenceChain
+      .then(() => {
+        // Re-check inside the serialized step: only release if it's STILL a different model than the target
+        // (a concurrent inference may have released/reloaded in between).
+        if (loadedContext && loadedModelPath !== target) {
+          beginRelease();
+        }
+      })
+      .catch(() => undefined);
+  }
+}
+
+/**
  * Load (or reuse) the llama.rn context for `modelPath`. Refuses to build a fresh context unless the engine
  * is `ready`: while an older context is still `releasing` (or the engine is `poisoned` by a failed release)
  * building a new multi-GB context would double native residency and likely OOM (Sol P1) — so those states
@@ -512,6 +544,17 @@ async function runInference(messages: ChatMessage[], callbacks: InferenceCallbac
         return;
       }
       const context = await ensureContext(modelPath);
+      // Defense in depth (Sol Fable-round-5 P2): the operator may have switched/cleared the active model
+      // WHILE we were loading. Re-read it immediately before running completion; if it no longer matches the
+      // model we just loaded, do NOT generate a reply for a model they moved away from — initiate a
+      // path-aware release of this now-stale context and ask the caller to retry. This backstops any future
+      // mutation path that forgets to notify the engine via `syncNativeContextToActiveModel`.
+      const stillActive = await activeModelPath();
+      if (stillActive !== modelPath) {
+        void releaseModelContextIfLoaded(modelPath);
+        callbacks.onError(ENGINE_RECOVERING_MESSAGE);
+        return;
+      }
       // Race the native completion against a bounded timeout so a wedged generation can't stall the
       // inference chain forever (see INFERENCE_TIMEOUT_MS). The completion callback still streams each
       // token to `onDelta` on the success path — unchanged; only the never-settles case is bounded.

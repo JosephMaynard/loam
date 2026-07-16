@@ -106,6 +106,7 @@ describe("performSetActive — P2-1 rollback semantics", () => {
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performSetActive(deps, A);
@@ -124,6 +125,7 @@ describe("performSetActive — P2-1 rollback semantics", () => {
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performSetActive(deps, A);
@@ -143,6 +145,7 @@ describe("performSetActive — P2-1 rollback semantics", () => {
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performSetActive(deps, A);
@@ -150,6 +153,48 @@ describe("performSetActive — P2-1 rollback semantics", () => {
     expect(result.kind).toBe("persist-failed");
     expect(setActive).not.toHaveBeenCalled();
     expect(store.get().activeId).toBe("B");
+  });
+
+  it("notifies the engine of the new active model on a successful switch (Sol Fable-round-5 P2)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const sync = vi.fn(() => {});
+    const deps: ModelActionDeps = {
+      mutate: store.mutate,
+      setActiveModel: async () => OK,
+      clearActiveModel: async () => OK,
+      deleteModelFile: vi.fn(async () => {}),
+      releaseActiveContext: vi.fn(async () => {}),
+      releaseModelContext: vi.fn(async () => "released" as const),
+      syncActiveModel: sync,
+    };
+
+    const result = await performSetActive(deps, B);
+
+    expect(result.kind).toBe("ok");
+    // The engine is told the active model is now B (target-aware; disposes a stale A load, leaves B alone).
+    expect(sync.mock.calls.map((c) => c[0])).toEqual([B.uri]);
+  });
+
+  it("on a definite bridge FAILURE, notifies the engine of B (switch) THEN of the restored A (rollback) (Sol P2)", async () => {
+    // B must be invalidated when local state rolls back to A: a concurrent inference could have started
+    // loading B while the bridge was pending, and it must never complete after the rollback.
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const sync = vi.fn(() => {});
+    const deps: ModelActionDeps = {
+      mutate: store.mutate,
+      setActiveModel: async () => ({ status: "failed", error: "boom" }),
+      clearActiveModel: async () => OK,
+      deleteModelFile: vi.fn(async () => {}),
+      releaseActiveContext: vi.fn(async () => {}),
+      releaseModelContext: vi.fn(async () => "released" as const),
+      syncActiveModel: sync,
+    };
+
+    const result = await performSetActive(deps, B);
+
+    expect(result.kind).toBe("rolled-back");
+    expect(store.get().activeId).toBe("A"); // reverted
+    expect(sync.mock.calls.map((c) => c[0])).toEqual([B.uri, A.uri]);
   });
 });
 
@@ -165,6 +210,7 @@ describe("conditional rollback — a stale rollback never clobbers a newer selec
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     // Start A (mutex-free perform*), let it persist activeId=A and block on its pending bridge.
@@ -195,6 +241,7 @@ describe("conditional rollback — a stale rollback never clobbers a newer selec
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const pA = performSetActive(deps, A); // previous = "B"
@@ -229,6 +276,7 @@ describe("global operation mutex serializes whole transactions (P2-2)", () => {
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const pA = setActiveAction(deps, A);
@@ -262,6 +310,7 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       deleteModelFile: deleteFile,
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performDelete(deps, A);
@@ -282,6 +331,7 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       deleteModelFile: deleteFile,
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performDelete(deps, A);
@@ -303,6 +353,7 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       deleteModelFile: deleteFile,
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performDelete(deps, A);
@@ -328,6 +379,7 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       },
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const pDeactivate = deactivateAction(deps);
@@ -444,6 +496,7 @@ function scriptedDeps(
     deleteModelFile: vi.fn(async () => {}),
     releaseActiveContext: vi.fn(async () => {}),
     releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     ...overrides,
   };
 }
@@ -977,6 +1030,7 @@ describe("real-store integration: a failed pending-clear keeps controls blocked 
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performSetActive(deps, A);
@@ -1008,6 +1062,7 @@ describe("real-store integration: a failed pending-clear keeps controls blocked 
       deleteModelFile: vi.fn(async () => {}),
       releaseActiveContext: vi.fn(async () => {}),
       releaseModelContext: vi.fn(async () => 'released' as const),
+      syncActiveModel: vi.fn(() => {}),
     };
 
     const result = await performSetActive(deps, A);

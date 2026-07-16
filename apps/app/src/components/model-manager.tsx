@@ -31,11 +31,16 @@ import {
 } from '@/lib/model-download';
 import {
   abortActiveDownload,
+  abortDownloadOwnedBy,
   isDownloadActive,
   runDownload,
   subscribeDownloadActive,
 } from '@/lib/download-coordinator';
-import { releaseActiveModelContext, releaseModelContextIfLoaded } from '@/lib/on-device-llm';
+import {
+  releaseActiveModelContext,
+  releaseModelContextIfLoaded,
+  syncNativeContextToActiveModel,
+} from '@/lib/on-device-llm';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
@@ -128,13 +133,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * is guarded on this, so no state update ever runs against an unmounted overlay (React would warn, and
    * more importantly the write is meaningless). */
   const mountedRef = useRef(true);
-  /** True ONLY while a download transaction THIS instance started is the one currently holding the
-   * coordinator's process-global mutex (Sol P2). Set at the top of the coordinated `run` body (which the
-   * coordinator invokes only for the call that actually acquired the mutex) and cleared in its `finally`.
-   * The unmount effect uses it to `abortActiveDownload()` for a transaction this instance owns — and only
-   * that one — so tearing down the overlay cancels its own in-flight download (the mutex then releases when
-   * the aborted transaction settles), without ever aborting a download some other instance owns. */
-  const ownsActiveDownloadRef = useRef(false);
+  /** A STABLE per-instance owner token for the download coordinator (Sol Fable-round-5 P2). The coordinator
+   * records it SYNCHRONOUSLY at mutex acquisition (before its orphan-cleanup await), so the unmount effect can
+   * `abortDownloadOwnedBy(token)` to cancel a download THIS instance started even if the overlay unmounts
+   * during that cleanup window — and can never abort a download some other instance owns. `useRef` with an
+   * initializer mints one stable object per mounted instance. */
+  const downloadOwnerRef = useRef<object>({});
 
   /** The store + bridge + filesystem operations the activate/deactivate/delete/reconcile transactions
    * need, bound to the real implementations (the bridge fns partially applied with this overlay's
@@ -156,6 +160,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // named model is the loaded one), so reconciling an old delete never tears down a newer active model.
       releaseActiveContext: () => releaseActiveModelContext(),
       releaseModelContext: (modelPath) => releaseModelContextIfLoaded(modelPath),
+      // Notify the engine after an active-model switch/rollback (Sol Fable-round-5 P2) so a native load of a
+      // model the operator switched away from is disposed, never published or run. Target-aware.
+      syncActiveModel: (nextPath) => syncNativeContextToActiveModel(nextPath),
     }),
     [channel],
   );
@@ -291,17 +298,21 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     return subscribeDownloadActive(sync);
   }, []);
 
-  // On unmount (a `ready → error` host transition tears the whole overlay down — see app/index.tsx),
-  // stop guarding-off further setState AND abort a download THIS instance owns (Sol P2). Aborting does
-  // NOT release the coordinator mutex — it frees only when the aborted transaction's own `finally`
-  // settles — so a freshly-mounted overlay still can't start a second concurrent download until the old
-  // one has fully torn down its file/progress state.
+  // On mount SET `mountedRef` true, and on unmount (a `ready → error` host transition tears the whole overlay
+  // down — see app/index.tsx) set it false AND abort a download THIS instance owns (Sol P2). Setting true in
+  // the effect SETUP (not only the one-time `useRef(true)`) is required for React StrictMode: its dev-mode
+  // mount → cleanup → remount replay runs the cleanup (which sets false) and, without this, would leave the
+  // remounted overlay permanently `mountedRef=false`, silently swallowing every guarded setState. Aborting by
+  // OWNER TOKEN cancels only this instance's transaction, even if the unmount lands during the coordinator's
+  // orphan-cleanup window (before the download body starts) — and never a different instance's download.
+  // Aborting does NOT release the coordinator mutex; it frees only when the aborted transaction's own
+  // `finally` settles, so a freshly-mounted overlay still can't start a second concurrent download.
   useEffect(() => {
+    mountedRef.current = true;
+    const owner = downloadOwnerRef.current;
     return () => {
       mountedRef.current = false;
-      if (ownsActiveDownloadRef.current) {
-        abortActiveDownload();
-      }
+      abortDownloadOwnedBy(owner);
     };
   }, []);
 
@@ -432,49 +443,44 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    *   4. `body` (the actual download + registration) runs inside try/catch/finally so ANY throw still clears
    *      the busy row and progress — the catalog path had no such guard before.
    * `body` receives the transaction's `AbortSignal`; it does the download + registration and returns nothing.
-   * `ownsActiveDownloadRef` is set for the lifetime of the coordinated body so the unmount effect aborts only
-   * a transaction THIS instance owns.
+   * The transaction is tagged with this instance's `downloadOwnerRef` token, established SYNCHRONOUSLY by the
+   * coordinator, so the unmount effect can abort THIS instance's transaction even if the overlay unmounts
+   * during the coordinator's orphan-cleanup window (Sol Fable-round-5 P2).
    */
   const runDownloadTransaction = async (
     id: string,
     sizeForStorageCheck: number,
     body: (signal: AbortSignal) => Promise<void>,
   ): Promise<void> => {
-    const outcome = await runDownload(async (signal) => {
-      // This body runs ONLY when this call acquired the coordinator's mutex — mark ownership so the unmount
-      // effect aborts this (and only this) transaction, and clear it once the body settles.
-      ownsActiveDownloadRef.current = true;
+    const outcome = await runDownload(downloadOwnerRef.current, async (signal) => {
+      // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
+      // snapshot, which other app activity could have invalidated.
+      const caps = await probeDeviceCapabilities();
+      if (mountedRef.current) {
+        setCapabilities(caps);
+      }
+      if (storageFit(caps, sizeForStorageCheck) === 'insufficient') {
+        setStatusMessageIfMounted(
+          `Not enough free storage to download a model (only ${formatBytes(caps.freeStorageBytes)} free).`,
+        );
+        return;
+      }
+      setBusy(id, true);
       try {
-        // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
-        // snapshot, which other app activity could have invalidated.
-        const caps = await probeDeviceCapabilities();
-        if (mountedRef.current) {
-          setCapabilities(caps);
-        }
-        if (storageFit(caps, sizeForStorageCheck) === 'insufficient') {
-          setStatusMessageIfMounted(
-            `Not enough free storage to download a model (only ${formatBytes(caps.freeStorageBytes)} free).`,
-          );
-          return;
-        }
-        setBusy(id, true);
-        try {
-          await body(signal);
-        } catch (err) {
-          // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
-          // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
-          setStatusMessageIfMounted(`Model download failed — ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-          clearModelProgress(id);
-          setBusy(id, false);
-        }
+        await body(signal);
+      } catch (err) {
+        // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
+        // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
+        setStatusMessageIfMounted(`Model download failed — ${err instanceof Error ? err.message : String(err)}`);
       } finally {
-        ownsActiveDownloadRef.current = false;
+        clearModelProgress(id);
+        setBusy(id, false);
       }
     });
-    // A second entry point (same-tick double tap, or a remounted overlay) was refused globally — nothing to
-    // tear down here, since this call never acquired the mutex or touched any per-download state.
-    if (outcome.status === 'busy') {
+    // A second entry point (same-tick double tap, or a remounted overlay) was refused globally, or this
+    // instance's transaction was aborted (unmount) before the body ever ran — nothing to tear down here,
+    // since neither case touched any per-download state in this call.
+    if (outcome.status === 'busy' || outcome.status === 'aborted') {
       return;
     }
     if (outcome.status === 'orphan-blocked') {

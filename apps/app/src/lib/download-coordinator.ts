@@ -28,6 +28,13 @@ import { clearRetainedOrphans } from './model-download';
  * tap — can never both acquire it. */
 let activeController: AbortController | null = null;
 
+/** The OWNER token of the active transaction (Sol Fable-round-5 P2), set SYNCHRONOUSLY alongside
+ * `activeController`. Ownership is established at mutex-acquisition time (before the `clearRetainedOrphans`
+ * await), so a component that unmounts DURING orphan cleanup can still abort the transaction it started via
+ * {@link abortDownloadOwnedBy} — closing the window where the old code (which set ownership only once the
+ * download body began) let a headless multi-GB download proceed with no owner left to cancel it. */
+let activeOwner: object | null = null;
+
 /** Subscribers notified whenever `isDownloadActive()` flips, so a freshly-mounted overlay can render the
  * correct in-flight (disabled-buttons) state even though it didn't start the transaction itself. */
 const activeListeners = new Set<() => void>();
@@ -45,6 +52,7 @@ const activeListeners = new Set<() => void>();
 export type RunDownloadOutcome<T> =
   | { status: 'completed'; value: T }
   | { status: 'busy' }
+  | { status: 'aborted' }
   | { status: 'orphan-blocked'; error: string };
 
 /** Whether a download transaction is in flight process-wide. Read by a mounting overlay to seed its
@@ -95,12 +103,18 @@ function notifyActiveChanged(): void {
  * across an abort until the aborted `run` actually settles. A refused (`'busy'`) call touches no state and
  * skips the `finally` entirely (it never acquired the mutex).
  */
-export async function runDownload<T>(run: (signal: AbortSignal) => Promise<T>): Promise<RunDownloadOutcome<T>> {
+export async function runDownload<T>(
+  owner: object,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<RunDownloadOutcome<T>> {
   if (activeController !== null) {
     return { status: 'busy' };
   }
   const controller = new AbortController();
+  // Acquire the mutex AND record ownership synchronously, before any `await`, so an unmount during the
+  // orphan-cleanup await below can already target this transaction by owner.
   activeController = controller;
+  activeOwner = owner;
   notifyActiveChanged();
   try {
     // Clean any orphan(s) left by an earlier download whose registration AND checked-delete both failed,
@@ -110,10 +124,17 @@ export async function runDownload<T>(run: (signal: AbortSignal) => Promise<T>): 
     if (!cleared.ok) {
       return { status: 'orphan-blocked', error: cleared.error };
     }
+    // The owner may have unmounted DURING `clearRetainedOrphans` and aborted this transaction (Sol
+    // Fable-round-5 P2). If so, do NOT start the (multi-GB) download body — there would be no mounted owner
+    // left to cancel it, and the host is in an error state. The mutex is still released by the `finally`.
+    if (controller.signal.aborted) {
+      return { status: 'aborted' };
+    }
     const value = await run(controller.signal);
     return { status: 'completed', value };
   } finally {
     activeController = null;
+    activeOwner = null;
     notifyActiveChanged();
   }
 }
@@ -130,11 +151,24 @@ export function abortActiveDownload(): void {
 }
 
 /**
+ * Abort the active transaction ONLY IF it is owned by `owner` (Sol Fable-round-5 P2) — for a component
+ * unmounting, so it cancels the download IT started but can NEVER abort a different overlay's transaction.
+ * Like {@link abortActiveDownload} it does not release the mutex; the aborted `run` settles and its `finally`
+ * clears it. A no-op if no transaction is active or a different owner holds it.
+ */
+export function abortDownloadOwnedBy(owner: object): void {
+  if (activeOwner === owner) {
+    activeController?.abort();
+  }
+}
+
+/**
  * TEST-ONLY: force the coordinator back to idle for isolation between test cases (there is no
  * corresponding production reset — production always releases via `runDownload`'s `finally`). Never call
  * this from app code. Kept minimal and clearly namespaced so it can't be mistaken for a real API.
  */
 export function resetDownloadCoordinatorForTests(): void {
   activeController = null;
+  activeOwner = null;
   activeListeners.clear();
 }

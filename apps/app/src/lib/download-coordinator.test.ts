@@ -3,10 +3,11 @@
 // never start a second concurrent download while the first transaction is still settling.
 //
 // What is NOT covered here (and cannot be, in the node-only harness): the `.tsx` wiring in
-// `model-manager.tsx` — the unmount effect that calls `abortActiveDownload()`, the `mountedRef` guard on
-// async setState, and the `subscribeDownloadActive`-driven `downloadInFlight` render state. Those are
-// typecheck/review-only. Everything that carries the SERIALIZATION / abort / orphan-clean-first
-// correctness lives in `download-coordinator.ts` and is exercised below.
+// `model-manager.tsx` — the unmount effect that calls `abortDownloadOwnedBy(token)`, the mount effect that
+// re-sets `mountedRef.current = true` (StrictMode replay), the `mountedRef` guard on async setState, and the
+// `subscribeDownloadActive`-driven `downloadInFlight` render state. Those are typecheck/review-only.
+// Everything that carries the SERIALIZATION / owner-abort / orphan-clean-first correctness lives in
+// `download-coordinator.ts` and is exercised below.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fileSystemMock, resetFileSystemMock, seedFile } from '@/test-utils/mocks';
@@ -18,6 +19,7 @@ vi.mock('expo-file-system/legacy', () => fileSystemMock);
 
 import {
   abortActiveDownload,
+  abortDownloadOwnedBy,
   isDownloadActive,
   resetDownloadCoordinatorForTests,
   runDownload,
@@ -65,7 +67,7 @@ describe('runDownload single-flight mutex', () => {
     const firstRun = vi.fn(async () => {
       await first.promise;
     });
-    const firstOutcome = runDownload(firstRun);
+    const firstOutcome = runDownload({}, firstRun);
     await flush();
 
     expect(isDownloadActive()).toBe(true);
@@ -75,7 +77,7 @@ describe('runDownload single-flight mutex', () => {
     // to download again. The remount's attempt must be REFUSED — not run — while the first is unsettled.
     abortActiveDownload();
     const secondRun = vi.fn(async () => {});
-    const second = await runDownload(secondRun);
+    const second = await runDownload({}, secondRun);
 
     expect(second).toEqual({ status: 'busy' });
     expect(secondRun).not.toHaveBeenCalled();
@@ -93,7 +95,7 @@ describe('runDownload single-flight mutex', () => {
     const firstRun = vi.fn(async () => {
       await first.promise;
     });
-    const firstOutcome = runDownload(firstRun);
+    const firstOutcome = runDownload({}, firstRun);
     await flush();
 
     // ready → error: the overlay unmounts and aborts its own transaction.
@@ -102,7 +104,7 @@ describe('runDownload single-flight mutex', () => {
     // → ready: a new overlay mounts and immediately tries a download. Still refused: the aborted
     // transaction hasn't settled, so its mutex is still held.
     const remountRun = vi.fn(async () => {});
-    expect(await runDownload(remountRun)).toEqual({ status: 'busy' });
+    expect(await runDownload({}, remountRun)).toEqual({ status: 'busy' });
     expect(remountRun).not.toHaveBeenCalled();
     expect(firstRun).toHaveBeenCalledTimes(1);
 
@@ -120,8 +122,8 @@ describe('runDownload single-flight mutex', () => {
 
     // Two synchronous calls in the SAME tick (a catalog row + the custom button, or two overlay
     // instances) — the process-global mutex admits exactly one.
-    const a = runDownload(body);
-    const b = runDownload(body);
+    const a = runDownload({}, body);
+    const b = runDownload({}, body);
 
     expect(await b).toEqual({ status: 'busy' });
     await flush();
@@ -136,7 +138,7 @@ describe('abortActiveDownload', () => {
   it('aborts the active controller but holds the mutex until the aborted transaction settles', async () => {
     const settle = deferred<void>();
     let observedAbort = false;
-    const outcome = runDownload(async (signal) => {
+    const outcome = runDownload({}, async (signal) => {
       signal.addEventListener('abort', () => {
         observedAbort = true;
       });
@@ -151,7 +153,7 @@ describe('abortActiveDownload', () => {
     expect(observedAbort).toBe(true);
     // …but the mutex is STILL held: a new download is refused until the aborted body's `finally` settles.
     expect(isDownloadActive()).toBe(true);
-    expect(await runDownload(async () => {})).toEqual({ status: 'busy' });
+    expect(await runDownload({}, async () => {})).toEqual({ status: 'busy' });
 
     // The aborted body finishes its cleanup — now the mutex releases and a new download can proceed.
     settle.resolve();
@@ -159,7 +161,7 @@ describe('abortActiveDownload', () => {
     await flush();
     expect(isDownloadActive()).toBe(false);
     const nextRun = vi.fn(async () => {});
-    expect(await runDownload(nextRun)).toEqual({ status: 'completed', value: undefined });
+    expect(await runDownload({}, nextRun)).toEqual({ status: 'completed', value: undefined });
     expect(nextRun).toHaveBeenCalledTimes(1);
   });
 
@@ -170,13 +172,91 @@ describe('abortActiveDownload', () => {
   });
 });
 
+describe('owner-token abort (Sol Fable-round-5 P2)', () => {
+  it('aborting by owner DURING orphan cleanup means the download body never runs, and holds the mutex until cleanup settles', async () => {
+    // Retain an orphan so `clearRetainedOrphans` does real async fs work — a window in which the overlay can
+    // unmount and abort its own transaction BEFORE the download body ever starts.
+    const orphanUri = `${MODELS_DIR}pre.gguf`;
+    seedFile(orphanUri, 'bytes');
+    retainOrphanUri(orphanUri);
+
+    const owner = {};
+    const body = vi.fn(async () => {});
+    const outcome = runDownload(owner, body); // synchronously acquires the mutex + records the owner
+
+    // The owning overlay unmounts during the cleanup window and aborts the transaction it started.
+    abortDownloadOwnedBy(owner);
+    // The mutex is STILL held while the aborted transaction finishes its cleanup (a remount would get 'busy').
+    expect(isDownloadActive()).toBe(true);
+
+    expect(await outcome).toEqual({ status: 'aborted' });
+    expect(body).not.toHaveBeenCalled(); // the multi-GB download never started
+    expect(retainedOrphanCount()).toBe(0); // orphan cleanup still ran before the aborted check
+    await flush();
+    expect(isDownloadActive()).toBe(false); // released only after the transaction settled
+  });
+
+  it('abortDownloadOwnedBy aborts ONLY the owning transaction, never a different owner\'s', async () => {
+    const ownerA = {};
+    const ownerB = {};
+    const settle = deferred<void>();
+    let aborted = false;
+    const outcome = runDownload(ownerA, async (signal) => {
+      signal.addEventListener('abort', () => {
+        aborted = true;
+      });
+      await settle.promise;
+    });
+    await flush();
+    expect(isDownloadActive()).toBe(true);
+
+    // A DIFFERENT overlay instance (ownerB) unmounting must NOT abort ownerA's in-flight download.
+    abortDownloadOwnedBy(ownerB);
+    await flush();
+    expect(aborted).toBe(false);
+    expect(isDownloadActive()).toBe(true);
+
+    // The real owner aborts it.
+    abortDownloadOwnedBy(ownerA);
+    await flush();
+    expect(aborted).toBe(true);
+
+    settle.resolve();
+    await outcome;
+    await flush();
+    expect(isDownloadActive()).toBe(false);
+  });
+
+  it('the global abortActiveDownload (app backgrounding) still aborts whatever owner is active', async () => {
+    const owner = {};
+    const settle = deferred<void>();
+    let aborted = false;
+    const outcome = runDownload(owner, async (signal) => {
+      signal.addEventListener('abort', () => {
+        aborted = true;
+      });
+      await settle.promise;
+    });
+    await flush();
+
+    abortActiveDownload(); // AppState → background: global, no token
+    await flush();
+    expect(aborted).toBe(true);
+
+    settle.resolve();
+    await outcome;
+    await flush();
+    expect(isDownloadActive()).toBe(false);
+  });
+});
+
 describe('clean-first orphan handling inside the coordinated transaction', () => {
   it("cleans an old transaction's orphan (created after a new caller mounts) before any later download", async () => {
     // First transaction downloads, fails to register, and retains its file as an orphan just before it
     // settles — i.e. AFTER a would-be new overlay has already mounted and is waiting on the mutex.
     const orphanUri = `${MODELS_DIR}orphan.gguf`;
     const first = deferred<void>();
-    const firstOutcome = runDownload(async () => {
+    const firstOutcome = runDownload({}, async () => {
       await first.promise;
       seedFile(orphanUri, 'leftover multi-GB bytes');
       retainOrphanUri(orphanUri);
@@ -185,7 +265,7 @@ describe('clean-first orphan handling inside the coordinated transaction', () =>
     expect(isDownloadActive()).toBe(true);
 
     // A second caller tries to start while the first is still in flight — refused.
-    expect(await runDownload(async () => {})).toEqual({ status: 'busy' });
+    expect(await runDownload({}, async () => {})).toEqual({ status: 'busy' });
 
     // The first transaction produces its orphan and settles.
     first.resolve();
@@ -196,7 +276,7 @@ describe('clean-first orphan handling inside the coordinated transaction', () =>
 
     // Now a later download proceeds. Its body must only run AFTER the orphan has been cleaned first.
     let orphanStillPresentWhenBodyRan: boolean | undefined;
-    const laterOutcome = await runDownload(async () => {
+    const laterOutcome = await runDownload({}, async () => {
       orphanStillPresentWhenBodyRan = (await fileSystemMock.getInfoAsync(orphanUri)).exists;
     });
 
@@ -216,7 +296,7 @@ describe('clean-first orphan handling inside the coordinated transaction', () =>
     failFileSystemUri(orphanUri, new Error('read-only mount'));
 
     const body = vi.fn(async () => {});
-    const outcome = await runDownload(body);
+    const outcome = await runDownload({}, body);
 
     expect(outcome.status).toBe('orphan-blocked');
     expect(body).not.toHaveBeenCalled();
@@ -234,7 +314,7 @@ describe('isDownloadActive subscription', () => {
     });
 
     const gate = deferred<void>();
-    const outcome = runDownload(async () => {
+    const outcome = runDownload({}, async () => {
       await gate.promise;
     });
     await flush();
@@ -253,7 +333,7 @@ describe('isDownloadActive subscription', () => {
     const late: boolean[] = [];
     const unsubscribeLate = subscribeDownloadActive(() => late.push(isDownloadActive()));
     const nextGate = deferred<void>();
-    const nextOutcome = runDownload(async () => {
+    const nextOutcome = runDownload({}, async () => {
       await nextGate.promise;
     });
     await flush();

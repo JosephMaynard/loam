@@ -41,6 +41,9 @@ const mocks = vi.hoisted(() => ({
   // `backendDevicesImpl` is the diagnostic probe (must never gate the load).
   initLlamaImpl: undefined as undefined | (() => Promise<unknown>),
   backendDevicesImpl: undefined as undefined | (() => Promise<unknown[]>),
+  loadStateImpl: undefined as
+    | undefined
+    | (() => Promise<{ downloaded: { id: string; uri: string; [k: string]: unknown }[]; activeId: string | undefined }>),
 }));
 
 vi.mock("llama.rn", () => ({
@@ -75,7 +78,9 @@ function makeNativeContext() {
 }
 
 vi.mock("@/lib/model-manager-store", () => ({
-  loadModelManagerState: vi.fn(async () => mocks.state),
+  // `loadStateImpl` (when set) lets a test return DIFFERENT active-model state on successive reads, so the
+  // runInference re-read of the active model (Sol Fable-round-5 P2 defense-in-depth) can be exercised.
+  loadModelManagerState: vi.fn(() => (mocks.loadStateImpl ? mocks.loadStateImpl() : Promise.resolve(mocks.state))),
 }));
 
 interface FakeChannel {
@@ -120,6 +125,7 @@ const endedFor = (channel: FakeChannel, id: string) =>
 let registerOnDeviceLlm: typeof import("@/lib/on-device-llm").registerOnDeviceLlm;
 let releaseActiveModelContext: typeof import("@/lib/on-device-llm").releaseActiveModelContext;
 let releaseModelContextIfLoaded: typeof import("@/lib/on-device-llm").releaseModelContextIfLoaded;
+let syncNativeContextToActiveModel: typeof import("@/lib/on-device-llm").syncNativeContextToActiveModel;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -142,7 +148,9 @@ beforeEach(async () => {
   mocks.contextsCreated = 0;
   mocks.initLlamaImpl = undefined;
   mocks.backendDevicesImpl = undefined;
-  ({ registerOnDeviceLlm, releaseActiveModelContext, releaseModelContextIfLoaded } = await import("@/lib/on-device-llm"));
+  mocks.loadStateImpl = undefined;
+  ({ registerOnDeviceLlm, releaseActiveModelContext, releaseModelContextIfLoaded, syncNativeContextToActiveModel } =
+    await import("@/lib/on-device-llm"));
 });
 
 afterEach(() => {
@@ -644,4 +652,95 @@ describe("bounded model load — a never-settling initLlama can't wedge the engi
     await vi.advanceTimersByTimeAsync(1);
     expect(endedFor(channel, "2")).toBe(true);
   });
+});
+
+describe("model switch invalidates an in-flight load of the old model (Sol Fable-round-5 P2)", () => {
+  it("switching to B disposes a still-loading A, never runs completion(A), and B then loads and runs", async () => {
+    let resolveLoad!: (ctx: unknown) => void;
+    mocks.initLlamaImpl = () => new Promise((resolve) => (resolveLoad = resolve));
+    const completion = vi.fn(async () => ({ text: "should not run" }));
+    mocks.completionImpl = completion;
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush(); // A is loading (loadingPath = m.gguf)
+
+    // Operator selects a DIFFERENT model — the actions layer notifies the engine (target-aware).
+    syncNativeContextToActiveModel("file:///models/other.gguf");
+
+    // A's native load resolves LATE: it must be disposed, not published, and completion never runs.
+    resolveLoad(makeNativeContext());
+    await flush();
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+    expect(completion).not.toHaveBeenCalled();
+    expect(endedFor(channel, "1")).toBe(false);
+
+    // The next request can load and run (the engine is recovered after A's disposal).
+    mocks.initLlamaImpl = undefined;
+    mocks.completionImpl = async (_params, onToken) => {
+      onToken?.({ token: "ok" });
+      return { text: "ok" };
+    };
+    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "2")).toBe(true);
+  });
+
+  it("syncing to the SAME model does not invalidate its in-flight load", async () => {
+    let resolveLoad!: (ctx: unknown) => void;
+    mocks.initLlamaImpl = () => new Promise((resolve) => (resolveLoad = resolve));
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+
+    // Re-selecting the SAME model must NOT invalidate its load (target matches loadingPath).
+    syncNativeContextToActiveModel("file:///models/m.gguf");
+    resolveLoad(makeNativeContext());
+    await flush();
+
+    // The load published normally and request 1 completed; nothing was released.
+    expect(endedFor(channel, "1")).toBe(true);
+    expect(mocks.release).not.toHaveBeenCalled();
+  });
+
+  it("switching away from an already-LOADED model releases it (serialized)", async () => {
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "1")).toBe(true);
+    expect(mocks.release).not.toHaveBeenCalled();
+
+    // The loaded model is m.gguf; switching to a different model releases it.
+    syncNativeContextToActiveModel("file:///models/other.gguf");
+    await flush();
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("defense in depth: if the active model changes DURING a load, completion is not run for the stale one", async () => {
+    // First read (ensureContext) sees A active; the second read (runInference re-check) sees B active.
+    const stateA = { downloaded: [model("a"), model("b")], activeId: "a" as string | undefined };
+    const stateB = { downloaded: [model("a"), model("b")], activeId: "b" as string | undefined };
+    let reads = 0;
+    mocks.loadStateImpl = async () => (++reads <= 1 ? stateA : stateB);
+    const completion = vi.fn(async () => ({ text: "should not run" }));
+    mocks.completionImpl = completion;
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+
+    // The model loaded was A, but the re-read found B active → completion must NOT run; a retry error instead.
+    expect(completion).not.toHaveBeenCalled();
+    expect(endedFor(channel, "1")).toBe(false);
+    expect(String(errorFor(channel, "1")?.payload.error)).toMatch(/recovering/i);
+  });
+
+  function model(id: string) {
+    return { id, uri: `file:///models/${id}.gguf`, displayName: id, sizeBytes: 1, isCustom: false, sourceUrl: "", downloadedAt: 0 };
+  }
 });

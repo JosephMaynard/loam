@@ -62,6 +62,12 @@ export interface ModelActionDeps {
    * the pending until an app restart. PATH-AWARE, so reconciling an old delete for one model never tears down
    * a different, newly-loaded one. Never throws. */
   releaseModelContext(modelPath: string): Promise<ContextReleaseOutcome>;
+  /** Notify the native engine of a newly-selected active model (bound to `syncNativeContextToActiveModel`,
+   * Sol Fable-round-5 P2) — called after every successful durable `activeId` transition (a set-active and any
+   * rollback to the previous model). TARGET-AWARE: invalidates an in-flight load / releases a loaded context
+   * for a DIFFERENT model, but leaves the now-active model alone (so it can't tear down the newly-correct one
+   * that a concurrent inference may already be loading). Synchronous, never throws. `null` = nothing active. */
+  syncActiveModel(nextPath: string | null): void;
 }
 
 /** The confirmed outcome of a path-aware context release barrier — see `ModelActionDeps.releaseModelContext`. */
@@ -138,6 +144,11 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     return { kind: 'persist-failed', message: PERSIST_FAILED_MESSAGE };
   }
 
+  // The active model is now durably B (Sol Fable-round-5 P2). Tell the engine immediately, BEFORE the launcher
+  // bridge call: a concurrent inference could already have read B and started loading it, and an old model may
+  // be loading/loaded. Target-aware, so it disposes a stale A load / releases a loaded A but never touches B.
+  deps.syncActiveModel(model.uri);
+
   const result = await deps.setActiveModel({ modelPath: model.uri, model: model.displayName });
   if (result.status === 'ok') {
     // Confirmed. Durably CLEAR the write-ahead pending — but only report a clean `ok` once that clear is
@@ -158,7 +169,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     };
   }
   if (result.status === 'failed') {
-    return rollbackActiveId(deps, {
+    const rolled = await rollbackActiveId(deps, {
       expected: model.id,
       restoreTo: previousActiveId,
       pendingId: POINTER_PENDING_ID,
@@ -167,6 +178,15 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
           ? `Couldn't set ${model.displayName} active — the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
           : `Couldn't set ${model.displayName} active, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
     });
+    // Second-order case (Sol Fable-round-5 P2): while B was persisted a concurrent inference may have started
+    // loading B. Now that local state has rolled back to the PREVIOUS active model, notify the engine so B's
+    // in-flight load / loaded context is invalidated/released — target-aware to the restored model.
+    const restoredUri =
+      rolled.state?.activeId !== undefined
+        ? rolled.state.downloaded.find((m) => m.id === rolled.state?.activeId)?.uri ?? null
+        : null;
+    deps.syncActiveModel(restoredUri);
+    return rolled;
   }
   // Timeout — AMBIGUOUS. The write may already have landed, so leave the local `activeId` set rather
   // than reverting it (a wrong rollback is exactly the divergence P2-1 prevents). The write-ahead
