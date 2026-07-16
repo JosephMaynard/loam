@@ -2881,6 +2881,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   ]);
 
   /**
+   * The opportunistic-mesh transport BRIDGE routes (docs/16 §5, docs/17). These are an in-process
+   * plumbing seam between the Android launcher's courier brain and the relay — the launcher polls them
+   * over `127.0.0.1` and never over the LAN, and every blob they carry is ALREADY end-to-end sealed at
+   * the `@loam/crypto` mesh layer (the wire below them adds nothing). Under `required` mode a direct
+   * `/api/` hit with no resolved transport session would otherwise 401 (`requiresTransportSession`), which
+   * would silently wedge the courier the moment an operator turns transport encryption up. They are exempt
+   * from the transport-session requirement ONLY when the request actually arrives over loopback (the
+   * handlers additionally refuse any non-loopback caller), so the exemption can never widen LAN exposure.
+   */
+  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound"]);
+
+  /**
    * Apply validated user update fields to an existing user object.
    *
    * @param user - The existing user object to update (mutated in-place)
@@ -5934,6 +5946,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // transport session has no `activeSession` here and falls through to the 401, so plaintext sync is
       // still refused in `required` mode.
       if (activeSession && DIRECT_SEALED_SYNC_ROUTES.has(request.routeOptions?.url ?? "")) {
+        return;
+      }
+      // The in-process mesh bridge (docs/17) is loopback-only and carries blobs already sealed at the
+      // mesh crypto layer, so it isn't the LAN-content this gate protects — let the launcher's courier
+      // keep polling it when the operator turns transport encryption up. Gated on a real loopback peer
+      // (the handlers re-check too), so a LAN joiner still can't reach it unsealed.
+      if (MESH_LOOPBACK_BRIDGE_ROUTES.has(request.routeOptions?.url ?? "") && requestFromLoopback(request)) {
         return;
       }
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));

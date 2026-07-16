@@ -562,7 +562,23 @@ function writeConfigFile(next) {
   fs.mkdirSync(dataDir, { recursive: true });
   const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
   fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf8');
+  // fsync the temp file's contents before the rename, then the directory after it (Fable review LOW-4).
+  // Without this the atomic rename only orders the metadata: a power loss right after `renameSync` can
+  // still surface an empty/short config.json (the rename is durable but the data blocks aren't), which
+  // would strand the operator with an unparseable config on the next cold boot. Best-effort — a
+  // filesystem that rejects fsync must not fail the (already atomic) write.
+  try {
+    const fd = fs.openSync(tmpPath, 'r+');
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    // Contents-fsync unsupported/failed — the temp+rename is still atomic; proceed.
+  }
   fs.renameSync(tmpPath, configPath);
+  fsyncDir(dataDir);
 }
 
 rnBridge.channel.on('loam-model-set-active', (payload) => {
@@ -643,7 +659,15 @@ const DB_KEY_LOCKED_ERROR = 'locked-error';
  * FAILURE (timeout, malformed/unrecognized payload, a post() throw, or RN's own reported read error)
  * resolves to `{ mode: 'locked-error' }` (P1-3, Sol round 5) so the caller locks rather than silently
  * falls back to plaintext. Only a genuinely successful `{mode:'off'}` reply resolves to `'off'`. */
+var dbKeyRequestCounter = 0;
 function requestDbKey(timeoutMs) {
+  // Correlate each request with its response (Fable review LOW-6): a request that TIMED OUT removes its
+  // listener, but RN may still answer it late; without a correlation id that late answer would be caught
+  // by the NEXT request's freshly-registered listener and satisfy it with stale mode/key state (e.g. a
+  // pre-passphrase "locked" answer landing on the post-passphrase unlock retry). The id is echoed back by
+  // RN's responder; a response is accepted only when it matches (a response with no id at all is still
+  // accepted, for tolerance against an older RN build that doesn't echo).
+  var requestId = 'dbkey-' + (++dbKeyRequestCounter);
   return new Promise(function (resolve) {
     var settled = false;
 
@@ -658,6 +682,11 @@ function requestDbKey(timeoutMs) {
     }
 
     function onResponse(payload) {
+      var responseId = payload && payload.requestId;
+      if (typeof responseId === 'string' && responseId !== requestId) {
+        // A late answer to a PRIOR, already-settled request — ignore it and keep waiting for ours.
+        return;
+      }
       var mode = payload && payload.mode;
       if (mode === DB_MODE_READ_ERROR) {
         // RN successfully answered, but told us ITS read of the stored mode failed — not the same as
@@ -687,7 +716,7 @@ function requestDbKey(timeoutMs) {
     // Listener registered BEFORE the request is posted — no race with RN's answer, however fast.
     rnBridge.channel.on('loam-db-key-response', onResponse);
     try {
-      rnBridge.channel.post('loam-db-key-request');
+      rnBridge.channel.post('loam-db-key-request', { requestId: requestId });
     } catch (err) {
       finish({ mode: DB_KEY_LOCKED_ERROR });
     }

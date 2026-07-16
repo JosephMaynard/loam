@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildApp } from "./app.js";
+import { parseDbEncryptionMode } from "./embedded.js";
 import { resolveLanIPv4 } from "./net.js";
 
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
@@ -43,6 +44,12 @@ const host = process.env.HOST ?? "0.0.0.0";
 // LOAM_DB_KEY: a passphrase encrypts at rest; the literal "ephemeral" uses a random RAM-only key
 // (never persisted; lost on reboot; rotated by the kill switch). Unset = no encryption.
 const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
+// LOAM_DB_ENCRYPTION_MODE: the operator-declared at-rest key strategy, threaded through so the reported
+// posture (`networkConfig.dbEncryption`) reflects the ACTUAL key path, not just `security.dbEncryption`
+// in config — same contract the embedded/Android launcher uses (embedded.ts). Unset on the CLI = fall
+// back to the configured value; `ephemeral` is inferred from the `LOAM_DB_KEY === "ephemeral"` literal.
+const dbEncryptionMode =
+  parseDbEncryptionMode(process.env.LOAM_DB_ENCRYPTION_MODE) ?? (ephemeralDbKey ? "ephemeral" : undefined);
 
 const app = await buildApp({
   dataDir,
@@ -55,6 +62,7 @@ const app = await buildApp({
   clientPort,
   dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
   ephemeralDbKey,
+  dbEncryptionMode,
   version: resolveVersion(),
 });
 

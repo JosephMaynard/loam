@@ -7505,6 +7505,37 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
       expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("meet at the docks");
     });
+
+    it("stays reachable over loopback when transport encryption is REQUIRED (courier must not wedge)", async () => {
+      // The in-process courier polls these endpoints over plain 127.0.0.1 with no transport session. In
+      // `required` mode the general content gate would 401 an unsealed direct hit; the mesh bridge is
+      // exempted (loopback-only, blobs already sealed at the mesh crypto layer) so turning transport
+      // encryption up can't silently stop the radio from moving mail (Fable review).
+      const app = await makeApp({ mesh: MESH, security: { profile: "custom", transportEncryption: "required" } });
+      const out = await app.server.inject({ method: "GET", url: "/api/mesh/outbound" });
+      expect(out.statusCode).toBe(200);
+      const inbound = await app.server.inject({
+        method: "POST",
+        url: "/api/mesh/inbound",
+        payload: { messages: [] },
+      });
+      // Empty batch is a 400 (schema min(1)), NOT a 401 — proving the request passed the transport gate
+      // and reached the handler rather than being refused for lacking a sealed session.
+      expect(inbound.statusCode).toBe(400);
+    });
+
+    it("still refuses a NON-loopback caller under required mode (exemption never widens LAN reach)", async () => {
+      const app = await makeApp({ mesh: MESH, security: { profile: "custom", transportEncryption: "required" } });
+      const out = await app.server.inject({
+        method: "GET",
+        url: "/api/mesh/outbound",
+        remoteAddress: "192.168.4.7",
+      });
+      // A LAN peer is REFUSED: the exemption is loopback-gated, so a non-loopback hit never qualifies and
+      // falls through to the required-mode transport gate (401 — "needs an encrypted session"). It never
+      // reaches the handler, so the exemption grants a LAN joiner nothing.
+      expect(out.statusCode).toBe(401);
+    });
   });
 });
 

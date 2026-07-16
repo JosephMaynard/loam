@@ -207,6 +207,39 @@ describe("registerDbEncryption", () => {
     }
   });
 
+  it("LOW-6: echoes the launcher's requestId so a late reply can't satisfy a later request", async () => {
+    await setStoredPassphrase("hunter2");
+    await setDbEncryptionMode("passphrase");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "dbkey-7" });
+      await flushMicrotasks();
+
+      const payload = channel.posted[0]!.payload as { mode: string; requestId?: string };
+      expect(payload.mode).toBe("passphrase");
+      expect(payload.requestId).toBe("dbkey-7");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("LOW-6: omits requestId when the launcher sends none (older-launcher tolerance)", async () => {
+    await setDbEncryptionMode("off");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request");
+      await flushMicrotasks();
+
+      const payload = channel.posted[0]!.payload as { mode: string; requestId?: string };
+      expect(payload.mode).toBe("off");
+      expect("requestId" in payload).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("P1-1: records a confirmed migration when the launcher signals loam-db-key-migrated", async () => {
     await setStoredPassphrase("hunter2");
     expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();

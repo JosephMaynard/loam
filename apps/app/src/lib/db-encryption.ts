@@ -19,7 +19,7 @@ export const DB_ENCRYPTION_MODES: readonly DbEncryptionMode[] = ['off', 'ephemer
 
 /** One-line description shown next to each mode in the picker UI. */
 export const DB_ENCRYPTION_MODE_DESCRIPTIONS: Record<DbEncryptionMode, string> = {
-  off: 'The on-device database is stored in plain SQLite — todays default.',
+  off: 'The on-device database is stored in plain SQLite — the default.',
   ephemeral: 'A random key generated at each launch, held only in memory. Wipes the database on every restart — nothing survives a reboot.',
   persistent: 'A random key generated once and stored in the device Keystore. Survives reboots; the database stays encrypted at rest.',
   passphrase: 'A key derived from an operator-chosen passphrase, stored in the device Keystore. Survives reboots; anyone who knows the passphrase can also derive the key.',
@@ -62,6 +62,12 @@ const DEVICE_SECRET_ITEM = 'loam-db-encryption-device-secret';
  */
 const PASSPHRASE_KEY_VERSION_ITEM = 'loam-db-passphrase-key-version';
 const CURRENT_PASSPHRASE_KEY_VERSION = '2';
+
+// The boot-time unlock CANDIDATE value that `resolveDbKey` actually used to derive the key THIS boot (or
+// undefined if the committed passphrase was used / none). `markPassphraseKeyMigrated` promotes THIS value —
+// the one a successful DB open verified — never whatever is stored NOW, which a concurrent "replace the
+// pending passphrase" in Settings could have swapped to an unverified value (TOCTOU, Fable review).
+let candidateUsedForOpen: string | undefined;
 
 export type ResolvedDbKey = {
   mode: DbEncryptionMode;
@@ -198,7 +204,12 @@ export async function setPassphraseCandidate(passphrase: string): Promise<void> 
 export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
   const errors: string[] = [];
 
-  for (const item of [PASSPHRASE_ITEM, PASSPHRASE_CANDIDATE_ITEM]) {
+  // Also delete the key-VERSION marker (Fable review MEDIUM-1): without this, "Forget" leaves the marker at
+  // the current version, so a re-entered passphrase (as a boot candidate) is never re-offered with its legacy
+  // key and `markPassphraseKeyMigrated` never fires to promote it — the node then boots forever on an
+  // unpromoted candidate while Settings misreports "no passphrase set". Clearing the marker lets the next
+  // candidate re-run the migrate/promote path cleanly.
+  for (const item of [PASSPHRASE_ITEM, PASSPHRASE_CANDIDATE_ITEM, PASSPHRASE_KEY_VERSION_ITEM]) {
     try {
       await SecureStore.deleteItemAsync(item);
     } catch (err) {
@@ -233,19 +244,27 @@ export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
 export async function markPassphraseKeyMigrated(): Promise<void> {
   try {
     // P2-a (Sol round 6): a DB open under the current key is PROOF the passphrase used to derive it is
-    // correct. If the open used an uncommitted boot-time CANDIDATE (which `resolveDbKey` only falls back
-    // to when nothing is committed), promote it to the stored passphrase now — it's verified. Guard on
-    // "nothing committed" so a stale/wrong leftover candidate can never clobber a committed passphrase
-    // that itself opened the DB (resolveDbKey prefers the committed one, so a committed value is what
-    // actually opened it in that case). Clear the candidate either way — a successful open means any
-    // pending guess is resolved.
-    const candidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
-    if (typeof candidate === 'string' && candidate.length > 0) {
-      const committed = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
-      if (typeof committed !== 'string' || committed.length === 0) {
-        await SecureStore.setItemAsync(PASSPHRASE_ITEM, candidate);
+    // correct. If the open used an uncommitted boot-time CANDIDATE, promote THAT EXACT value — the one
+    // `resolveDbKey` recorded in `candidateUsedForOpen` and the DB open just verified — never whatever is
+    // stored NOW (a concurrent "replace the pending passphrase" in Settings could have swapped it to an
+    // unverified value between resolve and this promote: TOCTOU, Fable review). Guard on "nothing committed"
+    // so this can never clobber a committed passphrase that itself opened the DB.
+    const openedWith = candidateUsedForOpen;
+    const committed = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
+    const hasCommitted = typeof committed === 'string' && committed.length > 0;
+    if (typeof openedWith === 'string' && openedWith.length > 0 && !hasCommitted) {
+      // Promote the VERIFIED candidate (the one the DB open used), never the value stored NOW.
+      await SecureStore.setItemAsync(PASSPHRASE_ITEM, openedWith);
+    }
+    // Resolve the pending candidate: drop it when a committed passphrase now exists (it is moot —
+    // `resolveDbKey` always prefers the committed one) OR when it equals the verified value we opened with.
+    // NEVER drop a candidate that differs from `openedWith` while nothing is committed — it may be a newer
+    // pending guess (TOCTOU) that deserves its own boot attempt.
+    const storedCandidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+    if (typeof storedCandidate === 'string' && storedCandidate.length > 0) {
+      if (hasCommitted || (typeof openedWith === 'string' && storedCandidate === openedWith)) {
+        await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
       }
-      await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
     }
     await SecureStore.setItemAsync(PASSPHRASE_KEY_VERSION_ITEM, CURRENT_PASSPHRASE_KEY_VERSION);
   } catch {
@@ -422,15 +441,17 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     }
 
     // mode === 'passphrase'
+    candidateUsedForOpen = undefined; // reset per boot; set below only if we fall back to a candidate
     let passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
       // P2-a (Sol round 6): no COMMITTED passphrase — fall back to a boot-time unlock CANDIDATE if one is
       // pending (entered on the locked screen). It is tried WITHOUT being committed; only once the DB
-      // opens under it does `markPassphraseKeyMigrated` promote it. So a wrong guess can't overwrite an
-      // intact stored passphrase.
+      // opens under it does `markPassphraseKeyMigrated` promote it (the exact value used, tracked below).
+      // So a wrong guess can't overwrite an intact stored passphrase.
       const candidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
       if (typeof candidate === 'string' && candidate.length > 0) {
         passphrase = candidate;
+        candidateUsedForOpen = candidate;
       }
     }
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
@@ -479,7 +500,12 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
  * Never logs `key`/`legacyKey`/the passphrase. Returns a cleanup that removes both listeners.
  */
 export function registerDbEncryption(channel: BridgeChannel): () => void {
-  const onRequest = (): void => {
+  const onRequest = (payload: unknown): void => {
+    // Echo main.js's correlation id (Fable review LOW-6) so a late answer to an already-timed-out request
+    // can't be mistaken for the answer to a subsequent one. Absent on an older launcher — then we simply
+    // don't echo, and the launcher's tolerant match still accepts the response.
+    const rawId = (payload as { requestId?: unknown } | undefined)?.requestId;
+    const requestId = typeof rawId === 'string' ? rawId : undefined;
     void (async () => {
       let response: ResolvedDbKey | { mode: typeof DB_ENCRYPTION_MODE_READ_ERROR };
       try {
@@ -489,7 +515,12 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
         response = { mode: DB_ENCRYPTION_MODE_READ_ERROR };
       }
       try {
-        const payload: { mode: DbEncryptionModeOrError; key?: string; legacyKey?: string } = { mode: response.mode };
+        const payload: { mode: DbEncryptionModeOrError; key?: string; legacyKey?: string; requestId?: string } = {
+          mode: response.mode,
+        };
+        if (requestId !== undefined) {
+          payload.requestId = requestId;
+        }
         if ('key' in response && response.key) {
           payload.key = response.key;
         }

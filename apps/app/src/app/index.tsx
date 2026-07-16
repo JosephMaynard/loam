@@ -644,7 +644,16 @@ export default function HostScreen() {
     // passphrase only once the DB actually opens under it (markPassphraseKeyMigrated). So a wrong guess
     // here can never overwrite an intact stored passphrase and strand the database — it stays recoverable
     // for another attempt.
-    await setPassphraseCandidate(trimmed);
+    // Guard the SecureStore write (Fable review MEDIUM-4): `setPassphraseCandidate` re-throws on a Keystore
+    // failure, and without this catch that would escape as an unhandled rejection AND leave `unlockBusy` true
+    // forever (both Unlock and Retry disabled) until a force-restart.
+    try {
+      await setPassphraseCandidate(trimmed);
+    } catch (error) {
+      setUnlockBusy(false);
+      setUnlockMessage(`Couldn't save the passphrase — ${error instanceof Error ? error.message : 'unknown error'}. You can try again.`);
+      return;
+    }
     // P1-b (Sol round 6): transactionally record the mode-name hint so a later transient key-request
     // failure locks (rather than plaintext-boots) this passphrase-mode node. Best-effort — the mode is
     // already persisted in SecureStore regardless.

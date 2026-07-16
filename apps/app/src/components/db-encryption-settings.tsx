@@ -184,6 +184,13 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     if (transitionInFlight.current) {
       return;
     }
+    // Re-selecting the ALREADY-active mode is a no-op — never run the destructive "delete & start fresh"
+    // flow for it (Fable review LOW-5): tapping the current encrypted row is a common "just checking" gesture,
+    // and it would otherwise invite an accidental deletion of a selection that changes nothing.
+    if (next === mode) {
+      setStatusMessage(`${MODE_LABELS[next]} is already the active mode.`);
+      return;
+    }
     if (!dbModeSelectionIsDestructive(next)) {
       void applyModeChange(next);
       return;
@@ -263,7 +270,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
   // re-exposing the entry path so a NEW passphrase could overwrite the still-committed old one while the
   // DB was under the OLD key. On a failed/unverified clear, keep `passphrasePresence === 'present'` (so
   // no first-time entry is offered) and surface the failure.
-  const handleForgetPassphrase = async () => {
+  const forgetPassphrase = async () => {
     const result = await clearStoredPassphrase();
     if (!result.ok) {
       setStatusMessage(`Couldn't forget the passphrase — ${result.error ?? 'unknown error'}. It is still set; try again.`);
@@ -272,6 +279,22 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     setPassphrasePresence('absent');
     setCandidatePending(false);
     setStatusMessage('Passphrase forgotten. Encrypted-passphrase mode has no key until a new one is entered.');
+  };
+
+  // Confirm before forgetting (Fable review LOW-6): forgetting is destructive to ACCESS — the node locks at
+  // the next restart until the passphrase is re-entered (and the data is only recoverable if it's remembered),
+  // so it gets the same explicit confirmation as every other destructive action in this screen.
+  const handleForgetPassphrase = () => {
+    Alert.alert(
+      'Forget the passphrase?',
+      'The stored passphrase is removed from this device. The database is NOT deleted, but the node will be ' +
+        'LOCKED at the next restart until you re-enter the passphrase — if you have forgotten it, the data can ' +
+        'no longer be opened. Continue?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Forget passphrase', style: 'destructive', onPress: () => void forgetPassphrase() },
+      ],
+    );
   };
 
   // P1-3 (Sol round 7): re-read passphrase presence after an `'error'` state (a transient SecureStore
