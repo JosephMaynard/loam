@@ -16,6 +16,11 @@ const rnBridge = require('rn-bridge');
 // P1-2 (Sol round 5): the pure "may a key be resolved this boot?" decision, split out so it can be
 // unit-tested directly (this file itself can't be — see db-key-gate.js's doc comment).
 const { mayResolveDbKeyThisBoot } = require('./db-key-gate');
+// Sol P1: the pure three-outcome durable install of the start-fresh marker, split out for the same
+// reason (unit-testable with an injected `fs` — see start-fresh-marker.js's doc comment). Distinguishes
+// a durable install from a provably-absent write and from an INDETERMINATE post-rename commit, which a
+// bare `durableWriteFileSync` boolean conflates with "nothing was written".
+const { installStartFreshMarker } = require('./start-fresh-marker');
 
 const PORT = 3000;
 const projectDir = __dirname;
@@ -915,33 +920,66 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
     return;
   }
 
+  // P1-6 (Sol round 8): record the operator's INTENT in the marker. 'delete' = a deliberate destructive
+  // mode change (Settings "Delete & start fresh") → the server DELETES + proves the old DB gone; anything
+  // else = accidental-lockout recovery → the server renames the old ciphertext aside. Default 'preserve'
+  // (never escalate to destruction on a missing/odd intent).
+  var intent = payload && payload.intent === 'delete' ? 'delete' : 'preserve';
+
+  // Sol P1: install the marker DURABLY (fd + fsync + atomic rename + parent-dir fsync) and only ack
+  // ok:true AFTER it is on stable storage. When this is requested from the ALREADY-running Settings
+  // screen the in-process reboot below is a no-op (the server is already up), so the marker must survive
+  // until the NEXT real app restart; a non-durable write that a power-loss then discarded would report a
+  // false "scheduled" success and force the operator to repeat the destructive confirmation.
+  //
+  // We use `installStartFreshMarker` rather than the shared `durableWriteFileSync` because the boolean the
+  // latter returns CONFLATES two very different failures for THIS marker: a parent-dir fsync that fails
+  // AFTER the rename has already installed the marker leaves it live in the current namespace even though
+  // the write reported false — so acking a flat "not scheduled" would tell the operator a 'delete' reset
+  // was cancelled while it could still be consumed (destructively) on a later restart. The three-outcome
+  // install distinguishes a durable install, a PROVABLY-absent write (safe to call unscheduled), and an
+  // INDETERMINATE commit (may still take effect) — see start-fresh-marker.js.
+  var outcome;
   try {
     fs.mkdirSync(dataDir, { recursive: true });
-    // P1-6 (Sol round 8): record the operator's INTENT in the marker. 'delete' = a deliberate destructive
-    // mode change (Settings "Delete & start fresh") → the server DELETES + proves the old DB gone; anything
-    // else = accidental-lockout recovery → the server renames the old ciphertext aside. Default 'preserve'
-    // (never escalate to destruction on a missing/odd intent).
-    var intent = payload && payload.intent === 'delete' ? 'delete' : 'preserve';
-    // P2-2 (Sol round 8): write the marker DURABLY (fd + fsync + atomic rename + parent-dir fsync) and only
-    // ack ok:true AFTER it is on stable storage. When this is requested from the ALREADY-running Settings
-    // screen the in-process reboot is a no-op (the server is already up), so the marker must survive until
-    // the NEXT real app restart; a non-durable write that a power-loss then discarded would report a false
-    // "scheduled" success and force the operator to repeat the destructive confirmation.
-    if (!durableWriteFileSync(START_FRESH_MARKER_PATH, intent)) {
-      throw new Error('could not durably write the start-fresh marker');
-    }
-    rnBridge.channel.post('loam-db-start-fresh-result', { requestId: requestId, ok: true });
+    outcome = installStartFreshMarker({
+      fs: fs,
+      markerPath: START_FRESH_MARKER_PATH,
+      tmpPath: START_FRESH_MARKER_PATH + '.tmp-' + process.pid + '-' + Date.now(),
+      dir: path.dirname(START_FRESH_MARKER_PATH),
+      contents: intent,
+    });
   } catch (err) {
+    // mkdir (or an unexpected throw before any staging write) — nothing was installed on disk.
+    outcome = 'not-installed';
+  }
+
+  if (outcome !== 'durable') {
+    // Convey the indeterminate case through the `error` STRING only, so the RN caller needs no new field
+    // (the bridge result stays `{ ok, error }`). 'not-installed' is provably absent → safe to retry;
+    // 'indeterminate' must NOT claim the reset was cancelled/unscheduled.
+    var error =
+      outcome === 'indeterminate'
+        ? 'The reset could NOT be confirmed and MAY still take effect on the next app restart — do NOT ' +
+          'assume it was cancelled. Restart the app to let it complete, or check the database state before retrying.'
+        : 'The reset was not scheduled — nothing was written to disk. It is safe to try again.';
     try {
       rnBridge.channel.post('loam-db-start-fresh-result', {
         requestId: requestId,
         ok: false,
-        error: String((err && err.message) || err),
+        error: error,
       });
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.
     }
     return;
+  }
+
+  try {
+    rnBridge.channel.post('loam-db-start-fresh-result', { requestId: requestId, ok: true });
+  } catch (postErr) {
+    // RN side isn't listening for the ack — still proceed with the in-process reboot below; the operator
+    // will see the recovered server's outcome via the next `loam-status` regardless.
   }
 
   // P1-1 (Sol round 3): re-attempt boot right here, in the SAME still-alive process. The marker is now
