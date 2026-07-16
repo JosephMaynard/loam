@@ -1447,12 +1447,151 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return result;
   }
 
+  /** Durably record the preserve-recovery ANCHOR (the target snapshot dir name). Returns durability. */
+  function writeRecoveryState(recoveryDirName: string): boolean {
+    return durableWriteFileSync(recoveryStatePath, recoveryDirName);
+  }
+
+  /** Durably remove the preserve-recovery anchor (unlink + parent-dir fsync). Returns proven-gone. */
+  function clearRecoveryState(): boolean {
+    try {
+      rmSync(recoveryStatePath, { force: true });
+    } catch (error) {
+      server.log.warn(error, "Preserve recovery: failed to delete the recovery-state anchor");
+    }
+    if (provenAbsence(recoveryStatePath) !== "absent") {
+      return false;
+    }
+    return fsyncDir(dataDir);
+  }
+
+  /**
+   * Move (or FINISH moving) the whole unopenable DB set + user media into `recoveryDir`, durably (P1, Sol
+   * round-12). Idempotent/resumable: only entries still in the ACTIVE namespace are moved, so a re-run after a
+   * crash completes a partial move rather than duplicating it — the DB set therefore always ends up COHERENT
+   * (every `loam.db*` file together) in the snapshot. Every source-presence check is ENOENT-only
+   * (`provenAbsence`); an UNVERIFIABLE stat aborts (returns false) BEFORE any fresh store could be opened, so a
+   * transient EIO can't silently leave media in the active namespace (P1-4). fsyncs BOTH parent directories —
+   * a cross-directory rename changes both, so making only the source durable would risk losing the destination
+   * link (P1-1). Returns whether the snapshot is now complete AND durable.
+   */
+  function completePreserveMove(recoveryDir: string): boolean {
+    try {
+      mkdirSync(recoveryDir, { recursive: true });
+    } catch (error) {
+      server.log.error(error, "Preserve recovery: could not create the recovery snapshot directory");
+      return false;
+    }
+    // Media directories first (ENOENT-only; abort on unverifiable).
+    for (const [name, dir] of [
+      ["avatars", avatarsDir],
+      ["attachments", attachmentsDir],
+    ] as const) {
+      const status = provenAbsence(dir);
+      if (status === "present") {
+        try {
+          renameSync(dir, join(recoveryDir, name));
+        } catch (error) {
+          if (provenAbsence(dir) !== "absent") {
+            server.log.error(error, `Preserve recovery: could not move ${dir} into the snapshot`);
+            return false;
+          }
+        }
+      } else if (status === "unknown") {
+        server.log.error(`Preserve recovery: could not verify ${dir} (unreadable) — aborting before any commit`);
+        return false;
+      }
+    }
+    // Every `loam.db*` artifact still in the active dir → into the snapshot.
+    const base = basename(dbPath);
+    let entries: string[];
+    try {
+      entries = readdirSync(dataDir);
+    } catch (error) {
+      server.log.error(error, "Preserve recovery: could not enumerate the data directory — aborting");
+      return false;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith(base)) {
+        continue;
+      }
+      const from = join(dataDir, entry);
+      try {
+        renameSync(from, join(recoveryDir, entry));
+      } catch (error) {
+        if (provenAbsence(from) !== "absent") {
+          server.log.error(error, `Preserve recovery: could not move ${from} into the snapshot`);
+          return false;
+        }
+      }
+    }
+    // Both parents must be durable (cross-directory rename changes both) before we report success.
+    return fsyncDir(recoveryDir) && fsyncDir(dataDir);
+  }
+
+  /**
+   * Boot-time resume of an interrupted preserve recovery (P1, Sol round-12): if the durable anchor is present,
+   * FINISH the move into the recorded snapshot and clear the anchor, so `openInitialStore` below never opens a
+   * fresh DB over a half-moved (incoherent) set. Runs before the store is opened. Fails closed (throws the
+   * recoverable {@link DbEncryptionUnreadableError}) rather than open over an uncertain state.
+   */
+  function resumePreserveRecovery(): void {
+    let recoveryDirName: string;
+    try {
+      recoveryDirName = readFileSync(recoveryStatePath, "utf8").trim();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return; // no interrupted preserve recovery
+      }
+      const message =
+        "A preserve-recovery anchor is present but UNREADABLE — a partial recovery snapshot may exist; refusing " +
+        "to open the database. The node is locked; resolve the filesystem fault and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    if (!recoveryDirName.startsWith(".loam-recovery-")) {
+      const message =
+        "A preserve-recovery anchor is present but malformed — refusing to open the database (a partial recovery " +
+        "snapshot may exist). The node is locked; resolve it and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    const recoveryDir = join(dataDir, recoveryDirName);
+    if (!completePreserveMove(recoveryDir)) {
+      const message =
+        "Resuming an interrupted preserve recovery: could not durably complete the move into the recovery " +
+        `snapshot ("${recoveryDirName}"). The node is locked; resolve the filesystem fault and reopen.`;
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    if (!clearRecoveryState()) {
+      const message =
+        "Resuming an interrupted preserve recovery: completed the move but could not durably clear the anchor. " +
+        "The node is locked; resolve the filesystem fault and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    server.log.warn(`Resumed and completed an interrupted preserve recovery into "${recoveryDirName}".`);
+  }
+
   // Operator "start fresh" confirmation marker (shared launcher contract, SF2/docs/15): the RN host's
   // explicit start-fresh UI writes this file BEFORE restarting the server; `openInitialStore` below
   // consumes (deletes) it as the ONLY thing allowed to trigger an automatic destructive DB replace.
   // Its mere presence is standing in for an operator's affirmative click — nothing else may substitute
   // for it (Sol's design review: an automatic replace on every unopenable DB is wrong).
   const dbStartFreshMarkerPath = join(dataDir, ".loam-db-start-fresh");
+
+  // Durable ANCHOR for a RESUMABLE preserve recovery (P1, Sol round-12). A `preserve` start-fresh moves the
+  // whole unopenable DB set + media into a unique `.loam-recovery-<suffix>/` snapshot. The moves are not one
+  // atomic op, so this state file (written BEFORE any move, cleared only after the move is durable) records
+  // the target snapshot: a boot-time `resumePreserveRecovery` sees it and FINISHES the move, so a crash can
+  // never leave the DB set split across the active namespace and the snapshot, or open a fresh DB over a
+  // partial one. Named under the `.loam-recovery-` prefix so a kill switch's snapshot sweep clears it too.
+  const recoveryStatePath = join(dataDir, ".loam-recovery-state");
 
   // Durable wipe PHASE file (P1-1, Sol round 8) — replaces the old single `.loam-wipe-pending` marker,
   // which conflated "deletion still pending" with "safe to clear the key". A shared launcher contract with
@@ -1541,9 +1680,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    *  current admin config — a boot-time resume restores config.json from this snapshot before it clears the
    *  journal, so config is durable the instant the intent is. */
   // `configInvalid` distinguishes a genuinely ABSENT config snapshot (legacy wipe / no snapshot → proceed)
-  // from one that is PRESENT but fails schema validation (corrupt on disk → do NOT silently drop it and lose
-  // config: the resume stays locked without clearing the journal, so the config bytes survive for repair).
-  type WipeJournal = { phase: WipePhase; config?: LoamConfig; configInvalid?: boolean };
+  // from one that is PRESENT but fails schema validation. `corrupt` covers a journal we cannot read or parse
+  // at all (non-ENOENT read error, malformed JSON, a JSON primitive, or unrecognized non-JSON content) — as
+  // opposed to an EXACT legacy plain string. In BOTH the `configInvalid` and `corrupt` cases the resume fails
+  // closed (locks WITHOUT clearing/rewriting the journal), so if the journal is the only durable copy of the
+  // admin config it is never silently dropped and reverted to defaults (CodeRabbit/Sol round-11/12).
+  type WipeJournal = { phase: WipePhase; config?: LoamConfig; configInvalid?: boolean; corrupt?: boolean };
 
   /** Strip the one plaintext bearer secret (`sync.token`) before it is written to `.loam-wipe-phase` or
    *  config.json — both are plain, unprotected files (scrypt-hashed secrets are safe to persist as-is). */
@@ -1578,32 +1720,47 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // No NEW journal — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished wipe.
         return migrateLegacyWipeMarkerIfPresent();
       }
+      // A non-ENOENT read error (EIO/EACCES): we CANNOT read the journal, so we cannot know whether it holds
+      // the only config copy. CORRUPT/unverifiable → the resume locks without clearing it (P1-3, round-12).
+      return { phase: "delete-pending", corrupt: true };
+    }
+    // EXACT legacy plain-string content (pre-round-10, no config snapshot) — the ONLY non-JSON forms accepted.
+    const trimmed = raw.trim();
+    if (trimmed === "delete-pending") {
       return { phase: "delete-pending" };
     }
-    // New JSON journal format (round-10+).
-    try {
-      const parsed = JSON.parse(raw) as { phase?: unknown; config?: unknown };
-      if (parsed && typeof parsed === "object") {
-        const phase: WipePhase = parsed.phase === "key-clear-ready" ? "key-clear-ready" : "delete-pending";
-        let config: LoamConfig | undefined;
-        let configInvalid = false;
-        if (parsed.config !== undefined) {
-          const validated = LoamConfigSchema.safeParse(parsed.config);
-          if (validated.success) {
-            config = validated.data;
-          } else {
-            // Present but invalid (disk corruption) — flag it so the resume fails closed rather than silently
-            // dropping it and reverting config to defaults.
-            configInvalid = true;
-          }
-        }
-        return { phase, config, configInvalid };
-      }
-    } catch {
-      // Not JSON — fall through to the legacy plain-string format below.
+    if (trimmed === "key-clear-ready") {
+      return { phase: "key-clear-ready" };
     }
-    // Legacy pre-round-10 plain-string content (no config snapshot).
-    return { phase: raw.trim() === "key-clear-ready" ? "key-clear-ready" : "delete-pending" };
+    // New JSON journal format (round-10+).
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // Not JSON and not an exact legacy string → unrecognized/malformed. durableWriteFileSync writes the
+      // journal atomically (temp+rename), so this is disk corruption, NOT a torn write. CORRUPT → lock, never
+      // treat an ambiguous file as a legacy no-config journal and clear it (P1-3, round-12).
+      return { phase: "delete-pending", corrupt: true };
+    }
+    // JSON must be a `{ phase, config? }` OBJECT. A primitive (null/number/string/boolean) or an array is not
+    // a valid journal → CORRUPT (lock), not a legacy no-config journal.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { phase: "delete-pending", corrupt: true };
+    }
+    const obj = parsed as { phase?: unknown; config?: unknown };
+    const phase: WipePhase = obj.phase === "key-clear-ready" ? "key-clear-ready" : "delete-pending";
+    let config: LoamConfig | undefined;
+    let configInvalid = false;
+    if (obj.config !== undefined) {
+      const validated = LoamConfigSchema.safeParse(obj.config);
+      if (validated.success) {
+        config = validated.data;
+      } else {
+        // Present but invalid (disk corruption) — the resume fails closed rather than silently dropping it.
+        configInvalid = true;
+      }
+    }
+    return { phase, config, configInvalid };
   }
 
   /**
@@ -1706,6 +1863,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * this is a boot-time safety net, not a substitute for it.
    */
   function openInitialStore(): LoamStore {
+    // P1 (Sol round-12): FINISH any interrupted preserve recovery FIRST — before consuming the start-fresh
+    // marker or opening the store — so a fresh DB is never opened over a half-moved (incoherent) DB set. A
+    // no-op when no recovery is pending; throws (locks) on an unverifiable/incomplete resume.
+    resumePreserveRecovery();
+
     const keyWasResolved = dbKey !== undefined;
 
     /**
@@ -1755,42 +1917,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
       }
 
-      // preserve: move the WHOLE snapshot — the DB set AND the user media (avatars + attachments) — into a
-      // UNIQUE recovery DIRECTORY (P1, Sol round-10), not just rename the DB files aside. Leaving avatars/
-      // attachments in the ACTIVE namespace let the boot-time orphan reaper (`reapOrphanedAttachments`, which
-      // scans the live `attachments/`) delete them — the fresh DB references none of the old attachment ids —
-      // so "preserve" silently DESTROYED the very files the preserved messages point at, and left avatars where
-      // a fresh node could collide with them. A dedicated `.loam-recovery-<suffix>/` directory keeps the
-      // snapshot coherent and OUT of both the reaper's path and the fresh node's active media dirs; a kill
-      // switch still wipes it (see `recoveryDirPaths` in the deletion inventory). Fail on a non-durable move.
+      // preserve: move the WHOLE snapshot — the DB set AND user media (avatars + attachments) — into a UNIQUE
+      // recovery DIRECTORY, RESUMABLY (P1, Sol round-12). Leaving media in the active namespace let the orphan
+      // reaper delete it; a dedicated `.loam-recovery-<suffix>/` keeps the snapshot coherent and out of the
+      // reaper's path AND the fresh node's active dirs. Because the moves aren't one atomic op, a durable ANCHOR
+      // (`.loam-recovery-state`) is written BEFORE any move, so a crash mid-move is FINISHED by
+      // `resumePreserveRecovery` on the next boot (the DB set never ends up split across the two directories).
+      // `completePreserveMove` uses ENOENT-only presence checks and fsyncs BOTH parent dirs. A kill switch
+      // still wipes the snapshot + anchor (both under the `.loam-recovery-` prefix).
       try {
         const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-        const recoveryDir = join(dataDir, `.loam-recovery-${preservedSuffix}`);
-        mkdirSync(recoveryDir, { recursive: true });
-        const base = basename(dbPath);
-        // CRASH-ATOMICITY (CodeRabbit round-11 CRITICAL): the moves are not one atomic op, so ORDER them so the
-        // `loam.db` MAIN-file rename is the single COMMIT point, and never leave a fresh DB paired with stale
-        // sidecars. FIRST move the media + the DB SIDECARS (`-wal`/`-shm`/`-journal`/`.premigration`/prior
-        // `.unreadable-*`) into the snapshot and fsync the recovery dir so its contents are durable; THEN move
-        // `loam.db` itself (the commit) and fsync the data dir. A crash BEFORE the loam.db move leaves the old
-        // DB still openable in place → wrong-key → `db_encryption_unreadable` lock (recoverable, no fresh DB
-        // opened over a partial snapshot); a crash AFTER it leaves the data dir clean for the fresh open.
-        // Move the user-media directories (so the reaper never sees them and the fresh node starts empty).
-        for (const [name, dir] of [
-          ["avatars", avatarsDir],
-          ["attachments", attachmentsDir],
-        ] as const) {
-          if (existsSync(dir)) {
-            renameSync(dir, join(recoveryDir, name));
-          }
+        const recoveryDirName = `.loam-recovery-${preservedSuffix}`;
+        const recoveryDir = join(dataDir, recoveryDirName);
+        // 1. Durable anchor FIRST (before any move) so an interrupted move is resumed, not left split.
+        if (!writeRecoveryState(recoveryDirName)) {
+          throw new Error("could not durably record the preserve-recovery anchor");
         }
-        // Move every `loam.db*` artifact EXCEPT the main `loam.db` file (sidecars + snapshots) first.
-        for (const entry of readdirSync(dataDir)) {
-          if (entry.startsWith(base) && entry !== base) {
-            renameSync(join(dataDir, entry), join(recoveryDir, entry));
-          }
+        // 2. Move the whole set into the snapshot, durably (both parents fsynced); resumable + coherent.
+        if (!completePreserveMove(recoveryDir)) {
+          throw new Error("preserve-recovery move could not be completed durably");
         }
-        // A small manifest describing the snapshot (informational; recovery does not depend on it).
+        // 3. A small manifest (informational; recovery does not depend on it).
         try {
           writeFileSync(
             join(recoveryDir, "manifest.json"),
@@ -1800,30 +1947,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         } catch (manifestError) {
           server.log.warn(manifestError, "Preserve recovery: could not write the snapshot manifest (informational only)");
         }
-        // Make the snapshot's own contents durable BEFORE the commit rename below.
-        if (!fsyncDir(recoveryDir)) {
-          throw new Error("preserved recovery snapshot could not be made durable (recovery-directory fsync failed)");
-        }
-        // COMMIT: move the main `loam.db` file last. Before this the old DB is still in place (recoverable);
-        // after it the data dir is clean.
-        if (existsSync(dbPath)) {
-          renameSync(dbPath, join(recoveryDir, base));
-        }
-        // fsync the data dir so the removals (media + loam.db + sidecars) are DURABLE before the fresh open.
-        if (!fsyncDir(dataDir)) {
-          throw new Error("preserved recovery snapshot could not be made durable (parent-directory fsync failed)");
+        // 4. Clear the anchor — the snapshot is complete + durable and the active namespace is clean.
+        if (!clearRecoveryState()) {
+          throw new Error("could not durably clear the preserve-recovery anchor");
         }
         const message =
           "An explicit PRESERVE start-fresh confirmation was present, so the previous database and all user media " +
-          `were moved into a recovery snapshot (".loam-recovery-${preservedSuffix}/") and a fresh database was started.`;
+          `were moved into a recovery snapshot ("${recoveryDirName}/") and a fresh database was started.`;
         server.log.warn(message);
         reportBootNotice(message, "db_encryption_recovered_fresh");
         return openLoamStore();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         const message =
-          "Start-fresh recovery failed while renaming the previous database aside or opening a fresh one " +
-          `(${detail}). The confirmation was already consumed; the operator can confirm start-fresh again to retry.`;
+          "Start-fresh recovery failed while moving the previous database into the recovery snapshot or opening a " +
+          `fresh one (${detail}). The confirmation was already consumed; the operator can confirm start-fresh again ` +
+          "to retry (the recovery anchor makes any partial move resume on the next boot).";
         server.log.error(message);
         reportBootNotice(message, "db_encryption_unreadable");
         throw new DbEncryptionUnreadableError(message);
@@ -2149,16 +2288,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     // The resume treats `delete-pending` and `key-clear-ready` identically — both re-verify deletion and
     // (re-)advance — so only the config snapshot is read here; the phase is fail-safe either way.
-    const { config, configInvalid } = journal;
+    const { config, configInvalid, corrupt } = journal;
 
-    // CodeRabbit round-11 MAJOR: a PRESENT-but-INVALID config snapshot (journal corrupted on disk) must NOT be
-    // silently dropped — that would revert admin config to defaults. Fail closed: do NOT clear the journal or
-    // proceed (either would lose the config bytes); lock so the operator can inspect/repair `.loam-wipe-phase`.
-    if (configInvalid) {
+    // Round-11/12 (CodeRabbit/Sol): a journal we cannot trust — either UNREADABLE/unparseable (`corrupt`) or
+    // with a PRESENT-but-INVALID config snapshot (`configInvalid`) — must NOT be silently proceeded past. If
+    // config.json's live write failed, this journal is the only durable copy of the admin config; clearing or
+    // ignoring it would revert the armed kill switch / security profile / retention to defaults. Fail closed:
+    // lock WITHOUT clearing/rewriting the journal, so the bytes survive for inspection/repair.
+    if (corrupt || configInvalid) {
+      const detail = corrupt
+        ? "could not be read or parsed (unreadable or malformed — possible disk corruption)"
+        : "has a PRESENT but INVALID config snapshot";
       const message =
-        "Resuming an interrupted emergency wipe: the config snapshot in the wipe journal is PRESENT but INVALID " +
-        "(the journal file may be corrupt). Refusing to proceed — clearing the journal would lose the admin " +
-        "config. The node is locked; inspect or repair `.loam-wipe-phase` and reopen.";
+        `Resuming an interrupted emergency wipe: the wipe journal ${detail}. Refusing to proceed — clearing or ` +
+        "ignoring it could lose the admin config. The node is locked; inspect or repair `.loam-wipe-phase` and reopen.";
       server.log.error(message);
       reportBootNotice(message, "kill_switch_wipe_incomplete");
       throw new WipeResumeInProgressError(message);

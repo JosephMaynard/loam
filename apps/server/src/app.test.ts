@@ -80,6 +80,7 @@ const premigrationDeleteFailure = vi.hoisted(() => ({ armed: false }));
 // test / unrelated fs call is affected; reset in `afterEach`.
 const readdirFailure = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 const lstatFailure = vi.hoisted(() => ({ path: undefined as string | undefined }));
+const readFileSyncFailure = vi.hoisted(() => ({ path: undefined as string | undefined }));
 // P1-5 (Sol round 8): fault-injection seam for the DURABLE-write fsync. `openSyncFailure.path` makes
 // `openSync` of that EXACT path throw EIO, so the parent-DIRECTORY fsync (`fsyncDir` opens the dir with
 // openSync) fails — proving `durableWriteFileSync`/`clearWipePhase` report NOT-durable (fail closed) rather
@@ -112,6 +113,16 @@ vi.mock("node:fs", async (importOriginal) => {
         throw err;
       }
       return actual.readdirSync(...(args as Parameters<typeof actual.readdirSync>));
+    },
+    readFileSync: (...args: Parameters<typeof actual.readFileSync>) => {
+      // P1-3 (Sol round 12): fault a non-ENOENT read of one exact path (e.g. `.loam-wipe-phase`) to prove a
+      // journal we CANNOT read is treated as corrupt/unverifiable (lock), not a legacy no-config journal.
+      if (readFileSyncFailure.path && String(args[0]) === readFileSyncFailure.path) {
+        const err = new Error("simulated readFileSync EIO (P1-3 test fault injection)") as NodeJS.ErrnoException;
+        err.code = "EIO";
+        throw err;
+      }
+      return actual.readFileSync(...(args as Parameters<typeof actual.readFileSync>));
     },
     lstatSync: (...args: Parameters<typeof actual.lstatSync>) => {
       if (lstatFailure.path && String(args[0]) === lstatFailure.path) {
@@ -207,6 +218,7 @@ afterEach(async () => {
   openSyncFailure.path = undefined;
   openSyncFailure.failOnCall = undefined;
   openSyncFailure.count = 0;
+  readFileSyncFailure.path = undefined;
   wipeMarkerWriteFailure.armed = false;
   backupCapture.dir = undefined;
   postRekeyCleanupFailure.armed = false;
@@ -272,9 +284,10 @@ function readJournalConfig(dataDir: string): Record<string, unknown> | undefined
   }
 }
 
-/** Preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol round-11). */
+/** Preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol round-11), excluding the
+ *  transient `.loam-recovery-state` anchor file (Sol round-12). */
 function recoverySnapshots(dataDir: string): string[] {
-  return readdirSync(dataDir).filter((name) => name.startsWith(".loam-recovery-"));
+  return readdirSync(dataDir).filter((name) => name.startsWith(".loam-recovery-") && name !== ".loam-recovery-state");
 }
 
 function sessionCookie(response: InjectResponse): string {
@@ -2295,6 +2308,112 @@ describe("encryption at rest + key-discard kill switch", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(readFileSync(join(snap, "attachments", "att_00000000000000aa.png"), "utf8")).toBe("ATTACHMENT_BYTES");
     expect(readFileSync(join(snap, "avatars", "avt_cafecafecafecafe.webp"), "utf8")).toBe("AVATAR_BYTES");
+  });
+
+  it("P1-1/P1-2 (Sol round 12): an INTERRUPTED preserve recovery (anchor + a SPLIT DB set) is RESUMED on boot — the move completes coherently, no fresh DB opens over a partial snapshot", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "SPLIT_PRESERVE_SECRET")).statusCode).toBe(201);
+    const avatarsDir = join(dataDir, "avatars");
+    const attachmentsDir = join(dataDir, "attachments");
+    mkdirSync(avatarsDir, { recursive: true });
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(join(avatarsDir, "avt_split.webp"), "AVATAR_SPLIT");
+    writeFileSync(join(attachmentsDir, "att_split.png"), "ATTACH_SPLIT");
+    await app.close();
+
+    // Simulate a CRASH mid-preserve-move: the durable anchor is present, and the DB set is SPLIT — a sidecar
+    // was already moved into the recovery dir, but loam.db + media are still in the active namespace.
+    const recoveryDirName = ".loam-recovery-1700000000000-abcdef";
+    const recoveryDir = join(dataDir, recoveryDirName);
+    mkdirSync(recoveryDir, { recursive: true });
+    writeFileSync(join(recoveryDir, "loam.db-wal"), "PRE_MOVED_WAL");
+    writeFileSync(join(dataDir, ".loam-recovery-state"), recoveryDirName);
+
+    // Boot under a DIFFERENT key (realistic wrong-key lockout). resumePreserveRecovery runs FIRST, finishes
+    // the move, clears the anchor; then a fresh DB opens under the new key.
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+
+    // The anchor is cleared and the snapshot is COHERENT — every piece is together in ONE recovery dir.
+    expect(existsSync(join(dataDir, ".loam-recovery-state"))).toBe(false);
+    expect(recoverySnapshots(dataDir)).toEqual([recoveryDirName]);
+    expect(existsSync(join(recoveryDir, "loam.db"))).toBe(true);
+    expect(existsSync(join(recoveryDir, "loam.db-wal"))).toBe(true); // the pre-moved sidecar stays with it
+    expect(readFileSync(join(recoveryDir, "avatars", "avt_split.webp"), "utf8")).toBe("AVATAR_SPLIT");
+    expect(readFileSync(join(recoveryDir, "attachments", "att_split.png"), "utf8")).toBe("ATTACH_SPLIT");
+    // The active namespace is clean — no split remnants, fresh DB usable.
+    expect(existsSync(join(avatarsDir, "avt_split.webp"))).toBe(false);
+    const boot2Admin = await session(boot2);
+    expect((await post(boot2, boot2Admin.cookie, "after resumed preserve")).statusCode).toBe(201);
+  });
+
+  it("P1-4 (Sol round 12): a preserve move with an UNVERIFIABLE media dir (non-ENOENT stat) aborts before opening a fresh store — media is never left in the active namespace", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    const attachmentsDir = join(dataDir, "attachments");
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(join(attachmentsDir, "att_unverif.png"), "UNVERIF");
+    await app.close();
+
+    // A preserve confirmation + an lstat fault on the attachments dir (provenAbsence → "unknown"): the move
+    // must ABORT (fail closed) rather than skip the dir as if absent and open a fresh store over live media.
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
+    lstatFailure.path = attachmentsDir;
+    const reports = installFakeBootBridge();
+    await expect(
+      buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" }),
+    ).rejects.toThrow();
+    lstatFailure.path = undefined;
+    expect(reports.some((r) => r.code === "db_encryption_unreadable")).toBe(true);
+  });
+
+  describe("P1-3 (Sol round 12): a corrupt/unverifiable wipe journal fails closed instead of being read as a legacy no-config journal", () => {
+    async function expectJournalLocks(content: string, opts?: { unreadable?: boolean }): Promise<void> {
+      const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+      await session(app);
+      await app.close();
+      writeFileSync(join(dataDir, ".loam-wipe-phase"), content);
+      if (opts?.unreadable) {
+        readFileSyncFailure.path = join(dataDir, ".loam-wipe-phase");
+      }
+      const reports = installFakeBootBridge();
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+      ).rejects.toThrow();
+      readFileSyncFailure.path = undefined;
+      // The journal is RETAINED (not cleared/rewritten) so any config bytes survive; a distinct notice fires.
+      expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+    }
+
+    it("truncated JSON", () => expectJournalLocks('{"phase":"delete-pen'));
+    it("JSON null", () => expectJournalLocks("null"));
+    it("JSON array", () => expectJournalLocks("[1,2,3]"));
+    it("unrecognized non-JSON string", () => expectJournalLocks("garbage-not-a-recognized-phase"));
+    it("non-ENOENT read error", () => expectJournalLocks('{"phase":"delete-pending"}', { unreadable: true }));
+  });
+
+  it("P1-3 (Sol round 12): EXACT legacy plain-string journals (delete-pending / key-clear-ready) stay valid no-config journals — the no-hook resume proceeds and completes, not a corrupt lock", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "LEGACY_STRING_SECRET")).statusCode).toBe(201);
+    await app.close();
+
+    writeFileSync(join(dataDir, ".loam-wipe-phase"), "delete-pending"); // EXACT legacy plain string
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+    // Proceeded (not a corrupt lock): the no-hook resume deleted + cleared the journal + opened fresh.
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    const search = await boot2.server.inject({
+      method: "GET",
+      url: "/api/search?q=LEGACY_STRING_SECRET",
+      headers: { cookie: (await session(boot2)).cookie },
+    });
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
   });
 
   it("RF-a extended (Sol round 10 review): an in-process wipe (ephemeral) 503-gates concurrent requests throughout the shared-tail media-deletion awaits, then serves the fresh state once complete", async () => {
