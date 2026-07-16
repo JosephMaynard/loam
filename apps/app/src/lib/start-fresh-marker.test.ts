@@ -37,6 +37,8 @@ function ioError(msg: string, code = "EIO"): Enoent {
 }
 
 interface MockOptions {
+  /** make `mkdirSync(DIR)` throw — the directory-preparation step at the START of phase 1. */
+  failMkdir?: boolean;
   failWrite?: boolean;
   /** fail `openSync(tmpPath)` — the FILE-inode fsync in phase 1 (before any rename). */
   failFileFsyncOpen?: boolean;
@@ -48,6 +50,8 @@ interface MockOptions {
   failUnlink?: boolean;
   /** force `lstatSync(MARKER)` to report the marker still present even after a successful unlink. */
   markerLingersAfterUnlink?: boolean;
+  /** make `lstatSync(MARKER)` throw a non-ENOENT error (the absence proof is unverifiable). */
+  failLstatUnverifiable?: boolean;
 }
 
 /** An in-memory `fs` exposing only the calls `installStartFreshMarker` makes, with injectable faults. */
@@ -58,6 +62,11 @@ function makeFs(opts: MockOptions) {
   const fdPath = new Map<number, string>();
 
   const fs = {
+    mkdirSync(pathArg: string) {
+      if (pathArg === DIR && opts.failMkdir) {
+        throw ioError("mkdir failed");
+      }
+    },
     writeFileSync(pathArg: string) {
       if (opts.failWrite) {
         throw ioError("write failed");
@@ -104,6 +113,9 @@ function makeFs(opts: MockOptions) {
       files.delete(pathArg);
     },
     lstatSync(pathArg: string) {
+      if (pathArg === MARKER && opts.failLstatUnverifiable) {
+        throw ioError("lstat failed", "EACCES"); // cannot prove absence
+      }
       if (pathArg === MARKER && opts.markerLingersAfterUnlink) {
         return {}; // pretend the marker is still there despite the unlink
       }
@@ -206,5 +218,34 @@ describe("installStartFreshMarker", () => {
     fs.writeFileSync(MARKER); // a stale marker from an earlier unconsumed request
     expect(install(fs)).toBe("indeterminate");
     expect(fs._has(MARKER)).toBe(true);
+  });
+
+  // Sol P2: directory preparation now lives INSIDE the helper's phase-1 try, so a mkdir failure routes
+  // through the same ENOENT-only absence proof as a write/rename failure — the caller no longer wraps the
+  // helper in its own mkdir + outer catch that reported 'not-installed' without proving marker absence.
+  it("returns 'not-installed' when directory preparation fails and NO marker exists on disk (provably absent)", () => {
+    const fs = makeFs({ failMkdir: true });
+    expect(install(fs)).toBe("not-installed");
+    expect(fs._has(MARKER)).toBe(false);
+    // the staging file was never written (mkdir threw first), so nothing lingers
+    expect(fs._tmpFilesRemaining()).toEqual([]);
+  });
+
+  it("returns 'indeterminate' (NOT 'not-installed') when directory preparation fails but a PRE-EXISTING marker is still on disk", () => {
+    // A prior unconsumed 'delete' marker exists; mkdir throws before this call stages anything. Reporting
+    // 'not-installed' here would let the caller claim "nothing was written" while an armed, possibly
+    // destructive marker remains consumable on a later restart.
+    const fs = makeFs({ failMkdir: true });
+    fs.writeFileSync(MARKER); // a stale 'delete' marker from an earlier unconsumed request
+    expect(install(fs)).toBe("indeterminate");
+    // the pre-existing marker is untouched — because we returned 'indeterminate', we did NOT claim absence.
+    expect(fs._has(MARKER)).toBe(true);
+  });
+
+  it("returns 'indeterminate' when directory preparation fails and the absence-proof lstat is unverifiable", () => {
+    // mkdir throws, then the ENOENT-only absence proof itself hits a non-ENOENT stat error (EACCES/EIO):
+    // absence cannot be verified, so the marker MAY be present → indeterminate, never a false 'not scheduled'.
+    const fs = makeFs({ failMkdir: true, failLstatUnverifiable: true });
+    expect(install(fs)).toBe("indeterminate");
   });
 });

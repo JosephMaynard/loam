@@ -54,11 +54,19 @@ function fsyncDirWith(fs, dir) {
  *                       failed). The marker MAY be on disk and MAY be consumed on a later restart — the
  *                       caller must NOT report this as cancelled/unscheduled.
  *
+ * The helper also PREPARES the parent directory itself (`mkdirSync(dir, { recursive: true })`) as the very
+ * first step of Phase 1, so the whole "prepare dir → stage → fsync → rename" operation is a single tested
+ * function with the correct three-outcome contract (the caller no longer wraps it in its own mkdir + catch).
+ * Because the mkdir is INSIDE the Phase-1 try, a directory-preparation failure falls into the SAME Phase-1
+ * catch as a write/rename failure: it proves marker absence (ENOENT-only lstat) before reporting
+ * `not-installed`, so a mkdir throw while a PRIOR unconsumed marker exists yields `indeterminate`, never a
+ * false "nothing was written".
+ *
  * All filesystem access goes through the injected `options.fs` so this is unit-testable with a mock `fs`.
  *
  * @param {object} options
- * @param {object} options.fs         `fs`-like: writeFileSync, openSync, fsyncSync, closeSync, renameSync,
- *                                     rmSync, unlinkSync, lstatSync.
+ * @param {object} options.fs         `fs`-like: mkdirSync, writeFileSync, openSync, fsyncSync, closeSync,
+ *                                     renameSync, rmSync, unlinkSync, lstatSync.
  * @param {string} options.markerPath final marker path.
  * @param {string} options.tmpPath    staging path (same directory / filesystem as markerPath).
  * @param {string} options.dir        parent directory of the marker, to fsync.
@@ -72,13 +80,17 @@ function installStartFreshMarker(options) {
   var dir = options.dir;
   var contents = options.contents;
 
-  // Phase 1 — stage the bytes, fsync the file inode, then atomically rename onto the marker path. A failure
-  // here means THIS call did not install a new marker. But the atomic rename leaves any PRE-EXISTING marker
-  // (from an earlier unconsumed request) untouched, so "this write failed" does NOT prove the marker path is
-  // absent (CodeRabbit round-10 CRITICAL). Clean up the staging file, then PROVE absence (lstat, ENOENT-only)
-  // before reporting `not-installed`; if a marker still exists — or absence can't be verified — report
-  // `indeterminate` so the caller never claims "nothing was written" while a consumable marker is on disk.
+  // Phase 1 — prepare the parent directory, stage the bytes, fsync the file inode, then atomically rename
+  // onto the marker path. A failure here (INCLUDING the directory preparation) means THIS call did not
+  // install a new marker. But the atomic rename leaves any PRE-EXISTING marker (from an earlier unconsumed
+  // request) untouched, so "this write failed" does NOT prove the marker path is absent (CodeRabbit round-10
+  // CRITICAL; keeping mkdir inside this try is the Sol P2 fix so a mkdir throw routes through the same
+  // absence-proof rather than a false "not scheduled"). Clean up the staging file, then PROVE absence (lstat,
+  // ENOENT-only) before reporting `not-installed`; if a marker still exists — or absence can't be verified —
+  // report `indeterminate` so the caller never claims "nothing was written" while a consumable marker is on
+  // disk.
   try {
+    fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(tmpPath, contents, 'utf8');
     var fd = fs.openSync(tmpPath, 'r');
     try {
