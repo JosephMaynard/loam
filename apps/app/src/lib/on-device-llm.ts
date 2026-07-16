@@ -210,6 +210,33 @@ export function releaseActiveModelContext(): Promise<void> {
 }
 
 /**
+ * PATH-AWARE release used when a SPECIFIC model is being cleared/deleted (Finding 1): initiate the tracked
+ * release of the loaded context ONLY if the currently-loaded model is `modelPath`. This is what lets the
+ * action layer drive a release on EVERY confirmed launcher clear — including reconciliation of an OLD delete
+ * from a previous process — without ever tearing down a DIFFERENT, newly-loaded model: reconciling a stale
+ * delete for model A while B is loaded must not release B. `modelPath` is compared after stripping the
+ * `file://` scheme the same way `activeModelPath` does before it stores `loadedModelPath`, so a caller can
+ * pass a raw `model.uri` (`file:///…`) and it still matches the bare path we loaded with.
+ *
+ * Like `releaseActiveModelContext`, it runs SERIALIZED behind `inferenceChain` (so it can't release a
+ * context out from under a running completion), only INITIATES the release (`beginRelease` — never `await`s
+ * the native `release()`, preserving the Sol P1 state-machine contract that nothing on this path can wedge
+ * the chain), and never throws — safe to `await` from the delete transaction without risking a hang. The
+ * path check runs INSIDE the serialized step, against the state that exists once any in-flight inference has
+ * drained, so it reflects what's actually loaded at release time.
+ */
+export function releaseModelContextIfLoaded(modelPath: string): Promise<void> {
+  const target = modelPath.replace(/^file:\/\//, '');
+  const run = inferenceChain.then(() => {
+    if (loadedContext && loadedModelPath === target) {
+      beginRelease();
+    }
+  });
+  inferenceChain = run.catch(() => undefined);
+  return run;
+}
+
+/**
  * Load (or reuse) the llama.rn context for `modelPath`. Refuses to build a fresh context unless the engine
  * is `ready`: while an older context is still `releasing` (or the engine is `poisoned` by a failed release)
  * building a new multi-GB context would double native residency and likely OOM (Sol P1) — so those states

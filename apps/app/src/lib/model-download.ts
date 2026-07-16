@@ -334,6 +334,69 @@ async function safeDelete(uri: string): Promise<void> {
   }
 }
 
+// ---- retained-orphan registry (Finding 2) ---------------------------------------------------------
+// A download whose bytes landed on disk but then failed BOTH to register in the model list AND to be
+// checked-deleted leaves a multi-GB orphan. Its URI is retained at MODULE level (survives the model-manager
+// overlay unmounting/remounting — component state would lose it) so the NEXT download attempt cleans it
+// FIRST and aborts if it still can't be removed, guaranteeing orphans never accumulate. This is a SET, not a
+// scalar: a SECOND failed cleanup (catalog then custom, or two catalog rows before the guard is cleared)
+// must not overwrite the first's URI and strand it. The per-process orphan sweep (`sweepOrphanedModelFiles`)
+// only runs once at first open, so it can't catch an orphan created afterward — this registry is that
+// safety net between sweeps, and the sweep remains the durable next-process backstop.
+
+const retainedOrphanUris = new Set<string>();
+
+/** Record a just-downloaded file whose registration AND checked cleanup both failed (Finding 2) so the next
+ * download attempt re-attempts its deletion before starting. Prefer `discardUnregisteredDownload`, which
+ * only retains after a cleanup actually fails; this is exposed for tests / direct callers. */
+export function retainOrphanUri(uri: string): void {
+  retainedOrphanUris.add(uri);
+}
+
+/** How many orphan URIs are currently retained — for tests/diagnostics only. */
+export function retainedOrphanCount(): number {
+  return retainedOrphanUris.size;
+}
+
+/**
+ * Discard a just-downloaded file that couldn't be registered in the model list (Finding 2): CHECKED-delete
+ * its bytes so no unreferenced final model accumulates. On success the file is gone and nothing is retained;
+ * on a cleanup FAILURE the URI is retained in the module-level orphan set so the next download attempt
+ * (`clearRetainedOrphans`) cleans it first. Never throws — returns whether the file was cleanly removed.
+ */
+export async function discardUnregisteredDownload(uri: string): Promise<{ removed: boolean; error?: string }> {
+  try {
+    await deleteModelFileChecked(uri);
+    return { removed: true };
+  } catch (err) {
+    retainedOrphanUris.add(uri);
+    return { removed: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Before ANY new download, atomically clean EVERY retained orphan (Finding 2): CHECKED-delete each, dropping
+ * it from the set ONLY on confirmed deletion. Returns `{ ok: true }` once the set is empty; `{ ok: false }`
+ * (with the first failure's message) if any orphan still can't be removed — the caller MUST abort the new
+ * download so orphans can never accumulate. Idempotent and safe to call before every download.
+ */
+export async function clearRetainedOrphans(): Promise<{ ok: true } | { ok: false; error: string }> {
+  let firstError: string | undefined;
+  for (const uri of [...retainedOrphanUris]) {
+    try {
+      await deleteModelFileChecked(uri);
+      retainedOrphanUris.delete(uri);
+    } catch (err) {
+      if (firstError === undefined) {
+        firstError = err instanceof Error ? err.message : String(err);
+      }
+    }
+  }
+  return retainedOrphanUris.size === 0
+    ? { ok: true }
+    : { ok: false, error: firstError ?? 'a retained model file could not be removed' };
+}
+
 // ---- custom (pasted-URL) download validation & redaction (Finding 2) ------------------------------
 
 /** The one trusted public host custom (pasted-URL) downloads are allowed to reach. The curated catalog

@@ -44,6 +44,19 @@ export interface ModelActionDeps {
    * throw here keeps the durable delete-pending in place so reconciliation retries, rather than reporting
    * a model "deleted" while its multi-GB file silently remains on disk. */
   deleteModelFile(uri: string): Promise<void>;
+  /** Release the loaded on-device native context UNCONDITIONALLY (bound to `releaseActiveModelContext`) —
+   * used after a confirmed DEACTIVATE / active `clear`. Fix 2 / Finding 1: driving this from the action
+   * layer means EVERY confirmed launcher clear releases the (multi-GB) context, including the ambiguous
+   * outcomes and reconciliation — not just a direct deactivate whose bridge returned `ok`. It only
+   * INITIATES the release and returns PROMPTLY (never blocks on the native `release()`), so awaiting it
+   * here can't wedge the operation mutex; and it never throws. */
+  releaseActiveContext(): Promise<void>;
+  /** Release the loaded native context ONLY IF the currently-loaded model is `modelPath` (bound to
+   * `releaseModelContextIfLoaded`) — used before the IRREVERSIBLE byte deletion of a DELETED model so the
+   * GGUF is never unlinked while the native context may still map it (Finding 1). PATH-AWARE so reconciling
+   * an old delete for one model never tears down a different, newly-loaded one. Like `releaseActiveContext`
+   * it only initiates the release, returns promptly, and never throws. */
+  releaseModelContext(modelPath: string): Promise<void>;
 }
 
 /** How a transaction ended, so `model-manager.tsx` can adopt the resulting state and show a message:
@@ -180,6 +193,11 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
 
   const result = await deps.clearActiveModel();
   if (result.status === 'ok') {
+    // Confirmed launcher clear → release the native context now (Finding 1), BEFORE clearing the journal.
+    // Driving it from here (not the component's post-`ok` path) means even a confirmed clear whose
+    // pending-journal write then fails still releases exactly once. Prompt-returning, so it never blocks
+    // the mutex.
+    await deps.releaseActiveContext();
     const cleared = await clearPendingEntry(deps, POINTER_PENDING_ID);
     if (!cleared.persisted) {
       return {
@@ -318,12 +336,16 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
         message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
       };
     }
-    // Confirmed `ok` — the launcher released the file. Now delete the bytes (CHECKED) then clear the
-    // journal (Finding 1).
+    // Confirmed `ok` — the launcher released the file. Release the native context FIRST (path-aware —
+    // Finding 1) so the GGUF isn't unlinked while the native side may still have it mapped, THEN delete the
+    // bytes (CHECKED) and clear the journal. Prompt-returning, so it never blocks the mutex.
+    await deps.releaseModelContext(model.uri);
     return commitByteDeletion(deps, model, state);
   }
 
   // Inactive: no launcher clear needed — delete the bytes (CHECKED) then clear the journal (Finding 1).
+  // No context release: an inactive model isn't the loaded one, and `releaseModelContext` is path-aware
+  // anyway, so a release here would be a guaranteed no-op.
   return commitByteDeletion(deps, model, state);
 }
 
@@ -455,6 +477,12 @@ async function reconcileOne(
   }
 
   if (result.status === 'ok') {
+    // A confirmed `clear` means the launcher released the active model — release the native context too
+    // (Finding 1), the same as a direct deactivate, so a clear that only settled on RECONCILIATION (e.g. it
+    // timed out originally) still reclaims the context. `setActive` never releases. Before the journal drop.
+    if (action.kind === 'clear') {
+      await deps.releaseActiveContext();
+    }
     // Confirmed. Durably drop the pending and CHECK it landed (P2-1): only once the drop is on disk may
     // we treat it settled. If the drop write fails, keep the pending in our view so the next pass retries;
     // never report settled off an in-memory assumption that isn't on disk.
@@ -511,6 +539,13 @@ async function reconcileDelete(
       // timeout (ambiguous) or failed (launcher still references it) — keep the pending + bytes untouched.
       return state;
     }
+  }
+  if (requiresLauncherClear && action.fileUri) {
+    // Active delete whose launcher clear is now confirmed (or was SKIPPED above because a newer model took
+    // the pointer, `state.activeId` set): release the native context BEFORE unlinking the bytes (Finding 1),
+    // so reconciling a delete that only settled this pass still reclaims the context and never unlinks a
+    // still-mapped file. PATH-AWARE, so an OLD delete for model A never releases a newly-loaded B.
+    await deps.releaseModelContext(action.fileUri);
   }
   if (action.fileUri) {
     try {

@@ -98,6 +98,7 @@ const endedFor = (channel: FakeChannel, id: string) =>
 // state machine, and the inference chain) is fresh — a wedged run in one test must not chain into the next.
 let registerOnDeviceLlm: typeof import("@/lib/on-device-llm").registerOnDeviceLlm;
 let releaseActiveModelContext: typeof import("@/lib/on-device-llm").releaseActiveModelContext;
+let releaseModelContextIfLoaded: typeof import("@/lib/on-device-llm").releaseModelContextIfLoaded;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -118,7 +119,7 @@ beforeEach(async () => {
   // once hang or reject on `release`, and `mockClear` alone would leave that implementation in place.
   mocks.release.mockImplementation(async () => {});
   mocks.contextsCreated = 0;
-  ({ registerOnDeviceLlm, releaseActiveModelContext } = await import("@/lib/on-device-llm"));
+  ({ registerOnDeviceLlm, releaseActiveModelContext, releaseModelContextIfLoaded } = await import("@/lib/on-device-llm"));
 });
 
 afterEach(() => {
@@ -372,6 +373,54 @@ describe("on-device-llm inference", () => {
 
     expect(mocks.release).toHaveBeenCalledTimes(1);
     expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/No on-device model is selected/i);
+  });
+
+  it("releaseModelContextIfLoaded is PATH-AWARE: a different model's uri never releases the loaded one (Finding 1)", async () => {
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    // Load model `m` (uri file:///models/m.gguf → stored as the bare path /models/m.gguf).
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "1")).toBe(true);
+    expect(mocks.release).not.toHaveBeenCalled();
+
+    // Reconciling an OLD delete for a DIFFERENT model must NOT tear down the loaded one (accepts the raw
+    // `file://` uri and strips it before comparing, same as the active-path derivation).
+    await releaseModelContextIfLoaded("file:///models/other.gguf");
+    await flush();
+    expect(mocks.release).not.toHaveBeenCalled();
+
+    // The loaded model's own uri DOES release it.
+    await releaseModelContextIfLoaded("file:///models/m.gguf");
+    await flush();
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("releaseModelContextIfLoaded is a no-op that never throws when nothing is loaded (Finding 1)", async () => {
+    await expect(releaseModelContextIfLoaded("file:///models/m.gguf")).resolves.toBeUndefined();
+    expect(mocks.release).not.toHaveBeenCalled();
+  });
+
+  it("releaseModelContextIfLoaded whose native release HANGS returns promptly and doesn't wedge the chain (Finding 1 / Sol P1)", async () => {
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "1")).toBe(true);
+
+    // The native release() never settles — the path-aware release must still return promptly (initiate-only).
+    mocks.release.mockImplementationOnce(() => new Promise(() => {}));
+    await releaseModelContextIfLoaded("file:///models/m.gguf");
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+    const contextsWhileReleasing = mocks.contextsCreated;
+
+    // A following request fails FAST (engine `releasing`) rather than hanging, and builds no second context.
+    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(mocks.contextsCreated).toBe(contextsWhileReleasing);
+    expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/still recovering/i);
   });
 
   it("does not throw (and never crashes) when release fails on the no-active-model path", async () => {

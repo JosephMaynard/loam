@@ -5,13 +5,18 @@
 // reclaimed as before.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fileSystemMock, resetFileSystemMock, seedFile } from "@/test-utils/mocks";
+import { clearFileSystemFailure, failFileSystemUri, fileSystemMock, resetFileSystemMock, seedFile } from "@/test-utils/mocks";
 
 vi.mock("expo-file-system/legacy", () => fileSystemMock);
 
-const { deleteModelFileChecked, prepareCustomModelDownload, sweepOrphanedModelFiles } = await import(
-  "@/lib/model-download"
-);
+const {
+  clearRetainedOrphans,
+  deleteModelFileChecked,
+  discardUnregisteredDownload,
+  prepareCustomModelDownload,
+  retainedOrphanCount,
+  sweepOrphanedModelFiles,
+} = await import("@/lib/model-download");
 
 const MODELS_DIR = `${fileSystemMock.documentDirectory}models/`;
 const keep = `${MODELS_DIR}keep.gguf`;
@@ -179,5 +184,81 @@ describe("prepareCustomModelDownload — parsing, authorization & credential red
     if (!result.ok) return;
     expect(result.fileName).toBe("mymodel.gguf");
     expect(result.displayName).toBe("mymodel");
+  });
+});
+
+// Finding 2: a download whose bytes landed but couldn't be registered is discarded with a CHECKED delete;
+// if that cleanup ALSO fails the URI is retained in a module-level SET (not a scalar), and no new download
+// may start until every retained orphan is confirmed gone. This is the registry both the catalog and custom
+// paths funnel their registration-failure cleanup through, so an orphan can never accumulate.
+describe("retained-orphan registry — discard + clear-first guard (Finding 2)", () => {
+  const orphan1 = `${MODELS_DIR}orphan-1.gguf`;
+  const orphan2 = `${MODELS_DIR}orphan-2.gguf`;
+
+  beforeEach(async () => {
+    resetFileSystemMock();
+    // Drain any orphan URIs retained by a previous test (the registry is module-level). With a fresh mock
+    // the files are absent, so each checked delete is an idempotent no-op success and drops from the set.
+    await clearRetainedOrphans();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("catalog/custom success-then-persist-fail with a SUCCESSFUL cleanup leaves NO orphan", async () => {
+    seedModelsDir(orphan1);
+
+    const result = await discardUnregisteredDownload(orphan1);
+
+    expect(result.removed).toBe(true);
+    expect((await fileSystemMock.getInfoAsync(orphan1)).exists).toBe(false);
+    expect(retainedOrphanCount()).toBe(0);
+    // Nothing retained → a subsequent download is unblocked.
+    expect(await clearRetainedOrphans()).toEqual({ ok: true });
+  });
+
+  it("a FAILED cleanup retains the URI and blocks every later download until it can be removed", async () => {
+    seedModelsDir(orphan1);
+    failFileSystemUri(orphan1, new Error("EROFS: read-only file system"));
+
+    const result = await discardUnregisteredDownload(orphan1);
+
+    expect(result.removed).toBe(false);
+    expect(retainedOrphanCount()).toBe(1);
+    // The clean-first guard reports NOT ok while the orphan can't be removed — the caller must abort.
+    const blocked = await clearRetainedOrphans();
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.error).toMatch(/read-only/);
+    expect(retainedOrphanCount()).toBe(1);
+
+    // Once the filesystem lets the delete through, the guard clears it and unblocks downloads.
+    clearFileSystemFailure(orphan1);
+    expect(await clearRetainedOrphans()).toEqual({ ok: true });
+    expect(retainedOrphanCount()).toBe(0);
+    expect((await fileSystemMock.getInfoAsync(orphan1)).exists).toBe(false);
+  });
+
+  it("multiple retained URIs don't overwrite each other (a SET, not a scalar)", async () => {
+    seedModelsDir(orphan1, orphan2);
+    failFileSystemUri(orphan1, new Error("orphan-1 stuck"));
+    failFileSystemUri(orphan2, new Error("orphan-2 stuck"));
+
+    expect((await discardUnregisteredDownload(orphan1)).removed).toBe(false);
+    expect((await discardUnregisteredDownload(orphan2)).removed).toBe(false);
+    // Both retained — the second did NOT clobber the first (a scalar retained-uri would have lost orphan1).
+    expect(retainedOrphanCount()).toBe(2);
+
+    // Clear only orphan2's failure: clearRetainedOrphans removes it, keeps orphan1, reports NOT ok.
+    clearFileSystemFailure(orphan2);
+    const partial = await clearRetainedOrphans();
+    expect(partial.ok).toBe(false);
+    // orphan2 removed + dropped; orphan1 still stuck (its failure is still injected) so still retained.
+    expect(retainedOrphanCount()).toBe(1);
+    expect((await fileSystemMock.getInfoAsync(orphan2)).exists).toBe(false);
+
+    // Clear the last one → the guard drains fully and downloads are unblocked.
+    clearFileSystemFailure(orphan1);
+    expect(await clearRetainedOrphans()).toEqual({ ok: true });
+    expect(retainedOrphanCount()).toBe(0);
   });
 });
