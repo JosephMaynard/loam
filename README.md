@@ -150,23 +150,60 @@ two-step join flow, and troubleshooting.
 
 ## How it works
 
-```text
-   Host device (laptop / Pi / phone)              Nearby people
- ┌───────────────────────────────────┐
- │  LOAM server (Fastify)            │            📱  scan QR ─┐
- │   • REST + WebSocket              │            📱  scan QR ─┤
- │   • local database (SQLite)       │◀── WiFi ───            ├─▶ open the PWA
- │   • serves the PWA client         │            📱  scan QR ─┘     in a browser
- │   • optional local LLM (Ollama)   │
- └───────────────────────────────────┘
-        no internet · no cloud · no accounts
+At its simplest, LOAM has two sides: one **host** and any number of **joiners**.
+
+The host is whoever runs LOAM (on a laptop, a Raspberry Pi, or a phone). That one device does three
+jobs at once: it becomes a small WiFi hotspot, it runs the LOAM server, and it hands the messaging app
+to anyone who connects. Joiners install nothing. They connect to the hotspot, scan a QR code, and the
+app opens in their browser.
+
+```mermaid
+flowchart LR
+    P1["📱 Joiner"]
+    P2["📱 Joiner"]
+    P3["📱 Joiner"]
+    subgraph Host["Host device: laptop, Pi, or phone"]
+        direction TB
+        S["LOAM server (Fastify)"]
+        C["Web app (Preact PWA)"]
+        DB[("Local database (SQLite)")]
+        S --- C
+        S --- DB
+    end
+    P1 -->|"WiFi + scan QR"| Host
+    P2 -->|"WiFi + scan QR"| Host
+    P3 -->|"WiFi + scan QR"| Host
 ```
 
-The host runs a small [Fastify](https://fastify.dev) server that stores everything locally and
-serves a [Preact](https://preactjs.com) PWA. Joiners never install anything; they load the app in a
-browser and talk to the host over the local network via REST and a WebSocket. The client and server
-share a single [Zod](https://zod.dev) schema package as their contract and both validate every
-message against it, so the wire format can't drift.
+Everything lives on the host. Messages are stored on the host's disk, the app is served by the host,
+and no data ever leaves the local network. Turn the host device off and the network is gone. There is
+no internet, no cloud, and no accounts anywhere in the picture.
+
+### What happens when you send a message
+
+Sending a message is a short round trip. Your browser posts it to the server, the server checks it and
+saves it, then the server pushes it out to everyone else over a live connection so it shows up on their
+screens right away.
+
+```mermaid
+sequenceDiagram
+    participant You as Your browser
+    participant Server as LOAM server
+    participant DB as SQLite
+    participant Others as Everyone allowed to see it
+
+    You->>Server: POST /api/messages (the new message)
+    Note over Server: Validate against the shared schema,<br/>check feature flags and permissions
+    Server->>DB: Save the message
+    Server-->>You: 201 Created (the saved message)
+    Server->>Others: Live push over the WebSocket
+    Note over Others: Only people allowed to see it receive it<br/>(see Real-time and privacy below)
+```
+
+The **client** (the app in your browser) and the **server** never guess about each other. They share
+one rulebook, a [Zod](https://zod.dev) schema package, and both check every message against it, so the
+two sides can never drift out of shape. A "WebSocket" is just a two-way live connection that stays open,
+so new messages arrive without the app having to keep asking.
 
 ## Project layout
 
@@ -182,6 +219,236 @@ A [pnpm workspace](pnpm-workspace.yaml) (`apps/*`, `packages/*`).
 | [`packages/display-name`](packages/display-name) | Deterministic, privacy-preserving display names from an id. |
 | [`packages/avatar`](packages/avatar) | Deterministic SVG avatars from an id. |
 | [`packages/qr`](packages/qr) | Dependency-free QR encoder + renderers used by the join flow. |
+
+## Architecture in depth
+
+This section goes deeper. You do not need any of it to run a node, but if you want to understand how
+the pieces fit together, read on. Each part starts plain and then gets specific.
+
+### The building blocks
+
+Four kinds of thing make up LOAM: the app people use, the server that runs it, the shared rulebook the
+two agree on, and a set of small helper libraries.
+
+```mermaid
+flowchart TB
+    subgraph Browser["In each joiner's browser"]
+        Client["Client (Preact PWA)<br/>renders the UI, talks to the server"]
+    end
+    subgraph Shared["Shared contract"]
+        Schema["schema (Zod)<br/>the message shapes both sides obey"]
+    end
+    subgraph Hostbox["On the host"]
+        Server["Server (Fastify)<br/>REST + WebSocket, all the rules"]
+        DAL["Data layer<br/>in-memory state + write-through"]
+        SQLite[("SQLite file<br/>optionally encrypted")]
+        Server --- DAL --- SQLite
+    end
+    Helpers["Helper libraries:<br/>display-name, avatar, qr, crypto"]
+    Client <-->|"REST + WebSocket"| Server
+    Client -.->|uses| Schema
+    Server -.->|uses| Schema
+    Client -.->|uses| Helpers
+    Server -.->|uses| Helpers
+```
+
+The **client** is a PWA, which is a website you can install like an app and that keeps working offline
+against a local cache. The **server** is a single [Fastify](https://fastify.dev) process. The
+**schema** package is the single source of truth for what a message, channel, or user looks like;
+because both sides import it and validate against it, the wire format cannot drift. The **helper
+libraries** are deliberately tiny and dependency-free: one turns an id into a memorable name, one turns
+an id into an avatar, one draws QR codes, and one does the mesh cryptography.
+
+### Identities and sessions
+
+There are no accounts. The first time your browser talks to a node, the server mints a random id for
+you (something like `user.1a2b3c4d`) and sets a cookie. That cookie is your identity for as long as you
+keep it. Your display name and avatar are generated from the id and nothing else, so the same id always
+looks the same to everyone, but there is no email, phone number, or password attached to it.
+
+The names are deterministic and human-friendly: an `adjective.material.creature` triple (for example
+`brave.copper.otter`) hashed from your id, so people can recognise each other across a session without
+anyone signing up. The cookie is the real identity; the id your browser shows before the server answers
+is just a placeholder that gets replaced on first load.
+
+Who becomes the admin is a per-node choice the host makes: the first person to join, a one-time setup
+code printed at startup, a shared passphrase, or nobody. Admin powers (moderation, config, the
+Emergency Reset) are always checked on the server. The app only hides buttons; it never trusts the
+browser.
+
+### Storage: fast reads, safe writes
+
+The server keeps the current state (users, channels, messages) in memory so reads are instant. Every
+change is also written straight through to a SQLite file on disk before the server confirms it, so a
+crash or restart loses nothing. There is no separate "save" step to forget.
+
+The default database driver is Node's own built-in `node:sqlite`, which means there is no native
+compiler step and no `node-gyp` to fight. When you turn on encryption (below), the server instead loads
+an encrypted driver. Either way the code that reads and writes data is the same.
+
+### Encryption at rest
+
+A node can encrypt its on-disk database so a lost or seized host device does not readily give up stored
+messages. It is off by default and picked with the `LOAM_DB_KEY` environment variable:
+
+```mermaid
+flowchart TB
+    Start{"LOAM_DB_KEY set?"}
+    Start -->|"unset"| Plain["Plain SQLite file<br/>(no encryption)"]
+    Start -->|"a passphrase"| Pass["Encrypted with SQLCipher (AES-256).<br/>Same passphrase needed on every start."]
+    Start -->|"the word 'ephemeral'"| Eph["Random key made in memory,<br/>never written to disk.<br/>Reboot loses the key forever."]
+```
+
+"At rest" means "while written to disk". Passphrase mode uses [SQLCipher](https://www.zetetic.net/sqlcipher/)
+so the file on flash is ciphertext. Ephemeral mode keeps the key only in memory, so the data is readable
+while the process runs and gone the moment it stops. The same encrypted driver ships with the Android
+host, so this is available on a phone and not only on a desktop.
+
+### Real-time and privacy: who sees what
+
+New messages travel over the WebSocket. The server does not blindly send everything to everyone. Before
+each live update goes out, it checks the audience:
+
+- **Public channel** posts go to everyone.
+- **Direct messages** and reactions on them go only to the two participants.
+- **Private channels** are fully hidden from non-members: the channel, its messages, and reactions on
+  them are only sent to members. Someone removed from a private channel gets a targeted event that
+  purges it from their device.
+
+Optional **presence** shows small online dots next to who is currently connected. It can be turned off
+for high-risk settings, because it reveals who is present.
+
+### Feature flags and security profiles
+
+Almost everything is a switch the host can flip: replies, direct messages, reactions, public channels,
+private channels, markdown, attachments, presence, the local AI, node-to-node sync, and the mesh. These
+switches are enforced on the server, so turning something off actually stops it, rather than only hiding
+a button.
+
+For convenience, a named **security profile** bundles a coherent set of these switches:
+
+| Profile | What it aims for |
+|---------|------------------|
+| `open` | easiest to join, fewest restrictions |
+| `standard` | a sensible middle ground |
+| `hardened` | join approval, disappearing messages, Emergency Reset armed, transport encryption required |
+| `custom` | you set every switch yourself (the default) |
+
+Picking a named profile forces its bundle of settings; `custom` leaves every switch under your own
+control.
+
+### Running on a phone: the Android host
+
+The Android host (`apps/app`) is the most involved piece, because it packs a whole node into one app.
+It runs the **real LOAM server embedded on the phone** using a mobile build of Node, brings up a
+local-only WiFi hotspot, and shows the messaging app in a WebView (an in-app browser view). To the
+joiners it looks exactly like any other LOAM node.
+
+```mermaid
+flowchart TB
+    subgraph Phone["One Android phone"]
+        direction TB
+        Shell["App shell (React Native)<br/>host screen, QR, hotspot controls"]
+        WV["WebView<br/>loads the same web client joiners use"]
+        EmbNode["Embedded Node<br/>runs the same Fastify server code"]
+        Hotspot["WiFi hotspot module (Kotlin)"]
+        Store[("SQLite / SQLCipher on the phone")]
+        LLM["Optional on-device AI (llama.rn)"]
+        Shell --- WV
+        Shell --- Hotspot
+        Shell --- EmbNode
+        EmbNode --- Store
+        EmbNode --- LLM
+        WV -->|"localhost"| EmbNode
+    end
+    Joiner["📱 Nearby joiner"] -->|"WiFi + QR"| Hotspot
+    Joiner -->|"opens the web app"| EmbNode
+```
+
+Because the embedded server is the same code as the desktop server, features behave the same way. The
+phone-specific parts are the hotspot, the WebView, the encrypted-database key handoff (the app holds the
+key in the phone's secure keystore and hands it to the embedded server at boot), and the optional
+on-device AI. Building this app is a one-command step; see [Host it from an Android
+phone](#host-it-from-an-android-phone) above and [docs/04](docs/04-android-host-app.md).
+
+### Transport encryption for hostile networks
+
+The traffic between a joiner and the host normally runs as plain HTTP over the LAN, which is fine on a
+trusted network. For untrusted networks LOAM can add an app-layer encryption on top, bootstrapped from
+the join QR so there is nothing to type. Browsers block the usual web crypto on a plain-HTTP LAN
+address, so LOAM ships its own: an X25519 key handshake and XChaCha20-Poly1305 sealing (the same modern
+primitives used elsewhere, in a small pure library).
+
+```mermaid
+sequenceDiagram
+    participant J as Joiner
+    participant Q as Join QR
+    participant H as Host
+    Q-->>J: Host public key (in the QR)
+    J->>H: Handshake using that key
+    Note over J,H: Both sides derive one shared session key
+    J->>H: Sealed request (body encrypted)
+    H-->>J: Sealed response
+```
+
+It has three levels: `off` (plain HTTP, the default), `optional` (encrypt the contents but leave paths
+visible), and `required` (also route every request through one opaque tunnel, so even which page you
+asked for is hidden). In `required` mode the only thing visible on the wire is that "a request happened"
+plus its rough size and timing. Reading the host public key from the QR (rather than trusting whatever
+the network offers) is what makes this resistant to a machine-in-the-middle on the LAN. This is an
+emerging feature; see [docs/08](docs/08-transport-security.md).
+
+### Connecting separate nodes: sync and mesh
+
+Two hotspots do not have to stay separate. LOAM has two ways to join up conversations, for two
+different situations.
+
+**Node-to-node sync** is for nodes that *can* reach each other, even briefly (same larger network, or
+one within radio range of another). They gossip their **public** data only, pulling each other's public
+channel messages so the two hotspots converge into one conversation. Direct messages, private channels,
+and anything from a blocked author never leave a node. A peer's join URL is also its sync address.
+
+```mermaid
+flowchart LR
+    A["Node A"] <-->|"sync: public channels only"| B["Node B"]
+    Akept["A keeps its DMs and<br/>private channels to itself"] -.-> A
+    Bkept["B keeps its DMs and<br/>private channels to itself"] -.-> B
+```
+
+**Opportunistic mesh** (a delay-tolerant "carry my message" relay) is for when two people *cannot* reach
+each other directly, but a third person moves between them. Person A seals a message so only person B can
+open it, and a carrier C physically carries the sealed blob from A's area to B's, without ever being able
+to read it.
+
+```mermaid
+flowchart LR
+    A["A writes a sealed<br/>message for B"] -->|"C passes by A"| C["Carrier C<br/>(cannot read it)"]
+    C -->|"C later reaches B"| B["B opens it"]
+```
+
+The sealing uses per-user mesh identities and a self-certifying address, so a carrier cannot read the
+message and a swapped key is rejected. It is delivered by relaying sealed blobs with limits on how far
+and how long they travel. This is a phased, security-first effort; the cryptography and addressing are
+built and tested, while the device-to-device radio transport is still in progress. See
+[docs/16](docs/16-opportunistic-mesh.md).
+
+### The Emergency Reset
+
+The host can wipe a node in one action. It deletes stored messages, avatars, and sessions, tells every
+connected client to purge its local copy and show a neutral disconnected screen, and re-seeds a clean
+node. The node configuration survives, so it comes back ready to use. In encrypted-at-rest mode the
+wipe also rotates the key, so remnants left on flash become unreadable rather than merely deleted. An
+optional pre-shared token can trigger it without logging in. It is called `killSwitch` in the code and
+"Emergency Reset" in the app; see [docs/02](docs/02-kill-switch.md).
+
+### Optional on-device AI
+
+The local AI is off by default and entirely local when on. On a desktop it points at a model you run in
+[Ollama](https://ollama.com). On the Android host it can instead download and run a small model on the
+phone itself (through llama.rn). Either way a bot shows up as a direct-message contact and its reply
+streams in token by token. On the phone, loading a multi-gigabyte model is carefully bounded so a slow
+or stuck load can never freeze the assistant, and switching or deleting a model cleans up its memory
+safely. See [docs/06](docs/06-llm.md).
 
 ## Configuration
 
