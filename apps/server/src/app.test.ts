@@ -287,7 +287,9 @@ function readJournalConfig(dataDir: string): Record<string, unknown> | undefined
 /** Preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol round-11), excluding the
  *  transient `.loam-recovery-state` anchor file (Sol round-12). */
 function recoverySnapshots(dataDir: string): string[] {
-  return readdirSync(dataDir).filter((name) => name.startsWith(".loam-recovery-") && name !== ".loam-recovery-state");
+  return readdirSync(dataDir).filter(
+    (name) => name.startsWith(".loam-recovery-") && name !== ".loam-recovery-state" && !name.includes(".tmp-"),
+  );
 }
 
 function sessionCookie(response: InjectResponse): string {

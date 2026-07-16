@@ -1550,7 +1550,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       reportBootNotice(message, "db_encryption_unreadable");
       throw new DbEncryptionUnreadableError(message);
     }
-    if (!recoveryDirName.startsWith(".loam-recovery-")) {
+    // Validate the anchor content is a plain `.loam-recovery-<suffix>` basename — NEVER a path with separators
+    // or `..` (defense-in-depth: the writer only ever emits `.loam-recovery-${ts}-${hex}`, but a corrupted
+    // anchor must not let `join(dataDir, …)` resolve the move target outside the data dir).
+    if (!recoveryDirName.startsWith(".loam-recovery-") || recoveryDirName !== basename(recoveryDirName)) {
       const message =
         "A preserve-recovery anchor is present but malformed — refusing to open the database (a partial recovery " +
         "snapshot may exist). The node is locked; resolve it and reopen.";
