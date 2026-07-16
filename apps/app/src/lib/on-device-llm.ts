@@ -15,13 +15,18 @@
 //
 // This module instead funnels EVERYTHING through one serialized command queue processed by a single
 // `drain()` loop. The loop owns the native context and reconciles it toward one target: `desired`, the
-// operator's latest active model. `desired` is kept in step with durable truth — re-read from the model
-// manager at the start of each inference and set synchronously by `reconcileActiveModel` — and the reconcile
-// command releases a loaded context that no longer matches `desired` AT THE TIME IT RUNS (not a value it
-// captured), so a burst of switches converges on the final target with no wrong-model churn. Because only
-// one command runs at a time and each re-reads the latest truth when it acts, the whole class of interaction
-// bugs (double-load, a stale load publishing/running, a switch that doesn't invalidate, a reconcile that
-// forgets to notify) becomes impossible by construction rather than prevented by a guard. The entry points:
+// COMMITTED active model. The key discipline is that `desired` tracks COMMITTED truth, not the durable
+// `activeId` the action layer writes OPTIMISTICALLY ahead of its launcher-bridge confirmation: `desired`
+// moves only via `reconcileActiveModel` (called AFTER a bridge outcome) plus a one-time bootstrap on the
+// first inference. An inference reads the optimistic `activeId` only to decide what may RUN — if it and
+// `desired` disagree, the actor is in a provisional switch window and touches no native context at all, so
+// a switch the bridge later rolls back can never have released the still-committed loaded model. The
+// reconcile command releases a loaded context that no longer matches `desired` AT THE TIME IT RUNS (not a
+// value it captured), so a burst of switches converges on the final target with no wrong-model churn.
+// Because only one command runs at a time and each re-reads the latest truth when it acts, the whole class
+// of interaction bugs (double-load, a stale load publishing/running, a switch that doesn't invalidate, a
+// reconcile that forgets to notify, an optimistic write-ahead releasing a committed model) becomes
+// impossible by construction rather than prevented by a guard. The entry points:
 //   - `runInference`               enqueues one inference (load-if-needed → completion), fully bounded.
 //   - `reconcileActiveModel(path)` after a DURABLE activeId change (switch/deactivate/rollback/reconcile):
 //                                  set `desired` and release a now-stale loaded context. Called only once
@@ -99,9 +104,17 @@ const RELEASE_CONFIRM_BUDGET_MS = 5 * 1000;
 /** The single loaded native context, or null. Only ever mutated inside the drain loop (and detached
  * synchronously by `beginReleaseLoaded`). */
 let loaded: { path: string; ctx: LlamaContext } | null = null;
-/** The operator's latest desired active model (bare path), or null. Set by `reconcileActiveModel` and
- * re-read from durable truth at the start of each inference; the loop converges the native context to it. */
+/** The COMMITTED active model (bare path), or null — the actor's authoritative target for native teardown.
+ * It is changed ONLY by `reconcileActiveModel` (which the action layer calls AFTER a bridge outcome) and,
+ * once, by the first inference's bootstrap (`desiredInitialized`). It is DELIBERATELY not overwritten from
+ * the durable `activeId` on every inference: `activeId` is written OPTIMISTICALLY, ahead of the launcher-
+ * bridge confirmation, so treating it as final would let a provisional switch release the still-committed,
+ * loaded old model that a failed switch then rolls back to. */
 let desired: string | null = null;
+/** Whether `desired` has been seeded from durable truth yet. The first inference of the process adopts the
+ * persisted `activeId` as the committed target (safe — nothing is loaded then, so it can only seed, never
+ * release); thereafter only `reconcileActiveModel` moves `desired`. */
+let desiredInitialized = false;
 /** A native `release()` REJECTED — the context may still be resident, so we can never `initLlama` again this
  * process. Terminal until app restart. */
 let poisoned = false;
@@ -310,14 +323,22 @@ function onLoadResolved(ctx: LlamaContext, myEpoch: number, target: string, op: 
     inFlightOp = null;
   }
   if (myEpoch === loadEpoch && !poisoned && !loaded) {
-    lastAccelerationInfo = { gpu: ctx.gpu, reasonNoGPU: ctx.reasonNoGPU, devices: ctx.devices };
-    console.log(
-      'LOAM on-device LLM: model loaded — gpu=%s reasonNoGPU=%s devices=%s',
-      ctx.gpu,
-      ctx.reasonNoGPU,
-      JSON.stringify(ctx.devices),
-    );
+    // Take OWNERSHIP first (P3): a throwing native proxy getter or diagnostic serialization must NEVER leave
+    // this context untracked — that would leak it AND let a second `initLlama` start (double residency / OOM).
+    // The acceleration read + log are best-effort and wrapped so they can't affect ownership or reject
+    // `op.settled` (its never-reject contract).
     loaded = { path: target, ctx };
+    try {
+      lastAccelerationInfo = { gpu: ctx.gpu, reasonNoGPU: ctx.reasonNoGPU, devices: ctx.devices };
+      console.log(
+        'LOAM on-device LLM: model loaded — gpu=%s reasonNoGPU=%s devices=%s',
+        ctx.gpu,
+        ctx.reasonNoGPU,
+        JSON.stringify(ctx.devices),
+      );
+    } catch (error) {
+      console.warn('LOAM on-device LLM: reading load diagnostics failed (context still owned)', error);
+    }
   } else {
     // Superseded (a switch/delete bumped the epoch) or the load timed out — dispose the late context so it
     // never becomes active and its RAM is reclaimed. This starts a NEW in-flight release op.
@@ -414,15 +435,30 @@ async function runCompletion(ctx: LlamaContext, messages: ChatMessage[], callbac
 async function processInfer(messages: ChatMessage[], callbacks: InferenceCallbacks): Promise<void> {
   try {
     const target = await activeModelPath();
-    desired = target; // keep `desired` in step with durable truth at inference time
-    if (target === null) {
-      // Nothing active (Deactivate / the active model deleted): reclaim the loaded context's RAM and error.
-      beginReleaseLoaded();
-      callbacks.onError(NO_MODEL_MESSAGE);
-      return;
+    if (!desiredInitialized) {
+      // First inference of the process: adopt durable truth as the committed target. Nothing is loaded yet,
+      // so this can only SEED `desired` — it can never release a context off optimistic write-ahead state.
+      desired = target;
+      desiredInitialized = true;
     }
     if (poisoned) {
       callbacks.onError(ENGINE_POISONED_MESSAGE);
+      return;
+    }
+    // `target` is the durable-but-OPTIMISTIC `activeId` (a set-active/deactivate/delete writes it AHEAD of
+    // its launcher-bridge confirmation); `desired` is the COMMITTED model (moved only by reconcileActiveModel,
+    // AFTER the bridge outcome). When they DISAGREE we are inside a provisional transition window: neither
+    // build nor tear down any native context off optimistic state — that is exactly the failure where a
+    // still-committed, loaded A is released for a switch to B the bridge then rolls back (Sol P2). Report
+    // recovering; the action layer commits the transition via reconcileActiveModel once the bridge settles.
+    if (target !== desired) {
+      callbacks.onError(ENGINE_RECOVERING_MESSAGE);
+      return;
+    }
+    if (target === null) {
+      // COMMITTED inactive (a confirmed Deactivate / active-model delete): reclaim the loaded RAM and error.
+      beginReleaseLoaded();
+      callbacks.onError(NO_MODEL_MESSAGE);
       return;
     }
     // Release a loaded context that isn't the target, then wait (bounded) for that — and any prior abandoned
@@ -492,6 +528,7 @@ export function runInference(messages: ChatMessage[], callbacks: InferenceCallba
 export function reconcileActiveModel(nextPath: string | null): void {
   const target = nextPath === null ? null : bare(nextPath);
   desired = target;
+  desiredInitialized = true; // a bridge outcome is authoritative — commit it even before the first inference
   if (loadingPath !== null && loadingPath !== target) {
     loadEpoch += 1; // abandon the in-flight load of a now-stale model (its late context is disposed)
   }

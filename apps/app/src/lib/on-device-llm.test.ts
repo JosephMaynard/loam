@@ -365,8 +365,11 @@ describe("on-device-llm inference", () => {
     expect(endedFor(channel, "1")).toBe(true);
     expect(mocks.release).not.toHaveBeenCalled();
 
-    // Operator deactivates (or deletes the active model): the next request resolves no active path.
+    // Operator deactivates (or deletes the active model): the action layer clears the store AND commits the
+    // transition to the actor via reconcileActiveModel(null) — that (not the optimistic store read) is what
+    // authorizes releasing the loaded context.
     mocks.state = { downloaded: [], activeId: undefined };
+    reconcileActiveModel(null);
     channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
     await flush();
 
@@ -374,7 +377,7 @@ describe("on-device-llm inference", () => {
     expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/No on-device model is selected/i);
   });
 
-  it("does not throw (and never crashes) when release fails on the no-active-model path", async () => {
+  it("does not throw (and never crashes) when the deactivate release fails (poisons gracefully)", async () => {
     mocks.release.mockRejectedValueOnce(new Error("native release blew up"));
     const channel = makeChannel();
     registerOnDeviceLlm(channel);
@@ -383,13 +386,16 @@ describe("on-device-llm inference", () => {
     channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
     await flush();
 
+    // Committed deactivate: reconcileActiveModel(null) releases the loaded context, but the native release
+    // REJECTS. That must not throw — it poisons the engine (the context may still be resident).
     mocks.state = { downloaded: [], activeId: undefined };
-    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    expect(() => reconcileActiveModel(null)).not.toThrow();
     await flush();
 
-    // A throwing release is swallowed (it poisons the engine, but that's off the no-model path here); the
-    // caller still gets the graceful "no model" error rather than a crash.
-    expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/No on-device model is selected/i);
+    // A subsequent request surfaces the graceful restart error rather than crashing.
+    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/needs a restart/i);
   });
 });
 
@@ -406,11 +412,20 @@ describe("reconcileActiveModel — release/deactivate driven from the actions la
 
     // Operator taps Deactivate: the actions layer calls this after the confirmed clear. The default release
     // resolves, so the engine is usable again.
+    mocks.state = { downloaded: [], activeId: undefined };
     reconcileActiveModel(null);
     await flush();
     expect(mocks.release).toHaveBeenCalledTimes(1);
 
-    // A later inference rebuilds a fresh context (the cached one was released; the store still lists m active).
+    // Re-activate m (a committed set-active) → a later inference rebuilds a FRESH context (the cached one was
+    // released when it was deactivated).
+    mocks.state = {
+      downloaded: [
+        { id: "m", displayName: "Test model", uri: "file:///models/m.gguf", sizeBytes: 1, isCustom: false, sourceUrl: "", downloadedAt: 0 },
+      ],
+      activeId: "m",
+    };
+    reconcileActiveModel("file:///models/m.gguf");
     const contextsBefore = mocks.contextsCreated;
     channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
     await flush();
@@ -526,12 +541,14 @@ describe("bounded model load — a never-settling initLlama can't wedge the engi
     expect(completion).not.toHaveBeenCalled();
     expect(endedFor(channel, "1")).toBe(false);
 
-    // A subsequent request (default fast initLlama) builds a FRESH context — the stale one never became active.
+    // Re-activate m (committed) and issue a subsequent request (default fast initLlama): it builds a FRESH
+    // context — the stale one never became active.
     mocks.initLlamaImpl = undefined;
     mocks.completionImpl = async (_params, onToken) => {
       onToken?.({ token: "ok" });
       return { text: "ok" };
     };
+    reconcileActiveModel("file:///models/m.gguf");
     channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
     await vi.advanceTimersByTimeAsync(1);
     expect(endedFor(channel, "2")).toBe(true);
@@ -811,5 +828,199 @@ describe("confirmActiveModelReleased — the delete BARRIER", () => {
     const outcome = confirmActiveModelReleased("file:///models/m.gguf", 50);
     await vi.advanceTimersByTimeAsync(50);
     await expect(outcome).resolves.toBe("unconfirmed");
+  });
+});
+
+describe("provisional transition window (Sol P2): optimistic activeId never releases the committed model", () => {
+  const A = { id: "a", displayName: "A", uri: "file:///models/a.gguf", sizeBytes: 1, isCustom: false, sourceUrl: "", downloadedAt: 0 };
+  const B = { id: "b", displayName: "B", uri: "file:///models/b.gguf", sizeBytes: 1, isCustom: false, sourceUrl: "", downloadedAt: 0 };
+
+  /** A mutable two-model store whose reads reflect later mutations (so an optimistic write-ahead activeId is
+   * visible to the actor mid-transition, exactly as the real store behaves). */
+  function twoModelStore(activeId: string | undefined) {
+    const state = { downloaded: [A, B], activeId };
+    mocks.loadStateImpl = async () => state;
+    return state;
+  }
+
+  async function loadA(channel: FakeChannel) {
+    channel.emit("loam-llm-request", { id: "load-a", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "load-a")).toBe(true);
+  }
+
+  it("A -> B switch whose bridge DEFINITELY FAILS: A.release is NEVER called and A is reused after rollback", async () => {
+    const store = twoModelStore("a");
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    await loadA(channel);
+    const contextsAfterA = mocks.contextsCreated;
+
+    // Now configure A.release to REJECT (and hang would be the same): if the actor wrongly releases A during
+    // the provisional window it will be INVOKED here (and poison the engine). We assert it is never called.
+    mocks.release.mockImplementation(() => new Promise(() => {})); // hang
+    const rejectRelease = vi.fn(() => Promise.reject(new Error("A.release must not be called")));
+    mocks.release.mockImplementation(rejectRelease as unknown as () => Promise<void>);
+
+    // performSetActive PERSIST: optimistic activeId=B + invalidateStaleLoad(B) (releases nothing). Bridge is
+    // deferred — reconcileActiveModel is NOT called yet.
+    store.activeId = "b";
+    invalidateStaleLoad(B.uri);
+
+    // An inference during the provisional window must report recovering and touch no native context.
+    channel.emit("loam-llm-request", { id: "provisional", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(String(errorFor(channel, "provisional")?.payload.error)).toMatch(/recovering/i);
+    expect(mocks.release).not.toHaveBeenCalled();
+    expect(mocks.contextsCreated).toBe(contextsAfterA); // no B load either
+
+    // Bridge DEFINITELY FAILS → rollback to A: reconcileActiveModel(A).
+    store.activeId = "a";
+    reconcileActiveModel(A.uri);
+
+    // A is still loaded → the next request REUSES it: no release ever, no reload.
+    channel.emit("loam-llm-request", { id: "after-rollback", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "after-rollback")).toBe(true);
+    expect(mocks.release).not.toHaveBeenCalled();
+    expect(mocks.contextsCreated).toBe(contextsAfterA);
+  });
+
+  it("A -> B switch whose bridge SUCCEEDS: reconcileActiveModel(B) releases A and converges to B", async () => {
+    const store = twoModelStore("a");
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    await loadA(channel);
+    const contextsAfterA = mocks.contextsCreated;
+
+    store.activeId = "b";
+    invalidateStaleLoad(B.uri);
+    channel.emit("loam-llm-request", { id: "provisional", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(String(errorFor(channel, "provisional")?.payload.error)).toMatch(/recovering/i);
+    expect(mocks.release).not.toHaveBeenCalled();
+
+    // Bridge OK → commit B: reconcileActiveModel(B) releases loaded A (target-aware).
+    reconcileActiveModel(B.uri);
+    await flush();
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+
+    // The next inference loads B fresh and runs it.
+    channel.emit("loam-llm-request", { id: "on-b", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "on-b")).toBe(true);
+    expect(mocks.contextsCreated).toBe(contextsAfterA + 1);
+    const { initLlama } = (await import("llama.rn")) as unknown as { initLlama: ReturnType<typeof vi.fn> };
+    expect(initLlama).toHaveBeenLastCalledWith(expect.objectContaining({ model: "/models/b.gguf" }));
+  });
+
+  it("provisional DEACTIVATE whose bridge fails: A.release is never called and A is reused after rollback", async () => {
+    const store = twoModelStore("a");
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    await loadA(channel);
+    const contextsAfterA = mocks.contextsCreated;
+    mocks.release.mockImplementation(() => Promise.reject(new Error("A.release must not be called")));
+
+    // performDeactivate PERSIST: optimistic activeId=undefined, no invalidateStaleLoad (nothing loading).
+    store.activeId = undefined;
+    channel.emit("loam-llm-request", { id: "provisional", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(String(errorFor(channel, "provisional")?.payload.error)).toMatch(/recovering/i);
+    expect(mocks.release).not.toHaveBeenCalled();
+
+    // Bridge fails → rollback to A.
+    store.activeId = "a";
+    reconcileActiveModel(A.uri);
+    channel.emit("loam-llm-request", { id: "after-rollback", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "after-rollback")).toBe(true);
+    expect(mocks.release).not.toHaveBeenCalled();
+    expect(mocks.contextsCreated).toBe(contextsAfterA);
+  });
+
+  it("provisional active-DELETE whose launcher clear fails: A.release is never called and A is reused after rollback", async () => {
+    const store = twoModelStore("a");
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    await loadA(channel);
+    const contextsAfterA = mocks.contextsCreated;
+    mocks.release.mockImplementation(() => Promise.reject(new Error("A.release must not be called")));
+
+    // performDelete (active) PERSIST: optimistic activeId=undefined + invalidateStaleLoad(null) (A is loaded,
+    // not loading, so this releases nothing).
+    store.activeId = undefined;
+    invalidateStaleLoad(null);
+    channel.emit("loam-llm-request", { id: "provisional", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(String(errorFor(channel, "provisional")?.payload.error)).toMatch(/recovering/i);
+    expect(mocks.release).not.toHaveBeenCalled();
+
+    // Launcher clear DEFINITELY fails → rollback restores activeId=A: reconcileActiveModel(A).
+    store.activeId = "a";
+    reconcileActiveModel(A.uri);
+    channel.emit("loam-llm-request", { id: "after-rollback", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "after-rollback")).toBe(true);
+    expect(mocks.release).not.toHaveBeenCalled();
+    expect(mocks.contextsCreated).toBe(contextsAfterA);
+  });
+
+  it("active-DELETE timeout: reconcileActiveModel(null) releases the loaded A and converges to no-model", async () => {
+    const store = twoModelStore("a");
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+    await loadA(channel);
+
+    // performDelete (active) TIMEOUT: durable truth is inactive; the action layer calls reconcileActiveModel(null),
+    // which must release the still-resident A (the retention fix) even though no later inference has arrived.
+    store.activeId = undefined;
+    invalidateStaleLoad(null);
+    reconcileActiveModel(null);
+    await flush();
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+
+    // A subsequent inference sees committed no-model.
+    channel.emit("loam-llm-request", { id: "no-model", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(String(errorFor(channel, "no-model")?.payload.error)).toMatch(/No on-device model is selected/i);
+  });
+});
+
+describe("P3: fallible load diagnostics never affect context ownership", () => {
+  it("a load whose acceleration getter throws keeps the context owned/releasable and never double-loads", async () => {
+    // A native context whose `gpu` getter throws during diagnostics — ownership must be taken BEFORE the read.
+    const throwingCtx = {
+      get gpu(): boolean {
+        throw new Error("native getter blew up");
+      },
+      get reasonNoGPU(): string {
+        return "x";
+      },
+      get devices(): string[] {
+        return [];
+      },
+      completion: (params: unknown, onToken?: TokenCallback) => mocks.completionImpl(params, onToken),
+      stopCompletion: mocks.stopCompletion,
+      release: mocks.release,
+    };
+    mocks.initLlamaImpl = () => Promise.resolve(throwingCtx);
+    const { initLlama } = (await import("llama.rn")) as unknown as { initLlama: ReturnType<typeof vi.fn> };
+    const loadsBefore = initLlama.mock.calls.length; // the shared mock isn't reset per test — use a baseline
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    // The diagnostic read throws, but the context is OWNED (published) → completion still runs.
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+    expect(endedFor(channel, "1")).toBe(true);
+    expect(initLlama.mock.calls.length).toBe(loadsBefore + 1);
+
+    // The owned context is releasable and NO second context was ever built (no leak / double residency).
+    mocks.state = { downloaded: [], activeId: undefined };
+    reconcileActiveModel(null);
+    await flush();
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+    expect(initLlama.mock.calls.length).toBe(loadsBefore + 1);
   });
 });

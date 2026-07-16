@@ -336,6 +336,13 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
   }
 
   if (wasActive) {
+    // Persist cleared activeId AHEAD of the bridge (write-ahead). Before the fallible bridge, abandon an
+    // in-flight load of the model being deleted (Sol P2) so a fresh A context can't publish and MAP a file
+    // we are about to unlink — invalidateStaleLoad only abandons an in-flight load, it never releases a
+    // loaded context. The actor's `desired` stays A until an outcome-driven reconcileActiveModel below, so a
+    // concurrent inference reads the optimistic activeId=null, sees it disagrees with `desired`, and reports
+    // recovering WITHOUT releasing the loaded A that a rollback would restore.
+    deps.invalidateStaleLoad(null);
     const result = await deps.clearActiveModel();
     if (result.status === 'failed') {
       // Definite failure: the launcher still thinks this model is active — deleting its bytes now would
@@ -357,6 +364,11 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
           pending: dropPending(current.pending, pendingId),
         };
       });
+      // Rolled back to the disk-confirmed active model → commit the actor transition to it (Sol P2). Target-
+      // aware: if that model is the loaded one, it is LEFT untouched; the delete never destroyed it.
+      const restoredUri =
+        rolled?.activeId !== undefined ? rolled.downloaded.find((m) => m.id === rolled.activeId)?.uri ?? null : null;
+      deps.reconcileActiveModel(restoredUri);
       return {
         kind: 'rolled-back',
         state: rolled,
@@ -370,16 +382,21 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
       // confirm the launcher released the file. The write-ahead delete-pending is ALREADY durable (its
       // `fileUri` is a do-not-sweep reference guarding against the dangling-pointer bug), so there is
       // nothing more to persist — reconciliation re-sends the clear and deletes the bytes once CONFIRMED.
+      // Durable truth is "no active model", so converge the actor to null now (Sol P2) — otherwise a loaded
+      // A stays resident indefinitely until a later inference or manager reconcile.
+      deps.reconcileActiveModel(null);
       return {
         kind: 'ambiguous',
         state,
         message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
       };
     }
-    // Confirmed `ok` — the launcher released the file. `commitByteDeletion` now runs the CONFIRMED-release
-    // barrier itself (path-aware, bounded) before the checked byte delete, so the GGUF is never unlinked while
-    // the native context may still map it, and an unconfirmed/poisoned release defers the delete to
-    // reconciliation instead of blocking (CodeRabbit).
+    // Confirmed `ok` — the launcher released the file. Commit the actor to "no active model" FIRST (Sol P2:
+    // updates `desired` to null and enqueues the release of a loaded A), THEN run the CONFIRMED-release
+    // barrier in `commitByteDeletion` (path-aware, bounded) which confirms native disposal before the checked
+    // byte delete, so the GGUF is never unlinked while the native context may still map it (queue ordering:
+    // the reconcile's release runs, the barrier then confirms it settled).
+    deps.reconcileActiveModel(null);
     return commitByteDeletion(deps, model, state);
   }
 

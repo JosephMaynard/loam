@@ -868,6 +868,92 @@ describe("native-context convergence is driven from the action layer (Finding 1)
     expect(reconcileActiveModel).toHaveBeenCalledWith(null);
   });
 
+  it("active delete PERSIST calls invalidateStaleLoad(null); a confirmed clear reconciles the engine to null BEFORE the barrier (Sol P2)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const order: string[] = [];
+    const invalidateStaleLoad = vi.fn(() => order.push("invalidate"));
+    const reconcileActiveModel = vi.fn(() => order.push("reconcile"));
+    const confirmActiveModelReleased = vi.fn(async () => {
+      order.push("barrier");
+      return "released" as const;
+    });
+    const deleteModelFile = vi.fn(async () => {
+      order.push("delete");
+    });
+    const deps = scriptedDeps(store, {
+      clearActiveModel: async () => OK,
+      invalidateStaleLoad,
+      reconcileActiveModel,
+      confirmActiveModelReleased,
+      deleteModelFile,
+    });
+
+    const result = await performDelete(deps, A);
+
+    expect(result.kind).toBe("ok");
+    expect(invalidateStaleLoad).toHaveBeenCalledWith(null); // at persist, before the fallible bridge
+    expect(reconcileActiveModel).toHaveBeenCalledWith(null); // durable truth is inactive
+    // invalidate at persist → reconcile(null) commits desired=null + enqueues release → barrier CONFIRMS
+    // disposal → only then unlink. So the file is never removed while the native context may still map it.
+    expect(order).toEqual(["invalidate", "reconcile", "barrier", "delete"]);
+  });
+
+  it("active delete whose clear DEFINITELY FAILS reconciles the engine to the restored model A after rollback (Sol P2)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const invalidateStaleLoad = vi.fn(() => {});
+    const reconcileActiveModel = vi.fn(() => {});
+    const deps = scriptedDeps(store, { clearActiveModel: async () => FAILED, invalidateStaleLoad, reconcileActiveModel });
+
+    const result = await performDelete(deps, A);
+
+    expect(result.kind).toBe("rolled-back");
+    expect(store.get().activeId).toBe("A"); // restored
+    expect(invalidateStaleLoad).toHaveBeenCalledWith(null);
+    // Converge the engine to the disk-confirmed RESTORED target (A) — a target-aware reconcile leaves a
+    // loaded A untouched, so the failed delete never destroyed it.
+    expect(reconcileActiveModel).toHaveBeenCalledWith(A.uri);
+  });
+
+  it("active delete whose clear TIMES OUT reconciles the engine to null (releases a resident A) and keeps the file (Sol P2)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const invalidateStaleLoad = vi.fn(() => {});
+    const reconcileActiveModel = vi.fn(() => {});
+    const deleteModelFile = vi.fn(async () => {});
+    const deps = scriptedDeps(store, {
+      clearActiveModel: async () => TIMEOUT,
+      invalidateStaleLoad,
+      reconcileActiveModel,
+      deleteModelFile,
+    });
+
+    const result = await performDelete(deps, A);
+
+    expect(result.kind).toBe("ambiguous");
+    expect(deleteModelFile).not.toHaveBeenCalled(); // file kept — can't confirm the launcher released it
+    expect(invalidateStaleLoad).toHaveBeenCalledWith(null);
+    // Durable truth is inactive → converge to null so a resident A is released now, not left until a later
+    // inference/manager reconcile (the retention fix).
+    expect(reconcileActiveModel).toHaveBeenCalledWith(null);
+    expect((store.get().pending ?? []).map((p) => p.id)).toEqual([`delete:${A.uri}`]);
+  });
+
+  it("an INACTIVE delete drives NEITHER invalidateStaleLoad NOR reconcileActiveModel (the active target is unchanged)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" }); // A is inactive
+    const invalidateStaleLoad = vi.fn(() => {});
+    const reconcileActiveModel = vi.fn(() => {});
+    const confirmActiveModelReleased = vi.fn(async () => "released" as const);
+    const deleteModelFile = vi.fn(async () => {});
+    const deps = scriptedDeps(store, { invalidateStaleLoad, reconcileActiveModel, confirmActiveModelReleased, deleteModelFile });
+
+    const result = await performDelete(deps, A);
+
+    expect(result.kind).toBe("ok");
+    expect(invalidateStaleLoad).not.toHaveBeenCalled();
+    expect(reconcileActiveModel).not.toHaveBeenCalled();
+    // The path-aware barrier still runs (a confirmed no-op for a non-loaded model).
+    expect(confirmActiveModelReleased).toHaveBeenCalledWith(A.uri);
+  });
+
   it("active delete: byte-delete FAILS, but the context was released FIRST (with the model's uri) and the delete stays pending", async () => {
     const store = makeStore({ downloaded: [A, B], activeId: "A" });
     const order: string[] = [];
