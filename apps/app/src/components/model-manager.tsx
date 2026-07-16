@@ -37,9 +37,9 @@ import {
   subscribeDownloadActive,
 } from '@/lib/download-coordinator';
 import {
-  releaseActiveModelContext,
-  releaseModelContextIfLoaded,
-  syncNativeContextToActiveModel,
+  confirmActiveModelReleased,
+  invalidateStaleLoad,
+  reconcileActiveModel,
 } from '@/lib/on-device-llm';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
@@ -153,16 +153,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // the durable delete-pending and retries, rather than reporting a model deleted while its file
       // silently remains on disk.
       deleteModelFile: deleteModelFileChecked,
-      // Native-context release, driven from the action layer (Finding 1) so it fires on EVERY confirmed
-      // launcher clear — direct deactivate, an active delete, AND reconciliation of either — and, for a
-      // delete, BEFORE the GGUF bytes are unlinked. Both only INITIATE the release and return promptly, so
-      // they never block the operation mutex. `releaseModelContext` is PATH-AWARE (releases only if the
-      // named model is the loaded one), so reconciling an old delete never tears down a newer active model.
-      releaseActiveContext: () => releaseActiveModelContext(),
-      releaseModelContext: (modelPath) => releaseModelContextIfLoaded(modelPath),
-      // Notify the engine after an active-model switch/rollback (Sol Fable-round-5 P2) so a native load of a
-      // model the operator switched away from is disposed, never published or run. Target-aware.
-      syncActiveModel: (nextPath) => syncNativeContextToActiveModel(nextPath),
+      // The single-actor engine's target-aware synchronization (Fable-round-7). `reconcileActiveModel` is
+      // called after every DURABLE activeId outcome (release a now-stale loaded context, converge to the
+      // target); `invalidateStaleLoad` runs at persist time BEFORE the fallible bridge (abandon an in-flight
+      // load of the old model without releasing the loaded one, so a rollback can't destroy it); and
+      // `confirmActiveModelReleased` is the delete BARRIER (release + confirm native disposal before the file
+      // is unlinked). All never block the operation mutex beyond a bounded budget and never throw.
+      reconcileActiveModel: (nextPath) => reconcileActiveModel(nextPath),
+      invalidateStaleLoad: (keepPath) => invalidateStaleLoad(keepPath),
+      confirmActiveModelReleased: (modelPath) => confirmActiveModelReleased(modelPath),
     }),
     [channel],
   );
@@ -626,8 +625,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * launcher clear (checked), the native-context release, and the IRREVERSIBLE byte delete so a failure
    * at any step leaves a safe, recoverable state — and never deletes the bytes when the launcher clear
    * couldn't be confirmed. Releasing the (multi-GB) native context before the byte delete is now driven
-   * from inside the transaction via `actionDeps.releaseModelContext` (Finding 1) — path-aware and firing
-   * on every confirmed clear including reconciliation — so there is no post-`ok` release to do here.
+   * from inside the transaction via the delete BARRIER `actionDeps.confirmActiveModelReleased` (Finding 1)
+   * — path-aware, and it CONFIRMS native disposal before the unlink — so there is no post-`ok` release here.
    */
   const handleDelete = (model: DownloadedModel) => runOperation(model.id, () => deleteAction(actionDeps, model));
 
@@ -641,7 +640,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
 
   /** Clear the active model — `deactivateAction` (P2-2), same serialized persist-then-mirror
    * transaction with conditional rollback on a definite failure and no rollback on a timeout. The
-   * native-context release is now driven from inside the transaction (`actionDeps.releaseActiveContext`,
+   * native-context release is now driven from inside the transaction (`actionDeps.reconcileActiveModel(null)`,
    * Finding 1) after the CONFIRMED launcher clear, so it fires on every confirmed clear (including one
    * that only settles on reconciliation) rather than only on a direct `'ok'` here — no post-`ok` release
    * to do in the component. */

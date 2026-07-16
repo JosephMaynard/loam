@@ -104,9 +104,9 @@ describe("performSetActive — P2-1 rollback semantics", () => {
       setActiveModel: async () => ({ status: "timeout", error: "no response" }),
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performSetActive(deps, A);
@@ -123,9 +123,9 @@ describe("performSetActive — P2-1 rollback semantics", () => {
       setActiveModel: async () => ({ status: "failed", error: "boom" }),
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performSetActive(deps, A);
@@ -143,9 +143,9 @@ describe("performSetActive — P2-1 rollback semantics", () => {
       setActiveModel: setActive,
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performSetActive(deps, A);
@@ -157,44 +157,53 @@ describe("performSetActive — P2-1 rollback semantics", () => {
 
   it("notifies the engine of the new active model on a successful switch (Sol Fable-round-5 P2)", async () => {
     const store = makeStore({ downloaded: [A, B], activeId: "A" });
-    const sync = vi.fn(() => {});
+    const invalidateStaleLoad = vi.fn(() => {});
+    const reconcileActiveModel = vi.fn(() => {});
     const deps: ModelActionDeps = {
       mutate: store.mutate,
       setActiveModel: async () => OK,
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => "released" as const),
-      syncActiveModel: sync,
+      reconcileActiveModel,
+      invalidateStaleLoad,
+      confirmActiveModelReleased: vi.fn(async () => "released" as const),
     };
 
     const result = await performSetActive(deps, B);
 
     expect(result.kind).toBe("ok");
-    // The engine is told the active model is now B (target-aware; disposes a stale A load, leaves B alone).
-    expect(sync.mock.calls.map((c) => c[0])).toEqual([B.uri]);
+    // At PERSIST (before the bridge) the stale old-model load is invalidated, keeping the newly-selected B;
+    // AFTER the ok bridge confirms, the engine is reconciled to the DURABLE active model B (target-aware;
+    // disposes a stale A load, leaves B alone).
+    expect(invalidateStaleLoad.mock.calls.map((c) => c[0])).toEqual([B.uri]);
+    expect(reconcileActiveModel.mock.calls.map((c) => c[0])).toEqual([B.uri]);
   });
 
-  it("on a definite bridge FAILURE, notifies the engine of B (switch) THEN of the restored A (rollback) (Sol P2)", async () => {
+  it("on a definite bridge FAILURE, invalidates the stale load for B (switch) THEN reconciles to the restored A (rollback) (Sol P2)", async () => {
     // B must be invalidated when local state rolls back to A: a concurrent inference could have started
     // loading B while the bridge was pending, and it must never complete after the rollback.
     const store = makeStore({ downloaded: [A, B], activeId: "A" });
-    const sync = vi.fn(() => {});
+    const invalidateStaleLoad = vi.fn(() => {});
+    const reconcileActiveModel = vi.fn(() => {});
     const deps: ModelActionDeps = {
       mutate: store.mutate,
       setActiveModel: async () => ({ status: "failed", error: "boom" }),
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => "released" as const),
-      syncActiveModel: sync,
+      reconcileActiveModel,
+      invalidateStaleLoad,
+      confirmActiveModelReleased: vi.fn(async () => "released" as const),
     };
 
     const result = await performSetActive(deps, B);
 
     expect(result.kind).toBe("rolled-back");
     expect(store.get().activeId).toBe("A"); // reverted
-    expect(sync.mock.calls.map((c) => c[0])).toEqual([B.uri, A.uri]);
+    // Persist-time invalidate targets the newly-selected B (without releasing the loaded context). After the
+    // definite failure rolls the selection back, the post-outcome reconcile targets the DURABLE restored
+    // model A — abandoning any in-flight B load, since A is now the target.
+    expect(invalidateStaleLoad.mock.calls.map((c) => c[0])).toEqual([B.uri]);
+    expect(reconcileActiveModel.mock.calls.map((c) => c[0])).toEqual([A.uri]);
   });
 });
 
@@ -208,9 +217,9 @@ describe("conditional rollback — a stale rollback never clobbers a newer selec
         request.modelPath === A.uri ? aBridge.promise : Promise.resolve(OK),
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     // Start A (mutex-free perform*), let it persist activeId=A and block on its pending bridge.
@@ -239,9 +248,9 @@ describe("conditional rollback — a stale rollback never clobbers a newer selec
         request.modelPath === A.uri ? aBridge.promise : Promise.resolve(OK),
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const pA = performSetActive(deps, A); // previous = "B"
@@ -274,9 +283,9 @@ describe("global operation mutex serializes whole transactions (P2-2)", () => {
       },
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const pA = setActiveAction(deps, A);
@@ -308,9 +317,9 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       setActiveModel: async () => OK,
       clearActiveModel: clear,
       deleteModelFile: deleteFile,
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performDelete(deps, A);
@@ -329,9 +338,9 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       setActiveModel: async () => OK,
       clearActiveModel: async () => ({ status: "failed", error: "clear refused" }),
       deleteModelFile: deleteFile,
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performDelete(deps, A);
@@ -351,9 +360,9 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       setActiveModel: async () => OK,
       clearActiveModel: async () => ({ status: "timeout", error: "no response" }),
       deleteModelFile: deleteFile,
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performDelete(deps, A);
@@ -377,9 +386,9 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
       deleteModelFile: async () => {
         deleteFileCalled = true;
       },
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const pDeactivate = deactivateAction(deps);
@@ -494,9 +503,9 @@ function scriptedDeps(
     setActiveModel: async () => OK,
     clearActiveModel: async () => OK,
     deleteModelFile: vi.fn(async () => {}),
-    releaseActiveContext: vi.fn(async () => {}),
-    releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+    reconcileActiveModel: vi.fn(() => {}),
+    invalidateStaleLoad: vi.fn(() => {}),
+    confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     ...overrides,
   };
 }
@@ -598,13 +607,17 @@ describe("reconcilePendingActions — RESTART-level: all attempts timed out, not
       desired: { enabled: true, modelPath: A.uri, model: A.displayName },
     };
     const store = makeStore({ downloaded: [A, B], activeId: "A", pending: [pending] });
-    const deps = scriptedDeps(store, { setActiveModel: async () => FAILED });
+    const reconcileActiveModel = vi.fn(() => {});
+    const deps = scriptedDeps(store, { setActiveModel: async () => FAILED, reconcileActiveModel });
 
     const result = await reconcilePendingActions(deps);
 
     expect(result.settled).toBe(true);
     expect(store.get().activeId).toBeUndefined(); // launcher didn't apply it — stop claiming it locally
     expect(store.get().pending ?? []).toEqual([]);
+    // Sol round-6 P2#1: clearing activeId must ALSO sync the engine to the resulting DURABLE target (here
+    // nothing active → null), so A's abandoned load/loaded context can't still publish and run.
+    expect(reconcileActiveModel).toHaveBeenCalledWith(null);
   });
 
   it("no pending → settles immediately without touching the bridge", async () => {
@@ -812,47 +825,53 @@ describe("reconcile refuses to settle (or let the caller sweep) when its state r
 });
 
 // ---------------------------------------------------------------------------
-// Finding 1: native-context release is driven from the ACTION layer (injected `releaseActiveContext` /
-// `releaseModelContext`), so it fires on EVERY confirmed launcher clear — including the ambiguous
-// outcomes and reconciliation — and, for a delete, BEFORE the bytes are unlinked. These use release
-// spies (+ a call-order log) layered on `scriptedDeps`.
+// Finding 1: native-context convergence is driven from the ACTION layer (injected `reconcileActiveModel`
+// for the deactivate/clear paths, `confirmActiveModelReleased` for the delete BARRIER), so it fires on
+// EVERY confirmed launcher outcome — including the ambiguous outcomes and reconciliation — and, for a
+// delete, BEFORE the bytes are unlinked. These use engine spies (+ a call-order log) layered on `scriptedDeps`.
 // ---------------------------------------------------------------------------
 
-describe("native-context release is driven from the action layer (Finding 1)", () => {
-  it("deactivate: a confirmed clear whose pending-journal clear then FAILS still releases exactly once", async () => {
+describe("native-context convergence is driven from the action layer (Finding 1)", () => {
+  it("deactivate: a confirmed clear whose pending-journal clear then FAILS still reconciles to null exactly once", async () => {
     const store = makeStore({ downloaded: [A], activeId: "A" });
     // Write 1 = the write-ahead (clear activeId + pending); write 2 = clearPendingEntry after the ok bridge → FAIL.
     store.failWriteAt(2);
-    const releaseActiveContext = vi.fn(async () => {});
-    const deps = scriptedDeps(store, { clearActiveModel: async () => OK, releaseActiveContext });
+    const reconcileActiveModel = vi.fn(() => {});
+    const deps = scriptedDeps(store, { clearActiveModel: async () => OK, reconcileActiveModel });
 
     const result = await performDeactivate(deps);
 
-    // Ambiguous (the pending-clear didn't land) — but the context was released, once, on the confirmed clear.
+    // Ambiguous (the pending-clear didn't land) — but the engine was reconciled to null, once, on the confirmed clear.
     expect(result.kind).toBe("ambiguous");
-    expect(releaseActiveContext).toHaveBeenCalledTimes(1);
+    expect(reconcileActiveModel).toHaveBeenCalledTimes(1);
+    expect(reconcileActiveModel).toHaveBeenCalledWith(null);
   });
 
-  it("deactivate that TIMED OUT then is CONFIRMED by reconciliation releases the context (once, at reconcile)", async () => {
+  it("deactivate that TIMED OUT then is CONFIRMED by reconciliation reconciles the engine to null on each pass", async () => {
     const store = makeStore({ downloaded: [A], activeId: "A" });
-    const releaseActiveContext = vi.fn(async () => {});
+    const reconcileActiveModel = vi.fn(() => {});
 
-    // Direct deactivate times out → NO release yet, a durable `clear` pending is recorded.
-    const first = await performDeactivate(scriptedDeps(store, { clearActiveModel: async () => TIMEOUT, releaseActiveContext }));
+    // Direct deactivate times out → the durable truth is already "no active model", so the engine is
+    // reconciled to null even while the launcher ack is unconfirmed (the synchronous target-sync fires on
+    // the ambiguous outcome too), and a durable `clear` pending is recorded.
+    const first = await performDeactivate(scriptedDeps(store, { clearActiveModel: async () => TIMEOUT, reconcileActiveModel }));
     expect(first.kind).toBe("ambiguous");
-    expect(releaseActiveContext).not.toHaveBeenCalled();
+    expect(reconcileActiveModel).toHaveBeenCalledTimes(1);
+    expect(reconcileActiveModel).toHaveBeenCalledWith(null);
     expect((store.get().pending ?? []).map((p) => p.kind)).toEqual(["clear"]);
+    reconcileActiveModel.mockClear();
 
-    // Reconciliation re-sends the clear, which now confirms → the context is released.
-    const reconciled = await reconcilePendingActions(scriptedDeps(store, { clearActiveModel: async () => OK, releaseActiveContext }));
+    // Reconciliation re-sends the clear, which now confirms → the engine is reconciled to null again.
+    const reconciled = await reconcilePendingActions(scriptedDeps(store, { clearActiveModel: async () => OK, reconcileActiveModel }));
     expect(reconciled.settled).toBe(true);
-    expect(releaseActiveContext).toHaveBeenCalledTimes(1);
+    expect(reconcileActiveModel).toHaveBeenCalledTimes(1);
+    expect(reconcileActiveModel).toHaveBeenCalledWith(null);
   });
 
   it("active delete: byte-delete FAILS, but the context was released FIRST (with the model's uri) and the delete stays pending", async () => {
     const store = makeStore({ downloaded: [A, B], activeId: "A" });
     const order: string[] = [];
-    const releaseModelContext = vi.fn(async () => {
+    const confirmActiveModelReleased = vi.fn(async () => {
       order.push("release");
       return "released" as const;
     });
@@ -860,14 +879,14 @@ describe("native-context release is driven from the action layer (Finding 1)", (
       order.push("delete");
       throw new Error("unlink failed — read-only mount");
     });
-    const deps = scriptedDeps(store, { clearActiveModel: async () => OK, releaseModelContext, deleteModelFile });
+    const deps = scriptedDeps(store, { clearActiveModel: async () => OK, confirmActiveModelReleased, deleteModelFile });
 
     const result = await performDelete(deps, A);
 
     expect(result.kind).toBe("ambiguous");
     // Release CONFIRMED before the (failing) byte delete — the file is never unlinked while the context may map it.
     expect(order).toEqual(["release", "delete"]);
-    expect(releaseModelContext).toHaveBeenCalledWith(A.uri);
+    expect(confirmActiveModelReleased).toHaveBeenCalledWith(A.uri);
     // The durable delete-pending is KEPT for a retry (never a never-settling release wedging anything).
     expect((store.get().pending ?? []).map((p) => p.id)).toEqual([`delete:${A.uri}`]);
   });
@@ -882,7 +901,7 @@ describe("native-context release is driven from the action layer (Finding 1)", (
     };
     const store = makeStore({ downloaded: [B], activeId: undefined, pending: [pending] });
     const order: string[] = [];
-    const releaseModelContext = vi.fn(async () => {
+    const confirmActiveModelReleased = vi.fn(async () => {
       order.push("release");
       return "released" as const;
     });
@@ -890,41 +909,41 @@ describe("native-context release is driven from the action layer (Finding 1)", (
       order.push("delete");
     });
     const result = await reconcilePendingActions(
-      scriptedDeps(store, { clearActiveModel: async () => OK, releaseModelContext, deleteModelFile }),
+      scriptedDeps(store, { clearActiveModel: async () => OK, confirmActiveModelReleased, deleteModelFile }),
     );
 
     expect(result.settled).toBe(true);
     expect(order).toEqual(["release", "delete"]);
-    expect(releaseModelContext).toHaveBeenCalledWith(A.uri);
+    expect(confirmActiveModelReleased).toHaveBeenCalledWith(A.uri);
   });
 
   it("an inactive delete runs the path-aware release BARRIER (a confirmed no-op) and still deletes", async () => {
     // The barrier always runs before the unlink; for an inactive model it's a path-aware no-op that resolves
     // 'released' immediately (the model isn't loaded), so the byte delete proceeds. The active context is
-    // never actually torn down — that path-awareness is verified in on-device-llm.test.ts. `releaseActiveContext`
-    // (the deactivate/clear release) is NOT called for a delete.
+    // never actually torn down — that path-awareness is verified in on-device-llm.test.ts. `reconcileActiveModel`
+    // (the deactivate/clear engine sync) is NOT called for a delete.
     const store = makeStore({ downloaded: [A, B], activeId: "B" });
-    const releaseActiveContext = vi.fn(async () => {});
-    const releaseModelContext = vi.fn(async () => "released" as const);
+    const reconcileActiveModel = vi.fn(() => {});
+    const confirmActiveModelReleased = vi.fn(async () => "released" as const);
     const deleteFile = vi.fn(async () => {});
-    const deps = scriptedDeps(store, { releaseActiveContext, releaseModelContext, deleteModelFile: deleteFile });
+    const deps = scriptedDeps(store, { reconcileActiveModel, confirmActiveModelReleased, deleteModelFile: deleteFile });
 
     const result = await performDelete(deps, A); // A is inactive (B is active)
 
     expect(result.kind).toBe("ok");
-    expect(releaseActiveContext).not.toHaveBeenCalled();
-    expect(releaseModelContext).toHaveBeenCalledWith(A.uri); // the barrier ran (path-aware no-op)
+    expect(reconcileActiveModel).not.toHaveBeenCalled();
+    expect(confirmActiveModelReleased).toHaveBeenCalledWith(A.uri); // the barrier ran (path-aware no-op)
     expect(deleteFile).toHaveBeenCalledWith(A.uri);
   });
 
   it("an UNCONFIRMED release defers the byte delete — pending kept, no unlink (CodeRabbit)", async () => {
     const store = makeStore({ downloaded: [A, B], activeId: "A" });
-    const releaseModelContext = vi.fn(async () => "unconfirmed" as const);
+    const confirmActiveModelReleased = vi.fn(async () => "unconfirmed" as const);
     const deleteFile = vi.fn(async () => {});
     const result = await performDelete(
       store.get().activeId === "A"
-        ? scriptedDeps(store, { clearActiveModel: async () => OK, releaseModelContext, deleteModelFile: deleteFile })
-        : scriptedDeps(store, { releaseModelContext, deleteModelFile: deleteFile }),
+        ? scriptedDeps(store, { clearActiveModel: async () => OK, confirmActiveModelReleased, deleteModelFile: deleteFile })
+        : scriptedDeps(store, { confirmActiveModelReleased, deleteModelFile: deleteFile }),
       A,
     );
 
@@ -1028,9 +1047,9 @@ describe("real-store integration: a failed pending-clear keeps controls blocked 
       setActiveModel: setActive,
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performSetActive(deps, A);
@@ -1060,9 +1079,9 @@ describe("real-store integration: a failed pending-clear keeps controls blocked 
       setActiveModel: async () => OK,
       clearActiveModel: async () => OK,
       deleteModelFile: vi.fn(async () => {}),
-      releaseActiveContext: vi.fn(async () => {}),
-      releaseModelContext: vi.fn(async () => 'released' as const),
-      syncActiveModel: vi.fn(() => {}),
+      reconcileActiveModel: vi.fn(() => {}),
+      invalidateStaleLoad: vi.fn(() => {}),
+      confirmActiveModelReleased: vi.fn(async () => 'released' as const),
     };
 
     const result = await performSetActive(deps, A);
