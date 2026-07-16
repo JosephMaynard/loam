@@ -297,16 +297,155 @@ export async function sweepOrphanedModelFiles(
   }
 }
 
-export async function deleteModelFile(uri: string): Promise<void> {
-  await safeDelete(uri);
+/**
+ * CHECKED, strict deletion for an IRREVERSIBLE model-byte removal (Finding 1). Unlike `safeDelete`
+ * below — which is deliberately best-effort and swallows EVERY error — this both PROPAGATES a
+ * filesystem failure AND verifies the file is actually gone afterwards: a `deleteAsync` that resolves
+ * while the bytes are still on disk (a driver quirk, a read-only mount, a stale handle) is treated as a
+ * FAILURE and throws. Every caller that must not claim a model is "deleted" until its multi-GB GGUF is
+ * genuinely reclaimed uses this — the delete transaction + reconciliation in `model-manager-actions.ts`
+ * (which keep the durable delete-pending and retry on a throw) and the custom persist-failure cleanup in
+ * `model-manager.tsx` (which retains the orphan URI and blocks another download until this succeeds). A
+ * silent no-op delete can therefore never leave an orphan while the UI or the journal report success.
+ *
+ * Idempotent (`{ idempotent: true }` plus the post-delete existence check): deleting an already-absent
+ * file succeeds cleanly, which is exactly what makes reconciliation safe to REPEAT after a crash that
+ * lands between the byte deletion and clearing the journal — the second pass re-runs this no-op delete
+ * and settles.
+ */
+export async function deleteModelFileChecked(uri: string): Promise<void> {
+  await FileSystem.deleteAsync(uri, { idempotent: true });
+  const info = await FileSystem.getInfoAsync(uri);
+  if (info.exists) {
+    throw new Error(`Failed to delete model file — ${uri} still exists after deletion.`);
+  }
 }
 
+/** Best-effort deletion for GENUINELY discardable cleanup ONLY (Finding 1): failed/partial download
+ * staging files and orphan-sweep reclaims, where a delete that can't complete is harmless (the file is
+ * already unreferenced and will be retried by a later sweep). It swallows every error and never verifies
+ * — so it must NEVER be used for a delete whose success anything reports or depends on. Those use the
+ * CHECKED `deleteModelFileChecked` above. */
 async function safeDelete(uri: string): Promise<void> {
   try {
     await FileSystem.deleteAsync(uri, { idempotent: true });
   } catch {
     // best-effort
   }
+}
+
+// ---- custom (pasted-URL) download validation & redaction (Finding 2) ------------------------------
+
+/** The one trusted public host custom (pasted-URL) downloads are allowed to reach. The curated catalog
+ * only ever uses `huggingface.co` (see model-catalog.ts), so this is the whole allowlist. */
+export const CUSTOM_DOWNLOAD_ALLOWED_HOST = 'huggingface.co';
+
+/**
+ * Whether a pasted custom-URL host is on the allowlist. The previous approach — reject textual
+ * loopback/link-local hosts — was NOT a real boundary: it was bypassed by the device's OWN LAN/hotspot
+ * RFC1918 address (192.168.x.x, 10.x.x.x, 172.16/12), IPv6 ULA (fc00::/7), IPv4-mapped hex forms that
+ * WHATWG URL normalization produces (`[::ffff:7f00:1]`), a public hostname that RESOLVES to a private
+ * address (DNS rebinding), and a public URL that REDIRECTS to a local address (`createDownloadResumable`
+ * follows redirects; validation only ever sees the original URL). The embedded server listens on
+ * non-loopback interfaces, so any of those could aim a GET at `http://<device-lan-ip>/api/config` and
+ * consume the one-time `firstUser` admin grant exactly like a loopback URL. The Expo downloader can't
+ * enforce the final destination or redirect chain, so — per Sol's blessed fallback — we PIN custom
+ * downloads to an explicit HTTPS allowlist of trusted model hosts instead. Redirect-to-local is then out
+ * of scope because the initial host is a trusted public domain, not because we inspect the hops.
+ *
+ * Case-insensitive exact-or-subdomain match (`huggingface.co`, `cdn-lfs.huggingface.co`, …) using a
+ * proper suffix check — never a bare `includes`, which `evil-huggingface.co` or
+ * `huggingface.co.attacker.example` would slip past.
+ */
+export function isAllowedCustomDownloadHost(hostname: string): boolean {
+  // URL.hostname keeps IPv6 in brackets (e.g. `[::1]`); strip them for a bare comparison. An IP literal
+  // can never match a DNS host suffix, so this also rejects every raw-address form implicitly.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return host === CUSTOM_DOWNLOAD_ALLOWED_HOST || host.endsWith(`.${CUSTOM_DOWNLOAD_ALLOWED_HOST}`);
+}
+
+/** Validated result of preparing a pasted custom-model URL (Finding 2). `downloadUrl` is the FULL
+ * authorized URL to fetch with; `sourceUrl` is the REDACTED value to PERSIST (origin + pathname only —
+ * never credentials or query); `displayName`/`fileName` are the sanitized on-disk name parts (`fileName`
+ * has `.gguf` ensured, but NOT the per-download id prefix — the caller composes that). */
+export type CustomModelUrlResult =
+  | { ok: true; downloadUrl: string; sourceUrl: string; displayName: string; fileName: string }
+  | { ok: false; error: string };
+
+/**
+ * Parse, authorize, and redact a user-pasted custom-model URL (Finding 2) — a PURE function extracted
+ * out of `model-manager.tsx`'s async press handler so its edge cases are unit-testable (the component's
+ * `.tsx` isn't mounted by the node-only vitest harness). Fixes two bugs the inline version had:
+ *
+ *   1. `decodeURIComponent` of the last path segment can THROW on a malformed percent-escape (a bare
+ *      `%`, `%2`, …). Inline it sat OUTSIDE the URL-parse `try` inside a `try/finally`, so a
+ *      syntactically valid URL like `https://huggingface.co/%` made the whole press handler reject with
+ *      no useful status. Here it's wrapped and surfaces the same invalid-name message as any other bad
+ *      name.
+ *   2. Userinfo (`user:pass@host`) and a `?token=…` query both defeat the allowlist as a trust boundary
+ *      and — worse — used to be PERSISTED verbatim as `sourceUrl` in the plain Expo JSON store, i.e.
+ *      credentials/tokens at rest OUTSIDE SecureStore/SQLCipher. Userinfo is now REJECTED outright, and
+ *      the persisted `sourceUrl` is reduced to `origin + pathname` (query + hash + any userinfo
+ *      stripped). The FULL pasted URL is still returned as `downloadUrl` so the fetch itself is
+ *      unaffected; `sourceUrl` isn't used for redownload, so redacting it is lossless.
+ */
+export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return { ok: false, error: 'Enter a link to a .gguf model file.' };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { ok: false, error: "That doesn't look like a valid URL." };
+  }
+  // Require HTTPS AND an allowlisted host (see `isAllowedCustomDownloadHost`). `http:` is dropped
+  // entirely for custom URLs.
+  if (parsed.protocol !== 'https:') {
+    return { ok: false, error: 'Only https:// links are supported for custom models.' };
+  }
+  // Reject userinfo BEFORE anything else trusts the host: `user:pass@huggingface.co` would otherwise
+  // pass the allowlist (hostname is still `huggingface.co`) and smuggle a plaintext credential into the
+  // persisted store.
+  if (parsed.username || parsed.password) {
+    return {
+      ok: false,
+      error: 'Remove the username/password from the link — credentials embedded in a URL are not allowed.',
+    };
+  }
+  if (!isAllowedCustomDownloadHost(parsed.hostname)) {
+    return {
+      ok: false,
+      error: `Custom downloads are limited to ${CUSTOM_DOWNLOAD_ALLOWED_HOST} (and its subdomains). Host the .gguf there, or request it be added to the catalog.`,
+    };
+  }
+
+  // decodeURIComponent must run BEFORE sanitizing — an encoded `%2F`/`%2E%2E` only becomes a real
+  // `/`/`..` after decoding, and a naive split-then-decode order is exactly what lets a crafted URL
+  // (e.g. `.../foo%2F..%2F..%2Fbar.gguf`) smuggle a path-traversal segment past a pre-decode split. It
+  // is wrapped because a malformed escape (a bare `%`) makes it THROW — surface that as an invalid name.
+  let guessedName: string | null;
+  try {
+    const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
+    guessedName = sanitizeModelFileName(decodedName);
+  } catch {
+    return { ok: false, error: "That URL's file name isn't valid — try a direct link with a plain file name." };
+  }
+  if (!guessedName) {
+    return { ok: false, error: "That URL's file name isn't safe to use — try a direct link with a plain file name." };
+  }
+
+  return {
+    ok: true,
+    downloadUrl: trimmed,
+    // REDACTED persisted metadata: origin + pathname only. `URL.origin` for an https URL is
+    // `https://<host>[:port]` with no trailing slash, so this is `https://huggingface.co/path/model.gguf`
+    // — never a `?token=…`, `#fragment`, or `user:pass@`.
+    sourceUrl: `${parsed.origin}${parsed.pathname}`,
+    displayName: guessedName,
+    fileName: guessedName.toLowerCase().endsWith('.gguf') ? guessedName : `${guessedName}.gguf`,
+  };
 }
 
 // ---- streaming SHA-256 (P2-4/AF7) -----------------------------------------------------------------

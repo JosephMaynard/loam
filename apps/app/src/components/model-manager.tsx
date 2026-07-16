@@ -21,7 +21,13 @@ import {
   type ModelActionDeps,
   type ModelActionResult,
 } from '@/lib/model-manager-actions';
-import { deleteModelFile, downloadModel, sanitizeModelFileName, sweepOrphanedModelFiles } from '@/lib/model-download';
+import {
+  deleteModelFileChecked,
+  downloadModel,
+  prepareCustomModelDownload,
+  sanitizeModelFileName,
+  sweepOrphanedModelFiles,
+} from '@/lib/model-download';
 import { releaseActiveModelContext } from '@/lib/on-device-llm';
 import { clearActiveModel, setActiveModel, type BridgeChannel } from '@/lib/model-manager-bridge';
 import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
@@ -58,34 +64,6 @@ type ProgressMap = Record<string, { written: number; total: number; phase: 'down
  * is cleanest (per the round-4 review note). */
 let orphanSweepDone = false;
 
-/** The one trusted public host custom (pasted-URL) downloads are allowed to reach. The curated catalog
- * only ever uses `huggingface.co` (see model-catalog.ts), so this is the whole allowlist. */
-const CUSTOM_DOWNLOAD_ALLOWED_HOST = 'huggingface.co';
-
-/**
- * Whether a pasted custom-URL host is on the allowlist (Fix 3). The previous approach — reject textual
- * loopback/link-local hosts — was NOT a real boundary: it was bypassed by the device's OWN LAN/hotspot
- * RFC1918 address (192.168.x.x, 10.x.x.x, 172.16/12), IPv6 ULA (fc00::/7), IPv4-mapped hex forms that
- * WHATWG URL normalization produces (`[::ffff:7f00:1]`), a public hostname that RESOLVES to a private
- * address (DNS rebinding), and a public URL that REDIRECTS to a local address (`createDownloadResumable`
- * follows redirects; validation only ever sees the original URL). The embedded server listens on
- * non-loopback interfaces, so any of those could aim a GET at `http://<device-lan-ip>/api/config` and
- * consume the one-time `firstUser` admin grant exactly like a loopback URL. The Expo downloader can't
- * enforce the final destination or redirect chain, so — per Sol's blessed fallback — we PIN custom
- * downloads to an explicit HTTPS allowlist of trusted model hosts instead. Redirect-to-local is then out
- * of scope because the initial host is a trusted public domain, not because we inspect the hops.
- *
- * Case-insensitive exact-or-subdomain match (`huggingface.co`, `cdn-lfs.huggingface.co`, …) using a
- * proper suffix check — never a bare `includes`, which `evil-huggingface.co` or
- * `huggingface.co.attacker.example` would slip past.
- */
-function isAllowedCustomDownloadHost(hostname: string): boolean {
-  // URL.hostname keeps IPv6 in brackets (e.g. `[::1]`); strip them for a bare comparison. An IP literal
-  // can never match a DNS host suffix, so this also rejects every raw-address form implicitly.
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  return host === CUSTOM_DOWNLOAD_ALLOWED_HOST || host.endsWith(`.${CUSTOM_DOWNLOAD_ALLOWED_HOST}`);
-}
-
 type ModelManagerOverlayProps = {
   visible: boolean;
   onClose: () => void;
@@ -119,6 +97,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * multi-GB downloads in parallel. This ref is checked-and-set at the very top of the handler and
    * cleared in its `finally`, so the second synchronous tap short-circuits before starting anything. */
   const customDownloadInFlightRef = useRef(false);
+  /** The URI of a fully-downloaded custom model that could NOT be saved to the list AND whose CHECKED
+   * cleanup ALSO failed (Finding 1) — a real, still-on-disk orphan. Retained so the next add attempt
+   * re-runs a checked delete of it BEFORE starting any new download: a new download would mint a fresh
+   * id/filename and, if left unchecked, could pile up a SECOND multi-GB orphan before an app restart.
+   * Cleared once the checked delete finally confirms the file is gone. */
+  const [orphanedCustomUri, setOrphanedCustomUri] = useState<string | undefined>();
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
   /** Gates every download-start control (P2-7 round 4) until the orphan sweep below has actually
    * finished — initialized from the module-level flag so a remount after the sweep already ran once
@@ -152,7 +136,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       mutate: mutateModelManagerState,
       setActiveModel: (request) => setActiveModel(channel, request),
       clearActiveModel: () => clearActiveModel(channel),
-      deleteModelFile,
+      // CHECKED delete (Finding 1): the transaction relies on a byte-delete failure THROWING so it keeps
+      // the durable delete-pending and retries, rather than reporting a model deleted while its file
+      // silently remains on disk.
+      deleteModelFile: deleteModelFileChecked,
     }),
     [channel],
   );
@@ -414,9 +401,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   };
 
   /** Download a user-pasted URL — no size/hash to verify against, so it's always best-effort + warned.
-   * The host is pinned to the HTTPS allowlist (`isAllowedCustomDownloadHost`, Fix 3), a synchronous
-   * `useRef` guards against a same-tick double-tap (Fix 4), and a persist failure after a successful
-   * download deletes the orphaned file before offering retry (Fix 5). */
+   * URL parsing/authorization/redaction is the pure `prepareCustomModelDownload` (Finding 2 — malformed
+   * percent-escapes, userinfo, and credential/token redaction of the persisted `sourceUrl`), a
+   * synchronous `useRef` guards against a same-tick double-tap (Fix 4), and a persist failure after a
+   * successful download deletes the orphaned file with a CHECKED delete before offering retry — RETAINING
+   * the URI and blocking another download until that checked delete succeeds if it can't (Finding 1). */
   const handleAddCustomUrl = async () => {
     // Fix 4: synchronous re-entry guard. Two taps in the SAME tick both reach here before the disabled
     // state re-renders; the ref is set/read synchronously so the second tap short-circuits immediately
@@ -427,29 +416,32 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
     customDownloadInFlightRef.current = true;
     try {
-      const trimmed = customUrl.trim();
-      if (!trimmed) {
-        return;
+      // Finding 1: if a PRIOR custom download succeeded-then-failed-to-persist and its CHECKED cleanup
+      // also failed, an orphan is still on disk. Before starting ANY new download (which would mint a new
+      // id/filename and could accumulate a SECOND multi-GB orphan), re-attempt the checked delete of it.
+      // Only once it's confirmed gone do we proceed; if it STILL can't be removed, abort with an honest
+      // status rather than piling on another orphan. (This handler is the retry path — the button stays
+      // enabled so the operator can trigger it; disabling it would strand the orphan until an app restart.)
+      if (orphanedCustomUri) {
+        try {
+          await deleteModelFileChecked(orphanedCustomUri);
+          setOrphanedCustomUri(undefined);
+        } catch (cleanupErr) {
+          const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+          setStatusMessage(
+            `A previous custom download left a file that still can't be removed (${cleanupMessage}). Restart the app to clear it before adding another custom model.`,
+          );
+          return;
+        }
       }
-      let parsed: URL;
-      try {
-        parsed = new URL(trimmed);
-      } catch {
-        setStatusMessage("That doesn't look like a valid URL.");
-        return;
-      }
-      // Fix 3: require HTTPS AND an allowlisted host. Textual loopback/link-local filtering was NOT a real
-      // boundary (bypassable via the device's own LAN/hotspot RFC1918 address, IPv6 ULA, IPv4-mapped hex,
-      // DNS rebinding, or redirect-to-local); pinning to a trusted public host is. `http:` is dropped
-      // entirely for custom URLs.
-      if (parsed.protocol !== 'https:') {
-        setStatusMessage('Only https:// links are supported for custom models.');
-        return;
-      }
-      if (!isAllowedCustomDownloadHost(parsed.hostname)) {
-        setStatusMessage(
-          `Custom downloads are limited to ${CUSTOM_DOWNLOAD_ALLOWED_HOST} (and its subdomains). Host the .gguf there, or request it be added to the catalog.`,
-        );
+
+      // Finding 2: all URL parsing/authorization/redaction lives in the pure `prepareCustomModelDownload`
+      // (unit-tested in model-download.test.ts). It fails closed on a malformed percent-escape, rejects
+      // userinfo, pins the host allowlist, and hands back a REDACTED `sourceUrl` (origin+pathname only) to
+      // persist alongside the FULL `downloadUrl` to fetch with.
+      const prepared = prepareCustomModelDownload(customUrl);
+      if (!prepared.ok) {
+        setStatusMessage(prepared.error);
         return;
       }
 
@@ -465,16 +457,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       }
 
       const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      // decodeURIComponent must run BEFORE sanitizing — an encoded `%2F`/`%2E%2E` only becomes a real
-      // `/`/`..` after decoding, and a naive split-then-decode order is exactly what lets a crafted URL
-      // (e.g. `.../foo%2F..%2F..%2Fbar.gguf`) smuggle a path-traversal segment past a pre-decode split.
-      const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
-      const guessedName = sanitizeModelFileName(decodedName);
-      if (!guessedName) {
-        setStatusMessage("That URL's file name isn't safe to use — try a direct link with a plain file name.");
-        return;
-      }
-      const fileName = `${id}-${guessedName.toLowerCase().endsWith('.gguf') ? guessedName : `${guessedName}.gguf`}`;
+      const fileName = `${id}-${prepared.fileName}`;
 
       setCustomDownloadInFlight(true);
       setBusy(id, true);
@@ -486,7 +469,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // than leaving the row stuck busy + leaking the controller.
       try {
         const outcome = await downloadModel(
-          trimmed,
+          prepared.downloadUrl,
           fileName,
           undefined,
           undefined,
@@ -501,11 +484,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         }
         const model: DownloadedModel = {
           id,
-          displayName: guessedName,
+          displayName: prepared.displayName,
           uri: outcome.uri,
           sizeBytes: outcome.sizeBytes,
           isCustom: true,
-          sourceUrl: trimmed,
+          // REDACTED (Finding 2): origin+pathname only — never the pasted URL's credentials/query/hash.
+          sourceUrl: prepared.sourceUrl,
           downloadedAt: Date.now(),
         };
         const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
@@ -513,20 +497,22 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           // Clear the input only on a fully successful download+persist — a persistence failure keeps the
           // entered URL so the operator can retry without re-typing it (CodeRabbit).
           setCustomUrl('');
-          setStatusMessage(`${guessedName} downloaded.`);
+          setStatusMessage(`${prepared.displayName} downloaded.`);
         } else {
-          // Fix 5: the final `.gguf` is on disk but NOT in `managerState`, and the one-per-process orphan
-          // sweep already ran — so a retry (which mints a NEW id → a new file name) would download a
-          // SECOND copy and leave this one orphaned until app restart. Delete the just-downloaded file
-          // BEFORE offering retry so no unreferenced final model can accumulate. If the cleanup itself
-          // fails, say so honestly rather than implying the disk is clean.
+          // Fix 5 + Finding 1: the final `.gguf` is on disk but NOT in `managerState`, and the
+          // one-per-process orphan sweep already ran — so a retry (which mints a NEW id → a new file name)
+          // would download a SECOND copy and leave this one orphaned until app restart. Delete the
+          // just-downloaded file with a CHECKED delete BEFORE offering retry so no unreferenced final model
+          // can accumulate. If the checked cleanup itself fails, the orphan is REAL: retain its URI so the
+          // next add attempt cleans it FIRST (above), never reporting a clean disk when it isn't.
           try {
-            await deleteModelFile(outcome.uri);
-            setStatusMessage(`${guessedName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`);
+            await deleteModelFileChecked(outcome.uri);
+            setStatusMessage(`${prepared.displayName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`);
           } catch (cleanupErr) {
             const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+            setOrphanedCustomUri(outcome.uri);
             setStatusMessage(
-              `${guessedName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${cleanupMessage}). Restart the app to clear it, then try again.`,
+              `${prepared.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${cleanupMessage}). It'll be cleared on your next attempt, or restart the app to clear it.`,
             );
           }
         }

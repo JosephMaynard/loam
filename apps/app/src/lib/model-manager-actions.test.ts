@@ -325,6 +325,87 @@ describe("performDelete — safe sequencing (P2-2 / P2-1)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Finding 1: the byte deletion is CHECKED — a delete that throws (leaves the GGUF on disk) must NOT be
+// reported "deleted"; the durable delete-pending is kept so reconciliation retries the idempotent delete.
+// Covers BOTH an active-model delete (needs a launcher clear first) and an inactive-model delete (no
+// clear), and the reconciliation retry closing each out.
+// ---------------------------------------------------------------------------
+
+describe("checked byte deletion — a failed delete is not reported done and is retryable (Finding 1)", () => {
+  it("ACTIVE model: byte delete FAILS after a confirmed clear → ambiguous, pending kept, then reconciliation deletes it", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "A" });
+    const deleteFile = vi.fn(async () => {
+      throw new Error("unlink failed — read-only mount");
+    });
+    const clear = vi.fn(async () => OK);
+    const deps = scriptedDeps(store, { clearActiveModel: clear, deleteModelFile: deleteFile });
+
+    const result = await performDelete(deps, A);
+
+    // NOT reported deleted — the file may still be on disk.
+    expect(result.kind).toBe("ambiguous");
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(deleteFile).toHaveBeenCalledWith(A.uri);
+    // Metadata removed, but the durable delete-pending is KEPT for a retry (and keeps the file protected).
+    expect(store.get().downloaded.map((m) => m.id)).toEqual(["B"]);
+    expect((store.get().pending ?? []).map((p) => p.id)).toEqual([`delete:${A.uri}`]);
+    // The state the component adopts still carries the pending → controls stay blocked.
+    expect((result.state?.pending ?? []).map((p) => p.id)).toEqual([`delete:${A.uri}`]);
+
+    // Reconciliation retries: the launcher clear is re-sent (activeId is undefined) and the byte delete
+    // now succeeds → settled, pending gone.
+    deleteFile.mockResolvedValue(undefined);
+    const reconciled = await reconcilePendingActions(deps);
+
+    expect(reconciled.settled).toBe(true);
+    expect(deleteFile).toHaveBeenCalledTimes(2);
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+
+  it("INACTIVE model: byte delete FAILS → ambiguous, NO launcher clear, pending kept, reconciliation never clears the live model", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" });
+    const deleteFile = vi.fn(async () => {
+      throw new Error("unlink failed");
+    });
+    const clear = vi.fn(async () => OK);
+    const deps = scriptedDeps(store, { clearActiveModel: clear, deleteModelFile: deleteFile });
+
+    const result = await performDelete(deps, A); // A is inactive (B is active)
+
+    expect(result.kind).toBe("ambiguous");
+    expect(clear).not.toHaveBeenCalled(); // inactive delete never touches the launcher pointer
+    expect(deleteFile).toHaveBeenCalledWith(A.uri);
+    expect(store.get().activeId).toBe("B"); // live model untouched
+    expect(store.get().downloaded.map((m) => m.id)).toEqual(["B"]);
+    expect((store.get().pending ?? []).map((p) => p.id)).toEqual([`delete:${A.uri}`]);
+
+    // Reconciliation retries the byte delete WITHOUT clearing the launcher (B is still active) — the fix
+    // that stops an inactive-origin delete-pending from wrongly disabling the live model.
+    deleteFile.mockResolvedValue(undefined);
+    const reconciled = await reconcilePendingActions(deps);
+
+    expect(reconciled.settled).toBe(true);
+    expect(clear).not.toHaveBeenCalled();
+    expect(store.get().activeId).toBe("B");
+    expect(store.get().pending ?? []).toEqual([]);
+  });
+
+  it("does not report an inactive delete as 'ok' when the byte delete throws (regression: silent-swallow made this always ok)", async () => {
+    const store = makeStore({ downloaded: [A, B], activeId: "B" });
+    const deps = scriptedDeps(store, {
+      deleteModelFile: async () => {
+        throw new Error("boom");
+      },
+    });
+
+    const result = await performDelete(deps, A);
+
+    expect(result.kind).not.toBe("ok");
+    expect(result.kind).toBe("ambiguous");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // P2-b: durable pending actions are recorded on ambiguity and reconciled later.
 // ---------------------------------------------------------------------------
 
@@ -566,21 +647,23 @@ describe("write-ahead intent is atomic and durable (P2-1)", () => {
 });
 
 describe("reconcile only reports settled from CONFIRMED-on-disk state (P2-1)", () => {
-  it("failure to CLEAR a confirmed delete pending → not settled, bytes NOT deleted, pending kept (no stale replay)", async () => {
+  it("byte deletion succeeds but the pending-CLEAR write fails → not settled, pending kept, retried next pass (Finding 1)", async () => {
     const pending: PendingAction = { id: `delete:${A.uri}`, kind: "delete", desired: { enabled: false }, fileUri: A.uri };
     const store = makeStore({ downloaded: [B], activeId: undefined, pending: [pending] });
-    // The reconcile's identity read is write #1; the clear-pending after the ok bridge is write #2 — fail it.
+    // The reconcile's identity read is write #1; the clear-pending after the checked byte delete is write
+    // #2 — fail it.
     store.failWriteAt(2);
     const deleteFile = vi.fn(async () => {});
     const deps = scriptedDeps(store, { clearActiveModel: async () => OK, deleteModelFile: deleteFile });
 
     const result = await reconcilePendingActions(deps);
 
-    // The launcher confirmed the clear, but we couldn't durably drop the pending — so DO NOT report
-    // settled and DO NOT delete the bytes; the on-disk pending must survive to be retried, never replaced
-    // by an in-memory assumption that would let the file be swept.
+    // New order (Finding 1): confirm clear → delete bytes (CHECKED) → clear pending. The launcher
+    // confirmed the clear and the (idempotent, safe-to-repeat) byte delete ran, but the journal drop
+    // didn't land — so we must NOT report settled: the on-disk pending survives and the next pass repeats
+    // the now-no-op checked delete and clears it.
     expect(result.settled).toBe(false);
-    expect(deleteFile).not.toHaveBeenCalled();
+    expect(deleteFile).toHaveBeenCalledWith(A.uri);
     expect(store.get().pending).toEqual([pending]);
   });
 

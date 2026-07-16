@@ -21,7 +21,8 @@
 // Dependencies are injected (`ModelActionDeps`) rather than imported directly, so tests can drive the
 // transactions against in-memory fakes and deterministically script bridge success/failure/timeout and
 // interleavings. `model-manager.tsx` binds the real deps (the store's `mutateModelManagerState`, the
-// bridge's `setActiveModel`/`clearActiveModel`, and `deleteModelFile`) and calls the wrappers below.
+// bridge's `setActiveModel`/`clearActiveModel`, and the CHECKED `deleteModelFileChecked`) and calls the
+// wrappers below.
 
 import type { ActiveModelResult, SetActiveModelRequest } from './model-manager-bridge';
 import type { DownloadedModel, ModelManagerState, MutateResult, PendingAction } from './model-manager-store';
@@ -37,7 +38,11 @@ export interface ModelActionDeps {
   setActiveModel(request: SetActiveModelRequest): Promise<ActiveModelResult>;
   /** Clear the launcher's active pointer — the bridge's `clearActiveModel(channel)`. */
   clearActiveModel(): Promise<ActiveModelResult>;
-  /** Irreversibly delete a downloaded GGUF's bytes — `deleteModelFile`. */
+  /** Irreversibly delete a downloaded GGUF's bytes. MUST be a CHECKED delete (Finding 1) — it PROPAGATES
+   * a filesystem failure and only resolves once the file is confirmed gone (bound to
+   * `deleteModelFileChecked`, not the best-effort `safeDelete`). The transactions below rely on that: a
+   * throw here keeps the durable delete-pending in place so reconciliation retries, rather than reporting
+   * a model "deleted" while its multi-GB file silently remains on disk. */
   deleteModelFile(uri: string): Promise<void>;
 }
 
@@ -211,42 +216,59 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
 
 /**
  * Delete `model`. Sequenced so a failure at any step leaves a SAFE, recoverable state:
- *   1. Persist the metadata removal (drop from `downloaded`; clear `activeId` if it was active).
+ *   1. Persist the metadata removal (drop from `downloaded`; clear `activeId` if it was active) AND — in
+ *      the SAME atomic write — record a durable write-ahead `delete` pending whose `fileUri` keeps the
+ *      bytes sweep-protected until the deletion is confirmed (recorded for BOTH the active and inactive
+ *      cases now — Finding 1 — so a byte-deletion failure is durably retryable in either).
  *   2. If it was active, clear the launcher's active pointer and CHECK the result.
  *   3. Only on a confirmed `'ok'` (or if there was nothing active to clear) do we perform the
- *      IRREVERSIBLE byte deletion.
- * A DEFINITE clear failure conditionally rolls the metadata back (re-add the model, restore `activeId`)
- * and leaves the file on disk. A TIMEOUT is ambiguous: we still do NOT delete the bytes (can't confirm
- * the launcher released the file — a dangling pointer to MISSING bytes is the one outcome to avoid),
- * and — per P2-1 — do NOT roll back either (the clear may have landed); the metadata stays removed and
- * the leftover file is reclaimed later by the orphan sweep. Exposed for interleaving tests.
+ *      IRREVERSIBLE byte deletion — now a CHECKED delete (Finding 1) that throws if the file survives.
+ *   4. Delete the bytes, THEN clear the pending. If the byte delete FAILS we keep the pending and report
+ *      `ambiguous` (never a false "deleted"), so reconciliation retries the idempotent checked deletion.
+ * A DEFINITE clear failure conditionally rolls the metadata back (re-add the model, restore `activeId`,
+ * drop the write-ahead pending) and leaves the file on disk. A TIMEOUT is ambiguous: we still do NOT
+ * delete the bytes (can't confirm the launcher released the file — a dangling pointer to MISSING bytes is
+ * the one outcome to avoid), and — per P2-1 — do NOT roll back either (the clear may have landed); the
+ * metadata stays removed and the delete-pending drives the retry. Exposed for interleaving tests.
  */
 export async function performDelete(deps: ModelActionDeps, model: DownloadedModel): Promise<ModelActionResult> {
+  const pendingId = `delete:${model.uri}`;
   let wasActive = false;
-  // Write-ahead intent (P2-1): remove the metadata AND — if it was active — record a durable
-  // pending-`delete` in ONE atomic write, BEFORE the bridge clear. The pending's `fileUri` keeps the
-  // bytes sweep-protected from the moment the metadata is gone (closing the "restart finds metadata
-  // removed but no pending protection → sweep deletes the file" window), and reconciliation re-sends the
-  // clear if we die before confirming. CRITICALLY, this preserves any OTHER `pending` entries: the old
+  // Write-ahead intent (P2-1): remove the metadata AND record a durable pending-`delete` in ONE atomic
+  // write, BEFORE the bridge clear. The pending's `fileUri` keeps the bytes sweep-protected from the
+  // moment the metadata is gone (closing the "restart finds metadata removed but no pending protection →
+  // sweep deletes the file" window), and reconciliation re-sends the clear (if it was active) / retries
+  // the byte deletion if we die before confirming. This preserves any OTHER `pending` entries: the old
   // reconstruction returned a bare `{ downloaded, activeId }`, silently DROPPING the whole pending array.
   const { state, persisted } = await deps.mutate((current) => {
     wasActive = current.activeId === model.id;
-    const base: ModelManagerState = {
-      ...current,
-      downloaded: current.downloaded.filter((existing) => existing.id !== model.id),
-      activeId: wasActive ? undefined : current.activeId,
-    };
-    if (!wasActive) {
-      return base; // inactive: no launcher clear needed, so no delete-pending to record
+    const remaining = current.downloaded.filter((existing) => existing.id !== model.id);
+    if (wasActive) {
+      // Active delete: clear `activeId` and record the write-ahead delete-pending. `recordPending` also
+      // drops any stale launcher-pointer pending — correct here, since deleting the active model
+      // supersedes an in-flight pointer intent.
+      return {
+        ...current,
+        downloaded: remaining,
+        activeId: undefined,
+        pending: recordPending(current.pending, {
+          id: pendingId,
+          kind: 'delete',
+          desired: { enabled: false },
+          fileUri: model.uri,
+        }),
+      };
     }
+    // Inactive delete: leave `activeId` (and any launcher-pointer pending for ANOTHER model) untouched,
+    // and append the delete-pending as a pure byte-deletion journal (Finding 1) — superseding only an
+    // existing same-file entry, never the pointer — so a failed byte delete is durably retryable.
     return {
-      ...base,
-      pending: recordPending(current.pending, {
-        id: `delete:${model.uri}`,
-        kind: 'delete',
-        desired: { enabled: false },
-        fileUri: model.uri,
-      }),
+      ...current,
+      downloaded: remaining,
+      pending: [
+        ...(current.pending ?? []).filter((existing) => existing.id !== pendingId),
+        { id: pendingId, kind: 'delete', desired: { enabled: false }, fileUri: model.uri },
+      ],
     };
   });
   if (!persisted) {
@@ -272,7 +294,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
             ? current.downloaded
             : [...current.downloaded, model],
           activeId: model.id,
-          pending: dropPending(current.pending, `delete:${model.uri}`),
+          pending: dropPending(current.pending, pendingId),
         };
       });
       return {
@@ -294,24 +316,49 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
         message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
       };
     }
-    // Confirmed `ok` — the launcher released the file. Durably CLEAR the write-ahead delete-pending FIRST
-    // and CHECK it landed; only then delete the bytes. If the clear write fails, keep the pending (bytes
-    // stay sweep-protected) and report `ambiguous` so the next reconcile finishes it — never delete bytes
-    // while a pending referencing them might still be on disk.
-    const cleared = await clearPendingEntry(deps, `delete:${model.uri}`);
-    if (!cleared.persisted) {
-      return {
-        kind: 'ambiguous',
-        state: cleared.state,
-        message: `Removed ${model.displayName} from the list and the host app released it, but the pending record couldn't be cleared — its file was kept and will be reconciled next time you open the model manager.`,
-      };
-    }
-    await deps.deleteModelFile(model.uri);
-    return { kind: 'ok', state: cleared.state, message: `${model.displayName} deleted.` };
+    // Confirmed `ok` — the launcher released the file. Now delete the bytes (CHECKED) then clear the
+    // journal (Finding 1).
+    return commitByteDeletion(deps, model, state);
   }
 
-  await deps.deleteModelFile(model.uri);
-  return { kind: 'ok', state, message: `${model.displayName} deleted.` };
+  // Inactive: no launcher clear needed — delete the bytes (CHECKED) then clear the journal (Finding 1).
+  return commitByteDeletion(deps, model, state);
+}
+
+/**
+ * Finish a delete transaction by performing the IRREVERSIBLE byte deletion, CHECKED (Finding 1), then
+ * clearing the write-ahead delete-pending — in that order, so a delete that leaves the file on disk keeps
+ * the durable pending for reconciliation to retry instead of ever reporting a false "deleted":
+ *   - the checked `deps.deleteModelFile` THROWS if the file survives → keep the pending (its `fileUri`
+ *     also keeps the file sweep-protected), hand back the write-ahead `state` (pending still present so
+ *     the component's controls stay blocked), report `ambiguous`;
+ *   - it succeeds → durably drop the pending; only report a clean `ok` once that drop lands, else
+ *     `ambiguous` (the file is gone but the journal survives; the next reconcile repeats the now-no-op
+ *     idempotent checked delete and clears it).
+ */
+async function commitByteDeletion(
+  deps: ModelActionDeps,
+  model: DownloadedModel,
+  writeAheadState: ModelManagerState,
+): Promise<ModelActionResult> {
+  try {
+    await deps.deleteModelFile(model.uri);
+  } catch (error) {
+    return {
+      kind: 'ambiguous',
+      state: writeAheadState,
+      message: `Removed ${model.displayName} from the list, but its file couldn't be deleted (${error instanceof Error ? error.message : String(error)}) — it'll be retried next time you open the model manager.`,
+    };
+  }
+  const cleared = await clearPendingEntry(deps, `delete:${model.uri}`);
+  if (!cleared.persisted) {
+    return {
+      kind: 'ambiguous',
+      state: cleared.state,
+      message: `Deleted ${model.displayName}'s file, but its pending record couldn't be cleared — it'll be reconciled next time you open the model manager.`,
+    };
+  }
+  return { kind: 'ok', state: cleared.state, message: `${model.displayName} deleted.` };
 }
 
 /**
@@ -392,34 +439,28 @@ async function reconcileOne(
   action: PendingAction,
   state: ModelManagerState,
 ): Promise<ModelManagerState> {
+  if (action.kind === 'delete') {
+    return reconcileDelete(deps, action, state);
+  }
+
   const result =
     action.kind === 'setActive'
       ? await deps.setActiveModel({ modelPath: action.desired.modelPath ?? '', model: action.desired.model })
       : await deps.clearActiveModel();
 
   if (result.status === 'timeout') {
-    return state; // still ambiguous — leave the pending entry (and file protection) in place
+    return state; // still ambiguous — leave the pending entry in place
   }
 
   if (result.status === 'ok') {
-    // Confirmed. Durably drop the pending FIRST and CHECK it landed (P2-1): only once the drop is on
-    // disk may we treat it settled — and, for a `'delete'`, only then delete the bytes. If the drop
-    // write fails, keep the pending (and, for a delete, the bytes) in our view so the next pass retries;
-    // never report settled — or delete bytes — off an in-memory assumption that isn't on disk.
+    // Confirmed. Durably drop the pending and CHECK it landed (P2-1): only once the drop is on disk may
+    // we treat it settled. If the drop write fails, keep the pending in our view so the next pass retries;
+    // never report settled off an in-memory assumption that isn't on disk.
     const cleared = await clearPendingEntry(deps, action.id);
-    if (!cleared.persisted) {
-      return state;
-    }
-    if (action.kind === 'delete' && action.fileUri) {
-      await deps.deleteModelFile(action.fileUri);
-    }
-    return cleared.state;
+    return cleared.persisted ? cleared.state : state;
   }
 
   // Definite failure.
-  if (action.kind === 'delete') {
-    return state; // launcher still references the file — keep it protected, never delete the bytes
-  }
   if (action.kind === 'setActive') {
     const { state: next, persisted } = await deps.mutate((current) => {
       const stillOurs =
@@ -433,6 +474,45 @@ async function reconcileOne(
     // If the resolve write itself failed, the on-disk pending survives — keep our pre-mutation view so
     // `settled` reflects disk truth and the entry is retried next pass, not silently reported resolved.
     return persisted ? next : state;
+  }
+  const cleared = await clearPendingEntry(deps, action.id);
+  return cleared.persisted ? cleared.state : state;
+}
+
+/**
+ * Reconcile ONE durable `delete` pending (P2-b + Finding 1). Ordered CHECKED-delete-then-clear, and
+ * gated so it never wrongly touches the launcher pointer:
+ *   - It clears the launcher's active pointer ONLY when local truth (`state.activeId`) says NOTHING
+ *     should be active — i.e. this delete was of the active model, which set `activeId = undefined`. If a
+ *     DIFFERENT model is currently active, the launcher must keep pointing at it: an inactive model's
+ *     delete never moved the pointer (Finding 1 records a delete-pending for those too now), so clearing
+ *     it here would wrongly disable the live model. In that case we skip the bridge and go straight to the
+ *     byte deletion (the launcher never referenced this file, so there is no dangling-pointer risk).
+ *   - A launcher clear that TIMES OUT (ambiguous) or FAILS (launcher still references the file) keeps the
+ *     pending and its bytes for the next pass.
+ *   - On a confirmed release, the bytes are deleted with the CHECKED delete FIRST (keep the pending on a
+ *     throw so it retries), then the journal entry is dropped — only reporting the file reclaimed once
+ *     that drop lands (else keep the pending; a crash between the two is safe, the next pass repeats the
+ *     idempotent checked delete).
+ */
+async function reconcileDelete(
+  deps: ModelActionDeps,
+  action: PendingAction,
+  state: ModelManagerState,
+): Promise<ModelManagerState> {
+  if (state.activeId === undefined) {
+    const result = await deps.clearActiveModel();
+    if (result.status !== 'ok') {
+      // timeout (ambiguous) or failed (launcher still references it) — keep the pending + bytes untouched.
+      return state;
+    }
+  }
+  if (action.fileUri) {
+    try {
+      await deps.deleteModelFile(action.fileUri);
+    } catch {
+      return state; // bytes may still be on disk — keep the pending, retry next pass
+    }
   }
   const cleared = await clearPendingEntry(deps, action.id);
   return cleared.persisted ? cleared.state : state;
