@@ -58,8 +58,19 @@ let inferenceChain: Promise<void> = Promise.resolve();
 //                  the timeout/cleanup path does can wedge the serialized inference chain.
 //   'poisoned'   — an old `release()` REJECTED; the native context may still be resident and we can never
 //                  safely `initLlama` again in this process. Terminal until app restart.
-type EngineStatus = 'ready' | 'releasing' | 'poisoned';
+//   'loading'    — an `initLlama` is in flight (see `ensureContext`, Sol Fable-round-4 P1). Bounded for the
+//                  operator-visible caller, but a native load that never settles must not wedge the chain or
+//                  publish a stale context after the operator moved on. `ensureContext` refuses a SECOND load
+//                  while one is in flight (no double-load/OOM); a load ABANDONED by a timeout / deactivate /
+//                  delete (its `currentLoadId` bumped) has its late context routed through the release path
+//                  instead of being published.
+type EngineStatus = 'ready' | 'loading' | 'releasing' | 'poisoned';
 let engineStatus: EngineStatus = 'ready';
+// The in-flight `initLlama`'s model path (or null), and a monotonically-bumped id that identifies THIS load
+// attempt. `invalidateLoad` bumps the id so a native load that resolves AFTER a timeout / deactivate / delete
+// is recognised as stale and disposed rather than published as the active context (Sol Fable-round-4 P1).
+let loadingPath: string | null = null;
+let currentLoadId = 0;
 // The bare path of the context whose native `release()` is CURRENTLY in flight, and its tracking promise
 // (CodeRabbit). After `beginRelease` detaches the context, `loadedContext` is null — so a RETRY of the delete
 // barrier for that same model would otherwise see "nothing loaded" and wrongly report 'released' while the
@@ -77,6 +88,16 @@ const ENGINE_RECOVERING_MESSAGE =
  * this process, so only an app restart can recover — say so plainly rather than implying a retry will help. */
 const ENGINE_POISONED_MESSAGE =
   'The on-device model engine needs a restart — close and reopen the LOAM host app to use on-device AI again.';
+/** Shown when `initLlama` (the model load) exceeds `MODEL_LOAD_TIMEOUT_MS` (Sol Fable-round-4 P1). The load
+ * is abandoned so it can't wedge the inference chain; a later request retries once the native load settles. */
+const ENGINE_LOAD_TIMEOUT_MESSAGE =
+  'Loading the on-device model timed out — try again in a moment, or restart the LOAM host app if it persists.';
+
+/** Bounded ceiling on a single `initLlama` load. A multi-GB model on a slow phone can legitimately take a
+ * while, so this is generous — but a native load that NEVER settles must not wedge `inferenceChain` forever
+ * (the same never-settling-async class as the completion timeout). On timeout the request errors and the
+ * chain advances; the abandoned native load's late context is disposed, never published. */
+const MODEL_LOAD_TIMEOUT_MS = 3 * 60 * 1000;
 
 // A generous but bounded ceiling on a single on-device completion. A slow phone can legitimately take
 // a while to generate 512 tokens, so this is deliberately long — but a native `completion()` that
@@ -145,15 +166,23 @@ function beginRelease(): Promise<void> {
   }
   const context = loadedContext;
   const path = loadedModelPath;
-  // Phase 1 — detach synchronously (separate from, and before, confirming native disposal below). Record the
-  // model being released + its tracking promise so a barrier RETRY for this same model (after the detach)
-  // recognises it's still disposing rather than seeing "nothing loaded" and reporting 'released'.
+  // Phase 1 — detach synchronously (separate from, and before, confirming native disposal below).
   loadedContext = null;
   loadedModelPath = null;
+  return trackRelease(context, path);
+}
+
+/**
+ * Track a native `context.release()` to completion, driving `engineStatus` + `releasingPath`/`releasingPromise`
+ * (Sol Fable-round-4 P1: shared by {@link beginRelease}'s detach-and-release of the LOADED context AND the
+ * disposal of an ABANDONED late `initLlama` result, so a stale load's context never leaks). Records the model
+ * being released so a barrier RETRY for it recognises it's still disposing rather than seeing "nothing loaded"
+ * and reporting 'released'. `Promise.resolve().then(...)` funnels even a SYNCHRONOUS throw from `release()`
+ * into the reject arm, so a synchronously-failing release poisons the engine like an async one.
+ */
+function trackRelease(context: LlamaContext, path: string | null): Promise<void> {
   engineStatus = 'releasing';
   releasingPath = path;
-  // Phase 2 — track the native release. `Promise.resolve().then(...)` funnels even a SYNCHRONOUS throw from
-  // `release()` into the reject arm, so a synchronously-failing release poisons the engine like an async one.
   const track: Promise<void> = Promise.resolve()
     .then(() => context.release())
     .then(
@@ -178,6 +207,19 @@ function beginRelease(): Promise<void> {
     );
   releasingPromise = track;
   return track;
+}
+
+/**
+ * Invalidate the in-flight `initLlama` load (if any) so its LATE resolution is disposed instead of published
+ * (Sol Fable-round-4 P1) — called on a load timeout AND when a deactivate/delete removes the model mid-load,
+ * so a native load that finishes after the operator moved on can never silently become the active context.
+ * Bumps `currentLoadId`; the load compares its captured id and disposes on mismatch. Leaves `engineStatus`
+ * 'loading' until the native load actually settles (no new `initLlama` may start meanwhile — no double-load).
+ */
+function invalidateLoad(): void {
+  if (loadingPath !== null) {
+    currentLoadId += 1;
+  }
 }
 
 /**
@@ -227,6 +269,12 @@ export function releaseActiveModelContext(): Promise<void> {
   // couple the caller (the operation mutex) to whatever is currently on the chain — including a not-timeout-
   // wrapped `initLlama` load. `beginRelease` detaches synchronously when it runs; the engine state gates any
   // later load. Never throws.
+  // Invalidate any in-flight load SYNCHRONOUSLY (Sol Fable-round-4 P1) — NOT inside the chained step, which
+  // would queue behind the very load step that holds `inferenceChain`, so a native load that resolved first
+  // could still publish + run a completion before the invalidation ran. Bumping the generation now means that
+  // load's late result is disposed, not published. Then schedule the release of whatever is loaded behind the
+  // chain (so it can't tear a context out from under a running completion).
+  invalidateLoad();
   inferenceChain = inferenceChain
     .then(() => {
       beginRelease();
@@ -268,6 +316,13 @@ export function releaseModelContextIfLoaded(
   // after the release COMPLETES — otherwise a hung `release()` would wedge the chain (every later request
   // would block on it). So the step returns nothing (resolves post-detach); the native release is inspected
   // SEPARATELY for the confirmation below.
+  // If the model being deleted is still LOADING, invalidate that load SYNCHRONOUSLY (Sol Fable-round-4 P1) —
+  // outside the chained step (which would queue behind the load step holding `inferenceChain`), so a load that
+  // resolves first can't publish + run a completion on a model whose file the caller is about to unlink. Its
+  // late context is then disposed, not published; we report 'unconfirmed' until that disposal settles.
+  if (loadingPath === target) {
+    invalidateLoad();
+  }
   const step = inferenceChain.then(() => {
     if (loadedContext && loadedModelPath === target) {
       beginRelease(); // detaches synchronously; sets releasingPath/Promise; resolves when release() settles
@@ -276,20 +331,24 @@ export function releaseModelContextIfLoaded(
   inferenceChain = step.catch(() => undefined);
 
   // Confirm NATIVE disposal, BOUNDED so a slow/hung release can't block the caller (the operation mutex)
-  // forever — on timeout the caller keeps the delete-pending and reconciles later. Crucially, this inspects
-  // the RELEASING state, not just `loadedContext`: on a retry the context is already detached (null), but if
-  // THIS model's release is still in flight we must await it (→ 'unconfirmed' on timeout, 'poisoned' if it
-  // rejected), never report 'released' and let the caller unlink a still-mapped file (CodeRabbit).
-  const confirmed = step.then(async (): Promise<'released' | 'poisoned'> => {
-    // If THIS model's native release is still in flight (e.g. a barrier RETRY after the context was already
-    // detached), await it — bounded by the outer budget race. Otherwise nothing maps this model's file.
+  // forever — on timeout the caller keeps the delete-pending and reconciles later. Inspects the RELEASING and
+  // LOADING state, not just `loadedContext`: on a retry the context is already detached (null), but if THIS
+  // model's release is still in flight we await it; if it's still (abandoned) loading, we defer — never report
+  // 'released' and let the caller unlink a still-mapped or about-to-be-mapped file (CodeRabbit / Sol).
+  const confirmed = step.then(async (): Promise<'released' | 'unconfirmed' | 'poisoned'> => {
     if (releasingPath === target && releasingPromise) {
       await releasingPromise; // resolves when release() settles; never rejects
     }
-    // Single classification point. `as EngineStatus` re-widens past TS's stale flow-narrowing (the value can
-    // have flipped to 'poisoned' during the await — a module-level mutation the analysis doesn't model).
-    // Poison is terminal → never unlink; anything else means this model's context is gone → safe to unlink.
-    return (engineStatus as EngineStatus) === 'poisoned' ? 'poisoned' : 'released';
+    // `as EngineStatus` re-widens past TS's stale flow-narrowing (the value can have flipped during the await).
+    if ((engineStatus as EngineStatus) === 'poisoned') {
+      return 'poisoned';
+    }
+    // Still loading this model (abandoned load not yet disposed) → NOT safe to unlink; defer to reconciliation,
+    // which retries once the late context has been disposed (then this returns 'released').
+    if (loadingPath === target) {
+      return 'unconfirmed';
+    }
+    return 'released';
   });
 
   let budgetTimer: ReturnType<typeof setTimeout> | undefined;
@@ -328,11 +387,12 @@ export function releaseModelContextIfLoaded(
  * `lastAccelerationInfo` (see `getLastAccelerationInfo`) rather than assumed from any of this.
  */
 async function ensureContext(modelPath: string): Promise<LlamaContext> {
-  // Engine-state gate (Sol P1) — never `initLlama` while an old context is disposing or failed to dispose.
+  // Engine-state gate (Sol P1) — never `initLlama` while an old context is disposing/failed-to-dispose OR
+  // while another load is already in flight (no double native residency → OOM).
   if (engineStatus === 'poisoned') {
     throw new Error(ENGINE_POISONED_MESSAGE);
   }
-  if (engineStatus === 'releasing') {
+  if (engineStatus === 'releasing' || engineStatus === 'loading') {
     throw new Error(ENGINE_RECOVERING_MESSAGE);
   }
   if (loadedContext && loadedModelPath === modelPath) {
@@ -345,30 +405,89 @@ async function ensureContext(modelPath: string): Promise<LlamaContext> {
     beginRelease();
     throw new Error(ENGINE_RECOVERING_MESSAGE);
   }
-  try {
-    const devices = await getBackendDevicesInfo();
-    console.log('LOAM on-device LLM: detected backend devices', JSON.stringify(devices));
-  } catch (error) {
-    // Diagnostic-only — a probe failure must never block loading the model.
-    console.warn('LOAM on-device LLM: getBackendDevicesInfo() failed', error);
-  }
-  // n_ctx is a fixed constant, not read from config.json's llm.onDevice.contextSize: this module reads
-  // the active model from its OWN local model-manager-store.json (see activeModelPath above), not from
-  // config.json, and nothing in the RN model-manager UI currently collects a context-size choice from
-  // the operator — threading contextSize through would need new UI + storage plumbing, not just
-  // reading a field (see model-manager-bridge.ts's header comment for the full config.json story).
-  // Left as a documented follow-up rather than half-wired.
-  const context = await initLlama({ model: modelPath, n_ctx: 4096, n_gpu_layers: 99 });
-  lastAccelerationInfo = { gpu: context.gpu, reasonNoGPU: context.reasonNoGPU, devices: context.devices };
-  console.log(
-    'LOAM on-device LLM: model loaded — gpu=%s reasonNoGPU=%s devices=%s',
-    context.gpu,
-    context.reasonNoGPU,
-    JSON.stringify(context.devices),
+
+  // Fresh load, BOUNDED (Sol Fable-round-4 P1). A native `initLlama` that never settles must not wedge the
+  // inference chain or block every later request forever.
+  const myLoadId = ++currentLoadId;
+  engineStatus = 'loading';
+  loadingPath = modelPath;
+
+  // Diagnostics ONLY — fire-and-forget, NEVER awaited (a hung `getBackendDevicesInfo` used to be able to
+  // block the load here). n_ctx is a fixed constant (see the model-manager-bridge.ts config.json note).
+  void getBackendDevicesInfo()
+    .then((devices) => console.log('LOAM on-device LLM: detected backend devices', JSON.stringify(devices)))
+    .catch((error) => console.warn('LOAM on-device LLM: getBackendDevicesInfo() failed', error));
+
+  const nativeLoad = Promise.resolve().then(() => initLlama({ model: modelPath, n_ctx: 4096, n_gpu_layers: 99 }));
+  // Track the native load's settlement SEPARATELY from the bounded wait below, so a load that resolves AFTER
+  // its timeout (or after a deactivate/delete abandoned it) is DISPOSED, never published as the active context.
+  void nativeLoad.then(
+    (context) => finishLoad(context, myLoadId, modelPath),
+    (error) => failLoad(error, myLoadId),
   );
-  loadedContext = context;
-  loadedModelPath = modelPath;
-  return context;
+
+  let loadTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    loadTimer = setTimeout(() => reject(new Error('__load_timeout__')), MODEL_LOAD_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([nativeLoad, timeout]);
+  } catch (error) {
+    if (error instanceof Error && error.message === '__load_timeout__') {
+      // ABANDON this load: bump the generation so its late resolution disposes the context instead of
+      // publishing it (`finishLoad` checks the id), and LEAVE the engine 'loading' so no new `initLlama`
+      // starts while the original native load may still be resident. When it settles, `finishLoad`/`failLoad`
+      // dispose/clear the engine back to a usable state.
+      if (myLoadId === currentLoadId) {
+        currentLoadId += 1;
+      }
+      throw new Error(ENGINE_LOAD_TIMEOUT_MESSAGE);
+    }
+    throw error; // the native load rejected — `failLoad` already reset the engine state
+  } finally {
+    if (loadTimer !== undefined) {
+      clearTimeout(loadTimer);
+    }
+  }
+  // `nativeLoad` won the race → `finishLoad` ran first (registered before the race's `.then`) and published
+  // the context if this load is still current. Return it if so; otherwise it was superseded/abandoned.
+  if (loadedContext && loadedModelPath === modelPath && myLoadId === currentLoadId) {
+    return loadedContext;
+  }
+  throw new Error(ENGINE_RECOVERING_MESSAGE);
+}
+
+/** Called when a native `initLlama` RESOLVES: publish the context iff this load is still the current,
+ * non-abandoned one; otherwise DISPOSE it (a timeout / deactivate / delete moved on) so it never leaks and the
+ * no-double-load invariant holds until it's gone (Sol Fable-round-4 P1). */
+function finishLoad(context: LlamaContext, myLoadId: number, modelPath: string): void {
+  loadingPath = null;
+  if (myLoadId === currentLoadId && engineStatus === 'loading') {
+    lastAccelerationInfo = { gpu: context.gpu, reasonNoGPU: context.reasonNoGPU, devices: context.devices };
+    console.log(
+      'LOAM on-device LLM: model loaded — gpu=%s reasonNoGPU=%s devices=%s',
+      context.gpu,
+      context.reasonNoGPU,
+      JSON.stringify(context.devices),
+    );
+    loadedContext = context;
+    loadedModelPath = modelPath;
+    engineStatus = 'ready';
+  } else {
+    // Abandoned (timed out, or a deactivate/delete invalidated it) — dispose the late context through the
+    // release machinery rather than publishing it (so nothing maps a deleted model's file, and no leak).
+    trackRelease(context, modelPath);
+  }
+}
+
+/** Called when a native `initLlama` REJECTS: nothing got loaded, so return the engine to `ready` (unless a
+ * dispose/poison for an abandoned sibling load already moved it on). */
+function failLoad(error: unknown, _myLoadId: number): void {
+  loadingPath = null;
+  console.warn('LOAM on-device LLM: initLlama() failed', error);
+  if (engineStatus === 'loading') {
+    engineStatus = 'ready';
+  }
 }
 
 /**

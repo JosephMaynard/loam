@@ -36,22 +36,43 @@ const mocks = vi.hoisted(() => ({
   // context is REBUILT fresh (a different native context) only after the old release resolved, and that
   // NO fresh context is built while the engine is `releasing`/`poisoned`.
   contextsCreated: 0,
+  // Overridable per-test so the bounded-load tests (Sol Fable-round-4 P1) can make `initLlama` hang/reject
+  // and `getBackendDevicesInfo` hang. `initLlamaImpl` returns the native context (or throws/never-settles);
+  // `backendDevicesImpl` is the diagnostic probe (must never gate the load).
+  initLlamaImpl: undefined as undefined | (() => Promise<unknown>),
+  backendDevicesImpl: undefined as undefined | (() => Promise<unknown[]>),
 }));
 
 vi.mock("llama.rn", () => ({
-  getBackendDevicesInfo: vi.fn(async () => []),
-  initLlama: vi.fn(async () => {
+  getBackendDevicesInfo: vi.fn(() => (mocks.backendDevicesImpl ? mocks.backendDevicesImpl() : Promise.resolve([]))),
+  initLlama: vi.fn(() => {
+    if (mocks.initLlamaImpl) {
+      return mocks.initLlamaImpl();
+    }
     mocks.contextsCreated += 1;
-    return {
+    return Promise.resolve({
       gpu: false,
       reasonNoGPU: "test",
       devices: [],
       completion: (params: unknown, onToken?: TokenCallback) => mocks.completionImpl(params, onToken),
       stopCompletion: mocks.stopCompletion,
       release: mocks.release,
-    };
+    });
   }),
 }));
+
+/** Build a native-context double (as `initLlama` would return), incrementing `contextsCreated`. */
+function makeNativeContext() {
+  mocks.contextsCreated += 1;
+  return {
+    gpu: false,
+    reasonNoGPU: "test",
+    devices: [],
+    completion: (params: unknown, onToken?: TokenCallback) => mocks.completionImpl(params, onToken),
+    stopCompletion: mocks.stopCompletion,
+    release: mocks.release,
+  };
+}
 
 vi.mock("@/lib/model-manager-store", () => ({
   loadModelManagerState: vi.fn(async () => mocks.state),
@@ -119,6 +140,8 @@ beforeEach(async () => {
   // once hang or reject on `release`, and `mockClear` alone would leave that implementation in place.
   mocks.release.mockImplementation(async () => {});
   mocks.contextsCreated = 0;
+  mocks.initLlamaImpl = undefined;
+  mocks.backendDevicesImpl = undefined;
   ({ registerOnDeviceLlm, releaseActiveModelContext, releaseModelContextIfLoaded } = await import("@/lib/on-device-llm"));
 });
 
@@ -494,5 +517,131 @@ describe("on-device-llm inference", () => {
     // A throwing release is swallowed (it poisons the engine, but that's off the no-model path here); the
     // caller still gets the graceful "no model" error rather than a crash.
     expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/No on-device model is selected/i);
+  });
+});
+
+describe("bounded model load — a never-settling initLlama can't wedge the engine (Sol Fable-round-4 P1)", () => {
+  const LOAD_TIMEOUT = 3 * 60 * 1000;
+
+  it("getBackendDevicesInfo never settling does NOT block the load (diagnostic is fire-and-forget)", async () => {
+    mocks.backendDevicesImpl = () => new Promise(() => {}); // hangs forever
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await flush();
+
+    // The load + completion still succeed — the hung diagnostic never gated `initLlama`.
+    expect(endedFor(channel, "1")).toBe(true);
+    expect(mocks.contextsCreated).toBe(1);
+  });
+
+  it("initLlama never settling: the request errors within the bound, later requests fail fast, no 2nd load", async () => {
+    vi.useFakeTimers();
+    mocks.initLlamaImpl = () => new Promise(() => {}); // never settles
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(LOAD_TIMEOUT); // past the model-load timeout
+    expect(String(errorFor(channel, "1")?.payload.error)).toMatch(/timed out/i);
+
+    // A later request fails FAST (engine still `loading` behind the abandoned native load) — no 2nd initLlama.
+    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(String(errorFor(channel, "2")?.payload.error)).toMatch(/still recovering/i);
+    // initLlama was called once for the wedged load; the mock only counts contexts it actually returns.
+    expect(mocks.contextsCreated).toBe(0);
+  });
+
+  it("a load that TIMES OUT then RESOLVES late disposes the stale context and never runs completion()", async () => {
+    vi.useFakeTimers();
+    let resolveLoad!: (ctx: unknown) => void;
+    mocks.initLlamaImpl = () => new Promise((resolve) => (resolveLoad = resolve));
+    const completion = vi.fn(async () => ({ text: "should not run" }));
+    mocks.completionImpl = completion;
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(LOAD_TIMEOUT); // abandon the load
+    expect(String(errorFor(channel, "1")?.payload.error)).toMatch(/timed out/i);
+
+    // The native load resolves LATE with a context — it must be RELEASED (disposed), never published/run.
+    resolveLoad(makeNativeContext());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.release).toHaveBeenCalledTimes(1); // the stale context was disposed
+    expect(completion).not.toHaveBeenCalled();
+  });
+
+  it("deactivate during a pending load prevents the late context from becoming active or running completion", async () => {
+    vi.useFakeTimers();
+    let resolveLoad!: (ctx: unknown) => void;
+    mocks.initLlamaImpl = () => new Promise((resolve) => (resolveLoad = resolve));
+    const completion = vi.fn(async () => ({ text: "should not run" }));
+    mocks.completionImpl = completion;
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(1); // load is in flight
+    // Operator deactivates mid-load → the load is invalidated SYNCHRONOUSLY (even though the load step still
+    // holds the inference chain), so the late context can't be published behind the chain.
+    await releaseActiveModelContext();
+    await vi.advanceTimersByTimeAsync(1);
+
+    // The load now resolves — its context is DISPOSED, never published, and request 1 never runs completion.
+    resolveLoad(makeNativeContext());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+    expect(completion).not.toHaveBeenCalled();
+    expect(endedFor(channel, "1")).toBe(false);
+
+    // A subsequent request (default fast initLlama) builds a FRESH context — the stale one never became active.
+    mocks.initLlamaImpl = undefined;
+    mocks.completionImpl = async (_params, onToken) => {
+      onToken?.({ token: "ok" });
+      return { text: "ok" };
+    };
+    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(endedFor(channel, "2")).toBe(true);
+  });
+
+  it("releaseModelContextIfLoaded of a model that's still LOADING returns 'unconfirmed' (defers the unlink)", async () => {
+    vi.useFakeTimers();
+    mocks.initLlamaImpl = () => new Promise(() => {}); // load hangs
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(1); // load in flight (loadingPath === m.gguf)
+
+    // Deleting a model that's still loading must NOT report 'released' (its file would be unlinked while the
+    // load may still map it) — it defers until the abandoned load disposes.
+    const outcome = releaseModelContextIfLoaded("file:///models/m.gguf", 50);
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(outcome).resolves.toBe("unconfirmed");
+  });
+
+  it("an abandoned load that REJECTS returns the engine safely to ready", async () => {
+    vi.useFakeTimers();
+    let rejectLoad!: (err: unknown) => void;
+    mocks.initLlamaImpl = () => new Promise((_resolve, reject) => (rejectLoad = reject));
+    const channel = makeChannel();
+    registerOnDeviceLlm(channel);
+
+    channel.emit("loam-llm-request", { id: "1", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(LOAD_TIMEOUT);
+    expect(String(errorFor(channel, "1")?.payload.error)).toMatch(/timed out/i);
+
+    rejectLoad(new Error("native load blew up"));
+    await vi.advanceTimersByTimeAsync(1);
+
+    // Engine recovered: a fresh request (default initLlama) loads and completes.
+    mocks.initLlamaImpl = undefined;
+    channel.emit("loam-llm-request", { id: "2", messages: [{ role: "user", content: "hi" }] });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(endedFor(channel, "2")).toBe(true);
   });
 });
