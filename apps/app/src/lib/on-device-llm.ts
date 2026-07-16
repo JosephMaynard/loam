@@ -43,6 +43,13 @@ let loadedModelPath: string | null = null;
 // A llama.cpp context can't run concurrent completions; serialize DMs through a promise chain.
 let inferenceChain: Promise<void> = Promise.resolve();
 
+// A generous but bounded ceiling on a single on-device completion. A slow phone can legitimately take
+// a while to generate 512 tokens, so this is deliberately long — but a native `completion()` that
+// never settles (a wedged/crashed generation) would otherwise wedge `inferenceChain` forever: every
+// later DM queues behind the unresolved run and eventually errors, until app restart. On timeout we
+// ask the native side to stop (best-effort) and reject, so the chain advances and the next DM runs.
+const INFERENCE_TIMEOUT_MS = 3 * 60 * 1000;
+
 /** The active downloaded model's local filesystem path (from the model manager), or null if none is
  * selected. Strips the `file://` scheme expo-file-system uses — llama.rn wants a bare path. */
 async function activeModelPath(): Promise<string | null> {
@@ -69,6 +76,28 @@ export function getLastAccelerationInfo(): { gpu: boolean; reasonNoGPU: string; 
 }
 
 /**
+ * Release the currently-loaded llama.rn context (best-effort) and clear the cached context/path, so its
+ * (multi-GB) RAM is reclaimed. Called both when SWITCHING models (see `ensureContext`) and when the
+ * active model becomes null — Deactivate, or deleting the active model — so the context doesn't stay
+ * resident until app restart (RAM pressure on a device also running the embedded server). The cached
+ * references are cleared BEFORE awaiting `release()` so a throwing release still can't leave a stale
+ * context that a later call would wrongly reuse.
+ */
+async function releaseLoadedContext(): Promise<void> {
+  if (!loadedContext) {
+    return;
+  }
+  const context = loadedContext;
+  loadedContext = null;
+  loadedModelPath = null;
+  try {
+    await context.release();
+  } catch {
+    // best-effort — a failed release must never block the caller; the cached references are already clear.
+  }
+}
+
+/**
  * Load (or reuse) the llama.rn context for `modelPath`, releasing a previously-loaded different model
  * first.
  *
@@ -92,15 +121,7 @@ async function ensureContext(modelPath: string): Promise<LlamaContext> {
   if (loadedContext && loadedModelPath === modelPath) {
     return loadedContext;
   }
-  if (loadedContext) {
-    try {
-      await loadedContext.release();
-    } catch {
-      // best-effort — releasing a stale context should never block loading the new one
-    }
-    loadedContext = null;
-    loadedModelPath = null;
-  }
+  await releaseLoadedContext();
   try {
     const devices = await getBackendDevicesInfo();
     console.log('LOAM on-device LLM: detected backend devices', JSON.stringify(devices));
@@ -139,24 +160,56 @@ async function runInference(messages: ChatMessage[], callbacks: InferenceCallbac
     try {
       const modelPath = await activeModelPath();
       if (!modelPath) {
+        // No active model (Deactivate, or the active model was deleted): release the loaded context so
+        // its RAM is reclaimed rather than left resident until app restart (it's otherwise only released
+        // on a model SWITCH). Best-effort — a release failure must not prevent surfacing the error below.
+        await releaseLoadedContext();
         callbacks.onError('No on-device model is selected. Download and activate one from the AI model manager.');
         return;
       }
       const context = await ensureContext(modelPath);
-      await context.completion(
-        {
-          messages,
-          n_predict: 512,
-          // Gemma's turn terminator (+ the generic end token); llama.rn stops on any match.
-          stop: ['<end_of_turn>', '<eos>'],
-        },
-        (data) => {
-          const token = data?.token;
-          if (typeof token === 'string' && token.length > 0) {
-            callbacks.onDelta(token);
+      // Race the native completion against a bounded timeout so a wedged generation can't stall the
+      // inference chain forever (see INFERENCE_TIMEOUT_MS). The completion callback still streams each
+      // token to `onDelta` on the success path — unchanged; only the never-settles case is bounded.
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timeoutTimer = setTimeout(() => {
+          // Best-effort: ask the native side to abandon the wedged generation so the reused context
+          // isn't left mid-completion. Guard both a synchronous throw and a rejected promise so neither
+          // masks the timeout error below nor surfaces as an unhandled rejection.
+          try {
+            void Promise.resolve(context.stopCompletion()).catch(() => undefined);
+          } catch {
+            // stopCompletion threw synchronously / isn't available — nothing more we can do.
           }
-        },
-      );
+          reject(new Error(`On-device inference timed out after ${Math.round(INFERENCE_TIMEOUT_MS / 1000)}s.`));
+        }, INFERENCE_TIMEOUT_MS);
+      });
+      try {
+        await Promise.race([
+          context.completion(
+            {
+              messages,
+              n_predict: 512,
+              // Gemma's turn terminator (+ the generic end token); llama.rn stops on any match.
+              stop: ['<end_of_turn>', '<eos>'],
+            },
+            (data) => {
+              const token = data?.token;
+              if (typeof token === 'string' && token.length > 0) {
+                callbacks.onDelta(token);
+              }
+            },
+          ),
+          timeout,
+        ]);
+      } finally {
+        // Always clear the timer — on the success path so it can't fire after we've resolved, and on
+        // the timeout/error path it's a harmless no-op.
+        if (timeoutTimer !== undefined) {
+          clearTimeout(timeoutTimer);
+        }
+      }
       callbacks.onEnd();
     } catch (error) {
       callbacks.onError(error instanceof Error ? error.message : String(error));

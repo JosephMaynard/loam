@@ -56,6 +56,34 @@ type ProgressMap = Record<string, { written: number; total: number; phase: 'down
  * is cleanest (per the round-4 review note). */
 let orphanSweepDone = false;
 
+/** Reject a pasted custom-URL host that points at the device itself or a link-local address. Loopback
+ * is the important case: a `http://127.0.0.1:<port>/…` URL would aim a GET from the RN process at the
+ * node's OWN embedded server — the codebase deliberately never issues HTTP from the bridge to the local
+ * server (it probes `/api/health`, which mints no identity) precisely because such a request could
+ * consume the one-time `firstUser` admin grant. Covers `localhost`, IPv4 loopback (127.0.0.0/8), the
+ * unspecified address (0.0.0.0 / ::), IPv6 loopback (::1), IPv4-mapped forms, and link-local
+ * (169.254.0.0/16). Best-effort string matching — a real model download never needs a loopback or
+ * link-local host, so erring toward rejection here is safe. */
+function isLoopbackOrLinkLocalHost(hostname: string): boolean {
+  // URL.hostname keeps IPv6 in brackets (e.g. `[::1]`); strip them for a bare comparison.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    return true;
+  }
+  if (host === '0.0.0.0' || host === '::' || host === '::0' || host === '::1') {
+    return true;
+  }
+  // IPv4 loopback 127.0.0.0/8 and link-local 169.254.0.0/16.
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) || /^169\.254\.\d{1,3}\.\d{1,3}$/.test(host)) {
+    return true;
+  }
+  // IPv4-mapped IPv6 forms of the same (e.g. `::ffff:127.0.0.1`).
+  if (/^::ffff:127\./.test(host) || /^::ffff:169\.254\./.test(host)) {
+    return true;
+  }
+  return false;
+}
+
 type ModelManagerOverlayProps = {
   visible: boolean;
   onClose: () => void;
@@ -78,6 +106,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const [progress, setProgress] = useState<ProgressMap>({});
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set());
   const [customUrl, setCustomUrl] = useState('');
+  /** True while a pasted-URL download is running. Disables the "Add & download" button for its duration
+   * so a second tap can't start a duplicate parallel download under a fresh id (the custom id is
+   * generated per-call, so `busyIds` alone wouldn't gate the button). */
+  const [customDownloadInFlight, setCustomDownloadInFlight] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
   /** Gates every download-start control (P2-7 round 4) until the orphan sweep below has actually
    * finished — initialized from the module-level flag so a remount after the sweep already ran once
@@ -384,6 +416,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       setStatusMessage('Only http/https URLs are supported.');
       return;
     }
+    if (isLoopbackOrLinkLocalHost(parsed.hostname)) {
+      setStatusMessage(
+        'That address points at this device or a local network address — enter a public link to a .gguf file.',
+      );
+      return;
+    }
 
     // Free-storage gate (G9): a pasted URL has no known size ahead of time (unlike a catalog entry),
     // so RAM can't be checked and the exact-size storage check can't run either — but we can still
@@ -408,40 +446,48 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
     const fileName = `${id}-${guessedName.toLowerCase().endsWith('.gguf') ? guessedName : `${guessedName}.gguf`}`;
 
+    setCustomDownloadInFlight(true);
     setBusy(id, true);
     setModelProgress(id, 0, 0);
     const controller = new AbortController();
     activeDownloads.current.set(id, controller);
-    const outcome = await downloadModel(
-      trimmed,
-      fileName,
-      undefined,
-      undefined,
-      (written, total) => setModelProgress(id, written, total),
-      undefined,
-      controller.signal,
-    );
-    activeDownloads.current.delete(id);
-    clearModelProgress(id);
-    setBusy(id, false);
+    // try/finally so a throw anywhere in the download (e.g. `downloadModel`'s dir-prep/stat before it
+    // returns its `{ ok }` outcome) still clears the busy row, progress, and the AbortController rather
+    // than leaving the row stuck busy + leaking the controller.
+    try {
+      const outcome = await downloadModel(
+        trimmed,
+        fileName,
+        undefined,
+        undefined,
+        (written, total) => setModelProgress(id, written, total),
+        undefined,
+        controller.signal,
+      );
 
-    if (!outcome.ok) {
-      setStatusMessage(`Custom model download failed — ${outcome.error}`);
-      return;
-    }
-    const model: DownloadedModel = {
-      id,
-      displayName: guessedName,
-      uri: outcome.uri,
-      sizeBytes: outcome.sizeBytes,
-      isCustom: true,
-      sourceUrl: trimmed,
-      downloadedAt: Date.now(),
-    };
-    const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
-    setCustomUrl('');
-    if (persisted) {
-      setStatusMessage(`${guessedName} downloaded.`);
+      if (!outcome.ok) {
+        setStatusMessage(`Custom model download failed — ${outcome.error}`);
+        return;
+      }
+      const model: DownloadedModel = {
+        id,
+        displayName: guessedName,
+        uri: outcome.uri,
+        sizeBytes: outcome.sizeBytes,
+        isCustom: true,
+        sourceUrl: trimmed,
+        downloadedAt: Date.now(),
+      };
+      const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
+      setCustomUrl('');
+      if (persisted) {
+        setStatusMessage(`${guessedName} downloaded.`);
+      }
+    } finally {
+      activeDownloads.current.delete(id);
+      clearModelProgress(id);
+      setBusy(id, false);
+      setCustomDownloadInFlight(false);
     }
   };
 
@@ -571,11 +617,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
               />
               <Pressable
                 onPress={() => void handleAddCustomUrl()}
-                disabled={!customUrl.trim() || !sweepReady || actionsBlocked}
+                disabled={!customUrl.trim() || !sweepReady || actionsBlocked || customDownloadInFlight}
                 accessibilityRole="button"
-                style={[styles.button, (!customUrl.trim() || !sweepReady || actionsBlocked) && styles.buttonDisabled]}>
+                style={[
+                  styles.button,
+                  (!customUrl.trim() || !sweepReady || actionsBlocked || customDownloadInFlight) &&
+                    styles.buttonDisabled,
+                ]}>
                 <ThemedText type="smallBold" style={styles.buttonLabel}>
-                  Add &amp; download
+                  {customDownloadInFlight ? 'Downloading…' : 'Add & download'}
                 </ThemedText>
               </Pressable>
 
