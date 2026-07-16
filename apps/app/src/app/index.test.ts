@@ -67,7 +67,7 @@ vi.mock('@/lib/db-encryption', () => ({
 
 // Imported AFTER the mocks (vi.mock is hoisted, so ordering is safe) — index.tsx evaluates cleanly
 // against the doubles above.
-import { clearWipeKeyAndAck, handleClientWebViewMessage } from './index';
+import { clearWipeKeyAndAck, handleClientWebViewMessage, startFreshIntentForCode } from './index';
 
 beforeEach(() => {
   clearStoredDbKeys.mockReset();
@@ -90,6 +90,26 @@ describe('handleClientWebViewMessage', () => {
   it('ignores malformed (non-JSON) messages without throwing or clearing the device key', () => {
     expect(() => handleClientWebViewMessage('not-json {')).not.toThrow();
     expect(clearStoredDbKeys).not.toHaveBeenCalled();
+  });
+});
+
+describe('startFreshIntentForCode (Sol P1: button copy ↔ marker intent must agree)', () => {
+  it('requests DELETE for the plaintext-unconverted destructive recovery ("Delete existing data & start encrypted")', () => {
+    // The `db_encryption_plaintext_unconverted` button is a DELIBERATE destructive action — the server
+    // must DELETE the plaintext DB and start a fresh encrypted one, so the marker intent must be 'delete'.
+    expect(startFreshIntentForCode('db_encryption_plaintext_unconverted')).toBe('delete');
+  });
+
+  it('requests PRESERVE for the unreadable accidental-lockout recovery ("Preserve old database & start fresh")', () => {
+    // The `db_encryption_unreadable` button is accidental-lockout recovery — the server renames the old
+    // (still key-recoverable) ciphertext aside rather than deleting it, so the intent must be 'preserve'.
+    expect(startFreshIntentForCode('db_encryption_unreadable')).toBe('preserve');
+  });
+
+  it('defaults to the non-destructive PRESERVE for any other / undefined code', () => {
+    // A mis-routed or codeless caller must never silently delete data — 'preserve' is the safe default.
+    expect(startFreshIntentForCode(undefined)).toBe('preserve');
+    expect(startFreshIntentForCode('boot_timeout')).toBe('preserve');
   });
 });
 

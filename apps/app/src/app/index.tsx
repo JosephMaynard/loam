@@ -26,6 +26,7 @@ import {
   setDbModeHint,
   setPassphraseCandidate,
   type DbEncryptionMode,
+  type StartFreshIntent,
 } from '@/lib/db-encryption';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
@@ -182,6 +183,23 @@ export async function clearWipeKeyAndAck(
     // while the marker is still present) covers this; nothing more to do here.
   }
   return { ok: true };
+}
+
+/**
+ * Map the active boot-error code to the start-fresh {@link StartFreshIntent} its recovery button carries
+ * (Sol P1). The two fresh-start recovery flows share one marker mechanism but mean OPPOSITE things on
+ * disk, so the intent must track which button the operator actually pressed:
+ *   - `db_encryption_plaintext_unconverted` → `'delete'`: the operator explicitly chose "Delete existing
+ *     data & start encrypted" — a deliberate destructive transition; the server DELETES the plaintext DB.
+ *   - `db_encryption_unreadable` (and any other code) → `'preserve'`: an accidental wrong/lost-key
+ *     lockout — "Preserve old database & start fresh" renames the old ciphertext aside for a later
+ *     attempt. `'preserve'` (the non-destructive choice) is the default so a mis-routed caller can never
+ *     silently delete data.
+ * Extracted as a pure, dependency-free function so the button-copy↔intent agreement is unit-testable in
+ * one place, decoupled from the component's closures.
+ */
+export function startFreshIntentForCode(code: string | undefined): StartFreshIntent {
+  return code === DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE ? 'delete' : 'preserve';
 }
 
 type HostStatus = 'starting' | 'ready' | 'error';
@@ -565,18 +583,27 @@ export default function HostScreen() {
     setErrorMessage(message);
   };
 
-  // "Preserve old database & start fresh" (AF8/design#1, P1-1): ask the launcher to write the
-  // confirmation marker. As of Sol round 3 this ALSO makes main.js retry boot immediately, in the SAME
-  // still-alive Node runtime (see its `loam-db-start-fresh` listener) — no app restart needed any more.
-  // `onStatus`'s `'ready'` branch clears the fatal `dbUnreadable` block automatically once that retry
-  // succeeds (and resets this busy/message state); if it fails again, a fresh `db_encryption_unreadable`
-  // `'error'` status simply replaces this one.
+  // Fresh-start recovery (AF8/design#1, P1-1): ask the launcher to write the confirmation marker. Shared
+  // by BOTH the `db_encryption_unreadable` "Preserve old database & start fresh" button and the
+  // `db_encryption_plaintext_unconverted` "Delete existing data & start encrypted" button — the marker
+  // intent is derived from the active `errorCode` below (Sol P1) so it matches the pressed button. As of
+  // Sol round 3 this ALSO makes main.js retry boot immediately, in the SAME still-alive Node runtime (see
+  // its `loam-db-start-fresh` listener) — no app restart needed any more. `onStatus`'s `'ready'` branch
+  // clears the active fatal block automatically once that retry succeeds (and resets this busy/message
+  // state); if it fails again, a fresh `'error'` status simply replaces this one.
   const handleStartFresh = async () => {
     setStartFreshBusy(true);
     setStartFreshMessage(undefined);
-    // Accidental-lockout recovery: PRESERVE the old (unreadable/plaintext) database on disk rather
-    // than deleting it — the operator is recovering from a key/mode mismatch, not wiping the node.
-    const result = await requestDbStartFresh(nodejs.channel, 'preserve');
+    // Sol P1: BOTH fresh-start recovery buttons share this handler, so the marker intent must be
+    // derived from the ACTIVE error code — never hardcoded — so the intent always matches the button
+    // the operator pressed. `db_encryption_unreadable` is an accidental-lockout PRESERVE (the server
+    // renames the old, still-key-recoverable ciphertext aside for a later attempt); the
+    // `db_encryption_plaintext_unconverted` "Delete existing data & start encrypted" button is a
+    // DELIBERATE destructive DELETE (the server removes the plaintext DB and boots a fresh keyed one).
+    // Each button only renders while its own error code is active (see `dbUnreadable`/
+    // `dbPlaintextUnconverted`), so `errorCode` unambiguously selects the intent.
+    const intent = startFreshIntentForCode(errorCode);
+    const result = await requestDbStartFresh(nodejs.channel, intent);
     if (!result.ok) {
       // The marker write itself failed — main.js never got to (re)invoke boot, so there is no retry in
       // flight to wait for; safe to let the operator try again immediately.
@@ -591,7 +618,9 @@ export default function HostScreen() {
     // could race a second in-process reboot attempt against the first — main.js and embedded-main.ts
     // both now also guard against that directly, but the UI should never even offer the chance.
     setStartFreshMessage(
-      'Confirmed — the old database is preserved on disk and a fresh one is starting now…',
+      intent === 'delete'
+        ? 'Confirmed — the existing data will be deleted and a fresh encrypted database is starting now…'
+        : 'Confirmed — the old database is preserved on disk and a fresh one is starting now…',
     );
   };
 
