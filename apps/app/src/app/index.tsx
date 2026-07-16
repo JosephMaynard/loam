@@ -605,10 +605,14 @@ export default function HostScreen() {
     const intent = startFreshIntentForCode(errorCode);
     const result = await requestDbStartFresh(nodejs.channel, intent);
     if (!result.ok) {
-      // The marker write itself failed — main.js never got to (re)invoke boot, so there is no retry in
-      // flight to wait for; safe to let the operator try again immediately.
+      // The launcher did NOT durably install the marker, so main.js never (re)invoked boot — there is no
+      // retry in flight to wait for. Two sub-cases, both surfaced verbatim via `result.error`: `not-installed`
+      // (nothing was written — safe to try again) and `indeterminate` (a post-rename fsync failure means the
+      // marker MAY still be on disk and take effect on the next restart — the message says NOT to assume it
+      // was cancelled). Either way re-tapping just re-writes a same-intent, idempotent marker, so we let the
+      // operator retry — but we show the launcher's exact wording rather than a blanket "failed".
       setStartFreshBusy(false);
-      setStartFreshMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      setStartFreshMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}.`);
       return;
     }
     // RF2: main.js's `loam-db-start-fresh` listener retries boot immediately after this ack. Leave

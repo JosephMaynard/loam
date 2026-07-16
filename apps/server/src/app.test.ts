@@ -2172,6 +2172,37 @@ describe("encryption at rest + key-discard kill switch", () => {
     openSyncFailure.path = undefined;
   });
 
+  it("RF-a extended (Sol round 10 review): an in-process wipe (ephemeral) 503-gates concurrent requests throughout the shared-tail media-deletion awaits, then serves the fresh state once complete", async () => {
+    const { app } = await makeEncryptedApp({ ephemeralDbKey: true }, { killSwitch: { enabled: true } });
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "STALE_DURING_WIPE")).statusCode).toBe(201);
+
+    // Hold the shared tail's `await rm(avatarsDir)` open so a concurrent request lands mid-wipe.
+    let release!: () => void;
+    rmGate.promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const wipePromise = app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The 503 gate is now raised for the WHOLE wipe (not just the hooked fixed-key branch), so a request
+    // during the tail's media-deletion await sees 503 — never a stale 200 from the still-populated mirror.
+    const during = await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } });
+    expect(during.statusCode).toBe(503);
+
+    release();
+    expect((await wipePromise).statusCode).toBe(200);
+
+    // The gate is LIFTED on the in-process success return, so the node serves the fresh (re-seeded) state.
+    const after = await app.server.inject({ method: "GET", url: "/api/channels" });
+    expect(after.statusCode).toBe(200);
+  });
+
   describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {
     async function expectConfigSurvivesFixedKeyWipe(dbEncryptionMode: "persistent" | "passphrase"): Promise<void> {
       const hook = installFakeWipeRestartHook();

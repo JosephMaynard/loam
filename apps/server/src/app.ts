@@ -3902,6 +3902,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return { complete: false };
     }
 
+    // RF-a, extended (Sol round-10 review): raise the 503 lockdown gate SYNCHRONOUSLY, before ANY branch or
+    // await, for EVERY wipe path — not just the hooked fixed-key branch. The in-process reopen paths (no-hook
+    // fixed-key, ephemeral, plaintext logical) reset the in-memory `data`/`sessions` only in the shared tail,
+    // AFTER their first `await rm(...)`; without this a concurrent request landing in that window read the
+    // still-populated mirror with a 200 instead of a 503. The gate now covers the whole wipe; it is LIFTED
+    // again (`awaitingWipeRestart = false`) only on the in-process SUCCESS return once `loadData()` has
+    // repopulated `data` from the fresh empty DB. The hooked fixed-key branch returns with the gate still
+    // raised (it hands off to a launcher restart), and every fail-closed path stays 503-locked.
+    awaitingWipeRestart = true;
+
     // A `persistent`/`passphrase` key is FIXED (Keystore-held on Android, config-held on desktop) —
     // this process has no way to mint a new one. Recreating the encrypted DB in-process (as the
     // ephemeral/off branches below do) would just re-key the fresh database under the SAME key that
@@ -4192,7 +4202,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     server.log.warn("Kill switch executed: all data wiped, defaults re-seeded");
     // These branches (ephemeral rotation, same-key fallback, plaintext logical wipe) complete the wipe
-    // in-process and re-seed a usable node — no launcher handoff is pending, so the wipe is complete.
+    // in-process and re-seed a usable node — no launcher handoff is pending, so the wipe is complete. The
+    // in-memory mirror is now the fresh empty DB (loadData above), so LIFT the 503 gate raised at the top:
+    // the node serves again, and no request between here and now saw stale pre-wipe data (Sol round-10 review).
+    awaitingWipeRestart = false;
     return { complete: true };
   }
 
