@@ -2222,7 +2222,10 @@ describe("encryption at rest + key-discard kill switch", () => {
     ).toBe(503);
     await app.close();
 
-    // Boot 2 with the fault cleared: the resume re-runs (idempotent) deletion, clears the journal, opens fresh.
+    // Boot 2 with the fault cleared. Note: clearWipePhase `rmSync`s the journal BEFORE its dir-fsync fails, so
+    // boot 1 already physically removed the journal (its return was false only because the fsync couldn't PROVE
+    // the removal durable). So boot 2 is a clean fresh boot (`readWipeJournal` → ENOENT → no resume): the DB was
+    // deleted on boot 1 and never served, so a fresh empty node comes up with no old data.
     openSyncFailure.path = undefined;
     openSyncFailure.failOnCall = undefined;
     openSyncFailure.count = 0;
