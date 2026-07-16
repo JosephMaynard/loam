@@ -10,8 +10,8 @@
 //
 // Usage: pnpm --filter app bundle:server   (or: node ./scripts/bundle-server.mjs)
 
-import { cpSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
@@ -21,9 +21,19 @@ const appDir = join(here, "..");
 const repoRoot = join(appDir, "..", "..");
 const serverEntry = join(repoRoot, "apps/server/src/embedded-main.ts");
 const clientDist = join(repoRoot, "apps/client/dist");
-// Committed launcher template (main.js + package.json). The nodejs-project dir itself is gitignored
-// build output; these two files are its versioned source of truth.
+// Committed launcher template. The nodejs-project dir itself is gitignored build output; the files
+// under templateDir are its versioned source of truth. main.js `require('./helper')`s its siblings
+// (db-key-gate, start-fresh-marker, …) at boot, so EVERY template file must reach the runtime — a
+// missing helper throws MODULE_NOT_FOUND before the server starts (Sol P0).
 const templateDir = join(appDir, "nodejs-project-template");
+
+// The whole template is runtime source: every *.js helper plus package.json. Copying the directory's
+// actual contents (rather than a hardcoded [main.js, package.json] list) means a future helper can't
+// be silently omitted. There are currently no template files that must be excluded; if one is ever
+// added (e.g. a README), exclude it explicitly here with a comment explaining why.
+const templateFiles = readdirSync(templateDir).filter(
+  (name) => name.endsWith(".js") || name === "package.json",
+);
 
 // Output lands under nodejs-assets/nodejs-project — the layout nodejs-mobile expects.
 const outDir = join(appDir, "nodejs-assets", "nodejs-project");
@@ -36,14 +46,58 @@ function assertBuilt(path, hint) {
   }
 }
 
+/**
+ * Statically verify that every relative `require('./x')` in a generated entry file resolves to a
+ * sibling in the runtime dir. `./x` maps to `x.js` (or `x` verbatim if it already ends in `.js`);
+ * `x/index.js` is accepted for a directory-style specifier. Throws (fails the build) on any miss.
+ */
+function assertRelativeRequiresResolve(entryFile, runtimeDir) {
+  const source = readFileSync(entryFile, "utf8");
+  const requireRe = /require\(\s*(['"])(\.\/[^'"]+)\1\s*\)/g;
+  const specs = new Set();
+  for (let match = requireRe.exec(source); match !== null; match = requireRe.exec(source)) {
+    specs.add(match[2]);
+  }
+  const missing = [];
+  for (const spec of specs) {
+    const rel = spec.slice(2); // strip leading "./"
+    const candidates = rel.endsWith(".js") ? [rel] : [`${rel}.js`, join(rel, "index.js")];
+    if (!candidates.some((candidate) => existsSync(join(runtimeDir, candidate)))) {
+      missing.push(spec);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `bundle:server smoke check failed: ${basename(entryFile)} requires relative module(s) absent ` +
+        `from the generated runtime (${runtimeDir}): ${missing.join(", ")}. Ensure each helper ` +
+        `exists in nodejs-project-template/ so it is copied into the runtime.`,
+    );
+  }
+  console.log(
+    `✓ Smoke check: all ${specs.size} relative require(s) in main.js resolve in the runtime`,
+  );
+}
+
 assertBuilt(join(repoRoot, "packages/schema/dist/index.js"), "pnpm -r build");
 assertBuilt(clientDist, "pnpm --filter client build");
 
 // Rebuild the generated artifacts but preserve node_modules (the native better-sqlite3 prebuild,
 // placed by scripts/fetch-native-modules.mjs) so bundling doesn't wipe it.
 mkdirSync(outDir, { recursive: true });
-for (const stale of [outFile, clientOut, join(outDir, "main.js"), join(outDir, "package.json")]) {
+for (const stale of [outFile, clientOut]) {
   rmSync(stale, { recursive: true, force: true });
+}
+// Purge STALE launcher helpers left by a previous run: any top-level *.js in the runtime that is
+// neither the esbuild bundle (loam-server.js, regenerated below) nor a current template file. This
+// stops a renamed/removed helper from lingering across rebuilds.
+const keepJs = new Set(["loam-server.js", ...templateFiles.filter((n) => n.endsWith(".js"))]);
+if (existsSync(outDir)) {
+  for (const name of readdirSync(outDir)) {
+    if (name.endsWith(".js") && !keepJs.has(name)) {
+      rmSync(join(outDir, name), { force: true });
+      console.log(`✓ Removed stale launcher helper → ${name}`);
+    }
+  }
 }
 
 const result = await build({
@@ -76,9 +130,16 @@ const result = await build({
 });
 
 cpSync(clientDist, clientOut, { recursive: true });
-// The CJS launcher template (main.js) and its package.json — nodejs-mobile runs main.js on boot.
-cpSync(join(templateDir, "main.js"), join(outDir, "main.js"));
-cpSync(join(templateDir, "package.json"), join(outDir, "package.json"));
+// The complete CJS launcher template — nodejs-mobile runs main.js on boot, which requires its helper
+// siblings. Copy every template file so no `require('./helper')` target is missing on-device.
+for (const name of templateFiles) {
+  cpSync(join(templateDir, name), join(outDir, name));
+}
+
+// Build-time smoke check: every relative `require('./x')` in the generated main.js must resolve to a
+// file present in the runtime dir. Catches the exact class of packaging bug (a referenced helper not
+// copied → Node throws MODULE_NOT_FOUND at boot before the server starts). Fails the build loudly.
+assertRelativeRequiresResolve(join(outDir, "main.js"), outDir);
 
 const hasNative = existsSync(
   join(outDir, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node"),
@@ -90,7 +151,7 @@ console.log(
   `\n✓ Bundled ${inputs} modules → ${outFile.replace(`${repoRoot}/`, "")} (${(bytes / 1024 / 1024).toFixed(2)} MB)`,
 );
 console.log(`✓ Copied web client → ${clientOut.replace(`${repoRoot}/`, "")}`);
-console.log(`✓ Copied launcher template (main.js, package.json)`);
+console.log(`✓ Copied launcher template (${templateFiles.join(", ")})`);
 console.log(
   hasNative
     ? "✓ better-sqlite3 native prebuild present"
