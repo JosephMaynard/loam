@@ -131,7 +131,7 @@ tarball (downloaded and vendored alike) before installing it. Each JS-wrapper np
   `apps/app/nodejs-project-template/{main.js,package.json}` (the CJS launcher template),
   `apps/app/plugins/with-loam-host.js` (config plugin: cleartext localhost + arm64-only ABIs +
   hotspot/WiFi permissions), `apps/app/nodejs-assets/BUILD_NATIVE_MODULES.txt` (`0`),
-  `apps/app/app.json` (package `app.loam.host`, plugin), `apps/app/src/app/index.tsx` (host WebView
+  `apps/app/app.json` (package `com.loamnet.host`, `loam://` scheme, plugin), `apps/app/src/app/index.tsx` (host WebView
   screen + "Share · Host" button + overlay), `apps/app/src/components/{host-panel,host-share-overlay,
   qr-code}.tsx`, `apps/app/src/hooks/use-hotspot.ts`, **`apps/app/modules/loam-hotspot/`** (the local
   Expo module: `expo-module.config.json`, `index.ts`, `src/*.ts`, `android/build.gradle` +

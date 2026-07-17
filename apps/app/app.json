@@ -5,13 +5,13 @@
     "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/loam-icon.png",
-    "scheme": "app",
+    "scheme": "loam",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/images/loam-icon.png"
     },
     "android": {
-      "package": "app.loam.host",
+      "package": "com.loamnet.host",
       "versionCode": 2,
       "adaptiveIcon": {
         "backgroundColor": "#d14900",
