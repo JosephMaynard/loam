@@ -384,6 +384,28 @@ describe("custom sourceUrl redaction + migration (Finding D)", () => {
     expect(JSON.parse(raw).downloaded[0].sourceUrl).toBe("https://huggingface.co/repo/m.gguf");
   });
 
+  it("clears the secret from EVERY slot — including the backup — when the legacy state lived only in .bak (CodeRabbit)", async () => {
+    // A crash-only-left-a-backup case: the legacy token is in `.bak` with no primary. The migration must not
+    // leave the plaintext secret behind in the backup slot (the primary rewrite alone would not touch it).
+    const legacy = customModel("c1", "https://huggingface.co/repo/m.gguf?token=secret");
+    seedFile(BAK_PATH, JSON.stringify({ downloaded: [legacy], activeId: "c1" }));
+
+    await migrateLegacyCustomSourceUrls();
+
+    // No persisted slot retains the credential/token.
+    const primaryRaw = await fileSystemMock.readAsStringAsync(STATE_PATH);
+    expect(primaryRaw).not.toContain("token");
+    expect(primaryRaw).not.toContain("secret");
+    if ((await fileSystemMock.getInfoAsync(BAK_PATH)).exists) {
+      const backupRaw = await fileSystemMock.readAsStringAsync(BAK_PATH);
+      expect(backupRaw).not.toContain("token");
+      expect(backupRaw).not.toContain("secret");
+    }
+    // The migrated sourceUrl is token-free.
+    const state = await loadModelManagerState();
+    expect(state.downloaded[0].sourceUrl).toBe("https://huggingface.co/repo/m.gguf");
+  });
+
   it("is a no-op (no write) when nothing needs redacting", async () => {
     const clean = customModel("c1", "https://huggingface.co/repo/m.gguf");
     seedFile(STATE_PATH, JSON.stringify({ downloaded: [clean], activeId: "c1" }));

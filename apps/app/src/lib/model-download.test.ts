@@ -290,15 +290,18 @@ describe("downloadModel — bounded by remaining free space (Finding B)", () => 
 
   /** Install a fake `createDownloadResumable` that replays `progress` ticks (each of which may trip the
    * limit and call `cancelAsync`), and — unless cancelled — seeds `fileSize` bytes at the staging path
-   * and resolves with `status`. */
-  function installFakeResumable(behavior: { progress?: ProgressData[]; fileSize?: number; status?: number }) {
+   * and resolves with `status`. Returns a handle so a test can assert the transfer was actually cancelled
+   * (not merely rejected after the fact). */
+  function installFakeResumable(behavior: { progress?: ProgressData[]; fileSize?: number; status?: number }): {
+    wasCancelled: () => boolean;
+  } {
+    let cancelled = false;
     (fileSystemMock as unknown as { createDownloadResumable: unknown }).createDownloadResumable = (
       _url: string,
       dest: string,
       _options: unknown,
       onProgress: (data: ProgressData) => void,
     ) => {
-      let cancelled = false;
       return {
         async downloadAsync() {
           for (const tick of behavior.progress ?? []) {
@@ -315,6 +318,7 @@ describe("downloadModel — bounded by remaining free space (Finding B)", () => 
         },
       };
     };
+    return { wasCancelled: () => cancelled };
   }
 
   beforeEach(() => {
@@ -327,20 +331,25 @@ describe("downloadModel — bounded by remaining free space (Finding B)", () => 
 
   it("stops and rejects when the DECLARED size exceeds maxBytes (streaming guard)", async () => {
     // The very first progress tick declares 5000 bytes against a 100-byte budget → cancel + reject.
-    installFakeResumable({ progress: [{ totalBytesWritten: 0, totalBytesExpectedToWrite: 5000 }], fileSize: 5000 });
+    const resumable = installFakeResumable({
+      progress: [{ totalBytesWritten: 0, totalBytesExpectedToWrite: 5000 }],
+      fileSize: 5000,
+    });
 
     const outcome = await downloadModel("https://huggingface.co/x.gguf", fileName, undefined, undefined, () => {}, undefined, undefined, 100);
 
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error).toMatch(/free space/);
+    // The transfer was actively CANCELLED (not just rejected after completing).
+    expect(resumable.wasCancelled()).toBe(true);
     // No partial or final file is left behind.
     expect((await fileSystemMock.getInfoAsync(destUri)).exists).toBe(false);
     expect((await fileSystemMock.getInfoAsync(finalUri)).exists).toBe(false);
   });
 
   it("rejects when the WRITTEN bytes cross maxBytes even if the declared total stayed small", async () => {
-    installFakeResumable({
+    const resumable = installFakeResumable({
       progress: [
         { totalBytesWritten: 50, totalBytesExpectedToWrite: 0 },
         { totalBytesWritten: 250, totalBytesExpectedToWrite: 0 }, // crosses the 100-byte budget
@@ -353,6 +362,8 @@ describe("downloadModel — bounded by remaining free space (Finding B)", () => 
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error).toMatch(/free space/);
+    // The write-byte overage cancelled the in-flight transfer.
+    expect(resumable.wasCancelled()).toBe(true);
   });
 
   it("rejects via the final on-disk size backstop when progress never reported the overage", async () => {

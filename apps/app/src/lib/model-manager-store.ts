@@ -465,8 +465,16 @@ export async function migrateLegacyCustomSourceUrls(): Promise<void> {
     return;
   }
   // `mutateModelManagerState` reloads through `normalizeState` (which redacts), so an identity mutation
-  // persists the redacted `sourceUrl`s — serialized against every other in-flight mutation.
-  await mutateModelManagerState((current) => current);
+  // persists the redacted `sourceUrl`s to the PRIMARY — serialized against every other in-flight mutation.
+  const result = await mutateModelManagerState((current) => current);
+  if (result.persisted) {
+    // But that rewrite only cleans the primary: its crash-safety rotation moves the pre-mutation
+    // (un-redacted) primary into `.bak`, and a backup-ONLY legacy state was never touched at all — so the
+    // plaintext token can survive in the backup slot (CodeRabbit). Drop the stale `.bak`: the freshly
+    // written primary is a complete, valid, redacted copy (the "at least one slot is always good"
+    // invariant still holds), and the next normal save rebuilds a clean backup. Best-effort; never throws.
+    await FileSystem.deleteAsync(BAK_PATH, { idempotent: true }).catch(() => undefined);
+  }
 }
 
 /**
