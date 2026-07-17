@@ -458,7 +458,11 @@ const defaultChannels: Channel[] = [
   },
 ];
 
-const seedUsers = ["user.1234", "user.5678"];
+/** Fixed ids of the legacy demo users early builds planted so a fresh node had example DM contacts. A
+ * live node must never ship fake users, so these are no longer seeded — and any that a pre-existing DB
+ * still carries are removed at boot (see the cleanup in the store initializer). Real users are always
+ * `user.<hex>`, so these constant ids are unambiguously the old seeds and safe to delete. */
+const legacyDemoUserIds = ["user.1234", "user.5678"];
 
 /**
  * Stable snake_case code for every error message the server can return, so clients can localize the
@@ -4051,13 +4055,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       });
     }
 
-    for (const id of seedUsers) {
-      const seed = ensureUser(id);
-
-      if (seed.isAdmin) {
-        seed.isAdmin = false;
-        store.upsertUser(seed);
+    // Remove the legacy demo users (user.1234/user.5678) that early builds seeded — a live node shouldn't
+    // ship fake DM contacts. Delete both the user rows and every message that references them (authored by,
+    // or a DM sent to, the demo user), in one transaction. A fresh node never creates them in the first
+    // place; this only cleans up a pre-existing DB.
+    for (const id of legacyDemoUserIds) {
+      if (!data.users.some((user) => user.id === id)) {
+        continue;
       }
+      const involvesDemoUser = (message: Message): boolean =>
+        message.authorId === id || (message.type === "dm" && message.recipientUserId === id);
+      const doomedMessageIds = data.messages.filter(involvesDemoUser).map((message) => message.id);
+      data.messages = data.messages.filter((message) => !involvesDemoUser(message));
+      data.users = data.users.filter((user) => user.id !== id);
+      store.transaction(() => {
+        for (const messageId of doomedMessageIds) {
+          store.deleteMessage(messageId);
+        }
+        store.deleteUser(id);
+      });
     }
 
     ensureBotUser();

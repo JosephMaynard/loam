@@ -474,7 +474,7 @@ describe("admin bootstrap", () => {
     expect(second.isAdmin).toBe(false);
   });
 
-  it("demotes legacy admin seed users so bootstrap governs admin", async () => {
+  it("removes legacy demo seed users so a live node ships no fake contacts and bootstrap governs admin", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     writeFileSync(
       join(dataDir, "users.json"),
@@ -496,8 +496,10 @@ describe("admin bootstrap", () => {
       rmSync(dataDir, { recursive: true, force: true });
     });
 
+    // The legacy demo user is GONE (a fresh node never seeds it, and a pre-existing DB is cleaned at boot),
+    // so it can't clutter the DM list or hold admin.
     const users = app.store.loadUsers();
-    expect(users.find((user) => user.id === "user.1234")?.isAdmin).toBe(false);
+    expect(users.find((user) => user.id === "user.1234")).toBeUndefined();
 
     const first = await newSession(app);
     expect(first.isAdmin).toBe(true);

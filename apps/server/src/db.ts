@@ -147,6 +147,9 @@ export interface LoamStore {
   loadMessages(): Message[];
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
+  /** Delete a single user row by id. Used for the legacy demo-user cleanup (`user.1234`/`user.5678`);
+   * the caller removes any messages that reference the user separately. */
+  deleteUser(userId: string): void;
   upsertChannel(channel: Channel): void;
   insertMessage(message: Message): void;
   updateMessage(message: Message): void;
@@ -424,6 +427,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
      WHERE id = ?`,
   );
   const deleteMessageStmt = db.prepare("DELETE FROM messages WHERE id = ?");
+  const deleteUserStmt = db.prepare("DELETE FROM users WHERE id = ?");
   const putSessionStmt = db.prepare(
     "INSERT INTO sessions (token, user_id) VALUES (?, ?) ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id",
   );
@@ -521,6 +525,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     upsertUser(user) {
       upsertUserStmt.run(user.id, JSON.stringify(user));
+    },
+    deleteUser(userId) {
+      deleteUserStmt.run(userId);
     },
     upsertChannel(channel) {
       upsertChannelStmt.run(channel.id, JSON.stringify(channel));

@@ -105,6 +105,16 @@ describe("openStore", () => {
     expect(store.isEmpty()).toBe(false);
   });
 
+  it("deletes a user by id (legacy demo-user cleanup)", () => {
+    store.upsertUser(makeUser("user.1234"));
+    store.upsertUser(makeUser("user.keep"));
+    store.deleteUser("user.1234");
+    expect(store.loadUsers().map((user) => user.id)).toEqual(["user.keep"]);
+    // Deleting an absent id is a harmless no-op.
+    store.deleteUser("user.gone");
+    expect(store.loadUsers().map((user) => user.id)).toEqual(["user.keep"]);
+  });
+
   it("round-trips channels", () => {
     const channel = makeChannel("general", { description: "Open room" });
     store.upsertChannel(channel);
