@@ -13,6 +13,16 @@
     "lan"
   ],
   "license": "AGPL-3.0-only",
+  "author": "Magic Zebra Ltd",
+  "homepage": "https://github.com/JosephMaynard/loam#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JosephMaynard/loam.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/JosephMaynard/loam/issues"
+  },
   "type": "module",
   "bin": {
     "loam": "./bin/loam.js"

@@ -6,6 +6,7 @@ import {
   ChannelSchema,
   MessageSchema,
   UserSchema,
+  type AvatarImageMimeType,
   type Channel,
   type Message,
   type User,
@@ -23,6 +24,31 @@ export type IdentityTokenRecord = {
   tokenHash: string;
   userId: string;
   createdAt: number;
+};
+
+/**
+ * A work item recording that a peer's attachment file failed to copy during a node-to-node sync
+ * import (docs/15 A6): the message itself still imported (best-effort), but without this record a
+ * later sync digest would see the message id as already-known and never re-offer the attachment,
+ * stranding it image-less forever. `attempts` counts retries (used for backoff — see
+ * `retryMissingAttachments` in `app.ts`); `lastAttemptAt` (0 = never attempted) is what that backoff
+ * is measured from, so the reaper's 30s tick doesn't hammer an unreachable peer every cycle.
+ */
+export type MissingAttachmentRecord = {
+  messageId: string;
+  attachmentId: string;
+  mimeType: AvatarImageMimeType;
+  peerUrl: string;
+  attempts: number;
+  createdAt: number;
+  lastAttemptAt: number;
+  /**
+   * When this record next becomes eligible for a retry (epoch ms; 0 = due immediately — a fresh,
+   * never-attempted record). Stamped by `bumpMissingAttachmentAttempts` from the caller's own backoff
+   * policy (P2-2, docs/15 A6/F1) and used by `loadDueMissingAttachments` to select — and fairly order
+   * — only the records actually eligible right now, rather than every record in creation order.
+   */
+  nextAttemptAt: number;
 };
 
 /**
@@ -161,12 +187,61 @@ export interface LoamStore {
    */
   upsertMeshContact(ownerUserId: string, meshId: string, data: string): void;
   loadMeshContacts(): { ownerUserId: string; meshId: string; data: string }[];
+  /**
+   * Record that a peer attachment failed to copy during a sync import (docs/15 A6), starting its
+   * attempt counter at 0. A conflict (same message+attachment already tracked) is a no-op — it keeps
+   * the original `attempts`/`createdAt` rather than resetting the retry clock.
+   */
+  addMissingAttachment(
+    record: Omit<MissingAttachmentRecord, "attempts" | "createdAt" | "lastAttemptAt" | "nextAttemptAt">,
+  ): void;
+  loadMissingAttachments(): MissingAttachmentRecord[];
+  /**
+   * Records currently due for a retry (P2-2, docs/15 A6/F1): `nextAttemptAt <= nowMs`, fairly ordered
+   * (earliest-due first) and capped at `limit`. Unlike `loadMissingAttachments` (every record, creation
+   * order), this is what the retry pass itself should page through — it guarantees the per-pass cap
+   * applies to records that are actually ELIGIBLE right now, so a block of records still in backoff can
+   * never starve out ones that came later but are already due.
+   */
+  loadDueMissingAttachments(nowMs: number, limit: number): MissingAttachmentRecord[];
+  /** The attachment copy finally succeeded (or the message/work item it belonged to is gone) — drop it. */
+  clearMissingAttachment(messageId: string, attachmentId: string): void;
+  /** Another retry against the peer failed — bump the attempt counter, stamp `lastAttemptAt` (now), and
+   * set `nextAttemptAt` to the caller-computed epoch ms (the caller owns the backoff policy; this is a
+   * dumb storage write) — so `loadDueMissingAttachments` skips this record until then. */
+  bumpMissingAttachmentAttempts(messageId: string, attachmentId: string, nextAttemptAt: number): void;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
   isEmpty(): boolean;
   /** Delete all users, channels, messages, and sessions in one transaction. Config is preserved. */
   wipeAll(): void;
+  /**
+   * Fold the write-ahead log back into the main `loam.db` file via `PRAGMA wal_checkpoint(TRUNCATE)`,
+   * so that single file is a complete, standalone snapshot with nothing left to lose in `-wal`/`-shm`
+   * (TRUNCATE also shrinks the WAL to zero, so a later file-level copy can't pick up stale frames).
+   * Used by the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
+   * pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
+   * transactions still resident in the WAL — this makes the snapshot single-file-consistent first.
+   * Only meaningful on a SQLCipher (encrypted) connection, the only path that migrates; throws on a
+   * plaintext store (no `pragma` handle), mirroring {@link rekey}. Also throws if the checkpoint comes
+   * back `busy` (RF6-e, Sol round 6) — a non-zero `busy` means the WAL wasn't fully truncated (the
+   * sole-connection invariant is broken), so the file is NOT a complete snapshot and must not be copied
+   * as a backup. Never logs any key material.
+   */
+  checkpoint(): void;
+  /**
+   * Re-encrypt an already-open SQLCipher-backed store under `newKey`, via `PRAGMA rekey` (P1-1, Sol
+   * round 5 — the passphrase key-derivation migration: round 4 changed the passphrase KDF from
+   * `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)`, so an existing passphrase DB
+   * opens only under the OLD derivation; the caller — `openInitialStore` in `app.ts` — opens with that
+   * legacy key and calls this to re-key it in place under the current one, so every later boot uses the
+   * current key directly). SQLCipher applies the new key to the existing (already-decrypted) pages in
+   * place; the connection stays open and usable immediately afterward under the new key. Throws if this
+   * store was not opened with `encryptionKey` (plaintext `node:sqlite`/plain `better-sqlite3` stores have
+   * no key to rotate). Never logs `newKey`.
+   */
+  rekey(newKey: string): void;
   close(): void;
 }
 
@@ -198,7 +273,10 @@ export function openStore(path: string, options: OpenStoreOptions = {}): LoamSto
   const db = openConnection(path, options);
 
   try {
-    return buildStore(db);
+    // Only an encrypted (SQLCipher) connection exposes `.pragma()` — threaded through separately so
+    // `buildStore` can implement `rekey()` (P1-1, Sol round 5) without needing to know the driver.
+    const pragma = options.encryptionKey ? (db as EncryptedDatabase).pragma.bind(db as EncryptedDatabase) : undefined;
+    return buildStore(db, pragma);
   } catch (error) {
     // A wrong encryption key surfaces here (the first pragma/DDL fails); don't leak the handle.
     db.close();
@@ -224,10 +302,43 @@ function migrateTombstonesCreatedAt(db: SqliteConnection): void {
 }
 
 /**
+ * Backfill the `missing_attachments.last_attempt_at` column onto a database created before
+ * retry-backoff existed (docs/15 A6 / F1). `0` (never attempted) is the correct backfill for
+ * existing rows — the retry pass treats it as "due immediately", which is the same behaviour those
+ * rows already had under the old no-backoff code.
+ */
+function migrateMissingAttachmentsLastAttempt(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(missing_attachments)").all() as { name: string }[];
+  const hasLastAttemptAt = columns.some((column) => column.name === "last_attempt_at");
+
+  if (!hasLastAttemptAt) {
+    db.exec("ALTER TABLE missing_attachments ADD COLUMN last_attempt_at INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+/**
+ * Backfill the `missing_attachments.next_attempt_at` column onto a database created before
+ * fair-ordered retry-due selection existed (docs/15 A6 / P2-2). `0` (due immediately) is the correct
+ * backfill for existing rows: it's exactly the "never contacted yet" default new rows already get, so
+ * every pre-existing record simply becomes eligible on the very next pass — nothing is starved worse
+ * than it already was.
+ */
+function migrateMissingAttachmentsNextAttempt(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(missing_attachments)").all() as { name: string }[];
+  const hasNextAttemptAt = columns.some((column) => column.name === "next_attempt_at");
+
+  if (!hasNextAttemptAt) {
+    db.exec("ALTER TABLE missing_attachments ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+/**
  * Initialise the schema and prepared statements on an open connection and return the store.
  * Split out so `openStore` can close the connection if any setup step throws.
+ *
+ * @param pragma - Present only for an encrypted (SQLCipher) connection; backs {@link LoamStore.rekey}.
  */
-function buildStore(db: SqliteConnection): LoamStore {
+function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown): LoamStore {
   let closed = false;
 
   db.exec("PRAGMA journal_mode = WAL");
@@ -281,8 +392,21 @@ function buildStore(db: SqliteConnection): LoamStore {
       user_id TEXT NOT NULL,
       created_at INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS missing_attachments (
+      message_id TEXT NOT NULL,
+      attachment_id TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      peer_url TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      last_attempt_at INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (message_id, attachment_id)
+    );
   `);
   migrateTombstonesCreatedAt(db);
+  migrateMissingAttachmentsLastAttempt(db);
+  migrateMissingAttachmentsNextAttempt(db);
 
   const upsertUserStmt = db.prepare(
     "INSERT INTO users (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
@@ -327,6 +451,23 @@ function buildStore(db: SqliteConnection): LoamStore {
      ON CONFLICT(owner_user_id, mesh_id) DO UPDATE SET data = excluded.data`,
   );
   const loadMeshContactsStmt = db.prepare("SELECT owner_user_id, mesh_id, data FROM mesh_contacts");
+  const addMissingAttachmentStmt = db.prepare(
+    `INSERT INTO missing_attachments (message_id, attachment_id, mime_type, peer_url, attempts, created_at)
+     VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(message_id, attachment_id) DO NOTHING`,
+  );
+  const loadMissingAttachmentsStmt = db.prepare(
+    "SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at, last_attempt_at, next_attempt_at FROM missing_attachments ORDER BY rowid",
+  );
+  const loadDueMissingAttachmentsStmt = db.prepare(
+    `SELECT message_id, attachment_id, mime_type, peer_url, attempts, created_at, last_attempt_at, next_attempt_at
+     FROM missing_attachments WHERE next_attempt_at <= ? ORDER BY next_attempt_at ASC, rowid ASC LIMIT ?`,
+  );
+  const clearMissingAttachmentStmt = db.prepare(
+    "DELETE FROM missing_attachments WHERE message_id = ? AND attachment_id = ?",
+  );
+  const bumpMissingAttachmentAttemptsStmt = db.prepare(
+    "UPDATE missing_attachments SET attempts = attempts + 1, last_attempt_at = ?, next_attempt_at = ? WHERE message_id = ? AND attachment_id = ?",
+  );
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -436,6 +577,39 @@ function buildStore(db: SqliteConnection): LoamStore {
         data: row.data as string,
       }));
     },
+    addMissingAttachment(record) {
+      addMissingAttachmentStmt.run(record.messageId, record.attachmentId, record.mimeType, record.peerUrl, Date.now());
+    },
+    loadMissingAttachments() {
+      return loadMissingAttachmentsStmt.all().map((row) => ({
+        messageId: row.message_id as string,
+        attachmentId: row.attachment_id as string,
+        mimeType: row.mime_type as AvatarImageMimeType,
+        peerUrl: row.peer_url as string,
+        attempts: row.attempts as number,
+        createdAt: row.created_at as number,
+        lastAttemptAt: row.last_attempt_at as number,
+        nextAttemptAt: row.next_attempt_at as number,
+      }));
+    },
+    loadDueMissingAttachments(nowMs, limit) {
+      return loadDueMissingAttachmentsStmt.all(nowMs, limit).map((row) => ({
+        messageId: row.message_id as string,
+        attachmentId: row.attachment_id as string,
+        mimeType: row.mime_type as AvatarImageMimeType,
+        peerUrl: row.peer_url as string,
+        attempts: row.attempts as number,
+        createdAt: row.created_at as number,
+        lastAttemptAt: row.last_attempt_at as number,
+        nextAttemptAt: row.next_attempt_at as number,
+      }));
+    },
+    clearMissingAttachment(messageId, attachmentId) {
+      clearMissingAttachmentStmt.run(messageId, attachmentId);
+    },
+    bumpMissingAttachmentAttempts(messageId, attachmentId, nextAttemptAt) {
+      bumpMissingAttachmentAttemptsStmt.run(Date.now(), nextAttemptAt, messageId, attachmentId);
+    },
     transaction(fn) {
       db.exec("BEGIN IMMEDIATE");
 
@@ -462,7 +636,50 @@ function buildStore(db: SqliteConnection): LoamStore {
         db.exec("DELETE FROM mesh_identities");
         db.exec("DELETE FROM mesh_contacts");
         db.exec("DELETE FROM transport_identity_tokens");
+        db.exec("DELETE FROM missing_attachments");
       });
+    },
+    checkpoint() {
+      if (!pragma) {
+        throw new Error(
+          "checkpoint() requires a store opened with encryptionKey (SQLCipher) — this store is plaintext.",
+        );
+      }
+      // TRUNCATE folds all committed WAL frames back into the main DB file and resets the WAL to zero
+      // bytes. This store is the sole open connection when the migration calls it (nothing else can
+      // hold a read lock), so the checkpoint can't be blocked/partial — the single `loam.db` is a
+      // complete snapshot afterward.
+      //
+      // RF6-e (Sol round 6): DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
+      // `(busy, log, checkpointed)` row; `busy !== 0` means another connection held a lock and the WAL
+      // was NOT fully folded/truncated — i.e. the sole-connection invariant this migration relies on is
+      // broken and the raw file copy that follows would MISS WAL-resident committed rows. Fail loudly
+      // instead of committing an incomplete pre-migration backup: the caller (`openInitialStore`) then
+      // skips the unbackable in-place rekey rather than risk an unrecoverable interrupted migration.
+      const rows = pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }> | undefined;
+      const busy = Array.isArray(rows) && rows.length > 0 ? rows[0]?.busy : undefined;
+      if (busy !== 0) {
+        throw new Error(
+          `wal_checkpoint(TRUNCATE) did not fully truncate the WAL (busy=${String(busy)}) — the ` +
+            "sole-connection invariant is broken, so this DB file is NOT a complete standalone snapshot.",
+        );
+      }
+    },
+    rekey(newKey) {
+      if (!pragma) {
+        throw new Error("rekey() requires a store opened with encryptionKey (SQLCipher) — this store is plaintext.");
+      }
+      // SQLCipher's `PRAGMA rekey` refuses to run in WAL journal mode ("Rekeying is not supported in
+      // WAL journal mode") — drop to DELETE mode for the rekey itself, then restore WAL (matching the
+      // `PRAGMA journal_mode = WAL` this store always opens with).
+      pragma("journal_mode='DELETE'");
+      try {
+        // Escape single quotes so an arbitrary key/passphrase-derived string can't break out of the
+        // pragma literal — mirrors the same escaping `openConnection` applies to the initial `key=`.
+        pragma(`rekey='${newKey.replace(/'/g, "''")}'`);
+      } finally {
+        pragma("journal_mode='WAL'");
+      }
     },
     close() {
       if (!closed) {

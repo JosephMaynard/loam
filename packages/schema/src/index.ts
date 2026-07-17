@@ -111,6 +111,19 @@ export type Locale = z.infer<typeof LocaleSchema>;
 export const TransportEncryptionSchema = z.enum(["off", "optional", "required"]);
 export type TransportEncryption = z.infer<typeof TransportEncryptionSchema>;
 
+/**
+ * At-rest DB-encryption key strategy (SQLCipher via `openStore(path, { encryptionKey })`, see
+ * `apps/server/src/db.ts`). `off` (the pre-existing behaviour): the DB is plaintext on disk. `ephemeral`:
+ * a random key is generated in RAM at boot and never persisted — the DB is unreadable after a restart
+ * (or if the process is killed), trading node resumability for a stronger wipe guarantee. `persistent`:
+ * the key is held in hardware-backed storage (Android Keystore) so the node can resume after a power
+ * loss without operator input. `passphrase`: the operator enters a secret at boot to derive the key.
+ * This axis is declared/displayed only — actually keying the DB is driven by `LOAM_DB_KEY` /
+ * `openStore`, wired by the orchestrator (Android host key handoff) separately.
+ */
+export const DbEncryptionModeSchema = z.enum(["off", "ephemeral", "persistent", "passphrase"]);
+export type DbEncryptionMode = z.infer<typeof DbEncryptionModeSchema>;
+
 /** `POST /api/transport/handshake` (docs/08): the client's ephemeral X25519 public key (base64url). */
 export const TransportHandshakeRequestSchema = z.object({
   clientEphemeralPublic: z
@@ -266,6 +279,8 @@ export const NetworkConfigSchema = z.object({
    * encryption isn't `off`. The client prefers the QR-delivered key; this lets it show the fingerprint
    * and detect a mismatch. Absent when transport encryption is off. */
   transportPublicKey: z.string().min(1).max(64).optional(),
+  /** At-rest DB encryption posture, surfaced so the host UI can display it. */
+  dbEncryption: DbEncryptionModeSchema,
   /** Admin-selected UI language for the whole node; the client renders every label in it. */
   locale: LocaleSchema,
 });
@@ -369,6 +384,15 @@ export const SecurityConfigSchema = z.object({
   /** App-layer transport encryption posture (docs/08). A named profile forces this; `custom` uses it
    * as configured. Default `off` keeps existing plain-HTTP deployments unchanged. */
   transportEncryption: TransportEncryptionSchema,
+  /**
+   * At-rest DB-encryption key strategy (see `DbEncryptionModeSchema`). Unlike `transportEncryption`,
+   * this axis is **not** forced by a named security profile (it's absent from `SecurityProfilePreset`
+   * / `SECURITY_PROFILE_PRESETS`) — it's independently operator-set regardless of `profile`, because
+   * the key-handling tradeoffs (resumability vs. wipe guarantees, hardware-Keystore availability) are
+   * orthogonal to the join/retention/kill-switch/transport bundle a profile represents. Default `off`
+   * keeps existing unencrypted deployments unchanged.
+   */
+  dbEncryption: DbEncryptionModeSchema,
 });
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
 

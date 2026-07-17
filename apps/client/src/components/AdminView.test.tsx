@@ -39,7 +39,7 @@ const config: LoamConfig = {
   admin: { bootstrap: "firstUser" },
   killSwitch: { enabled: false, requireConfirmation: true },
   retention: {},
-  security: { profile: "custom", transportEncryption: "off" },
+  security: { profile: "custom", transportEncryption: "off", dbEncryption: "off" },
   access: { joinPolicy: "open" },
   sync: { enabled: false, peers: [], intervalMs: 60_000 },
   mesh: { enabled: false, relay: false, ttlMs: 86_400_000, hopLimit: 8, maxCarried: 1000, maxContacts: 500 },

@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -22,6 +31,177 @@ import {
 } from "@loam/schema";
 
 import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.js";
+import { openStore } from "./db.js";
+
+// RF4: a single-shot fault-injection seam for `node:fs`'s `renameSync`, used ONLY by the "marker-
+// confirmed recovery failure" test below to make `openInitialStore`'s rename-aside step throw
+// synthetically (there's no other way to force that specific failure deterministically — the real
+// call happens between two other `node:fs` calls in the same synchronous function, so OS-permission
+// tricks can't isolate it). `renameFailure.armed` defaults to `undefined` (pass straight through to the
+// real implementation) and self-disarms the instant it fires, so every other test in this file — which
+// never arms it — is completely unaffected; every other `node:fs` export is untouched (`...actual`).
+const renameFailure = vi.hoisted(() => ({ armed: false }));
+// P1-1 (Sol round 8): a fault-injection seam for `node:fs`'s `writeFileSync` targeting the durable
+// `.loam-wipe-phase` file specifically (both its atomic `.tmp-*` staging path AND the direct fallback
+// write) — used by the fail-closed kill-switch tests to force the durable phase write to fail so the
+// "delete + verify synchronously, THEN signal" fail-closed path runs even without a durable phase. Unlike a
+// single-shot seam it stays armed (`writeWipePhase` writes twice — `delete-pending` then `key-clear-ready`
+// — and BOTH must fail to simulate "no durable phase at all"); reset in `afterEach`. Never matches any
+// other `writeFileSync` caller.
+const wipeMarkerWriteFailure = vi.hoisted(() => ({ armed: false }));
+// P1-a (Sol round 6): a capture seam for the migration's pre-migration backup copy. When `dir` is set, the
+// `copyFileSync(loam.db → loam.db.premigration.tmp)` the migration performs is mirrored to
+// `<dir>/captured-backup.db`, so a test can open that single-file snapshot under the legacy key and PROVE it
+// contains committed rows that were WAL-resident before the checkpoint folded them in. Inert by default.
+const backupCapture = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+// RF6-a (Sol round 6): a capture seam recording every `rmSync` PATH argument while `paths` is a live
+// array (default `undefined` = inert). Used by the foreign-`-journal` test to PROVE Step 0b explicitly
+// removes `loam.db-journal` before restoring — an end-to-end "no journal after boot" check can't, since
+// any successful DB open also cleans a hot journal, so it would pass even WITHOUT the fix.
+const rmSyncCapture = vi.hoisted(() => ({ paths: undefined as string[] | undefined }));
+// P2-2 (Sol round 7): a single-shot fault-injection seam for `node:fs`'s `rmSync` targeting ONLY the
+// migration's POST-REKEY cleanup of the committed `loam.db.premigration` backup (exact `.premigration`
+// path — never the `.tmp`/`-wal`/`-shm`/`-journal` sidecars, which Step 0b deletes first for a clean
+// migration). Used to prove that a cleanup failure AFTER a successful rekey does NOT fail the boot / leak
+// the migrated handle. Defaults disarmed (pass through) and self-disarms on fire.
+const postRekeyCleanupFailure = vi.hoisted(() => ({ armed: false }));
+// RF7-a (Sol round 7 adversarial review): a PERSISTENT (does NOT self-disarm) fault-injection seam for
+// `node:fs`'s `rmSync` targeting ONLY the committed `loam.db.premigration` legacy-key ciphertext snapshot
+// (exact `.premigration` path — never the `.tmp`/`-wal`/`-shm`/`-journal` sidecars). Unlike the single-shot
+// `postRekeyCleanupFailure` above, this keeps failing for every delete attempt on that file, so the
+// marker-SUCCESS kill-switch path's `deleteAndVerifyDbArtifacts()` sees the survivor and must refuse to
+// signal the launcher. Defaults disarmed (pass through); reset in `afterEach`.
+const premigrationDeleteFailure = vi.hoisted(() => ({ armed: false }));
+// P1-2 (Sol round 8): fault-injection seams for the FAIL-CLOSED "verified gone" checks. `readdirFailure.dir`
+// makes `readdirSync` of that exact directory throw EACCES (an unreadable data dir is NOT proof no
+// `*.unreadable-*` survivor exists — `dbArtifactInventory` must surface it as an error). `lstatFailure.path`
+// makes `lstatSync` of that exact path throw a NON-ENOENT error (EIO) so `provenAbsence` returns "unknown"
+// (could-not-determine, NOT confirmed absence). Both default inert and target one exact path, so no other
+// test / unrelated fs call is affected; reset in `afterEach`.
+const readdirFailure = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+const lstatFailure = vi.hoisted(() => ({ path: undefined as string | undefined }));
+const readFileSyncFailure = vi.hoisted(() => ({ path: undefined as string | undefined }));
+// P1-5 (Sol round 8): fault-injection seam for the DURABLE-write fsync. `openSyncFailure.path` makes
+// `openSync` of that EXACT path throw EIO, so the parent-DIRECTORY fsync (`fsyncDir` opens the dir with
+// openSync) fails — proving `durableWriteFileSync`/`clearWipePhase` report NOT-durable (fail closed) rather
+// than claiming a write/clear survived power-loss. Targets one exact path; default inert; reset in afterEach.
+// `failOnCall` (optional, 1-based): when set, fail ONLY the Nth `openSync(path)` — the `count` field tracks
+// how many have been seen — so a test can let earlier durable-write dir-fsyncs succeed and fail exactly the
+// phase-clear one (Sol round-11 coverage). When `failOnCall` is unset, EVERY `openSync(path)` fails.
+const openSyncFailure = vi.hoisted(
+  () => ({ path: undefined as string | undefined, failOnCall: undefined as number | undefined, count: 0 }),
+);
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      if (openSyncFailure.path && String(args[0]) === openSyncFailure.path) {
+        openSyncFailure.count += 1;
+        if (openSyncFailure.failOnCall === undefined || openSyncFailure.count === openSyncFailure.failOnCall) {
+          const err = new Error("simulated openSync EIO (P1-5 test fault injection)") as NodeJS.ErrnoException;
+          err.code = "EIO";
+          throw err;
+        }
+      }
+      return actual.openSync(...(args as Parameters<typeof actual.openSync>));
+    },
+    readdirSync: (...args: Parameters<typeof actual.readdirSync>) => {
+      if (readdirFailure.dir && String(args[0]) === readdirFailure.dir) {
+        const err = new Error("simulated readdir EACCES (P1-2 test fault injection)") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      }
+      return actual.readdirSync(...(args as Parameters<typeof actual.readdirSync>));
+    },
+    readFileSync: (...args: Parameters<typeof actual.readFileSync>) => {
+      // P1-3 (Sol round 12): fault a non-ENOENT read of one exact path (e.g. `.loam-wipe-phase`) to prove a
+      // journal we CANNOT read is treated as corrupt/unverifiable (lock), not a legacy no-config journal.
+      if (readFileSyncFailure.path && String(args[0]) === readFileSyncFailure.path) {
+        const err = new Error("simulated readFileSync EIO (P1-3 test fault injection)") as NodeJS.ErrnoException;
+        err.code = "EIO";
+        throw err;
+      }
+      return actual.readFileSync(...(args as Parameters<typeof actual.readFileSync>));
+    },
+    lstatSync: (...args: Parameters<typeof actual.lstatSync>) => {
+      if (lstatFailure.path && String(args[0]) === lstatFailure.path) {
+        const err = new Error("simulated lstat EIO (P1-2 test fault injection)") as NodeJS.ErrnoException;
+        err.code = "EIO";
+        throw err;
+      }
+      return actual.lstatSync(...(args as Parameters<typeof actual.lstatSync>));
+    },
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (rmSyncCapture.paths) {
+        rmSyncCapture.paths.push(String(args[0]));
+      }
+      if (postRekeyCleanupFailure.armed && String(args[0]).endsWith("loam.db.premigration")) {
+        postRekeyCleanupFailure.armed = false;
+        throw new Error("simulated post-rekey cleanup rmSync failure (P2-2 test fault injection)");
+      }
+      if (premigrationDeleteFailure.armed && String(args[0]).endsWith("loam.db.premigration")) {
+        // PERSISTENT — no self-disarm: the survivor can never be deleted this test run.
+        throw new Error("simulated persistent .premigration rmSync failure (RF7-a test fault injection)");
+      }
+      return actual.rmSync(...args);
+    },
+    renameSync: (...args: Parameters<typeof actual.renameSync>) => {
+      if (renameFailure.armed) {
+        renameFailure.armed = false;
+        throw new Error("simulated renameSync failure (RF4 test fault injection)");
+      }
+      return actual.renameSync(...args);
+    },
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      const target = String(args[0]);
+      // Match the durable phase file's atomic `.tmp-*` staging path AND its direct fallback write, and stay
+      // armed (both `writeWipePhase` calls must fail to simulate "no durable phase") — P1-1, Sol round 8.
+      if (wipeMarkerWriteFailure.armed && target.includes(".loam-wipe-phase")) {
+        throw new Error("simulated wipe-phase write failure (P1-1 test fault injection)");
+      }
+      // P1-4 (Sol round 9): `persistConfigForRestart` is now SYNC (durableWriteFileSync), so the config-persist
+      // fault injection moved here from the async `writeFile` mock. Targets ONLY the config.json staging path.
+      if (configWriteFailures.remaining > 0 && target.includes("config.json.tmp-")) {
+        configWriteFailures.remaining -= 1;
+        throw new Error("simulated config.json write failure (P1-4 test fault injection)");
+      }
+      return actual.writeFileSync(...args);
+    },
+    copyFileSync: (...args: Parameters<typeof actual.copyFileSync>) => {
+      const result = actual.copyFileSync(...args);
+      if (backupCapture.dir && String(args[1]).endsWith(".premigration.tmp")) {
+        actual.copyFileSync(String(args[1]), `${backupCapture.dir}/captured-backup.db`);
+      }
+      return result;
+    },
+  };
+});
+
+// P1-2(a): a fault/delay-injection seam for `node:fs/promises`'s `rm`, used ONLY by the "confidentiality
+// window" test below to hold the fixed-key kill-switch's file-deletion awaits open while concurrent
+// requests are issued — there's no other reliable way to observe what a request sees DURING that async
+// window. `rmGate.promise` defaults to `undefined` (pass straight through to the real implementation),
+// so every other test — which never sets it — is unaffected; every other `node:fs/promises` export is
+// untouched (`...actual`).
+const rmGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
+// P1-4 (Sol round 9): a config-persist fault-injection counter. `persistConfigForRestart` is now SYNCHRONOUS
+// (durableWriteFileSync), so the injection lives in the SYNC `writeFileSync` mock above (matching the
+// `config.json.tmp-...` staging path only) — used to exercise the retry-once + proceed-with-the-wipe policy.
+// Inert (`0`) for every other test.
+const configWriteFailures = vi.hoisted(() => ({ remaining: 0 }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      if (rmGate.promise) {
+        await rmGate.promise;
+      }
+      return actual.rm(...args);
+    },
+  };
+});
 
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 
@@ -31,6 +211,21 @@ afterEach(async () => {
   // Restore real timers before tearing anything down, so a test that installed fake timers can't
   // leave `app.close()` (which awaits Fastify shutdown) or the next test running on a frozen clock.
   vi.useRealTimers();
+  // Belt-and-suspenders: a test that armed the P1-2(a) `rm()` gate but failed before releasing it must
+  // never leave a later, unrelated test's own `rm()` calls hanging on a promise nobody will resolve.
+  rmGate.promise = undefined;
+  configWriteFailures.remaining = 0;
+  openSyncFailure.path = undefined;
+  openSyncFailure.failOnCall = undefined;
+  openSyncFailure.count = 0;
+  readFileSyncFailure.path = undefined;
+  wipeMarkerWriteFailure.armed = false;
+  backupCapture.dir = undefined;
+  postRekeyCleanupFailure.armed = false;
+  premigrationDeleteFailure.armed = false;
+  readdirFailure.dir = undefined;
+  lstatFailure.path = undefined;
+  rmSyncCapture.paths = undefined;
   while (cleanups.length) {
     await cleanups.pop()?.();
   }
@@ -62,6 +257,39 @@ async function reopenApp(app: LoamApp, dataDir: string): Promise<LoamApp> {
   const next = await buildApp({ dataDir, logger: false });
   cleanups.push(() => next.close());
   return next;
+}
+
+/** The wipe journal's PHASE (Sol round-10 the `.loam-wipe-phase` file is JSON `{ phase, config? }`;
+ *  tolerate the legacy plain-string format too). Throws if the journal file is absent. */
+function readJournalPhase(dataDir: string): string {
+  const raw = readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8");
+  try {
+    const parsed = JSON.parse(raw) as { phase?: unknown };
+    if (parsed && typeof parsed === "object" && typeof parsed.phase === "string") {
+      return parsed.phase;
+    }
+  } catch {
+    // Legacy plain-string journal.
+  }
+  return raw.trim();
+}
+
+/** The config snapshot embedded in the wipe journal, or undefined if none / not JSON. */
+function readJournalConfig(dataDir: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dataDir, ".loam-wipe-phase"), "utf8")) as { config?: unknown };
+    return parsed && typeof parsed.config === "object" ? (parsed.config as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol round-11), excluding the
+ *  transient `.loam-recovery-state` anchor file (Sol round-12). */
+function recoverySnapshots(dataDir: string): string[] {
+  return readdirSync(dataDir).filter(
+    (name) => name.startsWith(".loam-recovery-") && name !== ".loam-recovery-state" && !name.includes(".tmp-"),
+  );
 }
 
 function sessionCookie(response: InjectResponse): string {
@@ -391,6 +619,74 @@ describe("admin config API", () => {
       payload: { features: { enableReplies: "nope" } },
     });
     expect(response.statusCode).toBe(400);
+  });
+
+  it("defaults dbEncryption to off and reflects a PATCHed value in /api/config when the store is actually keyed, independent of the security profile", async () => {
+    // F5: `networkConfig.dbEncryption` now reports the EFFECTIVE posture, not the merely-configured
+    // value — so this round-trip only shows the PATCHed value while a real key is active. The `off` →
+    // false-report case (no real key) is covered separately below.
+    const app = await makeApp(undefined, { dbEncryptionKey: "a fixed host passphrase" });
+    const admin = await newSession(app);
+
+    const before = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(before.networkConfig.dbEncryption).toBe("off");
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { dbEncryption: "ephemeral" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string; securityProfile: string };
+    };
+    expect(after.networkConfig.dbEncryption).toBe("ephemeral");
+    // dbEncryption is not one of the axes a named profile forces (only transportEncryption /
+    // joinPolicy / messageTtlMs / killSwitch are), so switching profiles must not clobber it.
+    expect(after.networkConfig.securityProfile).toBe("custom");
+
+    const rejected = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { dbEncryption: "hardware-hsm" } },
+    });
+    expect(rejected.statusCode).toBe(400);
+  });
+
+  it("F5: reports the EFFECTIVE dbEncryption posture (off) when no real key is active, even after PATCHing a non-off value", async () => {
+    // No dbEncryptionKey/ephemeralDbKey passed — the store is genuinely unencrypted, whatever the
+    // config says. `security.dbEncryption` is a declarative admin setting decoupled from the real key
+    // (see the comment on `encryptionEnabled` in app.ts); the wire must never claim encryption that
+    // isn't active.
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { security: { dbEncryption: "persistent" } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const after = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(after.networkConfig.dbEncryption).toBe("off");
+
+    // The admin config view (the raw, redacted config) still reflects what was actually configured —
+    // only the client-facing networkConfig is truthed up to the effective posture.
+    const adminConfig = (await app.server.inject({
+      method: "GET",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+    })).json() as { security: { dbEncryption: string } };
+    expect(adminConfig.security.dbEncryption).toBe("persistent");
   });
 
   it("applies, enforces, broadcasts shape, and persists feature flag changes", async () => {
@@ -968,6 +1264,39 @@ describe("config robustness", () => {
   });
 });
 
+describe("join address resolution (docs/15 A7)", () => {
+  it("re-resolves the join host on every request when no explicit joinHost is configured", async () => {
+    let currentAddress = "10.0.0.1";
+    const { app } = await makeApp(undefined, { resolveLanAddress: () => currentAddress });
+
+    const first = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as { joinUrl: string };
+    expect(first.joinUrl).toContain("10.0.0.1");
+
+    // Simulate the Android hotspot interface coming up (or changing) after boot — a later request
+    // must reflect it, not whatever was resolved when the process started.
+    currentAddress = "192.168.49.1";
+
+    const second = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as { joinUrl: string };
+    expect(second.joinUrl).toContain("192.168.49.1");
+    expect(second.joinUrl).not.toContain("10.0.0.1");
+
+    // /api/config (used post-hydration) resolves the same live way.
+    const config = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as { joinUrl: string };
+    expect(config.joinUrl).toContain("192.168.49.1");
+  });
+
+  it("an explicit joinHost wins outright and is never re-resolved (desktop/Pi: the boot address is fine)", async () => {
+    const { app } = await makeApp(undefined, {
+      joinHost: "pinned.example",
+      resolveLanAddress: () => "should-never-be-used",
+    });
+
+    const response = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as { joinUrl: string };
+    expect(response.joinUrl).toContain("pinned.example");
+    expect(response.joinUrl).not.toContain("should-never-be-used");
+  });
+});
+
 describe("avatar uploads", () => {
   it("keeps only the latest uploaded avatar image per user", async () => {
     const { app, dataDir } = await makeApp({
@@ -1077,7 +1406,7 @@ describe("secret storage", () => {
 describe("encryption at rest + key-discard kill switch", () => {
   // Build directly (not via makeApp) so `app.store` stays the live getter across an encrypted wipe.
   async function makeEncryptedApp(
-    opts: Pick<AppOptions, "dbEncryptionKey" | "ephemeralDbKey">,
+    opts: Pick<AppOptions, "dbEncryptionKey" | "ephemeralDbKey" | "dbEncryptionMode">,
     config?: unknown,
   ): Promise<{ app: LoamApp; dataDir: string }> {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-app-test-"));
@@ -1158,6 +1487,62 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect((await post(app, returning.cookie, "after wipe")).statusCode).toBe(201);
   });
 
+  it("SF1/P1-1+P2-1: an Android-style ephemeral boot (ephemeralDbKey + dbEncryptionMode, as embedded.ts " +
+    "now derives them) reports the effective posture immediately AND rotates the key on kill switch", async () => {
+    // Mirrors exactly what the fixed `embedded.ts` passes for a real ephemeral session: `ephemeralDbKey`
+    // is already resolved true (via `resolveEphemeralDbKey`, P1-1) and `dbEncryptionMode` carries the
+    // launcher's declared mode — `dbEncryptionKey` is never set for this path (a real ephemeral session
+    // discards whatever hex key LOAM_DB_KEY carried).
+    const { app, dataDir } = await makeEncryptedApp(
+      { ephemeralDbKey: true, dbEncryptionMode: "ephemeral" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+
+    // P2-1: the wire reports "ephemeral" from the FIRST request — no admin PATCH of the declarative
+    // `security.dbEncryption` axis (which defaults "off") is needed to make this true.
+    const before = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(before.networkConfig.dbEncryption).toBe("ephemeral");
+
+    expect((await post(app, admin.cookie, "ANDROID_EPHEMERAL_NEEDLE")).statusCode).toBe(201);
+    const beforeWipeFile = readFileSync(join(dataDir, "loam.db"));
+
+    // P1-1: with the fix, executeKillSwitch's `ephemeralDbKey` branch actually rotates the key for this
+    // scenario (the old embedded.ts, checking only the LOAM_DB_KEY==="ephemeral" literal, would have
+    // left `ephemeralDbKey` false here and skipped rotation entirely).
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    expect(app.store.loadMessages()).toEqual([]);
+    const afterWipeFile = readFileSync(join(dataDir, "loam.db"));
+    expect(afterWipeFile.equals(beforeWipeFile)).toBe(false); // fresh key ⇒ entirely different ciphertext
+
+    // Posture still reports "ephemeral" post-wipe (still encrypted, mode unchanged).
+    const after = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(after.networkConfig.dbEncryption).toBe("ephemeral");
+  });
+
+  it("SF1/P2-1: a boot-resolved dbEncryptionMode (passphrase/persistent) is reported without an admin PATCH", async () => {
+    const { app } = await makeEncryptedApp({
+      dbEncryptionKey: "a fixed host passphrase",
+      dbEncryptionMode: "persistent",
+    });
+
+    const config = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { dbEncryption: string };
+    };
+    expect(config.networkConfig.dbEncryption).toBe("persistent");
+  });
+
   it("kill switch on a passphrase-key node also empties and recovers", async () => {
     const { app } = await makeEncryptedApp(
       { dbEncryptionKey: "a fixed host passphrase" },
@@ -1175,6 +1560,2036 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(wipe.statusCode).toBe(200);
     expect(app.store.loadMessages()).toEqual([]);
     expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
+  });
+
+  /** Install the launcher's `globalThis.__loamRequestWipeRestart` hook (P1-2, docs/15) and record every
+   *  invocation. Auto-uninstalled via the module-level `cleanups` array. */
+  function installFakeWipeRestartHook(): { calls: number } {
+    const state = { calls: 0 };
+    (globalThis as unknown as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart = () => {
+      state.calls += 1;
+    };
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamRequestWipeRestart?: unknown }).__loamRequestWipeRestart;
+    });
+    return state;
+  }
+
+  it("P1-2: persistent-mode executeKillSwitch deletes the DB files and does NOT recreate in-process — it hands off to the launcher's wipe-restart hook instead", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed under a fixed key")).statusCode).toBe(201);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // The launcher hook was invoked exactly once — it owns clearing the Keystore key and restarting
+    // the embedded runtime from here; this process must not try to obtain a new key itself.
+    expect(hook.calls).toBe(1);
+
+    // The DB files are gone and were NOT recreated in-process (this process has no way to mint the new
+    // key the launcher's restart will resolve) — a bare delete, unlike the ephemeral/off paths below.
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-wal"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-shm"))).toBe(false);
+
+    // Avatars/attachments still get cleaned up even on this early-return branch (they're plain
+    // filesystem, not store-dependent).
+    expect(existsSync(join(dataDir, "avatars"))).toBe(false);
+    expect(existsSync(join(dataDir, "attachments"))).toBe(false);
+  });
+
+  it("P1-2: passphrase-mode executeKillSwitch also hands off to the wipe-restart hook rather than recreating under the same key", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed passphrase-derived key", dbEncryptionMode: "passphrase" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    expect(hook.calls).toBe(1);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+  });
+
+  it("RF1: persistent-mode wipe-restart takes effect immediately (503 on everything but /api/health) instead of leaving the running process serving stale in-memory content until a manual restart", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "still readable before the wipe?")).statusCode).toBe(201);
+
+    // Sanity: before the wipe, the admin's cookie sees the node's data as normal.
+    const before = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(before.statusCode).toBe(200);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+
+    // The SAME still-valid-looking cookie must not see any in-memory content: no stale 200 while this
+    // process waits for the launcher to actually restart it.
+    const afterWithCookie = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(afterWithCookie.statusCode).toBe(503);
+
+    // A brand-new (cookie-less) request is refused identically — it must not mint a fresh identity or
+    // see any re-seeded default content on this still-live process either.
+    const afterFreshSession = await app.server.inject({ method: "GET", url: "/api/channels" });
+    expect(afterFreshSession.statusCode).toBe(503);
+
+    // Posting is refused too — the process cannot accept new writes while it awaits its restart.
+    const afterPost = await post(app, admin.cookie, "should never be accepted");
+    expect(afterPost.statusCode).toBe(503);
+
+    // The one exception: the Android launcher's liveness probe still works, so it can tell the process
+    // is still alive (and eventually notice/trigger the actual restart).
+    const health = await app.server.inject({ method: "GET", url: "/api/health" });
+    expect(health.statusCode).toBe(200);
+  });
+
+  it("P1-2: falls back to the existing recreate-under-the-SAME-key behaviour when no launcher restart hook is installed (desktop/CI — documented limitation)", async () => {
+    // Deliberately NOT installing __loamRequestWipeRestart — simulates a non-Android host.
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed passphrase key", dbEncryptionMode: "passphrase" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // No hook available → the node must still boot usable, recreated in-process (same key) exactly as
+    // it always has — this is the documented limitation, not a crash or a stuck kill switch.
+    expect(app.store.loadMessages()).toEqual([]);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+    expect((await post(app, (await session(app)).cookie, "after")).statusCode).toBe(201);
+  });
+
+  it("P1-1 (Sol round 8): a durable `key-clear-ready` phase file is written before signaling the launcher, and this process never deletes it itself (only a verified `loam-wipe-complete` ack may)", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+
+    // Every artifact was proven gone, so the phase advanced to `key-clear-ready` before the launcher was
+    // signaled. This process has no way to observe whether the launcher actually cleared the device key —
+    // the phase file MUST still be on disk. Only main.js's `loam-wipe-complete` handler (after a VERIFIED
+    // `clearStoredDbKeys()`) is allowed to delete it, and that never happens here (the fake hook is a bare
+    // recorder, not a real launcher).
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    expect(readJournalPhase(dataDir)).toBe("key-clear-ready");
+  });
+
+  it("P1-2(a): a concurrent request during the slow file-deletion await already sees the lockdown (503), never stale in-memory data", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "must not leak out mid-deletion")).statusCode).toBe(201);
+
+    let release!: () => void;
+    rmGate.promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const wipePromise = app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+
+    // Let the handler's synchronous lockdown, broadcast, launcher signal, and config.json persist all
+    // run and reach the gated `rm()` call, without letting that call resolve yet — this is the window
+    // the OLD code left unprotected (the lockdown used to run AFTER these awaits, not before them).
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const concurrentRead = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+    });
+    expect(concurrentRead.statusCode).toBe(503);
+
+    const concurrentWrite = await post(app, admin.cookie, "must never be accepted mid-deletion");
+    expect(concurrentWrite.statusCode).toBe(503);
+
+    const freshSession = await app.server.inject({ method: "GET", url: "/api/channels" });
+    expect(freshSession.statusCode).toBe(503);
+
+    release();
+    const wipe = await wipePromise;
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+  });
+
+  it("P1-4 (Sol round 9): config is persisted DURABLY BEFORE the phase in the HOOK fixed-key wipe (config.json exists whenever the phase does), and a DB-only admin change survives the launcher restart", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    // A DB-ONLY admin change (lives only in the DB `config` table, never the initial config.json).
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { sync: { enabled: true, token: "a-plaintext-bearer-sync-token-x" } },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+
+    // P1-4: config.json was written BEFORE the phase, so it exists whenever the phase file does — a resume
+    // that deletes the DB always has the CURRENT effective config (including the DB-only sync change) to fall
+    // back to. The phase reached key-clear-ready.
+    expect(readJournalPhase(dataDir)).toBe("key-clear-ready");
+    const persisted = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
+      sync: { enabled: boolean; token?: string };
+    };
+    expect(persisted.sync.enabled).toBe(true);
+    expect(persisted.sync.token).toBeUndefined(); // plaintext bearer secret blanked
+
+    // Simulate the launcher's verified restart with a rotated key: the fresh DB's config table is empty, so
+    // config.json is the ONLY carrier of the DB-only sync change into the new boot.
+    rmSync(join(dataDir, ".loam-wipe-phase"), { force: true });
+    const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => restarted.close());
+    const restartedAdmin = await session(restarted);
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
+    ).json() as { sync: { enabled: boolean } };
+    expect(config.sync.enabled).toBe(true);
+  });
+
+  it("P1-4 (Sol round 9): the NO-HOOK fixed-key wipe persists config.json (with DB-only admin changes) BEFORE the phase, so it survives even though the wipe deletes the DB", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    // DB-only admin change: retention TTL, which lives in the DB config table.
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { retention: { messageTtlMs: 3_600_000 } },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    // No hook installed → the in-process no-hook fixed-key wipe runs: persist config.json BEFORE the phase,
+    // delete + recreate under the same key.
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    // config.json carries the DB-only retention change forward.
+    const persisted = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
+      retention: { messageTtlMs?: number };
+    };
+    expect(persisted.retention.messageTtlMs).toBe(3_600_000);
+
+    // Restart under the same key (no-hook can't rotate): the fresh DB's config table is empty, so config.json
+    // is the source — the retention change survives.
+    const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    cleanups.push(() => restarted.close());
+    const restartedAdmin = await session(restarted);
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
+    ).json() as { retention: { messageTtlMs?: number } };
+    expect(config.retention.messageTtlMs).toBe(3_600_000);
+  });
+
+  it("P1-4 (Sol round 10): a config.json persist failure during a fixed-key wipe does NOT lose config or signal the launcher — the journal retains the config snapshot and a reopen recovers it", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+
+    // config.json write fails on BOTH the attempt AND its retry.
+    configWriteFailures.remaining = 2;
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    // FAIL CLOSED (round-10): 503, and the launcher is NOT signaled — its key-clear would clear the journal
+    // before config could be recovered. But the DB WAS deleted (confidentiality), and the journal carries the
+    // config snapshot atomically, so config is never lost.
+    expect(wipe.statusCode).toBe(503);
+    expect(hook.calls).toBe(0);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+    expect(readJournalPhase(dataDir)).toBe("delete-pending");
+    expect(readJournalConfig(dataDir)?.killSwitch).toMatchObject({ enabled: true });
+    await app.close();
+
+    // Reopen with the fault cleared: the resume restores config.json FROM THE JOURNAL, re-verifies deletion,
+    // advances to key-clear-ready, and signals the launcher — so config survives and the wipe completes.
+    configWriteFailures.remaining = 0;
+    const hook2 = installFakeWipeRestartHook();
+    await expect(
+      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+    ).rejects.toThrow();
+    const recovered = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
+      killSwitch: { enabled: boolean };
+    };
+    expect(recovered.killSwitch.enabled).toBe(true);
+    expect(hook2.calls).toBe(1);
+  });
+
+  it("P1-4 (Sol round 11 / CodeRabbit): a wipe journal with a PRESENT but INVALID config snapshot fails closed (locks + retains the journal) instead of silently dropping config and reverting to defaults", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // Seed a journal whose config field is PRESENT but schema-invalid (simulating on-disk corruption of the
+    // snapshot). Distinct from an absent config (legacy), which is allowed to proceed.
+    writeFileSync(
+      join(dataDir, ".loam-wipe-phase"),
+      JSON.stringify({ phase: "delete-pending", config: { not: "a valid LoamConfig" } }),
+    );
+    const reports = installFakeBootBridge();
+
+    // The resume refuses to proceed (which would clear the journal and lose the config bytes) — it locks.
+    await expect(
+      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+    ).rejects.toThrow();
+    // The journal is RETAINED (not cleared), so the config bytes survive for inspection/repair.
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+  });
+
+  it("P1-1/P1-d (Sol round 8): when the durable wipe-phase file CANNOT be written, the ciphertext is deleted and VERIFIED gone SYNCHRONOUSLY before the launcher is signaled (fail closed) — a kill right after the hook cannot recover the data", async () => {
+    // A launcher hook that records, at the moment it is called, whether ANY ciphertext file still exists.
+    // The fix's guarantee is that by the time the launcher is signaled, the ciphertext is already gone —
+    // so a kill immediately after `hook()` (with RN's key-clear also interrupted) leaves nothing to recover.
+    const reports = installFakeBootBridge();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+
+    let ciphertextPresentAtHook: boolean | undefined;
+    let hookCalls = 0;
+    (globalThis as unknown as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart = () => {
+      ciphertextPresentAtHook =
+        existsSync(join(dataDir, "loam.db")) ||
+        existsSync(join(dataDir, "loam.db-wal")) ||
+        existsSync(join(dataDir, "loam.db-shm"));
+      hookCalls += 1;
+    };
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamRequestWipeRestart?: unknown }).__loamRequestWipeRestart;
+    });
+
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "MUST_NOT_SURVIVE_A_FAILED_MARKER")).statusCode).toBe(201);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+
+    // Force the durable phase write to fail — this is exactly the fail-open window P1-d closes.
+    wipeMarkerWriteFailure.armed = true;
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+
+    // The crux: the launcher WAS signaled, but the ciphertext was already gone at that instant — so a stop
+    // immediately after the hook cannot recover the encrypted data (the fail-OPEN bug would have had the
+    // ciphertext still present here, deleted only by a later async rm that a kill could skip).
+    expect(hookCalls).toBe(1);
+    expect(ciphertextPresentAtHook).toBe(false);
+
+    // And it is genuinely gone on disk afterward, with NO phase file written (the write failed by design).
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-wal"))).toBe(false);
+    expect(existsSync(join(dataDir, "loam.db-shm"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+
+    // A distinct notice was surfaced so the operator knows the wipe completed without a durable resume
+    // phase (and must reopen to finish clearing the now-unused key if RN's key-clear was also interrupted).
+    expect(reports.some((r) => r.code === "kill_switch_wipe_no_marker")).toBe(true);
+  });
+
+  it("RF7-a/P1-1 (Sol round 8): a `.premigration` survivor that can't be deleted BLOCKS the launcher handoff — the wipe reports INCOMPLETE (503), stays `delete-pending` + 503-locked, and never signals while recoverable ciphertext remains", async () => {
+    const reports = installFakeBootBridge();
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "doomed under a fixed key")).statusCode).toBe(201);
+
+    // Plant a committed legacy-key `.premigration` snapshot (still-readable ciphertext under the
+    // NON-discardable SHA256(passphrase) key) alongside the live DB, then make its deletion FAIL
+    // PERSISTENTLY — the survivor the wipe must never signal the launcher past.
+    const premigration = join(dataDir, "loam.db.premigration");
+    writeFileSync(premigration, Buffer.from("legacy-key ciphertext that must not survive a wipe"));
+    premigrationDeleteFailure.armed = true;
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    // P1-1 (Sol round 8): the endpoint no longer reports success on an INCOMPLETE wipe — it 503s.
+    expect(wipe.statusCode).toBe(503);
+
+    // The crux (RF7-a): the launcher was NOT signaled while the survivor remained — so RN can't clear the
+    // device secret (which doesn't decrypt `.premigration`) and restart into a Step-0b restore of it.
+    expect(hook.calls).toBe(0);
+    // The survivor is still on disk (it genuinely couldn't be deleted), and a distinct incomplete notice
+    // was surfaced — the phase stays `delete-pending` (durable), so the next boot re-runs deletion.
+    expect(existsSync(premigration)).toBe(true);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+    expect(readJournalPhase(dataDir)).toBe("delete-pending");
+    expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+
+    // The node stays locked down (503 everywhere) — the RF-a synchronous in-memory lockdown ran first and
+    // was never cleared, so nothing reopened while recoverable ciphertext survives.
+    const locked = await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } });
+    expect(locked.statusCode).toBe(503);
+  });
+
+  it("P1-1 (Sol round 8): an upgraded node with only a PRE-round-8 `.loam-wipe-pending` marker (+ a legacy-key `.premigration` survivor) RESUMES the wipe on boot — deletion runs and the pre-upgrade data is never served", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "PRE_UPGRADE_SECRET")).statusCode).toBe(201);
+    await app.close();
+
+    // The EXACT round-7 fail-closed state that upgraded to round-8: only the OLD marker on disk (no
+    // `.loam-wipe-phase`), a still-readable legacy-key `.premigration` survivor, and the live DB intact.
+    writeFileSync(join(dataDir, ".loam-wipe-pending"), "1");
+    writeFileSync(join(dataDir, "loam.db.premigration"), Buffer.from("legacy-key ciphertext survivor"));
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+
+    // Boot round-8 (no launcher hook = desktop path): it must recognise the legacy marker as an unfinished
+    // wipe, re-run deletion, clear BOTH marker names, and open a FRESH DB — never serve the surviving data.
+    const rebooted = await buildApp({
+      dataDir,
+      logger: false,
+      dbEncryptionKey: "a fixed persistent key",
+      dbEncryptionMode: "persistent",
+    });
+    cleanups.push(() => rebooted.close());
+    expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-pending"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    const search = await rebooted.server.inject({
+      method: "GET",
+      url: "/api/search?q=PRE_UPGRADE_SECRET",
+      headers: { cookie: (await session(rebooted)).cookie },
+    });
+    expect(search.statusCode).toBe(200);
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+  });
+
+  it("P1-4 (Sol round 8): a NO-LAUNCHER fixed-key wipe whose deletion FAILS durably records delete-pending + stays 503-locked, and on the NEXT boot (fault cleared) completes the wipe — old rows never served between attempts", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "NOHOOK_WIPE_SECRET")).statusCode).toBe(201);
+
+    // A committed legacy-key `.premigration` whose deletion FAILS persistently — the survivor. NO wipe hook
+    // is installed (desktop no-launcher path).
+    writeFileSync(join(dataDir, "loam.db.premigration"), Buffer.from("survivor"));
+    premigrationDeleteFailure.armed = true;
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    // The no-hook wipe deletion could not be verified → 503 (incomplete), with a DURABLE delete-pending phase
+    // recorded (the P1-4 fix: previously there was no durable record, so a restart forgot the wipe).
+    expect(wipe.statusCode).toBe(503);
+    expect(readJournalPhase(dataDir)).toBe("delete-pending");
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+    ).toBe(503);
+    await app.close();
+
+    // Boot 2 with the fault CLEARED: the boot-time resume re-runs deletion (now succeeds), clears the phase,
+    // and opens a fresh DB. The old rows are never served.
+    premigrationDeleteFailure.armed = false;
+    const boot2 = await buildApp({
+      dataDir,
+      logger: false,
+      dbEncryptionKey: "a fixed persistent key",
+      dbEncryptionMode: "persistent",
+    });
+    cleanups.push(() => boot2.close());
+    expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    const search = await boot2.server.inject({
+      method: "GET",
+      url: "/api/search?q=NOHOOK_WIPE_SECRET",
+      headers: { cookie: (await session(boot2)).cookie },
+    });
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+  });
+
+  it("P1-5 (Sol round 8): a no-hook wipe resume whose phase-clear cannot be made durable (parent-directory fsync fails) stays LOCKED rather than opening a fresh DB a resurrected phase would re-wipe", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // A wipe was mid-flight (durable delete-pending on disk), no launcher hook. Make EVERY parent-directory
+    // fsync on the data dir fail, so `clearWipePhase` can never confirm the unlink is power-loss-durable.
+    writeFileSync(join(dataDir, ".loam-wipe-phase"), "delete-pending");
+    openSyncFailure.path = dataDir;
+
+    // The resume deletes (best-effort), but the no-hook path refuses to open a fresh DB when the phase clear
+    // is not durable — it throws (stays locked) rather than risk a resurrected `key-clear-ready` re-wiping the
+    // freshly minted key on the next boot.
+    await expect(
+      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+    ).rejects.toThrow();
+    openSyncFailure.path = undefined;
+  });
+
+  it("P1-6 (Sol round 8): a DELIBERATE delete-and-start-fresh (marker intent `delete`) DELETES the old encrypted DB and proves it gone, instead of renaming it aside where it stays recoverable", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "DELETE_INTENT_SECRET")).statusCode).toBe(201);
+    await app.close();
+
+    // The operator confirmed "Delete & start fresh" for a deliberate mode change → the marker carries
+    // `delete`. Boot with a DIFFERENT key (the new mode's key can't open the old ciphertext).
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+
+    // DELETED, not renamed aside: no `.unreadable-*` recovery copies remain, and the fresh DB serves no old data.
+    expect(readdirSync(dataDir).filter((n) => n.includes(".unreadable-"))).toEqual([]);
+    const search = await boot2.server.inject({
+      method: "GET",
+      url: "/api/search?q=DELETE_INTENT_SECRET",
+      headers: { cookie: (await session(boot2)).cookie },
+    });
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+  });
+
+  it("P1-6 (Sol round 8): an accidental-lockout recovery (marker intent `preserve`) renames the old DB ASIDE instead of deleting it", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // Accidental wrong/lost-key lockout: the operator preserves the old DB while starting fresh. Boot with a
+    // different key so the old ciphertext can't open, and the `preserve` marker keeps it on disk.
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+    expect(recoverySnapshots(dataDir).length).toBeGreaterThan(0);
+  });
+
+  it("P1-2 (Sol round 9): a DELETE start-fresh also removes USER MEDIA (avatars + attachments), not just the DB files", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    await app.close();
+
+    // Seed user media alongside the encrypted DB — attachments are message content, avatars are user data.
+    const avatarsDir = join(dataDir, "avatars");
+    const attachmentsDir = join(dataDir, "attachments");
+    mkdirSync(avatarsDir, { recursive: true });
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(join(avatarsDir, "avt_deadbeefdeadbeef.webp"), "avatar bytes");
+    writeFileSync(join(attachmentsDir, "att_00000000000000ff.png"), "attachment bytes");
+
+    // Deliberate delete-and-start-fresh (the new key can't open the old ciphertext).
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+
+    // The DB was deleted (no `.unreadable-*` copy) AND the media directories are gone.
+    expect(readdirSync(dataDir).filter((n) => n.includes(".unreadable-"))).toEqual([]);
+    expect(existsSync(avatarsDir)).toBe(false);
+    expect(existsSync(attachmentsDir)).toBe(false);
+  });
+
+  it("P1-2 (Sol round 9): a PRESERVE start-fresh marker on a PLAINTEXT database under an encrypted mode does NOT delete it — it is renamed aside (preserve never escalates to destruction)", async () => {
+    // A plaintext DB (no encryption key).
+    const { app, dataDir } = await makeEncryptedApp({});
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "PLAINTEXT_PRESERVE_SECRET")).statusCode).toBe(201);
+    await app.close();
+
+    // An encrypted mode is now configured, but the marker intent is `preserve` (e.g. a legacy/mis-routed
+    // marker). The plaintext DB must NOT be deleted — it is renamed aside, honoring the intent.
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
+    const encrypted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a key", dbEncryptionMode: "persistent" });
+    cleanups.push(() => encrypted.close());
+    expect(recoverySnapshots(dataDir).length).toBeGreaterThan(0);
+  });
+
+  it("P1-1 (Sol round 9): a LIVE no-hook fixed-key wipe whose deletion cannot be made DURABLE (parent-dir fsync fails) returns 503 and does NOT open a fresh store", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "LIVE_NOHOOK_SECRET")).statusCode).toBe(201);
+
+    // No launcher hook. Make every parent-directory fsync on the data dir fail so the durable deletion (and
+    // durable phase clear) can never be confirmed — the wipe must fail closed (503), not reopen a fresh DB.
+    openSyncFailure.path = dataDir;
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(503);
+    // The node stays locked (nothing served) rather than exposing a fresh store while durability is uncertain.
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+    ).toBe(503);
+    openSyncFailure.path = undefined;
+  });
+
+  it("P1-1 (Sol round 11 coverage): a no-hook wipe reaches clearWipePhase and fails closed when ONLY the phase-clear fsync fails (config, journal, deletion all durable) — 503, no fresh store, and boot 2 retries clean", async () => {
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "CLEAR_FSYNC_SECRET")).statusCode).toBe(201);
+
+    // Let the FIRST THREE data-dir fsyncs succeed (journal write, durable deletion, config.json persist) and
+    // fail ONLY the FOURTH — the `clearWipePhase` parent-dir fsync. This exercises the round-9 clear-before-open
+    // regression that the all-fsyncs-fail test never reached.
+    openSyncFailure.path = dataDir;
+    openSyncFailure.failOnCall = 4;
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    // clearWipePhase reached but could not be made DURABLE (its dir fsync failed) → fail closed: 503, and NO
+    // fresh store is opened (the round-9 clear-before-open regression). The deletion did happen (DB gone).
+    expect(wipe.statusCode).toBe(503);
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+    // The node stays locked — never exposes a fresh store while the phase clear is unproven.
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+    ).toBe(503);
+    await app.close();
+
+    // Boot 2 with the fault cleared. Note: clearWipePhase `rmSync`s the journal BEFORE its dir-fsync fails, so
+    // boot 1 already physically removed the journal (its return was false only because the fsync couldn't PROVE
+    // the removal durable). So boot 2 is a clean fresh boot (`readWipeJournal` → ENOENT → no resume): the DB was
+    // deleted on boot 1 and never served, so a fresh empty node comes up with no old data.
+    openSyncFailure.path = undefined;
+    openSyncFailure.failOnCall = undefined;
+    openSyncFailure.count = 0;
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    const search = await boot2.server.inject({
+      method: "GET",
+      url: "/api/search?q=CLEAR_FSYNC_SECRET",
+      headers: { cookie: (await session(boot2)).cookie },
+    });
+    expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+  });
+
+  it("P1 (Sol round 11): PRESERVE recovery moves the attachment + avatar bytes into a recovery snapshot — the boot orphan reaper does NOT delete them, and they survive a further restart", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    const admin = await session(app);
+    // Seed a REAL message attachment + an avatar file alongside the encrypted DB.
+    const avatarsDir = join(dataDir, "avatars");
+    const attachmentsDir = join(dataDir, "attachments");
+    mkdirSync(avatarsDir, { recursive: true });
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(join(avatarsDir, "avt_cafecafecafecafe.webp"), "AVATAR_BYTES");
+    writeFileSync(join(attachmentsDir, "att_00000000000000aa.png"), "ATTACHMENT_BYTES");
+    await app.close();
+
+    // Accidental wrong/lost-key lockout recovery: preserve. Boot with a different key + a preserve marker.
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    // Let the boot-time orphan reaper (which runs on start) complete — the fresh DB references no attachments,
+    // so if the old attachment were still in the ACTIVE `attachments/` it would be reaped here.
+    await new Promise((r) => setTimeout(r, 50));
+    await boot2.close();
+
+    // The preserved bytes live in the recovery snapshot, NOT the active namespace — untouched by the reaper.
+    const snapshots = recoverySnapshots(dataDir);
+    expect(snapshots.length).toBe(1);
+    const snap = join(dataDir, snapshots[0]);
+    expect(readFileSync(join(snap, "attachments", "att_00000000000000aa.png"), "utf8")).toBe("ATTACHMENT_BYTES");
+    expect(readFileSync(join(snap, "avatars", "avt_cafecafecafecafe.webp"), "utf8")).toBe("AVATAR_BYTES");
+
+    // A further restart must not disturb the snapshot either.
+    const boot3 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot3.close());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(readFileSync(join(snap, "attachments", "att_00000000000000aa.png"), "utf8")).toBe("ATTACHMENT_BYTES");
+    expect(readFileSync(join(snap, "avatars", "avt_cafecafecafecafe.webp"), "utf8")).toBe("AVATAR_BYTES");
+  });
+
+  it("P1-1/P1-2 (Sol round 12): an INTERRUPTED preserve recovery (anchor + a SPLIT DB set) is RESUMED on boot — the move completes coherently, no fresh DB opens over a partial snapshot", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "SPLIT_PRESERVE_SECRET")).statusCode).toBe(201);
+    const avatarsDir = join(dataDir, "avatars");
+    const attachmentsDir = join(dataDir, "attachments");
+    mkdirSync(avatarsDir, { recursive: true });
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(join(avatarsDir, "avt_split.webp"), "AVATAR_SPLIT");
+    writeFileSync(join(attachmentsDir, "att_split.png"), "ATTACH_SPLIT");
+    await app.close();
+
+    // Simulate a CRASH mid-preserve-move: the durable anchor is present, and the DB set is SPLIT — a sidecar
+    // was already moved into the recovery dir, but loam.db + media are still in the active namespace.
+    const recoveryDirName = ".loam-recovery-1700000000000-abcdef";
+    const recoveryDir = join(dataDir, recoveryDirName);
+    mkdirSync(recoveryDir, { recursive: true });
+    writeFileSync(join(recoveryDir, "loam.db-wal"), "PRE_MOVED_WAL");
+    writeFileSync(join(dataDir, ".loam-recovery-state"), recoveryDirName);
+
+    // Boot under a DIFFERENT key (realistic wrong-key lockout). resumePreserveRecovery runs FIRST, finishes
+    // the move, clears the anchor; then a fresh DB opens under the new key.
+    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    cleanups.push(() => boot2.close());
+
+    // The anchor is cleared and the snapshot is COHERENT — every piece is together in ONE recovery dir.
+    expect(existsSync(join(dataDir, ".loam-recovery-state"))).toBe(false);
+    expect(recoverySnapshots(dataDir)).toEqual([recoveryDirName]);
+    expect(existsSync(join(recoveryDir, "loam.db"))).toBe(true);
+    expect(existsSync(join(recoveryDir, "loam.db-wal"))).toBe(true); // the pre-moved sidecar stays with it
+    expect(readFileSync(join(recoveryDir, "avatars", "avt_split.webp"), "utf8")).toBe("AVATAR_SPLIT");
+    expect(readFileSync(join(recoveryDir, "attachments", "att_split.png"), "utf8")).toBe("ATTACH_SPLIT");
+    // The active namespace is clean — no split remnants, fresh DB usable.
+    expect(existsSync(join(avatarsDir, "avt_split.webp"))).toBe(false);
+    const boot2Admin = await session(boot2);
+    expect((await post(boot2, boot2Admin.cookie, "after resumed preserve")).statusCode).toBe(201);
+  });
+
+  it("P1-4 (Sol round 12): a preserve move with an UNVERIFIABLE media dir (non-ENOENT stat) aborts before opening a fresh store — media is never left in the active namespace", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    await session(app);
+    const attachmentsDir = join(dataDir, "attachments");
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(join(attachmentsDir, "att_unverif.png"), "UNVERIF");
+    await app.close();
+
+    // A preserve confirmation + an lstat fault on the attachments dir (provenAbsence → "unknown"): the move
+    // must ABORT (fail closed) rather than skip the dir as if absent and open a fresh store over live media.
+    writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
+    lstatFailure.path = attachmentsDir;
+    const reports = installFakeBootBridge();
+    await expect(
+      buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" }),
+    ).rejects.toThrow();
+    lstatFailure.path = undefined;
+    expect(reports.some((r) => r.code === "db_encryption_unreadable")).toBe(true);
+  });
+
+  describe("P1-3 (Sol round 12): a corrupt/unverifiable wipe journal fails closed instead of being read as a legacy no-config journal", () => {
+    async function expectJournalLocks(content: string, opts?: { unreadable?: boolean }): Promise<void> {
+      const { app, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+      await session(app);
+      await app.close();
+      writeFileSync(join(dataDir, ".loam-wipe-phase"), content);
+      if (opts?.unreadable) {
+        readFileSyncFailure.path = join(dataDir, ".loam-wipe-phase");
+      }
+      const reports = installFakeBootBridge();
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+      ).rejects.toThrow();
+      readFileSyncFailure.path = undefined;
+      // The journal is RETAINED (not cleared/rewritten) so any config bytes survive; a distinct notice fires.
+      expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+    }
+
+    it("truncated JSON", () => expectJournalLocks('{"phase":"delete-pen'));
+    it("JSON null", () => expectJournalLocks("null"));
+    it("JSON array", () => expectJournalLocks("[1,2,3]"));
+    it("JSON object with no phase", () => expectJournalLocks("{}"));
+    it("JSON object with an unrecognized phase", () => expectJournalLocks('{"phase":"unknown"}'));
+    it("unrecognized non-JSON string", () => expectJournalLocks("garbage-not-a-recognized-phase"));
+    it("non-ENOENT read error", () => expectJournalLocks('{"phase":"delete-pending"}', { unreadable: true }));
+  });
+
+  describe("P1-3 (Sol round 12): EXACT legacy plain-string journals stay valid no-config journals — the no-hook resume proceeds and completes, not a corrupt lock", () => {
+    async function expectLegacyStringProceeds(legacyPhase: "delete-pending" | "key-clear-ready"): Promise<void> {
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "LEGACY_STRING_SECRET")).statusCode).toBe(201);
+      await app.close();
+
+      writeFileSync(join(dataDir, ".loam-wipe-phase"), legacyPhase); // EXACT legacy plain string (no config)
+      const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+      cleanups.push(() => boot2.close());
+      // Proceeded (not a corrupt lock): the no-hook resume deleted + cleared the journal + opened fresh.
+      expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+      const search = await boot2.server.inject({
+        method: "GET",
+        url: "/api/search?q=LEGACY_STRING_SECRET",
+        headers: { cookie: (await session(boot2)).cookie },
+      });
+      expect((search.json() as { results: unknown[] }).results.length).toBe(0);
+    }
+
+    it("delete-pending", () => expectLegacyStringProceeds("delete-pending"));
+    it("key-clear-ready", () => expectLegacyStringProceeds("key-clear-ready"));
+  });
+
+  it("RF-a extended (Sol round 10 review): an in-process wipe (ephemeral) 503-gates concurrent requests throughout the shared-tail media-deletion awaits, then serves the fresh state once complete", async () => {
+    const { app } = await makeEncryptedApp({ ephemeralDbKey: true }, { killSwitch: { enabled: true } });
+    const admin = await session(app);
+    expect((await post(app, admin.cookie, "STALE_DURING_WIPE")).statusCode).toBe(201);
+
+    // Hold the shared tail's `await rm(avatarsDir)` open so a concurrent request lands mid-wipe.
+    let release!: () => void;
+    rmGate.promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const wipePromise = app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The 503 gate is now raised for the WHOLE wipe (not just the hooked fixed-key branch), so a request
+    // during the tail's media-deletion await sees 503 — never a stale 200 from the still-populated mirror.
+    const during = await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } });
+    expect(during.statusCode).toBe(503);
+
+    release();
+    expect((await wipePromise).statusCode).toBe(200);
+
+    // The gate is LIFTED on the in-process success return, so the node serves the fresh (re-seeded) state.
+    const after = await app.server.inject({ method: "GET", url: "/api/channels" });
+    expect(after.statusCode).toBe(200);
+  });
+
+  describe("P1-3 (Sol round 4): the fixed-key wipe preserves admin-set config across the restart, with plaintext bearer secrets blanked", () => {
+    async function expectConfigSurvivesFixedKeyWipe(dbEncryptionMode: "persistent" | "passphrase"): Promise<void> {
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp({
+        dbEncryptionKey: `key A (${dbEncryptionMode})`,
+        dbEncryptionMode,
+      });
+      const admin = await session(app);
+
+      // Change settings ONLY via the admin API (never the initial config file) — exactly the scenario
+      // the fix targets: an armed kill switch and a sync token that only ever lived in the DB `config`
+      // table, which the fixed-key wipe branch deletes without ever recreating one in-process.
+      const patch = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: {
+          killSwitch: { enabled: true },
+          sync: { enabled: true, token: "a-plaintext-bearer-sync-token-9" },
+        },
+      });
+      expect(patch.statusCode).toBe(200);
+
+      const wipe = await app.server.inject({
+        method: "POST",
+        url: "/api/admin/kill-switch",
+        headers: { cookie: admin.cookie },
+        payload: { confirm: "wipe" },
+      });
+      expect(wipe.statusCode).toBe(200);
+      expect(hook.calls).toBe(1);
+
+      // config.json — the only surviving file — carries the effective config, with the plaintext sync
+      // token blanked (unlike the already-scrypt-hashed admin.passphrase/killSwitch.panicToken, which
+      // are safe to persist as-is and are NOT asserted away here).
+      const rawConfig = readFileSync(join(dataDir, "config.json"), "utf8");
+      expect(rawConfig).not.toContain("a-plaintext-bearer-sync-token-9");
+      const configOnDisk = JSON.parse(rawConfig) as { killSwitch: { enabled: boolean }; sync: { token?: string } };
+      expect(configOnDisk.killSwitch.enabled).toBe(true);
+      expect(configOnDisk.sync.token).toBeUndefined();
+
+      // The wipe reached `key-clear-ready` and wrote the durable phase file. Simulate the launcher's
+      // `loam-wipe-complete` handoff (main.js's `clearWipePhase()` after RN VERIFIED the key is gone):
+      // delete the phase file BEFORE the restart, otherwise the boot-time resume would (correctly) refuse
+      // to open the store under the un-rotated key.
+      expect(readJournalPhase(dataDir)).toBe("key-clear-ready");
+      rmSync(join(dataDir, ".loam-wipe-phase"), { force: true });
+
+      // Simulate the launcher's actual restart: a fresh boot, same dataDir, a NEW (rotated) key — the
+      // whole point of the P1-2 handoff. The fresh DB's config table starts empty, so config.json is
+      // the ONLY thing carrying the admin's settings forward into the new boot.
+      const restarted = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: `key B (${dbEncryptionMode}, rotated)`,
+        dbEncryptionMode,
+      });
+      try {
+        const restartedAdmin = await session(restarted);
+        const config = (
+          await restarted.server.inject({
+            method: "GET",
+            url: "/api/admin/config",
+            headers: { cookie: restartedAdmin.cookie },
+          })
+        ).json() as { killSwitch: { enabled: boolean }; sync: { enabled: boolean; token?: string } };
+
+        // Not silently reverted to config.json-absent/defaults — the armed kill switch survives.
+        expect(config.killSwitch.enabled).toBe(true);
+        expect(config.sync.enabled).toBe(true);
+        expect(config.sync.token).toBeUndefined();
+      } finally {
+        await restarted.close();
+      }
+    }
+
+    it("persistent mode", async () => {
+      await expectConfigSurvivesFixedKeyWipe("persistent");
+    });
+
+    it("passphrase mode", async () => {
+      await expectConfigSurvivesFixedKeyWipe("passphrase");
+    });
+  });
+
+  describe("P1-2 (Sol round 7): the kill switch wipes EVERY DB artifact (migration/recovery sidecars), not just the 3 live files", () => {
+    const SENTINEL = "PREMIGRATION_LEGACY_SECRET";
+    // Every NON-live artifact `dbArtifactPaths()` must reach: the DELETE-mode rollback journal, the full
+    // `.premigration` snapshot family (+ the legacy multi-file `-wal`/`-shm` sidecars), and the
+    // timestamped `*.unreadable-<ts>` recovery renames.
+    const STALE_NAMES = [
+      "loam.db-journal",
+      "loam.db.premigration.tmp",
+      "loam.db.premigration-wal",
+      "loam.db.premigration-shm",
+      "loam.db.premigration-journal",
+      "loam.db-wal.premigration",
+      "loam.db-shm.premigration",
+      "loam.db.unreadable-1700000000000-abc123",
+      "loam.db-wal.unreadable-1700000000000-abc123",
+      "loam.db-journal.unreadable-1700000000000-abc123",
+    ];
+
+    /** Seed a REAL legacy-key-encrypted `loam.db.premigration` (openable with `legacyKey`, which has no
+     *  discardable device secret — THE crypto-wipe hole) plus every other stale DB artifact into
+     *  `dataDir`, alongside a running app's live DB. */
+    function seedStaleDbArtifacts(dataDir: string, legacyKey: string): void {
+      const seedDir = mkdtempSync(join(tmpdir(), "loam-legacy-premig-"));
+      cleanups.push(() => rmSync(seedDir, { recursive: true, force: true }));
+      const seedDb = join(seedDir, "legacy.db");
+      const legacy = openStore(seedDb, { encryptionKey: legacyKey });
+      legacy.setConfigValue("legacy-sentinel", SENTINEL);
+      legacy.checkpoint();
+      legacy.close();
+      // Sanity: it really IS a legacy-key DB — anyone with the passphrase can still open it, which is
+      // exactly why leaving `.premigration` behind (encrypted under the legacy key, not a discardable
+      // device secret) breaks the cryptographic-wipe guarantee.
+      const verify = openStore(seedDb, { encryptionKey: legacyKey });
+      expect(verify.getConfigValue("legacy-sentinel")).toBe(SENTINEL);
+      verify.checkpoint();
+      verify.close();
+      copyFileSync(seedDb, join(dataDir, "loam.db.premigration"));
+      for (const name of STALE_NAMES) {
+        writeFileSync(join(dataDir, name), Buffer.from(`stale artifact: ${name}`));
+      }
+    }
+
+    /** Every stale DB artifact still on disk (empty = a clean wipe). Excludes the LIVE `loam.db`/`-wal`/
+     *  `-shm`, which the ephemeral/same-key/off paths legitimately recreate/keep open. */
+    function staleArtifactsRemaining(dataDir: string): string[] {
+      if (!existsSync(dataDir)) return [];
+      const liveNames = new Set(["loam.db", "loam.db-wal", "loam.db-shm"]);
+      return readdirSync(dataDir).filter(
+        (n) =>
+          !liveNames.has(n) &&
+          (n.includes(".premigration") || n.includes(".unreadable-") || n === "loam.db-journal"),
+      );
+    }
+
+    async function fireKillSwitch(app: LoamApp, cookie: string): Promise<InjectResponse> {
+      return app.server.inject({
+        method: "POST",
+        url: "/api/admin/kill-switch",
+        headers: { cookie },
+        payload: { confirm: "wipe" },
+      });
+    }
+
+    it("marker-SUCCESS branch (fixed-key + launcher hook): deletes the legacy .premigration + journal + unreadable renames, not just the live files", async () => {
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+      expect(hook.calls).toBe(1);
+
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+      // The legacy-key backup (and every other sidecar) is physically gone — no passphrase can open it.
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+    });
+
+    it("phase-write-FAILURE fail-closed branch (fixed-key, phase write fails): synchronously deletes AND verifies EVERY artifact before signaling the launcher", async () => {
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+
+      let artifactsPresentAtHook: string[] | undefined;
+      (globalThis as unknown as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart = () => {
+        artifactsPresentAtHook = staleArtifactsRemaining(dataDir);
+      };
+      cleanups.push(() => {
+        delete (globalThis as unknown as { __loamRequestWipeRestart?: unknown }).__loamRequestWipeRestart;
+      });
+
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      wipeMarkerWriteFailure.armed = true;
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      // Fail-closed: by the time the launcher was signaled EVERY stale artifact was already gone (not
+      // just the 3 live files) — a kill right after the hook can't recover the legacy-key ciphertext.
+      expect(artifactsPresentAtHook).toEqual([]);
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+      expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    });
+
+    it("ephemeral branch: deletes stale migration/recovery artifacts before rotating to a fresh key", async () => {
+      const { app, dataDir } = await makeEncryptedApp(
+        { ephemeralDbKey: true, dbEncryptionMode: "ephemeral" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      // The live DB is recreated under a fresh key (loam.db exists), but every stale artifact is gone.
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(app.store.loadMessages()).toEqual([]);
+      expect((await post(app, (await session(app)).cookie, "after wipe")).statusCode).toBe(201);
+    });
+
+    it("same-key fallback branch (fixed-key, NO launcher hook): deletes stale artifacts before recreating under the same key", async () => {
+      // Deliberately NOT installing __loamRequestWipeRestart — the desktop/CI same-key fallback.
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed passphrase key", dbEncryptionMode: "passphrase" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(true); // recreated under the same key
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(app.store.loadMessages()).toEqual([]);
+    });
+
+    it("off/wipeAll branch (unencrypted): removes stale encrypted-era artifacts while keeping the live plaintext DB open", async () => {
+      const { app, dataDir } = await makeEncryptedApp({}, { killSwitch: { enabled: true } });
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+      seedStaleDbArtifacts(dataDir, "an old legacy premigration key");
+
+      expect((await fireKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+
+      expect(existsSync(join(dataDir, "loam.db"))).toBe(true); // live plaintext DB stays open (wipeAll)
+      expect(staleArtifactsRemaining(dataDir)).toEqual([]);
+      expect(app.store.loadMessages()).toEqual([]);
+    });
+  });
+
+  /** Install the `globalThis.__loamReportBootError` bridge (the same one `embedded-main.ts` uses for
+   *  fatal boot errors — see its own test suite) and capture every report. Auto-uninstalled. */
+  function installFakeBootBridge(): { message: string; code: string }[] {
+    const reports: { message: string; code: string }[] = [];
+    (
+      globalThis as unknown as { __loamReportBootError?: (message: string, code: string) => void }
+    ).__loamReportBootError = (message, code) => reports.push({ message, code });
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamReportBootError?: unknown }).__loamReportBootError;
+    });
+    return reports;
+  }
+
+  describe("P1-1 (Sol round 5): passphrase key-derivation migration (dbEncryptionMigrateFromKey / PRAGMA rekey)", () => {
+    /** Install the `globalThis.__loamReportDbKeyMigrated` bridge (main.js's migration-confirmed signal,
+     *  see db-encryption.ts's `markPassphraseKeyMigrated`) and count every invocation. Auto-uninstalled. */
+    function installFakeMigratedHook(): { calls: number; requestIds: (string | undefined)[] } {
+      const state: { calls: number; requestIds: (string | undefined)[] } = { calls: 0, requestIds: [] };
+      (globalThis as unknown as { __loamReportDbKeyMigrated?: (requestId?: string) => void }).__loamReportDbKeyMigrated =
+        (requestId?: string) => {
+          state.calls += 1;
+          state.requestIds.push(requestId);
+        };
+      cleanups.push(() => {
+        delete (globalThis as unknown as { __loamReportDbKeyMigrated?: unknown }).__loamReportDbKeyMigrated;
+      });
+      return state;
+    }
+
+    it("migrates an existing legacy-keyed passphrase DB in place: rows survive, the current key opens it directly afterward, the legacy key no longer does, and the launcher is told it migrated", async () => {
+      const migrated = installFakeMigratedHook();
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-migrate-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      // An "existing" passphrase DB, encrypted under the pre-round-4 legacy derivation.
+      const original = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      const admin = await session(original);
+      expect((await post(original, admin.cookie, "MIGRATE_ME")).statusCode).toBe(201);
+      await original.close();
+
+      expect(migrated.calls).toBe(0);
+
+      // Boot with the CURRENT key plus the legacy key as a migration fallback — mirrors main.js offering
+      // both because it hasn't recorded a confirmed migration yet.
+      const migratedApp = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMigrateFromKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+        // Sol Fable-round-2 P1-B: the launcher's immutable per-boot handoff id must be forwarded VERBATIM in
+        // the migration ack (so RN promotes the exact attempt that opened THIS DB, not a mutable global).
+        dbKeyRequestId: "dbkey-boot-7",
+      });
+
+      expect(migrated.calls).toBe(1);
+      expect(migrated.requestIds).toEqual(["dbkey-boot-7"]);
+      expect(migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "MIGRATE_ME")).toBe(true);
+      // RF-b: a CLEAN migration deletes the pre-migration backup sidecars — none must be left behind (a
+      // leftover would be misread as an interrupted migration on the next boot and trigger a restore).
+      expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+      await migratedApp.close();
+
+      // Rekeyed in place: a LATER boot with only the current key (no legacy key offered at all) opens
+      // the same file directly.
+      const reopened = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(reopened.store.loadMessages().some((m) => "body" in m && m.body === "MIGRATE_ME")).toBe(true);
+      await reopened.close();
+
+      // The OLD legacy key can no longer open the file at all.
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" }),
+      ).rejects.toThrow();
+    });
+
+    it("RF-b: an interrupted rekey (a .premigration backup present alongside a corrupt/half loam.db) is restored on boot and migrates successfully", async () => {
+      const migrated = installFakeMigratedHook();
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-migrate-interrupt-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      // A real legacy-encrypted passphrase DB with a row we must not lose.
+      const original = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      const admin = await session(original);
+      expect((await post(original, admin.cookie, "SURVIVE_INTERRUPTED_REKEY")).statusCode).toBe(201);
+      await original.close();
+
+      // Simulate a rekey interrupted by an OS-kill AFTER the pre-migration backup was taken but BEFORE
+      // (or during) the in-place PRAGMA rekey completed: the intact legacy files are preserved under
+      // `.premigration`, while the live `loam.db` is now half-rekeyed/corrupt (openable under neither key).
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const live = join(dataDir, `loam.db${suffix}`);
+        if (existsSync(live)) {
+          copyFileSync(live, `${live}.premigration`);
+        }
+      }
+      writeFileSync(join(dataDir, "loam.db"), Buffer.from("not a database — half-rekeyed corruption"));
+
+      // Boot: Step 0b must restore the intact legacy DB from the sidecars, then the migration branch
+      // rekeys it to the current key. The row survives and the launcher is told it migrated.
+      const recovered = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMigrateFromKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(migrated.calls).toBe(1);
+      expect(
+        recovered.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_INTERRUPTED_REKEY"),
+      ).toBe(true);
+      // The successful re-migration cleaned up the sidecars.
+      expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+      await recovered.close();
+
+      // And the rekey actually took: a later boot with only the current key opens it directly.
+      const reopened = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(
+        reopened.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_INTERRUPTED_REKEY"),
+      ).toBe(true);
+      await reopened.close();
+    });
+
+    it("P2-2 (Sol round 7): a post-rekey CLEANUP failure does NOT fail the boot — the current boot returns a ready, migrated store with data intact (not a plaintext/unreadable fallback)", async () => {
+      const migrated = installFakeMigratedHook();
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-p22-cleanup-fail-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      const original = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+      const admin = await session(original);
+      expect((await post(original, admin.cookie, "SURVIVE_CLEANUP_FAILURE")).statusCode).toBe(201);
+      await original.close();
+
+      // Force the POST-rekey cleanup `rmSync(loam.db.premigration)` to throw. Before the fix that jumped to
+      // the outer migration `catch` and fell through as if the rekey had FAILED — leaking the already-
+      // rekeyed handle and running the plaintext/recovery chain against a DB already valid under the current
+      // key. The fix treats the rekey as the commit point, so the cleanup failure is swallowed best-effort.
+      postRekeyCleanupFailure.armed = true;
+
+      const migratedApp = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMigrateFromKey: legacyKey,
+        dbEncryptionMode: "passphrase",
+      });
+
+      // The rekey is the commit point: the boot returns the LIVE migrated store — the launcher is told it
+      // migrated and the row survives (NOT a plaintext/unreadable fallback that would lose or expose data).
+      expect(migrated.calls).toBe(1);
+      expect(
+        migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_CLEANUP_FAILURE"),
+      ).toBe(true);
+      // Genuinely encrypted under the current key (not the plaintext fallback) — no plaintext on disk.
+      expect(dataDirHasPlaintext(dataDir, "SURVIVE_CLEANUP_FAILURE")).toBe(false);
+      // The cleanup failed, so the stale backup is INTENTIONALLY left behind for the next boot's Step-0b.
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+      await migratedApp.close();
+
+      // A later boot with ONLY the current key opens directly (the rekey took) AND Step-0b discards the
+      // stale backup the failed cleanup left — proving the cleanup failure never corrupted the migration.
+      const reopened = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: currentKey,
+        dbEncryptionMode: "passphrase",
+      });
+      expect(
+        reopened.store.loadMessages().some((m) => "body" in m && m.body === "SURVIVE_CLEANUP_FAILURE"),
+      ).toBe(true);
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+      await reopened.close();
+    });
+
+    describe("P1-a (Sol round 6): the pre-migration backup is CRASH-ATOMIC (single-file, checkpoint-folded, commit-by-rename)", () => {
+      const legacyKey = "legacy SHA256(passphrase)-only key";
+      const currentKey = "current SHA256(passphrase + deviceSecret) key";
+
+      /** Build a legacy-encrypted passphrase DB carrying `body`, closed cleanly (WAL checkpointed away, so
+       *  only a single-file `loam.db` remains on disk). Returns the dataDir it lives in. */
+      async function makeLegacyDb(body: string): Promise<string> {
+        const dataDir = mkdtempSync(join(tmpdir(), "loam-p1a-test-"));
+        cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+        const app = await buildApp({ dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" });
+        const admin = await session(app);
+        expect((await post(app, admin.cookie, body)).statusCode).toBe(201);
+        await app.close();
+        return dataDir;
+      }
+
+      /** Assert `dataDir` migrates cleanly under the current key with `body` intact and no leftover backup
+       *  artifacts (neither a committed `.premigration` nor a stray `.premigration.tmp`). */
+      async function expectCleanMigration(dataDir: string, body: string): Promise<void> {
+        const migrated = installFakeMigratedHook();
+        const app = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated.calls).toBe(1);
+        expect(app.store.loadMessages().some((m) => "body" in m && m.body === body)).toBe(true);
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await app.close();
+      }
+
+      it("kill AFTER checkpoint but BEFORE the copy: no backup artifacts exist, so the migration simply re-runs on the intact live DB", async () => {
+        // A checkpoint is non-destructive; a kill right after it (before any copy) leaves the intact legacy
+        // DB and NO `.premigration`/`.tmp` at all. This models that exact on-disk state.
+        const dataDir = await makeLegacyDb("AFTER_CHECKPOINT_BEFORE_COPY");
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await expectCleanMigration(dataDir, "AFTER_CHECKPOINT_BEFORE_COPY");
+      });
+
+      it("kill AFTER the copy but BEFORE the commit rename: a stray `.premigration.tmp` is DISCARDED, never restored, and the migration re-runs on the intact live DB", async () => {
+        const dataDir = await makeLegacyDb("AFTER_COPY_BEFORE_RENAME");
+        // Simulate a kill mid-copy: a truncated/partial `.tmp` is present, but no COMMITTED backup exists.
+        writeFileSync(join(dataDir, "loam.db.premigration.tmp"), Buffer.from("a half-written backup copy"));
+        expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+
+        // Step 0b must NOT restore from the uncommitted `.tmp` (that is the whole crash-atomicity guarantee —
+        // an incomplete backup can never replace the intact live DB); it discards it and the migration runs.
+        await expectCleanMigration(dataDir, "AFTER_COPY_BEFORE_RENAME");
+        expect(existsSync(join(dataDir, "loam.db.premigration.tmp"))).toBe(false);
+      });
+
+      it("kill AFTER the backup commit but BEFORE the rekey: the committed single-file backup is restored (single atomic rename) and the migration retries", async () => {
+        const dataDir = await makeLegacyDb("AFTER_COMMIT_BEFORE_REKEY");
+        // The committed backup exists and the rekey never ran, so the live DB still equals the (intact,
+        // legacy-encrypted) backup — exactly the state a kill in this window leaves.
+        copyFileSync(join(dataDir, "loam.db"), join(dataDir, "loam.db.premigration"));
+
+        await expectCleanMigration(dataDir, "AFTER_COMMIT_BEFORE_REKEY");
+      });
+
+      it("kill MID-rekey: the committed single-file backup is restored over the half-rekeyed (corrupt) live DB and the migration retries", async () => {
+        const dataDir = await makeLegacyDb("MID_REKEY");
+        // Committed backup = the intact legacy DB; live loam.db = half-rekeyed corruption (openable under
+        // neither key) plus stale `-wal`/`-shm` from the interrupted rekey.
+        copyFileSync(join(dataDir, "loam.db"), join(dataDir, "loam.db.premigration"));
+        writeFileSync(join(dataDir, "loam.db"), Buffer.from("half-rekeyed corruption — opens under no key"));
+        writeFileSync(join(dataDir, "loam.db-wal"), Buffer.from("stale half-rekey wal"));
+        writeFileSync(join(dataDir, "loam.db-shm"), Buffer.from("stale half-rekey shm"));
+
+        await expectCleanMigration(dataDir, "MID_REKEY");
+      });
+
+      it("committed data still resident in the WAL: the checkpoint folds it into the single-file backup, which a restore then preserves (no committed rows lost)", async () => {
+        // 1. Build a legacy DB whose committed row lives ONLY in the WAL, not in loam.db's main file.
+        const dataDir = mkdtempSync(join(tmpdir(), "loam-p1a-wal-test-"));
+        cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+        const producer = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        const admin = await session(producer);
+        expect((await post(producer, admin.cookie, "WAL_RESIDENT_ROW")).statusCode).toBe(201);
+        // Snapshot the live files WHILE the connection is open (row committed to the WAL, not yet folded
+        // into the main file — nothing writes after the synchronous write-through, so the copy is quiescent).
+        const snapDir = mkdtempSync(join(tmpdir(), "loam-p1a-wal-snap-"));
+        for (const suffix of ["", "-wal", "-shm"]) {
+          const live = join(dataDir, `loam.db${suffix}`);
+          if (existsSync(live)) copyFileSync(live, join(snapDir, `loam.db${suffix}`));
+        }
+        await producer.close(); // a clean close checkpoints + deletes the WAL — undone by the restore below
+        for (const suffix of ["", "-wal", "-shm"]) {
+          const snap = join(snapDir, `loam.db${suffix}`);
+          const live = join(dataDir, `loam.db${suffix}`);
+          if (existsSync(snap)) copyFileSync(snap, live);
+          else rmSync(live, { force: true });
+        }
+
+        // Precondition proof: the main file ALONE (no WAL) does not yet contain the row — it is WAL-resident.
+        const mainOnlyDir = mkdtempSync(join(tmpdir(), "loam-p1a-mainonly-"));
+        cleanups.push(() => rmSync(mainOnlyDir, { recursive: true, force: true }));
+        copyFileSync(join(snapDir, "loam.db"), join(mainOnlyDir, "loam.db"));
+        const mainOnly = openStore(join(mainOnlyDir, "loam.db"), { encryptionKey: legacyKey });
+        expect(mainOnly.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(false);
+        mainOnly.close();
+        rmSync(snapDir, { recursive: true, force: true });
+
+        // 2. Capture the single-file backup the migration commits, and run the (clean) migration.
+        const captureDir = mkdtempSync(join(tmpdir(), "loam-p1a-capture-"));
+        cleanups.push(() => rmSync(captureDir, { recursive: true, force: true }));
+        backupCapture.dir = captureDir;
+        const migrated = installFakeMigratedHook();
+        const migratedApp = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated.calls).toBe(1);
+        // The clean migration preserved the WAL-resident row.
+        expect(migratedApp.store.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(true);
+        await migratedApp.close();
+
+        // 3. The CAPTURED single-file backup — a copy of loam.db taken AFTER the checkpoint but BEFORE the
+        // rekey — contains the row. Without the checkpoint-before-copy this file would be the main-only file
+        // proven row-less above, and a restore from it would lose committed data.
+        const captured = openStore(join(captureDir, "captured-backup.db"), { encryptionKey: legacyKey });
+        expect(captured.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(true);
+        captured.close();
+
+        // 4. End-to-end restore: feed that production-made backup back through Step 0b over a corrupt live
+        // DB and confirm the row survives the backup+restore round trip.
+        backupCapture.dir = undefined;
+        copyFileSync(join(captureDir, "captured-backup.db"), join(dataDir, "loam.db.premigration"));
+        writeFileSync(join(dataDir, "loam.db"), Buffer.from("corrupt live db — must be restored from backup"));
+        rmSync(join(dataDir, "loam.db-wal"), { force: true });
+        rmSync(join(dataDir, "loam.db-shm"), { force: true });
+        const migrated2 = installFakeMigratedHook();
+        const restored = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated2.calls).toBe(1);
+        expect(restored.store.loadMessages().some((m) => "body" in m && m.body === "WAL_RESIDENT_ROW")).toBe(true);
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await restored.close();
+      });
+
+      it("RF6-a: an interrupted DELETE-mode rekey leaves a foreign `loam.db-journal` — Step 0b removes it so the restored single file is never paired with a hot rollback journal", async () => {
+        const dataDir = await makeLegacyDb("SURVIVES_FOREIGN_JOURNAL");
+        // Committed backup = the intact legacy DB. The live loam.db is half-rekeyed corruption (opens
+        // under no key) PLUS a `loam.db-journal` — the rollback journal a DELETE-mode rekey (the mode
+        // SQLCipher forces for rekey; it refuses under WAL) leaves when killed mid-way. This is NOT a
+        // `-wal`/`-shm` pair, which is exactly the state the old Step 0b failed to clean.
+        copyFileSync(join(dataDir, "loam.db"), join(dataDir, "loam.db.premigration"));
+        writeFileSync(join(dataDir, "loam.db"), Buffer.from("half-rekeyed corruption — opens under no key"));
+        writeFileSync(
+          join(dataDir, "loam.db-journal"),
+          Buffer.from("stale rollback journal left by the interrupted DELETE-mode rekey"),
+        );
+
+        // Capture rmSync paths so we can prove Step 0b EXPLICITLY removes the journal (not just that it
+        // happens to be gone after a successful open, which SQLite would do regardless of the fix).
+        rmSyncCapture.paths = [];
+        try {
+          await expectCleanMigration(dataDir, "SURVIVES_FOREIGN_JOURNAL");
+          expect(rmSyncCapture.paths.some((p) => p.endsWith("loam.db-journal"))).toBe(true);
+        } finally {
+          rmSyncCapture.paths = undefined;
+        }
+        // The foreign rollback journal must be gone — a restored self-consistent file paired with a hot
+        // journal violates the crash-atomic single-self-consistent-file invariant.
+        expect(existsSync(join(dataDir, "loam.db-journal"))).toBe(false);
+      });
+
+      it("RF6-b: a stale `.premigration` left by a SUCCESSFUL-but-uncleaned migration is DISCARDED (not restored), preserving the serving session's data", async () => {
+        // 1. A legacy DB with a pre-migration row; snapshot the intact legacy single file — this is what a
+        // stale, never-cleaned `.premigration` holds (it predates the migration, so ONLY the pre row).
+        const dataDir = await makeLegacyDb("PRE_MIGRATION_ROW");
+        const staleSnapshot = join(dataDir, "stale-legacy-snapshot.db");
+        copyFileSync(join(dataDir, "loam.db"), staleSnapshot);
+
+        // 2. Migrate cleanly to the current key, then write a NEW row during that serving session — the
+        // data a full session accrues AFTER a migration that already succeeded.
+        const migrated = installFakeMigratedHook();
+        const migratedApp = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        expect(migrated.calls).toBe(1);
+        const admin = await session(migratedApp);
+        expect((await post(migratedApp, admin.cookie, "POST_MIGRATION_SESSION_ROW")).statusCode).toBe(201);
+        await migratedApp.close();
+        // The clean migration removed its own backup.
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+
+        // 3. Simulate the post-success `rmSync(committedBackup)` cleanup having THROWN (read-only dir /
+        // locked file): the stale legacy snapshot survives as `loam.db.premigration` into the next boot.
+        copyFileSync(staleSnapshot, join(dataDir, "loam.db.premigration"));
+        rmSync(staleSnapshot, { force: true });
+
+        // 4. Boot again under the current key. Step 0b PROBES the live DB (it opens under the current key →
+        // the migration already succeeded) and DISCARDS the stale backup rather than restoring it. A blind
+        // restore would revert to the pre-migration snapshot and LOSE the session row.
+        const reopened = await buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: currentKey,
+          dbEncryptionMigrateFromKey: legacyKey,
+          dbEncryptionMode: "passphrase",
+        });
+        const bodies = reopened.store.loadMessages().flatMap((m) => ("body" in m ? [m.body] : []));
+        expect(bodies).toContain("PRE_MIGRATION_ROW");
+        // Preserved — proof the stale backup was discarded, not restored over the live DB.
+        expect(bodies).toContain("POST_MIGRATION_SESSION_ROW");
+        expect(readdirSync(dataDir).some((name) => name.includes(".premigration"))).toBe(false);
+        await reopened.close();
+      });
+    });
+
+    it("a fresh install (no prior DB) opens cleanly under the current key without ever needing the offered legacy one, and still reports migrated so the launcher stops offering it", async () => {
+      const migrated = installFakeMigratedHook();
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-migrate-fresh-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+
+      const app = await buildApp({
+        dataDir,
+        logger: false,
+        dbEncryptionKey: "current SHA256(passphrase + deviceSecret) key",
+        dbEncryptionMigrateFromKey: "a legacy key that will never actually be needed",
+        dbEncryptionMode: "passphrase",
+      });
+      cleanups.push(() => app.close());
+
+      expect(migrated.calls).toBe(1);
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "fresh install")).statusCode).toBe(201);
+    });
+
+    it("falls through to the existing db_encryption_unreadable recovery path when NEITHER the current nor the offered legacy key opens the database", async () => {
+      const reports = installFakeBootBridge();
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the real key" });
+      await session(original);
+      await original.close();
+
+      await expect(
+        buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: "a totally wrong current key",
+          dbEncryptionMigrateFromKey: "a totally wrong legacy key too",
+        }),
+      ).rejects.toThrow(/could not be opened/);
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+    });
+  });
+
+  describe("resilient encrypted-DB open (F4, docs/15)", () => {
+    it("P1-4-server (Sol round 8): an existing PLAINTEXT database under a configured encrypted mode is NOT silently served as plaintext — it reports `db_encryption_plaintext_unconverted` and LOCKS; a start-fresh confirmation then deletes it and starts a fresh ENCRYPTED database", async () => {
+      const reports = installFakeBootBridge();
+
+      // A plaintext DB already on disk (no encryption ever configured) — simulates a node switched
+      // into an encrypted mode without a rekey of the existing data.
+      const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-plaintext-unconverted-test-"));
+      cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+      const plain = await buildApp({ dataDir, logger: false });
+      const plainAdmin = await session(plain);
+      expect((await post(plain, plainAdmin.cookie, "PLAINTEXT_ALREADY_ON_DISK")).statusCode).toBe(201);
+      await plain.close();
+
+      // Reopen the SAME data dir with an encryption key configured. The keyed open fails against the real
+      // plaintext file, and a plaintext probe SUCCEEDS — the old code silently served that plaintext file
+      // (a confidentiality downgrade). Now it must LOCK with the distinct code, NOT serve.
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" }),
+      ).rejects.toThrow(/refusing to serve it unencrypted/);
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_plaintext_unconverted" })]);
+      // The key itself must never appear in the reported message.
+      expect(reports[0]?.message).not.toContain("a newly configured key");
+      // Nothing on disk was touched — the plaintext file is still there, still plaintext.
+      expect(readFileSync(join(dataDir, "loam.db")).subarray(0, 15).toString("ascii")).toBe("SQLite format 3");
+
+      // The operator confirms "delete data and start encrypted": the RN start-fresh marker is written with
+      // the DELETE intent (the plaintext-unconverted recovery is a deliberate destructive action, P1-2 round-9).
+      reports.length = 0;
+      writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
+
+      const encrypted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" });
+      cleanups.push(() => encrypted.close());
+
+      // The plaintext DB was DELETED (not preserved as a readable `.unreadable-` rename) and a FRESH
+      // encrypted database was created — reported as a recovered-fresh start.
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_recovered_fresh" })]);
+      // The old plaintext data is gone (a fresh DB), and the marker was consumed.
+      expect(encrypted.store.loadMessages()).toEqual([]);
+      expect(existsSync(join(dataDir, ".loam-db-start-fresh"))).toBe(false);
+      // The plaintext file was DELETED, not renamed aside — no `*.unreadable-*` copy of it survives.
+      expect(readdirSync(dataDir).some((n) => n.includes(".unreadable-"))).toBe(false);
+      // The new loam.db is genuinely encrypted: an UNKEYED open now fails ("not a database").
+      expect(() => openStore(join(dataDir, "loam.db"), {}).close()).toThrow();
+      // Fully usable, and reports encrypted posture.
+      const encAdmin = await session(encrypted);
+      expect((await post(encrypted, encAdmin.cookie, "after encrypted start")).statusCode).toBe(201);
+      expect(dataDirHasPlaintext(dataDir, "after encrypted start")).toBe(false);
+    });
+
+    /** Path to the shared launcher "start fresh" confirmation marker (SF2, docs/15) inside `dataDir`. */
+    function startFreshMarkerPath(dataDir: string): string {
+      return join(dataDir, ".loam-db-start-fresh");
+    }
+
+    /** Every `loam.db*` file in `dataDir`, for asserting nothing (or something specific) was touched. */
+    function dbFileNames(dataDir: string): string[] {
+      return readdirSync(dataDir).filter((name) => name.startsWith("loam.db"));
+    }
+
+    it("P1-2/design#1: a genuinely unopenable DB with NO start-fresh marker present THROWS non-destructively — the original files are untouched, not silently opened as plaintext or auto-replaced", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the original key" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "LOCKED_BEHIND_KEY_A")).statusCode).toBe(201);
+      await original.close();
+
+      const filesBefore = dbFileNames(dataDir).sort();
+      const bytesBefore = readFileSync(join(dataDir, "loam.db"));
+
+      // Reopen with a DIFFERENT key — case 1 (keyed open under the new key) fails, and case 2 (plaintext
+      // open) also fails because the file is genuinely SQLCipher ciphertext, not a valid plain SQLite
+      // header. Design#1: with no marker present, this must THROW rather than auto-replace the DB.
+      await expect(
+        buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" }),
+      ).rejects.toThrow(/could not be opened/);
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+      expect(reports[0]?.message).not.toContain("the original key");
+      expect(reports[0]?.message).not.toContain("a completely different key");
+
+      // Nothing on disk was touched — no rename, no new/renamed files, identical bytes.
+      expect(dbFileNames(dataDir).sort()).toEqual(filesBefore);
+      expect(readFileSync(join(dataDir, "loam.db")).equals(bytesBefore)).toBe(true);
+    });
+
+    it("P1-2: a ciphertext DB with NO key configured at all ALSO gets non-destructive recovery treatment, instead of buildApp's raw 'not a database' throw", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "some key" });
+      await session(original);
+      await original.close();
+
+      const filesBefore = dbFileNames(dataDir).sort();
+
+      // No dbEncryptionKey/ephemeralDbKey at all this time — encryptionEnabled starts false, but the
+      // file on disk is genuine SQLCipher ciphertext. Before the fix this bypassed recovery entirely
+      // (encryptionEnabled gated it) and buildApp rejected with a raw "file is not a database" error;
+      // now it must reach the same marker-gated non-destructive path as the keyed case.
+      await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/could not be opened/);
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+      expect(dbFileNames(dataDir).sort()).toEqual(filesBefore); // untouched
+    });
+
+    it("design#1: an explicit .loam-db-start-fresh marker consumes itself and triggers a unique-suffix recovery, reporting db_encryption_recovered_fresh", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the original key" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "LOCKED_BEHIND_KEY_A")).statusCode).toBe(201);
+      await original.close();
+
+      // The RN host's explicit start-fresh confirmation UI writes this marker before restarting.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+
+      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" });
+      cleanups.push(() => recovered.close());
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_recovered_fresh" })]);
+      expect(reports[0]?.message).not.toContain("the original key");
+      expect(reports[0]?.message).not.toContain("a completely different key");
+
+      // The marker is consumed (deleted), never re-triggering recovery on a later boot.
+      expect(existsSync(startFreshMarkerPath(dataDir))).toBe(false);
+
+      // The old ciphertext is preserved on disk in a UNIQUE recovery-snapshot directory (Sol round-11), not
+      // deleted and not overwriting any earlier snapshot; the old DB set lives INSIDE it (out of the active
+      // namespace + the orphan reaper's path).
+      const snapshots = recoverySnapshots(dataDir);
+      expect(snapshots.length).toBe(1);
+      expect(existsSync(join(dataDir, snapshots[0], "loam.db"))).toBe(true);
+
+      // The fresh DB has no memory of the old data, but is fully usable (and still encrypted — the
+      // effective posture wasn't downgraded, unlike the plaintext-fallback case above).
+      expect(recovered.store.loadMessages()).toEqual([]);
+      const recoveredAdmin = await session(recovered);
+      expect((await post(recovered, recoveredAdmin.cookie, "fresh after recovery")).statusCode).toBe(201);
+    });
+
+    it("RF4: a rename/open failure during marker-confirmed recovery is recast as a recoverable db_encryption_unreadable, not a generic throw that would kill the process", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "seed")).statusCode).toBe(201);
+      await original.close();
+
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+
+      // Force the marker-confirmed recovery's rename-aside step to throw AFTER the marker has already
+      // been consumed by step 0 — the exact scenario RF4 fixes (a failure here used to propagate as a
+      // generic, untyped error rather than the recoverable `db_encryption_unreadable` case). Single-shot:
+      // it fires on the very next `renameSync` call (the recovery block's — nothing else in this boot
+      // path calls it first) and immediately self-disarms.
+      renameFailure.armed = true;
+
+      await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" })).rejects.toThrow(
+        /Start-fresh recovery failed/,
+      );
+
+      // Recast as the SAME typed, recoverable error case 3 (no marker / genuinely unopenable) throws —
+      // NOT a generic error, which `embedded-main.ts` would treat as unrecoverable and `process.exit(1)`
+      // on instead of staying alive for a retry.
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+
+      // The marker was already consumed before the injected failure (step 0 runs first) — it must not
+      // linger to silently re-authorize some LATER, unrelated failure the operator never confirmed.
+      expect(existsSync(startFreshMarkerPath(dataDir))).toBe(false);
+
+      // A fresh confirmation lets the operator retry immediately and actually succeed this time — the
+      // fault injection was single-shot, so this second attempt hits the real (un-mocked) renameSync.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" });
+      cleanups.push(() => recovered.close());
+      expect(recovered.store.loadMessages()).toEqual([]);
+      const recoveredAdmin = await session(recovered);
+      expect((await post(recovered, recoveredAdmin.cookie, "after RF4 retry")).statusCode).toBe(201);
+    });
+
+    it("P1-3: two successive marker-confirmed recoveries each keep their OWN preserved copy — the second never overwrites the first", async () => {
+      installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "seed")).statusCode).toBe(201);
+      await original.close();
+
+      // First recovery: wrong key + marker present.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+      const first = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" });
+      const admin1 = await session(first);
+      expect((await post(first, admin1.cookie, "after first recovery")).statusCode).toBe(201);
+      await first.close();
+
+      const preservedAfterFirst = recoverySnapshots(dataDir);
+      expect(preservedAfterFirst.length).toBe(1);
+
+      // Second recovery: open under yet ANOTHER wrong key, with a fresh marker again.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+      const second = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key C" });
+      cleanups.push(() => second.close());
+
+      const preservedAfterSecond = recoverySnapshots(dataDir);
+      // Both the first recovery's snapshot dir AND the second's are present — nothing was overwritten.
+      expect(preservedAfterSecond.length).toBe(2);
+      for (const name of preservedAfterFirst) {
+        expect(preservedAfterSecond).toContain(name);
+      }
+    });
+
+    it("P2-3: a start-fresh marker present when the NORMAL open already succeeds is still consumed — it can never linger to authorize a LATER, unrelated failure", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "the correct key" });
+      const originalAdmin = await session(original);
+      expect((await post(original, originalAdmin.cookie, "seed")).statusCode).toBe(201);
+      await original.close();
+
+      // The operator wrote the marker (e.g. anticipating a key problem) but then the RIGHT key ended up
+      // being used after all — case 1 (keyed open) succeeds immediately, never reaching the recovery
+      // branch at all.
+      writeFileSync(startFreshMarkerPath(dataDir), "");
+
+      const reopened = await buildApp({ dataDir, logger: false, dbEncryptionKey: "the correct key" });
+      cleanups.push(() => reopened.close());
+
+      // No boot-bridge report at all — this was a perfectly normal open, not a degrade or a recovery.
+      expect(reports).toEqual([]);
+
+      // Old data is untouched (normal open, not a destructive replace).
+      expect(reopened.store.loadMessages().some((m) => "body" in m && m.body === "seed")).toBe(true);
+
+      // The marker is GONE — consumed up front (P2-3), not left behind to silently authorize some LATER,
+      // unrelated unopenable-DB failure the operator never actually confirmed for.
+      expect(existsSync(startFreshMarkerPath(dataDir))).toBe(false);
+    });
+
+    it("P2-3: if the marker can't actually be deleted, boot fails CLOSED — it is NOT treated as a valid confirmation", async () => {
+      const reports = installFakeBootBridge();
+
+      const { app: original, dataDir } = await makeEncryptedApp({ dbEncryptionKey: "key A" });
+      await session(original);
+      await original.close();
+
+      const filesBefore = dbFileNames(dataDir).sort();
+
+      // Force the marker deletion itself to fail: create it as a NON-EMPTY directory instead of a file.
+      // `rmSync(path, { force: true })` (no `recursive`) throws ENOTEMPTY/EISDIR for this, exactly the
+      // "delete failed" case P2-3 must fail closed on — `force` only swallows ENOENT (already-absent),
+      // never a genuine deletion failure.
+      const markerPath = startFreshMarkerPath(dataDir);
+      mkdirSync(markerPath);
+      writeFileSync(join(markerPath, "not-empty"), "");
+
+      // Wrong key too — case 1 and case 2 both fail, so this reaches the marker-gated recovery check.
+      await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" })).rejects.toThrow(
+        /could not be opened/,
+      );
+
+      expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
+
+      // Fail closed: no destructive replace happened — the original files are untouched...
+      expect(dbFileNames(dataDir).sort()).toEqual(filesBefore);
+      // ...and the marker (still an undeleted directory) is exactly where it was — NOT silently
+      // "consumed" despite authorizing nothing.
+      expect(existsSync(markerPath)).toBe(true);
+    });
+  });
+
+  describe("P1-1/P1-2 (Sol round 8): durable wipe-phase state machine + fail-closed deletion", () => {
+    function fireKillSwitch(app: LoamApp, cookie: string): Promise<InjectResponse> {
+      return app.server.inject({
+        method: "POST",
+        url: "/api/admin/kill-switch",
+        headers: { cookie },
+        payload: { confirm: "wipe" },
+      });
+    }
+
+    it("P1-1: a two-boot fixed-key lifecycle — boot 1 leaves phase `delete-pending` when a legacy-key `.premigration` deletion fails PERSISTENTLY (incomplete 503, NO key-clear signal, survivor recoverable); a fresh boot with deletion now succeeding RE-RUNS deletion, advances to `key-clear-ready`, and ONLY THEN signals the key-clear", async () => {
+      const reports = installFakeBootBridge();
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // Seed a VALID legacy-key `.premigration` snapshot — still-readable ciphertext under the
+      // NON-discardable SHA256(passphrase) key (THE crypto-wipe hole a surviving `.premigration` leaves;
+      // clearing the device secret does NOT decrypt it).
+      const legacyKey = "an old legacy premigration key";
+      const seedDir = mkdtempSync(join(tmpdir(), "loam-two-boot-legacy-"));
+      cleanups.push(() => rmSync(seedDir, { recursive: true, force: true }));
+      const seedDb = join(seedDir, "legacy.db");
+      const legacy = openStore(seedDb, { encryptionKey: legacyKey });
+      legacy.setConfigValue("legacy-sentinel", "TWO_BOOT_PREMIG_SECRET");
+      legacy.checkpoint();
+      legacy.close();
+      copyFileSync(seedDb, join(dataDir, "loam.db.premigration"));
+
+      // --- Boot 1: PERSISTENT deletion failure on the survivor; fire the wipe.
+      premigrationDeleteFailure.armed = true;
+      const wipe1 = await fireKillSwitch(app, admin.cookie);
+      // Incomplete → the endpoint 503s (never a false `{ ok: true }`), NO key-clear signal, phase stays
+      // `delete-pending` (durable), and the survivor is still on disk AND still recoverable under the legacy key.
+      expect(wipe1.statusCode).toBe(503);
+      expect(hook.calls).toBe(0);
+      expect(readJournalPhase(dataDir)).toBe("delete-pending");
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+      const stillReadable = openStore(join(dataDir, "loam.db.premigration"), { encryptionKey: legacyKey });
+      expect(stillReadable.getConfigValue("legacy-sentinel")).toBe("TWO_BOOT_PREMIG_SECRET");
+      stillReadable.close();
+      // The node is 503-locked (nothing reopened while recoverable ciphertext survives).
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
+
+      // --- Boot 2: a fresh boot on the same dataDir with the OLD key, deletion now succeeding. The
+      // boot-time resume (drive it directly via buildApp — a full two-process launcher test isn't feasible
+      // in-suite) re-runs deletion under the old key, advances the phase, hands off, and refuses to serve.
+      premigrationDeleteFailure.armed = false;
+      reports.length = 0;
+      await expect(
+        buildApp({
+          dataDir,
+          logger: false,
+          dbEncryptionKey: "a fixed persistent key",
+          dbEncryptionMode: "persistent",
+        }),
+      ).rejects.toThrow(/Resuming an interrupted emergency wipe/);
+
+      // The retry RE-RAN deletion (the survivor is finally gone), advanced to `key-clear-ready` DURABLY,
+      // and ONLY THEN signaled the launcher to clear the device key — never before deletion was proven.
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(false);
+      expect(readJournalPhase(dataDir)).toBe("key-clear-ready");
+      expect(hook.calls).toBe(1);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_resumed")).toBe(true);
+    });
+
+    it("P1-2: an unreadable data dir (readdir fault) BLOCKS a fixed-key wipe — 'can't enumerate' is not 'nothing to enumerate', so it fails closed (incomplete 503, phase `delete-pending`, launcher NOT signaled)", async () => {
+      const reports = installFakeBootBridge();
+      const hook = installFakeWipeRestartHook();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // The data dir can't be enumerated — a `*.unreadable-*` survivor could exist unseen, so the wipe
+      // must NOT declare itself clean.
+      readdirFailure.dir = dataDir;
+      const wipe = await fireKillSwitch(app, admin.cookie);
+      expect(wipe.statusCode).toBe(503);
+      expect(hook.calls).toBe(0);
+      expect(readJournalPhase(dataDir)).toBe("delete-pending");
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+      readdirFailure.dir = undefined;
+      // Still locked down.
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
+    });
+
+    it("P1-2: an UNVERIFIABLE deletion (lstat throws a non-ENOENT error) fails closed on the EPHEMERAL path — the key is NOT rotated / the DB NOT reopened while absence can't be proven (503-locked)", async () => {
+      const reports = installFakeBootBridge();
+      const { app, dataDir } = await makeEncryptedApp(
+        { ephemeralDbKey: true, dbEncryptionMode: "ephemeral" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // After the live DB is unlinked, its proven-absence check throws EIO (NOT ENOENT) — "could-not-
+      // determine", which must NOT be treated as confirmed absence.
+      lstatFailure.path = join(dataDir, "loam.db");
+      const wipe = await fireKillSwitch(app, admin.cookie);
+      expect(wipe.statusCode).toBe(503);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+      lstatFailure.path = undefined;
+      // Fail closed: the node is locked down (503), NOT reopened under a rotated key as if the wipe succeeded.
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
+    });
+
+    it("P1-2: a persistent deletion failure fails closed on the fixed-key/NO-hook same-key fallback path — it does NOT recreate a usable node while recoverable ciphertext survives (503-locked)", async () => {
+      // Deliberately NOT installing __loamRequestWipeRestart — the desktop/CI same-key fallback path.
+      const reports = installFakeBootBridge();
+      const { app, dataDir } = await makeEncryptedApp(
+        { dbEncryptionKey: "a fixed passphrase key", dbEncryptionMode: "passphrase" },
+        { killSwitch: { enabled: true } },
+      );
+      const admin = await session(app);
+      expect((await post(app, admin.cookie, "doomed")).statusCode).toBe(201);
+
+      // Plant a legacy-key `.premigration` whose deletion fails persistently — a survivor the same-key
+      // fallback must fail closed on rather than recreating a clean-looking node over it.
+      writeFileSync(join(dataDir, "loam.db.premigration"), Buffer.from("legacy-key ciphertext survivor"));
+      premigrationDeleteFailure.armed = true;
+
+      const wipe = await fireKillSwitch(app, admin.cookie);
+      expect(wipe.statusCode).toBe(503);
+      expect(existsSync(join(dataDir, "loam.db.premigration"))).toBe(true);
+      expect(reports.some((r) => r.code === "kill_switch_wipe_incomplete")).toBe(true);
+      // Fail closed: locked down (503), NOT recreated as a usable node under the same key.
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+      ).toBe(503);
+    });
   });
 });
 
@@ -3445,6 +5860,258 @@ describe("attachment + sync review hardening", () => {
     expect(existsSync(strayPath)).toBe(false);
   });
 
+  it("retries a transiently-failed sync attachment copy independently, without re-importing the message (docs/15 A6)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const attachment = await uploadAttachment(source, sourceAdmin.cookie);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+
+    const sourceFilePath = join(source.dataDir, "attachments", `${attachment.id}.png`);
+    expect(existsSync(sourceFilePath)).toBe(true);
+
+    // Simulate a transient failure: the peer's copy of the file is briefly unavailable (a hiccup, a
+    // mid-write) at the moment the puller's sync round asks for it — the message itself still
+    // imports (best-effort), but the attachment fetch throws.
+    const bytes = readFileSync(sourceFilePath);
+    rmSync(sourceFilePath);
+
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+
+    const firstRun = (
+      await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } })
+    ).json() as { peers: { status?: { imported: number } }[] };
+    const importedAfterFirstRun = firstRun.peers[0]?.status?.imported ?? -1;
+    expect(importedAfterFirstRun).toBeGreaterThan(0); // the message (text) imported fine
+
+    const pullerFilePath = join(puller.dataDir, "attachments", `${attachment.id}.png`);
+    expect(existsSync(pullerFilePath)).toBe(false); // ...but the image is still missing
+
+    // A second sync round is idempotent (the message id is already known — `imported` is a
+    // cumulative counter, so it stays unchanged) and — this is the bug A6 fixes — on its own never
+    // re-offers or re-fetches the attachment.
+    const again = (
+      await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } })
+    ).json() as { peers: { status?: { imported: number } }[] };
+    expect(again.peers[0]?.status?.imported).toBe(importedAfterFirstRun);
+    expect(existsSync(pullerFilePath)).toBe(false);
+
+    // The peer's file comes back (the transient failure resolves) — the independent retry pass
+    // (NOT a re-import: no /api/admin/sync/run here) picks it up from the recorded work item.
+    writeFileSync(sourceFilePath, bytes);
+    await puller.retryMissingAttachments();
+
+    expect(existsSync(pullerFilePath)).toBe(true);
+    expect(readFileSync(pullerFilePath)).toEqual(bytes);
+
+    // The work item is cleared on success — a further retry pass is a no-op, not a repeated fetch.
+    await puller.retryMissingAttachments();
+    expect(existsSync(pullerFilePath)).toBe(true);
+  });
+
+  it("F1: backs off between attempts, so a work item survives far more than the old fixed attempt cap without hitting its age bound", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const attachment = await uploadAttachment(source, sourceAdmin.cookie);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+
+    // The peer's copy stays missing for the whole test — every retry attempt fails.
+    rmSync(join(source.dataDir, "attachments", `${attachment.id}.png`));
+
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    expect(puller.store.loadMissingAttachments()).toHaveLength(1);
+
+    // Simulate 25 reaper ticks back-to-back — more than the old fixed cap of 20 attempts, which used
+    // to exhaust (and drop) the work item well before its days-scale age bound. With backoff, almost
+    // all of these are throttled (skipped) instead of actually contacting the still-unreachable peer.
+    for (let i = 0; i < 25; i += 1) {
+      await puller.retryMissingAttachments();
+    }
+
+    const records = puller.store.loadMissingAttachments();
+    expect(records).toHaveLength(1); // NOT given up — only the age bound (days) governs give-up now
+    expect(records[0]?.attempts).toBeLessThan(5); // backoff meant most of the 25 ticks were skipped
+  });
+
+  it("F2: no-ops entirely when sync is disabled, without touching queued work items", async () => {
+    const app = await makeApp({ sync: { enabled: false, peers: [{ url: "http://peer.example" }] } });
+    app.store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://peer.example",
+    });
+
+    await app.retryMissingAttachments();
+
+    const [record] = app.store.loadMissingAttachments();
+    expect(record).toMatchObject({ messageId: "msg_1", attachmentId: "att_1", attempts: 0 });
+  });
+
+  it("F2: drops a queued retry immediately once its peer is removed from sync.peers, via the admin config PATCH", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://peer.example" }] } });
+    const admin = await newSession(app);
+    app.store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://peer.example",
+    });
+    expect(app.store.loadMissingAttachments()).toHaveLength(1);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { sync: { peers: [] } },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    // Dropped immediately by the PATCH handler — no reaper tick needed.
+    expect(app.store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("F2: retryMissingAttachments also defensively drops a record for a peer that isn't in the current sync.peers (belt-and-suspenders)", async () => {
+    // A peer no longer in sync.peers — e.g. the config.json was edited between boots rather than via
+    // the admin PATCH, so the PATCH-handler cleanup above never ran.
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://still-active.example" }] } });
+    app.store.addMissingAttachment({
+      messageId: "msg_1",
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: "http://long-gone.example",
+    });
+
+    await app.retryMissingAttachments();
+
+    expect(app.store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("SF3: a tick overlapping an in-flight (slow) pass no-ops instead of running a second concurrent pass", async () => {
+    // A local, definitely-unlistened port — the eventual peer fetch fails fast (ECONNREFUSED, no real
+    // network/DNS involved), so the test stays quick while still giving the first pass a genuine async
+    // suspension point (see below) to be "in flight" at.
+    const unreachablePeerUrl = "http://127.0.0.1:39217";
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: unreachablePeerUrl }] } });
+    const admin = await newSession(app);
+
+    // A record referencing a REAL local message (so it survives the F2b/message-exists checks and
+    // reaches its first genuine `await` — `await stat(filePath)` on the still-missing file — instead of
+    // being dropped synchronously). That's what makes the first call still "in flight" (suspended, not
+    // yet past its `try`/`finally`) at the instant the second, overlapping call is fired.
+    const posted = (await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "carries a missing attachment" },
+    })).json() as { message: { id: string } };
+
+    app.store.addMissingAttachment({
+      messageId: posted.message.id,
+      attachmentId: "att_1",
+      mimeType: "image/png",
+      peerUrl: unreachablePeerUrl,
+    });
+
+    // A pass calls `store.loadDueMissingAttachments()` exactly once, synchronously, right at its start
+    // (P2-2) — so counting calls to it distinguishes "a second pass actually ran" from "the mutex
+    // no-op'd it".
+    let calls = 0;
+    const original = app.store.loadDueMissingAttachments.bind(app.store);
+    app.store.loadDueMissingAttachments = (...args: Parameters<typeof original>): ReturnType<typeof original> => {
+      calls += 1;
+      return original(...args);
+    };
+
+    const first = app.retryMissingAttachments(); // synchronously runs up to `await stat(filePath)`, then suspends
+    const second = app.retryMissingAttachments(); // fired while `first` is still in flight
+    await Promise.all([first, second]);
+
+    expect(calls).toBe(1);
+    // The mutex was released once the (slow) first pass finished — a later, non-overlapping call runs
+    // normally again.
+    await app.retryMissingAttachments();
+    expect(calls).toBe(2);
+  });
+
+  it("SF3: bounds work per pass at missingAttachmentMaxRecordsPerPass (25), leaving the rest for the next tick", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://still-active.example" }] } });
+
+    // All 30 point at a peer NOT in sync.peers, so every record the pass actually looks at is dropped
+    // immediately (F2b) — a fast, deterministic way to observe exactly how many records one pass
+    // touched, without any network mocking.
+    for (let i = 0; i < 30; i += 1) {
+      app.store.addMissingAttachment({
+        messageId: `msg_${i}`,
+        attachmentId: `att_${i}`,
+        mimeType: "image/png",
+        peerUrl: "http://long-gone.example",
+      });
+    }
+    expect(app.store.loadMissingAttachments()).toHaveLength(30);
+
+    await app.retryMissingAttachments();
+
+    // Only the first 25 (the per-pass cap) were looked at and dropped; the remaining 5 are untouched.
+    expect(app.store.loadMissingAttachments()).toHaveLength(5);
+
+    // A second pass picks up where the first left off.
+    await app.retryMissingAttachments();
+    expect(app.store.loadMissingAttachments()).toEqual([]);
+  });
+
+  it("P2-2: the due set is looked at even when the first 25 (by creation order) are all still in backoff — no starvation", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://still-active.example" }] } });
+
+    // First 25 (in creation/rowid order) are all bumped into the future — deliberately still in backoff.
+    for (let i = 0; i < 25; i += 1) {
+      app.store.addMissingAttachment({
+        messageId: `future_${i}`,
+        attachmentId: "att",
+        mimeType: "image/png",
+        peerUrl: "http://long-gone.example", // dropped on sight (F2b) once actually looked at
+      });
+      app.store.bumpMissingAttachmentAttempts(`future_${i}`, "att", Date.now() + 3_600_000);
+    }
+
+    // Last 5 (created after) are due right now (default nextAttemptAt = 0).
+    for (let i = 0; i < 5; i += 1) {
+      app.store.addMissingAttachment({
+        messageId: `due_${i}`,
+        attachmentId: "att",
+        mimeType: "image/png",
+        peerUrl: "http://long-gone.example",
+      });
+    }
+
+    expect(app.store.loadMissingAttachments()).toHaveLength(30);
+
+    await app.retryMissingAttachments();
+
+    // The old rowid-order slice-then-check-backoff logic looked at the first 25 (all still in backoff,
+    // all skipped) and NEVER reached the 5 due records added after them — permanent starvation. The
+    // fixed pass selects by due-ness (loadDueMissingAttachments), not creation order, so the 5 due ones
+    // ARE processed (F2b drops them immediately — the peer is gone) while the 25 not-yet-due ones are
+    // left untouched for a later tick.
+    const remaining = app.store.loadMissingAttachments();
+    expect(remaining).toHaveLength(25);
+    expect(remaining.every((record) => record.messageId.startsWith("future_"))).toBe(true);
+  });
+
   it("blocks a banned user from editing or deleting their old messages", async () => {
     const app = await makeApp();
     const admin = await newSession(app);
@@ -4843,6 +7510,37 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       ).toBe(1);
       const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
       expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("meet at the docks");
+    });
+
+    it("stays reachable over loopback when transport encryption is REQUIRED (courier must not wedge)", async () => {
+      // The in-process courier polls these endpoints over plain 127.0.0.1 with no transport session. In
+      // `required` mode the general content gate would 401 an unsealed direct hit; the mesh bridge is
+      // exempted (loopback-only, blobs already sealed at the mesh crypto layer) so turning transport
+      // encryption up can't silently stop the radio from moving mail (Fable review).
+      const app = await makeApp({ mesh: MESH, security: { profile: "custom", transportEncryption: "required" } });
+      const out = await app.server.inject({ method: "GET", url: "/api/mesh/outbound" });
+      expect(out.statusCode).toBe(200);
+      const inbound = await app.server.inject({
+        method: "POST",
+        url: "/api/mesh/inbound",
+        payload: { messages: [] },
+      });
+      // Empty batch is a 400 (schema min(1)), NOT a 401 — proving the request passed the transport gate
+      // and reached the handler rather than being refused for lacking a sealed session.
+      expect(inbound.statusCode).toBe(400);
+    });
+
+    it("still refuses a NON-loopback caller under required mode (exemption never widens LAN reach)", async () => {
+      const app = await makeApp({ mesh: MESH, security: { profile: "custom", transportEncryption: "required" } });
+      const out = await app.server.inject({
+        method: "GET",
+        url: "/api/mesh/outbound",
+        remoteAddress: "192.168.4.7",
+      });
+      // A LAN peer is REFUSED: the exemption is loopback-gated, so a non-loopback hit never qualifies and
+      // falls through to the required-mode transport gate (401 — "needs an encrypted session"). It never
+      // reaches the handler, so the exemption grants a LAN joiner nothing.
+      expect(out.statusCode).toBe(401);
     });
   });
 });

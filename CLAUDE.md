@@ -59,7 +59,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 |------|------|
 | `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. App factory: `src/app.ts` (`buildApp()`, all routes/logic — testable via `inject`); `src/server.ts` is the thin entry point (env, listen, SIGINT). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2k lines, all components). Libs in `src/lib/`. |
-| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored) and the host UI (`HostPanel`, `QRCode`). No test script, so `pnpm test` skips it; validate with `pnpm --filter app typecheck` (also a CI step). |
+| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored) and the host UI (`HostPanel`, `QRCode`). Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
 | `packages/avatar` | Deterministic SVG avatar from an id. Three modes: `face` (SVG template), `initial`, `pattern`. OKLCH colour derivation with WCAG contrast fixups. Has a standalone `demo/`. |
@@ -332,8 +332,11 @@ kill switch. See `docs/09-security-profiles.md`.
 - `security.profile` is wired (see the feature-flag note) but only bundles the axes LOAM enforces
   today; the axes that would distinguish `open` from `standard` (transport encryption, invite tokens
   — docs/08) are unbuilt, so those two profiles apply the same settings for now.
-- On-device SQLCipher (encrypted Android DB) is still deferred — needs a multiple-ciphers ABI-108
-  android-arm64 prebuild (docs/01, docs/04).
+- On-device SQLCipher (encrypted Android DB) now SHIPS: the multiple-ciphers ABI-108 android-arm64
+  prebuild is cross-compiled + vendored (`apps/app/native-prebuilds/multiple-ciphers/`, sha256-pinned
+  tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the
+  plain driver, so `security.dbEncryption` modes key the DB on-device. On-device runtime verification
+  (actual `PRAGMA key`/rekey/wipe on a physical arm64 phone) is the remaining device-test item (docs/01, docs/04).
 - LoRa / alternate transports: the node-to-node sync protocol (docs/11) is the transport-agnostic
   layer a LoRa link would carry; the LoRa framing/bandwidth work itself is unbuilt. **Sync peer
   authentication is now built**: an optional shared `sync.token` (stored in the clear — it's a bearer

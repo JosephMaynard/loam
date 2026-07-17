@@ -1,4 +1,4 @@
-// Progressive enhancement only — the page is fully readable without any of this.
+// Progressive enhancement only: the page is fully readable without any of this.
 
 // Current year in the footer.
 const yearEl = document.getElementById("year");
@@ -32,7 +32,7 @@ const revealables = document.querySelectorAll(".reveal");
 if (prefersReducedMotion || !("IntersectionObserver" in window)) {
   revealables.forEach((el) => el.classList.add("in"));
 } else {
-  // JS is handling reveals now — disarm the CSS fail-safe so items stay hidden until scrolled into view.
+  // JS is handling reveals now, so disarm the CSS fail-safe so items stay hidden until scrolled into view.
   document.documentElement.classList.add("reveal-js");
   const observer = new IntersectionObserver(
     (entries, obs) => {

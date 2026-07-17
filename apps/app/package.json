@@ -9,18 +9,23 @@
     "@loam/schema": "workspace:*",
     "expo": "~57.0.4",
     "expo-constants": "~57.0.3",
+    "expo-crypto": "~57.0.0",
     "expo-device": "~57.0.0",
+    "expo-file-system": "~57.0.0",
     "expo-font": "~57.0.0",
     "expo-glass-effect": "~57.0.0",
     "expo-image": "~57.0.0",
     "expo-keep-awake": "~57.0.0",
     "expo-linking": "~57.0.2",
     "expo-router": "~57.0.4",
+    "expo-secure-store": "~57.0.0",
     "expo-splash-screen": "~57.0.2",
     "expo-status-bar": "~57.0.0",
     "expo-symbols": "~57.0.0",
     "expo-system-ui": "~57.0.0",
     "expo-web-browser": "~57.0.0",
+    "js-sha256": "^0.11.1",
+    "llama.rn": "^0.12.6",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "react-native": "0.86.0",
@@ -35,7 +40,8 @@
   "devDependencies": {
     "@types/react": "~19.2.2",
     "esbuild": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "scripts": {
     "start": "expo start",
@@ -48,7 +54,8 @@
     "fetch:native": "node ./scripts/fetch-native-modules.mjs",
     "apk": "node ./scripts/build-apk.mjs",
     "keystore": "node ./scripts/generate-keystore.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "private": true
 }

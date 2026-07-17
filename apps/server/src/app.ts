@@ -1,7 +1,8 @@
+import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
@@ -58,6 +59,7 @@ import {
   type Channel,
   type ChannelCreateRequest,
   type ChannelUpdateRequest,
+  type DbEncryptionMode,
   type LoamConfig,
   type LoamConfigUpdate,
   type Message,
@@ -79,6 +81,7 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
 import { importLegacyJsonData, openStore, type LoamStore, type StoreDriver } from "./db.js";
+import { resolveLanIPv4 } from "./net.js";
 import {
   fetchPeerTransportPosture,
   handshakeWithPeer,
@@ -190,6 +193,50 @@ export type OnDeviceChatHook = (
   },
 ) => void;
 
+/**
+ * Best-effort report of a NON-FATAL boot notice to the RN host bridge (F4, docs/15). Reuses the same
+ * `globalThis.__loamReportBootError` hook `embedded-main.ts` uses for fatal startup failures — the
+ * launcher (`apps/app/nodejs-project-template/main.js`) installs it on `global` before requiring the
+ * server bundle, same pattern as {@link OnDeviceChatHook} above. Absent on every other host
+ * (desktop/Pi/CI, and most tests), so this is a silent no-op there. Used when the encrypted-DB open
+ * degrades instead of failing boot outright (`db_encryption_open_failed` / `db_encryption_unreadable`)
+ * so the RN host screen can still surface a "change encryption settings" action even though boot
+ * itself succeeded. Never pass the key or any derived secret in `message`.
+ */
+function reportBootNotice(message: string, code: string): void {
+  try {
+    const reporter = (globalThis as { __loamReportBootError?: (message: string, code: string) => void })
+      .__loamReportBootError;
+    reporter?.(message, code);
+  } catch (reportError) {
+    console.error("Failed to report boot notice to the RN host:", reportError);
+  }
+}
+
+/**
+ * Best-effort signal to the RN host bridge that a passphrase-mode DB was just migrated to the current
+ * key derivation (P1-1, Sol round 5 — see `AppOptions.dbEncryptionMigrateFromKey` and `openInitialStore`
+ * below). `globalThis.__loamReportDbKeyMigrated` is installed by `nodejs-project-template/main.js`
+ * before requiring the server bundle, same pattern as {@link reportBootNotice}; on the Android host it
+ * forwards to `db-encryption.ts`'s `markPassphraseKeyMigrated()` so future boots stop offering the
+ * legacy key. Absent (a silent no-op) on every other host and in tests that don't install it. Never
+ * passes any key material — this is a bare signal, not a payload.
+ *
+ * `requestId` is the launcher's IMMUTABLE per-boot key-handoff id (Sol Fable-round-2 P1-B), threaded from
+ * `AppOptions.dbKeyRequestId` (which `embedded.ts` reads from `LOAM_DB_KEY_REQUEST_ID` once at boot). The RN
+ * side promotes only the candidate bound to THIS id, so a duplicate/later unlock can't mis-tag the report.
+ * It is NOT key material — just the correlation id already visible in the clear on the bridge.
+ */
+function reportDbKeyMigrated(requestId?: string): void {
+  try {
+    const reporter = (globalThis as { __loamReportDbKeyMigrated?: (requestId?: string) => void })
+      .__loamReportDbKeyMigrated;
+    reporter?.(requestId);
+  } catch (reportError) {
+    console.error("Failed to report DB key migration to the RN host:", reportError);
+  }
+}
+
 export type AppOptions = {
   /** Directory holding the SQLite DB, avatars, and (by default) config.json. */
   dataDir: string;
@@ -197,12 +244,36 @@ export type AppOptions = {
   configPath?: string;
   /** Built client directory to serve statically; skipped when absent. */
   clientDistDir?: string;
-  /** Host used in the join URL returned by /api/config. */
+  /**
+   * Host used in the join URL returned by /api/bootstrap and /api/config. When set, it's used
+   * verbatim on every response (the desktop/Pi CLI resolves its LAN address once at boot and passes
+   * it here — fine, since that address is up before the process starts). When left unset, the join
+   * host is instead re-resolved via `resolveLanAddress` on every request (docs/15 A7) — the embedded
+   * Android host needs this because its Wi-Fi hotspot interface comes up *after* boot, so a
+   * boot-frozen address served a stale (or missing) host to a QR generated once the hotspot is live.
+   */
   joinHost?: string;
+  /**
+   * Resolves the current best LAN address for the join URL when `joinHost` isn't set. Defaults to a
+   * live network-interface scan (`resolveLanIPv4`); overridable so tests can simulate the address
+   * changing between requests without touching real interfaces.
+   */
+  resolveLanAddress?: () => string;
   /** Port used in the join URL returned by /api/config. */
   clientPort?: number;
   /** When set, encrypt the database at rest (SQLCipher). Requires a real data dir, not in-memory. */
   dbEncryptionKey?: string;
+  /**
+   * A PRIOR key derivation to fall back to if `dbEncryptionKey` can't open the database on boot (P1-1,
+   * Sol round 5): the Android launcher's passphrase-mode key derivation changed from `SHA256(passphrase)`
+   * (pre-round-4) to `SHA256(passphrase + ':' + deviceSecret)` (round 4+), so an existing passphrase DB
+   * only opens under the OLD derivation. `embedded.ts` threads its `LOAM_DB_KEY_MIGRATE_FROM` env
+   * through here. `openInitialStore` tries `dbEncryptionKey` first; only on failure, and only when this
+   * is set, does it retry with this key — and on THAT success, `PRAGMA rekey`s the database to
+   * `dbEncryptionKey` in place (see `LoamStore.rekey`) so every later boot uses the current key
+   * directly, and reports the migration back to the launcher. Never logged.
+   */
+  dbEncryptionMigrateFromKey?: string;
   /**
    * Encrypt at rest with a **random, RAM-only key** generated at startup and never written to disk
    * (takes precedence over `dbEncryptionKey`). Data is readable only while this process runs — a
@@ -210,6 +281,24 @@ export type AppOptions = {
    * flash-recoverable ciphertext becomes unreadable. See `docs/02-kill-switch.md`.
    */
   ephemeralDbKey?: boolean;
+  /**
+   * The caller's declared at-rest key strategy (P1-1/P2-1, docs/15) — the Android launcher threads its
+   * `LOAM_DB_ENCRYPTION_MODE` env through here (`embedded.ts`). This is the AUTHORITATIVE mode for
+   * `networkConfig.dbEncryption` reporting when present: unlike `appConfig.security.dbEncryption` (a
+   * declarative admin-config axis that a headless launcher never PATCHes to match reality), this is
+   * what the caller actually did with the key. When absent (desktop/Pi CLI, most tests), reporting
+   * falls back to the declarative config axis as before. Never changes what encryption is actually
+   * used — only `dbEncryptionKey`/`ephemeralDbKey` do that.
+   */
+  dbEncryptionMode?: DbEncryptionMode;
+  /**
+   * The launcher's IMMUTABLE per-boot key-handoff request id (Sol Fable-round-2 P1-B) — `embedded.ts`
+   * reads it from `LOAM_DB_KEY_REQUEST_ID` once at boot. Captured here at buildApp time and forwarded in
+   * the passphrase-migration ack ({@link reportDbKeyMigrated}) so the RN side promotes only the candidate
+   * bound to the attempt that actually opened THIS DB, never a mutable global a later attempt overwrote.
+   * Absent on non-launcher hosts (desktop/Pi CLI, tests) — the ack is then an un-correlated no-op RN-side.
+   */
+  dbKeyRequestId?: string;
   /**
    * Plaintext SQLite backend to use when no encryption key is set. Defaults to `node:sqlite`; the
    * Android host passes `"better-sqlite3"` because its embedded Node 18 lacks `node:sqlite`
@@ -257,6 +346,57 @@ class IdentityLimitError extends Error {
   }
 }
 
+/**
+ * Thrown by `openInitialStore` (P1-1, docs/15) when a database is genuinely unopenable (wrong/lost
+ * key, or an unreadable file) and no start-fresh confirmation was present for THIS boot attempt. The
+ * typed `.code` lets `embedded-main.ts` tell this specific, recoverable-without-a-process-restart
+ * failure apart from every other boot error — see its `hasStayAliveBootErrorCode` — without
+ * string-matching the human-readable message.
+ */
+class DbEncryptionUnreadableError extends Error {
+  readonly code = "db_encryption_unreadable" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEncryptionUnreadableError";
+  }
+}
+
+/**
+ * Thrown by `openInitialStore` (P1-4-server, Sol round 8) when an EXISTING PLAINTEXT database is found
+ * while an encrypted mode is configured (a `dbKey` is set): the keyed open failed but a plaintext open
+ * succeeds. Serving that plaintext file while the persisted mode/hint say encrypted is a silent
+ * confidentiality downgrade, so instead of falling through to a plaintext boot the store open LOCKS with
+ * this distinct code. `embedded-main.ts` keeps the runtime alive for it (same as the unreadable path) so
+ * the RN launcher bridge can offer the destructive "delete data and start encrypted" flow — consuming the
+ * start-fresh marker DELETES the plaintext DB so the next boot creates a fresh encrypted database. The
+ * plaintext-fallback-to-serving is only allowed when NO encrypted mode is configured (no `dbKey`).
+ */
+class DbEncryptionPlaintextUnconvertedError extends Error {
+  readonly code = "db_encryption_plaintext_unconverted" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEncryptionPlaintextUnconvertedError";
+  }
+}
+
+/**
+ * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
+ * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
+ * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still
+ * unverifiable → stay `delete-pending`, do not signal), or deletion is now proven complete and the
+ * launcher has been signaled to clear the device key + restart (`key-clear-ready`). In both cases the
+ * process must NOT serve under the old key, so the resume throws this and `embedded-main.ts` keeps the
+ * runtime alive (like the unreadable path) rather than exiting — the imminent launcher restart, or a
+ * later reopen, drives it forward.
+ */
+class WipeResumeInProgressError extends Error {
+  readonly code = "db_encryption_wipe_resume" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "WipeResumeInProgressError";
+  }
+}
+
 export type LoamApp = {
   server: FastifyInstance;
   store: LoamStore;
@@ -271,6 +411,9 @@ export type LoamApp = {
   reapExpiredMessages(): void;
   /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
   reapOrphanedAttachments(): Promise<void>;
+  /** Retry attachments that failed to copy during a sync import now (also runs on the reaper timer;
+   * docs/15 A6) — re-fetches missing files from their source peer without re-importing the message. */
+  retryMissingAttachments(): Promise<void>;
   /** Drop expired per-IP rate-limit entries (identity budget + claim/panic attempt limiters) now
    * (also runs on the reaper timer) so the maps stay bounded to the IPs active within a window. */
   pruneExpiredRateLimiters(): void;
@@ -487,6 +630,10 @@ export function defaultLoamConfig(): LoamConfig {
       // Off by default so existing plain-HTTP deployments are unchanged; operators opt in via a profile
       // or this axis (docs/08).
       transportEncryption: "off",
+      // Off by default so existing unencrypted deployments are unchanged; the actual DB keying is
+      // driven by LOAM_DB_KEY / openStore, wired separately (Android host key handoff). This is the
+      // declared/displayed posture, and it is not forced by a security profile (see SecurityConfigSchema).
+      dbEncryption: "off",
     },
     access: {
       joinPolicy: "open",
@@ -783,6 +930,33 @@ function parseAttachmentFileName(value: string): { id: string; mimeType: AvatarI
 
 const attachmentMaxBytes = 256 * 1024;
 
+// Retry policy for a missing-attachment work item (docs/15 A6, F1). `retryMissingAttachments` runs on
+// the 30s reaper tick, but it must NOT actually contact the peer on every tick — that burned through
+// `attempts` in ~10 minutes with no backoff, making `missingAttachmentMaxAgeMs` (a days-scale bound)
+// dead: it could never be reached before attempts exhausted first. Instead, `attempts` only drives a
+// growing backoff (`missingAttachmentBackoffMs`) between actual fetch attempts, and the age bound
+// below is the sole thing that governs giving up — deliberately generous, so a peer flapping in and
+// out over several hours or even days still converges.
+const missingAttachmentMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
+const missingAttachmentRetryBaseMs = 60_000; // first backoff step: 1 minute
+const missingAttachmentRetryMaxIntervalMs = 6 * 3_600_000; // cap: retry at most every 6 hours
+// SF3, docs/15: without a per-pass cap, a node with many stuck records could have each one consume up
+// to the full 10s peer-fetch timeout in a single pass, so a handful of unreachable records already
+// outlasts the 30s reaper tick on its own. Capping how many work items one pass even LOOKS at bounds
+// that worst case regardless of how many records are queued; the rest are simply due again on the next
+// tick (each record's own backoff still governs whether that next look actually contacts a peer).
+const missingAttachmentMaxRecordsPerPass = 25;
+
+/**
+ * Exponential backoff (capped) between retry attempts for one missing-attachment work item, keyed on
+ * its current `attempts` count. `attempts` 0 → 1 minute, doubling each attempt, capped at 6 hours —
+ * so a persistently-unreachable peer settles into a sane cadence instead of being hammered every 30s,
+ * while a briefly-flapping one still converges within a few ticks.
+ */
+function missingAttachmentBackoffMs(attempts: number): number {
+  return Math.min(missingAttachmentRetryBaseMs * 2 ** attempts, missingAttachmentRetryMaxIntervalMs);
+}
+
 /**
  * Map an avatar image MIME type to its canonical file extension.
  *
@@ -875,8 +1049,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const avatarsDir = join(dataDir, "avatars");
   const attachmentsDir = join(dataDir, "attachments");
   const configPath = options.configPath ?? join(dataDir, "config.json");
-  const joinHost = options.joinHost ?? "localhost";
+  const resolveLanAddress = options.resolveLanAddress ?? resolveLanIPv4;
   const clientPort = options.clientPort ?? 3000;
+
+  /**
+   * The host advertised in the join URL: an explicit `joinHost` wins outright (a caller that
+   * resolved it at boot, or pinned a hostname); otherwise re-resolved on every call (docs/15 A7) so
+   * the web-served QR reflects whatever's reachable right now, not whatever was up at listen() time.
+   */
+  function currentJoinHost(): string {
+    return options.joinHost ?? resolveLanAddress();
+  }
 
   const server = Fastify({
     logger: options.logger ?? true,
@@ -1061,6 +1244,26 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // itself the moment it changes, so an in-flight pull can't re-persist peer data onto the freshly
   // wiped store (docs/15 #2). A monotonic counter, never reset — only equality across a round matters.
   let wipeGeneration = 0;
+  // True for the duration of executeKillSwitch (set before its first await, cleared in a `finally`).
+  // A generation bump alone only catches a pass that was ALREADY RUNNING when a wipe starts; a pass
+  // that starts partway through a wipe (e.g. between `store.close()` and the reopen) would capture the
+  // POST-bump generation and see no further change, so it needs its own explicit "don't start" guard
+  // (SF3) — `retryMissingAttachments` checks this before doing any work.
+  let wipeInProgress = false;
+  // Single-flight guard for `executeKillSwitch` (CodeRabbit round-10): the in-flight wipe promise, so
+  // concurrent callers reuse it instead of racing a second destructive wipe. Cleared in its `finally`.
+  let wipeInFlight: Promise<KillSwitchResult> | undefined;
+  // RF1: set for the remainder of this process's life once a persistent/passphrase-encrypted node's
+  // kill switch hands off to the RN launcher for a key-rotation restart (executeKillSwitchBody). The
+  // ciphertext is already deleted and in-memory state is cleared at that point, but this process keeps
+  // running until the launcher actually restarts it — so every route except the liveness probe must
+  // refuse (503) rather than let a stale in-memory read or a surviving transport session serve content
+  // in the gap between "wipe requested" and "process restarted".
+  let awaitingWipeRestart = false;
+  // SF3: single-flight guard for `retryMissingAttachments` — each work item's fetch can consume the
+  // full 10s peer timeout, so without this an overlapping 30s reaper tick (a handful of unreachable
+  // records outlasting the tick) would stack unbounded concurrent passes/requests.
+  let retryMissingAttachmentsRunning = false;
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
@@ -1080,11 +1283,1177 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   let dbKey: string | undefined = ephemeralDbKey
     ? randomBytes(32).toString("hex")
     : options.dbEncryptionKey;
-  const encryptionEnabled = dbKey !== undefined;
+  // Whether the store is ACTUALLY open with a key right now. Starts as "a key was resolved", but
+  // `openInitialStore` below can downgrade it to `false` (case 2) if that key turns out not to open
+  // what's on disk. `currentNetworkConfig()` reports THIS — not the merely-configured
+  // `appConfig.security.dbEncryption` — so the wire never claims encryption that isn't active (F5).
+  let encryptionEnabled = dbKey !== undefined;
 
   const openLoamStore = (): LoamStore =>
     openStore(dbPath, { encryptionKey: dbKey, driver: options.dbDriver });
-  let store = openLoamStore();
+
+  /**
+   * EVERY on-disk artifact of the SQLite/SQLCipher database (P1-2, Sol round 7) — the single source of
+   * truth for exhaustive kill-switch deletion. Deleting only the three live files (`loam.db`/`-wal`/
+   * `-shm`) is a crypto-wipe hole: it leaves the DELETE-mode rollback `-journal`, the rekey-migration
+   * `.premigration` snapshot (+ its `.tmp`/`-wal`/`-shm`/`-journal` and the legacy multi-file
+   * `-wal.premigration`/`-shm.premigration` sidecars), and the timestamped `*.unreadable-<ts>` recovery
+   * renames. CRITICALLY, `.premigration` is copied BEFORE the rekey (see `openInitialStore`), so it is
+   * encrypted under the LEGACY `SHA256(passphrase)` derivation (no discardable device secret) — clearing
+   * the device secret does NOT cryptographically erase it; anyone with the passphrase could still open it.
+   * Only physically deleting it satisfies the "wipe all persisted data" + cryptographic-wipe guarantees.
+   * Returns the STATIC absolute paths plus the globbed recovery renames enumerated from the data dir,
+   * AND whether that enumeration FAILED (P1-2, Sol round 8): an unreadable data dir (EACCES/EIO) is NOT
+   * proof no `*.unreadable-*` survivor exists, so a `readdirSync` failure surfaces as `enumerationError`
+   * rather than being swallowed into an empty enumeration — the secure-wipe callers treat that as an error
+   * that BLOCKS completion. Callers delete + PROVE-gone each path before declaring the wipe complete.
+   */
+  function dbArtifactInventory(): { paths: string[]; enumerationError?: string } {
+    const paths = [
+      dbPath,
+      `${dbPath}-wal`,
+      `${dbPath}-shm`,
+      `${dbPath}-journal`,
+      `${dbPath}.premigration`,
+      `${dbPath}.premigration.tmp`,
+      `${dbPath}.premigration-wal`,
+      `${dbPath}.premigration-shm`,
+      `${dbPath}.premigration-journal`,
+      `${dbPath}-wal.premigration`,
+      `${dbPath}-shm.premigration`,
+    ];
+    // The marker-gated fresh-start recovery renames unopenable files aside as `<name>.unreadable-<ts>`
+    // (openInitialStore case 3, timestamp+random suffix). Those are still-readable ciphertext under a
+    // possibly-legacy key, so a wipe must remove them too — enumerate them by prefix from the data dir.
+    const base = basename(dbPath);
+    try {
+      for (const entry of readdirSync(dataDir)) {
+        if (entry.startsWith(base) && entry.includes(".unreadable-")) {
+          paths.push(join(dataDir, entry));
+        }
+      }
+    } catch (error) {
+      // P1-2 (Sol round 8): "can't enumerate" is NOT "nothing to enumerate" — a `*.unreadable-*` survivor
+      // could be present and unseen. Surface it so `deleteAndVerifyDbArtifacts` fails closed instead of
+      // reporting a false-clean wipe.
+      return { paths, enumerationError: `readdir ${dataDir}: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    return { paths };
+  }
+
+  /** The static + globbed artifact path list (the plaintext/best-effort logical wipe wants the list alone;
+   *  the secure paths use {@link dbArtifactInventory} so an enumeration failure blocks completion). */
+  function dbArtifactPaths(): string[] {
+    return dbArtifactInventory().paths;
+  }
+
+  /**
+   * Prove a path's absence (P1-2, Sol round 8). `existsSync` returns `false` for MANY stat/access errors,
+   * conflating "confirmed absent" with "could-not-determine" — so a wipe that trusts it can report a
+   * survivor as gone. `lstatSync` distinguishes them: `ENOENT` is the ONLY confirmed absence; the file
+   * still being there is confirmed presence; ANY other error is `"unknown"` (unverifiable — must NOT be
+   * treated as absence). `lstat` (not `stat`) so a dangling symlink counts as present, never as absent.
+   */
+  function provenAbsence(file: string): "absent" | "present" | "unknown" {
+    try {
+      lstatSync(file);
+      return "present";
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unknown";
+    }
+  }
+
+  /** Structured result of a fail-closed deletion sweep (P1-2, Sol round 8): `ok` is true ONLY when every
+   *  path is PROVEN absent (no survivors AND no unverifiable/unknown paths AND no enumeration error). */
+  type DeletionResult = { ok: boolean; survivors: string[]; errors: string[] };
+
+  /**
+   * Delete every {@link dbArtifactInventory} entry and PROVE each is gone (P1-2, Sol round 8). Best-effort
+   * per file (a delete failure is caught, then the path is re-checked via {@link provenAbsence}). Unlike
+   * the old `existsSync`-based check, "confirmed absent" is ONLY `ENOENT`: a still-present file → `survivors`,
+   * and ANY other stat error (or a failed data-dir enumeration) → `errors` ("could-not-determine", NOT
+   * absence). `ok` is false on either, so every encrypted wipe branch can FAIL CLOSED on an unverifiable
+   * result rather than continue rotating/reopening while recoverable ciphertext might survive.
+   */
+  function deleteAndVerifyDbArtifacts(): DeletionResult {
+    const inventory = dbArtifactInventory();
+    const survivors: string[] = [];
+    const errors: string[] = [];
+    if (inventory.enumerationError) {
+      errors.push(inventory.enumerationError);
+    }
+    for (const file of inventory.paths) {
+      try {
+        rmSync(file, { force: true });
+      } catch {
+        // Fall through to the proven-absence check — an undeletable file is caught there, not here.
+      }
+      const status = provenAbsence(file);
+      if (status === "present") {
+        survivors.push(file);
+      } else if (status === "unknown") {
+        errors.push(file);
+      }
+    }
+    return { ok: survivors.length === 0 && errors.length === 0, survivors, errors };
+  }
+
+  /**
+   * The FULL secure-wipe deletion set (P1-2, Sol round 8): every DB artifact PLUS the plaintext user-media
+   * directories (avatars/attachments), each deleted and PROVEN gone. Used by every fixed-key launcher-handoff
+   * gate and by the boot-time wipe-phase resume, so the "verified gone" decision covers the whole inventory
+   * (not just the DB files) before the launcher is ever signaled / the phase advances.
+   */
+  function deleteAndVerifyAllWipeArtifacts(): DeletionResult {
+    const db = deleteAndVerifyDbArtifacts();
+    const survivors = [...db.survivors];
+    const errors = [...db.errors];
+    // The media dirs, PLUS any preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol
+    // round-11): those hold an old, still-readable (under the prior key) DB set + avatars + attachments moved
+    // aside by a `preserve` start-fresh, so an emergency wipe must remove them too. A `readdir` failure here
+    // is surfaced as an error (fail closed) — "can't enumerate" is not "nothing to remove".
+    const dirsToRemove = [avatarsDir, attachmentsDir];
+    try {
+      for (const entry of readdirSync(dataDir)) {
+        if (entry.startsWith(".loam-recovery-")) {
+          dirsToRemove.push(join(dataDir, entry));
+        }
+      }
+    } catch (error) {
+      errors.push(`readdir ${dataDir} (recovery snapshots): ${error instanceof Error ? error.message : String(error)}`);
+    }
+    for (const dir of dirsToRemove) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Fall through to the proven-absence check.
+      }
+      const status = provenAbsence(dir);
+      if (status === "present") {
+        survivors.push(dir);
+      } else if (status === "unknown") {
+        errors.push(dir);
+      }
+    }
+    return { ok: survivors.length === 0 && errors.length === 0, survivors, errors };
+  }
+
+  /**
+   * {@link deleteAndVerifyAllWipeArtifacts} PLUS a parent-directory fsync so the deletions are DURABLE across
+   * power-loss (P1-1/P1-2, Sol round-9) before the caller opens a fresh DB or reports the wipe done — otherwise
+   * a "permanently deleted" result proves only current-namespace absence, not that the unlinks survived a crash.
+   * `ok` is true ONLY when every artifact + media path is proven gone AND the directory fsync succeeded (fail
+   * closed on either). The single destructive-recovery / no-hook-wipe helper Sol round-9 asked every branch to
+   * funnel through, so full-inventory + durable is enforced in one place.
+   */
+  function deleteAndVerifyAllWipeArtifactsDurable(): DeletionResult {
+    const result = deleteAndVerifyAllWipeArtifacts();
+    if (!result.ok) {
+      return result;
+    }
+    if (!fsyncDir(dataDir)) {
+      return {
+        ok: false,
+        survivors: result.survivors,
+        errors: [...result.errors, `${dataDir} (directory fsync failed — deletions not proven durable)`],
+      };
+    }
+    return result;
+  }
+
+  /** Durably record the preserve-recovery ANCHOR (the target snapshot dir name). Returns durability. */
+  function writeRecoveryState(recoveryDirName: string): boolean {
+    return durableWriteFileSync(recoveryStatePath, recoveryDirName);
+  }
+
+  /** Durably remove the preserve-recovery anchor (unlink + parent-dir fsync). Returns proven-gone. */
+  function clearRecoveryState(): boolean {
+    try {
+      rmSync(recoveryStatePath, { force: true });
+    } catch (error) {
+      server.log.warn(error, "Preserve recovery: failed to delete the recovery-state anchor");
+    }
+    if (provenAbsence(recoveryStatePath) !== "absent") {
+      return false;
+    }
+    return fsyncDir(dataDir);
+  }
+
+  /**
+   * Move (or FINISH moving) the whole unopenable DB set + user media into `recoveryDir`, durably (P1, Sol
+   * round-12). Idempotent/resumable: only entries still in the ACTIVE namespace are moved, so a re-run after a
+   * crash completes a partial move rather than duplicating it — the DB set therefore always ends up COHERENT
+   * (every `loam.db*` file together) in the snapshot. Every source-presence check is ENOENT-only
+   * (`provenAbsence`); an UNVERIFIABLE stat aborts (returns false) BEFORE any fresh store could be opened, so a
+   * transient EIO can't silently leave media in the active namespace (P1-4). fsyncs BOTH parent directories —
+   * a cross-directory rename changes both, so making only the source durable would risk losing the destination
+   * link (P1-1). Returns whether the snapshot is now complete AND durable.
+   */
+  function completePreserveMove(recoveryDir: string): boolean {
+    try {
+      mkdirSync(recoveryDir, { recursive: true });
+    } catch (error) {
+      server.log.error(error, "Preserve recovery: could not create the recovery snapshot directory");
+      return false;
+    }
+    // Media directories first (ENOENT-only; abort on unverifiable).
+    for (const [name, dir] of [
+      ["avatars", avatarsDir],
+      ["attachments", attachmentsDir],
+    ] as const) {
+      const status = provenAbsence(dir);
+      if (status === "present") {
+        try {
+          renameSync(dir, join(recoveryDir, name));
+        } catch (error) {
+          if (provenAbsence(dir) !== "absent") {
+            server.log.error(error, `Preserve recovery: could not move ${dir} into the snapshot`);
+            return false;
+          }
+        }
+      } else if (status === "unknown") {
+        server.log.error(`Preserve recovery: could not verify ${dir} (unreadable) — aborting before any commit`);
+        return false;
+      }
+    }
+    // Every `loam.db*` artifact still in the active dir → into the snapshot.
+    const base = basename(dbPath);
+    let entries: string[];
+    try {
+      entries = readdirSync(dataDir);
+    } catch (error) {
+      server.log.error(error, "Preserve recovery: could not enumerate the data directory — aborting");
+      return false;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith(base)) {
+        continue;
+      }
+      const from = join(dataDir, entry);
+      try {
+        renameSync(from, join(recoveryDir, entry));
+      } catch (error) {
+        if (provenAbsence(from) !== "absent") {
+          server.log.error(error, `Preserve recovery: could not move ${from} into the snapshot`);
+          return false;
+        }
+      }
+    }
+    // COMPLETENESS verification (CodeRabbit round-12): the ACTIVE namespace must now hold NO `loam.db*` artifact
+    // and NO media directory — if one does (a rename silently didn't take, or a stat became unverifiable), the
+    // snapshot is INCOMPLETE, so fail closed rather than clear the anchor / open fresh over a partial preserve.
+    // Because renames are ATOMIC (a file is never lost — it is either here in the active namespace or already
+    // in the snapshot), an empty active namespace PROVES a complete snapshot; that is why no separate per-entry
+    // inventory needs to be recorded and re-verified.
+    for (const dir of [avatarsDir, attachmentsDir]) {
+      if (provenAbsence(dir) !== "absent") {
+        server.log.error(`Preserve recovery: ${dir} still present after the move — snapshot incomplete, failing closed`);
+        return false;
+      }
+    }
+    let remaining: string[];
+    try {
+      remaining = readdirSync(dataDir);
+    } catch (error) {
+      server.log.error(error, "Preserve recovery: could not re-verify the data directory is clean — failing closed");
+      return false;
+    }
+    if (remaining.some((entry) => entry.startsWith(base))) {
+      server.log.error("Preserve recovery: a `loam.db*` artifact still remains active after the move — snapshot incomplete");
+      return false;
+    }
+    // Both parents must be durable (cross-directory rename changes both) before we report success.
+    return fsyncDir(recoveryDir) && fsyncDir(dataDir);
+  }
+
+  /**
+   * Boot-time resume of an interrupted preserve recovery (P1, Sol round-12): if the durable anchor is present,
+   * FINISH the move into the recorded snapshot and clear the anchor, so `openInitialStore` below never opens a
+   * fresh DB over a half-moved (incoherent) set. Runs before the store is opened. Fails closed (throws the
+   * recoverable {@link DbEncryptionUnreadableError}) rather than open over an uncertain state.
+   */
+  function resumePreserveRecovery(): void {
+    let recoveryDirName: string;
+    try {
+      recoveryDirName = readFileSync(recoveryStatePath, "utf8").trim();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return; // no interrupted preserve recovery
+      }
+      const message =
+        "A preserve-recovery anchor is present but UNREADABLE — a partial recovery snapshot may exist; refusing " +
+        "to open the database. The node is locked; resolve the filesystem fault and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    // Validate the anchor content is a plain `.loam-recovery-<suffix>` basename — NEVER a path with separators
+    // or `..` (defense-in-depth: the writer only ever emits `.loam-recovery-${ts}-${hex}`, but a corrupted
+    // anchor must not let `join(dataDir, …)` resolve the move target outside the data dir).
+    if (!recoveryDirName.startsWith(".loam-recovery-") || recoveryDirName !== basename(recoveryDirName)) {
+      const message =
+        "A preserve-recovery anchor is present but malformed — refusing to open the database (a partial recovery " +
+        "snapshot may exist). The node is locked; resolve it and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    const recoveryDir = join(dataDir, recoveryDirName);
+    if (!completePreserveMove(recoveryDir)) {
+      const message =
+        "Resuming an interrupted preserve recovery: could not durably complete the move into the recovery " +
+        `snapshot ("${recoveryDirName}"). The node is locked; resolve the filesystem fault and reopen.`;
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    if (!clearRecoveryState()) {
+      const message =
+        "Resuming an interrupted preserve recovery: completed the move but could not durably clear the anchor. " +
+        "The node is locked; resolve the filesystem fault and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+    server.log.warn(`Resumed and completed an interrupted preserve recovery into "${recoveryDirName}".`);
+  }
+
+  // Operator "start fresh" confirmation marker (shared launcher contract, SF2/docs/15): the RN host's
+  // explicit start-fresh UI writes this file BEFORE restarting the server; `openInitialStore` below
+  // consumes (deletes) it as the ONLY thing allowed to trigger an automatic destructive DB replace.
+  // Its mere presence is standing in for an operator's affirmative click — nothing else may substitute
+  // for it (Sol's design review: an automatic replace on every unopenable DB is wrong).
+  const dbStartFreshMarkerPath = join(dataDir, ".loam-db-start-fresh");
+
+  // Durable ANCHOR for a RESUMABLE preserve recovery (P1, Sol round-12). A `preserve` start-fresh moves the
+  // whole unopenable DB set + media into a unique `.loam-recovery-<suffix>/` snapshot. The moves are not one
+  // atomic op, so this state file (written BEFORE any move, cleared only after the move is durable) records
+  // the target snapshot: a boot-time `resumePreserveRecovery` sees it and FINISHES the move, so a crash can
+  // never leave the DB set split across the active namespace and the snapshot, or open a fresh DB over a
+  // partial one. Named under the `.loam-recovery-` prefix so a kill switch's snapshot sweep clears it too.
+  const recoveryStatePath = join(dataDir, ".loam-recovery-state");
+
+  // Durable wipe PHASE file (P1-1, Sol round 8) — replaces the old single `.loam-wipe-pending` marker,
+  // which conflated "deletion still pending" with "safe to clear the key". A shared launcher contract with
+  // `apps/app/nodejs-project-template/main.js` (both sides updated together):
+  //   - `delete-pending`  → a fixed-key wipe started; artifacts are NOT yet PROVEN gone. The launcher must
+  //                         NOT clear the device key — it defers to the SERVER's boot-time retry, which
+  //                         re-runs artifact deletion under the still-available OLD key before serving.
+  //   - `key-clear-ready` → every artifact + media path is PROVEN absent; ONLY now may the launcher clear
+  //                         the device key + restart, then delete the phase file.
+  // Written DURABLY (atomic temp+rename) BEFORE deletion, advanced to `key-clear-ready` only after the
+  // deletion is verified. Route on the PHASE, never on mere presence — see `executeKillSwitchBody` and the
+  // boot-time resume below.
+  const wipePhaseMarkerPath = join(dataDir, ".loam-wipe-phase");
+  // The PRE-round-8 single marker. A round-7 fail-closed wipe could leave THIS on disk alongside a deletion
+  // survivor (e.g. an undeletable legacy-key `.premigration`) while 503-locked, telling the operator to
+  // reopen. If a device upgrades to this build before reopening, the new phase machine must still recognise
+  // the old marker as an unfinished wipe (P1-1, Sol round-8) rather than forgetting it and serving surviving
+  // pre-wipe data. Migrated forward to `.loam-wipe-phase=delete-pending`; both names are cleared together
+  // only once the whole wipe protocol completes.
+  const legacyWipePendingMarkerPath = join(dataDir, ".loam-wipe-pending");
+  type WipePhase = "delete-pending" | "key-clear-ready";
+
+  /**
+   * fsync a directory so a create/rename/unlink INSIDE it is durable across power-loss (the directory
+   * entry, not just the file's bytes, must be flushed). Returns whether the fsync succeeded — callers that
+   * need genuine durability must fail closed on false, NOT log-and-continue (Sol round-8 P1-5). Some
+   * filesystems legitimately reject directory fsync with EINVAL; a caller may choose to tolerate that, but
+   * the wipe/config paths here do not (correctness over availability on those platforms).
+   */
+  function fsyncDir(dir: string): boolean {
+    try {
+      const dirFd = openSync(dir, "r");
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+      return true;
+    } catch (error) {
+      server.log.error(error, `Durable write: parent-directory fsync failed for ${dir} (a rename/unlink there may not survive power-loss)`);
+      return false;
+    }
+  }
+
+  /**
+   * Write `contents` to `filePath` DURABLY and ATOMICALLY (Sol round-8 P1-5 / P2-1). Atomic: a reader sees
+   * the old file or the complete new one, never a torn write. Durable: it returns `true` ONLY after EVERY
+   * step — staging write, file-bytes fsync, atomic rename, AND parent-directory fsync — succeeded, so a
+   * caller may treat the write as power-loss-durable strictly on `true`. A bare `writeFileSync`+`rename` is
+   * atomic but NOT durable (the OS may hold the bytes and/or the rename in the page cache); a power-loss
+   * before both flushes can lose the whole update — which for the wipe-phase marker means forgetting a wipe,
+   * and for config.json means silently disarming an armed kill switch. There is deliberately NO non-durable
+   * fallback: a failure returns `false` so the caller fails closed rather than proceeding on an unflushed
+   * write it believes is durable. The staged bytes are written by PATH (a single interceptable call); the
+   * file fsync then reopens the temp read-only purely to flush it (fsync flushes the inode, reachable via
+   * any fd, regardless of that fd's mode).
+   */
+  function durableWriteFileSync(filePath: string, contents: string): boolean {
+    const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      writeFileSync(tmpPath, contents, "utf8");
+      const fd = openSync(tmpPath, "r");
+      try {
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmpPath, filePath);
+    } catch (error) {
+      try {
+        rmSync(tmpPath, { force: true });
+      } catch {
+        // ENOENT is the common case (the staging write itself failed) — nothing to clean up.
+      }
+      server.log.error(error, `Durable write failed for ${filePath}`);
+      return false;
+    }
+    // The parent-directory fsync is REQUIRED, not best-effort: without it the rename itself can be lost on
+    // power-loss (resurrecting stale contents), so a failure here means "not durable" → return false.
+    return fsyncDir(dirname(filePath));
+  }
+
+  /** The durable wipe JOURNAL (Sol round-10 P1-4): `.loam-wipe-phase` now carries the wipe PHASE *and* a
+   *  sanitized snapshot of the effective config, committed together in ONE atomic durable write. A SIGKILL
+   *  between "record intent" and "persist config.json" can then no longer either FORGET the wipe or LOSE the
+   *  current admin config — a boot-time resume restores config.json from this snapshot before it clears the
+   *  journal, so config is durable the instant the intent is. */
+  // `configInvalid` distinguishes a genuinely ABSENT config snapshot (legacy wipe / no snapshot → proceed)
+  // from one that is PRESENT but fails schema validation. `corrupt` covers a journal we cannot read or parse
+  // at all (non-ENOENT read error, malformed JSON, a JSON primitive, or unrecognized non-JSON content) — as
+  // opposed to an EXACT legacy plain string. In BOTH the `configInvalid` and `corrupt` cases the resume fails
+  // closed (locks WITHOUT clearing/rewriting the journal), so if the journal is the only durable copy of the
+  // admin config it is never silently dropped and reverted to defaults (CodeRabbit/Sol round-11/12).
+  type WipeJournal = { phase: WipePhase; config?: LoamConfig; configInvalid?: boolean; corrupt?: boolean };
+
+  /** Strip the one plaintext bearer secret (`sync.token`) before it is written to `.loam-wipe-phase` or
+   *  config.json — both are plain, unprotected files (scrypt-hashed secrets are safe to persist as-is). */
+  function sanitizeConfigForRestart(config: LoamConfig): LoamConfig {
+    return { ...config, sync: { ...config.sync, token: undefined } };
+  }
+
+  /**
+   * Durably write the wipe journal `{ phase, config? }` (Sol round-10 P1-4). Returns whether a genuinely
+   * DURABLE write succeeded — `true` only after file + parent-directory fsync (fail closed on `false`). The
+   * config snapshot (already sanitized) rides along so a resume can restore config.json from it. `readWipeJournal`
+   * fail-safes any ambiguous content to `{delete-pending}`.
+   */
+  function writeWipeJournal(phase: WipePhase, config?: LoamConfig): boolean {
+    const payload = config === undefined ? { phase } : { phase, config };
+    return durableWriteFileSync(wipePhaseMarkerPath, JSON.stringify(payload));
+  }
+
+  /**
+   * Read the durable wipe journal. A confirmed `ENOENT` → check the legacy marker (→ `{delete-pending}` or
+   * undefined = no wipe). A well-formed `{ phase, config? }` → that (the config is validated against the
+   * schema; an invalid config is DROPPED, never trusted). Legacy pre-round-10 plain-string content
+   * (`key-clear-ready`/anything-else) is still recognized. ANY other state (unreadable / malformed) →
+   * `{delete-pending}` (fail-safe: an ambiguous-but-present journal means a wipe WAS in progress).
+   */
+  function readWipeJournal(): WipeJournal | undefined {
+    let raw: string;
+    try {
+      raw = readFileSync(wipePhaseMarkerPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        // No NEW journal — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished wipe.
+        return migrateLegacyWipeMarkerIfPresent();
+      }
+      // A non-ENOENT read error (EIO/EACCES): we CANNOT read the journal, so we cannot know whether it holds
+      // the only config copy. CORRUPT/unverifiable → the resume locks without clearing it (P1-3, round-12).
+      return { phase: "delete-pending", corrupt: true };
+    }
+    // EXACT legacy plain-string content (pre-round-10, no config snapshot) — the ONLY non-JSON forms accepted.
+    const trimmed = raw.trim();
+    if (trimmed === "delete-pending") {
+      return { phase: "delete-pending" };
+    }
+    if (trimmed === "key-clear-ready") {
+      return { phase: "key-clear-ready" };
+    }
+    // New JSON journal format (round-10+).
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // Not JSON and not an exact legacy string → unrecognized/malformed. durableWriteFileSync writes the
+      // journal atomically (temp+rename), so this is disk corruption, NOT a torn write. CORRUPT → lock, never
+      // treat an ambiguous file as a legacy no-config journal and clear it (P1-3, round-12).
+      return { phase: "delete-pending", corrupt: true };
+    }
+    // JSON must be a `{ phase, config? }` OBJECT. A primitive (null/number/string/boolean) or an array is not
+    // a valid journal → CORRUPT (lock), not a legacy no-config journal.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { phase: "delete-pending", corrupt: true };
+    }
+    const obj = parsed as { phase?: unknown; config?: unknown };
+    // Only the two recognized phases are valid. A missing or unrecognized `phase` is a malformed journal →
+    // CORRUPT (lock), NOT silently coerced to `delete-pending` (which would clear it, losing config) — CodeRabbit.
+    if (obj.phase !== "delete-pending" && obj.phase !== "key-clear-ready") {
+      return { phase: "delete-pending", corrupt: true };
+    }
+    const phase: WipePhase = obj.phase;
+    let config: LoamConfig | undefined;
+    let configInvalid = false;
+    if (obj.config !== undefined) {
+      const validated = LoamConfigSchema.safeParse(obj.config);
+      if (validated.success) {
+        config = validated.data;
+      } else {
+        // Present but invalid (disk corruption) — the resume fails closed rather than silently dropping it.
+        configInvalid = true;
+      }
+    }
+    return { phase, config, configInvalid };
+  }
+
+  /**
+   * P1-1 (Sol round-8) upgrade path: when there is NO new `.loam-wipe-phase`, a present (or unreadable)
+   * legacy `.loam-wipe-pending` marker means a pre-round-8 wipe was still unfinished — treat it as
+   * `delete-pending` (NEVER `key-clear-ready`: the old marker cannot prove deletion completed) and MIGRATE it
+   * durably to the new journal (no config snapshot exists for a legacy wipe). The legacy marker is NOT removed
+   * here — both names are cleared together only once the protocol completes (`clearWipePhase`).
+   */
+  function migrateLegacyWipeMarkerIfPresent(): WipeJournal | undefined {
+    if (provenAbsence(legacyWipePendingMarkerPath) === "absent") {
+      return undefined; // no wipe pending under EITHER name — a normal boot
+    }
+    if (!writeWipeJournal("delete-pending")) {
+      server.log.error(
+        "Wipe resume: found a legacy `.loam-wipe-pending` marker but could NOT durably migrate it to " +
+          "`.loam-wipe-phase` — treating as delete-pending for this boot; the legacy marker persists so a later boot retries.",
+      );
+    } else {
+      server.log.warn(
+        "Wipe resume: migrated a pre-round-8 `.loam-wipe-pending` marker to `.loam-wipe-phase=delete-pending`; " +
+          "deletion will be re-run and verified before any device-key clear.",
+      );
+    }
+    return { phase: "delete-pending" };
+  }
+
+  /** Delete the durable wipe-phase file, returning whether it is now PROVEN gone (removed, or confirmed
+   *  absent). The ONLY places allowed to call this: the launcher's verified `loam-wipe-complete` handoff
+   *  (via main.js, not here) after a `key-clear-ready` wipe, and the desktop/no-hook fallback below where
+   *  the key cannot be rotated in-process anyway. A `false` return means the marker may still be on disk,
+   *  so the caller must NOT treat the wipe as finished (else the next boot re-reads it and re-wipes). */
+  function clearWipePhase(): boolean {
+    // Remove BOTH the new phase file AND any migrated-from legacy `.loam-wipe-pending` marker (P1-1): if the
+    // legacy name lingered after a migration, leaving it would make the NEXT boot re-recognise it as a
+    // pending wipe and re-wipe the fresh DB in a loop. Both must be proven gone for a clean completion.
+    for (const path of [wipePhaseMarkerPath, legacyWipePendingMarkerPath]) {
+      try {
+        rmSync(path, { force: true });
+      } catch (error) {
+        server.log.warn(error, `Kill switch: failed to delete ${path} (a later boot re-reads it)`);
+      }
+      // `rmSync{force:true}` swallows ENOENT, so a throw here is a real removal failure — re-verify absence.
+      if (provenAbsence(path) !== "absent") {
+        return false;
+      }
+    }
+    // fsync the parent DIRECTORY so the unlinks are durable BEFORE any caller mints a new device key or opens
+    // a fresh DB (Sol round-8 P1-5.3): otherwise a power-loss after the unlink but before it reaches stable
+    // storage can RESURRECT the phase file as `key-clear-ready`, and the next boot would clear the freshly
+    // minted key and strand the new database. A parent-dir fsync failure → report NOT-cleared (fail closed).
+    return fsyncDir(dataDir);
+  }
+
+  /**
+   * Boot-time store open, tolerant of an unopenable DB (F4/SF2, docs/15). A failure here used to reject
+   * `buildApp` outright — and because the DB-encryption mode is persisted config, EVERY later boot hit
+   * the identical failure, permanently locking the operator out of their own node. The host must always
+   * boot (crisis-messaging priority), so this degrades in order instead of throwing straight through:
+   *
+   *  0. Consume the start-fresh confirmation marker FIRST, before touching anything else (P2-3, Sol
+   *     round 3). It's a one-shot, human-confirmed authorization for a SPECIFIC unopenable-DB incident,
+   *     so it must be read-and-deleted atomically-in-intent up front, not lazily checked only once
+   *     everything else has already failed — the old code left it on disk untouched whenever the
+   *     normal open (step 1) or the plaintext fallback (step 2) happened to succeed (e.g. the operator
+   *     independently fixed the key), so a stale marker could silently authorize a LATER, UNRELATED
+   *     unopenable-DB failure the operator never actually confirmed. If the delete itself fails, fail
+   *     CLOSED: treat the marker as NOT confirmed for this boot rather than risk honoring it without
+   *     actually consuming it.
+   *  1. Open exactly as configured (keyed if a key was resolved, else plaintext).
+   *  2. On failure, IF a key was resolved, probe whether the SAME file opens with no key. If it does, the
+   *     on-disk DB is genuinely PLAINTEXT while an encrypted mode is configured (P1-4-server, Sol round 8).
+   *     The old code SILENTLY served that plaintext file (a confidentiality downgrade). Now it does NOT:
+   *       - with a start-fresh confirmation (step 0) → DELETE the plaintext DB (not rename-aside — leaving
+   *         readable plaintext would defeat the switch to encryption) and open a FRESH ENCRYPTED database
+   *         (`db_encryption_recovered_fresh`);
+   *       - without one → report `db_encryption_plaintext_unconverted` and THROW a typed error, LOCKING
+   *         (like the unreadable path) so the RN UI can offer the destructive "delete data and start
+   *         encrypted" flow. The plaintext-fallback-to-serving is only reached when NO key was resolved
+   *         (step 1 already WAS the plaintext open). A ciphertext file with the wrong key falls through to
+   *         step 3 (marker-gated recovery), not a raw "file is not a database" throw.
+   *  3. Still unopenable: the file is genuinely unreadable with what we have (wrong/lost key, or
+   *     ciphertext with no key at all). An automatic destructive "start fresh" is NEVER triggered here
+   *     — only an explicit operator confirmation may do that (the design issue with the old behaviour,
+   *     which auto-replaced on every unopenable DB and, on a second occurrence, renamed straight onto
+   *     the fixed `loam.db.unreadable` name, destroying the first preserved copy — P1-3). So:
+   *       - marker was NOT confirmed (step 0) → report `db_encryption_unreadable` and THROW a typed
+   *         {@link DbEncryptionUnreadableError}, failing boot NON-destructively (the original files are
+   *         untouched) — `embedded-main.ts` recognizes the `.code` and keeps the host runtime alive
+   *         (rather than exiting) specifically so the RN launcher bridge can still receive an
+   *         operator's subsequent start-fresh confirmation and retry boot in-process (P1-1).
+   *       - marker WAS confirmed (step 0) → rename the whole `loam.db`/`-wal`/`-shm` set aside together
+   *         under a UNIQUE, collision-proof suffix (timestamp + random bytes, so two successive
+   *         recoveries each keep their own preserved copy instead of the second overwriting the first),
+   *         open a fresh database, and report `db_encryption_recovered_fresh`.
+   *
+   * Every report goes over the same RN bridge `embedded-main.ts` uses for fatal boot errors — and NEVER
+   * includes the key itself — so the host UI can surface the right action. The real fix for case 2 is a
+   * genuine plaintext→encrypted REKEY (SQLCipher `sqlcipher_export` / `PRAGMA rekey`), which is unbuilt;
+   * this is a boot-time safety net, not a substitute for it.
+   */
+  function openInitialStore(): LoamStore {
+    // P1 (Sol round-12): FINISH any interrupted preserve recovery FIRST — before consuming the start-fresh
+    // marker or opening the store — so a fresh DB is never opened over a half-moved (incoherent) DB set. A
+    // no-op when no recovery is pending; throws (locks) on an unverifiable/incomplete resume.
+    resumePreserveRecovery();
+
+    const keyWasResolved = dbKey !== undefined;
+
+    /**
+     * Execute a confirmed start-fresh honoring the operator's INTENT (P1-2, Sol round-9) — the SINGLE place
+     * every destructive/preservative start-fresh branch (plaintext-under-encrypted AND ciphertext-wrong-key)
+     * funnels through, so the full-inventory + durability rules are enforced once:
+     *   - `delete` (deliberate destructive mode change): delete + PROVE-gone the FULL inventory — every DB
+     *     artifact AND user media (attachments are message content, avatars are persisted user data) — DURABLY
+     *     (dir fsync), fail closed on any survivor/unverifiable path, then open fresh. A renamed-aside copy
+     *     would stay recoverable under the retained device secret, so a real, verified, durable delete is
+     *     required; "permanently deleted" must mean durable absence, not just current-namespace absence.
+     *   - `preserve` (accidental wrong/lost-key lockout): rename the whole DB set aside under a unique suffix
+     *     for a possible later attempt, then open fresh. NEVER reaches deletion.
+     * A failure after the (already consumed) one-shot marker is recast as the recognized
+     * `db_encryption_unreadable` recovery so the runtime stays alive and the operator can re-confirm, rather
+     * than a generic `boot_failed` process exit.
+     */
+    function startFreshWithIntent(intent: "delete" | "preserve"): LoamStore {
+      if (intent === "delete") {
+        const deletion = deleteAndVerifyAllWipeArtifactsDurable();
+        if (!deletion.ok) {
+          const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+          const message =
+            "Delete-and-start-fresh was confirmed, but the previous data could not be deleted and VERIFIED " +
+            `gone durably (${remaining}) — refusing to open a fresh database over recoverable data. Confirm ` +
+            "delete-and-start-fresh again to retry.";
+          server.log.error(message);
+          reportBootNotice(message, "db_encryption_unreadable");
+          throw new DbEncryptionUnreadableError(message);
+        }
+        try {
+          const store = openLoamStore();
+          const message =
+            "An explicit DELETE start-fresh confirmation was present, so the previous database and all user " +
+            "media were deleted and VERIFIED gone (durably) and a fresh database was started.";
+          server.log.warn(message);
+          reportBootNotice(message, "db_encryption_recovered_fresh");
+          return store;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const message =
+            `Delete-and-start-fresh deleted the previous data but then failed opening a fresh database (${detail}). ` +
+            "The confirmation was already consumed; the operator can confirm delete-and-start-fresh again to retry.";
+          server.log.error(message);
+          reportBootNotice(message, "db_encryption_unreadable");
+          throw new DbEncryptionUnreadableError(message);
+        }
+      }
+
+      // preserve: move the WHOLE snapshot — the DB set AND user media (avatars + attachments) — into a UNIQUE
+      // recovery DIRECTORY, RESUMABLY (P1, Sol round-12). Leaving media in the active namespace let the orphan
+      // reaper delete it; a dedicated `.loam-recovery-<suffix>/` keeps the snapshot coherent and out of the
+      // reaper's path AND the fresh node's active dirs. Because the moves aren't one atomic op, a durable ANCHOR
+      // (`.loam-recovery-state`) is written BEFORE any move, so a crash mid-move is FINISHED by
+      // `resumePreserveRecovery` on the next boot (the DB set never ends up split across the two directories).
+      // `completePreserveMove` uses ENOENT-only presence checks and fsyncs BOTH parent dirs. A kill switch
+      // still wipes the snapshot + anchor (both under the `.loam-recovery-` prefix).
+      try {
+        const preservedSuffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
+        const recoveryDirName = `.loam-recovery-${preservedSuffix}`;
+        const recoveryDir = join(dataDir, recoveryDirName);
+        // 1. Durable anchor FIRST (before any move) so an interrupted move is resumed, not left split.
+        if (!writeRecoveryState(recoveryDirName)) {
+          throw new Error("could not durably record the preserve-recovery anchor");
+        }
+        // 2. Move the whole set into the snapshot, durably (both parents fsynced); resumable + coherent.
+        if (!completePreserveMove(recoveryDir)) {
+          throw new Error("preserve-recovery move could not be completed durably");
+        }
+        // 3. A small manifest (informational; recovery does not depend on it).
+        try {
+          writeFileSync(
+            join(recoveryDir, "manifest.json"),
+            JSON.stringify({ preservedAt: preservedSuffix, reason: "start-fresh preserve recovery (unopenable DB)" }),
+            "utf8",
+          );
+        } catch (manifestError) {
+          server.log.warn(manifestError, "Preserve recovery: could not write the snapshot manifest (informational only)");
+        }
+        // 4. Clear the anchor — the snapshot is complete + durable and the active namespace is clean.
+        if (!clearRecoveryState()) {
+          throw new Error("could not durably clear the preserve-recovery anchor");
+        }
+        // Open the fresh store BEFORE reporting success (CodeRabbit): a fresh-open failure must surface as the
+        // recoverable `db_encryption_unreadable` (via the catch below), not a false `db_encryption_recovered_fresh`.
+        const store = openLoamStore();
+        const message =
+          "An explicit PRESERVE start-fresh confirmation was present, so the previous database and all user media " +
+          `were moved into a recovery snapshot ("${recoveryDirName}/") and a fresh database was started.`;
+        server.log.warn(message);
+        reportBootNotice(message, "db_encryption_recovered_fresh");
+        return store;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const message =
+          "Start-fresh recovery failed while moving the previous database into the recovery snapshot or opening a " +
+          `fresh one (${detail}). The confirmation was already consumed; the operator can confirm start-fresh again ` +
+          "to retry (the recovery anchor makes any partial move resume on the next boot).";
+        server.log.error(message);
+        reportBootNotice(message, "db_encryption_unreadable");
+        throw new DbEncryptionUnreadableError(message);
+      }
+    }
+
+    // Step 0 (P2-3): consume the marker up front, unconditionally, before any open attempt — see the
+    // doc comment above for why this can't wait until both opens have failed.
+    let startFreshConfirmed = false;
+    // P1-6 (Sol round 8): the marker carries the operator's INTENT. `delete` = a DELIBERATE destructive mode
+    // change (the operator chose "Delete & start fresh" in Settings) → the prior DB must be DELETED and PROVEN
+    // gone, not renamed aside (a renamed-aside encrypted DB stays recoverable under the retained device
+    // secret, so "deleted" would be a lie). Anything else — `preserve`, a legacy timestamp marker, or an
+    // unreadable one — = accidental wrong/lost-key LOCKOUT recovery → preserve the old ciphertext aside for a
+    // possible later attempt. Default `preserve` (NEVER destroy on an ambiguous/unreadable marker).
+    let startFreshIntent: "delete" | "preserve" = "preserve";
+    if (existsSync(dbStartFreshMarkerPath)) {
+      try {
+        if (readFileSync(dbStartFreshMarkerPath, "utf8").trim() === "delete") {
+          startFreshIntent = "delete";
+        }
+      } catch {
+        // Unreadable marker → keep the safe `preserve` default (never escalate to destruction on ambiguity).
+      }
+      try {
+        rmSync(dbStartFreshMarkerPath, { force: true });
+        startFreshConfirmed = true;
+      } catch {
+        // Fail closed: an unremovable marker is NOT treated as a valid confirmation this boot. It
+        // stays on disk (we couldn't delete it), so a later boot gets another chance at a clean delete
+        // — but THIS boot must not skip straight to a destructive replace on the strength of a marker
+        // it couldn't actually consume.
+        startFreshConfirmed = false;
+      }
+    }
+
+    // Step 0b (P1-a, Sol round 6): resume an interrupted rekey-migration, CRASH-ATOMICALLY. The migration
+    // branch below rekeys the live DB in place (SQLCipher `PRAGMA rekey`), which is NOT crash-atomic — an
+    // OS-kill mid-rekey can leave `loam.db` openable under NEITHER the legacy key nor the current one,
+    // destroying pre-round-4 passphrase data. To make that recoverable the migration first COMMITS a
+    // single-file, checkpoint-folded snapshot of the intact legacy DB to `loam.db.premigration` (copy →
+    // `.tmp` → atomic rename), then rekeys, then deletes it on success. A COMMITTED `loam.db.premigration`
+    // present HERE is AMBIGUOUS (RF6-b): usually an interrupted rekey (restore it), but possibly a
+    // migration that already SUCCEEDED whose backup-cleanup `rmSync` threw — leaving the stale snapshot
+    // behind through a serving session whose new data now lives in `loam.db`. The two are disambiguated
+    // below by PROBING the live DB under the current key: opens → already migrated, discard the stale
+    // backup and preserve the live data; doesn't open → genuine interrupt, restore. Because the snapshot
+    // is a SINGLE file, restore is ONE atomic `rename` (RF6-a: after first clearing a FOREIGN `loam.db-wal`/
+    // `-shm`/`-journal` — the rekey runs under DELETE journal mode, so an interrupt leaves a `-journal`
+    // rollback journal, NOT a `-wal`/`-shm` pair) — no multi-file race, and it can never install a partial
+    // backup. A leftover `.premigration.tmp` (a kill before the commit rename) is NOT a committed backup —
+    // discard it, never restore from it (the live DB is still intact; the migration just re-runs).
+    // Best-effort — a restore failure falls through to the normal open/recovery chain below (no worse than
+    // before). The backup holds ciphertext, not the key.
+    {
+      const committedBackup = `${dbPath}.premigration`;
+      const backupTmp = `${dbPath}.premigration.tmp`;
+      try {
+        // Discard any uncommitted/partial artifacts unconditionally: a stray `.tmp` (killed before the
+        // commit rename) and any legacy multi-file `-wal`/`-shm` sidecars a pre-redesign build may have
+        // left. None of these is a committed backup, so none is ever restored.
+        rmSync(backupTmp, { force: true });
+        rmSync(`${dbPath}-wal.premigration`, { force: true });
+        rmSync(`${dbPath}-shm.premigration`, { force: true });
+
+        if (existsSync(committedBackup)) {
+          // RF6-b (Sol round 6): a committed `.premigration` present here is AMBIGUOUS. Normally it is the
+          // intact legacy snapshot left by an INTERRUPTED rekey (restore is correct) — UNLESS a PRIOR
+          // migration actually SUCCEEDED and its post-success `rmSync(committedBackup)` cleanup threw
+          // (read-only dir, locked file), leaving the stale backup behind through a whole serving session.
+          // In THAT case the live `loam.db` holds the migrated data (plus a `-wal` of un-checkpointed
+          // messages from the session that just ran), and a BLIND restore would delete that WAL and rename
+          // the stale pre-migration snapshot over the live DB — losing data and re-migrating every boot.
+          // Disambiguate by PROBING: open the live `loam.db` under the CURRENT key (`dbKey`). If it opens,
+          // the migration already committed and this backup is stale garbage → delete it (and any sidecars/
+          // journal) and leave the live DB and its `-wal`/`-shm` untouched. Only if the live DB does NOT
+          // open under the current key is this a genuine interrupted rekey → restore. With no key this boot
+          // (plaintext — can't probe an encrypted DB) keep the conservative restore.
+          let liveOpensUnderCurrentKey = false;
+          if (dbKey !== undefined && existsSync(dbPath)) {
+            try {
+              const probe = openLoamStore();
+              probe.close();
+              liveOpensUnderCurrentKey = true;
+            } catch {
+              liveOpensUnderCurrentKey = false;
+            }
+          }
+
+          if (liveOpensUnderCurrentKey) {
+            // The owning migration already SUCCEEDED — the leftover backup is stale. Preserve the serving
+            // session's live data (do NOT touch `loam.db`/`-wal`/`-shm`); just delete the stale backup and
+            // any of its own sidecars/journal.
+            rmSync(committedBackup, { force: true });
+            rmSync(`${dbPath}-wal.premigration`, { force: true });
+            rmSync(`${dbPath}-shm.premigration`, { force: true });
+            rmSync(`${committedBackup}-journal`, { force: true });
+            server.log.warn(
+              "Found a leftover pre-migration DB backup whose owning migration already SUCCEEDED (the live " +
+                "database opens under the current key) — discarding the stale backup and preserving the live " +
+                "database and its WAL rather than restoring the stale snapshot over it (RF6-b).",
+            );
+          } else {
+            // Genuine interrupted rekey (or a plaintext boot that can't probe): restore the intact single-
+            // file snapshot. RF6-a: the rekey runs under DELETE journal mode (SQLCipher refuses to rekey
+            // under WAL), so an interrupted rekey leaves a `loam.db-journal` ROLLBACK journal — NOT a
+            // `-wal`/`-shm` pair. Drop `-wal`/`-shm`/`-journal` first so the restored single self-consistent
+            // file can never be paired with a FOREIGN hot journal, then a SINGLE atomic rename installs the
+            // snapshot over the live DB. The snapshot folded its own WAL in before it was copied, so the
+            // restored `loam.db` opens standalone with no journal of its own. Killed between the rm and the
+            // rename? The committed backup is still present, so the next boot repeats this idempotently.
+            rmSync(`${dbPath}-wal`, { force: true });
+            rmSync(`${dbPath}-shm`, { force: true });
+            rmSync(`${dbPath}-journal`, { force: true });
+            renameSync(committedBackup, dbPath);
+            server.log.warn(
+              "Restored an interrupted DB key-migration from its committed single-file pre-migration backup — " +
+                "the legacy-encrypted database is intact again and the migration will be retried this boot.",
+            );
+          }
+        }
+      } catch (error) {
+        server.log.error(
+          error,
+          "Failed to restore the pre-migration DB backup after an interrupted rekey — continuing to the " +
+            "normal open/recovery path",
+        );
+      }
+    }
+
+    try {
+      const opened = openLoamStore();
+      if (keyWasResolved && options.dbEncryptionMigrateFromKey !== undefined) {
+        // P1-1 (Sol round 5): the current key opened it directly — either this is already migrated, or
+        // it's a genuinely fresh install that never needed the legacy key at all. Either way, the
+        // launcher offered a legacy key because it hasn't recorded a confirmed migration yet (see
+        // db-encryption.ts's passphrase key-version marker) — tell it to stop, so later boots skip this
+        // extra key entirely.
+        reportDbKeyMigrated(options.dbKeyRequestId);
+      }
+      return opened;
+    } catch {
+      // Fall through — try the legacy-key migration below, then the plaintext fallback (case 2), or
+      // recovery (case 3).
+    }
+
+    // P1-1 (Sol round 5): passphrase key-derivation migration. Round 4 changed the passphrase-mode key
+    // from `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)` — an existing passphrase DB
+    // encrypted under the OLD derivation can no longer be opened with `dbKey` at all. If the launcher
+    // handed us that legacy derivation too (`dbEncryptionMigrateFromKey`, set only when it hasn't
+    // recorded a confirmed migration), try opening with IT; on success, `PRAGMA rekey` the database to
+    // the current key in place — every later boot then opens directly under `dbKey`, and this boot
+    // reports the migration back so the launcher stops offering the legacy key. Never logs either key.
+    if (keyWasResolved && options.dbEncryptionMigrateFromKey !== undefined) {
+      try {
+        const legacyStore = openStore(dbPath, {
+          encryptionKey: options.dbEncryptionMigrateFromKey,
+          driver: options.dbDriver,
+        });
+
+        // P1-a (Sol round 6): commit a CRASH-ATOMIC, single-file pre-migration backup BEFORE the in-place
+        // `PRAGMA rekey`. `rekey` rewrites pages under the new key in place and is NOT crash-atomic; an
+        // OS-kill mid-rekey could leave the DB openable under neither key, permanently losing pre-round-4
+        // passphrase data. The backup makes that recoverable — but the backup ITSELF must be crash-atomic,
+        // or a kill mid-copy would leave a truncated sidecar that Step 0b then restores OVER the intact live
+        // DB. So, crash-atomically:
+        //   1. `checkpoint()` (`wal_checkpoint(TRUNCATE)`) folds the WAL into the single `loam.db` file, so
+        //      committed transactions still resident in the WAL are NOT lost by the file-level copy below —
+        //      and there is nothing left in `-wal`/`-shm` to snapshot. (legacyStore is the sole connection.)
+        //   2. Copy that single file to `loam.db.premigration.tmp`.
+        //   3. Atomically `rename` (POSIX-atomic) `.tmp` → `loam.db.premigration`. The COMMITTED backup is
+        //      ONLY ever the post-rename file: a kill before the rename leaves an ignored `.tmp`, never a
+        //      half-written backup Step 0b could restore.
+        // On rekey SUCCESS the committed backup is deleted (below); on FAILURE it is left for Step 0b to
+        // restore and retry. If the backup can't be committed, do NOT proceed with an unbackable non-atomic
+        // rekey — clean up and fall through instead.
+        const committedBackup = `${dbPath}.premigration`;
+        const backupTmp = `${dbPath}.premigration.tmp`;
+        try {
+          legacyStore.checkpoint();
+          rmSync(backupTmp, { force: true }); // clear any stray tmp from a prior interrupted attempt
+          copyFileSync(dbPath, backupTmp);
+          renameSync(backupTmp, committedBackup);
+        } catch (backupError) {
+          rmSync(backupTmp, { force: true });
+          rmSync(committedBackup, { force: true });
+          legacyStore.close();
+          server.log.error(
+            backupError,
+            "Could not commit the pre-migration DB backup before rekey — skipping the in-place migration " +
+              "this boot rather than risk an unrecoverable interrupted rekey",
+          );
+          throw backupError;
+        }
+
+        try {
+          legacyStore.rekey(dbKey!);
+        } catch (rekeyError) {
+          // Leave the committed backup in place — Step 0b on the next boot restores the intact legacy DB
+          // and retries. Only the store handle is released here.
+          legacyStore.close();
+          throw rekeyError;
+        }
+
+        // P2-2 (Sol round 7): the rekey is the COMMIT point of the migration. From here `loam.db` is a
+        // valid database under the CURRENT key and `legacyStore` is its live, migrated handle — the
+        // migration has SUCCEEDED regardless of whether the post-success sidecar cleanup below works. So
+        // COMMIT FIRST — flip `encryptionEnabled`, report the migration to the launcher, and return the
+        // live store — and treat the `.premigration` cleanup as strictly best-effort in its OWN
+        // try/catch. Previously that cleanup sat inside the broad outer migration `try`, so a throwing
+        // `rmSync` (read-only dir, locked file) jumped to the outer `catch` and fell through as if the
+        // legacy key / rekey had FAILED — leaking this already-rekeyed handle and running the plaintext/
+        // recovery chain against a DB that is ALREADY valid under the current key. A stale backup left
+        // behind is harmless: the next boot's Step-0b probe finds the live DB opens under the current key
+        // and discards it (RF6-b). NEVER let a cleanup failure fail this boot.
+        encryptionEnabled = true;
+        const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
+        server.log.warn(message);
+        reportDbKeyMigrated(options.dbKeyRequestId);
+
+        // Best-effort post-commit cleanup: drop the pre-migration backup (and any stray tmp) so a later
+        // boot doesn't mistake it for an interrupted migration to resume. RF6-a: also clear any
+        // `loam.db-journal` the DELETE-mode rekey may have left — a successful rekey folds WAL back on and
+        // SQLCipher deletes its rollback journal on commit, so this is normally a no-op, but removing it
+        // defensively guarantees the freshly-rekeyed single file is never left paired with a foreign
+        // rollback journal.
+        try {
+          rmSync(committedBackup, { force: true });
+          rmSync(backupTmp, { force: true });
+          rmSync(`${dbPath}-journal`, { force: true });
+        } catch (cleanupError) {
+          server.log.warn(
+            cleanupError,
+            "Post-migration cleanup of the pre-migration DB backup failed — the migration itself already " +
+              "SUCCEEDED and is committed (the live DB is valid under the current key); the stale backup " +
+              "will be discarded by the next boot's Step-0b probe. Continuing this boot with the migrated store.",
+          );
+        }
+
+        return legacyStore;
+      } catch {
+        // The legacy key didn't open it either (or the backup/rekey itself failed) — this isn't a stale-
+        // derivation DB after all; fall through to the plaintext fallback / recovery chain below. Any
+        // `.premigration` sidecars a FAILED rekey left behind are deliberately preserved for Step 0b to
+        // resume on the next boot.
+      }
+    }
+
+    if (keyWasResolved) {
+      // P1-4-server (Sol round 8): an encrypted mode is configured (a key was resolved) but the keyed open
+      // failed. Probe whether the on-disk DB is actually PLAINTEXT. If it opens with no key, the file is a
+      // genuine plaintext SQLite DB under an encrypted mode — the persisted mode/hint say encrypted. The old
+      // code SILENTLY served that plaintext file (`encryptionEnabled=false`, `db_encryption_open_failed`),
+      // a confidentiality downgrade the operator was never told about. Instead LOCK: do NOT serve plaintext.
+      let plainStore: LoamStore | undefined;
+      try {
+        plainStore = openStore(dbPath, { driver: options.dbDriver });
+      } catch {
+        // Not plaintext either (genuine ciphertext with the wrong key) — fall through to the marker-gated
+        // recovery below, exactly as before.
+      }
+
+      if (plainStore) {
+        // Release the probe handle immediately — we never serve from it on this path.
+        plainStore.close();
+
+        if (startFreshConfirmed) {
+          // P1-2 (Sol round-9): HONOR THE INTENT even here. The old code deleted the plaintext DB regardless
+          // of intent, so a `preserve`/legacy/malformed marker (which defaults to `preserve`) could still
+          // authorize destruction — violating the "preserve never deletes" contract. Route through the single
+          // intent-aware helper: `delete` deletes + proves the FULL inventory (incl. media) gone durably;
+          // `preserve` renames the DB aside. (The plaintext-unconverted recovery button now sends `delete`.)
+          return startFreshWithIntent(startFreshIntent);
+        }
+
+        // No confirmation → do NOT silently serve plaintext. Report the distinct code and LOCK (typed error,
+        // like the unreadable path), so `embedded-main.ts`/main.js keep the runtime alive and the RN UI can
+        // offer the destructive "delete data and start encrypted" flow (which writes the start-fresh marker
+        // consumed above). NEVER include the key in the message.
+        const message =
+          "An existing PLAINTEXT database is present but an encrypted mode is configured — refusing to " +
+          "serve it unencrypted (a silent downgrade). Confirm 'delete data and start encrypted', or fix the key.";
+        server.log.error(message);
+        reportBootNotice(message, "db_encryption_plaintext_unconverted");
+        throw new DbEncryptionPlaintextUnconvertedError(message);
+      }
+    }
+
+    if (!startFreshConfirmed) {
+      const message =
+        "The database could not be opened (wrong/lost key, or an unreadable file) and no start-fresh " +
+        "confirmation is present; boot failed without touching the existing files.";
+      server.log.error(message);
+      reportBootNotice(message, "db_encryption_unreadable");
+      throw new DbEncryptionUnreadableError(message);
+    }
+
+    // The existing DB is genuine ciphertext the current key can't open. Route through the single intent-aware
+    // helper (P1-2/P1-6, Sol round-9): `delete` (deliberate mode change) deletes + proves the FULL inventory
+    // gone durably (a renamed-aside encrypted DB stays recoverable under the retained device secret, so a real
+    // delete is required); `preserve` (accidental lockout) renames the set aside for a later attempt.
+    return startFreshWithIntent(startFreshIntent);
+  }
+
+  /**
+   * Boot-time wipe-phase resume (P1-1, Sol round 8) — runs BEFORE the real store is opened for serving.
+   * Routes on the durable PHASE, not mere marker presence:
+   *   - `delete-pending`  → an earlier fixed-key wipe never PROVED its artifacts gone (or was killed mid-
+   *                         deletion). RE-RUN the full artifact+media deletion under the still-available OLD
+   *                         key. On success, advance to `key-clear-ready` and hand off to the launcher to
+   *                         clear the device key + restart; on failure, stay `delete-pending` (a later reopen
+   *                         retries). Either way, do NOT open/serve the real DB — throw {@link WipeResumeInProgressError}.
+   *   - `key-clear-ready` → artifacts already proven gone; the ONLY step left is the launcher's device-key
+   *                         clear. In the normal flow main.js does that dance and deletes the phase file
+   *                         BEFORE booting the server, so the server never sees this; if it does (defensive),
+   *                         re-signal the launcher rather than serve under the un-cleared key.
+   * Returns the store to serve from when there is NOTHING to resume (`undefined` phase); otherwise throws.
+   */
+  function resumeWipePhaseThenOpenStore(): LoamStore {
+    const journal = readWipeJournal();
+    if (journal === undefined) {
+      return openInitialStore();
+    }
+    // The resume treats `delete-pending` and `key-clear-ready` identically — both re-verify deletion and
+    // (re-)advance — so only the config snapshot is read here; the phase is fail-safe either way.
+    const { config, configInvalid, corrupt } = journal;
+
+    // Round-11/12 (CodeRabbit/Sol): a journal we cannot trust — either UNREADABLE/unparseable (`corrupt`) or
+    // with a PRESENT-but-INVALID config snapshot (`configInvalid`) — must NOT be silently proceeded past. If
+    // config.json's live write failed, this journal is the only durable copy of the admin config; clearing or
+    // ignoring it would revert the armed kill switch / security profile / retention to defaults. Fail closed:
+    // lock WITHOUT clearing/rewriting the journal, so the bytes survive for inspection/repair.
+    if (corrupt || configInvalid) {
+      const detail = corrupt
+        ? "could not be read or parsed (unreadable or malformed — possible disk corruption)"
+        : "has a PRESENT but INVALID config snapshot";
+      const message =
+        `Resuming an interrupted emergency wipe: the wipe journal ${detail}. Refusing to proceed — clearing or ` +
+        "ignoring it could lose the admin config. The node is locked; inspect or repair `.loam-wipe-phase` and reopen.";
+      server.log.error(message);
+      reportBootNotice(message, "kill_switch_wipe_incomplete");
+      throw new WipeResumeInProgressError(message);
+    }
+
+    // P1-4 (Sol round-10): RESTORE config.json FROM THE JOURNAL SNAPSHOT FIRST — before any deletion or phase
+    // advance, and before the journal is ever cleared. The live wipe committed the effective config INTO the
+    // journal atomically with the intent, so even if its live config.json write never landed (or a crash hit
+    // before it), the current admin config (armed kill switch, panic token, security profile, retention…) is
+    // recovered here rather than reverting to defaults. If we can't persist it yet, do NOT proceed (a later
+    // clear would lose the only copy) — stay locked; a later boot retries from the still-intact journal.
+    if (config !== undefined && !persistConfigForRestart(config)) {
+      const message =
+        "Resuming an interrupted emergency wipe: the config snapshot in the wipe journal could NOT be persisted " +
+        "to config.json yet — refusing to proceed (a later journal clear would lose the current admin config). " +
+        "The node is locked; resolve the filesystem fault and reopen to retry.";
+      server.log.error(message);
+      reportBootNotice(message, "kill_switch_wipe_incomplete");
+      throw new WipeResumeInProgressError(message);
+    }
+
+    const hook = wipeRestartHook();
+
+    // Both phases need the artifacts PROVEN gone (and the deletion made DURABLE — dir fsync) before any
+    // device-key clear. For `delete-pending` this is the retry the whole redesign hinges on; for
+    // `key-clear-ready` it's a cheap idempotent re-verify. Durable so the deletions can't be lost by a
+    // power-loss between here and the key clear (CodeRabbit round-10).
+    const deletion = deleteAndVerifyAllWipeArtifactsDurable();
+
+    if (!deletion.ok) {
+      // Deletion still incomplete/unverifiable — stay `delete-pending` and do NOT clear the key. Refuse to
+      // serve the surviving DB (it may hold pre-wipe data under the old key). A later reopen re-runs this.
+      // The downgrade write matters when we ENTERED at `key-clear-ready` (a defensive re-verify that just
+      // failed): if the file can't be rewritten to `delete-pending`, it lingers as `key-clear-ready` and the
+      // launcher's next-boot gate could clear the key while artifacts survive. We can't force a broken FS to
+      // accept the write, but we surface it loudly and stay locked THIS boot regardless (CodeRabbit CRITICAL).
+      const downgraded = writeWipeJournal("delete-pending", config);
+      const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+      const durability = downgraded
+        ? "the durable `delete-pending` phase is recorded, so the next boot re-runs deletion under the old key"
+        : "AND the phase file could NOT be rewritten to `delete-pending` — if it entered at `key-clear-ready`, " +
+          "reopen the node PROMPTLY so the server re-runs deletion before any launcher key-clear";
+      const message =
+        "Resuming an interrupted emergency wipe: artifact deletion is still incomplete or unverifiable " +
+        `(${remaining}) — ${durability}. The database was NOT opened and the device key was NOT cleared.`;
+      server.log.error(message);
+      reportBootNotice(message, "kill_switch_wipe_incomplete");
+      throw new WipeResumeInProgressError(message);
+    }
+
+    // Every artifact + media path is PROVEN gone. Advance to `key-clear-ready` durably (carrying the config
+    // snapshot forward), THEN hand off. A failed write here self-heals: the phase stays `delete-pending`, so a
+    // next boot re-enters this resume, re-verifies deletion (idempotent), and re-advances.
+    const phaseReady = writeWipeJournal("key-clear-ready", config);
+
+    if (!hook) {
+      // Desktop/CI (no launcher): the device key can't be rotated in-process. The wipe already deleted the
+      // ciphertext; clear the phase and boot a fresh (same-key) DB — the documented desktop limitation. If the
+      // phase file can't be removed, do NOT open a fresh store: the next boot would re-read `key-clear-ready`
+      // and re-wipe the fresh DB on every launch. Stay locked (fail-closed) so a persistent FS fault surfaces
+      // as a stuck node rather than a silent perpetual-wipe loop (CodeRabbit MAJOR).
+      if (!clearWipePhase()) {
+        const message =
+          "Resuming an interrupted emergency wipe: artifacts are deleted, but the durable wipe-phase file could " +
+          "NOT be removed on a node with no launcher hook — refusing to open a fresh database (it would be " +
+          "re-wiped on the next boot). The node is locked; resolve the filesystem fault and reopen.";
+        server.log.error(message);
+        reportBootNotice(message, "kill_switch_wipe_incomplete");
+        throw new WipeResumeInProgressError(message);
+      }
+      server.log.warn(
+        "Resuming an interrupted emergency wipe: artifacts are deleted, but no launcher hook is installed to " +
+          "clear the device key — booting a fresh database under the existing key (documented limitation, docs/02).",
+      );
+      return openInitialStore();
+    }
+
+    awaitingWipeRestart = true;
+    let signaled = true;
+    try {
+      hook();
+    } catch (error) {
+      signaled = false;
+      server.log.error(error, "Kill switch resume: failed to signal the RN launcher for the wipe-restart handoff");
+    }
+    // Be honest about what actually happened: if the hook threw, the launcher was NOT signaled this run. The
+    // durable `key-clear-ready` phase (when it wrote) still lets a later app restart's main.js re-drive the
+    // key-clear on its own gate, so recovery converges either way — but the notice must not claim a signal we
+    // didn't send (CodeRabbit MAJOR).
+    const phaseNote = phaseReady
+      ? "durable `key-clear-ready` phase written"
+      : "the `key-clear-ready` phase could NOT be written durably (a later boot re-verifies deletion and retries)";
+    const message = signaled
+      ? "Resuming an interrupted emergency wipe: every persisted artifact is deleted and VERIFIED gone; a " +
+        `device-key-clear-and-restart was REQUESTED from the launcher (${phaseNote}). The database was not opened.`
+      : "Resuming an interrupted emergency wipe: every persisted artifact is deleted and VERIFIED gone, but " +
+        `signaling the launcher for the key-clear FAILED (${phaseNote}) — restart the app to finish clearing the ` +
+        "device key. The database was not opened.";
+    server.log.warn(message);
+    reportBootNotice(message, "kill_switch_wipe_resumed");
+    throw new WipeResumeInProgressError(message);
+  }
+
+  let store = resumeWipePhaseThenOpenStore();
 
   /**
    * Parse one PRESENT config layer, **aborting startup** if it's malformed or invalid. Silently ignoring
@@ -1366,6 +2735,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // can handshake + show the fingerprint. The client still prefers the QR-delivered key (docs/08).
       transportPublicKey:
         appConfig.security.transportEncryption === "off" ? undefined : transportIdentity?.publicKey,
+      // Report the EFFECTIVE posture, not the merely-configured one (F5/P2-1): `security.dbEncryption`
+      // is a declarative admin setting, decoupled from whether the store actually got opened with a
+      // key — `encryptionEnabled` is boot-resolved truth (including the F4/SF2 fallback downgrade), so
+      // when it's false the wire must say "off" regardless of what's configured. When it's true, prefer
+      // the caller's boot-resolved `dbEncryptionMode` (P2-1: the Android launcher's actual key strategy,
+      // which nobody PATCHes into the admin config) over the declarative axis, falling back to it only
+      // when the caller didn't supply one (desktop/Pi CLI). Never claim encryption that isn't active.
+      dbEncryption: encryptionEnabled ? options.dbEncryptionMode ?? appConfig.security.dbEncryption : "off",
       locale: appConfig.node.locale,
     };
   }
@@ -1516,6 +2893,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/sync/messages",
     "/api/sync/attachment",
   ]);
+
+  /**
+   * The opportunistic-mesh transport BRIDGE routes (docs/16 §5, docs/17). These are an in-process
+   * plumbing seam between the Android launcher's courier brain and the relay — the launcher polls them
+   * over `127.0.0.1` and never over the LAN, and every blob they carry is ALREADY end-to-end sealed at
+   * the `@loam/crypto` mesh layer (the wire below them adds nothing). Under `required` mode a direct
+   * `/api/` hit with no resolved transport session would otherwise 401 (`requiresTransportSession`), which
+   * would silently wedge the courier the moment an operator turns transport encryption up. They are exempt
+   * from the transport-session requirement ONLY when the request actually arrives over loopback (the
+   * handlers additionally refuse any non-loopback caller), so the exemption can never widen LAN exposure.
+   */
+  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound"]);
 
   /**
    * Apply validated user update fields to an existing user object.
@@ -2726,37 +4115,379 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * sessions, avatar files), signal connected clients to purge their local caches, close their
    * sockets, and re-seed the node's defaults so it comes back factory-fresh. Config (including the
    * kill-switch settings themselves) survives — the wipe destroys data, not settings.
+   *
+   * Exception (P1-2, docs/15): a `persistent`/`passphrase`-encrypted node has a FIXED key this
+   * process can't replace in-process, so it deletes the ciphertext and hands off to the RN launcher
+   * to clear the Keystore key and restart instead of recreating the database under the same key —
+   * see the branch at the top of {@link executeKillSwitchBody}.
    */
-  async function executeKillSwitch(): Promise<void> {
+  async function executeKillSwitch(): Promise<KillSwitchResult> {
+    // SINGLE-FLIGHT (CodeRabbit round-10): two concurrent callers (the admin kill-switch endpoint + the panic
+    // token, or two same-tick requests that both cleared the 503 gate before the first raised it) must NOT
+    // each run a wipe — a second `store.close()`/delete/reopen racing the first is destructive. Reuse the
+    // in-flight attempt so every concurrent caller observes the SAME single wipe's outcome.
+    if (wipeInFlight) {
+      return wipeInFlight;
+    }
     // Invalidate any in-flight sync round up front (before the first await here): a pull that resumes
     // after this point will see the changed generation and bail instead of writing peer data back
-    // onto the store we're about to wipe (docs/15 #2).
+    // onto the store we're about to wipe (docs/15 #2). `wipeInProgress` (SF3) additionally blocks a
+    // pass that hasn't started yet — cleared in the `finally` below so it can't get stuck set on error.
     wipeGeneration += 1;
+    wipeInProgress = true;
 
-    if (encryptionEnabled) {
-      // Cryptographic wipe: destroy the ciphertext file AND (in ephemeral mode) rotate to a fresh
-      // key, so any bytes a forensic tool recovers from flash are unreadable — stronger than a
-      // logical DELETE, which leaves recoverable pages behind. See docs/02-kill-switch.md.
-      store.close();
-      for (const suffix of ["", "-wal", "-shm"]) {
-        await rm(`${dbPath}${suffix}`, { force: true });
+    const attempt = executeKillSwitchBody().finally(() => {
+      wipeInProgress = false;
+      wipeInFlight = undefined;
+    });
+    wipeInFlight = attempt;
+    return attempt;
+  }
+
+  /**
+   * The RN launcher's wipe-restart hook (P1-2, docs/15), if installed. `nodejs-project-template/main.js`
+   * sets this on `globalThis` before requiring the server bundle, same pattern as `__loamReportBootError`
+   * and `__loamOnDeviceChat` — absent on every other host (desktop/Pi/CI), where it's simply undefined.
+   * Exposed as a getter rather than an eager call so the caller can decide whether it's even worth
+   * writing the durable handoff marker (P1-2b) BEFORE actually signaling.
+   */
+  function wipeRestartHook(): (() => void) | undefined {
+    return (globalThis as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart;
+  }
+
+  /**
+   * Persist `config` to `configPath` (P1-3/P1-4, Sol rounds 4/5): the fixed-key kill-switch branch below
+   * deletes the whole DB — and with it, its `config` table — without ever recreating one in-process; the
+   * fresh DB only exists once the NEXT boot resolves a rotated key. Without this, admin-set values (an
+   * armed kill switch, the panic token, the security profile, retention, sync/mesh, feature flags…)
+   * would silently revert to config.json/defaults on that next boot, DISARMING the kill switch along
+   * with everything else. Writes atomically (temp file + rename) so a crash mid-write can never leave
+   * `config.json` truncated/corrupt and brick the next boot — `loadAppConfig` fails CLOSED on an
+   * unparseable file. Blanks `sync.token`, the one plaintext bearer secret in `LoamConfig`
+   * (`admin.passphrase`/`killSwitch.panicToken` are already scrypt-hashed and safe to persist as-is) —
+   * `config.json` is a plain, unprotected file, unlike the DB `config` table it would otherwise only
+   * ever have lived in.
+   *
+   * Retries once on failure (a transient fs error shouldn't cost the operator their config) and returns
+   * whether it EVENTUALLY succeeded. FULLY SYNCHRONOUS (P1-4, Sol round-9): the caller must persist config
+   * BEFORE writing the `delete-pending` phase and before any destruction — config.json must be durable ahead
+   * of the phase so that a boot-time resume (which DELETES the DB, and with it the DB `config` table) always
+   * has the CURRENT effective config to fall back to on config.json. Being sync (not async) also keeps the
+   * whole kill-switch critical section await-free, so there is no interleaving window between the in-memory
+   * lockdown and the phase write.
+   */
+  function persistConfigForRestart(config: LoamConfig): boolean {
+    const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
+    const contents = JSON.stringify(sanitized, null, 2);
+    // DURABLE write (P2-1, Sol round-8): staging write + file fsync + atomic rename + parent-dir fsync, via
+    // `durableWriteFileSync`. A bare writeFile+rename is atomic but NOT power-loss-durable — it could return
+    // "success" while a crash then discards the new bytes or the rename, silently reverting admin settings
+    // (the armed kill switch, panic token, security profile…) to config.json/defaults after the wipe deletes
+    // the DB `config` table. Retries once (a transient fs error shouldn't cost the config).
+    if (durableWriteFileSync(configPath, contents)) {
+      return true;
+    }
+    server.log.error(
+      "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe (attempt 1 of 2) — retrying once",
+    );
+    if (durableWriteFileSync(configPath, contents)) {
+      return true;
+    }
+    server.log.error(
+      "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe after a retry — giving up " +
+        "(the caller proceeds with the wipe regardless and reports a distinct notice)",
+    );
+    return false;
+  }
+
+  /**
+   * The result of a kill-switch run (P1-1, Sol round 8) — so the `/api/admin/kill-switch` and `/api/panic`
+   * endpoints never report success on an INCOMPLETE wipe. `complete` is false when the wipe could not be
+   * finished this run (deletion incomplete/unverifiable → 503-locked, retried on the next boot); `phase`
+   * carries the durable wipe phase for a fixed-key launcher handoff.
+   */
+  type KillSwitchResult = { complete: boolean; phase?: WipePhase };
+
+  /** The actual kill-switch work, split out so {@link executeKillSwitch} can guarantee `wipeInProgress`
+   *  is cleared via `finally` regardless of how this returns. */
+  async function executeKillSwitchBody(): Promise<KillSwitchResult> {
+    /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
+     *  tell clients to purge, close sockets, then report the distinct incomplete notice. Used by the
+     *  no-hook fail-closed paths (a phase-write failure and a deletion failure) so nothing stale is served
+     *  while the node is stuck; the fixed-key hook branch does its own equivalent lockdown up front (RF-a). */
+    function lockDownAndReportIncomplete(message: string): KillSwitchResult {
+      awaitingWipeRestart = true;
+      data = { users: [], channels: [], messages: [] };
+      attachmentOwners.clear();
+      sessions.clear();
+      identityTokens.clear();
+      claimAttempts.clear();
+      panicAttempts.clear();
+      transportSessions.clear();
+      peerTransportSessions.clear();
+      broadcast({ type: "wipe" });
+      for (const { socket } of sockets) {
+        socket.close();
+      }
+      sockets.clear();
+      for (const pending of [...pendingSockets]) {
+        pending.close();
+      }
+      server.log.error(message);
+      reportBootNotice(message, "kill_switch_wipe_incomplete");
+      return { complete: false };
+    }
+
+    // RF-a, extended (Sol round-10 review): raise the 503 lockdown gate SYNCHRONOUSLY, before ANY branch or
+    // await, for EVERY wipe path — not just the hooked fixed-key branch. The in-process reopen paths (no-hook
+    // fixed-key, ephemeral, plaintext logical) reset the in-memory `data`/`sessions` only in the shared tail,
+    // AFTER their first `await rm(...)`; without this a concurrent request landing in that window read the
+    // still-populated mirror with a 200 instead of a 503. The gate now covers the whole wipe; it is LIFTED
+    // again (`awaitingWipeRestart = false`) only on the in-process SUCCESS return once `loadData()` has
+    // repopulated `data` from the fresh empty DB. The hooked fixed-key branch returns with the gate still
+    // raised (it hands off to a launcher restart), and every fail-closed path stays 503-locked.
+    awaitingWipeRestart = true;
+
+    // A `persistent`/`passphrase` key is FIXED (Keystore-held on Android, config-held on desktop) —
+    // this process has no way to mint a new one. Recreating the encrypted DB in-process (as the
+    // ephemeral/off branches below do) would just re-key the fresh database under the SAME key that
+    // the wipe is supposed to be discarding, defeating the whole point (P1-2/Sol round 3). Instead:
+    // delete the ciphertext, hand off to the RN launcher (which clears the Keystore key and restarts
+    // the embedded runtime), and STOP — the store is now closed, so nothing below this branch may
+    // touch it again (a fresh key only exists once the NEXT boot resolves one).
+    const fixedKeyMode = options.dbEncryptionMode === "persistent" || options.dbEncryptionMode === "passphrase";
+
+    if (encryptionEnabled && fixedKeyMode) {
+      const hook = wipeRestartHook();
+
+      if (hook) {
+        // RF-a (adversarial review, round 5): the synchronous in-memory lockdown MUST run BEFORE this
+        // function's FIRST `await`. P1-4 had made `await persistConfigForRestart(appConfig)` the first
+        // statement here — which reopened the confidentiality window RF1 closed: during the config-file
+        // write the RF1 503-gate (`awaitingWipeRestart`) wasn't set yet, so a concurrent request was
+        // served a normal 200 from the still-populated `data`/`sessions` on the kill-switch path. So lock
+        // everything down FIRST, synchronously, with NO await — even a request already queued behind this
+        // turn of the event loop then sees the 503, not stale content. `appConfig` is deliberately left
+        // intact by this block; it's persisted just below, still BEFORE the marker + hook, as P1-4 wants.
+        awaitingWipeRestart = true;
+        data = { users: [], channels: [], messages: [] };
+        attachmentOwners.clear();
+        sessions.clear();
+        identityTokens.clear();
+        claimAttempts.clear();
+        panicAttempts.clear();
+        transportSessions.clear();
+        peerTransportSessions.clear();
+
+        // Notify still-connected clients to purge their local caches BEFORE closing their sockets —
+        // closing first would leave the broadcast with no one left to reach.
+        broadcast({ type: "wipe" });
+
+        for (const { socket } of sockets) {
+          socket.close();
+        }
+        sockets.clear();
+        for (const pending of [...pendingSockets]) {
+          pending.close();
+        }
+
+        // P1-4 (Sol round-10): commit the wipe INTENT and the effective CONFIG together, atomically, as the
+        // FIRST durable action — the wipe journal `{ phase: "delete-pending", config }`. A SIGKILL after this
+        // single write leaves BOTH on disk, so a boot-time resume can restore config.json from the snapshot
+        // before it clears the journal; a kill BEFORE it destroys nothing (no journal → wipe forgotten, but
+        // nothing lost). This is why config can no longer revert on a crash: it rides with the intent, not in
+        // a separate later write. A `false` does NOT abort the wipe (confidentiality-first, Sol round-8 P1-d /
+        // round-9 decision): deletion still runs; the only residual is the degraded-FS compound case.
+        const sanitized = sanitizeConfigForRestart(appConfig);
+        const journalWritten = writeWipeJournal("delete-pending", sanitized);
+        if (!journalWritten) {
+          server.log.error(
+            "KILL SWITCH NOTICE: could NOT durably write the wipe journal (intent + config) before this fixed-key " +
+              "wipe — proceeding with deletion regardless (confidentiality-first), but a crash mid-deletion could " +
+              "then forget the wipe and admin config may revert; reopen promptly.",
+          );
+        }
+
+        // Close the store so its files can be deleted, then delete + PROVE-gone the FULL inventory (DB + media)
+        // DURABLY (fail closed on any survivor/unverifiable path). Only after that may the key-clear be signaled.
+        store.close();
+        const deletion = deleteAndVerifyAllWipeArtifactsDurable();
+        if (!deletion.ok) {
+          // Stay 503-locked at `delete-pending`; the resume re-runs deletion. The journal (with config) is
+          // intact, so config is safe regardless.
+          const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+          const message =
+            `KILL SWITCH NOTICE: some persisted data could not be deleted and VERIFIED gone (${remaining}). ` +
+            "The launcher was NOT signaled, to avoid clearing the device key while recoverable ciphertext " +
+            "survives. The node is locked down (503); reopen it to retry the wipe.";
+          server.log.error(message);
+          reportBootNotice(message, "kill_switch_wipe_incomplete");
+          return { complete: false, phase: "delete-pending" };
+        }
+
+        // Persist config.json from the snapshot NOW, and gate the launcher handoff on it (P1-4, Sol round-10):
+        // the launcher clears the journal after its key-clear, and the fresh server boot then reads config.json
+        // (the journal is gone), so config.json MUST be current before we ever signal. If it can't be written,
+        // do NOT signal — stay 503-locked at `delete-pending` (the journal retains the config); a resume
+        // persists config.json from the journal and re-advances. The DB is already deleted (confidentiality
+        // preserved), config is never lost — both invariants hold.
+        if (!persistConfigForRestart(sanitized)) {
+          const message =
+            "KILL SWITCH NOTICE: the database was deleted and VERIFIED gone, but config.json could NOT be " +
+            "durably persisted — refusing to signal the launcher (its key-clear would clear the journal before " +
+            "config could be recovered). The node is locked down (503); reopen it — the resume restores config " +
+            "from the wipe journal and completes the handoff.";
+          server.log.error(message);
+          reportBootNotice(message, "kill_switch_wipe_incomplete");
+          return { complete: false, phase: "delete-pending" };
+        }
+
+        // Every artifact + media path is PROVEN gone and config.json is current. Advance to `key-clear-ready`
+        // DURABLY (carrying the config snapshot), THEN hand off to the launcher.
+        const phaseReady = writeWipeJournal("key-clear-ready", sanitized);
+        try {
+          hook();
+        } catch (error) {
+          server.log.error(error, "Kill switch: failed to signal the RN launcher for the wipe-restart handoff");
+        }
+
+        if (phaseReady) {
+          server.log.warn(
+            "Kill switch: persistent/passphrase-encrypted database and media deleted and VERIFIED gone; config " +
+              "persisted; a device-key-clear-and-restart was REQUESTED from the launcher (durable `key-clear-ready` " +
+              "journal written) — the key rotation is only confirmed once the launcher acknowledges it cleared the key.",
+          );
+          return { complete: true, phase: "key-clear-ready" };
+        }
+
+        // Data is unrecoverable, config.json is current, and the launcher was signaled, but the `key-clear-ready`
+        // journal could not be written durably. A next boot re-reads the (still-`delete-pending`) journal,
+        // re-verifies deletion (idempotent), re-persists config, and re-signals — so recovery converges.
+        const noMarkerMessage =
+          "KILL SWITCH NOTICE: all data was deleted and VERIFIED gone, config persisted, and a device-key-clear-" +
+          "and-restart was REQUESTED, but the durable `key-clear-ready` journal could not be written — if the " +
+          "key-clear is interrupted, reopen the node to finish clearing the (now-unused) device key.";
+        server.log.warn(noMarkerMessage);
+        reportBootNotice(noMarkerMessage, "kill_switch_wipe_no_marker");
+        return { complete: true, phase: "delete-pending" };
       }
 
+      // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a NEW key
+      // from in-process. Fall through to the durable no-hook fixed-key wipe below (full-inventory delete +
+      // durable phase clear + recreate under the SAME key) rather than bricking the wipe entirely; the key
+      // cannot be rotated without a launcher (documented limitation, docs/02). (When a hook IS present the
+      // block above always returns after the launcher handoff.)
+      server.log.warn(
+        "Kill switch: this node uses a fixed (persistent/passphrase) encryption key, but no launcher " +
+          "restart hook is installed, so the key cannot be rotated in-process. Performing a full durable " +
+          "wipe and recreating the database under the SAME key (documented limitation, docs/02).",
+      );
+    }
+
+    if (encryptionEnabled && fixedKeyMode) {
+      // NO-LAUNCHER fixed-key wipe (desktop persistent/passphrase — the hooked Android path returned above):
+      // can't rotate a fixed key in-process, so delete + recreate under the SAME key (documented limitation,
+      // docs/02). P1-1/P1-4 (Sol round-9): (1) persist config BEFORE the phase so a boot-time resume that
+      // deletes the DB still has current config; (2) delete + prove the FULL inventory (DB + media) gone
+      // DURABLY while the store is closed; (3) durably CLEAR the phase BEFORE opening the fresh store — fail
+      // closed (503) on either — so a resurrected phase can never delete a freshly opened DB (incl. post-wipe
+      // data written since a "success" response) and a crash can't forget still-pending media deletion.
+      // P1-4 (Sol round-10): journal `{ delete-pending, config }` atomically FIRST (intent + config together).
+      // Confidentiality-first: a failed write does NOT abort the wipe.
+      const sanitized = sanitizeConfigForRestart(appConfig);
+      if (!writeWipeJournal("delete-pending", sanitized)) {
+        server.log.error(
+          "Kill switch (no-hook fixed key): could NOT durably write the wipe journal (intent + config) before " +
+            "deletion — if deletion also fails, a restart cannot auto-resume; reopen promptly.",
+        );
+      }
+      store.close();
+      // Full inventory (every DB artifact + user media) + proof of absence + parent-dir fsync, fail closed.
+      const deletion = deleteAndVerifyAllWipeArtifactsDurable();
+      if (!deletion.ok) {
+        const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+        return lockDownAndReportIncomplete(
+          `KILL SWITCH NOTICE (no-hook fixed key): could not delete and VERIFY every artifact + media gone durably ` +
+            `(${remaining}) — refusing to reopen while recoverable data may remain. The node is locked down (503); ` +
+            "restart it to retry the wipe.",
+        );
+      }
+      // Persist config.json from the snapshot BEFORE clearing the journal (P1-4): the journal carries the only
+      // durable config copy until config.json lands, so if this fails, do NOT clear (a clear would lose it) —
+      // stay 503-locked; the resume restores config.json from the journal and re-clears.
+      if (!persistConfigForRestart(sanitized)) {
+        return lockDownAndReportIncomplete(
+          "KILL SWITCH NOTICE (no-hook fixed key): the database was deleted, but config.json could NOT be durably " +
+            "persisted — refusing to clear the wipe journal (its config snapshot is the only durable copy) or open a " +
+            "fresh DB. The node is locked down (503); reopen it — the resume restores config from the journal.",
+        );
+      }
+      // DURABLY clear the journal BEFORE opening the fresh store (P1-1). If the clear can't be made durable, do
+      // NOT open a fresh DB: a power-loss-resurrected `delete-pending` would re-wipe it on the next boot. Stay
+      // 503-locked; a restart's resume re-runs the (idempotent) deletion and re-clears. (config.json is already
+      // current from the step above, so a resume also has config.)
+      if (!clearWipePhase()) {
+        return lockDownAndReportIncomplete(
+          "KILL SWITCH NOTICE (no-hook fixed key): the full wipe completed but the durable phase clear could not be " +
+            "confirmed — refusing to open a fresh database (a resurrected phase would re-wipe it). The node is locked " +
+            "down (503); restart it to retry the wipe.",
+        );
+      }
+      store = openLoamStore();
+      // The wipe destroys data, not settings; the fresh encrypted DB starts with an empty config table, so
+      // re-persist the effective config into it (config.json above is the crash-recovery copy).
+      store.setConfigValue("config", JSON.stringify(sanitized));
+    } else if (encryptionEnabled) {
+      // Ephemeral (RAM-only key) OR a legacy keyed node with no declared mode: rotate the RAM key (only when
+      // there IS one — never rotate a legacy FIXED key) and recreate. No durable phase: an ephemeral key is
+      // regenerated on restart, so any surviving file is unreadable regardless. Media is deleted in the shared
+      // tail below. A cryptographic wipe destroys the ciphertext, stronger than a logical DELETE (docs/02).
+      store.close();
+      const deletion = deleteAndVerifyDbArtifacts();
+      if (!deletion.ok) {
+        const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
+        return lockDownAndReportIncomplete(
+          `KILL SWITCH NOTICE: the cryptographic wipe could not delete and VERIFY every DB artifact (${remaining}) — ` +
+            "refusing to rotate the key / reopen while recoverable ciphertext may remain. The node is locked " +
+            "down (503); restart it to retry the wipe.",
+        );
+      }
       if (ephemeralDbKey) {
         // Drop the old key by overwriting the reference; a fresh random key encrypts the new DB.
         // (Node strings can't be reliably zeroed in RAM — documented as a known limitation.)
         dbKey = randomBytes(32).toString("hex");
       }
-
       store = openLoamStore();
-      // The wipe destroys data, not settings — but the fresh encrypted DB starts with an empty
-      // config table, unlike wipeAll() below which preserves it. Re-persist the effective config
-      // so admin edits (an armed kill switch, the panic token, feature flags) survive a restart
-      // instead of silently reverting to config.json/defaults.
       store.setConfigValue("config", JSON.stringify(appConfig));
     } else {
       // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
       store.wipeAll();
+      // P1-2 (Sol round 7): wipeAll keeps the live plaintext DB open (and its config), but stale
+      // migration/recovery artifacts from a PRIOR encrypted era — the legacy-key `.premigration` snapshot
+      // (still-readable ciphertext!), its sidecars, a leftover `-journal`, and `*.unreadable-<ts>`
+      // renames — are NOT part of that open DB and must still be removed. Skip only the three live WAL
+      // files the open store owns.
+      const liveFiles = new Set([dbPath, `${dbPath}-wal`, `${dbPath}-shm`]);
+      for (const file of dbArtifactPaths()) {
+        if (liveFiles.has(file)) {
+          continue;
+        }
+        try {
+          rmSync(file, { force: true });
+        } catch {
+          // Fall through to the existence check — a delete failure is surfaced there, not swallowed here.
+        }
+        // RF7-c (Sol round 7 adversarial review): verify + WARN on any survivor, consistent with the
+        // encrypted paths above. This is a documented non-secure LOGICAL wipe (no fail-closed), but a
+        // stale `.premigration` here is still-readable legacy-key ciphertext — a silent failure that left
+        // it behind must at least get operator notice rather than vanishing without a trace.
+        if (existsSync(file)) {
+          server.log.warn(
+            `KILL SWITCH NOTICE: a stale DB artifact could not be deleted during the logical wipe (${file}) — ` +
+              "recoverable ciphertext from a prior encrypted era may remain on disk; remove it manually.",
+          );
+        }
+      }
     }
 
     await rm(avatarsDir, { recursive: true, force: true });
@@ -2797,6 +4528,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     server.log.warn("Kill switch executed: all data wiped, defaults re-seeded");
+    // These branches (ephemeral rotation, same-key fallback, plaintext logical wipe) complete the wipe
+    // in-process and re-seed a usable node — no launcher handoff is pending, so the wipe is complete. The
+    // in-memory mirror is now the fresh empty DB (loadData above), so LIFT the 503 gate raised at the top:
+    // the node serves again, and no request between here and now saw stale pre-wipe data (Sol round-10 review).
+    awaitingWipeRestart = false;
+    return { complete: true };
   }
 
   /**
@@ -3386,6 +5123,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           !bytes.length ||
           !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
         ) {
+          // Fetched something, but it isn't usable — record it as missing too (docs/15 A6) rather
+          // than silently dropping it: a peer mid-write or serving a truncated/corrupt copy today can
+          // look fine on a later retry.
+          store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
           continue;
         }
 
@@ -3405,11 +5146,163 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
       } catch {
         // Best-effort at import time: the fetch genuinely failed (peer unreachable, attachment gone, or a
-        // transient error). The message still imports; the image stays absent (the puller only re-requests
-        // messages it lacks, so an imported message's attachment isn't retried) — acceptable off-grid,
-        // where the text is the payload that matters. The required-mode 401 that dropped EVERY attachment
-        // is the case this path now fixes.
+        // transient error). The message still imports — the text is the payload that matters off-grid —
+        // but a plain digest pull never re-offers an already-known message id, so without a work item the
+        // image would stay absent forever (docs/15 A6). `retryMissingAttachments` is the independent pass
+        // that re-fetches just this file from this peer, without re-importing the message. The
+        // required-mode 401 that dropped EVERY attachment is the case this path originally fixed.
+        store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
       }
+    }
+  }
+
+  /**
+   * Independent retry pass for attachments that failed to copy during a sync import (docs/15 A6).
+   * `importPeerAttachments` is best-effort and, on failure, leaves the message imported but
+   * image-less; a later digest round sees the message id as already-known and never re-offers it, so
+   * without this the image stays missing forever. This re-fetches just the missing file(s) from the
+   * peer that had them (reusing `fetchPeerAttachmentBytes`, the same peer-fetch path the initial
+   * import used) — it never re-imports or otherwise touches the message. Runs on the reaper timer, but
+   * (F1) only actually contacts a peer once per record's backoff interval, and (F2) never contacts a
+   * peer sync is currently off, or one the operator has since removed from `sync.peers` — dropping
+   * that record instead. Gives up (drops the work item) past `missingAttachmentMaxAgeMs` so a
+   * permanently-gone file can't grow the work-item table forever. (SF3) Single-flight: a tick that
+   * lands while a pass is still in flight no-ops rather than starting a second concurrent pass, and no
+   * new pass starts while a kill-switch wipe is in progress.
+   *
+   * (P2-2, docs/15 A6/F1, Sol round 3) The per-pass cap (`missingAttachmentMaxRecordsPerPass`) is
+   * applied by `store.loadDueMissingAttachments` at the SQL level — `WHERE next_attempt_at <= now
+   * ORDER BY next_attempt_at ASC LIMIT`, so it selects from the records actually ELIGIBLE for a retry
+   * right now, fairly ordered by how overdue they are. The old code loaded EVERY record in creation
+   * (rowid) order and sliced the first `missingAttachmentMaxRecordsPerPass` BEFORE checking each one's
+   * own backoff — so if the oldest 25 records all happened to still be in backoff (e.g. a peer flapped
+   * and bumped them all around the same time), records 26+ were never even looked at, no matter how
+   * overdue they were: permanent starvation for anything added after the first
+   * `missingAttachmentMaxRecordsPerPass` records went into backoff together.
+   */
+  async function retryMissingAttachments(): Promise<void> {
+    // SF3: single-flight guard — an overlapping reaper tick (or a manual /api/admin/sync/run-triggered
+    // call landing mid-pass) must no-op, not stack a second concurrent pass of peer fetches.
+    if (retryMissingAttachmentsRunning) {
+      return;
+    }
+
+    // SF3: never START a new pass while a kill-switch wipe is in flight — `wipeGeneration` alone only
+    // catches a pass that was ALREADY RUNNING when the wipe began (see the comment on `wipeInProgress`).
+    if (wipeInProgress) {
+      return;
+    }
+
+    // F2a: no live sync means no peer to fetch from at all — don't touch the table (and don't wake a
+    // node that has sync switched off just to no-op every record in it).
+    if (!appConfig.sync.enabled) {
+      return;
+    }
+
+    const now = Date.now();
+    // P2-2: only the DUE records, fairly ordered and already capped at the DB level — see the doc
+    // comment above for why this replaced a full-table load + slice.
+    const records = store.loadDueMissingAttachments(now, missingAttachmentMaxRecordsPerPass);
+
+    if (!records.length) {
+      return;
+    }
+
+    retryMissingAttachmentsRunning = true;
+
+    try {
+      // Snapshot the wipe generation, same defense as importPeerAttachments/syncWithPeer: if a kill
+      // switch fires mid-pass, stop touching the store/disk it just wiped (docs/15 #2).
+      const generation = wipeGeneration;
+      const activePeerUrls = new Set(appConfig.sync.peers.map((peer) => peer.url));
+
+      for (const record of records) {
+        if (wipeGeneration !== generation) {
+          return;
+        }
+
+        // F2b: the peer was removed from sync.peers since this work item was recorded — never contact a
+        // peer the operator explicitly dropped. (The PATCH /api/admin/config handler also prunes these
+        // eagerly on removal; this is the belt-and-suspenders check for the config.json / boot-time path.)
+        if (!activePeerUrls.has(record.peerUrl)) {
+          store.clearMissingAttachment(record.messageId, record.attachmentId);
+          continue;
+        }
+
+        // The message this attachment belonged to is gone locally (deleted/tombstoned/expired since) —
+        // nothing left to attach it to.
+        if (!data.messages.some((message) => message.id === record.messageId)) {
+          store.clearMissingAttachment(record.messageId, record.attachmentId);
+          continue;
+        }
+
+        const filePath = join(attachmentsDir, attachmentFileName({ id: record.attachmentId, mimeType: record.mimeType }));
+
+        try {
+          await stat(filePath);
+          store.clearMissingAttachment(record.messageId, record.attachmentId); // another path already got it
+          continue;
+        } catch {
+          // still missing — fall through to retry
+        }
+
+        if (record.createdAt < now - missingAttachmentMaxAgeMs) {
+          store.clearMissingAttachment(record.messageId, record.attachmentId);
+          server.log.warn(
+            `Giving up on missing attachment ${record.attachmentId} for message ${record.messageId} (peer ${record.peerUrl})`,
+          );
+          continue;
+        }
+
+        // The SQL WHERE clause already guaranteed this record is due (next_attempt_at <= now) — no
+        // per-record backoff check needed here any more (P2-2).
+
+        try {
+          const bytes = await fetchPeerAttachmentBytes(record.peerUrl, { id: record.attachmentId, mimeType: record.mimeType });
+
+          if (wipeGeneration !== generation) {
+            return;
+          }
+
+          if (
+            bytes.length > attachmentMaxBytes ||
+            !bytes.length ||
+            !avatarImageHasExpectedSignature(bytes, record.mimeType)
+          ) {
+            store.bumpMissingAttachmentAttempts(
+              record.messageId,
+              record.attachmentId,
+              now + missingAttachmentBackoffMs(record.attempts + 1),
+            );
+            continue;
+          }
+
+          await mkdir(attachmentsDir, { recursive: true });
+          await writeFile(filePath, bytes);
+
+          if (wipeGeneration !== generation) {
+            await rm(filePath, { force: true });
+            return;
+          }
+
+          store.clearMissingAttachment(record.messageId, record.attachmentId);
+        } catch {
+          // F6: match the wipeGeneration re-check every other write site in this function has — a kill
+          // switch that lands while `fetchPeerAttachmentBytes` was in flight must not re-persist a bumped
+          // attempt count onto the store it just wiped.
+          if (wipeGeneration !== generation) {
+            return;
+          }
+
+          store.bumpMissingAttachmentAttempts(
+            record.messageId,
+            record.attachmentId,
+            now + missingAttachmentBackoffMs(record.attempts + 1),
+          );
+        }
+      }
+    } finally {
+      retryMissingAttachmentsRunning = false;
     }
   }
 
@@ -3971,6 +5864,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   void reapOrphanedAttachments();
 
   const reaperTimer = setInterval(() => {
+    // P1-2(c): once a fixed-key kill switch has handed off to the launcher for a restart, `store` is
+    // closed and its files are being (or already are) deleted — every one of these calls touches the
+    // store or the in-memory mirrors that `awaitingWipeRestart` deliberately froze at `{}` (RF1). A tick
+    // that lands in the gap between "wipe requested" and "process actually restarted" must be a pure
+    // no-op, not a crash against a closed handle or a resurrection of the frozen (empty) in-memory state.
+    if (awaitingWipeRestart) {
+      return;
+    }
+
     try {
       reapExpiredMessages();
     } catch (error) {
@@ -3982,11 +5884,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     pruneExpiredRateLimiters();
 
     void reapOrphanedAttachments().catch((error: unknown) => server.log.error(error));
+    void retryMissingAttachments().catch((error: unknown) => server.log.error(error));
   }, 30_000);
 
   // Sync ticker: a fixed 5s heartbeat; runSyncLoop itself enforces the configured interval (so an
   // admin shortening sync.intervalMs takes effect without re-arming a timer).
   const syncTimer = setInterval(() => {
+    // P1-2(c): same reasoning as the reaper gate above — a sync round touches the store and peer
+    // sessions, neither of which this process may read/write once a wipe-restart is pending.
+    if (awaitingWipeRestart) {
+      return;
+    }
     void runSyncLoop().catch((error: unknown) => server.log.error(error));
   }, 5_000);
 
@@ -4001,6 +5909,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // ciphertext for message/DM/config CONTENT. GET request paths + query strings and image bytes remain
   // visible (metadata); that's the documented Layer-1 scope. All inert when the mode is `off`.
   server.addHook("onRequest", async (request, reply) => {
+    // RF1: once a persistent/passphrase kill switch has handed off to the launcher for a restart, this
+    // process must not serve anything from its (deliberately) stale in-memory mirrors while it waits to
+    // be torn down. Checked before EVERYTHING else, including the internal tunnel bypass — the only
+    // route that stays reachable is the liveness probe, so the Android launcher's readiness poll still
+    // works. See `executeKillSwitchBody`.
+    if (awaitingWipeRestart && request.routeOptions?.url !== "/api/health") {
+      return reply.code(503).send(errorBody("This node is restarting after a kill switch reset."));
+    }
     // An internal tunnel re-dispatch runs plaintext inside the process — never enforce/decrypt it
     // (its response is sealed by the outer tunnel request instead). Checked before anything else so
     // it holds in every mode.
@@ -4044,6 +5960,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // transport session has no `activeSession` here and falls through to the 401, so plaintext sync is
       // still refused in `required` mode.
       if (activeSession && DIRECT_SEALED_SYNC_ROUTES.has(request.routeOptions?.url ?? "")) {
+        return;
+      }
+      // The in-process mesh bridge (docs/17) is loopback-only and carries blobs already sealed at the
+      // mesh crypto layer, so it isn't the LAN-content this gate protects — let the launcher's courier
+      // keep polling it when the operator turns transport encryption up. Gated on a real loopback peer
+      // (the handlers re-check too), so a LAN joiner still can't reach it unsealed.
+      if (MESH_LOOPBACK_BRIDGE_ROUTES.has(request.routeOptions?.url ?? "") && requestFromLoopback(request)) {
         return;
       }
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));
@@ -4175,7 +6098,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   server.get("/api/bootstrap", async () => ({
     nodeName: appConfig.node.name,
     version: options.version ?? "dev",
-    joinUrl: `http://${joinHost}:${clientPort}`,
+    joinUrl: `http://${currentJoinHost()}:${clientPort}`,
     websocketPath: "/ws",
     networkConfig: currentNetworkConfig(),
   }));
@@ -4186,7 +6109,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return {
       nodeName: appConfig.node.name,
       version: options.version ?? "dev",
-      joinUrl: `http://${joinHost}:${clientPort}`,
+      joinUrl: `http://${currentJoinHost()}:${clientPort}`,
       websocketPath: "/ws",
       currentUser: rolesVisibleUser(currentUser),
       networkConfig: currentNetworkConfig(),
@@ -5783,7 +7706,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(400).send(errorBody('Confirmation required: send { "confirm": "wipe" }'));
     }
 
-    await executeKillSwitch();
+    // P1-1 (Sol round 8): reflect the wipe RESULT — never report success on an INCOMPLETE wipe (deletion
+    // incomplete/unverifiable → the node is 503-locked and the wipe is retried on the next boot).
+    const result = await executeKillSwitch();
+    if (!result.complete) {
+      return reply
+        .code(503)
+        .send(errorBody("The emergency wipe could not be completed; the node is locked down — reopen it to retry."));
+    }
     return { ok: true };
   });
 
@@ -5829,7 +7759,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(404).send(errorBody("Not found"));
     }
 
-    await executeKillSwitch();
+    // P1-1 (Sol round 8): the token holder proved it, so an incomplete wipe is reported honestly (503),
+    // not as a false `{ ok: true }`. Only genuine probing (bad/absent token, above) stays a uniform 404.
+    const result = await executeKillSwitch();
+    if (!result.complete) {
+      return reply
+        .code(503)
+        .send(errorBody("The emergency wipe could not be completed; the node is locked down — reopen it to retry."));
+    }
     return { ok: true };
   });
 
@@ -5871,6 +7808,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     for (const url of [...peerSyncStatus.keys()]) {
       if (!activePeerUrls.has(url)) {
         peerSyncStatus.delete(url);
+      }
+    }
+    // Same cleanup for queued missing-attachment retries (F2, docs/15 A6): a removed peer's work items
+    // would otherwise sit in the table until `retryMissingAttachments`' own defensive check happened to
+    // run — drop them immediately so a peer the operator just removed is never contacted again.
+    for (const record of store.loadMissingAttachments()) {
+      if (!activePeerUrls.has(record.peerUrl)) {
+        store.clearMissingAttachment(record.messageId, record.attachmentId);
       }
     }
     // Drop every cached puller-side transport session (docs/08): a peer's URL, pinned transportKey, or
@@ -6186,6 +8131,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     getAdminSetupCode: () => adminSetupCode,
     reapExpiredMessages,
     reapOrphanedAttachments,
+    retryMissingAttachments,
     pruneExpiredRateLimiters,
     rateLimiterEntryCounts: () => ({
       claim: claimAttempts.size,

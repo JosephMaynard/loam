@@ -9,7 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 
@@ -24,10 +26,23 @@ import android.util.Log
  */
 class LoamHostService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
+  // Renews the bounded wake lock at roughly half its own timeout, for as long as this service is
+  // alive — see `acquireWakeLock`/`scheduleWakeLockRenewal`. Cancelled in `releaseWakeLock` so it can
+  // never outlive the service (or double up across restarts of the same instance).
+  private val wakeLockHandler = Handler(Looper.getMainLooper())
+  private val renewWakeLockRunnable = Runnable { renewWakeLock() }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent == null) {
+      // A spurious/redelivered start with no real command (e.g. the system resurrecting the service
+      // after the process was killed) — there's no RN/Node process behind it, so don't hold a
+      // notification + wake lock for a server that isn't there.
+      releaseWakeLock()
+      stopSelf()
+      return START_NOT_STICKY
+    }
     try {
       startForegroundNotification()
       acquireWakeLock()
@@ -35,8 +50,19 @@ class LoamHostService : Service() {
       Log.w(TAG, "Failed to enter the foreground host state", error)
       stopSelf()
     }
-    // START_STICKY: if Android kills us under memory pressure, restart the service when it can.
-    return START_STICKY
+    // START_NOT_STICKY: the embedded Node server lives in the RN process, not this service. If
+    // Android kills the process under memory pressure, the service must not be independently
+    // resurrected into a "hosting" state with no server behind it — the app restarts it (via
+    // `start()`) once the process (and Node) is actually back up.
+    return START_NOT_STICKY
+  }
+
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    // The user swiped the app away — stop hosting rather than keep the notification + wake lock
+    // alive for a process that's going away.
+    releaseWakeLock()
+    stopSelf()
+    super.onTaskRemoved(rootIntent)
   }
 
   override fun onDestroy() {
@@ -90,18 +116,49 @@ class LoamHostService : Service() {
   }
 
   private fun acquireWakeLock() {
-    if (wakeLock != null) {
+    // Only acquire when nothing is currently held — avoids stacking a duplicate acquisition on a
+    // repeated `onStartCommand` (e.g. the system redelivering a start while already hosting). This is
+    // NOT how the 12h window gets reset — see `renewWakeLock` below for that (P1-6): a naive "guard on
+    // isHeld, else acquire" here would make the periodic renewal tick a no-op, since the lock is still
+    // genuinely held at the halfway point (it hasn't expired yet) — which is exactly the bug this
+    // split fixes.
+    if (wakeLock?.isHeld == true) {
       return
     }
     val power = getSystemService(Context.POWER_SERVICE) as PowerManager
     wakeLock =
       power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "loam:host").apply {
         setReferenceCounted(false)
-        acquire()
+        // Bounded: a timeout backstop means a leaked lock can't drain the battery forever. Renewed
+        // periodically below (at half the timeout) for as long as the service stays alive, so a
+        // long-running kiosk/wall-mount host doesn't silently lose it at the 12h mark; this is a
+        // ceiling per acquisition, not an expected session length.
+        acquire(WAKE_LOCK_TIMEOUT_MS)
       }
+    scheduleWakeLockRenewal()
+  }
+
+  /** The renewal tick (fires at half the wake lock's own timeout, for as long as the service stays
+   * alive): explicitly RELEASE the current lock and ACQUIRE a fresh one, resetting the 12h window
+   * (P1-6). This is deliberately NOT just `acquireWakeLock()` — that guards on `isHeld` and no-ops when
+   * the lock is still held, which it always IS at this halfway-point tick (it hasn't expired yet); that
+   * guard made every renewal a no-op, so the original acquisition ran out at the full 12h mark with
+   * nothing having replaced it (a real gap/race in coverage, not just a missed optimization). */
+  private fun renewWakeLock() {
+    wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
+    wakeLock = null
+    acquireWakeLock()
+  }
+
+  /** (Re)schedule the next renewal at half the wake lock's own timeout, replacing any pending one so
+   * repeated `acquireWakeLock()` calls (e.g. from `onStartCommand`) can never stack up duplicates. */
+  private fun scheduleWakeLockRenewal() {
+    wakeLockHandler.removeCallbacks(renewWakeLockRunnable)
+    wakeLockHandler.postDelayed(renewWakeLockRunnable, WAKE_LOCK_TIMEOUT_MS / 2)
   }
 
   private fun releaseWakeLock() {
+    wakeLockHandler.removeCallbacks(renewWakeLockRunnable)
     wakeLock?.let { lock ->
       if (lock.isHeld) {
         lock.release()
@@ -114,6 +171,9 @@ class LoamHostService : Service() {
     private const val TAG = "LoamHostService"
     private const val CHANNEL_ID = "loam-host"
     private const val NOTIFICATION_ID = 4201
+    // Backstop for the partial wake lock: bounds a leak to this long instead of forever. Active
+    // hosting re-acquires it on the next start, so 12h comfortably outlasts any real gap between starts.
+    private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
 
     /** Start the foreground host service (best-effort; safe to call repeatedly). */
     fun start(context: Context) {

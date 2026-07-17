@@ -36,7 +36,9 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
-      # apps/app has no build/test script (Expo), so the recursive build and test steps skip it —
-      # typecheck it explicitly or its TypeScript is never validated in CI.
+      # apps/app has no build script (Expo), so the recursive build step skips it — typecheck it
+      # explicitly or its TypeScript is never validated in CI. It does have a Vitest `test` script
+      # (apps/app/vitest.config.ts), which the "Unit tests" step above already runs via `pnpm test`
+      # → `pnpm -r --if-present test`.
       - name: Android host typecheck
         run: pnpm --filter app typecheck
