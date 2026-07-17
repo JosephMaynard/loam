@@ -1,7 +1,7 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, BackHandler, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
@@ -309,11 +309,36 @@ export default function HostScreen() {
   // other apps; exiting requires the device's own screen-lock PIN.
   const [kiosk, setKiosk] = useState(false);
   const webViewRef = useRef<WebView>(null);
+  // Whether the WebView (the LOAM web client, which routes with preact-iso via the History API) has
+  // in-app history to go back through. A ref, not state: the hardware-back listener reads it without
+  // needing to re-subscribe on every navigation, and there's no render that depends on it.
+  const canGoBackRef = useRef(false);
   const theme = useTheme();
   // Bottom system-nav-bar inset (Android renders edge-to-edge by default): used both to hold a solid
   // strip below the WebView (so its content never draws under the on-screen nav bar) and, when needed,
   // to keep the boot/error screen's content clear of it too.
   const insets = useSafeAreaInsets();
+
+  // Wire the Android hardware/gesture Back button to the WebView's in-app history. The LOAM web client
+  // routes with preact-iso, which pushes History API entries, so the WebView has a real back stack — but
+  // a WebView-hosting RN Activity doesn't connect Back to it by default, so Back on the root screen just
+  // exits the app instead of going to the previous screen (the reported bug). When the WebView has
+  // history, consume Back and navigate it back; otherwise return false so the default (exit) happens. A
+  // native Modal (the menu / overlays) intercepts Back via its own `onRequestClose` before this fires, so
+  // Back still closes those first.
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (canGoBackRef.current) {
+        webViewRef.current?.goBack();
+        return true;
+      }
+      return false;
+    });
+    return () => subscription.remove();
+  }, []);
 
   // Derived, not stored: used both to gate a `useEffect` below (fetching `lockedMode`) and to drive the
   // fatal block's visibility in the render. Computed here (rather than after the `status === 'ready'`
@@ -952,6 +977,11 @@ export default function HostScreen() {
             // Bridge from the LOAM web client back to this native screen (AF1/Sol P1-1) — see
             // `handleWebViewMessage`'s comment.
             onMessage={handleWebViewMessage}
+            // Track whether the client has in-app history so the hardware Back handler (above) knows
+            // whether to navigate back or let Android exit the app.
+            onNavigationStateChange={(navState) => {
+              canGoBackRef.current = navState.canGoBack;
+            }}
             // Keep the WebView pinned to the embedded server's origin. originWhitelist is a coarse
             // prefix guard; onShouldStartLoadWithRequest is the real one — it allows only LOAM-origin
             // navigations and shunts external links (the client opens them with target=_blank) to the
