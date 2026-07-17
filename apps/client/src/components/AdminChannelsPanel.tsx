@@ -121,6 +121,7 @@ export function AdminChannelsPanel({
           <h2>{t("admin.createChannelHeading")}</h2>
         </div>
         <form
+          className="profile-panel-form"
           onSubmit={(event) => {
             event.preventDefault();
             void create();

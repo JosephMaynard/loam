@@ -835,6 +835,15 @@ a {
   font-weight: 800;
 }
 
+/* Some panels (e.g. AdminChannelsPanel's "create a channel" form) nest their fields inside a
+   <form> rather than laying them directly in the .profile-panel grid; give that form the same
+   row gap so consecutive fields — especially the short admin-toggle checkbox rows, which have no
+   input height to create visual separation — don't read as mashed together. */
+.profile-panel-form {
+  display: grid;
+  gap: 14px;
+}
+
 .profile-panel input,
 .profile-panel select {
   width: 100%;

@@ -257,6 +257,22 @@ permissions (`ACCESS_FINE_LOCATION`, plus `NEARBY_WIFI_DEVICES` on API 33+) via
 (Android allows one hotspot per process), and never throws — denial/failure lands in an `error` phase.
 The permissions are declared in the manifest by the config plugin (`with-loam-host.js`).
 
+> **Correction (fix/device-feedback-round1):** an earlier hardening pass ("A10") capped
+> `ACCESS_FINE_LOCATION` with `android:maxSdkVersion="32"` in the plugin, reasoning that
+> `NEARBY_WIFI_DEVICES` (API 33+, `neverForLocation`) would cover `startLocalOnlyHotspot` the same
+> way it covers Wi-Fi Aware/BLE scanning. Per Android's own docs that's true *only if the runtime
+> request is updated to ask for `NEARBY_WIFI_DEVICES` instead of `ACCESS_FINE_LOCATION` on API 33+*;
+> `use-hotspot.ts` was never changed to do that split (it still requests `ACCESS_FINE_LOCATION`
+> unconditionally, in addition to `NEARBY_WIFI_DEVICES` on 33+, and needs every requested permission
+> granted). With the manifest cap in place, the `ACCESS_FINE_LOCATION` request on any API 33+ device
+> auto-denies (a request for a permission the manifest doesn't declare shows no dialog), so the
+> hotspot could never start on **any** device running API 33+ — confirmed as the cause of a "Host
+> stopped / location permission is needed" regression on a Galaxy S25 Ultra (API 35). Fixed by
+> removing the `maxSdkVersion` cap, restoring the exact configuration verified in the emulator run
+> quoted above. A cleaner long-term fix is updating `use-hotspot.ts` to request only
+> `NEARBY_WIFI_DEVICES` on API 33+ — left as a follow-up, since the emulator behaviour above shows the
+> current unconditional-`ACCESS_FINE_LOCATION` request is at least a working baseline.
+
 **Host UI:** `src/app/index.tsx` renders a compact host bar above the LOAM WebView with a **"Share ·
 Host"** button (a top bar, not a floating overlay — an Android WebView swallows touches on any native
 view layered over it, so an on-top button wouldn't register). It opens `HostShareOverlay` (a
