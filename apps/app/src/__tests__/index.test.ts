@@ -67,7 +67,7 @@ vi.mock('@/lib/db-encryption', () => ({
 
 // Imported AFTER the mocks (vi.mock is hoisted, so ordering is safe) — index.tsx evaluates cleanly
 // against the doubles above.
-import { clearWipeKeyAndAck, handleClientWebViewMessage, startFreshIntentForCode } from './index';
+import { clearWipeKeyAndAck, handleClientWebViewMessage, startFreshIntentForCode } from '../app/index';
 
 beforeEach(() => {
   clearStoredDbKeys.mockReset();

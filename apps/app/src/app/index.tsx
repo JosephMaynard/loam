@@ -5,7 +5,6 @@ import { ActivityIndicator, Alert, Linking, Platform, Pressable, StyleSheet, Tex
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
-import { NetworkConfigSchema } from '@loam/schema';
 
 import { DbEncryptionSettingsOverlay } from '@/components/db-encryption-settings';
 import { HostShareOverlay } from '@/components/host-share-overlay';
@@ -572,16 +571,25 @@ export default function HostScreen() {
       settled = true;
       setBootstrapError(true);
     };
-    // Derive the URL fragment from a validated bootstrap body. A body that fails `NetworkConfigSchema`
-    // validation falls through safely to no fragment (treated as `off`) rather than trusting unvalidated
-    // shape; a validated `optional`/`required` config with a non-empty key yields the `#k=` fragment.
+    // Derive the URL fragment from a validated bootstrap body. Validate ONLY the two fields consumed here,
+    // inline — the full `@loam/schema` (and its zod graph) must not be imported into the embedded RN bundle
+    // (Metro's release bundler pulls the workspace package's build-tool graph and fails). A body whose
+    // `networkConfig` isn't an object, or whose transport mode/key don't match, falls through safely to no
+    // fragment (treated as `off`); an `optional`/`required` config with a non-empty string key yields `#k=`.
     const fragmentFor = (body: unknown): string => {
-      const parsed = NetworkConfigSchema.safeParse((body as { networkConfig?: unknown } | null)?.networkConfig);
-      if (!parsed.success) {
+      const networkConfig = (body as { networkConfig?: unknown } | null)?.networkConfig;
+      if (!networkConfig || typeof networkConfig !== 'object') {
         return '';
       }
-      const { transportEncryption, transportPublicKey } = parsed.data;
-      if (transportEncryption !== 'off' && typeof transportPublicKey === 'string' && transportPublicKey.length > 0) {
+      const { transportEncryption, transportPublicKey } = networkConfig as {
+        transportEncryption?: unknown;
+        transportPublicKey?: unknown;
+      };
+      if (
+        (transportEncryption === 'optional' || transportEncryption === 'required') &&
+        typeof transportPublicKey === 'string' &&
+        transportPublicKey.length > 0
+      ) {
         // Defensive: the fragment gets embedded straight into a URL string below (G10c) — encode it so a
         // key value that somehow contained a fragment-breaking character can't malform the URL.
         return `#k=${encodeURIComponent(transportPublicKey)}`;
