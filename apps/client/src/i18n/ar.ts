@@ -391,6 +391,10 @@ export const ar: Catalog = {
 
   "invite.hide": "× إخفاء الدعوة",
   "invite.show": "⧉ ادعُ شخصًا",
+  "invite.title": "ادعُ شخصًا",
+  "invite.close": "إغلاق الدعوة",
+  "invite.wifiButton": "إظهار رمز QR لنقطة اتصال Wi-Fi",
+  "invite.wifiHint": "يفتح رمز QR الخاص بشبكة Wi-Fi للمضيف حتى يتمكن الأشخاص من الانضمام إلى الشبكة أولاً.",
 
   "nodeLink.hide": "× إخفاء الرابط",
   "nodeLink.show": "⧉ ربط عقدة أخرى",

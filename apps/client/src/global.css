@@ -387,8 +387,10 @@ a {
   background: var(--c-surf-2);
   color: var(--c-ink-green);
   text-decoration: none;
-  font-size: 1.2rem;
-  font-weight: 800;
+}
+
+.mobile-back svg {
+  display: block;
 }
 
 .message-list,
@@ -1125,6 +1127,85 @@ a {
   color: var(--c-sidebar-muted);
   font-size: 0.75rem;
   overflow-wrap: anywhere;
+}
+
+/* Invite modal — a big centered overlay (opened from the sidebar's "Invite someone" button) showing
+   the join QR at a scannable size, plus (native host only) a way in to the Wi-Fi hotspot QR. */
+.invite-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(23, 35, 29, 0.55);
+}
+
+.invite-modal {
+  width: min(92vw, 440px);
+  max-height: 90vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 16px;
+  border-radius: 12px;
+  background: var(--c-white);
+  padding: 24px;
+  box-shadow: 0 24px 60px rgba(23, 35, 29, 0.35);
+}
+
+.invite-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.invite-modal-header h2 {
+  margin: 0;
+}
+
+.invite-modal-qr {
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--c-surf-3);
+  background: var(--c-white);
+  padding: 16px;
+}
+
+.invite-modal-qr svg {
+  width: min(100%, 280px);
+  height: auto;
+}
+
+.invite-modal-url {
+  margin: 0;
+  text-align: center;
+  color: var(--c-text-muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.invite-modal-wifi {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--c-surf-3);
+  padding-top: 16px;
+}
+
+.invite-modal-wifi button {
+  min-height: 44px;
+  border-radius: 8px;
+  background: var(--c-accent);
+  color: var(--c-white);
+  font-weight: 800;
+}
+
+.invite-modal-wifi p {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 /* New-message toasts. */

@@ -377,6 +377,10 @@ export const sw: Catalog = {
 
   "invite.hide": "× Ficha mwaliko",
   "invite.show": "⧉ Mwalike mtu",
+  "invite.title": "Mwalike mtu",
+  "invite.close": "Funga mwaliko",
+  "invite.wifiButton": "Onyesha QR ya hotspot ya Wi-Fi",
+  "invite.wifiHint": "Inafungua QR ya Wi-Fi ya mwenyeji ili watu waweze kujiunga na mtandao kwanza.",
 
   "nodeLink.hide": "× Ficha kiungo",
   "nodeLink.show": "⧉ Unganisha nodi nyingine",

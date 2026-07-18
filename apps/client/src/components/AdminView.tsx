@@ -20,6 +20,7 @@ import { fetchJson, REQUEST_TIMEOUT_MS } from "../lib/api";
 import { encryptedFetch } from "../lib/transport";
 import { AddSyncPeerControl } from "./AddSyncPeerControl";
 import { AdminChannelsPanel } from "./AdminChannelsPanel";
+import { BackArrowIcon } from "./BackArrowIcon";
 import { GettingStartedPanel } from "./GettingStartedPanel";
 import { LlmPanel } from "./LlmPanel";
 import { MeshPanel } from "./MeshPanel";
@@ -298,7 +299,7 @@ export function AdminView({
       <section className="settings-view">
         <header className="conversation-header">
           <NavLink active={false} className="mobile-back" href="/channels">
-            ←
+            <BackArrowIcon />
           </NavLink>
           <div>
             <p className="eyebrow">{t("admin.eyebrow")}</p>
@@ -314,7 +315,7 @@ export function AdminView({
     <section className="settings-view">
       <header className="conversation-header">
         <NavLink active={false} className="mobile-back" href="/channels">
-          ←
+          <BackArrowIcon />
         </NavLink>
         <div>
           <p className="eyebrow">{t("admin.eyebrow")}</p>

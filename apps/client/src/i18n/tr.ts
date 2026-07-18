@@ -377,6 +377,10 @@ export const tr: Catalog = {
 
   "invite.hide": "× Daveti gizle",
   "invite.show": "⧉ Birini davet et",
+  "invite.title": "Birini davet et",
+  "invite.close": "Daveti kapat",
+  "invite.wifiButton": "Wi-Fi erişim noktası QR kodunu göster",
+  "invite.wifiHint": "Kişilerin önce ağa katılabilmesi için sunucunun Wi-Fi QR kodunu açar.",
 
   "nodeLink.hide": "× Bağlantıyı gizle",
   "nodeLink.show": "⧉ Başka bir düğüm bağla",

@@ -26,6 +26,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 import { AdminView } from "./components/AdminView";
 import { Avatar } from "./components/Avatar";
 import { AvatarImageEditor } from "./components/AvatarImageEditor";
+import { BackArrowIcon } from "./components/BackArrowIcon";
 import { ChannelMembersPanel } from "./components/ChannelMembersPanel";
 import { MessageComposer } from "./components/MessageComposer";
 import { MessageItem } from "./components/MessageItem";
@@ -2066,7 +2067,7 @@ function ConversationHeader({
   return (
     <header className="conversation-header">
       <NavLink active={false} className="mobile-back" href="/channels">
-        ←
+        <BackArrowIcon />
       </NavLink>
       <div className="conversation-heading">
         <p className="eyebrow">{conversation.kind === "channel" ? t("conversation.kindChannel") : t("conversation.kindDm")}</p>
@@ -2213,7 +2214,7 @@ function ThreadPanel({
     <aside className="thread-panel">
       <header className="thread-header">
         <button className="mobile-back" onClick={onClose} type="button">
-          ←
+          <BackArrowIcon />
         </button>
         <div>
           <p className="eyebrow">{t("thread.eyebrow")}</p>
@@ -2345,7 +2346,7 @@ function SearchView({
     <section className="settings-view">
       <header className="conversation-header">
         <NavLink active={false} className="mobile-back" href="/channels">
-          ←
+          <BackArrowIcon />
         </NavLink>
         <div>
           <p className="eyebrow">{t("search.eyebrow")}</p>
@@ -2614,7 +2615,7 @@ function MeshView() {
     <section className="settings-view">
       <header className="conversation-header">
         <NavLink active={false} className="mobile-back" href="/channels">
-          ←
+          <BackArrowIcon />
         </NavLink>
         <div>
           <p className="eyebrow">{t("mesh.eyebrow")}</p>
@@ -2865,7 +2866,7 @@ function SettingsView({
     <section className="settings-view">
       <header className="conversation-header">
         <NavLink active={false} className="mobile-back" href="/channels">
-          ←
+          <BackArrowIcon />
         </NavLink>
         <div>
           <p className="eyebrow">{t("settings.joinEyebrow")}</p>
@@ -3125,7 +3126,7 @@ function PeopleView({
       <section className="settings-view">
         <header className="conversation-header">
           <NavLink active={false} className="mobile-back" href="/channels">
-            ←
+            <BackArrowIcon />
           </NavLink>
           <div>
             <p className="eyebrow">{t("people.eyebrow")}</p>
@@ -3141,7 +3142,7 @@ function PeopleView({
     <section className="settings-view">
       <header className="conversation-header">
         <NavLink active={false} className="mobile-back" href="/channels">
-          ←
+          <BackArrowIcon />
         </NavLink>
         <div>
           <p className="eyebrow">{t("people.eyebrow")}</p>

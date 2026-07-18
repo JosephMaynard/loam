@@ -27,6 +27,7 @@ afterEach(() => {
     container.remove();
   }
   mounted.length = 0;
+  delete (window as unknown as { ReactNativeWebView?: unknown }).ReactNativeWebView;
 });
 
 describe("InviteControl", () => {
@@ -34,31 +35,87 @@ describe("InviteControl", () => {
     expect(mount(<InviteControl />).querySelector(".invite-control")).toBeNull();
   });
 
-  it("starts collapsed: a toggle button, no invite panel", () => {
+  it("starts closed: a trigger button, no modal", () => {
     const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
-    const toggle = root.querySelector("button");
-    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
-    expect(root.querySelector(".invite-panel")).toBeNull();
+    expect(root.querySelector("button")).not.toBeNull();
+    expect(root.querySelector(".invite-modal-backdrop")).toBeNull();
   });
 
-  it("reveals the join URL and its QR when expanded, then hides them again", async () => {
+  it("opens a modal with the join URL and its QR, then closes via the close button", async () => {
     const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
     const toggle = root.querySelector("button");
 
     toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await tick();
 
-    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
-    expect(root.querySelector(".invite-url")?.textContent).toBe("http://192.168.0.5:3000");
+    const modal = root.querySelector(".invite-modal");
+    expect(modal).not.toBeNull();
+    expect(root.querySelector(".invite-modal-url")?.textContent).toBe("http://192.168.0.5:3000");
     // The QR is rendered as inline SVG markup, not an external asset, and hidden from assistive tech
     // (the URL text is the accessible content).
-    expect(root.querySelector(".invite-qr svg")).not.toBeNull();
-    expect(root.querySelector(".invite-qr")?.getAttribute("aria-hidden")).toBe("true");
+    expect(root.querySelector(".invite-modal-qr svg")).not.toBeNull();
+    expect(root.querySelector(".invite-modal-qr")?.getAttribute("aria-hidden")).toBe("true");
+    expect(modal?.getAttribute("role")).toBe("dialog");
+    expect(modal?.getAttribute("aria-modal")).toBe("true");
 
-    toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const close = root.querySelector(".close-button");
+    close?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await tick();
 
-    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
-    expect(root.querySelector(".invite-panel")).toBeNull();
+    expect(root.querySelector(".invite-modal-backdrop")).toBeNull();
+  });
+
+  it("closes when the backdrop is clicked", async () => {
+    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
+    root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    const backdrop = root.querySelector(".invite-modal-backdrop");
+    expect(backdrop).not.toBeNull();
+    backdrop?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    expect(root.querySelector(".invite-modal-backdrop")).toBeNull();
+  });
+
+  it("closes on Escape", async () => {
+    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
+    root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    expect(root.querySelector(".invite-modal-backdrop")).not.toBeNull();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await tick();
+
+    expect(root.querySelector(".invite-modal-backdrop")).toBeNull();
+  });
+
+  it("does not show the Wi-Fi hotspot button in a plain browser (no native bridge)", async () => {
+    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
+    root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    expect(root.querySelector(".invite-modal-wifi")).toBeNull();
+  });
+
+  it("shows a Wi-Fi hotspot button that posts loam-open-share when the native bridge is present", async () => {
+    const postMessage: string[] = [];
+    (window as unknown as { ReactNativeWebView: { postMessage: (message: string) => void } }).ReactNativeWebView = {
+      postMessage: (message: string) => postMessage.push(message),
+    };
+
+    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
+    root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    const wifiSection = root.querySelector(".invite-modal-wifi");
+    expect(wifiSection).not.toBeNull();
+    const wifiButton = wifiSection?.querySelector("button");
+    expect(wifiButton).not.toBeNull();
+
+    wifiButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    expect(postMessage).toEqual([JSON.stringify({ type: "loam-open-share" })]);
   });
 });

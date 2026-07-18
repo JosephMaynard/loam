@@ -377,6 +377,10 @@ export const ur: Catalog = {
 
   "invite.hide": "× دعوت چھپائیں",
   "invite.show": "⧉ کسی کو مدعو کریں",
+  "invite.title": "کسی کو مدعو کریں",
+  "invite.close": "دعوت بند کریں",
+  "invite.wifiButton": "وائی فائی ہاٹ اسپاٹ QR دکھائیں",
+  "invite.wifiHint": "میزبان کا وائی فائی QR کھولتا ہے تاکہ لوگ پہلے نیٹ ورک میں شامل ہو سکیں۔",
 
   "nodeLink.hide": "× لنک چھپائیں",
   "nodeLink.show": "⧉ دوسرا نوڈ جوڑیں",

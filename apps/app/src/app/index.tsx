@@ -840,7 +840,22 @@ export default function HostScreen() {
   // the acknowledged, phase-gated `loam-wipe-restart` -> verified clear -> `loam-wipe-complete` protocol
   // (`attemptWipeKeyClear`); see `handleClientWebViewMessage`'s doc comment for the full rationale.
   const handleWebViewMessage = (event: { nativeEvent: { data: string } }) => {
-    handleClientWebViewMessage(event.nativeEvent.data);
+    const raw = event.nativeEvent.data;
+    // The web client's "Invite someone" can ask the native host to open the share/invite overlay — that
+    // overlay (host-share-overlay.tsx) carries the Wi-Fi hotspot QR, which the WebView itself can't render
+    // (the credentials are native-only). Handle it here since it needs component state; everything else
+    // (the wipe protocol) goes to the pure classifier. Opening an overlay is benign, and the WebView is
+    // pinned to the LOAM origin, so this can't be triggered by arbitrary web content.
+    try {
+      const parsed = JSON.parse(raw) as { type?: unknown };
+      if (parsed && parsed.type === 'loam-open-share') {
+        setShareOpen(true);
+        return;
+      }
+    } catch {
+      // Not JSON / not ours — fall through to the wipe-protocol classifier.
+    }
+    handleClientWebViewMessage(raw);
   };
 
   if (Platform.OS !== 'android') {

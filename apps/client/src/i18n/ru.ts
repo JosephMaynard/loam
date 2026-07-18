@@ -387,6 +387,10 @@ export const ru: Catalog = {
 
   "invite.hide": "× Скрыть приглашение",
   "invite.show": "⧉ Пригласить кого-нибудь",
+  "invite.title": "Пригласить кого-нибудь",
+  "invite.close": "Закрыть приглашение",
+  "invite.wifiButton": "Показать QR-код Wi-Fi точки доступа",
+  "invite.wifiHint": "Открывает QR-код Wi-Fi хоста, чтобы люди могли сначала подключиться к сети.",
 
   "nodeLink.hide": "× Скрыть ссылку",
   "nodeLink.show": "⧉ Связать другой узел",

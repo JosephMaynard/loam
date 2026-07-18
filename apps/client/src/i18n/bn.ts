@@ -377,6 +377,10 @@ export const bn: Catalog = {
 
   "invite.hide": "× আমন্ত্রণ লুকান",
   "invite.show": "⧉ কাউকে আমন্ত্রণ জানান",
+  "invite.title": "কাউকে আমন্ত্রণ জানান",
+  "invite.close": "আমন্ত্রণ বন্ধ করুন",
+  "invite.wifiButton": "ওয়াই-ফাই হটস্পট QR দেখান",
+  "invite.wifiHint": "হোস্টের ওয়াই-ফাই QR খোলে যাতে মানুষ প্রথমে নেটওয়ার্কে যোগ দিতে পারে।",
 
   "nodeLink.hide": "× লিঙ্ক লুকান",
   "nodeLink.show": "⧉ আরেকটি নোড যুক্ত করুন",
