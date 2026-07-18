@@ -1,0 +1,32 @@
+diff --git a/android/src/main/java/com/rnllama/RNLlamaModule.java b/android/src/main/java/com/rnllama/RNLlamaModule.java
+index 407a62cb99c211778fcb4b946ff9b75764d3b8fb..03daea202dfb230f6ca09f17dc670d01a116614b 100644
+--- a/android/src/main/java/com/rnllama/RNLlamaModule.java
++++ b/android/src/main/java/com/rnllama/RNLlamaModule.java
+@@ -33,9 +33,26 @@ public class RNLlamaModule extends NativeRNLlamaSpec {
+         return;
+       }
+ 
++      // LOAM patch: use ReactContext#getJSCallInvokerHolder() directly instead of routing
++      // through the deprecated getCatalystInstance() accessor. Under React Native's New
++      // Architecture / bridgeless mode (mandatory for llama.rn >=0.10, see README "Starting
++      // with v0.10, llama.rn requires React Native's New Architecture"), ReactContext has no
++      // real CatalystInstance: BridgelessReactContext#getCatalystInstance() only returns a
++      // deprecated compatibility shim that logs "Bridgeless doesn't support CatalystInstance"
++      // and can fail (a null/not-ready reactInstance surfaces as a thrown
++      // IllegalArgumentException from Kotlin's requireNotNull) depending on instance-readiness
++      // timing. Any exception here is swallowed by the catch-all below, silently resolving
++      // `install()` to false, which llama.rn's JS layer reports as the opaque
++      // "JSI bindings not installed". getJSCallInvokerHolder() is the same CallInvokerHolderImpl
++      // exposed directly and bridgeless-safely by ReactContext (BridgelessReactContext overrides
++      // it to delegate straight to the ReactHost/ReactInstance, no Catalyst indirection) — the
++      // same class of accessor already used two lines up for getJavaScriptContextHolder().
++      // Upstream: https://github.com/mybigday/llama.rn/issues/354 (still unfixed in 0.12.6 as of
++      // 2026-07-18 — the published fix claim in that issue's only comment does not match the
++      // released source, which is unchanged).
+       long jsContextPointer = context.getJavaScriptContextHolder().get();
+       CallInvokerHolderImpl holder =
+-        (CallInvokerHolderImpl) context.getCatalystInstance().getJSCallInvokerHolder();
++        (CallInvokerHolderImpl) context.getJSCallInvokerHolder();
+ 
+       if (jsContextPointer == 0 || holder == null) {
+         promise.resolve(false);

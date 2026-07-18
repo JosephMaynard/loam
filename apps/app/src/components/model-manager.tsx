@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -82,6 +83,10 @@ let orphanSweepDone = false;
  * `orphanSweepDone`, module-level so a remount doesn't re-run it. Strips any credential/`?token=…` an
  * older build persisted verbatim; a no-op when there's nothing to redact. */
 let legacyRedactionDone = false;
+
+/** expo-keep-awake tag held for the duration of a model download+verify so the screen doesn't sleep and
+ * background (and thereby abort) a long multi-GB download. Distinct from the host's keep-screen-on tag. */
+const MODEL_DOWNLOAD_KEEP_AWAKE_TAG = 'loam-model-download';
 
 type ModelManagerOverlayProps = {
   visible: boolean;
@@ -475,6 +480,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     sizeForStorageCheck: number,
     body: (signal: AbortSignal, maxBytes: number) => Promise<void>,
   ): Promise<void> => {
+    // Keep the screen awake for the WHOLE download + verify (device-test round 2). A multi-GB model takes
+    // a long time and the hash pass is slow; if the screen turns off, Android backgrounds the app and the
+    // AppState listener above aborts the download — which is exactly why long downloads kept failing.
+    // Holding the screen on keeps the app foregrounded so the download actually completes. Best-effort: a
+    // keep-awake failure never blocks the download, and it's released when `runDownload` settles.
+    await activateKeepAwakeAsync(MODEL_DOWNLOAD_KEEP_AWAKE_TAG).catch(() => undefined);
     const outcome = await runDownload(downloadOwnerRef.current, async (signal) => {
       // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
       // snapshot, which other app activity could have invalidated.
@@ -504,6 +515,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         clearModelProgress(id);
         setBusy(id, false);
       }
+    }).finally(() => {
+      void deactivateKeepAwake(MODEL_DOWNLOAD_KEEP_AWAKE_TAG).catch(() => undefined);
     });
     // A second entry point (same-tick double tap, or a remounted overlay) was refused globally, or this
     // instance's transaction was aborted (unmount) before the body ever ran — nothing to tear down here,

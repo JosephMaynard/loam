@@ -24,6 +24,9 @@
       "tar@<7.5.16": "^7.5.16",
       "uuid@<11.1.1": "^11.1.1",
       "@babel/core@<7.29.6": "^7.29.6"
+    },
+    "patchedDependencies": {
+      "llama.rn@0.12.6": "patches/llama.rn@0.12.6.patch"
     }
   }
 }
