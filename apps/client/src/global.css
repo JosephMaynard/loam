@@ -402,23 +402,24 @@ a {
 .message-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
 }
 
+/* Chat-bubble layout: own messages align to the inline-END (right in LTR, auto-flips in RTL),
+   everyone else's to the inline-START — via auto margins on a flex row, never `flex-end`/hardcoded
+   left-right, so it flips correctly for RTL locales. Each row is capped to ~78% width so a bubble
+   never spans the full conversation column. */
 .message {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
+  display: flex;
+  align-items: flex-end;
   gap: 10px;
-  border-radius: 8px;
-  padding: 10px;
-}
-
-.message:hover {
-  background: var(--c-bg-5);
+  max-width: 78%;
+  margin-inline-end: auto;
 }
 
 .message.mine {
-  background: rgba(204, 233, 165, 0.22);
+  margin-inline-end: 0;
+  margin-inline-start: auto;
 }
 
 .message.streaming .markdown-body {
@@ -453,6 +454,9 @@ a {
 }
 
 .message-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -522,6 +526,35 @@ a {
   color: var(--c-info);
 }
 
+/* The chat bubble itself: text/attachments/location card, coloured to distinguish own vs other
+   messages (name/timestamp stay outside it, in `.message-meta`). Others get a neutral surface;
+   `.mine` gets an accent/green-tinted one — reusing the existing highlight token rather than a new
+   colour, so it already adapts to dark mode. */
+.message-bubble {
+  min-width: 0;
+  border-radius: 16px;
+  background: var(--c-surf-1);
+  padding: 8px 12px;
+}
+
+.message.mine .message-bubble {
+  background: var(--c-highlight);
+}
+
+/* Jumbo emoji (1-3 emoji and nothing else, no attachments — see `isJumboEmoji`): WhatsApp-style big
+   render with no bubble chrome at all. Declared after `.message.mine .message-bubble` so it wins the
+   cascade (equal specificity) and clears the mine tint too. */
+.message.jumbo .message-bubble {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+.message-jumbo-emoji {
+  font-size: 2.6rem;
+  line-height: 1.15;
+}
+
 .message-actions {
   display: flex;
   flex-wrap: wrap;
@@ -565,40 +598,44 @@ a {
   opacity: 1;
 }
 
-.message-delete {
-  min-height: 28px;
+/* Groups the edit/delete icon buttons and pins them to the action row's inline-END (right in LTR,
+   auto-flips in RTL). */
+.message-icon-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   margin-inline-start: auto;
+}
+
+.message-delete,
+.message-edit-button {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
   border-radius: 8px;
   background: transparent;
   color: var(--c-text-muted);
-  padding: 3px 8px;
-  font-size: 0.84rem;
+  padding: 0;
   opacity: 0;
 }
 
 .message:hover .message-delete,
-.message-delete:focus-visible {
+.message-delete:focus-visible,
+.message:hover .message-edit-button,
+.message-edit-button:focus-visible {
   opacity: 1;
+}
+
+.message-edit-button:hover {
+  background: var(--c-bg-7);
+  color: var(--c-ink-green);
 }
 
 .message-delete:hover {
   background: var(--c-danger-bg);
   color: var(--c-danger);
-}
-
-.message-edit-button {
-  min-height: 28px;
-  border-radius: 8px;
-  background: var(--c-bg-7);
-  color: var(--c-ink-green);
-  padding: 3px 8px;
-  font-size: 0.84rem;
-  opacity: 0;
-}
-
-.message:hover .message-edit-button,
-.message-edit-button:focus-visible {
-  opacity: 1;
 }
 
 /* Touch devices can't hover, so keep the edit/delete affordances visible for them. */
@@ -656,6 +693,8 @@ a {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
+  /* Bottom-align so the attach + send icon buttons stay at the base of the row as the textarea grows. */
+  align-items: end;
   border-top: 1px solid var(--c-surf-3);
   background: var(--c-bg-1);
   padding: 14px;
@@ -691,6 +730,27 @@ a {
   background: var(--c-accent);
   color: white;
   font-weight: 800;
+}
+
+/* The send control is a compact circular ICON button (WhatsApp/Slack style), not a wide text button —
+   overrides the generic `.composer button` sizing above. Sits at the bottom-right of the row and dims
+   when there's nothing to send. */
+.composer-send {
+  min-width: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+}
+
+.composer-send svg {
+  display: block;
+}
+
+.composer-send:disabled {
+  opacity: 0.45;
 }
 
 .thread-panel {
@@ -1453,18 +1513,8 @@ a {
     padding: 12px;
   }
 
-  .composer {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .composer.has-attach {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .composer.has-attach button[type="submit"] {
-    grid-column: 1 / -1;
-  }
-
+  /* Keep the single compact row ([attach] textarea [send icon]) on mobile too — the base `.composer`
+     grid already lays it out; the old override here dropped the send onto a second full-width row. */
   .composer button {
     min-height: 42px;
   }

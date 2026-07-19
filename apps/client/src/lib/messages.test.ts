@@ -9,6 +9,7 @@ import {
   groupReactionsByTarget,
   groupRepliesByParent,
   isConversationMessage,
+  isJumboEmoji,
   mergeMessagesInOrder,
   messageConversationKey,
   reactionSummary,
@@ -373,5 +374,36 @@ describe("messageConversationKey", () => {
 
   it("returns undefined for reactions (they drive no conversation)", () => {
     expect(messageConversationKey(reaction("x1", 1, "p1", "👍", ME), ME)).toBeUndefined();
+  });
+});
+
+describe("isJumboEmoji", () => {
+  it("is true for a single emoji", () => {
+    expect(isJumboEmoji("👍")).toBe(true);
+  });
+
+  it("is true for three emoji, one of them a ZWJ family sequence and a skin-tone modifier counted as one cluster each", () => {
+    expect(isJumboEmoji("👍🏽 ❤️ 👨‍👩‍👧‍👦")).toBe(true);
+  });
+
+  it("is false for four emoji", () => {
+    expect(isJumboEmoji("👍❤️😀🎉")).toBe(false);
+  });
+
+  it("is false when emoji are mixed with text", () => {
+    expect(isJumboEmoji("hi 😀")).toBe(false);
+  });
+
+  it("is false for plain text", () => {
+    expect(isJumboEmoji("hello world")).toBe(false);
+  });
+
+  it("is false for an empty or whitespace-only body", () => {
+    expect(isJumboEmoji("")).toBe(false);
+    expect(isJumboEmoji("   ")).toBe(false);
+  });
+
+  it("tolerates surrounding whitespace between emoji", () => {
+    expect(isJumboEmoji("  👍   🎉  ")).toBe(true);
   });
 });

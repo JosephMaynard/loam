@@ -4,6 +4,30 @@ import { useEffect, useId, useRef, useState } from "preact/hooks";
 import { t } from "../i18n";
 import { ATTACHMENT_MAX_COUNT } from "../lib/attachments";
 
+/**
+ * Paper-plane "send" glyph for the composer's submit button — same inline-SVG convention as
+ * `BackArrowIcon`/the attach paperclip (fixed viewBox, `currentColor`, round strokes, `aria-hidden`
+ * since the button itself carries the accessible label).
+ */
+function SendIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="20"
+    >
+      <path d="M22 2L11 13" />
+      <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+    </svg>
+  );
+}
+
 interface MessageComposerProps {
   /** When true, the composer offers the "share location" toggle (docs/10; off by default). */
   allowLocationSharing?: boolean;
@@ -76,14 +100,14 @@ export function MessageComposer({ allowLocationSharing, label, onSend, onUploadA
     textArea.style.height = `${Math.min(textArea.scrollHeight, 168)}px`;
   }, [value]);
 
-  function attachFiles(files: FileList | null): void {
-    if (!onUploadAttachment || !files) {
+  function attachFiles(files: File[] | null): void {
+    if (!onUploadAttachment || !files || !files.length) {
       return;
     }
 
     const room = ATTACHMENT_MAX_COUNT - pending.filter((entry) => entry.status !== "error").length;
 
-    for (const file of Array.from(files).slice(0, Math.max(0, room))) {
+    for (const file of files.slice(0, Math.max(0, room))) {
       pendingKeyRef.current += 1;
       const key = `att-${pendingKeyRef.current}`;
       setPending((previous) => [...previous, { key, name: file.name, status: "uploading" }]);
@@ -107,6 +131,47 @@ export function MessageComposer({ allowLocationSharing, label, onSend, onUploadA
           );
         });
     }
+  }
+
+  /**
+   * Route a pasted image into the same on-device attachment pipeline the attach button uses
+   * (`onUploadAttachment`, which wraps `prepareImageAttachment`) — no separate upload path to keep in
+   * sync. Only wired when attachments are enabled; falls through to the browser's normal text paste
+   * when the clipboard carries no image. An animated GIF pasted this way becomes a single static
+   * frame, since the shared pipeline re-encodes through a `<canvas>`. Note this does NOT cover
+   * Android's GIF/sticker keyboard: that inserts rich content via `InputEvent`'s
+   * `dataTransfer`/`getTargetRanges`, which a plain WebView `<textarea>` doesn't support — only an
+   * actual clipboard image (e.g. a long-press "Copy image", or a desktop paste) reaches this handler.
+   */
+  function handlePaste(event: ClipboardEvent): void {
+    if (!onUploadAttachment) {
+      return;
+    }
+
+    const items = event.clipboardData?.items;
+
+    if (!items) {
+      return;
+    }
+
+    const imageFiles: File[] = [];
+
+    for (const item of Array.from(items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+
+        if (file) {
+          imageFiles.push(file);
+        }
+      }
+    }
+
+    if (!imageFiles.length) {
+      return;
+    }
+
+    event.preventDefault();
+    attachFiles(imageFiles);
   }
 
   /** Close the location panel and discard its draft — sharing is deliberate per message (docs/10),
@@ -217,7 +282,7 @@ export function MessageComposer({ allowLocationSharing, label, onSend, onUploadA
                 className="sr-only"
                 multiple
                 onInput={(event) => {
-                  attachFiles(event.currentTarget.files);
+                  attachFiles(event.currentTarget.files ? Array.from(event.currentTarget.files) : null);
                   event.currentTarget.value = "";
                 }}
                 ref={fileInputRef}
@@ -266,22 +331,20 @@ export function MessageComposer({ allowLocationSharing, label, onSend, onUploadA
         dir="auto"
         id={composerId}
         onInput={(event) => setValue(event.currentTarget.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            void submit();
-          }
-        }}
+        onPaste={handlePaste}
         placeholder={placeholder}
         ref={textAreaRef}
         rows={1}
         value={value}
       />
       <button
+        aria-label={t("composer.send")}
+        className="composer-send"
         disabled={(!value.trim() && !readyAttachments.length && !draftLocation) || sending || uploading || locationIncomplete}
+        title={t("composer.send")}
         type="submit"
       >
-        {t("composer.send")}
+        <SendIcon />
       </button>
     </form>
   );

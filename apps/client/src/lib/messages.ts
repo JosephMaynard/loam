@@ -297,6 +297,52 @@ export function groupReactionsByTarget(messages: Message[]): Map<string, Message
   return grouped;
 }
 
+/** Matches a single Unicode code point tagged `Extended_Pictographic` — the property Unicode uses to
+ * mark emoji-capable characters (independent of `Emoji_Presentation`, so text-style pictographs like
+ * a bare `#` are excluded while heart/keycap/flag base characters are included). */
+const EMOJI_CODE_POINT = /\p{Extended_Pictographic}/u;
+
+/**
+ * Whether `body`, trimmed, is nothing but 1 to 3 emoji and no other text — the WhatsApp-style "jumbo
+ * emoji" rule (render big, no bubble). Counts by *grapheme cluster* via `Intl.Segmenter` so a
+ * multi-codepoint emoji — a ZWJ sequence like a family emoji, a skin-tone modifier, or a
+ * variation-selector pair — counts as a single emoji rather than one per code point. Every
+ * non-whitespace cluster must contain an `Extended_Pictographic` code point (checked with
+ * {@link EMOJI_CODE_POINT}); a single cluster of plain text (even mixed into an otherwise-emoji
+ * body, e.g. `"hi 😀"`) disqualifies the whole message.
+ *
+ * @param body - The message body to test (untrimmed is fine — leading/trailing whitespace is ignored).
+ * @returns `true` when the body is 1-3 emoji and nothing else.
+ */
+export function isJumboEmoji(body: string): boolean {
+  const trimmed = body.trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  let emojiCount = 0;
+
+  for (const { segment } of segmenter.segment(trimmed)) {
+    if (/^\s+$/.test(segment)) {
+      continue;
+    }
+
+    if (!EMOJI_CODE_POINT.test(segment)) {
+      return false;
+    }
+
+    emojiCount += 1;
+
+    if (emojiCount > 3) {
+      return false;
+    }
+  }
+
+  return emojiCount >= 1 && emojiCount <= 3;
+}
+
 /**
  * The conversation key a message belongs to from `currentUserId`'s perspective. Reactions have no
  * conversation of their own, so they return `undefined` (they never drive unread/toasts).
