@@ -1,8 +1,15 @@
 diff --git a/android/src/main/java/com/rnllama/RNLlamaModule.java b/android/src/main/java/com/rnllama/RNLlamaModule.java
-index 407a62cb99c211778fcb4b946ff9b75764d3b8fb..03daea202dfb230f6ca09f17dc670d01a116614b 100644
+index 407a62cb99c211778fcb4b946ff9b75764d3b8fb..f2aee6b7102b67573bb184251d52d6c27c8ccd13 100644
 --- a/android/src/main/java/com/rnllama/RNLlamaModule.java
 +++ b/android/src/main/java/com/rnllama/RNLlamaModule.java
-@@ -33,9 +33,26 @@ public class RNLlamaModule extends NativeRNLlamaSpec {
+@@ -29,24 +29,49 @@ public class RNLlamaModule extends NativeRNLlamaSpec {
+     try {
+       boolean loaded = RNLlama.loadNative(context);
+       if (!loaded) {
++        // LOAM diagnostic: surface which of install()'s silent failure paths fired, since llama.rn
++        // reports all of them as the opaque "JSI bindings not installed". Filter logcat on "RNLlama-LOAM".
++        android.util.Log.e("RNLlama-LOAM", "install FAILED: RNLlama.loadNative(context) returned false — the native librnllama .so did not load (ABI / packaging / missing dependency).");
+         promise.resolve(false);
          return;
        }
  
@@ -29,4 +36,20 @@ index 407a62cb99c211778fcb4b946ff9b75764d3b8fb..03daea202dfb230f6ca09f17dc670d01
 +        (CallInvokerHolderImpl) context.getJSCallInvokerHolder();
  
        if (jsContextPointer == 0 || holder == null) {
++        android.util.Log.e("RNLlama-LOAM", "install FAILED: jsContextPointer=" + jsContextPointer
++          + " holder=" + (holder == null ? "null (getJSCallInvokerHolder() returned null / not a CallInvokerHolderImpl at call time)" : "ok"));
          promise.resolve(false);
+         return;
+       }
+ 
+       installJSIBindings(jsContextPointer, holder);
++      android.util.Log.i("RNLlama-LOAM", "install OK: JSI bindings installed (bridgeless-safe).");
+       promise.resolve(true);
+       return;
+     } catch (UnsatisfiedLinkError e) {
++      android.util.Log.e("RNLlama-LOAM", "install FAILED: UnsatisfiedLinkError (native symbol/library missing)", e);
+     } catch (Exception e) {
++      android.util.Log.e("RNLlama-LOAM", "install FAILED: exception during JSI install", e);
+     }
+     promise.resolve(false);
+   }

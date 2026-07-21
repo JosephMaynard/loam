@@ -2,7 +2,7 @@
   "expo": {
     "name": "LOAM",
     "slug": "loam",
-    "version": "1.2.0",
+    "version": "0.2.0",
     "orientation": "portrait",
     "icon": "./assets/images/loam-icon.png",
     "scheme": "loam",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "com.loamnet.host",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "backgroundColor": "#d14900",
         "foregroundImage": "./assets/images/loam-icon.png"

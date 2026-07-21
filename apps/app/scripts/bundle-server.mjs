@@ -124,6 +124,13 @@ const result = await build({
   },
   define: {
     "import.meta.url": "__loamImportMetaUrl",
+    // Bake the app version (app.json) in at bundle time as LOAM_VERSION — which embedded.ts already reads
+    // for `buildApp({ version })`, but which the launcher never actually set on-device, so the web client
+    // footer showed "dev" for everyone. This makes it show the REAL build. A version bump flows through on
+    // the next bundle.
+    "process.env.LOAM_VERSION": JSON.stringify(
+      JSON.parse(readFileSync(join(appDir, "app.json"), "utf8")).expo.version,
+    ),
   },
   metafile: true,
   logLevel: "info",

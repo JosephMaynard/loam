@@ -41,7 +41,7 @@ overrides:
 
 patchedDependencies:
   llama.rn@0.12.6:
-    hash: d546a287f1a1f99003e338d41fb83d444f1f7f92f489e0dcf7f9472097ec087c
+    hash: cfb0780f93041a3250fd30607ea843e17efb34ee8d164a40f8a6827ae488d8c6
     path: patches/llama.rn@0.12.6.patch
 
 importers:
@@ -128,7 +128,7 @@ importers:
         version: 0.11.1
       llama.rn:
         specifier: ^0.12.6
-        version: 0.12.6(patch_hash=d546a287f1a1f99003e338d41fb83d444f1f7f92f489e0dcf7f9472097ec087c)(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.7))(react@19.2.7)
+        version: 0.12.6(patch_hash=cfb0780f93041a3250fd30607ea843e17efb34ee8d164a40f8a6827ae488d8c6)(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.7))(react@19.2.7)
       react:
         specifier: 19.2.7
         version: 19.2.7
@@ -6437,7 +6437,9 @@ snapshots:
       metro-runtime: 0.84.4
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
 
   '@react-native/normalize-colors@0.74.89': {}
 
@@ -8132,7 +8134,7 @@ snapshots:
       lightningcss-win32-arm64-msvc: 1.32.0
       lightningcss-win32-x64-msvc: 1.32.0
 
-  llama.rn@0.12.6(patch_hash=d546a287f1a1f99003e338d41fb83d444f1f7f92f489e0dcf7f9472097ec087c)(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.7))(react@19.2.7):
+  llama.rn@0.12.6(patch_hash=cfb0780f93041a3250fd30607ea843e17efb34ee8d164a40f8a6827ae488d8c6)(react-native@0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.7))(react@19.2.7):
     dependencies:
       react: 19.2.7
       react-native: 0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.7)
