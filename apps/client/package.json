@@ -15,9 +15,9 @@
     "@loam/display-name": "workspace:*",
     "@loam/qr": "workspace:*",
     "@loam/schema": "workspace:*",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.12",
     "preact": "catalog:",
-    "preact-iso": "^2.12.0",
+    "preact-iso": "^2.12.1",
     "snarkdown": "^2.0.0"
   },
   "devDependencies": {
