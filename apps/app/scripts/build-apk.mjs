@@ -17,7 +17,7 @@
 // set them yourself. This script only builds — install with `adb install -r <printed path>`.
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -116,12 +116,20 @@ run("pnpm", ["--filter", "app", "bundle:server"], pnpm);
 //     APK build is self-sufficient regardless of pnpm's script policy. Idempotent: it sha256-markers each
 //     artifact and no-ops when already installed. (pnpm-workspace.yaml also allow-lists llama.rn so a plain
 //     `pnpm install` populates these too; this is the belt-and-suspenders for the build path.)
-const llamaDownload = join(
-  dirname(createRequire(import.meta.url).resolve("llama.rn/package.json", { paths: [appDir] })),
-  "install",
-  "download-native-artifacts.js",
+const llamaPkgDir = dirname(
+  createRequire(import.meta.url).resolve("llama.rn/package.json", { paths: [appDir] }),
 );
-run("node", [llamaDownload], { cwd: appDir, env });
+run("node", [join(llamaPkgDir, "install", "download-native-artifacts.js")], { cwd: appDir, env });
+// llama.rn's CMake CONFIGURE caches its per-variant "skip rnllama_jni — no prebuilt for this ABI"
+// decision (CMakeLists build_rnllama_jni returns early when jniLibs/<abi>/librnllama.so is absent at
+// configure time). A build that ran BEFORE the download above baked that skip into the module's .cxx/
+// build caches — and `expo prebuild --clean` only cleans the APP's android/, never node_modules module
+// caches — so the JNI wrappers (librnllama_jni*.so, the libs loadNative actually dlopens) would never be
+// built even now that the prebuilts exist, and the on-device LLM would still fail. Drop those caches so
+// CMake re-configures against the now-present prebuilts. Cheap: only llama.rn recompiles.
+for (const stale of [join(llamaPkgDir, "android", ".cxx"), join(llamaPkgDir, "android", "build")]) {
+  rmSync(stale, { recursive: true, force: true });
+}
 // 4. Regenerate the native android/ project (gitignored) so app.json changes propagate. --clean is
 //    what makes the build reproducible from a checkout.
 run("npx", ["expo", "prebuild", "--platform", "android", "--no-install", "--clean"], {
