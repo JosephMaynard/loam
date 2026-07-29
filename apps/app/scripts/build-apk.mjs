@@ -18,6 +18,7 @@
 
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,6 +107,21 @@ run("pnpm", ["-r", "build"], pnpm);
 // 2. Native prebuild (better-sqlite3 android-arm64) + 3. bundle the embedded server for nodejs-mobile.
 run("pnpm", ["--filter", "app", "fetch:native"], pnpm);
 run("pnpm", ["--filter", "app", "bundle:server"], pnpm);
+// 3b. Ensure llama.rn's PREBUILT compute libs (librnllama*.so) are materialised in the package's
+//     android/src/main/jniLibs. llama.rn fetches these via a `postinstall` download script, which pnpm
+//     does NOT run for dependencies unless they're allow-listed in `onlyBuiltDependencies` — and without
+//     them the gradle CMake step (build_rnllama_jni) silently builds NO librnllama_jni.so at all, so the
+//     on-device LLM dies at runtime with "JSI bindings not installed" (RNLlama.loadNative can't find the
+//     .so) — invisible until an actual APK is run on a device. Run the downloader explicitly here so the
+//     APK build is self-sufficient regardless of pnpm's script policy. Idempotent: it sha256-markers each
+//     artifact and no-ops when already installed. (pnpm-workspace.yaml also allow-lists llama.rn so a plain
+//     `pnpm install` populates these too; this is the belt-and-suspenders for the build path.)
+const llamaDownload = join(
+  dirname(createRequire(import.meta.url).resolve("llama.rn/package.json", { paths: [appDir] })),
+  "install",
+  "download-native-artifacts.js",
+);
+run("node", [llamaDownload], { cwd: appDir, env });
 // 4. Regenerate the native android/ project (gitignored) so app.json changes propagate. --clean is
 //    what makes the build reproducible from a checkout.
 run("npx", ["expo", "prebuild", "--platform", "android", "--no-install", "--clean"], {
