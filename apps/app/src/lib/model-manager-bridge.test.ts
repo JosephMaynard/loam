@@ -22,8 +22,8 @@ function scriptedChannel(responder: Responder): { channel: BridgeChannel; posts:
       }
       listeners.get(name)!.add(handler);
     },
-    removeListener(name, handler) {
-      listeners.get(name)?.delete(handler);
+    removeAllListeners(name) {
+      listeners.delete(name);
     },
     post(name, payload) {
       const record = payload as Record<string, unknown>;
@@ -78,7 +78,7 @@ describe("bridge roundTrip — timeout vs explicit failure (P2-1)", () => {
   it("treats a synchronous post throw as a definite failure (message never sent), not a timeout", async () => {
     const channel: BridgeChannel = {
       addListener() {},
-      removeListener() {},
+      removeAllListeners() {},
       post() {
         throw new Error("channel closed");
       },

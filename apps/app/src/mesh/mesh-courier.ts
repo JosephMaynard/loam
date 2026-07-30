@@ -26,7 +26,7 @@ type SendCommand = { peerId?: unknown; blobId?: unknown; base64?: unknown };
 /** The subset of the nodejs-mobile bridge channel this module uses (kept loose, like the LLM bridge). */
 interface BridgeChannel {
   addListener(name: string, handler: (payload: unknown) => void): void;
-  removeListener(name: string, handler: (payload: unknown) => void): void;
+  removeAllListeners(name: string): void;
   post(name: string, payload: unknown): void;
 }
 
@@ -101,10 +101,10 @@ export function registerMeshCourier(channel: BridgeChannel): () => void {
   channel.addListener('loam-mesh-send', onSend);
 
   return () => {
-    channel.removeListener('loam-mesh-start', onStart);
-    channel.removeListener('loam-mesh-stop', onStop);
-    channel.removeListener('loam-mesh-advertise', onAdvertise);
-    channel.removeListener('loam-mesh-send', onSend);
+    channel.removeAllListeners('loam-mesh-start');
+    channel.removeAllListeners('loam-mesh-stop');
+    channel.removeAllListeners('loam-mesh-advertise');
+    channel.removeAllListeners('loam-mesh-send');
     meshTransport.stop();
   };
 }

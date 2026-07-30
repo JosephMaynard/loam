@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // --- Native / Expo / bridge module doubles (only what index.tsx touches at module load) -----------
 vi.mock('@comapeo/nodejs-mobile-react-native', () => ({
-  default: { channel: { post: vi.fn(), addListener: vi.fn(), removeListener: vi.fn() }, start: vi.fn() },
+  default: { channel: { post: vi.fn(), addListener: vi.fn(), removeAllListeners: vi.fn() }, start: vi.fn() },
 }));
 vi.mock('expo-keep-awake', () => ({ activateKeepAwakeAsync: vi.fn(), deactivateKeepAwake: vi.fn() }));
 vi.mock('react-native', () => ({

@@ -52,7 +52,7 @@ type LlmRequest = { id?: unknown; messages?: unknown };
 /** The subset of the nodejs-mobile bridge channel this module uses (kept loose so it stays decoupled). */
 interface BridgeChannel {
   addListener(name: string, handler: (payload: LlmRequest) => void): void;
-  removeListener(name: string, handler: (payload: LlmRequest) => void): void;
+  removeAllListeners(name: string): void;
   post(name: string, payload: unknown): void;
 }
 
@@ -675,5 +675,5 @@ export function registerOnDeviceLlm(channel: BridgeChannel): () => void {
   };
 
   channel.addListener('loam-llm-request', onRequest);
-  return () => channel.removeListener('loam-llm-request', onRequest);
+  return () => channel.removeAllListeners('loam-llm-request');
 }

@@ -145,7 +145,7 @@ export type ResolvedDbKey = {
  * RN↔launcher bridges — on-device-llm.ts, mesh-courier.ts, model-manager-bridge.ts). */
 export interface BridgeChannel {
   addListener(name: string, handler: (payload: unknown) => void): void;
-  removeListener(name: string, handler: (payload: unknown) => void): void;
+  removeAllListeners(name: string): void;
   post(name: string, payload: unknown): void;
 }
 
@@ -671,8 +671,8 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
   channel.addListener('loam-db-key-request', onRequest);
   channel.addListener('loam-db-key-migrated', onMigrated);
   return () => {
-    channel.removeListener('loam-db-key-request', onRequest);
-    channel.removeListener('loam-db-key-migrated', onMigrated);
+    channel.removeAllListeners('loam-db-key-request');
+    channel.removeAllListeners('loam-db-key-migrated');
   };
 }
 
@@ -729,7 +729,7 @@ export function requestDbStartFresh(
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeListener('loam-db-start-fresh-result', onResult);
+      channel.removeAllListeners('loam-db-start-fresh-result');
       resolve(result);
     };
 
@@ -781,7 +781,7 @@ export function requestDbUnlock(channel: BridgeChannel, timeoutMs = 5000): Promi
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeListener('loam-db-unlock-result', onResult);
+      channel.removeAllListeners('loam-db-unlock-result');
       resolve(result);
     };
 
@@ -834,7 +834,7 @@ export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, ti
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeListener('loam-db-set-mode-hint-result', onResult);
+      channel.removeAllListeners('loam-db-set-mode-hint-result');
       resolve(result);
     };
 

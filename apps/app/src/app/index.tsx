@@ -562,9 +562,9 @@ export default function HostScreen() {
 
     return () => {
       clearTimeout(startupTimeout);
-      nodejs.channel.removeListener('loam-status', onStatus);
-      nodejs.channel.removeListener('loam-hostinfo', onHostInfo);
-      nodejs.channel.removeListener('loam-wipe-restart', onWipeRestart);
+      nodejs.channel.removeAllListeners('loam-status');
+      nodejs.channel.removeAllListeners('loam-hostinfo');
+      nodejs.channel.removeAllListeners('loam-wipe-restart');
       cleanupLlm();
       cleanupMesh();
       cleanupDbEncryption();

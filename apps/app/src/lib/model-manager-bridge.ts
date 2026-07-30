@@ -27,7 +27,7 @@
 // NEXT time the app (re)starts the embedded server — the caller is expected to say so in the UI.
 export interface BridgeChannel {
   addListener(name: string, handler: (payload: unknown) => void): void;
-  removeListener(name: string, handler: (payload: unknown) => void): void;
+  removeAllListeners(name: string): void;
   post(name: string, payload: unknown): void;
 }
 
@@ -86,7 +86,7 @@ function roundTrip(
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeListener('loam-model-set-active-result', onResult);
+      channel.removeAllListeners('loam-model-set-active-result');
       resolve(result);
     };
 
