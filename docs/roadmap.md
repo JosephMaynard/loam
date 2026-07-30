@@ -28,6 +28,7 @@ Researched but not committed — briefings for Fable/owner to prioritize.
 | **Node-to-node sync** | Pull-based gossip of public data between nodes (the transport-agnostic layer LoRa will ride). **MVP landed.** | [11-node-sync.md](11-node-sync.md) |
 | **Transport security (no HTTPS)** | QR-bootstrapped app-layer encryption so plain-HTTP LAN traffic is confidential + MITM-resistant without certs. | [08-transport-security.md](08-transport-security.md) |
 | **Security profiles** | Make all security optional via a few named presets (open/standard/hardened), not a toggle matrix — spans disaster-relief to protest. | [09-security-profiles.md](09-security-profiles.md) |
+| **AT-Proto-inspired P2P** | Portable cryptographic identity + user-owned signed repos that sync between nodes (borrow the concepts, drop the online resolution). Largest remaining epic; builds on the mesh identity stack. | [22-atproto-p2p.md](22-atproto-p2p.md) |
 
 ## How they interlock
 
