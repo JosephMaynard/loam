@@ -1,0 +1,102 @@
+name: Build APK
+
+# Builds the Android host APK and, on a release tag, attaches it to the GitHub Release.
+#
+# Triggers:
+#   - push of a tag matching v*  → build + create/update that Release with the APK asset
+#   - manual (workflow_dispatch) → build + upload the APK as a workflow artifact (no Release)
+#
+# The heavy lifting is scripts/build-apk.mjs (`pnpm --filter app apk`): it runs the workspace build,
+# fetches the SQLite native prebuilds (fetch:native), bundles the embedded server, downloads llama.rn's
+# native libs, runs `expo prebuild --clean`, and assembles the release APK for arm64-v8a. This job only
+# has to provide the toolchain (JDK + Android SDK/NDK/CMake) and, optionally, a signing key.
+#
+# NOTE: for this to fire on a tag, the workflow file must already exist in the tagged commit — i.e. it
+# must be merged to master before you push a v* tag built from master.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # create/update the Release and upload the APK asset
+
+jobs:
+  build-apk:
+    name: Build Android host APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Referenced in the "Configure release signing" step's `if:` so the build stays debug-signed
+      # (still installable) when the secret isn't set. Secrets are safe to surface as job env.
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Setup JDK 17
+        # Version tags (not SHA-pinned like the reused actions above) — SHA-pin these to match the
+        # repo convention when convenient.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK + CMake
+        # NDK 27.1.12297006 is the version Expo SDK 57 / RN 0.86 prebuild pins (and what a working local
+        # build uses); llama.rn's CMake build links against it. CMake 3.22.1 is the AGP default the RN
+        # modules' externalNativeBuild expects.
+        run: sdkmanager "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure release signing
+        # Only when the keystore secret is present. Materialises release.jks + keystore.properties, which
+        # plugins/with-release-signing.js picks up at prebuild to sign the release build with a STABLE key
+        # (so installs update in place). Absent → strict no-op, build stays debug-signed (still installable,
+        # but each build's signature differs, so updating requires an uninstall first).
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > apps/app/release.jks
+          cat > apps/app/keystore.properties <<PROPS
+          storeFile=release.jks
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          PROPS
+
+      - name: Build APK
+        run: pnpm --filter app apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loam-host-apk
+          path: apps/app/loam-host.apk
+          if-no-files-found: error
+
+      - name: Attach APK to the Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: apps/app/loam-host.apk
+          fail_on_unmatched_files: true
