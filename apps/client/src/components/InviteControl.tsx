@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useState } from "preact/hooks";
+import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { safeQrSvg } from "../lib/qr";
@@ -32,11 +32,18 @@ export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: st
   const [open, setOpen] = useState(false);
   const qrSvg = useMemo(() => safeQrSvg(qrUrl ?? joinUrl, "#16271f"), [joinUrl, qrUrl]);
   const hasNativeBridge = typeof window !== "undefined" && !!reactNativeBridge();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
     if (!open) {
       return;
     }
+
+    // Move focus into the dialog so keyboard/screen-reader users aren't stranded on background content,
+    // and restore it to the trigger when the modal closes (Escape, backdrop click, or the close button).
+    const trigger = triggerRef.current;
+    dialogRef.current?.focus();
 
     function onKeyDown(event: KeyboardEvent): void {
       if (event.key === "Escape") {
@@ -45,7 +52,10 @@ export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: st
     }
 
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      trigger?.focus();
+    };
   }, [open]);
 
   if (!joinUrl) {
@@ -58,7 +68,7 @@ export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: st
 
   return (
     <div className="invite-control">
-      <button className="new-channel-toggle" onClick={() => setOpen(true)} type="button">
+      <button className="new-channel-toggle" onClick={() => setOpen(true)} ref={triggerRef} type="button">
         {t("invite.show")}
       </button>
       {open ? (
@@ -70,7 +80,14 @@ export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: st
             }
           }}
         >
-          <div aria-labelledby="invite-modal-title" aria-modal="true" className="invite-modal" role="dialog">
+          <div
+            aria-labelledby="invite-modal-title"
+            aria-modal="true"
+            className="invite-modal"
+            ref={dialogRef}
+            role="dialog"
+            tabIndex={-1}
+          >
             <div className="invite-modal-header">
               <h2 id="invite-modal-title">{t("invite.title")}</h2>
               <button

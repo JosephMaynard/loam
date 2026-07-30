@@ -4056,24 +4056,45 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     // Remove the legacy demo users (user.1234/user.5678) that early builds seeded — a live node shouldn't
-    // ship fake DM contacts. Delete both the user rows and every message that references them (authored by,
-    // or a DM sent to, the demo user), in one transaction. A fresh node never creates them in the first
-    // place; this only cleans up a pre-existing DB.
+    // ship fake DM contacts. Delete every message that references them (authored by, or a DM to, the demo
+    // user) AND every reaction/reply targeting those messages — via `collectDeletionSet` + `deleteMessages`,
+    // the same machinery the normal delete path uses, so removals are tombstoned (a peer can't re-import
+    // them over sync), attachment-swept, and persist-before-mirror ordered. Message cleanup runs even when
+    // the user row is already gone (a partial prior state can still leave orphan messages). A fresh node
+    // never creates these; this only cleans up a pre-existing DB.
     for (const id of legacyDemoUserIds) {
-      if (!data.users.some((user) => user.id === id)) {
-        continue;
-      }
       const involvesDemoUser = (message: Message): boolean =>
         message.authorId === id || (message.type === "dm" && message.recipientUserId === id);
-      const doomedMessageIds = data.messages.filter(involvesDemoUser).map((message) => message.id);
-      data.messages = data.messages.filter((message) => !involvesDemoUser(message));
-      data.users = data.users.filter((user) => user.id !== id);
-      store.transaction(() => {
-        for (const messageId of doomedMessageIds) {
-          store.deleteMessage(messageId);
+      const deletionSet = new Map<string, Message>();
+      for (const message of data.messages.filter(involvesDemoUser)) {
+        for (const casualty of collectDeletionSet(message)) {
+          deletionSet.set(casualty.id, casualty);
         }
-        store.deleteUser(id);
-      });
+      }
+      deleteMessages(Array.from(deletionSet.values()));
+
+      if (data.users.some((user) => user.id === id)) {
+        data.users = data.users.filter((user) => user.id !== id);
+        // Purge auth mappings too, so a stale session/identity token can never resurrect the user via
+        // `ensureSessionUser`. Seed users never authenticate, so these are normally empty — cleared anyway
+        // so the removal is provably complete (persisted + the in-memory mirrors loaded by loadData()).
+        const doomedTokens = [...sessions].filter(([, userId]) => userId === id).map(([token]) => token);
+        store.transaction(() => {
+          store.deleteUser(id);
+          store.deleteIdentityTokensForUser(id);
+          for (const token of doomedTokens) {
+            store.deleteSession(token);
+          }
+        });
+        for (const token of doomedTokens) {
+          sessions.delete(token);
+        }
+        for (const [tokenHash, userId] of identityTokens) {
+          if (userId === id) {
+            identityTokens.delete(tokenHash);
+          }
+        }
+      }
     }
 
     ensureBotUser();

@@ -24,7 +24,7 @@ LOAM is unusually well-positioned because the opportunistic-mesh work (`docs/16`
 
 | AT Proto pillar | LOAM today | Where |
 |---|---|---|
-| **DID** — portable self-certifying id | ✅ `mesh.` id = **hash of an Ed25519 pubkey** (a `did:key` in all but name) | `packages/crypto` (`@loam/crypto`), `mesh_identities` DAL |
+| **DID** — portable self-certifying id | ✅ `mesh.` id = **hash of an Ed25519 pubkey** — a self-certifying key fingerprint (`did:key`-like in spirit; it *hashes* the key rather than multibase-encoding it, so not literally `did:key`) | `packages/crypto` (`@loam/crypto`), `mesh_identities` DAL |
 | **Identity document / key exchange** | ✅ **mesh identity cards** (pubkeys + secret mailbox token), exchanged by QR/paste, re-verified server-side (`meshId===hash(sign)` + `kxSig` binding) | `GET /api/mesh/identity`, `POST /api/mesh/contacts`, `mesh_contacts` DAL |
 | **Crypto primitives** | ✅ Ed25519 signing, X25519 sealed-sender (XChaCha20-Poly1305), `@noble/*` pure-JS (works in the insecure-context PWA + embedded Node-18) | `packages/crypto` |
 | **Relay / firehose / federation** | 🟡 pull-based **node-to-node sync**: digest → diff → fetch, tombstones, optional shared `sync.token` — but it gossips **node-owned public data**, trusting the peer node | `GET /api/sync/digest`, `POST /api/sync/messages`, `docs/11` |
@@ -75,12 +75,18 @@ disturbed.
 - **Phase 1 — portable identity (opt-in).** Promote the mesh DID (`packages/crypto`) into an optional
   **key-based account**: a user can generate/import a keypair and be recognised across nodes by their
   `mesh.`-style id, alongside (never replacing) the anonymous default. Deepest authz surface; most careful.
+  Calling an account *portable* has hard prerequisites that must be designed up front, not bolted on:
+  **key rotation**, **lost-key recovery**, and **repo delegation** — i.e. how the identity and its signed
+  repo (Phase 2) stay accessible when the key changes or is unavailable. Treat these as Phase 1 gating work.
 - **Phase 2 — signed user repo.** Each post becomes a **signed record** in a per-user, content-addressed
   repo (start: a signed append-only commit log; not a full Merkle Search Tree). Store the signature +
   CID; verify on read. This is the big, security-critical phase.
 - **Phase 3 — repo sync.** Extend the `docs/11` sync engine to gossip **signed user-repo diffs** and
   verify authorship cryptographically (drop the trust-the-peer-node assumption for repo data). ~High reuse
-  of the existing digest/diff/fetch machinery, as the mesh relay reused it.
+  of the existing digest/diff/fetch machinery, as the mesh relay reused it. Sync stays **public-data-only**:
+  the signed diffs carry no DMs, private-channel data, or shadow-banned content, preserving the existing
+  audience + moderation filtering that `docs/11` already enforces — user-signed repos change *who vouches*
+  for a record, not *what leaves the node*.
 - **Phase 4 (optional, online only) — real federation.** Handle resolution + relays + `atproto` OAuth
   (`docs/05`) for internet-hosted website instances. Not for the off-grid host.
 
