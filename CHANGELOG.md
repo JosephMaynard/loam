@@ -6,7 +6,15 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
 ## [Unreleased]
 
-Work landed on `master` since 0.1.0, plus items in review.
+_Nothing yet._
+
+## [0.3.0] - 2026-07-31
+
+Everything landed on `master` since 0.1.0 — 0.2.0 was an interim device-test build, and **0.3.0 is the
+first release-signed build** (CI signs and attaches the APK to each tagged release). Verified on a
+physical phone this cycle: the on-device LLM works, encryption persists, and the earlier crashes are
+fixed. Also added an LLM DM-context bound, a 256KB sync-import body cap, and a docs / README / site
+accuracy pass. The detail below is the full arc since 0.1.0.
 
 ### Security & privacy
 - **Transport encryption (docs/08) — QR-bootstrapped app-layer session encryption over plain HTTP.**
