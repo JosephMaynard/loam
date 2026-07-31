@@ -51,8 +51,15 @@ function resolveKeytool() {
   return "keytool"; // fall back to PATH
 }
 
-const storePassword = randomBytes(24).toString("base64url");
-const keyPassword = randomBytes(24).toString("base64url");
+// ONE password for both the store and the key. The default keystore type is PKCS12, whose key entries
+// are protected by the STORE password — keytool ignores a distinct `-keypass` and folds it into the
+// store password (it prints a "Different store and key passwords not supported for PKCS12" warning).
+// Generating two different values (as this used to) recorded a `keyPassword` the key was never actually
+// created with, so Gradle's `signingConfig` then failed to open the key. A single value keeps
+// keystore.properties consistent with what's really in the .jks.
+const password = randomBytes(24).toString("base64url");
+const storePassword = password;
+const keyPassword = password;
 const keytool = resolveKeytool();
 
 // Pass the passwords via `:env` (read from the child's environment) rather than as CLI args, so they
