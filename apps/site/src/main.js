@@ -55,10 +55,13 @@ if (prefersReducedMotion || !("IntersectionObserver" in window)) {
 // localStorage), and `person_profiles: 'identified_only'` means no profile is ever created since we
 // never identify anyone. We disable session recording / surveys / autocapture, so nothing external is
 // loaded (keeps `script-src 'self'`) — the only network egress is anonymous event POSTs to the EU
-// ingest host in `connect-src`. Key + host come from Vercel build env; with no key set (local dev), this
-// is a no-op. All we measure is "did anyone visit / want to download LOAM", not who.
+// ingest host in `connect-src`. The key comes from the Vercel build env; with no key set (local dev),
+// this is a no-op. All we measure is "did anyone visit / want to download LOAM", not who.
 const posthogKey = import.meta.env.VITE_POSTHOG_KEY;
-const posthogHost = import.meta.env.VITE_POSTHOG_HOST || "https://eu.i.posthog.com";
+// EU ingest host, hardcoded to stay in lockstep with the CSP `connect-src` allowlist (vercel.json). A
+// different region would be silently blocked by CSP, so it is deliberately NOT an env override — change
+// the host here and in the CSP together if the project ever moves region.
+const posthogHost = "https://eu.i.posthog.com";
 if (posthogKey) {
   posthog.init(posthogKey, {
     api_host: posthogHost,
@@ -72,18 +75,24 @@ if (posthogKey) {
     advanced_disable_decide: true,
   });
 
-  // The only interest signals we care about beyond a pageview: someone clicked "Download for Android"
-  // or headed to the source on GitHub.
+  // The only interest signals we care about beyond a pageview: someone clicked "Download for Android" or
+  // headed to the source on GitHub. Resolve the real hostname (not a substring match) so a link such as
+  // `https://evil.example/github.com` can't mis-fire an event (CodeQL: incomplete URL sanitization).
   document.addEventListener("click", (event) => {
     const link = event.target instanceof Element ? event.target.closest("a") : null;
     if (!link) {
       return;
     }
-    const href = link.getAttribute("href") || "";
-    if (href.includes("releases/latest/download")) {
-      posthog.capture("download_apk_click");
-    } else if (href.includes("github.com")) {
-      posthog.capture("github_click");
+    let url;
+    try {
+      url = new URL(link.href, window.location.href);
+    } catch {
+      return;
     }
+    const host = url.hostname.toLowerCase();
+    if (host !== "github.com" && !host.endsWith(".github.com")) {
+      return;
+    }
+    posthog.capture(url.pathname.includes("/releases/latest/download") ? "download_apk_click" : "github_click");
   });
 }
