@@ -464,6 +464,12 @@ const defaultChannels: Channel[] = [
  * `user.<hex>`, so these constant ids are unambiguously the old seeds and safe to delete. */
 const legacyDemoUserIds = ["user.1234", "user.5678"];
 
+/** Upper bound on how many of the most-recent DM messages between a user and the LLM bot are sent to the
+ * model as context on each turn (see `llmMessagesForUser`). Prevents an unbounded history from growing the
+ * request every turn and overflowing the model's context window. Deliberately generous — most models hold
+ * far more, and dropping the oldest turns preserves what matters. */
+const MAX_LLM_CONTEXT_MESSAGES = 40;
+
 /**
  * Stable snake_case code for every error message the server can return, so clients can localize the
  * message from a catalog while the English `error` string stays as the fallback (unknown codes → the
@@ -3743,7 +3749,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     botId: string,
     currentUserId: string,
   ): { role: "system" | "user" | "assistant"; content: string }[] {
-    const messages = dmMessages(botId, currentUserId).flatMap((message) => {
+    const history = dmMessages(botId, currentUserId).flatMap((message) => {
       if (message.type !== "dm" || !message.body.trim()) {
         return [];
       }
@@ -3755,6 +3761,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         },
       ];
     });
+
+    // Bound the context to the most-recent turns: mapping the ENTIRE DM history every turn grows the
+    // request each time and eventually overflows the model's context window (the model then errors or
+    // silently drops the oldest tokens anyway). Keep the newest `MAX_LLM_CONTEXT_MESSAGES` and always keep
+    // the system prompt. A message-count bound (not a token budget) is the same hardcoded-limit style as the
+    // 5-minute Ollama timeout below; a token budget + summarisation is the documented fuller version
+    // (docs/25 P2). A single pathological message can still be large — that's the follow-up, not this fix.
+    const messages = history.slice(-MAX_LLM_CONTEXT_MESSAGES);
 
     return appConfig.llm.ollama.systemPrompt
       ? [{ role: "system" as const, content: appConfig.llm.ollama.systemPrompt }, ...messages]

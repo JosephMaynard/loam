@@ -368,3 +368,30 @@ describe("LLM streaming — feature-flag gating (docs/15 #15)", () => {
     expect(userSocket.events.some((event) => event.type === "end")).toBe(false);
   });
 });
+
+describe("LLM context bounding (docs/25 P2)", () => {
+  it("caps the DM history sent to the model at the most-recent turns, not the whole conversation", async () => {
+    const ollama = startMockOllama(["ok"], { delayMs: 0 });
+    cleanups.push(ollama.close);
+    const app = await makeLlmApp({ enabled: true, baseUrl: await ollama.url });
+    const user = await newSession(app);
+    const baseUrl = await listen(app);
+    const socket = await connect(baseUrl, user.cookie);
+
+    // Drive 25 exchanges (each adds a user + a bot message) so the history grows to ~49 — well past the
+    // 40-message cap. Wait for each turn's `end` (by count) before the next so the history is well-formed.
+    const turns = 25;
+    for (let i = 0; i < turns; i += 1) {
+      expect((await dmBot(app, user.cookie, `q${i}`)).statusCode).toBe(201);
+      expect(await waitFor(() => socket.events.filter((event) => event.type === "end").length >= i + 1)).toBe(true);
+    }
+
+    // No request ever carried more than the cap (+1 for an optional system prompt). Uncapped, the final
+    // turns would have sent ~49 messages — so a max of 40/41 proves the bound actually engaged (not a
+    // vacuous pass): >= 40 means the history exceeded the cap, <= 41 means it was held there.
+    const sizes = ollama.requests.map((request) => request.messages?.length ?? 0);
+    expect(ollama.requests.length).toBe(turns);
+    expect(Math.max(...sizes)).toBeGreaterThanOrEqual(40);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(41);
+  }, 20_000);
+});

@@ -39,7 +39,7 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 | # | Item | Size | | # | Item | Size |
 |---|------|------|--|---|------|------|
 | P1 | **RAG over local content** (semantic search; the standout off-grid feature) | L | | P5 | Provider abstraction: OpenAI-compatible + cloud providers | M |
-| P2 | **LLM context bounding** — `llmMessagesForUser` (`app.ts:3746`) maps the *entire* DM history every turn | S–M | | P6 | Multiple bots/personas; tool use / function calling | M/L |
+| P2 | **LLM context bounding** — ~~maps the *entire* DM history every turn~~ **PARTLY DONE**: a 40-msg recent-history cap landed (`MAX_LLM_CONTEXT_MESSAGES`, tested). A token budget + summarisation is the remaining fuller version | S | | P6 | Multiple bots/personas; tool use / function calling | M/L |
 | P3 | **LLM cancellation + concurrency/rate limits** — no stop button, no cap | S–M | | P7 | LLM backend health surfaced in the UI | S |
 | P4 | Channel participation / `@mention` for the bot (DM-only today) | M | | | | |
 
