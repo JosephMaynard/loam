@@ -30,8 +30,9 @@ real.)
 **Android phone.** `pnpm --filter app apk` builds `apps/app/loam-host.apk`; `adb install -r` it onto the
 phone, launch **LOAM**, and tap **Share · Host**. The app brings up a local-only WiFi hotspot, runs the
 server on the phone, and shows the join QR. See [docs/04](04-android-host-app.md) for the full build and
-join flow. Note: on-device database encryption isn't available on Android yet — the phone stores its DB
-unencrypted (docs/04).
+join flow. Note: on-device database encryption now **ships** on Android (SQLCipher via a vendored arm64
+prebuild, keyed per the `security.dbEncryption` mode) — pending final on-device runtime verification
+(docs/01, docs/04); only older builds stored the DB unencrypted.
 
 **Environment variables** (laptop/Pi; the Android host sets its own):
 
@@ -177,8 +178,10 @@ other converge in both directions.
   relay, which is against LOAM's off-grid design. Not planned.
 
 Enabling sync exposes this node's public content to anyone who can reach it while it's on — an explicit
-operator choice. There's no peer authentication yet, so hardened deployments should leave it off or pair
-it with approval joins. Depth and limits are in [docs/11](11-node-sync.md).
+operator choice. Peers can be authenticated with an optional shared `sync.token` (the `x-loam-sync-token`
+header, sealed inside the transport envelope on encrypted links; a missing/wrong token 404s exactly like
+sync being off) — hardened deployments should set one, pair it with approval joins, or leave sync off.
+Depth and limits are in [docs/11](11-node-sync.md).
 
 ## 7. Emergency posture
 
@@ -222,9 +225,9 @@ before you both enable sync *and* rely on the kill switch.
 - **Presence defaults on, disable when hardened.** The online-dot (`enablePresence`) is on by default for
   ordinary use, but it leaks who is currently connected — high-risk operators should turn it off.
 - **Sync trust model is node-level and pull-only.** A peer's public content is trusted enough to import
-  (schema-validated, private data and moderation state never cross); there's no peer authentication yet,
-  deletes don't propagate, and enabling sync deliberately exposes this node's public content to anyone
-  who can reach it.
+  (schema-validated, private data and moderation state never cross); peers can be authenticated with an
+  optional shared `sync.token`, deletes don't propagate, and enabling sync deliberately exposes this
+  node's public content to anyone who can reach it (a token-holder, if one is set).
 - **Unguessable-URL model for images.** Avatar images (`/api/avatars/…`) are served behind long random
   ids with no per-request authorization — anyone on the LAN who has the id can fetch one, consistent with
   the public, trusted-host model. Message **attachments** (`/api/attachments/…`) use the same random-id
