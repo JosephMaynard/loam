@@ -110,9 +110,12 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 
 ## 8. Stale / contradictory doc claims (to correct)
 
-Flagged by the consolidation sweep, verified against code. **Corrected on this branch:** #1 (docs/06 —
-streaming + context bullets) and #4/#5 (docs/12 — sync peer-auth + Android encryption). **Still to fix:**
-#2 (docs/13 RTL), #3 (docs/16 sealed-tombstone GC — confirm first), #6 (the `notifyIfHidden` half of docs/15 #22).
+Flagged by the consolidation sweep, verified against code. **All corrected on this branch:** #1 (docs/06 —
+streaming + context bullets), #2 (docs/13 — RTL audit is done), #3 (docs/16 — sealed tombstones DO share
+`addTombstone`/the horizon GC, verified), #4/#5 (docs/12 — sync peer-auth + Android encryption). #6 is not
+a doc claim: `notifyIfHidden` is genuinely inert (it only fires an OS notification, and
+`Notification.requestPermission()` is never called) — that's the D2 dead-code / P15 web-push item, left as-is
+(removing it is a no-op cleanup; wiring it is the P15 feature, which needs care on insecure-context LAN).
 1. **docs/06** "Current state" still describes the O(n²) per-token rebroadcast, calls `StreamEvent` "tested but never used," and `runInference` a "graceful stub." **All built:** `broadcastStreamEvent` emits `start/delta/end/error` (`app.ts:3983-4003`); `on-device-llm.ts` fully wires `llama.rn`. Only device *runtime* verification remains.
 2. **docs/13 §6** "RTL layout audit (still needed)." **Done:** `global.css` uses logical properties throughout, zero remaining physical directional props.
 3. **docs/16 §5 deviation 5** "expired-sealed tombstones aren't horizon-GC'd." Likely stale after the `pruneTombstonesHorizon` landing — confirm sealed tombstones are covered, then strike.
