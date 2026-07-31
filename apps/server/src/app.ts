@@ -458,7 +458,11 @@ const defaultChannels: Channel[] = [
   },
 ];
 
-const seedUsers = ["user.1234", "user.5678"];
+/** Fixed ids of the legacy demo users early builds planted so a fresh node had example DM contacts. A
+ * live node must never ship fake users, so these are no longer seeded — and any that a pre-existing DB
+ * still carries are removed at boot (see the cleanup in the store initializer). Real users are always
+ * `user.<hex>`, so these constant ids are unambiguously the old seeds and safe to delete. */
+const legacyDemoUserIds = ["user.1234", "user.5678"];
 
 /**
  * Stable snake_case code for every error message the server can return, so clients can localize the
@@ -4051,12 +4055,50 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       });
     }
 
-    for (const id of seedUsers) {
-      const seed = ensureUser(id);
+    // Remove the legacy demo users (user.1234/user.5678) that early builds seeded — a live node shouldn't
+    // ship fake DM contacts. Delete every message that references them (authored by, or a DM to, the demo
+    // user) AND every reaction/reply targeting those messages — via `collectDeletionSet` + `deleteMessages`,
+    // the same machinery the normal delete path uses, so removals are tombstoned (a peer can't re-import
+    // them over sync), attachment-swept, and persist-before-mirror ordered. Message cleanup runs even when
+    // the user row is already gone (a partial prior state can still leave orphan messages). A fresh node
+    // never creates these; this only cleans up a pre-existing DB.
+    for (const id of legacyDemoUserIds) {
+      const involvesDemoUser = (message: Message): boolean =>
+        message.authorId === id || (message.type === "dm" && message.recipientUserId === id);
+      const deletionSet = new Map<string, Message>();
+      for (const message of data.messages.filter(involvesDemoUser)) {
+        for (const casualty of collectDeletionSet(message)) {
+          deletionSet.set(casualty.id, casualty);
+        }
+      }
+      deleteMessages(Array.from(deletionSet.values()));
 
-      if (seed.isAdmin) {
-        seed.isAdmin = false;
-        store.upsertUser(seed);
+      // Purge the user row (only if still present) AND any auth mappings. The credential purge is NOT
+      // gated on the row existing, so a stale session/identity token can't linger — or resurrect the id via
+      // `ensureSessionUser` — after a partial prior cleanup that dropped the row but not its tokens. Persist
+      // in one transaction, then mirror the in-memory maps only AFTER it succeeds. Seed users never
+      // authenticate, so the mappings are normally empty — cleared anyway so the removal is provably complete.
+      const userExists = data.users.some((user) => user.id === id);
+      const doomedTokens = [...sessions].filter(([, userId]) => userId === id).map(([token]) => token);
+      store.transaction(() => {
+        if (userExists) {
+          store.deleteUser(id);
+        }
+        store.deleteIdentityTokensForUser(id);
+        for (const token of doomedTokens) {
+          store.deleteSession(token);
+        }
+      });
+      if (userExists) {
+        data.users = data.users.filter((user) => user.id !== id);
+      }
+      for (const token of doomedTokens) {
+        sessions.delete(token);
+      }
+      for (const [tokenHash, userId] of identityTokens) {
+        if (userId === id) {
+          identityTokens.delete(tokenHash);
+        }
       }
     }
 

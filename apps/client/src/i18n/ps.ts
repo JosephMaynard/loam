@@ -377,6 +377,10 @@ export const ps: Catalog = {
 
   "invite.hide": "× بلنه پټول",
   "invite.show": "⧉ یو څوک وبلئ",
+  "invite.title": "یو څوک وبلئ",
+  "invite.close": "بلنه بندول",
+  "invite.wifiButton": "د وایفای هاټ سپاټ QR کوډ ښودل",
+  "invite.wifiHint": "د کوربه وایفای QR کوډ خلاصوي ترڅو خلک لومړی شبکې ته ننوځي.",
 
   "nodeLink.hide": "× لینک پټول",
   "nodeLink.show": "⧉ بل نوډ نښلول",

@@ -377,6 +377,10 @@ export const my: Catalog = {
 
   "invite.hide": "× ဖိတ်ကြားချက် ဖျောက်ရန်",
   "invite.show": "⧉ တစ်ဦးကို ဖိတ်ရန်",
+  "invite.title": "တစ်ဦးကို ဖိတ်ရန်",
+  "invite.close": "ဖိတ်ကြားချက် ပိတ်ရန်",
+  "invite.wifiButton": "Wi-Fi hotspot QR ကို ပြရန်",
+  "invite.wifiHint": "လူများ ကွန်ရက်ကို ဦးစွာ ဝင်နိုင်ရန် host ၏ Wi-Fi QR ကို ဖွင့်ပေးသည်။",
 
   "nodeLink.hide": "× လင့်ခ် ဖျောက်ရန်",
   "nodeLink.show": "⧉ အခြား node ချိတ်ရန်",

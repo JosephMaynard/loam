@@ -378,6 +378,10 @@ export const prs: Catalog = {
 
   "invite.hide": "× پنهان‌کردن دعوت",
   "invite.show": "⧉ دعوت از کسی",
+  "invite.title": "دعوت از کسی",
+  "invite.close": "بستن دعوت",
+  "invite.wifiButton": "نمایش کد QR هات‌اسپات وایفای",
+  "invite.wifiHint": "کد QR وایفای میزبان را باز می‌کند تا مردم ابتدا بتوانند به شبکه بپیوندند.",
 
   "nodeLink.hide": "× پنهان‌کردن پیوند",
   "nodeLink.show": "⧉ پیوند گرهٔ دیگر",

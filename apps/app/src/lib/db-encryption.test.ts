@@ -77,7 +77,7 @@ async function runMigrationHandoff(requestId: string): Promise<void> {
 }
 
 /** Minimal in-memory `BridgeChannel` test double — an event-name -> handler-set map, matching the
- * addListener/removeListener/post surface `registerDbEncryption` uses. `emit` synchronously invokes
+ * addListener/removeAllListeners/post surface `registerDbEncryption` uses. `emit` synchronously invokes
  * every currently-registered handler for `name`. */
 function makeFakeChannel(): BridgeChannel & { emit: (name: string, payload?: unknown) => void; posted: { name: string; payload: unknown }[] } {
   const handlers = new Map<string, Set<(payload: unknown) => void>>();
@@ -90,8 +90,8 @@ function makeFakeChannel(): BridgeChannel & { emit: (name: string, payload?: unk
       }
       handlers.get(name)!.add(handler);
     },
-    removeListener(name, handler) {
-      handlers.get(name)?.delete(handler);
+    removeAllListeners(name) {
+      handlers.delete(name);
     },
     post(name, payload) {
       posted.push({ name, payload });

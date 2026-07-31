@@ -90,7 +90,7 @@ vi.mock("@/lib/model-manager-store", () => ({
 
 interface FakeChannel {
   addListener(name: string, handler: (payload: unknown) => void): void;
-  removeListener(name: string, handler: (payload: unknown) => void): void;
+  removeAllListeners(name: string): void;
   post(name: string, payload: unknown): void;
   emit(name: string, payload: unknown): void;
   posts: { name: string; payload: { id?: unknown; text?: unknown; error?: unknown } }[];
@@ -103,7 +103,7 @@ function makeChannel(): FakeChannel {
   const posts: FakeChannel["posts"] = [];
   return {
     addListener: (name, handler) => handlers.set(name, handler),
-    removeListener: (name) => handlers.delete(name),
+    removeAllListeners: (name) => handlers.delete(name),
     post: (name, payload) => posts.push({ name, payload: payload as { id?: unknown } }),
     emit: (name, payload) => handlers.get(name)?.(payload),
     posts,

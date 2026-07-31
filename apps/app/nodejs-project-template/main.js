@@ -1276,6 +1276,18 @@ function probeEncryptedDriver() {
     require('better-sqlite3-multiple-ciphers');
     return true;
   } catch (err) {
+    // Do NOT swallow this silently: a failed load is the reason an operator-selected encrypted mode
+    // silently downgrades to plaintext, and without the error there is no way to tell WHY on-device (a
+    // missing .node, a wrong-ABI/arch prebuild, a bad OpenSSL/libc link, a resolution failure...). Log it
+    // loudly to logcat so `adb logcat | grep LOAM-DB` surfaces the real cause. (better-sqlite3-multiple-
+    // ciphers is the SELF-BUILT vendored ABI-108 arm64 prebuild — the plain driver is a proven upstream
+    // prebuild, so this one is the untested-on-device path.)
+    console.warn(
+      'LOAM-DB: SQLCipher driver (better-sqlite3-multiple-ciphers) failed to load; encrypted modes will ' +
+        'downgrade to plaintext. Error: ' +
+        (err && err.message ? err.message : String(err)) +
+        (err && err.stack ? '\n' + String(err.stack).split('\n').slice(0, 4).join('\n') : ''),
+    );
     return false;
   }
 }
@@ -1294,6 +1306,18 @@ function resolveDbEncryptionAndBoot() {
         probeEncryptedDriver: probeEncryptedDriver,
       });
       applyBootEnv(cfg.env);
+      // Boot-decision summary to logcat (`adb logcat | grep LOAM-DB`): the mode RN asked for vs the mode we
+      // actually booted, so a silent encrypted->plaintext downgrade is diagnosable on-device. `outcome` +
+      // `bootError.code` say WHICH branch fired (unavailable driver / locked / off / proceed).
+      console.warn(
+        'LOAM-DB: boot decision requestedMode=' +
+          ((result && result.mode) || 'unknown') +
+          ' effectiveMode=' +
+          (cfg.env && cfg.env.LOAM_DB_ENCRYPTION_MODE ? cfg.env.LOAM_DB_ENCRYPTION_MODE : 'off') +
+          ' outcome=' +
+          (cfg.outcome || 'proceed') +
+          (cfg.bootError && cfg.bootError.code ? ' bootError=' + cfg.bootError.code : ''),
+      );
       if (cfg.deleteStaleEphemeralDb) {
         deleteStaleEphemeralDb();
       }

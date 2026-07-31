@@ -21,3 +21,8 @@ catalog:
 onlyBuiltDependencies:
   - better-sqlite3-multiple-ciphers
   - esbuild
+  # llama.rn ships no native libs in its npm tarball — it downloads the prebuilt librnllama*.so via a
+  # postinstall script. Without this allow-list entry pnpm skips that script, the Android build finds no
+  # prebuilt libs, gradle silently produces NO librnllama_jni.so, and the on-device LLM fails at runtime
+  # with "JSI bindings not installed". (build-apk.mjs also runs the downloader explicitly as a backstop.)
+  - llama.rn

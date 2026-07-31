@@ -1,8 +1,8 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Platform, Pressable, StyleSheet, TextInput } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { ActivityIndicator, Alert, BackHandler, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
 
@@ -275,6 +275,13 @@ export default function HostScreen() {
   const [modelManagerOpen, setModelManagerOpen] = useState(false);
   // Whether the on-device DB-encryption mode picker overlay (docs/01, docs/21) is open.
   const [dbEncryptionOpen, setDbEncryptionOpen] = useState(false);
+  // Whether the top-bar hamburger menu (AI model / Encryption / Share · Host) is open. The bar used to
+  // show each of those as its own button, but they ran off the right edge on narrower phones — now a
+  // single menu button opens a dropdown listing the same actions, wired to the same handlers/state above.
+  const [menuOpen, setMenuOpen] = useState(false);
+  // Measured height of the top bar (via onLayout), used to anchor the menu dropdown just below it —
+  // more robust than a hardcoded guess across devices/font scales.
+  const [topBarHeight, setTopBarHeight] = useState(0);
   // The host's real network addresses, reported by the launcher (loam-hostinfo). Used to build the
   // Step-2 join QR from the actual hotspot IP instead of a hardcoded guess.
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
@@ -302,7 +309,36 @@ export default function HostScreen() {
   // other apps; exiting requires the device's own screen-lock PIN.
   const [kiosk, setKiosk] = useState(false);
   const webViewRef = useRef<WebView>(null);
+  // Whether the WebView (the LOAM web client, which routes with preact-iso via the History API) has
+  // in-app history to go back through. A ref, not state: the hardware-back listener reads it without
+  // needing to re-subscribe on every navigation, and there's no render that depends on it.
+  const canGoBackRef = useRef(false);
   const theme = useTheme();
+  // Bottom system-nav-bar inset (Android renders edge-to-edge by default): used both to hold a solid
+  // strip below the WebView (so its content never draws under the on-screen nav bar) and, when needed,
+  // to keep the boot/error screen's content clear of it too.
+  const insets = useSafeAreaInsets();
+
+  // Wire the Android hardware/gesture Back button to the WebView's in-app history. The LOAM web client
+  // routes with preact-iso, which pushes History API entries, so the WebView has a real back stack — but
+  // a WebView-hosting RN Activity doesn't connect Back to it by default, so Back on the root screen just
+  // exits the app instead of going to the previous screen (the reported bug). When the WebView has
+  // history, consume Back and navigate it back; otherwise return false so the default (exit) happens. A
+  // native Modal (the menu / overlays) intercepts Back via its own `onRequestClose` before this fires, so
+  // Back still closes those first.
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (canGoBackRef.current) {
+        webViewRef.current?.goBack();
+        return true;
+      }
+      return false;
+    });
+    return () => subscription.remove();
+  }, []);
 
   // Derived, not stored: used both to gate a `useEffect` below (fetching `lockedMode`) and to drive the
   // fatal block's visibility in the render. Computed here (rather than after the `status === 'ready'`
@@ -526,9 +562,9 @@ export default function HostScreen() {
 
     return () => {
       clearTimeout(startupTimeout);
-      nodejs.channel.removeListener('loam-status', onStatus);
-      nodejs.channel.removeListener('loam-hostinfo', onHostInfo);
-      nodejs.channel.removeListener('loam-wipe-restart', onWipeRestart);
+      nodejs.channel.removeAllListeners('loam-status');
+      nodejs.channel.removeAllListeners('loam-hostinfo');
+      nodejs.channel.removeAllListeners('loam-wipe-restart');
       cleanupLlm();
       cleanupMesh();
       cleanupDbEncryption();
@@ -804,7 +840,22 @@ export default function HostScreen() {
   // the acknowledged, phase-gated `loam-wipe-restart` -> verified clear -> `loam-wipe-complete` protocol
   // (`attemptWipeKeyClear`); see `handleClientWebViewMessage`'s doc comment for the full rationale.
   const handleWebViewMessage = (event: { nativeEvent: { data: string } }) => {
-    handleClientWebViewMessage(event.nativeEvent.data);
+    const raw = event.nativeEvent.data;
+    // The web client's "Invite someone" can ask the native host to open the share/invite overlay — that
+    // overlay (host-share-overlay.tsx) carries the Wi-Fi hotspot QR, which the WebView itself can't render
+    // (the credentials are native-only). Handle it here since it needs component state; everything else
+    // (the wipe protocol) goes to the pure classifier. Opening an overlay is benign, and the WebView is
+    // pinned to the LOAM origin, so this can't be triggered by arbitrary web content.
+    try {
+      const parsed = JSON.parse(raw) as { type?: unknown };
+      if (parsed && parsed.type === 'loam-open-share') {
+        setShareOpen(true);
+        return;
+      }
+    } catch {
+      // Not JSON / not ours — fall through to the wipe-protocol classifier.
+    }
+    handleClientWebViewMessage(raw);
   };
 
   if (Platform.OS !== 'android') {
@@ -824,34 +875,71 @@ export default function HostScreen() {
         {/* Compact host bar above the WebView. Kept as a sibling *above* (not overlapping) the
             WebView: an Android WebView swallows touches on any native view layered over it, so a
             floating button on top wouldn't register — a top bar reliably does. */}
-        <ThemedView type="backgroundElement" style={styles.topBar}>
+        <ThemedView
+          type="backgroundElement"
+          style={styles.topBar}
+          onLayout={(event) => setTopBarHeight(event.nativeEvent.layout.height)}>
           <ThemedText type="smallBold">LOAM host</ThemedText>
-          <ThemedView style={styles.topBarActions}>
-            <Pressable
-              onPress={() => setModelManagerOpen(true)}
-              accessibilityRole="button"
-              accessibilityLabel="Manage the on-device AI model"
-              style={styles.secondaryButton}>
-              <ThemedText type="smallBold">AI model</ThemedText>
-            </Pressable>
-            <Pressable
-              onPress={() => setDbEncryptionOpen(true)}
-              accessibilityRole="button"
-              accessibilityLabel="On-device encryption settings"
-              style={styles.secondaryButton}>
-              <ThemedText type="smallBold">Encryption</ThemedText>
-            </Pressable>
-            <Pressable
-              onPress={() => setShareOpen(true)}
-              accessibilityRole="button"
-              accessibilityLabel="Share or host this LOAM node"
-              style={styles.shareButton}>
-              <ThemedText type="smallBold" style={styles.shareButtonLabel}>
-                Share · Host
-              </ThemedText>
-            </Pressable>
-          </ThemedView>
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Open host menu"
+            hitSlop={Spacing.two}
+            style={styles.menuButton}>
+            <View style={[styles.menuBar, { backgroundColor: theme.text }]} />
+            <View style={[styles.menuBar, { backgroundColor: theme.text }]} />
+            <View style={[styles.menuBar, { backgroundColor: theme.text }]} />
+          </Pressable>
         </ThemedView>
+        {/* The menu button's dropdown (Issue 2): a single hamburger replaces the old row of "AI model" /
+            "Encryption" / "Share · Host" buttons, which overflowed the bar on narrower phones. Each item
+            below calls the exact same handler/state setter the old buttons used — only the presentation
+            changed. A transparent Modal + full-screen backdrop Pressable (tap outside to dismiss) anchors
+            a small card just under the measured top bar, right-aligned under the menu button. */}
+        <Modal visible={menuOpen} transparent animationType="fade" onRequestClose={() => setMenuOpen(false)}>
+          <Pressable
+            style={styles.menuBackdrop}
+            onPress={() => setMenuOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close menu">
+            <View style={[styles.menuCardWrap, { paddingTop: insets.top + topBarHeight }]}>
+              <ThemedView type="backgroundElement" style={styles.menuCard}>
+                <Pressable
+                  onPress={() => {
+                    setMenuOpen(false);
+                    setModelManagerOpen(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Manage the on-device AI model"
+                  style={styles.menuItem}>
+                  <ThemedText type="smallBold">AI model</ThemedText>
+                </Pressable>
+                <View style={styles.menuDivider} />
+                <Pressable
+                  onPress={() => {
+                    setMenuOpen(false);
+                    setDbEncryptionOpen(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="On-device encryption settings"
+                  style={styles.menuItem}>
+                  <ThemedText type="smallBold">Encryption</ThemedText>
+                </Pressable>
+                <View style={styles.menuDivider} />
+                <Pressable
+                  onPress={() => {
+                    setMenuOpen(false);
+                    setShareOpen(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Share or host this LOAM node"
+                  style={styles.menuItem}>
+                  <ThemedText type="smallBold">Share · Host</ThemedText>
+                </Pressable>
+              </ThemedView>
+            </View>
+          </Pressable>
+        </Modal>
         {/* Persistent boot notice (AF2/P1-4): rendered as a sibling ABOVE the WebView, same reasoning
             as the top bar's comment — an overlay wouldn't receive touches. Survives 'ready' (unlike the
             old behaviour, where this arrived as a terminal 'error' and got wiped the moment 'ready'
@@ -904,6 +992,11 @@ export default function HostScreen() {
             // Bridge from the LOAM web client back to this native screen (AF1/Sol P1-1) — see
             // `handleWebViewMessage`'s comment.
             onMessage={handleWebViewMessage}
+            // Track whether the client has in-app history so the hardware Back handler (above) knows
+            // whether to navigate back or let Android exit the app.
+            onNavigationStateChange={(navState) => {
+              canGoBackRef.current = navState.canGoBack;
+            }}
             // Keep the WebView pinned to the embedded server's origin. originWhitelist is a coarse
             // prefix guard; onShouldStartLoadWithRequest is the real one — it allows only LOAM-origin
             // navigations and shunts external links (the client opens them with target=_blank) to the
@@ -956,6 +1049,13 @@ export default function HostScreen() {
             <ActivityIndicator size="large" style={styles.spinner} />
           </ThemedView>
         )}
+        {/* Bottom system-nav-bar inset (Issue 1): Android renders edge-to-edge by default, so without
+            this the WebView's content (composer, send button, sidebar footer) draws under the on-screen
+            nav bar. A sibling AFTER the flexed WebView/loading area, so it reserves real layout space
+            (the WebView shrinks to fit above it) rather than overlapping — same reasoning as the top bar
+            comment above. The owner asked for exactly this: a solid strip in the same colour as the
+            header, not a transparent gap. */}
+        <ThemedView type="backgroundElement" style={[styles.bottomInsetBar, { height: insets.bottom }]} />
         <HostShareOverlay
           visible={shareOpen}
           onClose={() => setShareOpen(false)}
@@ -1305,27 +1405,48 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
   },
-  topBarActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    backgroundColor: 'transparent',
+  // The hamburger menu button (Issue 2): three stacked bars drawn with plain Views (no react-native-svg
+  // dependency in this app) inside a tappable column.
+  menuButton: {
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    gap: Spacing.half,
+    padding: Spacing.two,
   },
-  secondaryButton: {
-    borderWidth: 1,
-    borderColor: '#208AEF',
-    paddingHorizontal: Spacing.three,
+  menuBar: {
+    width: 22,
+    height: 2,
+    borderRadius: 1,
+  },
+  // Full-screen dim backdrop behind the menu dropdown — tapping it (anywhere outside the card) closes
+  // the menu.
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
+  // Positions the card just under the measured top bar, right-aligned under the menu button.
+  menuCardWrap: {
+    alignItems: 'flex-end',
+    paddingRight: Spacing.three,
+  },
+  menuCard: {
+    minWidth: 180,
+    borderRadius: Spacing.three,
     paddingVertical: Spacing.one,
-    borderRadius: Spacing.five,
+    overflow: 'hidden',
   },
-  shareButton: {
-    backgroundColor: '#208AEF',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.one,
-    borderRadius: Spacing.five,
+  menuItem: {
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.three,
   },
-  // Fixed white on the brand-blue pill so the label reads regardless of the active theme.
-  shareButtonLabel: {
-    color: '#ffffff',
+  menuDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(128,128,128,0.3)',
+  },
+  // Bottom system-nav-bar inset strip (Issue 1) — a solid `backgroundElement`-coloured bar reserved
+  // below the WebView, sized to `insets.bottom` at render time (see the inline style merge).
+  bottomInsetBar: {
+    width: '100%',
   },
 });

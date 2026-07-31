@@ -377,6 +377,10 @@ export const fr: Catalog = {
 
   "invite.hide": "× Masquer l’invitation",
   "invite.show": "⧉ Inviter quelqu’un",
+  "invite.title": "Inviter quelqu’un",
+  "invite.close": "Fermer l’invitation",
+  "invite.wifiButton": "Afficher le QR du point d’accès Wi-Fi",
+  "invite.wifiHint": "Ouvre le QR Wi-Fi de l’hôte pour que les gens puissent d’abord rejoindre le réseau.",
 
   "nodeLink.hide": "× Masquer le lien",
   "nodeLink.show": "⧉ Relier un autre nœud",

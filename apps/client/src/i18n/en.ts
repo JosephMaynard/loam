@@ -430,6 +430,10 @@ export const en = {
   // Invite control (sidebar).
   "invite.hide": "× Hide invite",
   "invite.show": "⧉ Invite someone",
+  "invite.title": "Invite someone",
+  "invite.close": "Close invite",
+  "invite.wifiButton": "Show Wi-Fi hotspot QR",
+  "invite.wifiHint": "Opens the host's Wi-Fi QR so people can join the network first.",
 
   // Node-link control (admin sync panel).
   "nodeLink.hide": "× Hide link",
