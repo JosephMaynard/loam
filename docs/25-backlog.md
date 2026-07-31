@@ -117,3 +117,45 @@ Flagged by the consolidation sweep, verified against code:
 4. **docs/12 §6** "There's no peer authentication yet" for sync — **contradicts** the shipped `sync.token` bearer auth.
 5. **docs/12 §1** "on-device DB encryption isn't available on Android yet" — **contradicts** docs/01/04 (ships, pending device verification).
 6. **docs/15 #22** the `SERVER_URL_KEY` "read but never written" claim is now false (written in `transport.ts`); only the `notifyIfHidden` half stands.
+
+## 9. Codebase-sweep findings — 2026-07-31 (open items)
+
+Adversarial read-only sweep of server + client + Android. Verdict: **no critical/high on the host side;
+ship-quality.** The three safe, verifiable findings were fixed on `feat/test-debt-and-polish` (keep-awake
+shared-tag race, desktop Enter-to-send, shadow-ban attachment defense-in-depth). The rest are recorded here.
+
+**Server — need a policy decision (a budget/cap number), so deferred to the owner:**
+- **SW1 (LOW–MED)** Transport-tunnel requests bypass the tighter per-route rate limits (they hit the global
+  300/min via the internal `allowList`), so avatar/attachment/mesh/search caps don't apply under the tunnel.
+  Not attacker-forgeable (internal headers stripped first). Fix = a per-IP semantic limiter on the expensive
+  inner handlers, or a tighter budget on `/api/transport/tunnel` — pick the numbers. `app.ts:6119`.
+- **SW2 (LOW)** Stored `MessageBodySchema` is uncapped (intentional for long LLM replies), so a hostile
+  *sync peer* (needs sync + token) can push ~8MB bodies. Fix = a generous finite cap on the sync-import path.
+  `schema/index.ts:623`, `app.ts:5715`.
+
+**Android host — device-specific, needs on-ROM testing (don't change the working join flow blind):**
+- **HW1 (MED)** `lanAddresses()` excludes any `bridge*`/`dummy*`/`veth*` interface, but some ROMs bridge
+  tethering onto `bridge0` → the join QR silently falls back to the `192.168.49.1` guess and nobody can join.
+  Fix = prefer the known `192.168.49.0/24` hotspot subnet, or stop excluding `bridge`. `main.js:137`. **Test
+  across ROMs before changing** — it touches the core join path.
+
+**Mesh Phase 3 (native, documented-unverified — for the 2-phone device-test session):**
+- **PH1 (HIGH, deterministic)** BLE legacy advertisement overflows the 31-byte cap (128-bit service UUID +
+  service data) → every advertise fails `ADVERTISE_FAILED_DATA_TOO_LARGE`, node never discoverable. Fix =
+  service-data only (drop `addServiceUuid`) or extended advertising. `MeshBleController.kt:118`.
+- **PH2** Mesh hint stored UTF-8 but reported hex → group-hint gating never matches (`MeshAdvertCodec.kt`).
+- **PH3** `getCapabilities`/`getMissingPermissions` construct + cache radio controllers despite a
+  "side-effect-free" contract (`LoamMeshTransportModule.kt:66`).
+- **PH4** Wi-Fi Aware state receiver tears down a healthy session on any state change, not just unavailable
+  (`MeshWifiAwareController.kt:285`).
+- **PH5** `sendBlob` may pair a `PeerHandle` with the wrong discovery session (publish vs subscribe) →
+  data path never resolves (`MeshWifiAwareController.kt:505`).
+- **PH6** Launcher ignores `loam-mesh-started {ok}` → marks mesh live even if native `start()` failed
+  (`mesh-courier.ts:68`); **PH7** optimistic `sent.add` before ack can strand a blob if no ack arrives
+  (`main.js:462`). Plus assorted nits (executor dead-code, `RECEIVER_EXPORTED` flag, invalid
+  `fullBackupContent` value).
+
+**Misc low/nit (client + host):** `notifyIfHidden` is dead (no `requestPermission` call — tie to P15 or
+remove, `app.tsx:342`); `stopHostService` exported but never called (no "stop hosting" affordance); `.tmp-*`
+model-store files can leak on a crash mid-save; an `'aborted'` download shows no UI feedback; Settings join-QR
+lacks a `role="img"`/label. None are defects; all cheap if picked up.
