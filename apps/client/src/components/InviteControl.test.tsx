@@ -90,6 +90,25 @@ describe("InviteControl", () => {
     expect(root.querySelector(".invite-modal-backdrop")).toBeNull();
   });
 
+  it("moves focus into the dialog on open and restores it to the trigger on close", async () => {
+    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
+    const toggle = root.querySelector<HTMLButtonElement>(".new-channel-toggle");
+    toggle?.focus();
+
+    toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    // Focus moved into the dialog so keyboard/screen-reader users aren't stranded on background content.
+    expect(document.activeElement).toBe(root.querySelector(".invite-modal"));
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await tick();
+
+    // Closing (here via Escape) returns focus to the trigger.
+    expect(root.querySelector(".invite-modal-backdrop")).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+  });
+
   it("does not show the Wi-Fi hotspot button in a plain browser (no native bridge)", async () => {
     const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
     root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));

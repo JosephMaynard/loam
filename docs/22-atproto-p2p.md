@@ -79,8 +79,11 @@ disturbed.
   **key rotation**, **lost-key recovery**, and **repo delegation** — i.e. how the identity and its signed
   repo (Phase 2) stay accessible when the key changes or is unavailable. Treat these as Phase 1 gating work.
 - **Phase 2 — signed user repo.** Each post becomes a **signed record** in a per-user, content-addressed
-  repo (start: a signed append-only commit log; not a full Merkle Search Tree). Store the signature +
-  CID; verify on read. This is the big, security-critical phase.
+  repo (start: a signed append-only commit log; not a full Merkle Search Tree). **Verify on ingest, before
+  a record is persisted or included in any diff** — check the signature, recompute + record the CID,
+  confirm the record's repo identity, and validate parent/commit ancestry; reject invalid records without
+  storing them. Keep the read-time verification too, as defense in depth. This is the big, security-critical
+  phase.
 - **Phase 3 — repo sync.** Extend the `docs/11` sync engine to gossip **signed user-repo diffs** and
   verify authorship cryptographically (drop the trust-the-peer-node assumption for repo data). ~High reuse
   of the existing digest/diff/fetch machinery, as the mesh relay reused it. Sync stays **public-data-only**:

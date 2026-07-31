@@ -4073,26 +4073,31 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
       deleteMessages(Array.from(deletionSet.values()));
 
-      if (data.users.some((user) => user.id === id)) {
-        data.users = data.users.filter((user) => user.id !== id);
-        // Purge auth mappings too, so a stale session/identity token can never resurrect the user via
-        // `ensureSessionUser`. Seed users never authenticate, so these are normally empty — cleared anyway
-        // so the removal is provably complete (persisted + the in-memory mirrors loaded by loadData()).
-        const doomedTokens = [...sessions].filter(([, userId]) => userId === id).map(([token]) => token);
-        store.transaction(() => {
+      // Purge the user row (only if still present) AND any auth mappings. The credential purge is NOT
+      // gated on the row existing, so a stale session/identity token can't linger — or resurrect the id via
+      // `ensureSessionUser` — after a partial prior cleanup that dropped the row but not its tokens. Persist
+      // in one transaction, then mirror the in-memory maps only AFTER it succeeds. Seed users never
+      // authenticate, so the mappings are normally empty — cleared anyway so the removal is provably complete.
+      const userExists = data.users.some((user) => user.id === id);
+      const doomedTokens = [...sessions].filter(([, userId]) => userId === id).map(([token]) => token);
+      store.transaction(() => {
+        if (userExists) {
           store.deleteUser(id);
-          store.deleteIdentityTokensForUser(id);
-          for (const token of doomedTokens) {
-            store.deleteSession(token);
-          }
-        });
-        for (const token of doomedTokens) {
-          sessions.delete(token);
         }
-        for (const [tokenHash, userId] of identityTokens) {
-          if (userId === id) {
-            identityTokens.delete(tokenHash);
-          }
+        store.deleteIdentityTokensForUser(id);
+        for (const token of doomedTokens) {
+          store.deleteSession(token);
+        }
+      });
+      if (userExists) {
+        data.users = data.users.filter((user) => user.id !== id);
+      }
+      for (const token of doomedTokens) {
+        sessions.delete(token);
+      }
+      for (const [tokenHash, userId] of identityTokens) {
+        if (userId === id) {
+          identityTokens.delete(tokenHash);
         }
       }
     }

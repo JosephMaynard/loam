@@ -62,6 +62,12 @@ export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: st
     return null;
   }
 
+  /**
+   * Ask the native Android host to open its share overlay by posting a `loam-open-share` message over the
+   * WebView bridge. The host (`apps/app`, `index.tsx`'s WebView-message handler) opens its own share
+   * overlay — which carries the Wi-Fi hotspot QR the WebView itself can't render, since those credentials
+   * are native-only. A no-op outside the native host (`reactNativeBridge()` is `undefined` in a browser).
+   */
   function openHostShare(): void {
     reactNativeBridge()?.postMessage(JSON.stringify({ type: "loam-open-share" }));
   }
