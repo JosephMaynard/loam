@@ -691,6 +691,20 @@ p {
   color: color-mix(in srgb, var(--on-deep-muted) 80%, transparent);
 }
 
+.footer-fineprint {
+  margin-top: var(--s-3);
+  max-width: 74ch;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--on-deep-muted);
+  color: color-mix(in srgb, var(--on-deep-muted) 62%, transparent);
+}
+
+.footer-fineprint a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 /* ---- Reveal on scroll ---- */
 /* Fail-open: elements are hidden only when motion is allowed, and are revealed by the observer
    (.in) OR, if JS never runs (disabled, or main.js failed to load), by a CSS fail-safe a moment
