@@ -57,6 +57,7 @@ development on the same transport-agnostic layer.
 - 📱 **Nothing to install**: joiners open a link (or scan a QR); the host can run it from a laptop, Pi, or [an Android phone](docs/04-android-host-app.md).
 - 🕶️ **Ephemeral, privacy-preserving identities**: every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
 - 💬 **Real messaging**: public and private (invite-only) channels, threaded replies, direct messages, reactions, image attachments, and message search.
+- 🛡️ **Host controls**: optional join approval, plus greeter and moderator roles to vet newcomers and ban or shadow-ban when needed.
 - 🕸️ **Node-to-node sync (optional)**: two LOAM nodes that can reach each other sync their public channels, so separate hotspots converge into one conversation ([docs/11](docs/11-node-sync.md)).
 - 🤖 **Optional local AI**: point it at a laptop's [Ollama](https://ollama.com) model, or run a small downloadable model on the Android host itself (via llama.rn). Either way a bot appears as a DM contact and its replies stream in. Off by default, operator-installed, and entirely local.
 - 🔌 **Works offline**: the client is an installable PWA that keeps working against its local cache when the connection drops.
@@ -113,6 +114,11 @@ file with the web client. See [docs/14-distribution.md](docs/14-distribution.md)
 `apps/app` is an Expo/React-Native host that runs the LOAM server **embedded on the phone**, brings
 up a local-only WiFi hotspot, and shows the join QR, turning a single phone into a complete,
 internet-free LOAM node.
+
+**Download the APK (easiest).** Every tagged release ships a prebuilt host APK. Grab the latest from
+[Releases](https://github.com/JosephMaynard/loam/releases/latest) (`loam-host.apk`) and
+`adb install -r loam-host.apk`, or just open it on the phone. Building from source (below) is only needed
+to develop the app.
 
 **Prerequisites:** [Android Studio](https://developer.android.com/studio) (for its bundled JDK, the
 Android SDK + platform-tools, and NDK r27+) with `adb` on your `PATH`. On macOS the build script
@@ -302,7 +308,8 @@ flowchart TB
 "At rest" means "while written to disk". Passphrase mode uses [SQLCipher](https://www.zetetic.net/sqlcipher/)
 so the file on flash is ciphertext. Ephemeral mode keeps the key only in memory, so the data is readable
 while the process runs and gone the moment it stops. The same encrypted driver ships with the Android
-host, so this is available on a phone and not only on a desktop.
+host, so this is available on a phone and not only on a desktop. (On-device encryption is newly shipped;
+final runtime verification on physical arm64 hardware is in progress.)
 
 ### Real-time and privacy: who sees what
 
@@ -366,7 +373,8 @@ flowchart TB
 ```
 
 Because the embedded server is the same code as the desktop server, features behave the same way. The
-phone-specific parts are the hotspot, the WebView, the encrypted-database key handoff (the app holds the
+phone-specific parts are the hotspot, the WebView, an optional kiosk mode (screen-pinning, so a shared
+host phone can't be wandered off into other apps), the encrypted-database key handoff (the app holds the
 key in the phone's secure keystore and hands it to the embedded server at boot), and the optional
 on-device AI. Building this app is a one-command step; see [Host it from an Android
 phone](#host-it-from-an-android-phone) above and [docs/04](docs/04-android-host-app.md).
@@ -406,7 +414,8 @@ different situations.
 **Node-to-node sync** is for nodes that *can* reach each other, even briefly (same larger network, or
 one within radio range of another). They gossip their **public** data only, pulling each other's public
 channel messages so the two hotspots converge into one conversation. Direct messages, private channels,
-and anything from a blocked author never leave a node. A peer's join URL is also its sync address.
+and anything from a blocked author never leave a node. A peer's join URL is also its sync address. Nodes
+can optionally require a shared secret token before they'll sync, so only nodes you trust can pair.
 
 ```mermaid
 flowchart LR
@@ -497,7 +506,7 @@ LOAM_DB_KEY=ephemeral pnpm --filter @loam/server start
 ```
 
 The SQLCipher driver ships with the Android host too, so encryption at rest is available there and
-not only on desktop. It stays off by default on every platform.
+not only on desktop (newly shipped; final runtime verification on physical arm64 hardware is in progress). It stays off by default on every platform.
 
 For untrusted networks there is also an **optional app-layer transport encryption** (an X25519
 handshake bootstrapped from the join QR, off by default) that seals request and WebSocket traffic on
