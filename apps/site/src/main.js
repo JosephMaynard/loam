@@ -1,3 +1,5 @@
+import posthog from "posthog-js";
+
 // Progressive enhancement only: the page is fully readable without any of this.
 
 // Current year in the footer.
@@ -46,4 +48,42 @@ if (prefersReducedMotion || !("IntersectionObserver" in window)) {
     { rootMargin: "0px 0px -10% 0px", threshold: 0.1 },
   );
   revealables.forEach((el) => observer.observe(el));
+}
+
+// Privacy-friendly interest analytics (marketing site ONLY — never the app). Cookieless and
+// consent-free by construction: `persistence: 'memory'` stores nothing on the device (no cookies, no
+// localStorage), and `person_profiles: 'identified_only'` means no profile is ever created since we
+// never identify anyone. We disable session recording / surveys / autocapture, so nothing external is
+// loaded (keeps `script-src 'self'`) — the only network egress is anonymous event POSTs to the EU
+// ingest host in `connect-src`. Key + host come from Vercel build env; with no key set (local dev), this
+// is a no-op. All we measure is "did anyone visit / want to download LOAM", not who.
+const posthogKey = import.meta.env.VITE_POSTHOG_KEY;
+const posthogHost = import.meta.env.VITE_POSTHOG_HOST || "https://eu.i.posthog.com";
+if (posthogKey) {
+  posthog.init(posthogKey, {
+    api_host: posthogHost,
+    persistence: "memory",
+    person_profiles: "identified_only",
+    autocapture: false,
+    capture_pageview: true,
+    capture_pageleave: false,
+    disable_session_recording: true,
+    disable_surveys: true,
+    advanced_disable_decide: true,
+  });
+
+  // The only interest signals we care about beyond a pageview: someone clicked "Download for Android"
+  // or headed to the source on GitHub.
+  document.addEventListener("click", (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a") : null;
+    if (!link) {
+      return;
+    }
+    const href = link.getAttribute("href") || "";
+    if (href.includes("releases/latest/download")) {
+      posthog.capture("download_apk_click");
+    } else if (href.includes("github.com")) {
+      posthog.capture("github_click");
+    }
+  });
 }
