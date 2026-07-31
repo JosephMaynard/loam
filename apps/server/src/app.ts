@@ -6849,6 +6849,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         if (audience && !audience.has(user.id)) {
           return reply.code(404).send(errorBody("Attachment does not exist"));
         }
+
+        // Defense-in-depth: a shadow-banned author's message is hidden from everyone but the author on
+        // every other path (`withoutShadowBanned`, `socketCanReceiveEvent`), yet `messageAudienceUserIds`
+        // returns undefined (unrestricted) for a PUBLIC channel — so a participant who somehow learned the
+        // (unguessable) attachment id could still fetch the file. Apply the shadow-ban rule explicitly here
+        // too, matching how the message body itself is filtered.
+        const owningAuthor = data.users.find((candidate) => candidate.id === owningMessage.authorId);
+
+        if (owningAuthor?.shadowBanned && owningMessage.authorId !== user.id) {
+          return reply.code(404).send(errorBody("Attachment does not exist"));
+        }
       }
 
       try {

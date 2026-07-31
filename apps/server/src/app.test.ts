@@ -5871,6 +5871,39 @@ describe("attachment + sync review hardening", () => {
     expect((await app.server.inject({ method: "GET", url: pendingPath, headers: { cookie: eve.cookie } })).statusCode).toBe(404);
   });
 
+  it("withholds a shadow-banned author's public attachment from others, still serves the author", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app); // first session → admin (firstUser bootstrap)
+    const author = await newSession(app);
+    const viewer = await newSession(app);
+
+    const attachment = await uploadAttachment(app, author.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: author.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+    const path = `/api/attachments/${attachment.id}.png`;
+
+    // Baseline: a public-channel attachment is anonymously fetchable.
+    expect((await app.server.inject({ method: "GET", url: path })).statusCode).toBe(200);
+
+    const shadow = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${author.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+    expect(shadow.statusCode).toBe(200);
+
+    // After shadow-ban the message is withheld from everyone but the author — the attachment must follow.
+    // (Author still 200; another authenticated user 404 — the defense-in-depth this covers; anon 404 too.)
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: author.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: viewer.cookie } })).statusCode).toBe(404);
+    expect((await app.server.inject({ method: "GET", url: path })).statusCode).toBe(404);
+  });
+
   it("sweeps orphaned attachment files but keeps referenced and fresh-pending ones", async () => {
     const { app, dataDir } = await makeApp();
     const session = await newSession(app);
