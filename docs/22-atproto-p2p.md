@@ -1,5 +1,9 @@
 # 22 — AT-Proto-inspired portable identity & user-owned repos (investigation)
 
+> **Superseded by the plan of record: [`docs/23-atproto-p2p-plan.md`](23-atproto-p2p-plan.md)** — the
+> review-ready, threat-modelled design (written to be reviewed by an external crypto reviewer). This doc
+> remains the gentle introduction/orientation.
+
 **Status: investigation / briefing pack — not committed, not sequenced.** This captures the current
 state (grounded in real files), the goal, the one decision that shapes everything, a phased plan, and
 the open questions — the same shape as the other roadmap briefings (see `05`, `08`, `16`). Read
