@@ -104,8 +104,9 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    Wi-Fi Aware data-path handshake + port exchange, and to finish the BLE fallback. Full procedure +
    risk list: **docs/17**. As before, the sealed layer already relays over **any** transport it's given,
    so Phase 3 is *automation of discovery*, not a prerequisite for the feature to work.
-5. **Tombstone GC** — expired-sealed tombstones aren't yet horizon-GC'd (matches docs/11's existing
-   unbounded-tombstone behaviour); the bounded-GC in §3 is a follow-up.
+5. **Tombstone GC** — expired-sealed tombstones **are** horizon-GC'd: they use the same `addTombstone`
+   (stamped `created_at`) and are pruned by `pruneTombstonesOlderThan` past the 30-day horizon along with
+   every other tombstone (docs/15 #7, landed) — no longer the unbounded-growth follow-up this once was.
 6. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
 7. **Schema bounds** — the shipped `SealedMessageSchema` uses generous round caps (`toTag` ≤ 64 chars,
    `sealed` ≤ 90 000 chars) rather than the tight computed bounds in §2 below (22 / 87 480). Same

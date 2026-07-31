@@ -21,8 +21,10 @@ Each node *pulls* from its configured peers on an interval (or via "Sync now"). 
 schema-validated and defensive: messages only land in channels that are public *locally* (a
 malicious peer can't inject into a private channel id), imported user profiles are stripped of
 `isAdmin`/roles/moderation state (a peer's admin is a stranger here), and edits apply only when
-strictly newer. Message ids are globally unique, so gossip is idempotent and loop-safe; content
-propagates transitively (A←B←C) without coordination.
+strictly newer. An imported message body over **256KB** is skipped (`maxSyncImportBodyBytes`): the stored
+body schema is deliberately uncapped so long *local* LLM replies round-trip, but a hostile peer must not be
+able to amplify ~8MB bodies onto a syncing node (docs/25 SW2). Message ids are globally unique, so gossip is
+idempotent and loop-safe; content propagates transitively (A←B←C) without coordination.
 
 **Tombstones**: every local deletion (author/admin delete, reaction toggle-off, retention reaper)
 records the id in a `tombstones` table, so a peer that still holds the message can never hand it

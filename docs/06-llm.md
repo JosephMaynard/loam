@@ -9,13 +9,14 @@ All in `apps/server/src/server.ts`, gated on `llm.ollama.enabled`:
 - **DM-only bot**: `createOllamaResponse()` fires when a user DMs the configured bot user (`type: "bot"`).
   There is no channel participation and no `@mention` support.
 - **Unbounded context**: `llmMessagesForUser()` maps the **entire** DM history to chat messages every
-  turn (+ optional system prompt). No token budget, windowing, or summarization — long chats will slow
-  down and eventually exceed the model's context.
-- **Streaming is bandwidth-inefficient**: each delta calls `updateMessage()` → `broadcast({ type:
-  "messageUpdated", message })`, re-sending the **entire growing body** every token. That's O(n²) bytes
-  over the wire — a real problem on the low-bandwidth links LOAM targets. Meanwhile the schema already
-  defines a proper **`StreamEvent`** union (`start`/`delta`/`end`/`error`) that is **tested but never
-  used** — the intended incremental protocol was scaffolded and left unwired.
+  turn (+ optional system prompt), now **capped to the most-recent `MAX_LLM_CONTEXT_MESSAGES` (40)** so a
+  long chat no longer grows the request every turn or overflows the model's context window; a token budget
+  + summarization is still the fuller follow-up.
+- ~~**Streaming is bandwidth-inefficient**~~ **(FIXED)**: streaming now uses the **`StreamEvent`** union
+  (`start`/`delta`/`end`/`error`) — each delta carries only the *new* text to the DM participants, and the
+  final body is persisted + broadcast **once** at `end` (a single `messageUpdated`, so non-streaming
+  clients still converge). The old O(n²) per-token rebroadcast of the entire growing body is gone. See
+  `broadcastStreamEvent` in `app.ts`; covered by `apps/server/src/llm.test.ts`.
 - **No cancellation, no concurrency limits, no rate limiting**: every inbound DM to the bot spawns a
   generation; nothing caps how many run at once (rough on a Raspberry Pi).
 

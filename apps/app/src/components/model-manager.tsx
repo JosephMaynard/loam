@@ -480,43 +480,48 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     sizeForStorageCheck: number,
     body: (signal: AbortSignal, maxBytes: number) => Promise<void>,
   ): Promise<void> => {
-    // Keep the screen awake for the WHOLE download + verify (device-test round 2). A multi-GB model takes
-    // a long time and the hash pass is slow; if the screen turns off, Android backgrounds the app and the
-    // AppState listener above aborts the download — which is exactly why long downloads kept failing.
-    // Holding the screen on keeps the app foregrounded so the download actually completes. Best-effort: a
-    // keep-awake failure never blocks the download, and it's released when `runDownload` settles.
-    await activateKeepAwakeAsync(MODEL_DOWNLOAD_KEEP_AWAKE_TAG).catch(() => undefined);
     const outcome = await runDownload(downloadOwnerRef.current, async (signal) => {
-      // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
-      // snapshot, which other app activity could have invalidated.
-      const caps = await probeDeviceCapabilities();
-      if (mountedRef.current) {
-        setCapabilities(caps);
-      }
-      if (storageFit(caps, sizeForStorageCheck) === 'insufficient') {
-        setStatusMessageIfMounted(
-          `Not enough free storage to download a model (only ${formatBytes(caps.freeStorageBytes)} free).`,
-        );
-        return;
-      }
-      // Bound the download by the free space that must remain AFTER the required headroom (Finding B):
-      // passed into `downloadModel` so a custom (unpinned) URL — or any oversized/lying response — is
-      // stopped before it can fill the device, not just gated up front. `storageFit` already rejected a
-      // null `freeStorageBytes` above, so the `?? 0` is a type guard, not a real fallback.
-      const maxBytes = Math.max(0, (caps.freeStorageBytes ?? 0) - STORAGE_HEADROOM_BYTES);
-      setBusy(id, true);
+      // Keep the screen awake for the WHOLE accepted download + verify (device-test round 2): a multi-GB
+      // download plus a slow hash pass, and if the screen sleeps Android backgrounds the app and the
+      // AppState listener above aborts the download — exactly why long downloads kept failing. Activate
+      // INSIDE the accepted callback (not before `runDownload`): the keep-awake tag is shared and NOT
+      // ref-counted, so a REFUSED same-tick double-tap / remounted overlay — whose transaction never runs —
+      // must not toggle it; otherwise that loser's release (a plain `.finally`) would clear the tag out from
+      // under the running download and let the screen sleep → abort. Best-effort: a keep-awake failure never
+      // blocks the download; it's released in the `finally` below when THIS accepted download settles.
+      await activateKeepAwakeAsync(MODEL_DOWNLOAD_KEEP_AWAKE_TAG).catch(() => undefined);
       try {
-        await body(signal, maxBytes);
-      } catch (err) {
-        // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
-        // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
-        setStatusMessageIfMounted(`Model download failed — ${err instanceof Error ? err.message : String(err)}`);
+        // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
+        // snapshot, which other app activity could have invalidated.
+        const caps = await probeDeviceCapabilities();
+        if (mountedRef.current) {
+          setCapabilities(caps);
+        }
+        if (storageFit(caps, sizeForStorageCheck) === 'insufficient') {
+          setStatusMessageIfMounted(
+            `Not enough free storage to download a model (only ${formatBytes(caps.freeStorageBytes)} free).`,
+          );
+          return;
+        }
+        // Bound the download by the free space that must remain AFTER the required headroom (Finding B):
+        // passed into `downloadModel` so a custom (unpinned) URL — or any oversized/lying response — is
+        // stopped before it can fill the device, not just gated up front. `storageFit` already rejected a
+        // null `freeStorageBytes` above, so the `?? 0` is a type guard, not a real fallback.
+        const maxBytes = Math.max(0, (caps.freeStorageBytes ?? 0) - STORAGE_HEADROOM_BYTES);
+        setBusy(id, true);
+        try {
+          await body(signal, maxBytes);
+        } catch (err) {
+          // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
+          // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
+          setStatusMessageIfMounted(`Model download failed — ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          clearModelProgress(id);
+          setBusy(id, false);
+        }
       } finally {
-        clearModelProgress(id);
-        setBusy(id, false);
+        void deactivateKeepAwake(MODEL_DOWNLOAD_KEEP_AWAKE_TAG).catch(() => undefined);
       }
-    }).finally(() => {
-      void deactivateKeepAwake(MODEL_DOWNLOAD_KEEP_AWAKE_TAG).catch(() => undefined);
     });
     // A second entry point (same-tick double tap, or a remounted overlay) was refused globally, or this
     // instance's transaction was aborted (unmount) before the body ever ran — nothing to tear down here,

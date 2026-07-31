@@ -331,6 +331,22 @@ export function MessageComposer({ allowLocationSharing, label, onSend, onUploadA
         dir="auto"
         id={composerId}
         onInput={(event) => setValue(event.currentTarget.value)}
+        onKeyDown={(event) => {
+          // Enter-to-send on devices with a PRECISE pointer (desktop/laptop hosts, incl. the Electron
+          // target): Enter submits, Shift+Enter inserts a newline. On touch (coarse pointer) Enter stays a
+          // newline — the on-screen keyboard's return key must never fire a send mid-compose. Skip while an
+          // IME is composing (`isComposing`) so Enter confirms the candidate rather than sending.
+          if (
+            event.key === "Enter" &&
+            !event.shiftKey &&
+            !event.isComposing &&
+            typeof window !== "undefined" &&
+            window.matchMedia?.("(pointer: fine)").matches
+          ) {
+            event.preventDefault();
+            void submit();
+          }
+        }}
         onPaste={handlePaste}
         placeholder={placeholder}
         ref={textAreaRef}

@@ -5871,6 +5871,39 @@ describe("attachment + sync review hardening", () => {
     expect((await app.server.inject({ method: "GET", url: pendingPath, headers: { cookie: eve.cookie } })).statusCode).toBe(404);
   });
 
+  it("withholds a shadow-banned author's public attachment from others, still serves the author", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app); // first session → admin (firstUser bootstrap)
+    const author = await newSession(app);
+    const viewer = await newSession(app);
+
+    const attachment = await uploadAttachment(app, author.cookie);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: author.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "", attachments: [attachment] },
+    });
+    const path = `/api/attachments/${attachment.id}.png`;
+
+    // Baseline: a public-channel attachment is anonymously fetchable.
+    expect((await app.server.inject({ method: "GET", url: path })).statusCode).toBe(200);
+
+    const shadow = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${author.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { shadowBanned: true },
+    });
+    expect(shadow.statusCode).toBe(200);
+
+    // After shadow-ban the message is withheld from everyone but the author — the attachment must follow.
+    // (Author still 200; another authenticated user 404 — the defense-in-depth this covers; anon 404 too.)
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: author.cookie } })).statusCode).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: path, headers: { cookie: viewer.cookie } })).statusCode).toBe(404);
+    expect((await app.server.inject({ method: "GET", url: path })).statusCode).toBe(404);
+  });
+
   it("sweeps orphaned attachment files but keeps referenced and fresh-pending ones", async () => {
     const { app, dataDir } = await makeApp();
     const session = await newSession(app);
@@ -5898,6 +5931,42 @@ describe("attachment + sync review hardening", () => {
     expect(existsSync(join(attachmentsDir, `${attached.id}.png`))).toBe(true);
     expect(existsSync(join(attachmentsDir, `${pending.id}.png`))).toBe(true);
     expect(existsSync(strayPath)).toBe(false);
+  });
+
+  it("skips a sync-imported message whose body exceeds the import cap, still imports a normal one (docs/25 SW2)", async () => {
+    // The create path caps bodies at 8000 chars, so an oversized body can only arrive from a peer — model a
+    // hostile peer serving one directly. 300KB > the 256KB sync-import cap.
+    const author = { id: "user.peerbig", displayName: "Peer", type: "human", isAdmin: false, createdAt: 1, ephemeral: true };
+    const normal = { id: "msg.peer-normal", type: "channelPost", authorId: author.id, channelId: "general", body: "hi", createdAt: 1 };
+    const oversized = { id: "msg.peer-oversized", type: "channelPost", authorId: author.id, channelId: "general", body: "x".repeat(300 * 1024), createdAt: 2 };
+
+    const peer = createServer((req, res) => {
+      if (req.url === "/api/sync/digest") {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ channels: [], messages: [{ id: normal.id }, { id: oversized.id }] }));
+        return;
+      }
+      if (req.url === "/api/sync/messages") {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ messages: [normal, oversized], users: [author] }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => peer.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => new Promise<void>((resolve) => peer.close(() => resolve())));
+    const peerUrl = `http://127.0.0.1:${(peer.address() as AddressInfo).port}`;
+
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: peerUrl }] } });
+    const admin = await newSession(app);
+    await app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+
+    const messages = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: admin.cookie } })
+    ).json() as { id: string }[];
+    expect(messages.some((message) => message.id === normal.id)).toBe(true); // normal body imported
+    expect(messages.some((message) => message.id === oversized.id)).toBe(false); // oversized body skipped
   });
 
   it("retries a transiently-failed sync attachment copy independently, without re-importing the message (docs/15 A6)", async () => {

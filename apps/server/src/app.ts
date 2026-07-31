@@ -464,6 +464,12 @@ const defaultChannels: Channel[] = [
  * `user.<hex>`, so these constant ids are unambiguously the old seeds and safe to delete. */
 const legacyDemoUserIds = ["user.1234", "user.5678"];
 
+/** Upper bound on how many of the most-recent DM messages between a user and the LLM bot are sent to the
+ * model as context on each turn (see `llmMessagesForUser`). Prevents an unbounded history from growing the
+ * request every turn and overflowing the model's context window. Deliberately generous — most models hold
+ * far more, and dropping the oldest turns preserves what matters. */
+const MAX_LLM_CONTEXT_MESSAGES = 40;
+
 /**
  * Stable snake_case code for every error message the server can return, so clients can localize the
  * message from a catalog while the English `error` string stays as the fallback (unknown codes → the
@@ -3743,7 +3749,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     botId: string,
     currentUserId: string,
   ): { role: "system" | "user" | "assistant"; content: string }[] {
-    const messages = dmMessages(botId, currentUserId).flatMap((message) => {
+    const history = dmMessages(botId, currentUserId).flatMap((message) => {
       if (message.type !== "dm" || !message.body.trim()) {
         return [];
       }
@@ -3755,6 +3761,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         },
       ];
     });
+
+    // Bound the context to the most-recent turns: mapping the ENTIRE DM history every turn grows the
+    // request each time and eventually overflows the model's context window (the model then errors or
+    // silently drops the oldest tokens anyway). Keep the newest `MAX_LLM_CONTEXT_MESSAGES` and always keep
+    // the system prompt. A message-count bound (not a token budget) is the same hardcoded-limit style as the
+    // 5-minute Ollama timeout below; a token budget + summarisation is the documented fuller version
+    // (docs/25 P2). A single pathological message can still be large — that's the follow-up, not this fix.
+    const messages = history.slice(-MAX_LLM_CONTEXT_MESSAGES);
 
     return appConfig.llm.ollama.systemPrompt
       ? [{ role: "system" as const, content: appConfig.llm.ollama.systemPrompt }, ...messages]
@@ -4881,6 +4895,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // inside this; anything larger is not a LOAM peer talking in good faith.
   const maxPeerJsonBytes = 8 * 1024 * 1024;
 
+  // Per-message body cap for SYNC IMPORT only (docs/25 SW2). The stored `MessageBodySchema` is deliberately
+  // uncapped (a local LLM reply can be long, and locally-authored content must round-trip), but a hostile
+  // *sync peer* could otherwise push bodies up to `maxPeerJsonBytes` (~8MB each) to amplify storage and
+  // bandwidth against a syncing node. 256KB is far above any real message (including long LLM replies), so
+  // an over-cap imported body is skipped, not fatal. Reactions/sealed carry no `body`.
+  const maxSyncImportBodyBytes = 256 * 1024;
+
   /** The shared sync-token header (if configured), presented so a token-guarded peer will serve us and
    * harmless when the peer runs open. Under transport encryption this rides INSIDE the sealed session. */
   function peerSyncHeaders(): Record<string, string> {
@@ -5655,6 +5676,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     for (const message of sorted) {
       if (message.type === "dm" || message.meta?.streaming || tombstones.has(message.id)) {
+        continue;
+      }
+
+      // Skip an over-cap imported body (docs/25 SW2) — a hostile peer amplification guard. Only the
+      // body-bearing public arms have a `body`; reactions/sealed are unaffected.
+      if (
+        (message.type === "channelPost" || message.type === "channelReply") &&
+        Buffer.byteLength(message.body, "utf8") > maxSyncImportBodyBytes
+      ) {
         continue;
       }
 
@@ -6847,6 +6877,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         const audience = messageAudienceUserIds(owningMessage);
 
         if (audience && !audience.has(user.id)) {
+          return reply.code(404).send(errorBody("Attachment does not exist"));
+        }
+
+        // Defense-in-depth: a shadow-banned author's message is hidden from everyone but the author on
+        // every other path (`withoutShadowBanned`, `socketCanReceiveEvent`), yet `messageAudienceUserIds`
+        // returns undefined (unrestricted) for a PUBLIC channel — so a participant who somehow learned the
+        // (unguessable) attachment id could still fetch the file. Apply the shadow-ban rule explicitly here
+        // too, matching how the message body itself is filtered.
+        const owningAuthor = data.users.find((candidate) => candidate.id === owningMessage.authorId);
+
+        if (owningAuthor?.shadowBanned && owningMessage.authorId !== user.id) {
           return reply.code(404).send(errorBody("Attachment does not exist"));
         }
       }

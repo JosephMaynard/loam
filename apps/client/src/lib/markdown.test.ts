@@ -94,6 +94,15 @@ describe("renderMarkdown", () => {
       assertNoDangerousSrc(html);
     });
 
+    it("drops javascript: image src obfuscated with a leading control char (U+0001)", () => {
+      // The WHATWG URL parser strips leading C0 control chars, so a leading  still
+      // resolves to the javascript: scheme; isSafeImageSrc must reject it and drop the src.
+      const leadingControl = String.fromCharCode(0x01);
+      const html = renderMarkdown(`![x](${leadingControl}javascript:alert(1))`);
+      assertNoDangerousSrc(html);
+      expect(html).not.toContain("src=");
+    });
+
     it("drops vbscript: image src", () => {
       const html = renderMarkdown("![x](vbscript:msgbox(1))");
       assertNoDangerousSrc(html);
@@ -117,6 +126,15 @@ describe("renderMarkdown", () => {
       const html = renderMarkdown("![alt text](https://example.com/pic.png)");
       expect(html).toContain('src="https://example.com/pic.png"');
       expect(html).toContain('alt="alt text"');
+    });
+
+    it("keeps a relative attachment image src intact (resolves to the http(s) origin)", () => {
+      // Attachments are served from same-origin relative paths (e.g. /api/attachments/:file);
+      // these resolve to the http(s) origin and must be preserved, proving the hardening is
+      // scheme-based and not a blanket removal of every image.
+      const html = renderMarkdown("![receipt](/api/attachments/abc123.webp)");
+      expect(html).toContain('src="/api/attachments/abc123.webp"');
+      expect(html).toContain('alt="receipt"');
     });
   });
 });
