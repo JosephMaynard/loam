@@ -5933,6 +5933,42 @@ describe("attachment + sync review hardening", () => {
     expect(existsSync(strayPath)).toBe(false);
   });
 
+  it("skips a sync-imported message whose body exceeds the import cap, still imports a normal one (docs/25 SW2)", async () => {
+    // The create path caps bodies at 8000 chars, so an oversized body can only arrive from a peer — model a
+    // hostile peer serving one directly. 300KB > the 256KB sync-import cap.
+    const author = { id: "user.peerbig", displayName: "Peer", type: "human", isAdmin: false, createdAt: 1, ephemeral: true };
+    const normal = { id: "msg.peer-normal", type: "channelPost", authorId: author.id, channelId: "general", body: "hi", createdAt: 1 };
+    const oversized = { id: "msg.peer-oversized", type: "channelPost", authorId: author.id, channelId: "general", body: "x".repeat(300 * 1024), createdAt: 2 };
+
+    const peer = createServer((req, res) => {
+      if (req.url === "/api/sync/digest") {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ channels: [], messages: [{ id: normal.id }, { id: oversized.id }] }));
+        return;
+      }
+      if (req.url === "/api/sync/messages") {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ messages: [normal, oversized], users: [author] }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => peer.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => new Promise<void>((resolve) => peer.close(() => resolve())));
+    const peerUrl = `http://127.0.0.1:${(peer.address() as AddressInfo).port}`;
+
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: peerUrl }] } });
+    const admin = await newSession(app);
+    await app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+
+    const messages = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: admin.cookie } })
+    ).json() as { id: string }[];
+    expect(messages.some((message) => message.id === normal.id)).toBe(true); // normal body imported
+    expect(messages.some((message) => message.id === oversized.id)).toBe(false); // oversized body skipped
+  });
+
   it("retries a transiently-failed sync attachment copy independently, without re-importing the message (docs/15 A6)", async () => {
     const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
     const sourceAdmin = await newSession(source);

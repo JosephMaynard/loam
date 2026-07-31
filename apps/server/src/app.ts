@@ -4895,6 +4895,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // inside this; anything larger is not a LOAM peer talking in good faith.
   const maxPeerJsonBytes = 8 * 1024 * 1024;
 
+  // Per-message body cap for SYNC IMPORT only (docs/25 SW2). The stored `MessageBodySchema` is deliberately
+  // uncapped (a local LLM reply can be long, and locally-authored content must round-trip), but a hostile
+  // *sync peer* could otherwise push bodies up to `maxPeerJsonBytes` (~8MB each) to amplify storage and
+  // bandwidth against a syncing node. 256KB is far above any real message (including long LLM replies), so
+  // an over-cap imported body is skipped, not fatal. Reactions/sealed carry no `body`.
+  const maxSyncImportBodyBytes = 256 * 1024;
+
   /** The shared sync-token header (if configured), presented so a token-guarded peer will serve us and
    * harmless when the peer runs open. Under transport encryption this rides INSIDE the sealed session. */
   function peerSyncHeaders(): Record<string, string> {
@@ -5669,6 +5676,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     for (const message of sorted) {
       if (message.type === "dm" || message.meta?.streaming || tombstones.has(message.id)) {
+        continue;
+      }
+
+      // Skip an over-cap imported body (docs/25 SW2) — a hostile peer amplification guard. Only the
+      // body-bearing public arms have a `body`; reactions/sealed are unaffected.
+      if (
+        (message.type === "channelPost" || message.type === "channelReply") &&
+        Buffer.byteLength(message.body, "utf8") > maxSyncImportBodyBytes
+      ) {
         continue;
       }
 

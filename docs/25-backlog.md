@@ -131,9 +131,9 @@ shared-tag race, desktop Enter-to-send, shadow-ban attachment defense-in-depth).
   300/min via the internal `allowList`), so avatar/attachment/mesh/search caps don't apply under the tunnel.
   Not attacker-forgeable (internal headers stripped first). Fix = a per-IP semantic limiter on the expensive
   inner handlers, or a tighter budget on `/api/transport/tunnel` — pick the numbers. `app.ts:6119`.
-- **SW2 (LOW)** Stored `MessageBodySchema` is uncapped (intentional for long LLM replies), so a hostile
-  *sync peer* (needs sync + token) can push ~8MB bodies. Fix = a generous finite cap on the sync-import path.
-  `schema/index.ts:623`, `app.ts:5715`.
+- ~~**SW2 (LOW)** Stored `MessageBodySchema` is uncapped, so a hostile *sync peer* can push ~8MB bodies.~~
+  **DONE**: imported bodies over **256KB** (`maxSyncImportBodyBytes`) are skipped on the sync-import path;
+  the stored schema stays uncapped so long local LLM replies round-trip. Tested (docs/11).
 
 **Android host — device-specific, needs on-ROM testing (don't change the working join flow blind):**
 - **HW1 (MED)** `lanAddresses()` excludes any `bridge*`/`dummy*`/`veth*` interface, but some ROMs bridge
