@@ -73,15 +73,14 @@ ranked within each group. Each entry names the file and the concrete change.
 
 ## Correctness / robustness
 
-7. **Unbounded tombstone growth on ephemeral-retention nodes.** The reaper adds a tombstone per
-   reaped message forever (`tombstones` Set + DB table), so a long-lived high-traffic ephemeral node
-   grows without bound. **Note (do NOT gate tombstoning on `sync.enabled`):** an attempted fix that
-   skipped tombstoning while sync was off was reverted — `sync` is a runtime toggle, so a node that
-   deletes (e.g. a moderator delete) while sync is off and joins a mesh later would let a peer
-   **resurrect** the deleted message (moderation bypass; falsifies docs/11's unconditional guarantee).
-   The correct fix is a **horizon-based GC**: keep tombstoning unconditionally, stamp each tombstone,
-   and age entries out beyond a horizon longer than any realistic sync window. That needs a
-   `created_at` column on the `tombstones` table + a GC pass — a focused follow-up, not shipped here.
+7. ~~**Unbounded tombstone growth on ephemeral-retention nodes.**~~ **RESOLVED** (horizon-GC landed
+   in PR #68; now test-covered in `apps/server/src/tombstone.test.ts`): each tombstone carries a
+   `created_at` (added to the schema and migrated onto existing DBs via `migrateTombstonesCreatedAt`,
+   backfilling to `now` so the horizon clock starts fresh rather than expiring an old delete early).
+   `pruneTombstonesHorizon` (app.ts) ages out entries past a **30-day** horizon on the reaper timer +
+   boot, reconciling the in-memory `tombstones` Set with the pruned ids. Tombstoning stays
+   **unconditional** (never gated on `sync.enabled`), so the moderation-bypass hazard the original note
+   warned about — a peer resurrecting a message deleted while sync was off — cannot occur.
 8. ~~**Switching bootstrap to `setupCode` via config PATCH is inert.**~~ **RESOLVED**
    (`feat/deploy-hardening`): a PATCH that transitions `admin.bootstrap` into `setupCode` now mints a
    single-use code (only on the transition, so a code consumed by an earlier claim isn't re-minted),
@@ -114,9 +113,12 @@ ranked within each group. Each entry names the file and the concrete change.
 
 ## Test coverage (highest-value gaps)
 
-15. **LLM/Ollama streaming is completely untested server-side** — the delta-privacy invariant (deltas
-    to DM participants only), single-`messageUpdated` convergence, Ollama-unreachable error handling,
-    and `enableLLMChat`/`enableLLMStreaming` gating. Needs a mocked Ollama endpoint. Highest-value gap.
+15. ~~**LLM/Ollama streaming is completely untested server-side**~~ **RESOLVED**
+    (`apps/server/src/llm.test.ts`): 5 tests via a real mock Ollama (`node:http`, pointed at by
+    `llm.ollama.baseUrl`) covering the delta-privacy invariant (deltas to DM participants only),
+    single-`messageUpdated` convergence, Ollama-unreachable + HTTP-500 error handling (converges to a
+    non-streaming error message, no stuck stream), and flag gating. (The on-device `__loamOnDeviceChat`
+    backend remains untested — device-only.)
 16. **i18n error-code completeness vs the source of truth.** `i18n.test.ts` compares catalogs against
     a hand-copied `SERVER_ERROR_CODES` snapshot, so it can't catch a *new* server code that ships
     untranslated. Move the canonical code list to `@loam/schema` (both server and client depend on
@@ -125,9 +127,10 @@ ranked within each group. Each entry names the file and the concrete change.
     `channelRemoved`, `configUpdated`, `wipe`, `presence`) and reconnect/backoff are untested; the
     pure helpers `messageConversationKey`, `conversationMessages`, `topLevelMessages`, `repliesFor`,
     `reactionSummary`, `bodyFor` are trivially extractable and drive what every screen renders.
-18. **Markdown image-src XSS vectors.** `renderMarkdown` hardens `<a href>` explicitly but leaves
-    `<img src>` from `![alt](url)` to DOMPurify alone; add tests for `![x](javascript:…)` and
-    obfuscated schemes (`JaVaScRiPt:`, control chars).
+18. ~~**Markdown image-src XSS vectors.**~~ **RESOLVED**: `renderMarkdown` hardens `<img src>` too
+    (`isSafeImageSrc` drops any non-`http(s)` protocol — belt-and-braces over DOMPurify); now
+    test-covered in `apps/client/src/lib/markdown.test.ts` incl. `javascript:`, `vbscript:`,
+    `JaVaScRiPt:`, a leading U+0001 control char, and same-origin relative-path preservation.
 19. **Client wipe-event reaction end-to-end** (WS `wipe` → `destroyDatabase` + localStorage/SW-cache
     purge + neutral screen); **avatar contrast multi-seed sweep** (≥4.5 on both surfaces);
     **QR multi-block interleave** golden matrix; **schema refinement** unit tests.
