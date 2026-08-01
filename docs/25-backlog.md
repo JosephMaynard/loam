@@ -26,7 +26,7 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 | S1 | **On-device SQLCipher runtime verification** — the encrypted arm64 prebuild loads, but `PRAGMA key`/rekey/wipe was never run on physical Node-18 hardware (the MC wrapper even declares `engines: node 20/22`). A **release gate**. | 01,04,21 | S | Hardware |
 | S2 | **E2EE for DMs / private channels** (docs/08 Layer 2) — server sees all plaintext; no client-side crypto. Strongest protest-model protection; disables server LLM/search for those convos; bundles into `hardened`. | 07,08,09 | epic | Product decision |
 | S3 | **Optional authentication / `identity.mode`** (Better Auth now, atproto later) — enables website/team hosting without touching the anonymous default. | 05 | epic | Product decision |
-| S4 | **Mesh delivery-acks (blinded per-message MAC)** — convergence rests on TTL/hop/cap only; the identity-exposing ack form is rejected, the blinded-MAC replacement is blocked pending a security decision. | 16,19 | M | Security decision |
+| S4 | **Mesh delivery-acks** — convergence rests on TTL/hop/cap only. Design **now decided** (Sol review): a **hash-lock capability receipt** — sender commits `SHA-256("loam.mesh.ack.v1"‖msgId‖ackSecret)` in the public envelope, recipient publishes the preimage, carriers verify + delete + gossip. No recipient identity revealed; the sender can only prematurely delete its own message. Ready to build (docs/23 §11). | 16,19,23 | M | — |
 | S5 | **Inter-node sync MITM hardening** — unpinned peer keys are TOFU-learned over plain HTTP; `SyncPeer.transportKey` pinning exists in config but the **admin-UI pinned-key field is unbuilt**; longer-term per-peer signed authors. | 08,11,15#1/#6a | S (UI) / L | — |
 | S6 | **Sync peer auth: per-member / rotating creds** — only a single shared `sync.token`; revoking one courier re-keys every node. | 16,19 | M | Product decision |
 | S7 | **Transport-encryption join-QR follow-ups** — thread the `#k=` host-key through the remaining join-QR surfaces (`InviteControl`, Android host-panel, `NodeLinkControl`) + live re-handshake on a runtime mode flip. | 08,15#5 | S–M | — |
@@ -69,7 +69,7 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 | M1 | **Phase 3 native transport finish** — Kotlin BLE + Wi-Fi Aware scaffolded but never compiled/run against radios: Wi-Fi-Aware data-path handshake + port-exchange, the unimplemented BLE chunked fallback (`sendBlobFallback` throws), real-device fixes. | 16,17 | epic | Hardware (2–3 phones) |
 | M2 | **Phase 4 background duty-cycling + battery** — PendingIntent discovery, burst-scan/back-off, Doze-aware. "Where Briar stalled." | 16 | epic | Hardware |
 | M3 | **Phase 5 LoRa fixed relays** (Pi + LoRa hat; framing/bandwidth for the existing sync protocol) | 16,11 | epic | Hardware |
-| M4 | **AT-Proto-inspired portable identity + signed user repos** — the largest remaining epic; ~30–40% seeded by mesh crypto, the repo layer is net-new. **Plan of record: `docs/23`.** | 22,23 | epic | Product decision |
+| M4 | **AT-Proto-inspired portable identity + signed user repos** — the largest remaining epic. Plan of record **`docs/23`, revised after Sol round 1** (per-device operation logs, genesis-doc identity + off-grid recovery/freshness limit, fork-freeze-at-ancestor, publication as an explicit feature). One product call open — identity **Option A (portable pseudonym + encrypted backup) vs B (recovery-key hierarchy)** — then a revised Phase 0 spike. | 22,23 | epic | Product decision |
 
 ## 4. Correctness / robustness
 
@@ -107,6 +107,7 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 | I2 | `react-native-webview` 13 → 14 (pinned `13.16.1`) — needs v14 event-type annotations + device verify | 15#13 | S | Hardware |
 | I3 | Device-tested **signed** release + securely backed-up production keystore *(signing infra now built + verified — remaining: a released, installed, verified signed build)* | 15#25,04 | S | Process |
 | I4 | 32-bit `armeabi-v7a` Android support (arm64-only today) | 04 | S–M | Hardware |
+| I5 | **`@noble/*` 2.x crypto migration** — blocked: 2.x needs Node 20.19+ & is ESM-only, but the embedded host is Node 18; also needs a security-reviewed `@loam/crypto` migration, not an auto-bump. Deferred in `dependabot.yml` (major ignored); revisit when the embedded runtime moves off Node 18. Small `@noble/curves` 1.9.4→1.9.7 can go independently. | 23 | M | Runtime move |
 
 ## 8. Stale / contradictory doc claims (to correct)
 
