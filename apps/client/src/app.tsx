@@ -335,25 +335,10 @@ function conversationKey(conversation: Conversation): string {
   return `${conversation.kind}:${conversation.id}`;
 }
 
-/**
- * Best-effort OS notification for a new message. No-ops unless the Notification API exists, permission
- * is already granted, and the document is hidden — it never prompts and never throws (usually
- * unavailable over an insecure-context LAN origin).
- *
- * @param title - The notification title.
- * @param body - The notification body text.
- */
-function notifyIfHidden(title: string, body: string): void {
-  try {
-    if (typeof Notification === "undefined" || Notification.permission !== "granted" || !document.hidden) {
-      return;
-    }
-
-    new Notification(title, { body });
-  } catch {
-    // Best effort only — Notification is commonly blocked on insecure LAN origins.
-  }
-}
+// (Removed the dead `notifyIfHidden` OS-notification path — docs/25 D2. It could never fire:
+// Notification.requestPermission() was never called, so permission was never "granted", and web-push
+// needs a secure context that a plain-HTTP LAN origin doesn't provide. The in-app `pushToast` is the
+// working new-message signal; a real OS/web-push notification for the Android host is future work, P15.)
 
 /**
  * Tell the Android host app (if this page is running inside its WebView) that the node was just
@@ -597,7 +582,6 @@ function LoamApp() {
       }
 
       pushToast({ id: `${message.id}:${Date.now()}`, title, body, route });
-      notifyIfHidden(title, body);
     },
     [pushToast],
   );
