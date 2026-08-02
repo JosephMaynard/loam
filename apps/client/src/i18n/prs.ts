@@ -1,8 +1,8 @@
 // Machine-translated, NEEDS NATIVE REVIEW before field use; en.ts is authoritative.
 // Dari (prs) — Afghan Persian; Intl uses the fa-AF mapping (see icuLocale in ./index.ts).
-import type { Catalog } from "./en";
+import type { Translation } from "./en";
 
-export const prs: Catalog = {
+export const prs: Translation = {
   "composer.thinking": "در حال فکر کردن…",
   "toast.imageFallback": "📷 تصویر",
   "toast.locationFallback": "📍 موقعیت",

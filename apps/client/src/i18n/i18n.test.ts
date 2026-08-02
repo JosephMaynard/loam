@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { ar } from "./ar";
 import { bn } from "./bn";
-import { en, type Catalog, type PluralMessage } from "./en";
+import { en, type PluralMessage, type Translation } from "./en";
 import { es } from "./es";
 import { fa } from "./fa";
 import { fr } from "./fr";
@@ -20,7 +20,7 @@ import { errorText, icuLocale, loadLocale, resolveLocale, setActiveLocale, t } f
 
 // The shipped bundle lazy-loads catalogs (only `en` is static); the completeness tests need them all
 // synchronously, so the *test* imports every catalog directly (the test bundle isn't shipped).
-const ALL_CATALOGS: Record<Locale, Catalog> = {
+const ALL_CATALOGS: Record<Locale, Translation> = {
   en, es, fr, ar, fa, pt, uk, ru, tr, my, ur, prs, ps, sw, bn,
 };
 
@@ -38,9 +38,15 @@ function isPlural(value: unknown): value is PluralMessage {
 }
 
 describe("i18n catalogs", () => {
-  it("every locale has exactly en's key set (completeness)", () => {
+  it("no locale has keys outside en's set (stray-key check; missing keys fall back to en)", () => {
+    // Non-en catalogs are Partial: a translation MAY omit keys it hasn't localized yet — `t()` falls back
+    // to en at runtime (en.ts `Translation`). So completeness is no longer required; what IS forbidden is a
+    // STRAY key with no en counterpart (dead weight that can mask a rename). Token/plural parity below still
+    // applies to every key that IS present. The batched-translation pass fills the gaps before release.
+    const enKeySet = new Set(EN_KEYS);
     for (const locale of LOCALES) {
-      expect(Object.keys(ALL_CATALOGS[locale]).sort(), `locale ${locale}`).toEqual(EN_KEYS);
+      const stray = Object.keys(ALL_CATALOGS[locale]).filter((key) => !enKeySet.has(key));
+      expect(stray, `locale ${locale} stray keys`).toEqual([]);
     }
   });
 
@@ -53,6 +59,9 @@ describe("i18n catalogs", () => {
 
       for (const key of pluralKeys) {
         const value = (ALL_CATALOGS[locale] as Record<string, unknown>)[key];
+        if (value === undefined) {
+          continue; // omitted → falls back to en's plural (valid)
+        }
         expect(isPlural(value), `${locale} ${key} is a plural object`).toBe(true);
         const plural = value as PluralMessage;
         expect(Object.keys(plural).sort(), `${locale} ${key} categories`).toEqual(categories);
@@ -70,7 +79,10 @@ describe("i18n catalogs", () => {
     for (const locale of LOCALES) {
       for (const key of plainKeys) {
         const enSet = [...tokensOf(en[key as keyof typeof en] as string)].sort();
-        const value = (ALL_CATALOGS[locale] as Record<string, string>)[key];
+        const value = (ALL_CATALOGS[locale] as Record<string, string | undefined>)[key];
+        if (value === undefined) {
+          continue; // omitted → falls back to en (valid)
+        }
         expect([...tokensOf(value)].sort(), `${locale} ${key} token set`).toEqual(enSet);
       }
     }
@@ -95,6 +107,9 @@ describe("i18n catalogs", () => {
       for (const key of EN_KEYS) {
         const allowed = enTokens(key);
         const value = (ALL_CATALOGS[locale] as Record<string, unknown>)[key];
+        if (value === undefined) {
+          continue; // omitted → falls back to en (valid)
+        }
         const forms = typeof value === "string" ? [value] : Object.values(value as PluralMessage);
         for (const form of forms) {
           for (const token of tokensOf(form)) {
