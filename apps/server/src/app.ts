@@ -75,6 +75,7 @@ import {
   type ServerErrorCode,
   type SyncPeer,
   type SyncStatusReport,
+  type TransportEncryption,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -637,9 +638,12 @@ export function defaultLoamConfig(): LoamConfig {
       // defaults and an operator can set join/retention/kill-switch directly without a named profile
       // silently overriding them. Selecting open/standard/hardened opts into the coherent bundle.
       profile: "custom",
-      // Off by default so existing plain-HTTP deployments are unchanged; operators opt in via a profile
-      // or this axis (docs/08).
-      transportEncryption: "off",
+      // Secure by default (docs/08): a fresh node encrypts app-layer traffic. `optional` is seamless —
+      // clients that joined via the QR (the normal path) get its `#k=` key and encrypt automatically, while
+      // plaintext clients (a manually-typed URL, curl, dev) still work — so this closes the "plaintext on
+      // the LAN by default" gap with zero UX cost. `off` is no longer an operator-settable posture; the only
+      // way to run plaintext is Developer Mode (LOAM_DEV_MODE, dev-only, self-announcing banner).
+      transportEncryption: "optional",
       // Off by default so existing unencrypted deployments are unchanged; the actual DB keying is
       // driven by LOAM_DB_KEY / openStore, wired separately (Android host key handoff). This is the
       // declared/displayed posture, and it is not forced by a security profile (see SecurityConfigSchema).
@@ -1062,6 +1066,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const resolveLanAddress = options.resolveLanAddress ?? resolveLanIPv4;
   const clientPort = options.clientPort ?? 3000;
 
+  // Developer Mode (LOAM_DEV_MODE) — a dev-only diagnostic posture: transport encryption is forced OFF
+  // (plaintext on the wire, so traffic is inspectable) and logging is verbose. It is self-announcing —
+  // `networkConfig.devMode` drives a persistent banner in every client warning that traffic is readable
+  // on the LAN — and it REFUSES to engage in a production build (`NODE_ENV=production`), so a plaintext
+  // node can never ship by accident. This is the ONLY path to plaintext now that `off` is not an
+  // operator-settable posture (the default is `optional`; the admin UI omits `off`).
+  const devModeRequested = process.env.LOAM_DEV_MODE === "1" || process.env.LOAM_DEV_MODE === "true";
+  const isProductionBuild = process.env.NODE_ENV === "production";
+  const devMode = devModeRequested && !isProductionBuild;
+
   /**
    * The host advertised in the join URL: an explicit `joinHost` wins outright (a caller that
    * resolved it at boot, or pinned a hostname); otherwise re-resolved on every call (docs/15 A7) so
@@ -1072,9 +1086,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   const server = Fastify({
-    logger: options.logger ?? true,
+    // Developer Mode turns on verbose (`debug`) logging unless the caller passed an explicit logger.
+    logger: options.logger ?? (devMode ? { level: "debug" } : true),
     serverFactory: (handler) => createServer(handler),
   });
+  if (devModeRequested && isProductionBuild) {
+    server.log.error(
+      "LOAM_DEV_MODE is set but IGNORED: refusing to disable transport encryption in a production build (NODE_ENV=production).",
+    );
+  }
+  if (devMode) {
+    server.log.warn(
+      "⚠️  DEVELOPER MODE ACTIVE — transport encryption is OFF (plaintext, readable by anyone on the LAN) and logging is verbose. Never use this for real messaging; every client shows a Developer Mode banner.",
+    );
+  }
   const sockets = new Set<SocketSession>();
   // Encrypted sockets that have connected but not yet passed the key-confirmation challenge (docs/20 §7).
   // `unconfirmedSocketCount` is the global cap; `unconfirmedByIp` is a tighter per-IP cap so a couple of
@@ -1277,6 +1302,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   let staticFilesRegistered = false;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
+
+  /**
+   * The transport-encryption posture actually ENFORCED and REPORTED right now — the *effective* value, not
+   * the merely-stored one. In Developer Mode it is always `"off"` (plaintext) regardless of what config or
+   * profile resolved to. Crucially this is a **read-time projection that never mutates `appConfig`**, so the
+   * operator's real intent stays the single source of truth for persistence: a dev-mode PATCH or a
+   * kill-switch re-seed can never bake `"off"` into the stored config and then leak plaintext into a later
+   * NON-dev run of that same data dir (the bug an in-place override caused). `devMode` is false in any real
+   * deployment (and always on the Android host), so there the effective value is exactly the configured one.
+   */
+  function effectiveTransportEncryption(): TransportEncryption {
+    return devMode ? "off" : appConfig.security.transportEncryption;
+  }
 
   let data: AppData = {
     users: [],
@@ -2740,11 +2778,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
       joinPolicy: appConfig.access.joinPolicy,
       securityProfile: appConfig.security.profile,
-      transportEncryption: appConfig.security.transportEncryption,
+      // Report the EFFECTIVE posture (Developer Mode forces "off"), matching what's actually enforced.
+      transportEncryption: effectiveTransportEncryption(),
       // Publish the host's static public key only when transport encryption is in play, so the client
       // can handshake + show the fingerprint. The client still prefers the QR-delivered key (docs/08).
       transportPublicKey:
-        appConfig.security.transportEncryption === "off" ? undefined : transportIdentity?.publicKey,
+        effectiveTransportEncryption() === "off" ? undefined : transportIdentity?.publicKey,
       // Report the EFFECTIVE posture, not the merely-configured one (F5/P2-1): `security.dbEncryption`
       // is a declarative admin setting, decoupled from whether the store actually got opened with a
       // key — `encryptionEnabled` is boot-resolved truth (including the F4/SF2 fallback downgrade), so
@@ -2754,6 +2793,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // when the caller didn't supply one (desktop/Pi CLI). Never claim encryption that isn't active.
       dbEncryption: encryptionEnabled ? options.dbEncryptionMode ?? appConfig.security.dbEncryption : "off",
       locale: appConfig.node.locale,
+      // Self-announce Developer Mode so every client shows the "traffic is plaintext" banner. Always false
+      // in a production build (see the `devMode` const — it refuses to engage when NODE_ENV=production).
+      devMode,
     };
   }
 
@@ -5781,6 +5823,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       for (const channel of digest.channels) {
+        // Create-only import: a channel we already have (by id) is left untouched. Channel metadata does NOT
+        // re-sync across nodes (C1, deferred) — ids are human SLUGS, so two nodes' independently-created
+        // same-named channels (notably the default `general`/`announcements`) collide on id; a newer-wins
+        // merge there would let one node's admin rename/archive clobber a peer's distinct channel. The correct
+        // fix needs per-channel provenance (only update channels actually imported from that peer) + peer
+        // timestamp clamping; until then this stays create-only, which is safe. See docs/11 / docs/25 (C1).
         if (channel.visibility !== "public" || ensureChannel(channel.id)) {
           continue;
         }
@@ -6001,7 +6049,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     delete request.headers["x-loam-internal"];
     delete request.headers["x-loam-user"];
 
-    const mode = appConfig.security.transportEncryption;
+    const mode = effectiveTransportEncryption();
     if (mode === "off") {
       return;
     }
@@ -6196,7 +6244,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/transport/handshake",
     { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
     async (request, reply) => {
-      if (appConfig.security.transportEncryption === "off") {
+      if (effectiveTransportEncryption() === "off") {
         return reply.code(404).send(errorBody("Not found"));
       }
 
@@ -6413,7 +6461,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const tunnelSession = transportRequestSessions.get(request);
     if (tunnelSession?.authMode === "bound" && tunnelSession.userId) {
       headers["x-loam-user"] = tunnelSession.userId;
-    } else if (appConfig.security.transportEncryption === "required") {
+    } else if (effectiveTransportEncryption() === "required") {
       return reply.code(401).send(errorBody("Resume an identity before tunnelling content"));
     } else if (typeof request.headers.cookie === "string") {
       headers.cookie = request.headers.cookie;
@@ -7884,6 +7932,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const switchedAwayFromSetupCode =
       appConfig.admin.bootstrap === "setupCode" && next.admin.bootstrap !== "setupCode";
     appConfig = next;
+    // `appConfig` is always the operator's real intent (Developer Mode never mutates it — the plaintext
+    // override is a read-time projection via `effectiveTransportEncryption()`), so the persisted config can
+    // never carry a dev-forced `"off"` into a later non-dev run of this data dir.
     store.setConfigValue("config", JSON.stringify(appConfig));
     // Drop live sync-status for peers an admin just removed, so peerSyncStatus can't accrete entries
     // for peers that no longer exist (docs/15 #9).
@@ -7995,7 +8046,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   });
 
   server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
-    const mode = appConfig.security.transportEncryption;
+    const mode = effectiveTransportEncryption();
     const transportSession = mode === "off" ? undefined : wsTransportSession(request.url);
     const transportKey = transportSession?.key;
     // The presented transport session id (used at confirm-time to detect a mid-challenge revocation:

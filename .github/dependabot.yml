@@ -19,3 +19,13 @@ updates:
       # only minor/patch within the current major and revisit this when the Node pin moves.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # @noble/{hashes,curves,ciphers} 2.x require Node 20.19+ and are ESM-only; the embedded Android host
+      # runs Node 18, so the major is blocked until that runtime moves (Sol crypto review; docs/23 §11).
+      # It also needs a coordinated, security-reviewed migration of @loam/crypto — not an auto-bump. Hold at
+      # 1.x (minor/patch within 1.x is fine); revisit when the embedded runtime moves off Node 18.
+      - dependency-name: "@noble/hashes"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@noble/curves"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@noble/ciphers"
+        update-types: ["version-update:semver-major"]

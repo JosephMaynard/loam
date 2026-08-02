@@ -1,6 +1,13 @@
 import type { LoamApp } from "./app.js";
 import { startEmbeddedServer } from "./embedded.js";
 
+// This is the Android host's ONLY server entry (the esbuild bundle boots it) — a shipped, production
+// artifact, never the `pnpm dev` / `tsx watch` path (that runs `server.ts`). Default NODE_ENV to
+// "production" so Developer Mode (LOAM_DEV_MODE, which forces plaintext) can NEVER activate on a shipped
+// APK: `buildApp` refuses it whenever NODE_ENV==="production". `??=` still lets someone deliberately test
+// the embedded bundle in dev by setting NODE_ENV explicitly, but the default closes the accidental case.
+process.env.NODE_ENV ??= "production";
+
 // The nodejs-mobile launcher requires the bundle to boot the server on load; keeping the auto-start
 // out of embedded.ts (it stays side-effect-free to import elsewhere) and behind the exported
 // `bootEmbeddedServer` below (rather than inline at module scope) means both stay testable — this

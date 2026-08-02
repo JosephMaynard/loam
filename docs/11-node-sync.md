@@ -71,8 +71,9 @@ hotspot running too if the phone's chipset allows it".
   `LOAM_DB_KEY` encrypts only the **DB-persisted** config (a token set via the admin UI / `PATCH
   /api/admin/config`); a token placed in **`config.json`** stays plaintext even on an encrypted node
   (that file is never encrypted — see CLAUDE.md), so guard it with filesystem permissions or a
-  secret manager. And on LOAM's plain-HTTP LAN the token rides **in the clear on the wire** — transport
-  encryption (docs/08, still unbuilt) is what would stop on-path capture in a hostile network. Unset =
+  secret manager. And on LOAM's plain-HTTP LAN the token rides in the clear unless transport encryption
+  is in play — under `optional`/`required` (docs/08; `optional` is now the default) the digest/messages
+  requests, and so the token, travel **inside the sealed session**, stopping on-path capture. Unset =
   open (any node that can reach the endpoints may sync public data — the original behaviour).
 - User ids are random enough (`user.<8hex>`) that cross-node collisions are unlikely; a collision
   would merge two strangers' display identities on one node (cosmetic, not an auth issue — sessions
@@ -81,6 +82,19 @@ hotspot running too if the phone's chipset allows it".
 ## Known v1 limitations
 
 - Deletes/moderation don't propagate (tombstones only stop re-import locally).
-- Channel metadata doesn't re-sync after first import (rename on A won't rename on B).
-- Attachment copies are single-shot best-effort; a missed image 404s on the pulling node.
+- **Channel metadata doesn't re-sync after first import** (a rename/archive on A won't reach B). Deferred
+  on purpose (C1): channel ids are human slugs, so two nodes' independently-created same-named channels
+  (notably the default `general`/`announcements`) collide on id — a naive newer-wins merge would let one
+  node's admin edit clobber a peer's distinct channel. The correct fix needs per-channel provenance (only
+  update channels actually imported from that peer) + peer-timestamp clamping. Import stays create-only
+  until then. See docs/25 (C1).
 - No backpressure beyond batching (500 ids/request); fine at LAN scale, revisit for LoRa.
+
+## Resolved
+
+- **Attachment copies retry (C3).** A copy that fails at import records a work item
+  (`addMissingAttachment`); `retryMissingAttachments` re-fetches it from the peer on the reaper timer with
+  backoff, a starvation-fair per-pass cap, and a max-age drop — best-effort recovery from *transient*
+  failures (peer briefly unreachable, mid-write, required-mode 401), rather than the old single-shot copy
+  that left a missed image absent forever. A file that stays gone past the max-age is dropped from the work
+  queue and can still 404 — there's no source left to fetch it from.

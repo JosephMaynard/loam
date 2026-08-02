@@ -95,6 +95,7 @@ describe("@loam/schema", () => {
         transportEncryption: "off",
         dbEncryption: "off",
         locale: "en",
+        devMode: false,
       }),
     ).not.toThrow();
   });
@@ -324,13 +325,13 @@ describe("@loam/schema", () => {
       transportEncryption: "required",
     });
 
-    // open and standard now differ on transport encryption (the axis docs/08 added); the other
-    // enforced axes still match.
+    // Secure by default: open and standard now BOTH encrypt (`optional`) — plaintext (`off`) is no longer
+    // any profile's posture (Developer Mode only). They currently differ only in intent; hardened requires it.
     expect(securityProfilePreset("open")).toEqual({
       joinPolicy: "open",
       messageTtlMs: null,
       killSwitchEnabled: false,
-      transportEncryption: "off",
+      transportEncryption: "optional",
     });
     expect(securityProfilePreset("standard")).toEqual({
       joinPolicy: "open",

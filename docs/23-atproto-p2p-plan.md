@@ -1,228 +1,206 @@
-# 23 — Portable identity & user-owned signed repos: plan of record (for review)
+# 23 — Portable identity & user-owned signed repos: plan of record (revised after Sol round 1)
 
-**Status: plan of record, pre-implementation — written to be torn apart by a crypto reviewer.** This is
-the rigorous successor to the `docs/22` briefing. It assumes `docs/16` (opportunistic mesh — the
-identity/crypto/relay foundation this reuses) and `docs/11` (node-to-node sync). The goal of circulating
-it is to harden the **threat model and the two or three hard cryptographic decisions** *before* any code.
-Read `CLAUDE.md` for the built baseline.
+**Status: design revised, still pre-implementation.** External crypto review (Sol, round 1) gave a
+**"green light on the initiative, red light on freezing the round-1 record format"** — four architectural
+blockers, not implementation nits. This revision incorporates them. **The next step is NOT the Phase 0
+code PR; it is locking the four decisions in §9, then a revised Phase 0.** Round-1 brief + full response:
+`sol-review/REVIEW-BRIEF-future-plans.md`.
+
+## What round 1 changed (summary)
+- **The round-1 record format is withdrawn.** A single append-only chain *per author* cannot coexist with
+  offline multi-device use + deletion + ephemerality. Replaced with **per-device operation logs + a small
+  identity-control log** (§4–§5).
+- **"First-seen-wins" is dropped** — it does not converge (partitions stay permanently divergent). Replaced
+  with **fork-freeze-at-common-ancestor** (§6).
+- **Two honesty corrections:** tombstones are **not** permanent (they are 30-day horizon-GC'd — `docs/15`
+  #7), and non-resurrection holds only within that window; "equivocation is detectable" must be qualified as
+  *"detectable **if** the conflicting histories ever meet"* (a malicious relay can suppress a branch forever).
+- **The existing `mesh.` id is unsuitable** as the permanent public-account namespace (§2).
+- Secondary items re-answered: the mesh ack is a **hash-lock receipt** not a MAC; **`@noble` 2.x is blocked
+  by Node 18**; E2EE is Double-Ratchet-not-MLS-lite with a malicious-host caveat; inter-node auth is specced
+  (§11).
 
 ---
 
 ## 1. Goal & non-goals
+**Goal.** An **optional, portable, cryptographic identity** and a **signed, content-addressed record log**
+(a user's *published* posts), verifiable by any node **without trusting the relay**. Opt-in; coexists with
+the anonymous, ephemeral, node-local default.
+**Non-goals (v1):** not wire-compatible with the real AT Protocol network (no DNS/PDS/relays/firehose — all
+online); not a consensus system; not a replacement for anonymous mode.
 
-**Goal.** Give a LOAM user an **optional, portable, cryptographic identity** and a **user-owned, signed,
-content-addressed record log** (their posts), so that:
-- the same identity + history can move between nodes, and
-- any node can verify *who authored a record* **without trusting the node that relayed it**.
+## 2. Foundations — reused, and what must change
+**Reused:** `@loam/crypto` (Ed25519 / X25519 sealed-sender / XChaCha20-Poly1305, pure-JS), the transport
+handshake, and the digest→diff→fetch sync engine + tombstones.
+**Must change (blocker 4):**
+- The current `mesh.` id is `base32(sha256(signPubkey)[0..15])` — 16 bytes ⇒ ~**64-bit collision
+  resistance**, and the key is **host-generated/host-custodied**. Fine for the mesh's trusted-host model;
+  **not** acceptable as the permanent namespace for long-lived public accounts. The account id uses a
+  **full 32-byte SHA-256** (§4), and portable identity needs an **encrypted export/recovery** UX — "host-
+  custodied" ≠ "user-owned".
+- **Separate keys for public-repo signing vs private mesh messaging.** Reusing one identity across both lets
+  a recipient link sealed conversations to the public persona, and makes a single compromise span every
+  protocol.
 
-Today identity is anonymous, ephemeral, and **node-local** (`user.<8hex>` minted from a session cookie in
-`getSessionUserId`); data is **node-owned** (rows in one node's SQLite). AT Proto's insight is to make both
-**user-owned**. We borrow that insight.
+## 3. The off-grid decision (unchanged, firm)
+Borrow the data model; **drop online resolution** (no DNS handles, no PDS discovery, no global
+relays/firehose). Discovery stays **local** (QR/paste). This is *inspired-by*, not AT-compatible.
 
-**Non-goals (v1).**
-- **Not wire-compatible with the real AT Protocol network.** No DNS handle resolution, no HTTPS PDS
-  discovery, no global relays/firehose, no `did:plc` directory. Those are fundamentally online and fight
-  LOAM's first priority (off-grid, no internet, no accounts). Full interop is a separate, online-only,
-  much larger question — explicitly deferred (see §9).
-- **Not replacing anonymous mode.** The anonymous, ephemeral, node-local default is untouched; portable
-  identity is strictly opt-in and flag-gated.
-- **Not a consensus system.** We do not attempt global agreement on history order (see the equivocation
-  limit in §4).
-
-**One-line framing:** *AT-Proto-**inspired**, off-grid-first — portable self-certifying identity + signed
-per-author logs synced over the existing transport, with local (QR/paste) key exchange instead of DNS.*
-
----
-
-## 2. What already exists (reused, not rebuilt)
-
-Grounded in the shipped mesh work (`docs/16`, Phases 0–2 + v2 **built & tested**):
-
-| Primitive | Reused for | Where |
-|---|---|---|
-| Ed25519 sign/verify, X25519 sealed-sender, `@noble/*` pure-JS (works in the insecure-context PWA + embedded Node-18) | record signing; DM sealing stays as-is | `packages/crypto` (`@loam/crypto`) |
-| **Self-certifying `mesh.` id = hash(Ed25519 pubkey)** | the seed for a portable account id | `mesh_identities` DAL |
-| **Identity cards** (pubkeys + `kxSig` binding, re-verified `meshId===hash(sign)`), exchanged by QR/paste | local, DNS-free identity/key exchange | `GET /api/mesh/identity`, `POST /api/mesh/contacts` |
-| Digest → diff → fetch **sync engine** + `syncPeerAuthorized` + `wipeGeneration` guard | the transport for signed repo diffs | `/api/sync/*`, `docs/11` |
-| **Tombstones** (unconditional, horizon-GC'd) | non-resurrection of deleted records | `tombstones` table |
-| Transport encryption (X25519 + XChaCha20, QR `#k=`) | confidential/authenticated peer links | `docs/08`, `sync-transport.ts` |
-
-**~30–40% of the stack — and the hard cryptographic part — exists.** The gaps are (a) promoting the mesh
-id to a *first-class account*, and (b) the *signed record log* (content addressing + per-author chaining +
-verify-on-ingest).
-
----
-
-## 3. The decisive constraint: off-grid, so no online resolution
-
-AT Proto resolves `handle → DID → PDS` over DNS+HTTPS. LOAM cannot. **Decision (firm): borrow the data
-model, drop the resolution model.**
-- **Keep:** self-certifying identity, signed content-addressed records, verify-without-trusting-the-relay,
-  sync over the existing transport.
-- **Drop for the off-grid default:** DNS handles, PDS discovery, global relays, a canonical firehose.
-  Discovery is **local** — QR / paste / mesh contact cards (already built).
-- **Online mode only (optional, later):** real handles/relays + the `atproto` OAuth login (`docs/05`) make
-  sense *only* for an internet-hosted website deployment — never the off-grid host.
-
----
-
-## 4. Threat model (the part to attack)
-
-**Trust base.** A node is already trusted by *its own local users* (it serves their client, holds their
-plaintext, can wipe them). The new guarantees are therefore **against OTHER nodes and the relay path**, not
-against a user's own host. State this explicitly so the scope is honest.
-
-**Adversaries & goals the design must meet:**
-
-| # | Adversary | Must guarantee |
-|---|-----------|----------------|
-| A1 | A **relay/carrier node** that forwards repo data | Cannot forge, alter, or attribute records to an author (**authorship integrity**). Public repo content is *readable* by design (it's public); DMs stay sealed-sender (mesh, unchanged). |
-| A2 | A **malicious peer** supplying repo diffs | Cannot inject a record authored by someone else (**impersonation**), replay old/deleted records (**replay / resurrection**), or substitute keys (**key-substitution**). |
-| A3 | A **compromised/dishonest author** (or theft of their key) | Cannot silently rewrite already-published history (**tamper-evidence**); a *fork* (two histories) is at least **detectable** (§4.1). |
-| A4 | **Network eavesdropper / MITM** between nodes | Confidentiality + integrity of the link (transport encryption). **Known residual:** inter-node key discovery is TOFU unless the peer key is pinned (`docs/11`, `docs/15` #1/#6a) — call this out; it bounds A4 to passive unless pinned. |
-| A5 | **Metadata adversary** | Public repos reveal an authorship graph *by design*. DMs remain unlinkable via the mesh sealed-sender `toTag` scheme (unchanged). No new metadata guarantee is claimed for public content. |
-
-**Security properties, precisely:**
-1. **Authorship integrity** — a record verifies iff `sig` is valid under `pubkey` AND `authorId == hash(pubkey)` (self-certifying: the id *is* the key commitment, so there is no key-to-id lookup to attack).
-2. **Content integrity + addressing** — a record's `cid` is the hash of its canonical bytes; any mutation changes the cid.
-3. **Non-resurrection** — a deleted record's cid is tombstoned; verify-on-ingest refuses tombstoned cids (existing guarantee, extended to signed records).
-4. **Tamper-evidence & ordering** — each record commits to the author's previous record's cid (`prev`) + a monotonic `seq`, forming a **per-author hash chain**; truncation/reorder/insertion breaks the chain.
-5. **Replay resistance** — `(authorId, seq, cid)` is idempotent; a re-sent record is a no-op, a *different* record at an existing `seq` is a fork (§4.1).
-
-### 4.1 The hard limit: equivocation / forking
-
-A dishonest author (or a node holding their key) can sign **two** valid records with the same `prev` — two
-divergent histories shown to different peers. **Full non-equivocation is impossible off-grid without a
-consensus or witness layer** (this is the same reason AT Proto ultimately trusts the PDS + external
-verifiers). What we *can* do, and what this plan commits to:
-- **Detection, not prevention:** any node that sees two validly-signed records with the same `(authorId,
-  prev)` but different `cid` holds **cryptographic proof of equivocation** (both signed by the author). It
-  can flag the author, refuse the fork, and gossip the proof.
-- **Convergence policy:** **first-seen-wins per author head**, with the fork proof retained. A later
-  conflicting branch is rejected (not merged), so honest nodes converge; the equivocation is surfaced to
-  moderators rather than silently resolved.
-- This limitation must be documented in `SECURITY.md` — it is the honest boundary of an off-grid design.
-
-**→ Open question O1 for the reviewer:** is detection-plus-first-seen acceptable, or do we want an optional
-lightweight witness (e.g. co-signing peers stamp heads they've seen) for higher-trust deployments?
-
----
-
-## 5. Design
-
-### 5.1 Portable identity (Phase 1)
-- An **account keypair** (Ed25519). The account id is the existing self-certifying form: `mesh.`-style
-  `id = multibase(hash(pubkey))`. Opt-in; coexists with anonymous `user.<hex>` (see §6).
-- The **identity document** is the existing mesh identity card (signing + KX pubkeys, `kxSig` binding),
-  exchanged locally (QR/paste), re-verified server-side. No DNS.
-- **The identity-vs-signing-key fork — Open question O2 (biggest one):**
-  - **Option A — id = hash(signing key).** Dead simple, maximally self-certifying, matches mesh today.
-    **But the signing key cannot rotate** (rotating it changes the id → a new identity). Lost/compromised
-    key = lost identity.
-  - **Option B — id = hash(a stable *identity* key) that signs *delegations* to rotatable signing keys**
-    (closer to AT Proto's DID-with-rotation-keys, minus the online PLC directory). Enables rotation,
-    recovery, and per-device signing keys — at the cost of a delegation-verification layer and a way to
-    distribute rotation events off-grid (a signed key-change record in the log + re-published identity
-    card). This is where most of the cryptographic subtlety (and Sol's attention) lives: revocation
-    freshness without a directory, recovery-key custody, downgrade/rollback of rotation events.
-
-  Recommendation to debate: **B**, because "portable" without rotation/recovery is a weak promise — but B's
-  off-grid revocation story (O2b: how does a peer learn a key was revoked, and can an attacker suppress
-  that?) is the single hardest sub-problem and should be nailed with the reviewer before building.
-
-### 5.2 Signed, content-addressed records (Phase 2)
-Each post becomes a **signed record**:
+## 4. Identity model (O2 → **Option B, revised** — with an honest Option A fallback)
+A stable account id derived from a **canonical genesis identity document**, not from a single irreplaceable
+signing key:
+```text
+accountId = SHA-256(canonical({ version, recoveryPolicy, initialRecoveryKeys }))   // full 32 bytes
 ```
-record = { authorId, seq, prev, payload, /* payload = the existing Message shape */ }
-cid     = multihash(canonical(record))          // content address
-signed  = { ...record, sig = Ed25519(authorKey, cid) }
+- The genesis doc **precommits multiple recovery/controller keys** (e.g. a 2-of-3 policy for users who opt
+  into recovery); recovery keys stay offline / on separately-protected devices. Normal devices get scoped
+  Ed25519 **signing delegations**.
+- A separate **identity-control log** records: device-key delegation, revocation, recovery-policy change,
+  controller rotation, an **identity epoch**, and — critically — **the last accepted head of any revoked
+  device log** (so a stolen key cannot manufacture "older" records and claim they predate compromise).
+- **Off-grid revocation freshness — the honest limit.** It can only give: rollback protection *relative to
+  the newest epoch a peer has already seen*; fresher state via QR/paste + gossip; and **no** freshness
+  guarantee for a first-time peer, or one whose adversary suppresses the revocation. Peers cache their
+  highest accepted control epoch/head and **never accept older**. Identity cards carry the genesis doc + the
+  latest control proof; every record names the exact device key + control epoch that authorised it.
+  *There is no cryptographic way to guarantee an isolated newcomer has the latest revocation without an
+  online authority, a witness quorum, or a trusted physical exchange — stated explicitly.*
+- **Fallback (decision to lock):** if this hierarchy is too much UX/impl for v1, choose **Option A honestly**
+  — "a portable pseudonym with encrypted backup; losing or compromising it creates a new identity." A
+  *partial* Option B is more dangerous than a candid Option A.
+
+## 5. Repo model — **per-device operation logs** (blockers 1 + 3)
+Not one chain per author. Each authorised **device** keeps its own append-only **operation log**, aggregated
+into the account repo. Concurrent posts from two authorised devices are **both valid** — multi-device works.
+The operation-log entry (Sol's shape):
+```text
+entry = { version, accountId, deviceKeyId, identityEpoch,
+          deviceSeq, devicePrev,
+          operation,   // create | update | retract
+          recordId,
+          valueCid }   // separate content block; null for retract
 ```
-- **Canonicalization — Open question O3:** adopt **DAG-CBOR + multiformats CIDs** (AT-Proto-compatible, so a
-  future MST/bridge is feasible and canonicalization is a solved, spec'd problem) vs a simpler canonical
-  JSON (less code, LOAM-only). Leaning DAG-CBOR/multiformats: the interop option is cheap to keep open and
-  the canonicalization pitfalls are already solved.
-- **Repo format decision (O4):** **start with a per-author signed append-only log** (the hash chain in
-  §4.4), **not** a full Merkle Search Tree. Rationale: the log gives authorship integrity, ordering,
-  tamper-evidence, and fork-detection with far less machinery, and maps cleanly onto the existing
-  message-diff sync. An MST (range proofs, efficient set reconciliation, AT-Proto-faithful) is a **later**
-  upgrade once the log is proven. Keep CIDs/DAG-CBOR so that upgrade doesn't require a data migration.
+- **Content is addressed separately (`valueCid`)** so chain metadata can survive while a content block is
+  locally pruned. An update or **author retraction is a new signed operation**, never an in-place edit.
+- **Three distinct deletion concepts, kept separate:** *author retraction* (a signed, portable operation);
+  *local moderation hide* (node-local policy, never attributed to the author); *retention expiry / panic
+  wipe* (local destruction, **not** a globally enforceable delete). **Once public data has reached another
+  node, neither a tombstone nor the kill switch can erase that copy** — this must be prominent in the UI and
+  `SECURITY.md`.
 
-### 5.3 Verify-on-ingest (mandatory, before persist or diff)
-A record is accepted **only if**, in order: (1) `authorId == hash(pubkey)`; (2) `sig` verifies over `cid`
-under `pubkey`; (3) `cid == multihash(canonical(record))`; (4) `prev` links to a known head for `authorId`
-(or is genesis) and `seq` is exactly `prevSeq + 1`; (5) `cid` is not tombstoned; (6) no equivocation
-(§4.1). Any failure ⇒ **reject without storing**, and never include an unverified record in a diff.
-Read-time re-verification stays as defense-in-depth.
+**Verify-on-ingest** (before persist or diff): valid delegation for `deviceKeyId` under the account's
+control log at the claimed `identityEpoch`; signature over the domain-separated bytes (§7); recomputed CID
+matches; `devicePrev`/`deviceSeq` link to a known device head; not tombstoned; no device-fork (§6). Reject
+without storing; read-time re-verify as defense-in-depth.
 
-### 5.4 Repo sync (Phase 3)
-Extend the digest/diff/fetch engine (`docs/11`) to gossip **signed per-author repo heads + record ranges**
-instead of trusting node-attributed messages. The peer offers `{authorId → head cid, seq}`; the puller
-requests the missing suffix; each record is verified per §5.3. **Public-only** — the signed diffs carry no
-DMs, private-channel data, or shadow-banned content; the existing audience/moderation filtering (`docs/11`)
-is unchanged. Reuses `syncPeerAuthorized`, the `wipeGeneration` bail, and tombstones.
+## 6. Fork handling (O1 revised — blocker 2)
+Equivocation now means **the same device key signed two successors to the same device head**. On detection:
+- retain both signed successors as a **bounded fork proof**;
+- **freeze that device log at the common ancestor**;
+- stop presenting **both** post-fork branches;
+- require a recovery/control event or an explicit moderator/user decision before proceeding.
 
-### 5.5 Coexistence, moderation, durability
-- **Coexistence (O5):** a node hosts both key-based accounts and anonymous `user.<hex>`. Every authz /
-  audience-filter path must treat both — and there must be no privilege leak from presenting a portable id
-  (a portable identity is *not* automatically an admin/mod on a node it visits).
-- **Moderation:** once authorship is user-signed and portable, a node can refuse to **serve** a record but
-  cannot **rewrite** it. Ban/shadow-ban become *local serving policy* + tombstones + the equivocation
-  proofs — reconcile with the existing roles model (`docs/07`).
-- **Kill-switch / ephemerality tension (O6):** durable signed history conflicts directly with the
-  panic-wipe (`docs/02`) and ephemeral-retention postures. Decide per security-profile: repos are
-  wipeable-and-local by default; "durable portable" is an explicit opt-in that a hardened profile can
-  forbid.
+This converges on *"this device is forked"* without pretending a network race picked the authentic history.
+**No CID tie-breaker** (it lets a stolen-key attacker grind the winning branch and silently discards the
+evidence). **No witnesses in v1** (optional M-of-N signed checkpoints could later help managed deployments,
+but add a trusted roster, hurt partition availability, and don't solve first-contact freshness). Honesty:
+forks are **detectable *if* the conflicting histories ever meet** — a malicious relay can suppress a branch.
 
----
+## 7. Serialization — fixed CID suite + domain-separated signatures
+- **DAG-CBOR** with a **fixed, non-negotiable suite:** CIDv1, `dag-cbor`, SHA-256, **full 32-byte** hashes,
+  exact schema version, exact key/signature lengths, bounded object depth + encoded size. **Reject
+  attacker-selected multihash algorithms.** Decoders accept some non-canonical input, so we **validate typed
+  data and recompute the canonical bytes ourselves**.
+- **Sign a domain-separated byte string:** `Ed25519("loam.repo.entry.v1\0" || cid.bytes)` — never a bare CID
+  shared with other protocols.
+- **Interop claim softened:** AT Protocol now uses signed **MST** commits + its normalised **DRISL** CBOR;
+  choosing DAG-CBOR + CIDs does **not** make LOAM records AT-compatible or guarantee a migration-free MST
+  conversion later. Expect a **new repo/commit format** if an MST is ever added (content blocks may be
+  reusable).
 
-## 6. Phasing (each independently shippable, flag-gated, anonymous default untouched)
+## 8. Coexistence, moderation, durability — **publication is an explicit feature**
+A signed public repo is an explicit **publication**, not merely another representation of ordinary chat —
+so **not every public-channel message is auto-published.** Per profile:
+- **open / standard:** anonymous local chat stays the default; portable identity + "publish portably" are
+  explicit opt-ins.
+- **hardened:** portable-repo gossip, durable backups, and persistent identity are **off by default**; panic
+  wipe destroys local device keys; the UI still warns that already-replicated public material cannot be
+  recalled.
+- **archival / team:** portable publishing may be enabled broadly — but that is a **durability** profile,
+  not a stronger-security one.
 
-- **Phase 0 — spike & format lock.** In `packages/crypto` (+ a new `packages/repo`?): the record type, the
-  canonicalization/CID choice (O3), the per-author log + verify function, with tests. Wired into nothing.
-  *(Mirrors mesh Phase 0.)* **This is the first PR.**
-- **Phase 1 — portable identity (opt-in).** Promote the mesh id to a key-based account; resolve O2
-  (identity-vs-signing key, rotation/recovery) first. Deepest authz surface (§5.5) — most careful.
-- **Phase 2 — signed record log.** Records signed + content-addressed + verify-on-ingest; stored alongside
-  the existing message rows. The big, security-critical phase.
-- **Phase 3 — repo sync.** Signed per-author diffs over the existing engine (§5.4).
-- **Phase 4 (optional, online-only).** Real handles/relays + `atproto` OAuth for website instances. Not the
-  off-grid host.
+The kill switch removes host-custodied keys locally; it **cannot** wipe offline clients, exported recovery
+bundles, or remote peers — a prominent boundary.
 
-Rough size: **an epic on the scale of the mesh work — 6–10+ security-first sessions.**
+## 9. The four decisions to lock **before** Phase 0 (Sol's recommended next move)
+1. **Per-device operation logs** vs an explicit single-writer (signed writer-lease) constraint. *(Recommend
+   per-device.)*
+2. **Identity/control/recovery model** — the revised Option B (§4) and its unavoidable freshness limit, **or**
+   a candid Option A. *(The one genuine product/complexity call — owner input wanted.)*
+3. **Operation records + separately-addressed content blocks** (§5). *(Recommend adopt.)*
+4. **Portable publication as a distinct user action** from local chat (§8). *(Recommend yes.)*
 
----
+## 10. Revised Phase 0 (after the decisions) + required test matrix
+Wired into nothing (a `packages/repo` primitive): the **canonical codec** (fixed CID suite), **domain-
+separated signatures**, **delegation verification**, **per-device append** logic, and the **fork-freezing**
+policy. Tests must cover: concurrent valid devices; **revoked-device final-head anchoring**; stale control
+state; fork-proof retention; strict vs non-canonical CBOR rejection; integer overflow; oversized inputs;
+edit/retract operations; and **byte-identical known-answer vectors across Node 18, Node 24, browser, and
+Android**.
 
-## 7. Open questions for the reviewer (ranked)
+## 11. Related crypto items — updated per Sol
+- **Mesh delivery-ack → hash-lock receipt** (the proposed blinded MAC was unverifiable-by-a-carrier or
+  forgeable). Sender picks random `ackSecret` (carried in the encrypted inner payload); the authenticated
+  public envelope carries `ackCommit = SHA-256("loam.mesh.ack.v1" || msgId || ackSecret)`; the recipient
+  publishes `{ msgId, ackSecret }`; a carrier verifies the preimage, deletes, and gossips the receipt. No
+  recipient identity revealed; the sender can only prematurely delete *its own* message; replays are idempotent;
+  no sender-set `at` (carriers stamp their own time); only store an ack when the node holds the message. TTL
+  stays the backstop. *(Update `docs/16`'s ack section when built.)*
+- **`@noble` 2.x — blocked by Node 18.** All three 2.x packages require Node **20.19+** and are ESM-only; the
+  embedded Android host is Node 18, so the major is blocked regardless of transpilation. Stay on 1.x; do the
+  small `@noble/curves` 1.9.4 → 1.9.7 independently; **record the Node-18 reason in dependency policy so
+  automation stops reopening the bump**; migrate only after the embedded runtime moves (then: `.js` subpath
+  imports, renamed keygen APIs, moved hash modules, strict `Uint8Array`, cross-runtime KATs, and an explicit
+  RFC-8032 verification choice).
+- **E2EE — not "MLS-lite."** DMs: signed device key packages + pairwise **Double Ratchet**. Small private
+  channels: pairwise ciphertext fan-out over those sessions. Larger/dynamic groups: a **mature, audited MLS**
+  only if one runs on LOAM's browser + Node-18 runtimes. **Deeper blocker:** a malicious host serves the PWA
+  JavaScript and can serve code that steals client keys — E2EE protects against an honest-but-curious
+  operator, **not a malicious host**, unless the user runs a separately-trusted signed client (the installed
+  **APK**). The E2EE threat-model claim must be decided *before* protocol work.
+- **Inter-node authentication** — prioritise before repo-sync Phase 3 (needn't block a serialization-only
+  Phase 0). Not "per-peer signed authors" (too vague): a **stable self-certifying Ed25519 node identity** + a
+  signed binding to its transport X25519 key + **mutual challenge/transcript auth** + an **operator-pinned**
+  peer identity (QR / manual fingerprint) + **per-peer credentials** (not the shared ring-wide bearer token).
+  TOFU over attacker-controlled HTTP does not defeat an active first-contact MITM (which can eclipse peers
+  and suppress the very revocations/fork-proofs this design depends on).
 
-- **O2 — identity vs signing key & off-grid key rotation/recovery/revocation.** The crux. Option A (no
-  rotation) vs B (delegation + rotation). If B: how does a peer learn of a revocation without a directory,
-  and can an attacker suppress or roll it back? Recovery-key custody on the PWA (no `crypto.subtle`) + the
-  Android host (SQLCipher + device secret)?
-- **O1 — equivocation:** is detection + first-seen-wins + gossiped fork-proofs enough, or add an optional
-  witness/co-sign layer for higher-trust deployments?
-- **O3 — canonicalization/CID:** DAG-CBOR + multiformats (interop-ready) vs canonical JSON (simpler)?
-- **O4 — repo format:** confirm "per-author signed log first, MST later," or start MST?
-- **O6 — durability vs wipe/ephemerality:** the right default and per-profile policy.
-- **O7 — replay/freshness across long partitions:** `seq`+`prev` handle order, but how stale a head may a
-  node serve, and does that interact badly with tombstone horizon-GC (`docs/15` #7)?
-- **O8 — interop worth:** how much AT-Proto-faithfulness (CIDs/DAG-CBOR/MST/CAR) is worth carrying for a
-  future bridge vs a leaner LOAM-native format?
+## 12. The honest simultaneous-adversary result (Sol)
+With a stolen author key **plus** a malicious peer/relay, an attacker can: forge all future records + build
+alternative histories from any old head; suppress revocations/deletions/fork-proofs indefinitely; present a
+stale-but-valid prefix to newcomers; (under the withdrawn first-seen-wins) keep partitions divergent or
+misclassify honest multi-device activity as equivocation; resurrect data past the tombstone horizon; exploit
+the shortened mesh id if reused; link public persona to private messaging if keys are reused. **Signatures
+solve alteration and third-party attribution. They do not solve freshness, availability, compromise-time,
+deletion, or agreement** — which is why the revisions above target exactly those gaps.
 
----
-
-## 8. Concrete first deliverable (Phase 0 PR)
-
-A new `packages/repo` (or an extension of `packages/crypto`) providing: the `SignedRecord` type; the
-canonicalization + CID function (O3 decision baked in); `signRecord(key, record)` and
-`verifyRecord(record)` implementing §5.3 checks (1)–(4); a per-author `RepoLog` with append + head +
-fork-detection; and a thorough test suite (valid chain, bad sig, wrong author, broken `prev`, out-of-order
-`seq`, duplicate/idempotent, equivocation-detected). **Wired into nothing** — no server/client/schema
-changes, so it lands with zero product risk, exactly like the mesh Phase 0. Everything after depends on the
-O2/O3 answers, so the reviewer's feedback gates Phase 1+.
-
----
-
-## 9. Explicitly out of scope for this plan
-Real AT Protocol network interop (federation with Bluesky et al.), DNS handle resolution, the `did:plc`
-directory, global relays/firehose, and lexicon-style open extensible schemas. All are online-first and
-belong to a possible Phase 4 website mode, not the off-grid host.
+## 13. Open design flags to fold into the next review round
+Raised by an automated review pass of this draft; all concern the **unbuilt** design (nothing here ships in
+the current release). Carry them into the Sol round-2 review before any Phase-0 code:
+- **Out-of-order / conflicting successors on ingest.** Verify-on-ingest must not silently drop a validly-signed
+  entry just because its predecessor (or the current device head) isn't known yet: quarantine it pending its
+  predecessor, and persist a validly-signed *conflicting* successor as **fork evidence** rather than discarding
+  it. Otherwise a peer feeding entries out of order can hide a fork.
+- **Equivocation resolution must converge.** "First-seen-wins per head" lets two replicas independently pick
+  different branches while each believes it converged. Resolve only via a signed, canonical control event that
+  names both fork branches, **or** keep the device log frozen at the common ancestor until recovery mints a new
+  log — never per-replica local choice.
+- **Identity-control-log fork handling.** Define the same fork rules for the control log itself: each control
+  record names its predecessor; conflicting valid heads are a fork proof; the recovery authority resolves;
+  deterministic accept/reject/supersede rules so peers converge on the same delegations/revocations.
+- **update / retract need an explicit target record id** distinct from `devicePrev`, plus deterministic
+  record-level merge rules for concurrent update-vs-retract.
+- **CBOR policy is contradictory** (reject non-canonical vs accept-and-normalize) — pick one and align the
+  Phase-0 test matrix.
+- **Signature/CID definition** must name exactly which CID is signed and ensure the canonical CID **excludes**
+  the signature (no signature↔CID cycle), so every implementation signs identical bytes.

@@ -55,6 +55,7 @@ const networkConfig: NetworkConfig = {
   transportEncryption: "off",
   dbEncryption: "off",
   locale: "en",
+  devMode: false,
 };
 
 function frame(value: unknown): string {

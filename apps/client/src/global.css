@@ -1005,6 +1005,25 @@ a {
   background: var(--c-danger);
 }
 
+/* Developer Mode: an unmissable top-of-app warning that traffic is plaintext. Sits above the shell so it
+   spans every screen. Deliberately loud — this is a safety announcement, not decoration. */
+.dev-mode-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  padding: 8px 16px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  background: #b91c1c;
+  color: #fff;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.dev-mode-banner strong {
+  text-decoration: underline;
+}
+
 .wiped-screen {
   display: grid;
   min-height: 100vh;

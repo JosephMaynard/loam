@@ -1169,6 +1169,18 @@ function LoamApp() {
     document.title = nodeName && nodeName !== "LOAM local" ? `${nodeName} · LOAM` : "LOAM";
   }, [config?.networkConfig.nodeName]);
 
+  // Developer Mode announces itself loudly in the console too (the banner is the user-facing signal; this
+  // is for anyone with devtools open). Fires once when the node reports it.
+  useEffect(() => {
+    if (config?.networkConfig.devMode) {
+      console.warn(
+        "%cLOAM DEVELOPER MODE",
+        "font-weight:bold;color:#b91c1c",
+        "— transport encryption is OFF. Traffic is plaintext and readable by anyone on this LAN. Never use for real messaging.",
+      );
+    }
+  }, [config?.networkConfig.devMode]);
+
   // The admin selects one UI language for the whole node (config.networkConfig.locale); resolve it
   // (fallback `en`) and apply it via `setActiveLocale` — module state that `t()` reads — in a useMemo
   // so it runs *before* children render this pass (no stale-language flash). No context/provider is
@@ -1747,6 +1759,12 @@ function LoamApp() {
 
   return (
     <>
+    {config?.networkConfig.devMode ? (
+      <div className="dev-mode-banner" role="alert">
+        ⚠️ Developer Mode — messages are sent <strong>unencrypted</strong> and can be read by anyone on this
+        network. Do not use for anything private.
+      </div>
+    ) : null}
     <main className={shellClassName}>
       <Sidebar
         activeConversation={activeConversation}
