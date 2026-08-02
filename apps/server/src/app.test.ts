@@ -13,7 +13,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   currentEpoch,
@@ -7654,9 +7654,92 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
   });
 });
 
+describe("secure by default + Developer Mode", () => {
+  const DEV_ENV = "LOAM_DEV_MODE";
+  const NODE_ENV = "NODE_ENV";
+  let savedDev: string | undefined;
+  let savedNode: string | undefined;
+  beforeEach(() => {
+    savedDev = process.env[DEV_ENV];
+    savedNode = process.env[NODE_ENV];
+    delete process.env[DEV_ENV];
+    delete process.env[NODE_ENV];
+  });
+  afterEach(() => {
+    if (savedDev === undefined) delete process.env[DEV_ENV];
+    else process.env[DEV_ENV] = savedDev;
+    if (savedNode === undefined) delete process.env[NODE_ENV];
+    else process.env[NODE_ENV] = savedNode;
+  });
+
+  it("a fresh node encrypts by default (transportEncryption 'optional', devMode false)", async () => {
+    const app = await makeApp(); // no config → raw defaults
+    const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { transportEncryption: string; transportPublicKey?: string; devMode: boolean };
+    };
+    expect(cfg.networkConfig.transportEncryption).toBe("optional");
+    expect(cfg.networkConfig.devMode).toBe(false);
+    // ...and the handshake works out of the box (optional advertises the host key).
+    expect(cfg.networkConfig.transportPublicKey).toBeDefined();
+    const hello = transportClientHello();
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/handshake",
+      payload: { clientEphemeralPublic: hello.ephemeralPublic },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("every named profile encrypts: open + standard advertise 'optional' in plaintext /api/config", async () => {
+    for (const profile of ["open", "standard"] as const) {
+      const app = await makeApp({ security: { profile } });
+      const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+        networkConfig: { transportEncryption: string };
+      };
+      expect(cfg.networkConfig.transportEncryption).toBe("optional");
+    }
+  });
+
+  it("the hardened profile requires encryption: plaintext /api/config is 401'd", async () => {
+    const app = await makeApp({ security: { profile: "hardened" } });
+    const res = await app.server.inject({ method: "GET", url: "/api/config" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("LOAM_DEV_MODE forces plaintext + advertises devMode, overriding an encrypting config", async () => {
+    process.env[DEV_ENV] = "1";
+    // Even a hardened node is forced to plaintext in Developer Mode.
+    const app = await makeApp({ security: { profile: "hardened" } });
+    const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { transportEncryption: string; transportPublicKey?: string; devMode: boolean };
+    };
+    expect(cfg.networkConfig.devMode).toBe(true);
+    expect(cfg.networkConfig.transportEncryption).toBe("off");
+    expect(cfg.networkConfig.transportPublicKey).toBeUndefined();
+    // The handshake is disabled (plaintext path), matching a real 'off' node.
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/handshake",
+      payload: { clientEphemeralPublic: transportClientHello().ephemeralPublic },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("refuses to engage Developer Mode in a production build (NODE_ENV=production)", async () => {
+    process.env[DEV_ENV] = "1";
+    process.env[NODE_ENV] = "production";
+    const app = await makeApp(); // defaults → optional, and dev mode must NOT downgrade it
+    const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { transportEncryption: string; devMode: boolean };
+    };
+    expect(cfg.networkConfig.devMode).toBe(false);
+    expect(cfg.networkConfig.transportEncryption).toBe("optional");
+  });
+});
+
 describe("transport encryption foundation (docs/08)", () => {
   it("404s the handshake and advertises no host key when transport encryption is off", async () => {
-    const app = await makeApp(); // default: off
+    const app = await makeApp({ security: { transportEncryption: "off" } }); // 'off' is now opt-in (dev/tests only)
     const hello = transportClientHello();
     const res = await app.server.inject({
       method: "POST",

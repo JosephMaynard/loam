@@ -20,8 +20,12 @@
 > Fastify hooks) + seals WS frames for `/ws?enc=<sid>`. The client routes every fetch and the WebSocket
 > through `apps/client/src/lib/transport.ts`, which does the QR-bootstrapped handshake, seals/opens
 > frames, and gates `required` mode behind a "scan the join QR" screen when no QR key is available.
-> Gated by `security.transportEncryption` (`off` default / `optional` / `required`), which is now the
-> axis that distinguishes the `open`/`standard`/`hardened` profiles (the docs/09 gap). `required` mode
+> Gated by `security.transportEncryption` (**`optional` default — secure by default** / `required`; `off`
+> is no longer operator-settable, reachable only via Developer Mode `LOAM_DEV_MODE`, which self-announces a
+> plaintext banner to every client and refuses to run under `NODE_ENV=production`). `optional` is seamless
+> — a QR-joiner gets the `#k=` key and encrypts automatically, plaintext clients still work — so the
+> default closes plaintext-on-the-LAN at no UX cost. Every named profile encrypts: `open`/`standard` force
+> `optional`, `hardened` forces `required`. `required` mode
 > is deployable today: a client with no QR-delivered host key simply cannot connect, so there is no
 > silent downgrade to plaintext. **Anti-replay is now built:** every sealed REST request carries a
 > per-session monotonic sequence number *inside* its authenticated envelope, and the server enforces a

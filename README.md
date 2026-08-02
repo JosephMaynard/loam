@@ -63,6 +63,7 @@ development on the same transport-agnostic layer.
 - 🔌 **Works offline**: the client is an installable PWA that keeps working against its local cache when the connection drops.
 - 🌍 **Minimal by design**: an intentionally sparse interface that stays out of the way and renders text in any language, including right-to-left scripts.
 - 🌗 **Light & dark**: the client follows your system theme automatically.
+- 🔐 **Encrypted in transit by default**: messages are sealed between your device and the host over the local network (QR-bootstrapped, so it just works — no setup), keeping others on the same Wi-Fi from reading them. The host itself still sees messages (it's the server); end-to-end encryption that hides content from the host is future work. See [Security](#security).
 - 🔒 **Optional encryption at rest + an Emergency Reset**: the host (desktop or Android) can encrypt the on-disk database and wipe everything in one action (see [Security](#security)).
 
 ## Quick start

@@ -158,14 +158,16 @@ export type SecurityProfilePreset = {
 /**
  * The single source of truth mapping each named profile → the concrete config axes it forces, so
  * "pick a profile" stays testable as whole configurations instead of 2ⁿ toggles (docs/09). Transport
- * encryption (docs/08) is now enforced too and is the axis that finally distinguishes `open` (off)
- * from `standard` (optional); `hardened` requires it. `hardened` tightens every axis.
+ * encryption (docs/08) is enforced too: every named profile now encrypts by default — `open` and
+ * `standard` both use `optional` (seamless — QR-joiners encrypt, plaintext still works), and `hardened`
+ * requires it. Plaintext (`off`) is no longer any profile's posture; it's reachable only via Developer
+ * Mode. `open` and `standard` currently differ only in intent (both encrypt); `hardened` tightens every axis.
  */
 export const SECURITY_PROFILE_PRESETS: Record<
   Exclude<SecurityProfile, "custom">,
   SecurityProfilePreset
 > = {
-  open: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false, transportEncryption: "off" },
+  open: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false, transportEncryption: "optional" },
   standard: { joinPolicy: "open", messageTtlMs: null, killSwitchEnabled: false, transportEncryption: "optional" },
   hardened: { joinPolicy: "approval", messageTtlMs: 3_600_000, killSwitchEnabled: true, transportEncryption: "required" },
 };
@@ -283,6 +285,10 @@ export const NetworkConfigSchema = z.object({
   dbEncryption: DbEncryptionModeSchema,
   /** Admin-selected UI language for the whole node; the client renders every label in it. */
   locale: LocaleSchema,
+  /** Developer Mode is on (LOAM_DEV_MODE, dev builds only). It disables transport encryption and turns on
+   * verbose logging, so the client MUST surface a persistent banner to every user: on this node traffic is
+   * plaintext and readable by anyone on the LAN. Never true in a production build. */
+  devMode: z.boolean(),
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
 

@@ -230,8 +230,9 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
   (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session
   cookie's `Secure` flag tracks the real request protocol (`x-forwarded-proto`/TLS), not `NODE_ENV`.
-- **Transport encryption** (docs/08, `security.transportEncryption` — `off` default / `optional` /
-  `required`): QR-bootstrapped app-layer session encryption over plain HTTP (no WebCrypto/TLS in the
+- **Transport encryption** (docs/08, `security.transportEncryption` — `optional` **default (secure by
+  default)** / `required`; `off` is no longer operator-settable, see below):
+  QR-bootstrapped app-layer session encryption over plain HTTP (no WebCrypto/TLS in the
   insecure-context PWA, so it's `@loam/crypto`: X25519 handshake + XChaCha20-Poly1305). Host static
   key in the join QR `#k=` fragment (MITM-resistant); `POST /api/transport/handshake` derives a
   session; global `onRequest`/`preValidation`/`onSend` hooks transparently decrypt request bodies +
@@ -247,7 +248,19 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   attachment routes are no longer exempt, so a direct `<img>` GET is 401'd — the client fetches images
   through the tunnel (`encryptedImageUrl`/`useEncryptedImage` → cached `blob:` URL); optional/off serve
   images in clear. So required mode leaves only "a tunnel request happened" + ciphertext size/timing as
-  wire metadata. This is the axis that now distinguishes the `open`/`standard`/`hardened` profiles.
+  wire metadata. `required` is what `hardened` forces; `open`/`standard` both force `optional` (they now
+  differ only in intent). **Secure by default:** a fresh node defaults to `optional` — seamless because a
+  QR-joiner (the normal path) gets the `#k=` key and encrypts automatically, while plaintext clients still
+  work — so plaintext-on-the-LAN-by-default is closed at zero UX cost. **`off` is not an operator-settable
+  posture**: it's absent from the default, the profiles, and the admin UI. The ONLY plaintext path is
+  **Developer Mode** — see below.
+- **Developer Mode** (`LOAM_DEV_MODE=1`, dev builds only): forces `transportEncryption` to `off` (runtime
+  override applied after every config load, never persisted) and turns on verbose (`debug`) server logging,
+  so wire traffic is inspectable while debugging. It **refuses to engage when `NODE_ENV=production`** (logs
+  an error and stays encrypted), so a plaintext node can never ship by accident. It is **self-announcing**:
+  `NetworkConfig.devMode` is reported to every client, which shows a persistent red "messages are unencrypted"
+  banner (`.dev-mode-banner` in `app.tsx`) + a console warning. This is the reconciliation of "keep an
+  encryption-off path for debugging" with "secure by default, no silent plaintext."
 - **REST endpoints**: `GET /api/health` (liveness, mints no identity — the Android launcher probes
   this so it can't consume the `firstUser` admin grant), `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
@@ -329,9 +342,10 @@ kill switch. See `docs/09-security-profiles.md`.
   Remaining refinement idea: a join-request flow (today it is invite-only).
 - Message search is server-side substring (`LIKE`-equivalent over the in-memory mirror); semantic
   search would fall out of the RAG embeddings (docs/06) if that lands.
-- `security.profile` is wired (see the feature-flag note) but only bundles the axes LOAM enforces
-  today; the axes that would distinguish `open` from `standard` (transport encryption, invite tokens
-  — docs/08) are unbuilt, so those two profiles apply the same settings for now.
+- `security.profile` is wired (see the feature-flag note). Transport encryption is enforced, so now
+  **every named profile encrypts**: `open` and `standard` both force `optional`, `hardened` forces
+  `required`. `open`/`standard` therefore differ only in intent for now (invite tokens — docs/08 — would
+  be the axis to split them, still unbuilt). Plaintext (`off`) is no longer any profile's posture.
 - On-device SQLCipher (encrypted Android DB) now SHIPS: the multiple-ciphers ABI-108 android-arm64
   prebuild is cross-compiled + vendored (`apps/app/native-prebuilds/multiple-ciphers/`, sha256-pinned
   tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the

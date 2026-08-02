@@ -634,8 +634,9 @@ describe("sync transport encryption — OFF peer", () => {
   it("(c) an off-mode peer still syncs over the unchanged plaintext path", async () => {
     const peerDir = makeDataDir();
     const seededId = await seedPublicMessage(peerDir, "plaintext peer message");
-    // Off transport, but sync enabled so it serves the digest/messages endpoints.
-    writeConfig(peerDir, { sync: { enabled: true, peers: [] } });
+    // Off transport, but sync enabled so it serves the digest/messages endpoints. `off` is now opt-in
+    // (the default is `optional`), so request it explicitly.
+    writeConfig(peerDir, { security: { transportEncryption: "off" }, sync: { enabled: true, peers: [] } });
     const peer = await buildOn(peerDir);
     const peerUrl = await listen(peer);
 
