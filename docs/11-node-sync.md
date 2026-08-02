@@ -81,6 +81,16 @@ hotspot running too if the phone's chipset allows it".
 ## Known v1 limitations
 
 - Deletes/moderation don't propagate (tombstones only stop re-import locally).
-- Channel metadata doesn't re-sync after first import (rename on A won't rename on B).
-- Attachment copies are single-shot best-effort; a missed image 404s on the pulling node.
 - No backpressure beyond batching (500 ids/request); fine at LAN scale, revisit for LoRa.
+
+## Resolved
+
+- **Channel metadata now re-syncs (C1).** Channels carry an `updatedAt` stamped on every rename/archive
+  (`applyChannelUpdate`); the digest carries public channels *including archived ones*, and a puller
+  merges the peer's public metadata (name/description/posting policy/discoverable/archived) newer-wins —
+  only when the peer's `updatedAt` (falling back to `createdAt`) is strictly newer, so a stale peer can't
+  clobber a fresher local edit. Ownership, visibility, membership, and creation time never sync.
+- **Attachment copies retry (C3).** A copy that fails at import records a work item
+  (`addMissingAttachment`); `retryMissingAttachments` re-fetches it from the peer on the reaper timer with
+  backoff, a starvation-fair per-pass cap, and a max-age drop — so a transiently-missed image no longer
+  404s forever.

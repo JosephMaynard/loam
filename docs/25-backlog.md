@@ -75,11 +75,9 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 
 | # | Item | Doc | Size |
 |---|------|-----|------|
-| C1 | **Channel metadata doesn't re-sync after first import** — a rename/archive on A never reaches B | 11 | M |
 | C2 | **Sync deletes/moderation don't propagate** (tombstones only stop local re-import) — by-design v1, real limit for a moderated mesh | 11,12 | M |
-| C3 | **Attachment sync is single-shot best-effort** — a missed image 404s permanently on the puller | 11 | S |
 
-*(Resolved & excluded: QR-ECC ceiling, foreground wake-lock timeout, SW network-first, setupCode-PATCH, unbounded maps.)*
+*(Resolved & excluded: QR-ECC ceiling, foreground wake-lock timeout, SW network-first, setupCode-PATCH, unbounded maps, **C3 attachment-retry — BUILT: `addMissingAttachment` + `retryMissingAttachments` with backoff/max-age/starvation-fair per-pass cap, wired to the reaper timer, tested in `db.test.ts`**, **C1 channel-metadata re-sync — BUILT: `ChannelSchema.updatedAt` stamped in `applyChannelUpdate`; digest carries archived public channels; puller merges public metadata newer-wins (`syncWithPeer`); tested in `app.test.ts`**.)*
 
 ## 5. Test debt
 
