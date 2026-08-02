@@ -604,7 +604,6 @@ export const en = {
   "moderation.reports.reasonLine": "Reason: {reason}",
   "moderation.reports.targetMessage": "Reported message",
   "moderation.reports.targetUser": "Reported user",
-  "moderation.reports.missingTarget": "(the target no longer exists)",
   "moderation.reports.dismiss": "Dismiss",
   "moderation.reports.removeMessage": "Remove message",
   "moderation.reports.timeoutUser": "Time out author",

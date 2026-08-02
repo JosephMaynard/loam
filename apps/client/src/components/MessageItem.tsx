@@ -139,12 +139,14 @@ export function MessageItem({
   const hasAttachments = "attachments" in message && !!message.attachments?.length;
   const jumbo = !editing && !hasAttachments && isJumboEmoji(bodyText);
   // @mentions-lite: highlight a message that names the current user by their (deterministic, near-unique)
-  // display name. Client-side only — a visual/attention cue, not a stored/notified mention.
+  // display name. Client-side only — a visual/attention cue, not a stored/notified mention. A trailing
+  // boundary (no following word char or dot) stops `@blue.iron.fox` matching someone else's `@...foxes`.
   const mentionsYou =
     !isMine &&
     !removed &&
     message.type !== "reaction" &&
-    bodyText.toLowerCase().includes(`@${currentUser.displayName.toLowerCase()}`);
+    !!currentUser.displayName &&
+    new RegExp(`@${currentUser.displayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w.])`, "i").test(bodyText);
   const messageClassName = [
     "message",
     isMine ? "mine" : undefined,

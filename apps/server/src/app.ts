@@ -3058,13 +3058,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   ): User {
     const next = UserSchema.parse({ ...user, ...changes });
     store.upsertUser(next);
-    // Clear any changed field the schema dropped as an absent optional (e.g. lifting a timeout by setting
-    // `timeoutUntil` undefined) — Object.assign alone can't remove a key, so the stale value would linger.
-    for (const key of Object.keys(changes) as (keyof User)[]) {
-      if (!(key in next)) {
-        delete (user as Partial<User>)[key];
-      }
-    }
+    // Clearing works without deleting keys: a change like `timeoutUntil: undefined` is kept by Zod as an
+    // undefined-valued key, Object.assign copies it onto the live record (so `isTimedOut` reads false), and
+    // JSON.stringify omits it from what's persisted/broadcast.
     Object.assign(user, next);
     broadcast({ type: "userUpserted", user });
     return user;
@@ -3180,13 +3176,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       updatedAt: Date.now(),
     });
     store.upsertChannel(next);
-    // Clear any field the schema dropped as an absent optional (e.g. a cleared messageTtlMs) — Object.assign
-    // can't remove a key, so a stale value would linger on the in-memory record.
-    for (const key of ["messageTtlMs", "pinned"] as const) {
-      if (!(key in next)) {
-        delete (channel as Partial<Channel>)[key];
-      }
-    }
+    // A cleared `messageTtlMs` (null → undefined) is kept by Zod as an undefined-valued key; Object.assign
+    // copies it onto the live record (so `ttlForMessage` falls back to the node default) and JSON.stringify
+    // omits it on persist/broadcast — no explicit key-delete needed.
     Object.assign(channel, next);
     broadcast({ type: "channelUpserted", channel });
     return channel;
@@ -3214,6 +3206,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const clone = { ...user };
     delete clone.shadowBanned;
     delete clone.roles;
+    // A moderator timeout is moderation metadata, like shadowBanned/banned: don't broadcast "X is muted
+    // until T" to every peer. The subject still learns their own via rolesVisibleUser (so the composer
+    // disables), and moderators see it there too — this only strips it from the fully-public record.
+    delete clone.timeoutUntil;
     return clone;
   }
 
@@ -4758,11 +4754,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     const now = Date.now();
+    // Index channels once per cycle so the per-message TTL lookup is O(1), not an O(channels) find each.
+    const channelsById = new Map(data.channels.map((channel) => [channel.id, channel]));
     /** The retention TTL that applies to a message: its channel's override if set, else the node default. */
     const ttlForMessage = (message: Message): number | undefined => {
       const channelId =
         message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined;
-      const channelTtl = channelId ? ensureChannel(channelId)?.messageTtlMs : undefined;
+      const channelTtl = channelId ? channelsById.get(channelId)?.messageTtlMs : undefined;
       return channelTtl ?? globalTtl ?? undefined;
     };
     const expired = data.messages.filter((message) => {
@@ -4950,8 +4948,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return {
       // Public channels INCLUDING archived ones (C1) — a peer that imported this channel must see the
       // archived flag to converge. Archived is public metadata (no members leak); their messages are still
-      // withheld by `isSyncableMessage` below, so this carries channel metadata only.
-      channels: data.channels.filter((channel) => channel.visibility === "public"),
+      // withheld by `isSyncableMessage` below, so this carries channel metadata only. Strip the LOCAL-only
+      // `pinned`/`messageTtlMs` (a peer's retention/pin policy is its own business; import ignores them too).
+      channels: data.channels
+        .filter((channel) => channel.visibility === "public")
+        .map((channel) => {
+          const exported = { ...channel };
+          delete exported.pinned;
+          delete exported.messageTtlMs;
+          return exported;
+        }),
       messages: data.messages
         .filter((message) => message.type !== "sealed" && isSyncableMessage(message))
         .map((message) => ({
@@ -5916,6 +5922,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           // source's TTL and silently expire its own copy.
           const created = ChannelSchema.parse({
             ...channel,
+            // Clamp the imported stamp to now, exactly like the merge path — otherwise a future/
+            // clock-skewed peer stamp would freeze the channel on import and block every later correction.
+            updatedAt: Math.min(channel.updatedAt ?? channel.createdAt, Date.now()),
             memberUserIds: undefined,
             pinned: undefined,
             messageTtlMs: undefined,
@@ -6983,7 +6992,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         ...existing,
         status: "resolved",
         resolution: body.data.resolution,
-        ...(body.data.note ? { note: body.data.note } : {}),
+        // The moderator's note goes in `resolutionNote` — never overwrite the reporter's original `note`.
+        ...(body.data.note ? { resolutionNote: body.data.note } : {}),
         resolvedByUserId: currentUser.id,
         resolvedAt: Date.now(),
       });
@@ -7016,10 +7026,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.code(404).send(errorBody("Message does not exist"));
       }
 
+      // Actually destroy the removed content's attachment files — blanking the record alone would leave
+      // the images fetchable by id from GET /api/attachments/:fileName, exactly the wrong outcome for
+      // removing abuse imagery (mirrors the author-delete path in deleteMessages). `message` is already
+      // narrowed to a body-bearing type (post/reply/dm) by the `"body" in message` guard above. Best-effort.
+      for (const attachment of message.attachments ?? []) {
+        rm(join(attachmentsDir, attachmentFileName(attachment)), { force: true }).catch((error: unknown) =>
+          server.log.warn(error),
+        );
+      }
+
       const removed = MessageSchema.parse({
         ...message,
         body: "",
         attachments: [],
+        // Drop a shared location too — the tombstone must carry no residual content on the wire.
+        location: undefined,
         editedAt: Date.now(),
         meta: {
           ...message.meta,
@@ -7029,6 +7051,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         },
       });
       store.updateMessage(removed);
+      // `removed.location` is `undefined`; Object.assign copies that onto the live record and JSON omits it
+      // on the wire, so no residual location egresses.
       Object.assign(message, removed);
       broadcast({ type: "messageUpdated", message });
       return message;

@@ -16,8 +16,8 @@ export function AddSyncPeerControl({
   const trimmedUrl = url.trim().replace(/\/+$/, "");
   const trimmedKey = transportKey.trim();
   const validUrl = /^https?:\/\/.+/.test(trimmedUrl);
-  // Optional; when present it must be base64url (the server re-validates and refuses a mismatch on sync).
-  const validKey = trimmedKey === "" || /^[A-Za-z0-9_-]+$/.test(trimmedKey);
+  // Optional; when present it must be base64url within the server's length bound (SyncPeerSchema, max 64).
+  const validKey = trimmedKey === "" || (/^[A-Za-z0-9_-]+$/.test(trimmedKey) && trimmedKey.length <= 64);
 
   return (
     <div className="sync-peer-add">

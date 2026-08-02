@@ -50,7 +50,7 @@ export const UserSchema = z.object({
   shadowBanned: z.boolean().optional(),
   /**
    * Temporarily barred from posting until this timestamp (a moderator "timeout"). Unlike a ban it
-   * auto-expires and keeps the session/identity; the client shows a countdown and disables the composer.
+   * auto-expires and keeps the session/identity; the client disables the composer while it is active.
    * Absent/past = no active timeout. Enforced server-side in `createMessage()`.
    */
   timeoutUntil: TimestampSchema.optional(),
@@ -645,6 +645,8 @@ export const ReportSchema = z.object({
   createdAt: TimestampSchema,
   status: ReportStatusSchema,
   resolution: ReportResolutionSchema.optional(),
+  /** A moderator's private note recorded at resolution — kept separate from the reporter's `note`. */
+  resolutionNote: z.string().max(1000).optional(),
   resolvedByUserId: IdSchema.optional(),
   resolvedAt: TimestampSchema.optional(),
 });

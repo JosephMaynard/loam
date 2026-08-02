@@ -3571,7 +3571,7 @@ function ModerationUserRow({
     );
   }
 
-  function setModeration(update: { banned?: boolean; shadowBanned?: boolean }): void {
+  function setModeration(update: { banned?: boolean; shadowBanned?: boolean; timeoutUntil?: number | null }): void {
     void run(() => requestUser("PATCH", `/api/moderation/users/${encodeURIComponent(user.id)}`, update));
   }
 
@@ -3631,6 +3631,19 @@ function ModerationUserRow({
             <button disabled={busy} onClick={() => setModeration({ shadowBanned: !user.shadowBanned })} type="button">
               {user.shadowBanned ? t("moderation.unshadowban") : t("moderation.shadowban")}
             </button>
+            {isTimedOut(user) ? (
+              <button disabled={busy} onClick={() => setModeration({ timeoutUntil: null })} type="button">
+                {t("moderation.timeoutClear")}
+              </button>
+            ) : (
+              <button
+                disabled={busy}
+                onClick={() => setModeration({ timeoutUntil: Date.now() + TIMEOUT_DURATION_MS })}
+                type="button"
+              >
+                {t("moderation.timeout")}
+              </button>
+            )}
             {/* Promotion is admin-only and one-way (no demote — see the server route). Offered
                 only for a non-banned, non-pending member so the new admin is immediately usable. */}
             {canManageRoles(currentUser) && !user.banned && !user.pending ? (
@@ -3674,6 +3687,10 @@ function UserStateBadges({ user }: { user: User }) {
 
   if (user.shadowBanned) {
     badges.push({ key: "shadow", label: t("moderation.badgeShadow"), className: "badge-shadow" });
+  }
+
+  if (isTimedOut(user)) {
+    badges.push({ key: "timeout", label: t("moderation.timedOutBadge"), className: "badge-shadow" });
   }
 
   if (!badges.length) {
