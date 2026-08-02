@@ -5731,6 +5731,46 @@ describe("node-to-node sync", () => {
     );
   });
 
+  it("never lets a peer's public channel rewrite a local PRIVATE channel that shares its id", async () => {
+    // Source has a public channel whose id will collide with the puller's private one.
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Field Team" },
+    });
+    // Rename+archive it so the peer copy is "newer" and would win the timestamp check if the guard were absent.
+    await source.server.inject({
+      method: "PATCH",
+      url: "/api/channels/field-team",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Field Team (peer)", archived: true },
+    });
+    const sourceUrl = await listenApp(source);
+
+    // Puller independently creates a PRIVATE channel with the same slug/id.
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: pullerAdmin.cookie },
+      payload: { name: "Field Team", visibility: "private" },
+    });
+
+    await runSync(puller, pullerAdmin.cookie);
+
+    // The local private channel is untouched: still private, its own name, not archived.
+    const local = puller.store.loadChannels().find((channel) => channel.id === "field-team");
+    expect(local?.visibility).toBe("private");
+    expect(local?.name).toBe("Field Team");
+    expect(local?.archived ?? false).toBe(false);
+  });
+
   it("never exports private channels, DMs, or shadow-banned authors' messages", async () => {
     const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
     const admin = await newSession(source);

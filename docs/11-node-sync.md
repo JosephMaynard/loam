@@ -8,8 +8,9 @@
 
 A node with `sync.enabled` answers two endpoints (404 otherwise, indistinguishable from absent):
 
-- `GET /api/sync/digest` — its public non-archived channels plus `{id, editedAt}` for every
-  syncable message.
+- `GET /api/sync/digest` — its public channels (including archived ones, so an archive propagates —
+  C1; archived channels carry metadata only, no messages) plus `{id, editedAt}` for every syncable
+  message.
 - `POST /api/sync/messages {ids}` — full records (≤500/batch) plus the authors' profiles.
 
 **Syncable** means: posts/replies in *public, non-archived* channels, and reactions on them.
@@ -71,8 +72,9 @@ hotspot running too if the phone's chipset allows it".
   `LOAM_DB_KEY` encrypts only the **DB-persisted** config (a token set via the admin UI / `PATCH
   /api/admin/config`); a token placed in **`config.json`** stays plaintext even on an encrypted node
   (that file is never encrypted — see CLAUDE.md), so guard it with filesystem permissions or a
-  secret manager. And on LOAM's plain-HTTP LAN the token rides **in the clear on the wire** — transport
-  encryption (docs/08, still unbuilt) is what would stop on-path capture in a hostile network. Unset =
+  secret manager. And on LOAM's plain-HTTP LAN the token rides in the clear unless transport encryption
+  is in play — under `optional`/`required` (docs/08; `optional` is now the default) the digest/messages
+  requests, and so the token, travel **inside the sealed session**, stopping on-path capture. Unset =
   open (any node that can reach the endpoints may sync public data — the original behaviour).
 - User ids are random enough (`user.<8hex>`) that cross-node collisions are unlikely; a collision
   would merge two strangers' display identities on one node (cosmetic, not an auth issue — sessions
@@ -92,5 +94,7 @@ hotspot running too if the phone's chipset allows it".
   clobber a fresher local edit. Ownership, visibility, membership, and creation time never sync.
 - **Attachment copies retry (C3).** A copy that fails at import records a work item
   (`addMissingAttachment`); `retryMissingAttachments` re-fetches it from the peer on the reaper timer with
-  backoff, a starvation-fair per-pass cap, and a max-age drop — so a transiently-missed image no longer
-  404s forever.
+  backoff, a starvation-fair per-pass cap, and a max-age drop — best-effort recovery from *transient*
+  failures (peer briefly unreachable, mid-write, required-mode 401), rather than the old single-shot copy
+  that left a missed image absent forever. A file that stays gone past the max-age is dropped from the work
+  queue and can still 404 — there's no source left to fetch it from.

@@ -5843,6 +5843,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           continue;
         }
 
+        // The id already exists LOCALLY as a private channel: never let a peer touch it. A public channel
+        // on the peer that collides with a local private id must not be able to rename/archive/expose the
+        // private one — private channels never sync in either direction, so skip entirely.
+        if (existing.visibility !== "public") {
+          continue;
+        }
+
         // Already have it — re-sync its public metadata newer-wins (C1). Compare on `updatedAt`, falling
         // back to `createdAt` for channels created before the field existed; only a STRICTLY newer peer copy
         // wins, so a stale peer can't clobber a fresher local edit (and equal timestamps are a no-op).

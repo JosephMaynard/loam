@@ -51,7 +51,7 @@ what keeps "make it all optional" from becoming "too complex."
 | Axis | `open` (disaster relief) | `standard` (default) | `hardened` (high-risk) |
 |------|--------------------------|----------------------|------------------------|
 | Admission | open — anyone joins | token (QR invite) | token (QR invite) |
-| Transport encryption | off (or `optional`+TOFU) | **`optional`** (QR key) | **`required`** (QR key) |
+| Transport encryption | **`optional`** (QR key; a client that types the IP can still connect in plaintext / TOFU) | **`optional`** (QR key) | **`required`** (QR key) |
 | E2EE | off | off (host trusted) | **on** for DMs + private channels |
 | At-rest encryption | off | on | on |
 | Join QR | static (or none) | rotating | rotating, short interval |

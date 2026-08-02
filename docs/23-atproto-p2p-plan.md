@@ -49,7 +49,7 @@ relays/firehose). Discovery stays **local** (QR/paste). This is *inspired-by*, n
 ## 4. Identity model (O2 → **Option B, revised** — with an honest Option A fallback)
 A stable account id derived from a **canonical genesis identity document**, not from a single irreplaceable
 signing key:
-```
+```text
 accountId = SHA-256(canonical({ version, recoveryPolicy, initialRecoveryKeys }))   // full 32 bytes
 ```
 - The genesis doc **precommits multiple recovery/controller keys** (e.g. a 2-of-3 policy for users who opt
@@ -73,7 +73,7 @@ accountId = SHA-256(canonical({ version, recoveryPolicy, initialRecoveryKeys }))
 Not one chain per author. Each authorised **device** keeps its own append-only **operation log**, aggregated
 into the account repo. Concurrent posts from two authorised devices are **both valid** — multi-device works.
 The operation-log entry (Sol's shape):
-```
+```text
 entry = { version, accountId, deviceKeyId, identityEpoch,
           deviceSeq, devicePrev,
           operation,   // create | update | retract
@@ -153,7 +153,7 @@ Android**.
   forgeable). Sender picks random `ackSecret` (carried in the encrypted inner payload); the authenticated
   public envelope carries `ackCommit = SHA-256("loam.mesh.ack.v1" || msgId || ackSecret)`; the recipient
   publishes `{ msgId, ackSecret }`; a carrier verifies the preimage, deletes, and gossips the receipt. No
-  recipient identity revealed; the sender can only prematurely delete *its own* message; replays idempotent;
+  recipient identity revealed; the sender can only prematurely delete *its own* message; replays are idempotent;
   no sender-set `at` (carriers stamp their own time); only store an ack when the node holds the message. TTL
   stays the backstop. *(Update `docs/16`'s ack section when built.)*
 - **`@noble` 2.x — blocked by Node 18.** All three 2.x packages require Node **20.19+** and are ESM-only; the
@@ -183,3 +183,24 @@ misclassify honest multi-device activity as equivocation; resurrect data past th
 the shortened mesh id if reused; link public persona to private messaging if keys are reused. **Signatures
 solve alteration and third-party attribution. They do not solve freshness, availability, compromise-time,
 deletion, or agreement** — which is why the revisions above target exactly those gaps.
+
+## 13. Open design flags to fold into the next review round
+Raised by an automated review pass of this draft; all concern the **unbuilt** design (nothing here ships in
+the current release). Carry them into the Sol round-2 review before any Phase-0 code:
+- **Out-of-order / conflicting successors on ingest.** Verify-on-ingest must not silently drop a validly-signed
+  entry just because its predecessor (or the current device head) isn't known yet: quarantine it pending its
+  predecessor, and persist a validly-signed *conflicting* successor as **fork evidence** rather than discarding
+  it. Otherwise a peer feeding entries out of order can hide a fork.
+- **Equivocation resolution must converge.** "First-seen-wins per head" lets two replicas independently pick
+  different branches while each believes it converged. Resolve only via a signed, canonical control event that
+  names both fork branches, **or** keep the device log frozen at the common ancestor until recovery mints a new
+  log — never per-replica local choice.
+- **Identity-control-log fork handling.** Define the same fork rules for the control log itself: each control
+  record names its predecessor; conflicting valid heads are a fork proof; the recovery authority resolves;
+  deterministic accept/reject/supersede rules so peers converge on the same delegations/revocations.
+- **update / retract need an explicit target record id** distinct from `devicePrev`, plus deterministic
+  record-level merge rules for concurrent update-vs-retract.
+- **CBOR policy is contradictory** (reject non-canonical vs accept-and-normalize) — pick one and align the
+  Phase-0 test matrix.
+- **Signature/CID definition** must name exactly which CID is signed and ensure the canonical CID **excludes**
+  the signature (no signature↔CID cycle), so every implementation signs identical bytes.
