@@ -248,19 +248,26 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   attachment routes are no longer exempt, so a direct `<img>` GET is 401'd — the client fetches images
   through the tunnel (`encryptedImageUrl`/`useEncryptedImage` → cached `blob:` URL); optional/off serve
   images in clear. So required mode leaves only "a tunnel request happened" + ciphertext size/timing as
-  wire metadata. `required` is what `hardened` forces; `open`/`standard` both force `optional` (they now
-  differ only in intent). **Secure by default:** a fresh node defaults to `optional` — seamless because a
-  QR-joiner (the normal path) gets the `#k=` key and encrypts automatically, while plaintext clients still
-  work — so plaintext-on-the-LAN-by-default is closed at zero UX cost. **`off` is not an operator-settable
-  posture**: it's absent from the default, the profiles, and the admin UI. The ONLY plaintext path is
-  **Developer Mode** — see below.
-- **Developer Mode** (`LOAM_DEV_MODE=1`, dev builds only): forces `transportEncryption` to `off` (runtime
-  override applied after every config load, never persisted) and turns on verbose (`debug`) server logging,
-  so wire traffic is inspectable while debugging. It **refuses to engage when `NODE_ENV=production`** (logs
-  an error and stays encrypted), so a plaintext node can never ship by accident. It is **self-announcing**:
-  `NetworkConfig.devMode` is reported to every client, which shows a persistent red "messages are unencrypted"
-  banner (`.dev-mode-banner` in `app.tsx`) + a console warning. This is the reconciliation of "keep an
-  encryption-off path for debugging" with "secure by default, no silent plaintext."
+  wire metadata. `required` is what `hardened` forces; `open`/`standard` both force `optional` (with
+  identical enforced axes they now differ only in intent). **Secure by default:** a fresh node defaults to
+  `optional` — seamless because a QR-joiner (the normal path) gets the `#k=` key and encrypts automatically.
+  Be precise about the guarantee: `optional` makes the **QR-join path** encrypted-by-default, but a client
+  that skips the QR (a manually-typed URL, curl) can **still connect in plaintext** — `optional` accepts
+  both. `required` is what refuses plaintext clients outright. So `optional` closes *accidental* plaintext
+  for normal joiners at zero UX cost, without breaking odd clients; `required`/`hardened` is the strict
+  posture. **`off` is not an operator-settable posture**: it's absent from the default, the profiles, and
+  the admin UI. The ONLY plaintext-everything path is **Developer Mode** — see below.
+- **Developer Mode** (`LOAM_DEV_MODE=1`): forces `transportEncryption` to `off` (runtime override applied
+  after every config load, never persisted) and turns on verbose (`debug`) server logging, so wire traffic
+  is inspectable while debugging. **Exact activation condition:** `LOAM_DEV_MODE=1` **and**
+  `NODE_ENV !== "production"` — it logs an error and stays encrypted otherwise. The **Android host can never
+  run it**: its bundle entry (`embedded-main.ts`) defaults `NODE_ENV` to `"production"`, so a shipped APK
+  refuses dev mode regardless of env. On a desktop/Pi, plaintext requires an operator to *both* set
+  `LOAM_DEV_MODE=1` *and* not set `NODE_ENV=production` — a deliberate act, not an accident (you can't set an
+  env var by mistake), and one that self-announces. It is **self-announcing**: `NetworkConfig.devMode` is
+  reported to every client, which shows a persistent red "messages are unencrypted" banner (`.dev-mode-banner`
+  in `app.tsx`) + a console warning. This reconciles "keep an encryption-off path for debugging" with "secure
+  by default, no silent plaintext."
 - **REST endpoints**: `GET /api/health` (liveness, mints no identity — the Android launcher probes
   this so it can't consume the `firstUser` admin grant), `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
