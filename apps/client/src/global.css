@@ -1486,6 +1486,18 @@ a {
   font-size: 0.9rem;
 }
 
+/* @mentions-lite: attention cue when a message names you */
+.message.mentions-you .message-bubble {
+  box-shadow: inset 3px 0 0 var(--c-accent, #4f8cff);
+}
+
+.admin-channel-ttl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
 .moderation-identity {
   display: flex;
   flex-wrap: wrap;

@@ -211,6 +211,14 @@ export const ChannelSchema = z.object({
    */
   updatedAt: TimestampSchema.optional(),
   archived: z.boolean().optional(),
+  /** Pinned channels sort to the top of the client's channel list. Owner/admin toggled. */
+  pinned: z.boolean().optional(),
+  /**
+   * Per-channel message retention override (ms). When set, messages in this channel expire after this
+   * long instead of the node-wide `retention.messageTtlMs`; `null`/absent = use the node default. Lets an
+   * operator make one channel more (or less) ephemeral than the rest. Enforced by the retention reaper.
+   */
+  messageTtlMs: z.number().int().positive().nullable().optional(),
   /**
    * Private-channel roster: the user ids who may see, read, and post in the channel (the owner is
    * always treated as a member even if absent here). Present only on private channels — the server
@@ -257,6 +265,8 @@ export const ChannelUpdateRequestSchema = z
     allowPosting: ChannelPostingPolicySchema,
     allowReplies: z.boolean(),
     archived: z.boolean(),
+    pinned: z.boolean(),
+    messageTtlMs: z.number().int().positive().nullable(),
   })
   .partial();
 export type ChannelUpdateRequest = z.infer<typeof ChannelUpdateRequestSchema>;

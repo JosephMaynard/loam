@@ -611,6 +611,16 @@ export const en = {
   "moderation.reports.banUser": "Ban author",
   "moderation.reports.escalate": "Escalate",
   "moderation.reports.loadError": "Could not load reports",
+
+  // Channel pinning (P13) + per-channel retention (P12)
+  "admin.pin": "Pin",
+  "admin.unpin": "Unpin",
+  "admin.metaPinned": "Pinned",
+  "admin.channelRetentionLabel": "Auto-delete",
+  "admin.retention.default": "Node default",
+  "admin.retention.1h": "After 1 hour",
+  "admin.retention.1d": "After 1 day",
+  "admin.retention.7d": "After 7 days",
 };
 
 /**

@@ -3171,11 +3171,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowPosting: update.allowPosting ?? channel.allowPosting,
       allowReplies: update.allowReplies ?? channel.allowReplies,
       archived: update.archived === undefined ? channel.archived : update.archived,
+      pinned: update.pinned === undefined ? channel.pinned : update.pinned,
+      // `null` clears the per-channel TTL (back to the node default); a number sets it; omitted leaves it.
+      messageTtlMs:
+        update.messageTtlMs === undefined ? channel.messageTtlMs : (update.messageTtlMs ?? undefined),
       // Stamp the metadata-change time so a peer that IMPORTED this channel can re-sync the rename/archive
       // newer-wins (C1). Only ever applied to channels the peer marked as synced-origin (see syncWithPeer).
       updatedAt: Date.now(),
     });
     store.upsertChannel(next);
+    // Clear any field the schema dropped as an absent optional (e.g. a cleared messageTtlMs) — Object.assign
+    // can't remove a key, so a stale value would linger on the in-memory record.
+    for (const key of ["messageTtlMs", "pinned"] as const) {
+      if (!(key in next)) {
+        delete (channel as Partial<Channel>)[key];
+      }
+    }
     Object.assign(channel, next);
     broadcast({ type: "channelUpserted", channel });
     return channel;
@@ -4736,14 +4747,31 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     reapExpiredSealed();
     pruneTombstonesHorizon();
 
-    const ttl = appConfig.retention.messageTtlMs;
+    const globalTtl = appConfig.retention.messageTtlMs;
+    // A channel may override the node default with its own `messageTtlMs` (P12). Fast-path out only when
+    // there is neither a global TTL nor any per-channel override, so a channel TTL works even with the
+    // node default off.
+    const anyChannelTtl = data.channels.some((channel) => channel.messageTtlMs);
 
-    if (!ttl) {
+    if (!globalTtl && !anyChannelTtl) {
       return;
     }
 
-    const cutoff = Date.now() - ttl;
-    const expired = data.messages.filter((message) => message.createdAt < cutoff && !message.meta?.streaming);
+    const now = Date.now();
+    /** The retention TTL that applies to a message: its channel's override if set, else the node default. */
+    const ttlForMessage = (message: Message): number | undefined => {
+      const channelId =
+        message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined;
+      const channelTtl = channelId ? ensureChannel(channelId)?.messageTtlMs : undefined;
+      return channelTtl ?? globalTtl ?? undefined;
+    };
+    const expired = data.messages.filter((message) => {
+      if (message.meta?.streaming) {
+        return false;
+      }
+      const ttl = ttlForMessage(message);
+      return ttl !== undefined && message.createdAt < now - ttl;
+    });
 
     if (!expired.length) {
       return;
@@ -5883,7 +5911,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           if (channel.archived) {
             continue;
           }
-          const created = ChannelSchema.parse({ ...channel, memberUserIds: undefined });
+          // Strip the peer's LOCAL-only choices: private roster (never public here anyway), pin, and the
+          // per-channel retention TTL — retention is a local policy, so an importer must not inherit the
+          // source's TTL and silently expire its own copy.
+          const created = ChannelSchema.parse({
+            ...channel,
+            memberUserIds: undefined,
+            pinned: undefined,
+            messageTtlMs: undefined,
+          });
           store.upsertChannel(created);
           store.markChannelSynced(created.id);
           syncedChannelIds.add(created.id);

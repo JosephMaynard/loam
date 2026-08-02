@@ -82,7 +82,10 @@ export function Sidebar({
       <section className="nav-section">
         <h2>{t("sidebar.channels")}</h2>
         <nav aria-label={t("sidebar.channels")}>
-          {channels.map((channel) => (
+          {/* Pinned channels sort to the top (P13); stable otherwise so the existing order is preserved. */}
+          {[...channels]
+            .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
+            .map((channel) => (
             <NavLink
               active={activeConversation?.kind === "channel" && activeConversation.id === channel.id}
               href={`/channel/${encodeURIComponent(channel.id)}`}

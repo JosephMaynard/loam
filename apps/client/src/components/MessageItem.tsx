@@ -138,11 +138,19 @@ export function MessageItem({
   // narrows the union so this is safe for every message type.
   const hasAttachments = "attachments" in message && !!message.attachments?.length;
   const jumbo = !editing && !hasAttachments && isJumboEmoji(bodyText);
+  // @mentions-lite: highlight a message that names the current user by their (deterministic, near-unique)
+  // display name. Client-side only — a visual/attention cue, not a stored/notified mention.
+  const mentionsYou =
+    !isMine &&
+    !removed &&
+    message.type !== "reaction" &&
+    bodyText.toLowerCase().includes(`@${currentUser.displayName.toLowerCase()}`);
   const messageClassName = [
     "message",
     isMine ? "mine" : undefined,
     message.meta?.streaming ? "streaming" : undefined,
     jumbo ? "jumbo" : undefined,
+    mentionsYou ? "mentions-you" : undefined,
   ]
     .filter(Boolean)
     .join(" ");

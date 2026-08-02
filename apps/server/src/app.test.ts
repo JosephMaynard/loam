@@ -1107,6 +1107,48 @@ describe("message retention (ephemeral messages)", () => {
     expect(served.map((message) => message.body)).toEqual(["still fresh"]);
   });
 
+  it("honors a per-channel retention TTL even when the node default is off (P12)", async () => {
+    const app = await makeApp(); // no global retention TTL
+    const admin = await newSession(app);
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    // A 1s TTL on `general` only; `announcements` keeps the node default (off).
+    const patched = await app.server.inject({
+      method: "PATCH",
+      url: "/api/channels/general",
+      headers: { cookie: admin.cookie },
+      payload: { messageTtlMs: 1000 },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    expect(
+      (await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId: "general", body: "channel-ephemeral" },
+      })).statusCode,
+    ).toBe(201);
+
+    await vi.advanceTimersByTimeAsync(1500);
+
+    // Posted after the jump, in a channel with no per-channel TTL and the node default off — must survive.
+    expect(
+      (await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId: "announcements", body: "no ttl here" },
+      })).statusCode,
+    ).toBe(201);
+
+    app.reapExpiredMessages();
+
+    const bodies = app.store.loadMessages().map((message) => ("body" in message ? message.body : ""));
+    expect(bodies).toContain("no ttl here");
+    expect(bodies).not.toContain("channel-ephemeral");
+  });
+
   it("does nothing when no TTL is configured", async () => {
     const app = await makeApp();
     const session = await newSession(app);
