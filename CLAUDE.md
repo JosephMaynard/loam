@@ -257,10 +257,13 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
   for normal joiners at zero UX cost, without breaking odd clients; `required`/`hardened` is the strict
   posture. **`off` is not an operator-settable posture**: it's absent from the default, the profiles, and
   the admin UI. The ONLY plaintext-everything path is **Developer Mode** — see below.
-- **Developer Mode** (`LOAM_DEV_MODE=1`): forces `transportEncryption` to `off` (runtime override applied
-  after every config load, never persisted) and turns on verbose (`debug`) server logging, so wire traffic
-  is inspectable while debugging. **Exact activation condition:** `LOAM_DEV_MODE=1` **and**
-  `NODE_ENV !== "production"` — it logs an error and stays encrypted otherwise. The **Android host can never
+- **Developer Mode** (`LOAM_DEV_MODE=1`): forces the *effective* `transportEncryption` to `off` and turns
+  on verbose (`debug`) server logging, so wire traffic is inspectable while debugging. The override is a
+  **read-time projection** (`effectiveTransportEncryption()` = `devMode ? "off" : configured`), NOT a
+  mutation of `appConfig` — so the persisted config always keeps operator intent and a dev-mode PATCH/kill-
+  switch can never bake plaintext into a later non-dev run of the same data dir. **Activation condition:**
+  `LOAM_DEV_MODE` is `1` or `true`, **and** `NODE_ENV !== "production"` — it logs an error and stays
+  encrypted otherwise. The **Android host can never
   run it**: its bundle entry (`embedded-main.ts`) defaults `NODE_ENV` to `"production"`, so a shipped APK
   refuses dev mode regardless of env. On a desktop/Pi, plaintext requires an operator to *both* set
   `LOAM_DEV_MODE=1` *and* not set `NODE_ENV=production` — a deliberate act, not an accident (you can't set an

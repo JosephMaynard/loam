@@ -12,7 +12,7 @@
 > now encrypts** — `open` and `standard` both force `optional` (they differ only in intent for now; an
 > invite-token axis would split them), and `hardened` forces `required` (plus approval join, 1-hour TTL,
 > armed kill switch). Plaintext (`off`) is not any profile's posture; it's reachable only via Developer
-> Mode (`LOAM_DEV_MODE`, dev builds only, self-announcing). The default is `custom` so a fresh node's raw axes are never silently
+> Mode (`LOAM_DEV_MODE=1`, non-production builds only — it refuses when `NODE_ENV=production`, and the Android host is always production — self-announcing). The default is `custom` so a fresh node's raw axes are never silently
 > overridden, and `reconcileLegacyProfile()` demotes a legacy persisted preset to `custom` if its
 > stored axes diverge (so this change can't disarm a previously-armed kill switch). The rest of this
 > doc is the original briefing — the full vision the presets grow into as those axes land.

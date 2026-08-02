@@ -400,12 +400,14 @@ sequenceDiagram
     H-->>J: Sealed response
 ```
 
-It has three levels: `off` (plain HTTP, the default), `optional` (encrypt the contents but leave paths
-visible), and `required` (also route every request through one opaque tunnel, so even which page you
-asked for is hidden). In `required` mode the only thing visible on the wire is that "a request happened"
-plus its rough size and timing. Reading the host public key from the QR (rather than trusting whatever
-the network offers) is what makes this resistant to a machine-in-the-middle on the LAN. This is an
-emerging feature; see [docs/08](docs/08-transport-security.md).
+It has two operator postures: `optional` (**the default** — encrypt the contents but leave paths
+visible; QR joiners encrypt automatically, while a client that skips the QR can still connect in
+plaintext) and `required` (also route every request through one opaque tunnel, so even which page you
+asked for is hidden, and plaintext clients are refused). In `required` mode the only thing visible on the
+wire is that "a request happened" plus its rough size and timing. Reading the host public key from the QR
+(rather than trusting whatever the network offers) is what makes this resistant to a machine-in-the-middle
+on the LAN. (A fully-plaintext `off` mode exists only for local debugging via Developer Mode, which
+announces itself with a banner and refuses to run in production.) See [docs/08](docs/08-transport-security.md).
 
 ### Connecting separate nodes: sync and mesh
 
@@ -509,9 +511,10 @@ LOAM_DB_KEY=ephemeral pnpm --filter @loam/server start
 The SQLCipher driver ships with the Android host too, so encryption at rest is available there and
 not only on desktop (newly shipped; final runtime verification on physical arm64 hardware is in progress). It stays off by default on every platform.
 
-For untrusted networks there is also an **optional app-layer transport encryption** (an X25519
-handshake bootstrapped from the join QR, off by default) that seals request and WebSocket traffic on
-top of plain HTTP on the LAN. It is an emerging feature: see [docs/08](docs/08-transport-security.md).
+There is also **app-layer transport encryption** (an X25519 handshake bootstrapped from the join QR),
+**on by default** (`optional`), that seals request and WebSocket traffic on top of plain HTTP on the LAN
+— so a normal QR joiner is encrypted with no setup. A `required`/hardened node additionally refuses
+plaintext clients and hides request paths. See [docs/08](docs/08-transport-security.md).
 
 **Honest limitations.** This raises the bar; it is not a guarantee of safety. The host processes
 messages in plaintext while running, so a compromised host, a device seized while powered on with the

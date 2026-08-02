@@ -24,7 +24,8 @@
 > is no longer operator-settable, reachable only via Developer Mode `LOAM_DEV_MODE`, which self-announces a
 > plaintext banner to every client and refuses to run under `NODE_ENV=production`). `optional` is seamless
 > — a QR-joiner gets the `#k=` key and encrypts automatically, plaintext clients still work — so the
-> default closes plaintext-on-the-LAN at no UX cost. Every named profile encrypts: `open`/`standard` force
+> default prevents *accidental* plaintext for normal QR joiners at no UX cost (it does not block a client
+> that deliberately skips the QR; `required` is what refuses plaintext outright). Every named profile encrypts: `open`/`standard` force
 > `optional`, `hardened` forces `required`. `required` mode
 > is deployable today: a client with no QR-delivered host key simply cannot connect, so there is no
 > silent downgrade to plaintext. **Anti-replay is now built:** every sealed REST request carries a
