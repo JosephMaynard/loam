@@ -2,18 +2,22 @@ import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
 
-/** Compact add-a-peer form: URL (required, http/https) + optional label. */
+/** Compact add-a-peer form: URL (required, http/https) + optional label + optional pinned transport key. */
 export function AddSyncPeerControl({
   disabled,
   onAdd,
 }: {
   disabled: boolean;
-  onAdd: (peer: { url: string; label?: string }) => void;
+  onAdd: (peer: { url: string; label?: string; transportKey?: string }) => void;
 }) {
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
+  const [transportKey, setTransportKey] = useState("");
   const trimmedUrl = url.trim().replace(/\/+$/, "");
+  const trimmedKey = transportKey.trim();
   const validUrl = /^https?:\/\/.+/.test(trimmedUrl);
+  // Optional; when present it must be base64url (the server re-validates and refuses a mismatch on sync).
+  const validKey = trimmedKey === "" || /^[A-Za-z0-9_-]+$/.test(trimmedKey);
 
   return (
     <div className="sync-peer-add">
@@ -36,12 +40,26 @@ export function AddSyncPeerControl({
           value={label}
         />
       </label>
+      <label>
+        {t("admin.peerKey")}
+        <input
+          disabled={disabled}
+          onInput={(event) => setTransportKey(event.currentTarget.value)}
+          placeholder={t("admin.peerKeyPlaceholder")}
+          value={transportKey}
+        />
+      </label>
       <button
-        disabled={disabled || !validUrl}
+        disabled={disabled || !validUrl || !validKey}
         onClick={() => {
-          onAdd({ url: trimmedUrl, ...(label.trim() ? { label: label.trim() } : {}) });
+          onAdd({
+            url: trimmedUrl,
+            ...(label.trim() ? { label: label.trim() } : {}),
+            ...(trimmedKey ? { transportKey: trimmedKey } : {}),
+          });
           setUrl("");
           setLabel("");
+          setTransportKey("");
         }}
         type="button"
       >

@@ -621,6 +621,9 @@ export const en = {
   "admin.retention.1h": "After 1 hour",
   "admin.retention.1d": "After 1 day",
   "admin.retention.7d": "After 7 days",
+  "admin.peerKey": "Pinned key (optional)",
+  "admin.peerKeyPlaceholder": "Peer's transport key (from its join QR)",
+  "admin.peerKeyPinned": "key pinned",
 };
 
 /**
