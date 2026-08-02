@@ -5849,6 +5849,59 @@ describe("node-to-node sync", () => {
     expect(third.peers[0]?.status?.imported).toBe(importedTotal);
   });
 
+  it("re-syncs metadata for a channel it IMPORTED from the peer (C1: provenance-gated)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Relief Ops" },
+    });
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+
+    // First sync imports relief-ops → it's recorded as synced-origin.
+    await runSync(puller, pullerAdmin.cookie);
+    expect(puller.store.loadChannels().find((channel) => channel.id === "relief-ops")?.name).toBe("Relief Ops");
+
+    // Rename + archive on the source, then sync again — the imported copy tracks the change.
+    await source.server.inject({
+      method: "PATCH",
+      url: "/api/channels/relief-ops",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Relief Ops (closed)", archived: true },
+    });
+    await runSync(puller, pullerAdmin.cookie);
+    const after = puller.store.loadChannels().find((channel) => channel.id === "relief-ops");
+    expect(after?.name).toBe("Relief Ops (closed)");
+    expect(after?.archived).toBe(true);
+  });
+
+  it("never clobbers a locally-created channel that shares a peer's slug — default channels stay put (C1)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    // Rename + archive the source's OWN default `general` (every node ships general with the same id).
+    await source.server.inject({
+      method: "PATCH",
+      url: "/api/channels/general",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Source General", archived: true },
+    });
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+    await runSync(puller, pullerAdmin.cookie);
+
+    // The puller's own general is locally-created (not synced-origin), so the peer's same-slug edit is ignored.
+    const general = puller.store.loadChannels().find((channel) => channel.id === "general");
+    expect(general?.name).toBe("General");
+    expect(general?.archived ?? false).toBe(false);
+  });
+
   it("never exports private channels, DMs, or shadow-banned authors' messages", async () => {
     const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
     const admin = await newSession(source);

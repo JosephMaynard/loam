@@ -204,6 +204,12 @@ export const ChannelSchema = z.object({
   allowReplies: z.boolean(),
   discoverable: z.boolean(),
   createdAt: TimestampSchema,
+  /**
+   * When the channel's metadata (name/description/archived/posting policy/etc.) last changed. Absent on
+   * channels created before this field existed; consumers fall back to `createdAt`. Node-to-node sync uses
+   * it for newer-wins re-sync of channels this node IMPORTED from a peer (C1) — never local/default ones.
+   */
+  updatedAt: TimestampSchema.optional(),
   archived: z.boolean().optional(),
   /**
    * Private-channel roster: the user ids who may see, read, and post in the channel (the owner is

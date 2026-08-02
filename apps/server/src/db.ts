@@ -225,6 +225,14 @@ export interface LoamStore {
   getReport(id: string): Report | undefined;
   /** All still-open reports, newest first — the moderator queue. */
   loadOpenReports(): Report[];
+  /**
+   * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
+   * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
+   * (including the seeded defaults, which every node shares an id for) is never in this set, so a peer
+   * can't clobber it. Idempotent. Wiped with everything else by the kill switch.
+   */
+  markChannelSynced(channelId: string): void;
+  loadSyncedChannelIds(): string[];
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -424,6 +432,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       created_at INTEGER NOT NULL DEFAULT 0,
       data TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS synced_channels (
+      channel_id TEXT PRIMARY KEY
+    );
   `);
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
@@ -498,6 +509,10 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   const loadOpenReportsStmt = db.prepare(
     "SELECT data FROM reports WHERE status = 'open' ORDER BY created_at DESC, rowid DESC",
   );
+  const markChannelSyncedStmt = db.prepare(
+    "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
+  );
+  const loadSyncedChannelIdsStmt = db.prepare("SELECT channel_id FROM synced_channels");
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -671,6 +686,12 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         .all()
         .map((row) => ReportSchema.parse(JSON.parse((row as { data: string }).data)));
     },
+    markChannelSynced(channelId) {
+      markChannelSyncedStmt.run(channelId);
+    },
+    loadSyncedChannelIds() {
+      return loadSyncedChannelIdsStmt.all().map((row) => (row as { channel_id: string }).channel_id);
+    },
     wipeAll() {
       store.transaction(() => {
         db.exec("DELETE FROM messages");
@@ -683,6 +704,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM transport_identity_tokens");
         db.exec("DELETE FROM missing_attachments");
         db.exec("DELETE FROM reports");
+        db.exec("DELETE FROM synced_channels");
       });
     },
     checkpoint() {
