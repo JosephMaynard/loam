@@ -42,9 +42,13 @@ import {
   MeshIdentityCardSchema,
   MeshInboundRequestSchema,
   MeshSendRequestSchema,
+  MessageRemoveRequestSchema,
   MessageSchema,
   ModerationUpdateRequestSchema,
   PanicRequestSchema,
+  ReportCreateRequestSchema,
+  ReportResolveRequestSchema,
+  ReportSchema,
   RolesUpdateRequestSchema,
   securityProfilePreset,
   SyncAttachmentRequestSchema,
@@ -67,6 +71,7 @@ import {
   type MessageCreateRequest,
   type MeshContact,
   type MeshIdentityCard,
+  type Report,
   type SealedMessage,
   type NetworkConfig,
   type OllamaConfig,
@@ -3025,6 +3030,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Why a user may not POST right now even though they can still read: an active moderator timeout
+   * (docs/26). Returns a user-facing message until `timeoutUntil` passes, else undefined. Unlike
+   * `participationError`, this gates posting only — a timed-out member keeps reading the channel, and the
+   * timeout auto-expires (a past `timeoutUntil` is simply not active). The client shows a composer countdown.
+   */
+  function timeoutError(user: User): string | undefined {
+    if (user.timeoutUntil !== undefined && user.timeoutUntil > Date.now()) {
+      return "You are timed out by a moderator and cannot post right now";
+    }
+    return undefined;
+  }
+
+  /**
    * Apply moderation / role state to a user (roles, banned, shadowBanned, pending), re-validating
    * the whole record against the schema, persisting, then broadcasting `userUpserted`. Mirrors
    * `applyUserUpdate`: persist first, then mutate the live object and broadcast, so a failed write
@@ -3033,10 +3051,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function applyUserModeration(
     user: User,
-    changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending">>,
+    changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending" | "timeoutUntil">>,
   ): User {
     const next = UserSchema.parse({ ...user, ...changes });
     store.upsertUser(next);
+    // Clear any changed field the schema dropped as an absent optional (e.g. lifting a timeout by setting
+    // `timeoutUntil` undefined) — Object.assign alone can't remove a key, so the stale value would linger.
+    for (const key of Object.keys(changes) as (keyof User)[]) {
+      if (!(key in next)) {
+        delete (user as Partial<User>)[key];
+      }
+    }
     Object.assign(user, next);
     broadcast({ type: "userUpserted", user });
     return user;
@@ -3615,6 +3640,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (authorAccessError) {
       return { error: authorAccessError, forbidden: true };
+    }
+
+    // A moderator timeout blocks posting (but not reading) until it expires — the bot has none.
+    const authorTimeoutError = timeoutError(author);
+
+    if (authorTimeoutError) {
+      return { error: authorTimeoutError, forbidden: true };
     }
 
     if (
@@ -6725,7 +6757,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("You cannot moderate an admin or yourself"));
     }
 
-    const changes: Partial<Pick<User, "banned" | "shadowBanned">> = {};
+    const changes: Partial<Pick<User, "banned" | "shadowBanned" | "timeoutUntil">> = {};
 
     if (body.data.banned !== undefined) {
       changes.banned = body.data.banned;
@@ -6733,6 +6765,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (body.data.shadowBanned !== undefined) {
       changes.shadowBanned = body.data.shadowBanned;
+    }
+
+    if (body.data.timeoutUntil !== undefined) {
+      // `null` lifts the timeout (cleared to undefined); a number sets it. A past value is harmless (the
+      // posting gate treats only a future `timeoutUntil` as active).
+      changes.timeoutUntil = body.data.timeoutUntil ?? undefined;
     }
 
     // Broadcast the userUpserted first (so the target's own client learns it is banned), then tear
@@ -6757,6 +6795,153 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     return data.users.filter((user) => user.type === "human");
   });
+
+  // File a member abuse report (docs/26). Private by design: never broadcast, never in the message stream,
+  // and the reporter id never leaves the moderator queue below. Any participating member may report a
+  // message they can SEE or any human user. Rate-limited to blunt report spam.
+  server.post(
+    "/api/reports",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const body = ReportCreateRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid report"));
+      }
+
+      const { targetType, targetId, reason, note } = body.data;
+
+      if (targetType === "user") {
+        const target = data.users.find((candidate) => candidate.id === targetId);
+
+        if (!target || target.type !== "human") {
+          return reply.code(404).send(errorBody("Report target does not exist"));
+        }
+      } else {
+        const target = data.messages.find((candidate) => candidate.id === targetId);
+        // The reporter must be able to SEE the message: a restricted audience (DM / private channel) must
+        // include them; a public message (undefined audience) is reportable by anyone. 404 identically for
+        // "no such message" and "not visible to you" so report can't be used to probe for hidden content.
+        const audience = target ? messageAudienceUserIds(target) : undefined;
+
+        if (!target || (audience !== undefined && !audience.has(currentUser.id))) {
+          return reply.code(404).send(errorBody("Report target does not exist"));
+        }
+      }
+
+      const report = ReportSchema.parse({
+        id: newMessageId("rpt"),
+        targetType,
+        targetId,
+        reporterUserId: currentUser.id,
+        reason,
+        ...(note ? { note } : {}),
+        createdAt: Date.now(),
+        status: "open",
+      });
+      store.upsertReport(report);
+      // Intentionally no broadcast and no reporter detail in the response — reports are moderator-private.
+      return reply.code(201).send({ ok: true });
+    },
+  );
+
+  // The open-report queue for moderators/admins, newest first. Reporter ids are included here (mod-only) —
+  // this endpoint is the ONLY place a report or its reporter is ever exposed.
+  server.get("/api/moderation/reports", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!canModerate(currentUser)) {
+      return reply.code(403).send(errorBody("Moderator access required"));
+    }
+
+    return store.loadOpenReports();
+  });
+
+  // Resolve a report: record the action taken and close it. The enforcement itself (remove message /
+  // timeout / ban) is done via its own endpoint; this closes the loop so the queue clears. Mods/admins.
+  server.post<{ Params: { reportId: string } }>(
+    "/api/moderation/reports/:reportId/resolve",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+      if (!canModerate(currentUser)) {
+        return reply.code(403).send(errorBody("Moderator access required"));
+      }
+
+      const body = ReportResolveRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid resolution"));
+      }
+
+      const existing = store.getReport(request.params.reportId);
+
+      if (!existing) {
+        return reply.code(404).send(errorBody("Report does not exist"));
+      }
+
+      const resolved: Report = ReportSchema.parse({
+        ...existing,
+        status: "resolved",
+        resolution: body.data.resolution,
+        ...(body.data.note ? { note: body.data.note } : {}),
+        resolvedByUserId: currentUser.id,
+        resolvedAt: Date.now(),
+      });
+      store.upsertReport(resolved);
+      return resolved;
+    },
+  );
+
+  // Moderator removal of a message — the "honest tombstone": blank the body + attachments and mark it
+  // removed with an optional sanitized public reason, rather than a silent delete. Broadcast so readers
+  // see "removed by a moderator" (a private-channel tombstone still reaches only its members). Mods/admins.
+  server.post<{ Params: { messageId: string } }>(
+    "/api/moderation/messages/:messageId/remove",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+      if (!canModerate(currentUser)) {
+        return reply.code(403).send(errorBody("Moderator access required"));
+      }
+
+      const body = MessageRemoveRequestSchema.safeParse(request.body ?? {});
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid removal request"));
+      }
+
+      const message = data.messages.find((candidate) => candidate.id === request.params.messageId);
+
+      if (!message || !("body" in message)) {
+        return reply.code(404).send(errorBody("Message does not exist"));
+      }
+
+      const removed = MessageSchema.parse({
+        ...message,
+        body: "",
+        attachments: [],
+        editedAt: Date.now(),
+        meta: {
+          ...message.meta,
+          removedByModerator: true,
+          ...(body.data.reason ? { removalReason: body.data.reason } : {}),
+          streaming: false,
+        },
+      });
+      store.updateMessage(removed);
+      Object.assign(message, removed);
+      broadcast({ type: "messageUpdated", message });
+      return message;
+    },
+  );
 
   // Users awaiting approval under the `approval` join policy. Admins and greeters.
   server.get("/api/access/pending", async (request, reply) => {
