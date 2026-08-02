@@ -75,6 +75,7 @@ import {
   type ServerErrorCode,
   type SyncPeer,
   type SyncStatusReport,
+  type TransportEncryption,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
@@ -1303,13 +1304,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   let adminSetupCode: string | undefined;
 
   /**
-   * In Developer Mode, force transport encryption OFF regardless of what config/profile resolved to, so
-   * the whole enforcement path (hooks, sync, WS) and the wire report all see plaintext. Called after every
-   * `appConfig` (re)load — boot merge and admin PATCH — so an admin can't re-arm encryption on a dev node
-   * (and, conversely, a real deployment can never be silently downgraded, because `devMode` is false there).
+   * The transport-encryption posture actually ENFORCED and REPORTED right now — the *effective* value, not
+   * the merely-stored one. In Developer Mode it is always `"off"` (plaintext) regardless of what config or
+   * profile resolved to. Crucially this is a **read-time projection that never mutates `appConfig`**, so the
+   * operator's real intent stays the single source of truth for persistence: a dev-mode PATCH or a
+   * kill-switch re-seed can never bake `"off"` into the stored config and then leak plaintext into a later
+   * NON-dev run of that same data dir (the bug an in-place override caused). `devMode` is false in any real
+   * deployment (and always on the Android host), so there the effective value is exactly the configured one.
    */
-  function applyDevModeConfig(): void {
-    if (devMode) appConfig.security.transportEncryption = "off";
+  function effectiveTransportEncryption(): TransportEncryption {
+    return devMode ? "off" : appConfig.security.transportEncryption;
   }
 
   let data: AppData = {
@@ -2576,7 +2580,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     appConfig = config;
-    applyDevModeConfig();
   }
 
   function anyAdminExists(): boolean {
@@ -2775,11 +2778,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
       joinPolicy: appConfig.access.joinPolicy,
       securityProfile: appConfig.security.profile,
-      transportEncryption: appConfig.security.transportEncryption,
+      // Report the EFFECTIVE posture (Developer Mode forces "off"), matching what's actually enforced.
+      transportEncryption: effectiveTransportEncryption(),
       // Publish the host's static public key only when transport encryption is in play, so the client
       // can handshake + show the fingerprint. The client still prefers the QR-delivered key (docs/08).
       transportPublicKey:
-        appConfig.security.transportEncryption === "off" ? undefined : transportIdentity?.publicKey,
+        effectiveTransportEncryption() === "off" ? undefined : transportIdentity?.publicKey,
       // Report the EFFECTIVE posture, not the merely-configured one (F5/P2-1): `security.dbEncryption`
       // is a declarative admin setting, decoupled from whether the store actually got opened with a
       // key — `encryptionEnabled` is boot-resolved truth (including the F4/SF2 fallback downgrade), so
@@ -6085,7 +6089,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     delete request.headers["x-loam-internal"];
     delete request.headers["x-loam-user"];
 
-    const mode = appConfig.security.transportEncryption;
+    const mode = effectiveTransportEncryption();
     if (mode === "off") {
       return;
     }
@@ -6280,7 +6284,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/transport/handshake",
     { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
     async (request, reply) => {
-      if (appConfig.security.transportEncryption === "off") {
+      if (effectiveTransportEncryption() === "off") {
         return reply.code(404).send(errorBody("Not found"));
       }
 
@@ -6497,7 +6501,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const tunnelSession = transportRequestSessions.get(request);
     if (tunnelSession?.authMode === "bound" && tunnelSession.userId) {
       headers["x-loam-user"] = tunnelSession.userId;
-    } else if (appConfig.security.transportEncryption === "required") {
+    } else if (effectiveTransportEncryption() === "required") {
       return reply.code(401).send(errorBody("Resume an identity before tunnelling content"));
     } else if (typeof request.headers.cookie === "string") {
       headers.cookie = request.headers.cookie;
@@ -7968,10 +7972,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const switchedAwayFromSetupCode =
       appConfig.admin.bootstrap === "setupCode" && next.admin.bootstrap !== "setupCode";
     appConfig = next;
-    // Persist the operator's INTENT first, then apply the runtime-only dev override — so a dev node never
-    // bakes plaintext into its stored config (a dev DB later run in production would honour the stored value).
+    // `appConfig` is always the operator's real intent (Developer Mode never mutates it — the plaintext
+    // override is a read-time projection via `effectiveTransportEncryption()`), so the persisted config can
+    // never carry a dev-forced `"off"` into a later non-dev run of this data dir.
     store.setConfigValue("config", JSON.stringify(appConfig));
-    applyDevModeConfig();
     // Drop live sync-status for peers an admin just removed, so peerSyncStatus can't accrete entries
     // for peers that no longer exist (docs/15 #9).
     const activePeerUrls = new Set(appConfig.sync.peers.map((peer) => peer.url));
@@ -8082,7 +8086,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   });
 
   server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
-    const mode = appConfig.security.transportEncryption;
+    const mode = effectiveTransportEncryption();
     const transportSession = mode === "off" ? undefined : wsTransportSession(request.url);
     const transportKey = transportSession?.key;
     // The presented transport session id (used at confirm-time to detect a mid-challenge revocation:

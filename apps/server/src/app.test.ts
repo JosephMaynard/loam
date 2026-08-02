@@ -5741,13 +5741,6 @@ describe("node-to-node sync", () => {
       headers: { cookie: sourceAdmin.cookie },
       payload: { name: "Field Team" },
     });
-    // Rename+archive it so the peer copy is "newer" and would win the timestamp check if the guard were absent.
-    await source.server.inject({
-      method: "PATCH",
-      url: "/api/channels/field-team",
-      headers: { cookie: sourceAdmin.cookie },
-      payload: { name: "Field Team (peer)", archived: true },
-    });
     const sourceUrl = await listenApp(source);
 
     // Puller independently creates a PRIVATE channel with the same slug/id.
@@ -5760,6 +5753,17 @@ describe("node-to-node sync", () => {
       url: "/api/channels",
       headers: { cookie: pullerAdmin.cookie },
       payload: { name: "Field Team", visibility: "private" },
+    });
+
+    // Stamp the source's edit AFTER the puller's private channel was created, so the peer copy's
+    // `updatedAt` is strictly NEWER than the local private channel's `createdAt`. This is deliberate: it
+    // makes the newer-wins timestamp check pass, so the ONLY thing that can stop the overwrite is the
+    // visibility guard — remove that guard and this test fails (the private channel gets renamed/archived).
+    await source.server.inject({
+      method: "PATCH",
+      url: "/api/channels/field-team",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Field Team (peer)", archived: true },
     });
 
     await runSync(puller, pullerAdmin.cookie);
@@ -7818,6 +7822,43 @@ describe("secure by default + Developer Mode", () => {
     const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
       networkConfig: { transportEncryption: string; devMode: boolean };
     };
+    expect(cfg.networkConfig.devMode).toBe(false);
+    expect(cfg.networkConfig.transportEncryption).toBe("optional");
+  });
+
+  it("never bakes dev-mode plaintext into the persisted config (survives a non-dev reopen)", async () => {
+    // Regression: a dev-mode override that MUTATED appConfig used to leak "off" into the stored config via a
+    // later PATCH, so re-running that data dir without dev mode served silent plaintext (no banner). The
+    // override is now a read-time projection, so appConfig (persisted) always carries operator intent.
+    process.env[DEV_ENV] = "1";
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const dataDir = app.dataDir;
+    const admin = await newSession(app);
+    expect(admin.isAdmin).toBe(true);
+
+    // Dev mode is active and forcing plaintext at runtime...
+    const devCfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { transportEncryption: string; devMode: boolean };
+    };
+    expect(devCfg.networkConfig.devMode).toBe(true);
+    expect(devCfg.networkConfig.transportEncryption).toBe("off");
+
+    // ...and an admin PATCH that doesn't touch `security` (the exact trigger of the old bug).
+    const patched = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { features: { enableReactions: false } },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    // Reopen the SAME data dir WITHOUT dev mode — a real, non-dev run.
+    delete process.env[DEV_ENV];
+    const reopened = await reopenApp(app, dataDir);
+    const cfg = (await reopened.server.inject({ method: "GET", url: "/api/config" })).json() as {
+      networkConfig: { transportEncryption: string; devMode: boolean };
+    };
+    // Operator intent preserved — encrypted, not plaintext — and no dev mode.
     expect(cfg.networkConfig.devMode).toBe(false);
     expect(cfg.networkConfig.transportEncryption).toBe("optional");
   });
