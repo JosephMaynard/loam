@@ -64,6 +64,33 @@ export async function requestChannel(method: "POST" | "PATCH", path: string, bod
   }
 }
 
+/**
+ * POST/PATCH/DELETE a JSON endpoint through the transport wrapper and return the parsed body (unvalidated
+ * — the caller narrows). Throws a localized error on a non-2xx. For endpoints whose response shape the
+ * caller doesn't need to schema-validate (reports, moderation actions, resolves).
+ */
+export async function requestJson<T>(
+  method: "POST" | "PATCH" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await encryptedFetch(method, path, body, { signal: controller.signal });
+    const payload: unknown = await response.json().catch(() => undefined);
+
+    if (!response.ok) {
+      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
+    }
+
+    return payload as T;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 /** Parse an unknown payload into a list of valid `User`s, dropping anything that doesn't validate. */
 export function parseUserList(payload: unknown): User[] {
   return Array.isArray(payload)

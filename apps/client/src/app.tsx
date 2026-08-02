@@ -4,6 +4,7 @@ import {
   MeshIdentityCardSchema,
   MessageAttachmentSchema,
   MessageSchema,
+  ReportSchema,
   UserSchema,
   type Channel,
   type Message,
@@ -13,6 +14,8 @@ import {
   type MeshContact,
   type MeshIdentityCard,
   type NetworkConfig,
+  type Report,
+  type ReportResolution,
   type Role,
   type StreamEvent,
   type User,
@@ -29,11 +32,12 @@ import { AvatarImageEditor } from "./components/AvatarImageEditor";
 import { BackArrowIcon } from "./components/BackArrowIcon";
 import { ChannelMembersPanel } from "./components/ChannelMembersPanel";
 import { MessageComposer } from "./components/MessageComposer";
+import { ReportDialog } from "./components/ReportDialog";
 import { MessageItem } from "./components/MessageItem";
 import { NavLink } from "./components/NavLink";
 import { SearchResult } from "./components/SearchResult";
 import { Sidebar } from "./components/Sidebar";
-import { fetchJson, parseUserList, REQUEST_TIMEOUT_MS } from "./lib/api";
+import { fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
 import { prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { dayKey, dayLabel } from "./lib/dates";
@@ -2038,6 +2042,7 @@ function ConversationView({
         />
         <MessageComposer
           allowLocationSharing={allowLocationSharing}
+          disabledReason={isTimedOut(currentUser) ? t("composer.timedOut") : undefined}
           label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
           onSend={onSend}
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
@@ -2110,6 +2115,11 @@ interface MessageListProps {
   usersById: Map<string, User>;
 }
 
+/** Whether a user is currently under an active (not-yet-expired) moderator timeout. */
+function isTimedOut(user: User): boolean {
+  return user.timeoutUntil !== undefined && user.timeoutUntil > Date.now();
+}
+
 function MessageList({
   conversation,
   currentUser,
@@ -2124,6 +2134,8 @@ function MessageList({
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const previousScrollHeightRef = useRef<number | undefined>(undefined);
+  // The message currently being reported (opens ReportDialog); undefined = closed.
+  const [reportMessage, setReportMessage] = useState<Message | undefined>(undefined);
 
   useEffect(() => {
     const el = listRef.current;
@@ -2144,6 +2156,7 @@ function MessageList({
   }, [topMessages.length]);
 
   return (
+    <>
     <div className="message-list" ref={listRef}>
       {topMessages.length ? (
         topMessages.map((message, index) => {
@@ -2164,6 +2177,7 @@ function MessageList({
                 onEdit={onEdit}
                 onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
                 onReact={onReact}
+                onReport={setReportMessage}
                 reactions={reactionSummary(
                   reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES,
                   message.id,
@@ -2179,6 +2193,10 @@ function MessageList({
         <p className="empty-copy">{t("messageList.empty")}</p>
       )}
     </div>
+    {reportMessage ? (
+      <ReportDialog targetType="message" targetId={reportMessage.id} onClose={() => setReportMessage(undefined)} />
+    ) : null}
+    </>
   );
 }
 
@@ -2270,6 +2288,7 @@ function ThreadPanel({
       </div>
       <MessageComposer
         allowLocationSharing={allowLocationSharing}
+        disabledReason={isTimedOut(currentUser) ? t("composer.timedOut") : undefined}
         label={t("thread.replyLabel")}
         onSend={onReply}
         onUploadAttachment={onUploadAttachment}
@@ -3294,6 +3313,157 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
  * (`GET /api/moderation/users`) so they can be unbanned. Each row exposes ban / shadow-ban toggles,
  * and (for admins) role assignment. Controls are hidden for admin targets and for yourself.
  */
+const TIMEOUT_DURATION_MS = 3_600_000; // a moderator "time out" lasts one hour
+
+/**
+ * The moderator report queue (docs/26): open member reports with one-motion actions. A message report
+ * offers Remove / Escalate / Dismiss; a user report offers Time-out / Ban / Escalate / Dismiss. Every
+ * action resolves the report (it drops out of the queue). Names are resolved from the moderation roster.
+ */
+function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (user: User) => void }) {
+  const [reports, setReports] = useState<Report[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string>();
+  const [busyId, setBusyId] = useState<string>();
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoaded(false);
+    fetchJson<unknown>("/api/moderation/reports")
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setReports(
+          Array.isArray(payload)
+            ? payload.flatMap((item) => {
+                const parsed = ReportSchema.safeParse(item);
+                return parsed.success ? [parsed.data] : [];
+              })
+            : [],
+        );
+        setLoaded(true);
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : t("moderation.reports.loadError"));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [reloadKey]);
+
+  const nameFor = (id: string): string => people.find((entry) => entry.id === id)?.displayName ?? generateDisplayName(id);
+
+  async function act(report: Report, enforce: () => Promise<unknown>, resolution: ReportResolution): Promise<void> {
+    setBusyId(report.id);
+    setError(undefined);
+    try {
+      await enforce();
+      await requestJson("POST", `/api/moderation/reports/${encodeURIComponent(report.id)}/resolve`, { resolution });
+      setReports((previous) => previous.filter((entry) => entry.id !== report.id));
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : t("moderation.updateError"));
+    } finally {
+      setBusyId(undefined);
+    }
+  }
+
+  const removeMessage = (id: string): Promise<unknown> =>
+    requestJson("POST", `/api/moderation/messages/${encodeURIComponent(id)}/remove`, {});
+  const moderateUser = async (id: string, update: Record<string, unknown>): Promise<void> => {
+    const updated = await requestJson<unknown>("PATCH", `/api/moderation/users/${encodeURIComponent(id)}`, update);
+    const parsed = UserSchema.safeParse(updated);
+    if (parsed.success) {
+      onApplyUser(parsed.data);
+    }
+  };
+
+  return (
+    <div className="report-queue">
+      <div className="panel-heading">
+        <h3>{t("moderation.reports.title")}</h3>
+        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
+          {t("common.refresh")}
+        </button>
+      </div>
+      {error ? <p className="form-error">{error}</p> : null}
+      {loaded && reports.length === 0 ? <p className="form-note">{t("moderation.reports.empty")}</p> : null}
+      {reports.length > 0 ? (
+        <ul className="report-list">
+          {reports.map((report) => {
+            const busy = busyId === report.id;
+            return (
+              <li className="report-row" key={report.id}>
+                <div className="report-meta">
+                  <strong>
+                    {report.targetType === "message"
+                      ? t("moderation.reports.targetMessage")
+                      : `${t("moderation.reports.targetUser")}: ${nameFor(report.targetId)}`}
+                  </strong>
+                  <span>
+                    {t("moderation.reports.reasonLine", {
+                      reason: t(`report.reason.${report.reason}` as Parameters<typeof t>[0]),
+                    })}
+                  </span>
+                  <span>{t("moderation.reports.reporter", { name: nameFor(report.reporterUserId) })}</span>
+                  {report.note ? (
+                    <p className="report-note" dir="auto">
+                      {report.note}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="report-actions">
+                  {report.targetType === "message" ? (
+                    <button
+                      disabled={busy}
+                      onClick={() => void act(report, () => removeMessage(report.targetId), "message_removed")}
+                      type="button"
+                    >
+                      {t("moderation.reports.removeMessage")}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        disabled={busy}
+                        onClick={() =>
+                          void act(
+                            report,
+                            () => moderateUser(report.targetId, { timeoutUntil: Date.now() + TIMEOUT_DURATION_MS }),
+                            "user_timed_out",
+                          )
+                        }
+                        type="button"
+                      >
+                        {t("moderation.reports.timeoutUser")}
+                      </button>
+                      <button
+                        disabled={busy}
+                        onClick={() => void act(report, () => moderateUser(report.targetId, { banned: true }), "user_banned")}
+                        type="button"
+                      >
+                        {t("moderation.reports.banUser")}
+                      </button>
+                    </>
+                  )}
+                  <button disabled={busy} onClick={() => void act(report, () => Promise.resolve(), "escalated")} type="button">
+                    {t("moderation.reports.escalate")}
+                  </button>
+                  <button disabled={busy} onClick={() => void act(report, () => Promise.resolve(), "dismissed")} type="button">
+                    {t("moderation.reports.dismiss")}
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 function ModerationPanel({
   currentUser,
   onUsersChanged,
@@ -3355,6 +3525,7 @@ function ModerationPanel({
           {t("common.refresh")}
         </button>
       </div>
+      <ReportQueue onApplyUser={applyUser} people={people} />
       {loadError ? <p className="form-error">{loadError}</p> : null}
       {!loaded && !loadError ? <p className="form-note">{t("moderation.loading")}</p> : null}
       {loaded && people.length === 0 ? <p className="form-note">{t("moderation.empty")}</p> : null}
