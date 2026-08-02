@@ -3143,9 +3143,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowPosting: update.allowPosting ?? channel.allowPosting,
       allowReplies: update.allowReplies ?? channel.allowReplies,
       archived: update.archived === undefined ? channel.archived : update.archived,
-      // Stamp the metadata-change time so node-to-node sync can do newer-wins re-sync (C1): a rename or
-      // archive here now reaches peers, which otherwise skipped any channel they'd already imported.
-      updatedAt: Date.now(),
     });
     store.upsertChannel(next);
     Object.assign(channel, next);
@@ -4879,10 +4876,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   /** What this node advertises to pulling peers (see SyncDigestSchema). */
   function buildSyncDigest(): SyncDigest {
     return {
-      // Public channels, INCLUDING archived ones (C1): a peer must see the archived flag to converge on an
-      // archive done here. Archived is public metadata, so exposing it to a sync peer leaks nothing new.
-      // (Their messages are still filtered by `isSyncableMessage` below; this only carries channel metadata.)
-      channels: data.channels.filter((channel) => channel.visibility === "public"),
+      channels: data.channels.filter((channel) => channel.visibility === "public" && !channel.archived),
       messages: data.messages
         .filter((message) => message.type !== "sealed" && isSyncableMessage(message))
         .map((message) => ({
@@ -5829,54 +5823,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       for (const channel of digest.channels) {
-        if (channel.visibility !== "public") {
+        // Create-only import: a channel we already have (by id) is left untouched. Channel metadata does NOT
+        // re-sync across nodes (C1, deferred) — ids are human SLUGS, so two nodes' independently-created
+        // same-named channels (notably the default `general`/`announcements`) collide on id; a newer-wins
+        // merge there would let one node's admin rename/archive clobber a peer's distinct channel. The correct
+        // fix needs per-channel provenance (only update channels actually imported from that peer) + peer
+        // timestamp clamping; until then this stays create-only, which is safe. See docs/11 / docs/25 (C1).
+        if (channel.visibility !== "public" || ensureChannel(channel.id)) {
           continue;
         }
 
-        const existing = ensureChannel(channel.id);
-        if (!existing) {
-          // Never seen it: import it — unless it arrives already-archived, in which case there's nothing to
-          // show (no messages sync for an archived channel) and we'd just materialise an empty dead channel.
-          if (channel.archived) {
-            continue;
-          }
-          const created = ChannelSchema.parse({ ...channel, updatedAt: channel.updatedAt, memberUserIds: undefined });
-          store.upsertChannel(created);
-          data.channels.push(created);
-          broadcast({ type: "channelUpserted", channel: created });
-          continue;
-        }
-
-        // The id already exists LOCALLY as a private channel: never let a peer touch it. A public channel
-        // on the peer that collides with a local private id must not be able to rename/archive/expose the
-        // private one — private channels never sync in either direction, so skip entirely.
-        if (existing.visibility !== "public") {
-          continue;
-        }
-
-        // Already have it — re-sync its public metadata newer-wins (C1). Compare on `updatedAt`, falling
-        // back to `createdAt` for channels created before the field existed; only a STRICTLY newer peer copy
-        // wins, so a stale peer can't clobber a fresher local edit (and equal timestamps are a no-op).
-        const peerStamp = channel.updatedAt ?? channel.createdAt;
-        const localStamp = existing.updatedAt ?? existing.createdAt;
-        if (peerStamp <= localStamp) {
-          continue;
-        }
-        // Merge ONLY the public metadata a peer is authoritative-enough to carry; never let sync rewrite
-        // local ownership, visibility, membership, or creation time.
-        const merged = ChannelSchema.parse({
-          ...existing,
-          name: channel.name,
-          description: channel.description,
-          allowPosting: channel.allowPosting,
-          allowReplies: channel.allowReplies,
-          discoverable: channel.discoverable,
-          archived: channel.archived,
-          updatedAt: peerStamp,
-        });
-        store.upsertChannel(merged);
-        Object.assign(existing, merged);
-        broadcast({ type: "channelUpserted", channel: existing });
+        const created = ChannelSchema.parse({ ...channel, memberUserIds: undefined });
+        store.upsertChannel(created);
+        data.channels.push(created);
+        broadcast({ type: "channelUpserted", channel: created });
       }
 
       const localById = new Map(data.messages.map((message) => [message.id, message]));

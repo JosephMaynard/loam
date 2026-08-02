@@ -8,9 +8,8 @@
 
 A node with `sync.enabled` answers two endpoints (404 otherwise, indistinguishable from absent):
 
-- `GET /api/sync/digest` — its public channels (including archived ones, so an archive propagates —
-  C1; archived channels carry metadata only, no messages) plus `{id, editedAt}` for every syncable
-  message.
+- `GET /api/sync/digest` — its public non-archived channels plus `{id, editedAt}` for every
+  syncable message.
 - `POST /api/sync/messages {ids}` — full records (≤500/batch) plus the authors' profiles.
 
 **Syncable** means: posts/replies in *public, non-archived* channels, and reactions on them.
@@ -83,15 +82,16 @@ hotspot running too if the phone's chipset allows it".
 ## Known v1 limitations
 
 - Deletes/moderation don't propagate (tombstones only stop re-import locally).
+- **Channel metadata doesn't re-sync after first import** (a rename/archive on A won't reach B). Deferred
+  on purpose (C1): channel ids are human slugs, so two nodes' independently-created same-named channels
+  (notably the default `general`/`announcements`) collide on id — a naive newer-wins merge would let one
+  node's admin edit clobber a peer's distinct channel. The correct fix needs per-channel provenance (only
+  update channels actually imported from that peer) + peer-timestamp clamping. Import stays create-only
+  until then. See docs/25 (C1).
 - No backpressure beyond batching (500 ids/request); fine at LAN scale, revisit for LoRa.
 
 ## Resolved
 
-- **Channel metadata now re-syncs (C1).** Channels carry an `updatedAt` stamped on every rename/archive
-  (`applyChannelUpdate`); the digest carries public channels *including archived ones*, and a puller
-  merges the peer's public metadata (name/description/posting policy/discoverable/archived) newer-wins —
-  only when the peer's `updatedAt` (falling back to `createdAt`) is strictly newer, so a stale peer can't
-  clobber a fresher local edit. Ownership, visibility, membership, and creation time never sync.
 - **Attachment copies retry (C3).** A copy that fails at import records a work item
   (`addMissingAttachment`); `retryMissingAttachments` re-fetches it from the peer on the reaper timer with
   backoff, a starvation-fair per-pass cap, and a max-age drop — best-effort recovery from *transient*

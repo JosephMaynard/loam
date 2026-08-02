@@ -75,9 +75,10 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 
 | # | Item | Doc | Size |
 |---|------|-----|------|
+| C1 | **Channel metadata doesn't re-sync after first import** — a rename/archive on A never reaches B. A first attempt (newer-wins merge keyed on a new `ChannelSchema.updatedAt` + archived-in-digest) was built and then **reverted** after sub-agent review: channel ids are human SLUGS, so two nodes' independently-created same-named channels — notably the default `general`/`announcements` (fixed ids + fixed `createdAt` on every node) — collide, and newer-wins let one node's admin edit clobber a peer's *distinct* channel (archive then blocks message import there); peer `updatedAt` was also unbounded, so an off-grid clock-drifted peer wins uncorrectably. Correct fix = per-channel **provenance** (only update channels actually imported from that peer, never local/default ones) + **clamp** peer timestamps to now. Multi-node-sync only. | 11 | M |
 | C2 | **Sync deletes/moderation don't propagate** (tombstones only stop local re-import) — by-design v1, real limit for a moderated mesh | 11,12 | M |
 
-*(Resolved & excluded: QR-ECC ceiling, foreground wake-lock timeout, SW network-first, setupCode-PATCH, unbounded maps, **C3 attachment-retry — BUILT: `addMissingAttachment` + `retryMissingAttachments` with backoff/max-age/starvation-fair per-pass cap, wired to the reaper timer, tested in `db.test.ts`**, **C1 channel-metadata re-sync — BUILT: `ChannelSchema.updatedAt` stamped in `applyChannelUpdate`; digest carries archived public channels; puller merges public metadata newer-wins (`syncWithPeer`); tested in `app.test.ts`**.)*
+*(Resolved & excluded: QR-ECC ceiling, foreground wake-lock timeout, SW network-first, setupCode-PATCH, unbounded maps, **C3 attachment-retry — BUILT: `addMissingAttachment` + `retryMissingAttachments` with backoff/max-age/starvation-fair per-pass cap, wired to the reaper timer, tested in `db.test.ts`**.)*
 
 ## 5. Test debt
 
