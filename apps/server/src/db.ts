@@ -7,7 +7,7 @@ import {
   MessageSchema,
   ReportSchema,
   UserSchema,
-  type AvatarImageMimeType,
+  type AttachmentMimeType,
   type Channel,
   type Message,
   type Report,
@@ -39,7 +39,7 @@ export type IdentityTokenRecord = {
 export type MissingAttachmentRecord = {
   messageId: string;
   attachmentId: string;
-  mimeType: AvatarImageMimeType;
+  mimeType: AttachmentMimeType;
   peerUrl: string;
   attempts: number;
   createdAt: number;
@@ -632,7 +632,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       return loadMissingAttachmentsStmt.all().map((row) => ({
         messageId: row.message_id as string,
         attachmentId: row.attachment_id as string,
-        mimeType: row.mime_type as AvatarImageMimeType,
+        mimeType: row.mime_type as AttachmentMimeType,
         peerUrl: row.peer_url as string,
         attempts: row.attempts as number,
         createdAt: row.created_at as number,
@@ -644,7 +644,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       return loadDueMissingAttachmentsStmt.all(nowMs, limit).map((row) => ({
         messageId: row.message_id as string,
         attachmentId: row.attachment_id as string,
-        mimeType: row.mime_type as AvatarImageMimeType,
+        mimeType: row.mime_type as AttachmentMimeType,
         peerUrl: row.peer_url as string,
         attempts: row.attempts as number,
         createdAt: row.created_at as number,

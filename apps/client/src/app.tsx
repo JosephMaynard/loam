@@ -1095,30 +1095,39 @@ function LoamApp() {
    * attachment. Returns the descriptor to include in the message create request.
    */
   const uploadAttachment = useCallback(async (file: File): Promise<MessageAttachment> => {
-    const prepared = await prepareImageAttachment(file);
-    const buffer = await prepared.blob.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
+    const toBase64 = (bytes: Uint8Array): string => {
+      let binary = "";
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+      return btoa(binary);
+    };
 
-    for (const byte of bytes) {
-      binary += String.fromCharCode(byte);
+    // Images are downscaled + re-encoded (existing path). Any other file uploads as-is with its name; the
+    // server enforces the type allowlist + size cap and serves non-images as a forced download (never inline).
+    let uploadBody: { mimeType: string; data: string; width?: number; height?: number; name?: string };
+
+    if (file.type.startsWith("image/")) {
+      const prepared = await prepareImageAttachment(file);
+      uploadBody = {
+        mimeType: prepared.blob.type || "image/png",
+        data: toBase64(new Uint8Array(await prepared.blob.arrayBuffer())),
+        width: prepared.width,
+        height: prepared.height,
+      };
+    } else {
+      uploadBody = {
+        mimeType: file.type,
+        data: toBase64(new Uint8Array(await file.arrayBuffer())),
+        name: file.name,
+      };
     }
 
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await encryptedFetch(
-        "POST",
-        "/api/attachments",
-        {
-          mimeType: prepared.blob.type || "image/png",
-          data: btoa(binary),
-          width: prepared.width,
-          height: prepared.height,
-        },
-        { signal: controller.signal },
-      );
+      const response = await encryptedFetch("POST", "/api/attachments", uploadBody, { signal: controller.signal });
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {

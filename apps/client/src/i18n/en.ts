@@ -48,6 +48,7 @@ export const en = {
   "message.editedTag": "(edited)",
   "message.editAriaLabel": "Edit message",
   "message.attachedImageAlt": "Attached image",
+  "message.attachedFile": "Attached file",
   "message.streaming": "Streaming",
   "message.reply": "Reply",
   "message.replyCount": { one: "{n} reply", other: "{n} replies" },

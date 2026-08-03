@@ -32,9 +32,21 @@ export function attachmentExtension(mimeType: AvatarImageMimeType): string {
   return "webp";
 }
 
-/** Server path an attachment's image is served from. */
+/** Whether an attachment is an inline-renderable image (vs a download-only file). */
+export function isImageAttachment(attachment: Pick<MessageAttachment, "mimeType">): boolean {
+  return (
+    attachment.mimeType === "image/png" ||
+    attachment.mimeType === "image/jpeg" ||
+    attachment.mimeType === "image/webp"
+  );
+}
+
+/** Server path an attachment is served from (images keep their extension; files use the generic `.bin`). */
 export function attachmentPath(attachment: MessageAttachment): string {
-  return `/api/attachments/${attachment.id}.${attachmentExtension(attachment.mimeType)}`;
+  const extension = isImageAttachment(attachment)
+    ? attachmentExtension(attachment.mimeType as AvatarImageMimeType)
+    : "bin";
+  return `/api/attachments/${attachment.id}.${extension}`;
 }
 
 export type PreparedAttachment = {

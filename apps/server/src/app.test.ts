@@ -5702,6 +5702,42 @@ describe("message attachments", () => {
     });
   }
 
+  it("uploads a non-image file, serves it as a forced download, and rejects a script/XSS type (P11)", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    const uploaded = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: session.cookie },
+      payload: { mimeType: "text/plain", data: Buffer.from("hello, world").toString("base64"), name: "notes.txt" },
+    });
+    expect(uploaded.statusCode).toBe(201);
+    const attachment = uploaded.json() as { id: string; mimeType: string; name?: string };
+    expect(attachment.mimeType).toBe("text/plain");
+    expect(attachment.name).toBe("notes.txt");
+
+    // The uploader fetches their pending file — served as a FORCED DOWNLOAD (octet-stream + attachment),
+    // never inline, so an uploaded HTML/SVG could not execute in a browser.
+    const served = await app.server.inject({
+      method: "GET",
+      url: `/api/attachments/${attachment.id}.bin`,
+      headers: { cookie: session.cookie },
+    });
+    expect(served.statusCode).toBe(200);
+    expect(served.headers["content-type"]).toContain("application/octet-stream");
+    expect(String(served.headers["content-disposition"])).toContain("attachment");
+
+    // A script-executable type is not in the allowlist → rejected at upload.
+    const html = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: session.cookie },
+      payload: { mimeType: "text/html", data: Buffer.from("<script>alert(1)</script>").toString("base64") },
+    });
+    expect(html.statusCode).toBe(400);
+  });
+
   it("uploads, attaches, serves, and allows an image-only message", async () => {
     const app = await makeApp();
     const session = await newSession(app);

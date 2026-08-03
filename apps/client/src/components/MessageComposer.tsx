@@ -292,7 +292,7 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
           {onUploadAttachment ? (
             <>
               <input
-                accept="image/png,image/jpeg,image/webp,image/*"
+                accept="image/*,.pdf,.txt,.csv,.md,.json,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
                 className="sr-only"
                 multiple
                 onInput={(event) => {

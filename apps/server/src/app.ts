@@ -938,26 +938,74 @@ function newAttachmentId(): string {
 }
 
 /** Filename an attachment is stored (and served) under: `att_<16hex>.<ext>`. */
-function attachmentFileName(attachment: Pick<MessageAttachment, "id" | "mimeType">): string {
-  return `${attachment.id}.${avatarImageExtension(attachment.mimeType)}`;
+/** Whether an attachment MIME is one of the inline-renderable image types (vs a download-only file). */
+function isImageAttachmentMime(mimeType: string | undefined): mimeType is AvatarImageMimeType {
+  return mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/webp";
 }
 
-/** Parses an attachment filename (`att_<16hex>.<ext>`) into its id and MIME type. */
-function parseAttachmentFileName(value: string): { id: string; mimeType: AvatarImageMimeType } | undefined {
-  const match = value.match(/^(att_[a-f0-9]{16})\.(png|jpg|webp)$/);
+/**
+ * Sanitise a user-supplied attachment filename before it goes into a `Content-Disposition` header (and the
+ * client's escaped display): strip path separators, quotes, and control chars (header-injection / traversal
+ * vectors), bound the length, and fall back to `file` if nothing usable remains.
+ */
+function sanitizeAttachmentName(name: string | undefined): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = (name ?? "").replace(/["\\/\u0000-\u001f]/g, "_").trim().slice(0, 255);
+  return cleaned || "file";
+}
+
+function attachmentFileName(attachment: { id: string; mimeType?: MessageAttachment["mimeType"] }): string {
+  // Images keep their real extension (served inline). Non-image files are stored under a generic `.bin` so
+  // the on-disk name can never carry an executable/renderable extension, and they're served octet-stream.
+  return isImageAttachmentMime(attachment.mimeType)
+    ? `${attachment.id}.${avatarImageExtension(attachment.mimeType)}`
+    : `${attachment.id}.bin`;
+}
+
+/**
+ * Parses an attachment filename (`att_<16hex>.<ext>`) into its id + kind. For an image, the MIME is derived
+ * from the extension (safe to serve inline). For a `.bin` file, no MIME is derived — it is always served as
+ * `application/octet-stream` + `Content-Disposition: attachment`, so a mislabelled upload can't be rendered.
+ */
+function parseAttachmentFileName(
+  value: string,
+): { id: string; isImage: boolean; mimeType?: AvatarImageMimeType } | undefined {
+  const match = value.match(/^(att_[a-f0-9]{16})\.(png|jpg|webp|bin)$/);
 
   if (!match) {
     return undefined;
   }
 
   const extension = match[2];
+
+  if (extension === "bin") {
+    return { id: match[1] ?? "", isImage: false };
+  }
+
   const mimeType =
     extension === "png" ? "image/png" : extension === "jpg" ? "image/jpeg" : "image/webp";
 
-  return { id: match[1] ?? "", mimeType };
+  return { id: match[1] ?? "", isImage: true, mimeType };
 }
 
-const attachmentMaxBytes = 256 * 1024;
+const attachmentMaxBytes = 256 * 1024; // image cap (images are downscaled client-side first)
+
+/**
+ * Whether fetched attachment bytes are an acceptable copy: an image must be within the image cap AND match
+ * its declared type's magic bytes (it's served inline); a non-image file must be within the (larger) file
+ * cap — its MIME is already allowlisted by the schema and it's served octet-stream, so no signature check is
+ * meaningful. Shared by the sync import + retry paths so both agree.
+ */
+function isAcceptableAttachmentBytes(bytes: Buffer, mimeType: MessageAttachment["mimeType"]): boolean {
+  if (bytes.length === 0) {
+    return false;
+  }
+  if (isImageAttachmentMime(mimeType)) {
+    return bytes.length <= attachmentMaxBytes && avatarImageHasExpectedSignature(bytes, mimeType);
+  }
+  return bytes.length <= attachmentFileMaxBytes;
+}
+const attachmentFileMaxBytes = 1024 * 1024; // non-image file cap (no downscale) — modest for an off-grid LAN
 
 // Retry policy for a missing-attachment work item (docs/15 A6, F1). `retryMissingAttachments` runs on
 // the 30s reaper tick, but it must NOT actually contact the peer on every tick — that burned through
@@ -5329,11 +5377,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       try {
         const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment);
 
-        if (
-          bytes.length > attachmentMaxBytes ||
-          !bytes.length ||
-          !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
-        ) {
+        if (!isAcceptableAttachmentBytes(bytes, attachment.mimeType)) {
           // Fetched something, but it isn't usable — record it as missing too (docs/15 A6) rather
           // than silently dropping it: a peer mid-write or serving a truncated/corrupt copy today can
           // look fine on a later retry.
@@ -5475,11 +5519,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             return;
           }
 
-          if (
-            bytes.length > attachmentMaxBytes ||
-            !bytes.length ||
-            !avatarImageHasExpectedSignature(bytes, record.mimeType)
-          ) {
+          if (!isAcceptableAttachmentBytes(bytes, record.mimeType)) {
             store.bumpMissingAttachmentAttempts(
               record.messageId,
               record.attachmentId,
@@ -7230,24 +7270,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.code(400).send(errorBody("Invalid attachment upload request"));
       }
 
-      const image = Buffer.from(body.data.data, "base64");
+      const bytes = Buffer.from(body.data.data, "base64");
+      const isImage = isImageAttachmentMime(body.data.mimeType);
+      const cap = isImage ? attachmentMaxBytes : attachmentFileMaxBytes;
 
-      if (image.length === 0 || image.length > attachmentMaxBytes) {
-        return reply.code(400).send(errorBody("Attachment image must be 256KB or smaller"));
+      if (bytes.length === 0 || bytes.length > cap) {
+        return reply.code(400).send(errorBody("Attachment is empty or too large"));
       }
 
-      if (!avatarImageHasExpectedSignature(image, body.data.mimeType)) {
+      // Images must actually be the image they claim (magic bytes) since they're served INLINE. Non-image
+      // files carry an allowlisted MIME (schema-enforced) and are served octet-stream + attachment, so a
+      // mislabelled file can never be rendered — a magic-byte check per arbitrary type isn't needed.
+      if (isImageAttachmentMime(body.data.mimeType) && !avatarImageHasExpectedSignature(bytes, body.data.mimeType)) {
         return reply.code(400).send(errorBody("Attachment image type does not match the uploaded data"));
       }
 
       const attachment: MessageAttachment = {
         id: newAttachmentId(),
         mimeType: body.data.mimeType,
-        ...(body.data.width !== undefined ? { width: body.data.width } : {}),
-        ...(body.data.height !== undefined ? { height: body.data.height } : {}),
+        ...(isImage && body.data.width !== undefined ? { width: body.data.width } : {}),
+        ...(isImage && body.data.height !== undefined ? { height: body.data.height } : {}),
+        ...(isImage ? {} : { name: sanitizeAttachmentName(body.data.name) }),
       };
       await mkdir(attachmentsDir, { recursive: true });
-      await writeFile(join(attachmentsDir, attachmentFileName(attachment)), image);
+      await writeFile(join(attachmentsDir, attachmentFileName(attachment)), bytes);
       attachmentOwners.set(attachment.id, { userId: currentUser.id, uploadedAt: Date.now() });
       return reply.code(201).send(attachment);
     },
@@ -7307,11 +7353,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       try {
-        // Rebuild the filename from the parsed id + MIME type (like the avatar route) rather than
-        // joining the raw request param — the served path is then provably derived from the
-        // whitelisted pattern, never from user input.
-        const image = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
-        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
+        // Rebuild the filename from the parsed id + kind (like the avatar route) rather than joining the
+        // raw request param — the served path is then provably derived from the whitelisted pattern, never
+        // from user input.
+        const fileBytes = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
+        reply.header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff");
+
+        // Images render inline with their real type (safe — images aren't executable). A NON-image file is
+        // ALWAYS served as `application/octet-stream` + `Content-Disposition: attachment`, so the browser
+        // downloads it and never renders it — an uploaded HTML/SVG/etc. can't execute. The download name
+        // comes from the owning message's (sanitised) attachment record.
+        if (attachment.isImage && attachment.mimeType) {
+          return reply.type(attachment.mimeType).send(fileBytes);
+        }
+
+        const record =
+          owningMessage && "attachments" in owningMessage
+            ? owningMessage.attachments?.find((entry) => entry.id === attachment.id)
+            : undefined;
+        const downloadName = sanitizeAttachmentName(record?.name);
+        return reply
+          .type("application/octet-stream")
+          .header("content-disposition", `attachment; filename="${downloadName}"`)
+          .send(fileBytes);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
           return reply.code(404).send(errorBody("Attachment does not exist"));

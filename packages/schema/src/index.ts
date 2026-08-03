@@ -12,6 +12,31 @@ export type AvatarMode = z.infer<typeof AvatarModeSchema>;
 export const AvatarImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/webp"]);
 export type AvatarImageMimeType = z.infer<typeof AvatarImageMimeTypeSchema>;
 
+/**
+ * Non-image file attachments (P11). A deliberately small allowlist of common, non-executable document types
+ * — and deliberately WITHOUT `text/html`, `image/svg+xml`, or `application/xml`, which are script-execution
+ * / XSS vectors if a browser ever rendered them. As defence-in-depth the server ALSO serves every non-image
+ * attachment as `application/octet-stream` with `Content-Disposition: attachment`, so nothing uploaded is
+ * ever rendered inline regardless of type.
+ */
+export const AttachmentFileMimeTypeSchema = z.enum([
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "text/markdown",
+  "application/json",
+  "application/zip",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+]);
+export type AttachmentFileMimeType = z.infer<typeof AttachmentFileMimeTypeSchema>;
+
+/** Any attachment MIME: an inline-safe image or an allowlisted (download-only) file. */
+export const AttachmentMimeTypeSchema = z.union([AvatarImageMimeTypeSchema, AttachmentFileMimeTypeSchema]);
+export type AttachmentMimeType = z.infer<typeof AttachmentMimeTypeSchema>;
+
 export const UserAvatarSchema = z.object({
   kind: z.enum(["generated", "image"]).optional(),
   seed: z.string().min(1).max(128).optional(),
@@ -685,10 +710,12 @@ export type AvatarImageUploadRequest = z.infer<typeof AvatarImageUploadRequestSc
 /** An image attached to a message. The file itself is uploaded first via `POST /api/attachments`. */
 export const MessageAttachmentSchema = z.object({
   id: z.string().regex(/^att_[a-f0-9]{16}$/),
-  mimeType: AvatarImageMimeTypeSchema,
+  mimeType: AttachmentMimeTypeSchema,
   /** Pixel dimensions of the stored image (client-reported, cosmetic — used to reserve layout). */
   width: z.number().int().positive().max(10_000).optional(),
   height: z.number().int().positive().max(10_000).optional(),
+  /** Original filename, for a non-image file attachment (shown as the download link + Content-Disposition). */
+  name: z.string().min(1).max(255).optional(),
 });
 export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 
@@ -697,10 +724,14 @@ export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
  * uploading — the server enforces a 256KB binary cap and magic-byte/MIME agreement.
  */
 export const AttachmentUploadRequestSchema = z.object({
-  mimeType: AvatarImageMimeTypeSchema,
-  data: z.string().min(1).max(400_000),
+  mimeType: AttachmentMimeTypeSchema,
+  // base64 of the file bytes. ~1.4M chars ≈ 1MB raw — enough for a small PDF/doc while staying modest for
+  // an off-grid LAN; the server enforces the real per-kind byte cap after decoding.
+  data: z.string().min(1).max(1_400_000),
   width: z.number().int().positive().max(10_000).optional(),
   height: z.number().int().positive().max(10_000).optional(),
+  /** Original filename for a non-image file (sanitised server-side before use). */
+  name: z.string().min(1).max(255).optional(),
 });
 export type AttachmentUploadRequest = z.infer<typeof AttachmentUploadRequestSchema>;
 
