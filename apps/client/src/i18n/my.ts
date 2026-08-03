@@ -1,7 +1,7 @@
 // Machine-translated, NEEDS NATIVE REVIEW before field use; en.ts is authoritative.
-import type { Catalog } from "./en";
+import type { Translation } from "./en";
 
-export const my: Catalog = {
+export const my: Translation = {
   "composer.thinking": "စဉ်းစားနေသည်…",
   "toast.imageFallback": "📷 ပုံ",
   "toast.locationFallback": "📍 တည်နေရာ",

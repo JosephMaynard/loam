@@ -253,6 +253,7 @@ function AdminChannelRow({
         <span className="admin-channel-meta">
           {channel.allowPosting === "admins" ? t("admin.metaAdminsPost") : t("admin.metaOpenPosting")}
           {channel.visibility === "private" ? ` · ${t("admin.metaPrivate")}` : ""}
+          {channel.pinned ? ` · ${t("admin.metaPinned")}` : ""}
           {channel.archived ? ` · ${t("admin.metaArchived")}` : ""}
         </span>
       </div>
@@ -260,6 +261,26 @@ function AdminChannelRow({
         <button disabled={renameDisabled} onClick={() => void patch({ name: trimmedName })} type="button">
           {t("admin.rename")}
         </button>
+        <button disabled={busy} onClick={() => void patch({ pinned: !channel.pinned })} type="button">
+          {channel.pinned ? t("admin.unpin") : t("admin.pin")}
+        </button>
+        <label className="admin-channel-ttl">
+          {t("admin.channelRetentionLabel")}
+          <select
+            disabled={busy}
+            onInput={(event) =>
+              void patch({
+                messageTtlMs: event.currentTarget.value === "" ? null : Number(event.currentTarget.value),
+              })
+            }
+            value={channel.messageTtlMs ?? ""}
+          >
+            <option value="">{t("admin.retention.default")}</option>
+            <option value={3_600_000}>{t("admin.retention.1h")}</option>
+            <option value={86_400_000}>{t("admin.retention.1d")}</option>
+            <option value={604_800_000}>{t("admin.retention.7d")}</option>
+          </select>
+        </label>
         <button
           className={channel.archived ? undefined : "danger-button"}
           disabled={busy}

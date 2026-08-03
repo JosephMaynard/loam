@@ -626,6 +626,7 @@ export function AdminView({
                     <div className="moderation-name">
                       <strong>{peer.label ?? peer.url}</strong>
                       {peer.label ? <span>{peer.url}</span> : null}
+                      {peer.transportKey ? <span className="peer-key-pinned">🔒 {t("admin.peerKeyPinned")}</span> : null}
                     </div>
                     <div className="moderation-actions">
                       <button

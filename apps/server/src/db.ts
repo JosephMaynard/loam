@@ -5,10 +5,12 @@ import { join } from "node:path";
 import {
   ChannelSchema,
   MessageSchema,
+  ReportSchema,
   UserSchema,
   type AvatarImageMimeType,
   type Channel,
   type Message,
+  type Report,
   type User,
 } from "@loam/schema";
 
@@ -213,6 +215,24 @@ export interface LoamStore {
    * set `nextAttemptAt` to the caller-computed epoch ms (the caller owns the backoff policy; this is a
    * dumb storage write) — so `loadDueMissingAttachments` skips this record until then. */
   bumpMissingAttachmentAttempts(messageId: string, attachmentId: string, nextAttemptAt: number): void;
+  /**
+   * Store (or replace) a member abuse report (docs/26 idea 3). Reports are moderator-private data — never
+   * broadcast, never exported by sync — and are wiped with everything else by the kill switch. Upsert so
+   * the same call both files a new report and persists a resolution (status flips open → resolved).
+   */
+  upsertReport(report: Report): void;
+  /** A single report by id (for the resolve flow), or undefined. */
+  getReport(id: string): Report | undefined;
+  /** All still-open reports, newest first — the moderator queue. */
+  loadOpenReports(): Report[];
+  /**
+   * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
+   * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
+   * (including the seeded defaults, which every node shares an id for) is never in this set, so a peer
+   * can't clobber it. Idempotent. Wiped with everything else by the kill switch.
+   */
+  markChannelSynced(channelId: string): void;
+  loadSyncedChannelIds(): string[];
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -406,6 +426,15 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       next_attempt_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (message_id, attachment_id)
     );
+    CREATE TABLE IF NOT EXISTS reports (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      data TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS synced_channels (
+      channel_id TEXT PRIMARY KEY
+    );
   `);
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
@@ -472,6 +501,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   const bumpMissingAttachmentAttemptsStmt = db.prepare(
     "UPDATE missing_attachments SET attempts = attempts + 1, last_attempt_at = ?, next_attempt_at = ? WHERE message_id = ? AND attachment_id = ?",
   );
+  const upsertReportStmt = db.prepare(
+    `INSERT INTO reports (id, status, created_at, data) VALUES (?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data`,
+  );
+  const getReportStmt = db.prepare("SELECT data FROM reports WHERE id = ?");
+  const loadOpenReportsStmt = db.prepare(
+    "SELECT data FROM reports WHERE status = 'open' ORDER BY created_at DESC, rowid DESC",
+  );
+  const markChannelSyncedStmt = db.prepare(
+    "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
+  );
+  const loadSyncedChannelIdsStmt = db.prepare("SELECT channel_id FROM synced_channels");
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -633,6 +674,24 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       const row = countStmt.get();
       return !row || row.total === 0;
     },
+    upsertReport(report) {
+      upsertReportStmt.run(report.id, report.status, report.createdAt, JSON.stringify(report));
+    },
+    getReport(id) {
+      const row = getReportStmt.get(id) as { data: string } | undefined;
+      return row ? ReportSchema.parse(JSON.parse(row.data)) : undefined;
+    },
+    loadOpenReports() {
+      return loadOpenReportsStmt
+        .all()
+        .map((row) => ReportSchema.parse(JSON.parse((row as { data: string }).data)));
+    },
+    markChannelSynced(channelId) {
+      markChannelSyncedStmt.run(channelId);
+    },
+    loadSyncedChannelIds() {
+      return loadSyncedChannelIdsStmt.all().map((row) => (row as { channel_id: string }).channel_id);
+    },
     wipeAll() {
       store.transaction(() => {
         db.exec("DELETE FROM messages");
@@ -644,6 +703,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM mesh_contacts");
         db.exec("DELETE FROM transport_identity_tokens");
         db.exec("DELETE FROM missing_attachments");
+        db.exec("DELETE FROM reports");
+        db.exec("DELETE FROM synced_channels");
       });
     },
     checkpoint() {

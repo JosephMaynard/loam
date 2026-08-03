@@ -1107,6 +1107,48 @@ describe("message retention (ephemeral messages)", () => {
     expect(served.map((message) => message.body)).toEqual(["still fresh"]);
   });
 
+  it("honors a per-channel retention TTL even when the node default is off (P12)", async () => {
+    const app = await makeApp(); // no global retention TTL
+    const admin = await newSession(app);
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    // A 1s TTL on `general` only; `announcements` keeps the node default (off).
+    const patched = await app.server.inject({
+      method: "PATCH",
+      url: "/api/channels/general",
+      headers: { cookie: admin.cookie },
+      payload: { messageTtlMs: 1000 },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    expect(
+      (await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId: "general", body: "channel-ephemeral" },
+      })).statusCode,
+    ).toBe(201);
+
+    await vi.advanceTimersByTimeAsync(1500);
+
+    // Posted after the jump, in a channel with no per-channel TTL and the node default off — must survive.
+    expect(
+      (await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId: "announcements", body: "no ttl here" },
+      })).statusCode,
+    ).toBe(201);
+
+    app.reapExpiredMessages();
+
+    const bodies = app.store.loadMessages().map((message) => ("body" in message ? message.body : ""));
+    expect(bodies).toContain("no ttl here");
+    expect(bodies).not.toContain("channel-ephemeral");
+  });
+
   it("does nothing when no TTL is configured", async () => {
     const app = await makeApp();
     const session = await newSession(app);
@@ -5066,6 +5108,170 @@ describe("message search", () => {
   });
 });
 
+describe("member reports + timeout + honest tombstone (docs/26)", () => {
+  function setRoles(app: LoamApp, cookie: string, userId: string, roles: string[]): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${userId}/roles`,
+      headers: { cookie },
+      payload: { roles },
+    });
+  }
+  function postChannel(app: LoamApp, cookie: string, channelId: string, body: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+  }
+  function fileReport(app: LoamApp, cookie: string, payload: Record<string, unknown>): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/reports", headers: { cookie }, payload });
+  }
+
+  it("keeps reports moderator-private: filed but never broadcast, queue is mod-only, reporter id shown only there", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app); // firstUser → admin (also a moderator implicitly)
+    const author = await newSession(app);
+    const reporter = await newSession(app);
+
+    const msgId = ((await postChannel(app, author.cookie, "general", "questionable")).json() as {
+      message: { id: string };
+    }).message.id;
+
+    const filed = await fileReport(app, reporter.cookie, {
+      targetType: "message",
+      targetId: msgId,
+      reason: "harassment",
+      note: "not ok",
+    });
+    expect(filed.statusCode).toBe(201);
+
+    // A non-moderator cannot read the queue.
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/moderation/reports", headers: { cookie: reporter.cookie } }))
+        .statusCode,
+    ).toBe(403);
+
+    // The admin (moderator) sees it, with the reporter id (mod-only egress).
+    const queue = (
+      await app.server.inject({ method: "GET", url: "/api/moderation/reports", headers: { cookie: admin.cookie } })
+    ).json() as { targetId: string; reporterUserId: string; reason: string; status: string }[];
+    expect(queue).toHaveLength(1);
+    expect(queue[0]).toMatchObject({ targetId: msgId, reporterUserId: reporter.userId, reason: "harassment", status: "open" });
+
+    // The report never appears in the message stream.
+    const feed = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: admin.cookie } })
+    ).json() as { id: string }[];
+    expect(feed.some((m) => m.id.startsWith("rpt_"))).toBe(false);
+  });
+
+  it("404s a report against a private-channel message the reporter cannot see", async () => {
+    const app = await makeApp();
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+    const channelId = ((await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Ops", visibility: "private" },
+    })).json() as { id: string }).id;
+    const secretId = ((await postChannel(app, owner.cookie, channelId, "secret")).json() as {
+      message: { id: string };
+    }).message.id;
+
+    const res = await fileReport(app, outsider.cookie, { targetType: "message", targetId: secretId, reason: "spam" });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("a timeout blocks posting but not reading, and lifting it restores posting", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const member = await newSession(app);
+
+    const future = Date.now() + 3_600_000;
+    const timedOut = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${member.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { timeoutUntil: future },
+    });
+    expect(timedOut.statusCode).toBe(200);
+
+    // Posting is blocked (403)...
+    expect((await postChannel(app, member.cookie, "general", "hi")).statusCode).toBe(403);
+    // ...but reading still works.
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: member.cookie } }))
+        .statusCode,
+    ).toBe(200);
+
+    // Lift the timeout (null) → posting works again.
+    expect(
+      (await app.server.inject({
+        method: "PATCH",
+        url: `/api/moderation/users/${member.userId}`,
+        headers: { cookie: admin.cookie },
+        payload: { timeoutUntil: null },
+      })).statusCode,
+    ).toBe(200);
+    expect((await postChannel(app, member.cookie, "general", "hi again")).statusCode).toBe(201);
+  });
+
+  it("moderator removal leaves an honest tombstone (blanked, marked removed) — not a silent delete", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const author = await newSession(app);
+    const msgId = ((await postChannel(app, author.cookie, "general", "to be removed")).json() as {
+      message: { id: string };
+    }).message.id;
+
+    const removed = await app.server.inject({
+      method: "POST",
+      url: `/api/moderation/messages/${msgId}/remove`,
+      headers: { cookie: admin.cookie },
+      payload: { reason: "off-topic" },
+    });
+    expect(removed.statusCode).toBe(200);
+
+    // Still present in the feed (not deleted), but blanked + flagged removed with the reason.
+    const feed = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: admin.cookie } })
+    ).json() as { id: string; body?: string; meta?: { removedByModerator?: boolean; removalReason?: string } }[];
+    const tombstone = feed.find((m) => m.id === msgId);
+    expect(tombstone).toBeDefined();
+    expect(tombstone?.body).toBe("");
+    expect(tombstone?.meta?.removedByModerator).toBe(true);
+    expect(tombstone?.meta?.removalReason).toBe("off-topic");
+  });
+
+  it("resolving a report closes it (drops out of the open queue)", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const reporter = await newSession(app);
+    await fileReport(app, reporter.cookie, { targetType: "user", targetId: admin.userId, reason: "other" });
+
+    const queue = (
+      await app.server.inject({ method: "GET", url: "/api/moderation/reports", headers: { cookie: admin.cookie } })
+    ).json() as { id: string }[];
+    expect(queue).toHaveLength(1);
+
+    const resolved = await app.server.inject({
+      method: "POST",
+      url: `/api/moderation/reports/${queue[0]?.id}/resolve`,
+      headers: { cookie: admin.cookie },
+      payload: { resolution: "dismissed" },
+    });
+    expect(resolved.statusCode).toBe(200);
+
+    const after = (
+      await app.server.inject({ method: "GET", url: "/api/moderation/reports", headers: { cookie: admin.cookie } })
+    ).json() as unknown[];
+    expect(after).toHaveLength(0);
+  });
+});
+
 describe("participation gating (banned / pending read access)", () => {
   const readPaths = ["/api/channels", "/api/users", "/api/messages/general", "/api/search?q=x"];
 
@@ -5683,6 +5889,63 @@ describe("node-to-node sync", () => {
       peers: { status?: { imported: number } }[];
     };
     expect(third.peers[0]?.status?.imported).toBe(importedTotal);
+  });
+
+  it("re-syncs metadata for a channel it IMPORTED from the peer (C1: provenance-gated)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Relief Ops" },
+    });
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+
+    // First sync imports relief-ops → it's recorded as synced-origin.
+    await runSync(puller, pullerAdmin.cookie);
+    const imported = puller.store.loadChannels().find((channel) => channel.id === "relief-ops");
+    expect(imported?.name).toBe("Relief Ops");
+    // The peer's ownerUserId is stripped — an imported channel is ownerless here, never attributed to a
+    // (possibly locally-authoritative) foreign id.
+    expect(imported?.ownerUserId).toBeUndefined();
+
+    // Rename + archive on the source, then sync again — the imported copy tracks the change.
+    await source.server.inject({
+      method: "PATCH",
+      url: "/api/channels/relief-ops",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Relief Ops (closed)", archived: true },
+    });
+    await runSync(puller, pullerAdmin.cookie);
+    const after = puller.store.loadChannels().find((channel) => channel.id === "relief-ops");
+    expect(after?.name).toBe("Relief Ops (closed)");
+    expect(after?.archived).toBe(true);
+  });
+
+  it("never clobbers a locally-created channel that shares a peer's slug — default channels stay put (C1)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    // Rename + archive the source's OWN default `general` (every node ships general with the same id).
+    await source.server.inject({
+      method: "PATCH",
+      url: "/api/channels/general",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Source General", archived: true },
+    });
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({ sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 } });
+    const pullerAdmin = await newSession(puller);
+    await runSync(puller, pullerAdmin.cookie);
+
+    // The puller's own general is locally-created (not synced-origin), so the peer's same-slug edit is ignored.
+    const general = puller.store.loadChannels().find((channel) => channel.id === "general");
+    expect(general?.name).toBe("General");
+    expect(general?.archived ?? false).toBe(false);
   });
 
   it("never exports private channels, DMs, or shadow-banned authors' messages", async () => {

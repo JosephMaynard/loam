@@ -35,6 +35,26 @@ function PencilIcon() {
   );
 }
 
+/** Small flag glyph for the "report message" icon button — same convention as `PencilIcon`. */
+function FlagIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="16"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="16"
+    >
+      <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+      <line x1="4" x2="4" y1="22" y2="15" />
+    </svg>
+  );
+}
+
 /** Small trash-can glyph for the "delete message" icon button — same convention as `PencilIcon`. */
 function TrashIcon() {
   return (
@@ -65,6 +85,8 @@ interface MessageItemProps {
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onOpenThread?: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
+  /** Open the report dialog for this message (omitted → no report affordance, e.g. for the current user's own). */
+  onReport?: (message: Message) => void;
   reactions: ReactionSummary[];
   replyCount?: number;
   usersById: Map<string, User>;
@@ -89,6 +111,7 @@ export function MessageItem({
   onEdit,
   onOpenThread,
   onReact,
+  onReport,
   reactions,
   replyCount = 0,
   usersById,
@@ -102,7 +125,9 @@ export function MessageItem({
     ephemeral: true,
   };
   const isMine = message.authorId === currentUser.id;
-  const canEdit = isMine && !message.meta?.streaming && message.type !== "reaction";
+  // A moderator-removed message is an honest tombstone: shown, but with no body/attachments/actions.
+  const removed = message.meta?.removedByModerator === true;
+  const canEdit = isMine && !removed && !message.meta?.streaming && message.type !== "reaction";
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
@@ -113,16 +138,29 @@ export function MessageItem({
   // narrows the union so this is safe for every message type.
   const hasAttachments = "attachments" in message && !!message.attachments?.length;
   const jumbo = !editing && !hasAttachments && isJumboEmoji(bodyText);
+  // @mentions-lite: highlight a message that names the current user by their (deterministic, near-unique)
+  // display name. Client-side only — a visual/attention cue, not a stored/notified mention. A trailing
+  // boundary (no following word char or dot) stops `@blue.iron.fox` matching someone else's `@...foxes`.
+  const mentionsYou =
+    !isMine &&
+    !removed &&
+    message.type !== "reaction" &&
+    !!currentUser.displayName &&
+    new RegExp(`@${currentUser.displayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w.])`, "i").test(bodyText);
   const messageClassName = [
     "message",
     isMine ? "mine" : undefined,
     message.meta?.streaming ? "streaming" : undefined,
     jumbo ? "jumbo" : undefined,
+    mentionsYou ? "mentions-you" : undefined,
   ]
     .filter(Boolean)
     .join(" ");
-  const canDelete = (isMine || currentUser.isAdmin) && !message.meta?.streaming;
-  const hasIconActions = (canEdit && !editing) || canDelete;
+  const canDelete = (isMine || currentUser.isAdmin) && !removed && !message.meta?.streaming;
+  // Report anyone else's non-removed, non-streaming message (never your own; reactions carry no content).
+  const canReport =
+    !!onReport && !isMine && !removed && !message.meta?.streaming && message.type !== "reaction";
+  const hasIconActions = (canEdit && !editing) || canDelete || canReport;
 
   function startEditing(): void {
     setDraft(bodyFor(message));
@@ -150,7 +188,14 @@ export function MessageItem({
           {message.editedAt ? <span className="edited-tag">{t("message.editedTag")}</span> : null}
         </div>
         <div className="message-bubble">
-          {editing ? (
+          {removed ? (
+            <div className="message-removed" dir="auto">
+              <em>{t("message.removedByModerator")}</em>
+              {message.meta?.removalReason ? (
+                <span className="message-removed-reason"> — {message.meta.removalReason}</span>
+              ) : null}
+            </div>
+          ) : editing ? (
             <form
               className="message-edit"
               onSubmit={(event) => {
@@ -190,14 +235,14 @@ export function MessageItem({
               }}
             />
           )}
-          {message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (
+          {!removed && message.type !== "reaction" && message.type !== "sealed" && message.attachments?.length ? (
             <div className="message-attachments">
               {message.attachments.map((attachment) => (
                 <AttachmentImage attachment={attachment} alt={t("message.attachedImageAlt")} key={attachment.id} />
               ))}
             </div>
           ) : null}
-          {message.type !== "reaction" && message.type !== "sealed" && message.location ? (
+          {!removed && message.type !== "reaction" && message.type !== "sealed" && message.location ? (
             <LocationCard location={message.location} />
           ) : null}
         </div>
@@ -252,6 +297,17 @@ export function MessageItem({
                   type="button"
                 >
                   <TrashIcon />
+                </button>
+              ) : null}
+              {canReport ? (
+                <button
+                  aria-label={t("message.report")}
+                  className="message-report"
+                  onClick={() => onReport?.(message)}
+                  title={t("message.report")}
+                  type="button"
+                >
+                  <FlagIcon />
                 </button>
               ) : null}
             </div>

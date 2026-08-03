@@ -1,19 +1,28 @@
+import { SyncPeerSchema, type SyncPeer } from "@loam/schema";
 import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
 
-/** Compact add-a-peer form: URL (required, http/https) + optional label. */
+/** Compact add-a-peer form: URL (required, http/https) + optional label + optional pinned transport key. */
 export function AddSyncPeerControl({
   disabled,
   onAdd,
 }: {
   disabled: boolean;
-  onAdd: (peer: { url: string; label?: string }) => void;
+  onAdd: (peer: SyncPeer) => void;
 }) {
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
+  const [transportKey, setTransportKey] = useState("");
   const trimmedUrl = url.trim().replace(/\/+$/, "");
-  const validUrl = /^https?:\/\/.+/.test(trimmedUrl);
+  const trimmedKey = transportKey.trim();
+  // Validate the WHOLE candidate peer against the shared schema (URL protocol, key charset+length, label
+  // bound) — the same shape the server stores — instead of hand-rolled partial checks.
+  const candidate = SyncPeerSchema.safeParse({
+    url: trimmedUrl,
+    ...(label.trim() ? { label: label.trim() } : {}),
+    ...(trimmedKey ? { transportKey: trimmedKey } : {}),
+  });
 
   return (
     <div className="sync-peer-add">
@@ -36,12 +45,25 @@ export function AddSyncPeerControl({
           value={label}
         />
       </label>
+      <label>
+        {t("admin.peerKey")}
+        <input
+          disabled={disabled}
+          onInput={(event) => setTransportKey(event.currentTarget.value)}
+          placeholder={t("admin.peerKeyPlaceholder")}
+          value={transportKey}
+        />
+      </label>
       <button
-        disabled={disabled || !validUrl}
+        disabled={disabled || !candidate.success}
         onClick={() => {
-          onAdd({ url: trimmedUrl, ...(label.trim() ? { label: label.trim() } : {}) });
+          if (!candidate.success) {
+            return;
+          }
+          onAdd(candidate.data);
           setUrl("");
           setLabel("");
+          setTransportKey("");
         }}
         type="button"
       >

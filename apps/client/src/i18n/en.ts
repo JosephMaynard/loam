@@ -573,6 +573,56 @@ export const en = {
   "error.edit_own_only": "You can only edit your own messages",
   "error.deny_forbidden": "You cannot deny an admin or yourself",
   "error.moderate_forbidden": "You cannot moderate an admin or yourself",
+
+  // Moderation report loop (docs/26). Added en-first; other locales fall back to en until the batched
+  // translation pass fills them (see the `Translation` type note).
+  "message.report": "Report",
+  "message.removedByModerator": "Removed by a moderator",
+  "report.messageTitle": "Report this message",
+  "report.userTitle": "Report this user",
+  "report.reasonLabel": "Reason",
+  "report.reason.spam": "Spam",
+  "report.reason.harassment": "Harassment",
+  "report.reason.hateful_or_violent": "Hateful or violent",
+  "report.reason.sexual": "Sexual content",
+  "report.reason.illegal": "Illegal",
+  "report.reason.other": "Other",
+  "report.noteLabel": "Details (optional)",
+  "report.notePlaceholder": "Anything a moderator should know",
+  "report.submit": "Send report",
+  "report.submitting": "Sending…",
+  "report.sent": "Report sent to the moderators",
+  "report.error": "Could not send the report",
+  "report.cancel": "Cancel",
+  "composer.timedOut": "You're timed out by a moderator and can't post right now.",
+  "moderation.timeout": "Time out (1h)",
+  "moderation.timeoutClear": "Clear timeout",
+  "moderation.timedOutBadge": "Timed out",
+  "moderation.reports.title": "Reports",
+  "moderation.reports.empty": "No open reports.",
+  "moderation.reports.reporter": "Reported by {name}",
+  "moderation.reports.reasonLine": "Reason: {reason}",
+  "moderation.reports.targetMessage": "Reported message",
+  "moderation.reports.targetUser": "Reported user",
+  "moderation.reports.dismiss": "Dismiss",
+  "moderation.reports.removeMessage": "Remove message",
+  "moderation.reports.timeoutUser": "Time out author",
+  "moderation.reports.banUser": "Ban author",
+  "moderation.reports.escalate": "Escalate",
+  "moderation.reports.loadError": "Could not load reports",
+
+  // Channel pinning (P13) + per-channel retention (P12)
+  "admin.pin": "Pin",
+  "admin.unpin": "Unpin",
+  "admin.metaPinned": "Pinned",
+  "admin.channelRetentionLabel": "Auto-delete",
+  "admin.retention.default": "Node default",
+  "admin.retention.1h": "After 1 hour",
+  "admin.retention.1d": "After 1 day",
+  "admin.retention.7d": "After 7 days",
+  "admin.peerKey": "Pinned key (optional)",
+  "admin.peerKeyPlaceholder": "Peer's transport key (from its join QR)",
+  "admin.peerKeyPinned": "key pinned",
 };
 
 /**
@@ -584,3 +634,11 @@ export type Catalog = {
   [K in keyof typeof en]: (typeof en)[K] extends string ? string : PluralMessage;
 };
 export type CatalogKey = keyof Catalog;
+
+/**
+ * A non-`en` catalog. Deliberately `Partial`: a translation MAY omit keys it hasn't localized yet, and
+ * `t()` falls back to the authoritative `en` string at runtime (see `index.ts`). This lets new UI ship in
+ * English first with the translations following in a batched pass, rather than blocking every feature on 15
+ * hand-translations. The i18n test still forbids STRAY keys and checks token/plural parity for keys present.
+ */
+export type Translation = Partial<Catalog>;

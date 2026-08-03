@@ -1409,6 +1409,95 @@ a {
   padding: 12px;
 }
 
+/* Moderation report queue (docs/26) */
+.report-queue {
+  display: grid;
+  gap: 10px;
+  margin-block-end: 16px;
+}
+
+.report-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.report-row {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.report-meta {
+  display: grid;
+  gap: 2px;
+  font-size: 0.9rem;
+}
+
+.report-note {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--c-surface-2, rgba(127, 127, 127, 0.12));
+  white-space: pre-wrap;
+}
+
+.report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Report dialog (reuses .invite-modal shell) */
+.report-dialog form {
+  display: grid;
+  gap: 12px;
+}
+
+.report-dialog label {
+  display: grid;
+  gap: 4px;
+}
+
+.report-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.report-dialog-sent {
+  margin: 8px 0 16px;
+}
+
+/* Honest tombstone for a moderator-removed message + the composer's timeout notice */
+.message-removed {
+  color: var(--c-text-2);
+  font-size: 0.9rem;
+}
+
+.composer-disabled {
+  padding: 12px 14px;
+  color: var(--c-text-2);
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+/* @mentions-lite: attention cue when a message names you (logical inline-start edge so it's RTL-correct) */
+.message.mentions-you .message-bubble {
+  border-inline-start: 3px solid var(--c-accent, #4f8cff);
+}
+
+.admin-channel-ttl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
 .moderation-identity {
   display: flex;
   flex-wrap: wrap;

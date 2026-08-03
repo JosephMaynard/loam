@@ -31,6 +31,8 @@ function SendIcon() {
 interface MessageComposerProps {
   /** When true, the composer offers the "share location" toggle (docs/10; off by default). */
   allowLocationSharing?: boolean;
+  /** When set, the composer is replaced by this notice and no message can be sent (e.g. a mod timeout). */
+  disabledReason?: string;
   label: string;
   onSend: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
   /** When present, the composer offers image attachments (resized on-device before upload). */
@@ -69,7 +71,7 @@ function buildDraftLocation(label: string, latText: string, lngText: string): Me
   };
 }
 
-export function MessageComposer({ allowLocationSharing, label, onSend, onUploadAttachment, placeholder }: MessageComposerProps) {
+export function MessageComposer({ allowLocationSharing, disabledReason, label, onSend, onUploadAttachment, placeholder }: MessageComposerProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState<PendingAttachment[]>([]);
@@ -203,6 +205,16 @@ export function MessageComposer({ allowLocationSharing, label, onSend, onUploadA
     } finally {
       setSending(false);
     }
+  }
+
+  // A moderator timeout (or any caller-supplied reason) replaces the whole composer with a notice, so a
+  // blocked user can't even attempt to send (the server also rejects, but this is the honest UI signal).
+  if (disabledReason) {
+    return (
+      <div className="composer composer-disabled" role="status">
+        {disabledReason}
+      </div>
+    );
   }
 
   return (

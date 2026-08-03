@@ -48,6 +48,12 @@ export const UserSchema = z.object({
   banned: z.boolean().optional(),
   /** Can still post, but their new messages are only broadcast back to themselves (shadow ban). */
   shadowBanned: z.boolean().optional(),
+  /**
+   * Temporarily barred from posting until this timestamp (a moderator "timeout"). Unlike a ban it
+   * auto-expires and keeps the session/identity; the client disables the composer while it is active.
+   * Absent/past = no active timeout. Enforced server-side in `createMessage()`.
+   */
+  timeoutUntil: TimestampSchema.optional(),
   /** Awaiting a greeter/admin's approval to participate (when the node's joinPolicy is "approval"). */
   pending: z.boolean().optional(),
   /**
@@ -198,7 +204,21 @@ export const ChannelSchema = z.object({
   allowReplies: z.boolean(),
   discoverable: z.boolean(),
   createdAt: TimestampSchema,
+  /**
+   * When the channel's metadata (name/description/archived/posting policy/etc.) last changed. Absent on
+   * channels created before this field existed; consumers fall back to `createdAt`. Node-to-node sync uses
+   * it for newer-wins re-sync of channels this node IMPORTED from a peer (C1) — never local/default ones.
+   */
+  updatedAt: TimestampSchema.optional(),
   archived: z.boolean().optional(),
+  /** Pinned channels sort to the top of the client's channel list. Owner/admin toggled. */
+  pinned: z.boolean().optional(),
+  /**
+   * Per-channel message retention override (ms). When set, messages in this channel expire after this
+   * long instead of the node-wide `retention.messageTtlMs`; `null`/absent = use the node default. Lets an
+   * operator make one channel more (or less) ephemeral than the rest. Enforced by the retention reaper.
+   */
+  messageTtlMs: z.number().int().positive().nullable().optional(),
   /**
    * Private-channel roster: the user ids who may see, read, and post in the channel (the owner is
    * always treated as a member even if absent here). Present only on private channels — the server
@@ -245,6 +265,8 @@ export const ChannelUpdateRequestSchema = z
     allowPosting: ChannelPostingPolicySchema,
     allowReplies: z.boolean(),
     archived: z.boolean(),
+    pinned: z.boolean(),
+    messageTtlMs: z.number().int().positive().nullable(),
   })
   .partial();
 export type ChannelUpdateRequest = z.infer<typeof ChannelUpdateRequestSchema>;
@@ -560,11 +582,88 @@ export const ModerationUpdateRequestSchema = z
   .object({
     banned: z.boolean().optional(),
     shadowBanned: z.boolean().optional(),
+    /**
+     * A moderator timeout: a future timestamp temporarily bars posting; `null` clears an active timeout.
+     * Omitted = leave the timeout unchanged.
+     */
+    timeoutUntil: TimestampSchema.nullable().optional(),
   })
-  .refine((value) => value.banned !== undefined || value.shadowBanned !== undefined, {
-    message: "Provide at least one of banned or shadowBanned",
-  });
+  .refine(
+    (value) =>
+      value.banned !== undefined || value.shadowBanned !== undefined || value.timeoutUntil !== undefined,
+    { message: "Provide at least one of banned, shadowBanned, or timeoutUntil" },
+  );
 export type ModerationUpdateRequest = z.infer<typeof ModerationUpdateRequestSchema>;
+
+/**
+ * Member abuse reports (docs/26 idea 3). A report is a private signal to moderators — never broadcast,
+ * never in the message stream, and the reporter's identity never leaves the moderation queue.
+ */
+export const ReportReasonSchema = z.enum([
+  "spam",
+  "harassment",
+  "hateful_or_violent",
+  "sexual",
+  "illegal",
+  "other",
+]);
+export type ReportReason = z.infer<typeof ReportReasonSchema>;
+
+export const ReportTargetTypeSchema = z.enum(["message", "user"]);
+export type ReportTargetType = z.infer<typeof ReportTargetTypeSchema>;
+
+export const ReportStatusSchema = z.enum(["open", "resolved"]);
+export type ReportStatus = z.infer<typeof ReportStatusSchema>;
+
+/** The action a moderator recorded when resolving a report (for the audit trail shown in the queue). */
+export const ReportResolutionSchema = z.enum([
+  "dismissed",
+  "message_removed",
+  "user_timed_out",
+  "user_banned",
+  "escalated",
+]);
+export type ReportResolution = z.infer<typeof ReportResolutionSchema>;
+
+/** What a member POSTs to file a report. `note` is an optional free-text detail, bounded. */
+export const ReportCreateRequestSchema = z.object({
+  targetType: ReportTargetTypeSchema,
+  targetId: IdSchema,
+  reason: ReportReasonSchema,
+  note: z.string().max(1000).optional(),
+});
+export type ReportCreateRequest = z.infer<typeof ReportCreateRequestSchema>;
+
+/** A stored report as returned to moderators (the reporter id is mod-only and never egresses further). */
+export const ReportSchema = z.object({
+  id: IdSchema,
+  targetType: ReportTargetTypeSchema,
+  targetId: IdSchema,
+  reporterUserId: IdSchema,
+  reason: ReportReasonSchema,
+  note: z.string().max(1000).optional(),
+  createdAt: TimestampSchema,
+  status: ReportStatusSchema,
+  resolution: ReportResolutionSchema.optional(),
+  /** A moderator's private note recorded at resolution — kept separate from the reporter's `note`. */
+  resolutionNote: z.string().max(1000).optional(),
+  resolvedByUserId: IdSchema.optional(),
+  resolvedAt: TimestampSchema.optional(),
+});
+export type Report = z.infer<typeof ReportSchema>;
+
+/** How a moderator resolves a report: record the action taken (and an optional private note). */
+export const ReportResolveRequestSchema = z.object({
+  resolution: ReportResolutionSchema,
+  note: z.string().max(1000).optional(),
+});
+export type ReportResolveRequest = z.infer<typeof ReportResolveRequestSchema>;
+
+/** Moderator removal of a message (the honest-tombstone action): an optional sanitized public reason. */
+export const MessageRemoveRequestSchema = z.object({
+  reason: z.string().max(280).optional(),
+});
+export type MessageRemoveRequest = z.infer<typeof MessageRemoveRequestSchema>;
 
 export const AvatarImageUploadRequestSchema = z.object({
   mimeType: AvatarImageMimeTypeSchema,
@@ -611,6 +710,13 @@ export const MessageMetaSchema = z.object({
   model: z.string().min(1).optional(),
   markdown: z.boolean().optional(),
   streaming: z.boolean().optional(),
+  /**
+   * Set when a moderator removed this message (an "honest tombstone" — the body is blanked but the record
+   * stays, so readers see "removed by a moderator" + an optional sanitized reason instead of a silent hole).
+   * Distinct from an author deleting their own message (a hard delete) and from retention/kill-switch wipes.
+   */
+  removedByModerator: z.boolean().optional(),
+  removalReason: z.string().max(280).optional(),
 });
 export type MessageMeta = z.infer<typeof MessageMetaSchema>;
 

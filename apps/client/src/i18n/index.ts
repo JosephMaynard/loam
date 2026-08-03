@@ -6,7 +6,7 @@
  */
 import { LocaleSchema, type Locale } from "@loam/schema";
 
-import { en, type Catalog, type CatalogKey, type PluralMessage } from "./en";
+import { en, type CatalogKey, type PluralMessage, type Translation } from "./en";
 
 /**
  * Lazy catalog loaders. Only `en` is bundled statically (the guaranteed fallback + the `Catalog`
@@ -15,7 +15,7 @@ import { en, type Catalog, type CatalogKey, type PluralMessage } from "./en";
  * therefore costs the base bundle almost nothing. Each catalog file exports a const named for its
  * locale (`export const es = …`), so the loader picks that named export off the module.
  */
-const LOADERS: Record<Exclude<Locale, "en">, () => Promise<Catalog>> = {
+const LOADERS: Record<Exclude<Locale, "en">, () => Promise<Translation>> = {
   es: () => import("./es").then((m) => m.es),
   fr: () => import("./fr").then((m) => m.fr),
   ar: () => import("./ar").then((m) => m.ar),
@@ -33,7 +33,7 @@ const LOADERS: Record<Exclude<Locale, "en">, () => Promise<Catalog>> = {
 };
 
 /** Catalogs resolved so far. `en` is always present; others populate as `loadLocale` completes. */
-const loaded: Partial<Record<Locale, Catalog>> = { en };
+const loaded: Partial<Record<Locale, Translation>> = { en };
 
 /**
  * Fetch (once) the catalog for a locale, so `t()` can render it. `en` and already-loaded locales

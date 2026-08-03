@@ -42,9 +42,13 @@ import {
   MeshIdentityCardSchema,
   MeshInboundRequestSchema,
   MeshSendRequestSchema,
+  MessageRemoveRequestSchema,
   MessageSchema,
   ModerationUpdateRequestSchema,
   PanicRequestSchema,
+  ReportCreateRequestSchema,
+  ReportResolveRequestSchema,
+  ReportSchema,
   RolesUpdateRequestSchema,
   securityProfilePreset,
   SyncAttachmentRequestSchema,
@@ -67,6 +71,7 @@ import {
   type MessageCreateRequest,
   type MeshContact,
   type MeshIdentityCard,
+  type Report,
   type SealedMessage,
   type NetworkConfig,
   type OllamaConfig,
@@ -1254,6 +1259,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const attachmentPendingGraceMs = 15 * 60_000;
   // Message ids deliberately deleted on this node — node-to-node sync never re-imports these.
   const tombstones = new Set<string>();
+  // Channel ids IMPORTED from a sync peer (C1 provenance) — only these are eligible for peer-driven
+  // metadata re-sync, so a locally-created or default channel can never be clobbered. Loaded at boot.
+  const syncedChannelIds = new Set<string>();
   // Per-peer sync bookkeeping for the admin UI (RAM-only).
   type PeerSyncStatus = {
     lastAttemptAt?: number;
@@ -3025,6 +3033,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Why a user may not POST right now even though they can still read: an active moderator timeout
+   * (docs/26). Returns a user-facing message until `timeoutUntil` passes, else undefined. Unlike
+   * `participationError`, this gates posting only — a timed-out member keeps reading the channel, and the
+   * timeout auto-expires (a past `timeoutUntil` is simply not active). The client shows a composer countdown.
+   */
+  function timeoutError(user: User): string | undefined {
+    if (user.timeoutUntil !== undefined && user.timeoutUntil > Date.now()) {
+      return "You are timed out by a moderator and cannot post right now";
+    }
+    return undefined;
+  }
+
+  /**
    * Apply moderation / role state to a user (roles, banned, shadowBanned, pending), re-validating
    * the whole record against the schema, persisting, then broadcasting `userUpserted`. Mirrors
    * `applyUserUpdate`: persist first, then mutate the live object and broadcast, so a failed write
@@ -3033,10 +3054,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function applyUserModeration(
     user: User,
-    changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending">>,
+    changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending" | "timeoutUntil">>,
   ): User {
     const next = UserSchema.parse({ ...user, ...changes });
     store.upsertUser(next);
+    // Clearing works without deleting keys: a change like `timeoutUntil: undefined` is kept by Zod as an
+    // undefined-valued key, Object.assign copies it onto the live record (so `isTimedOut` reads false), and
+    // JSON.stringify omits it from what's persisted/broadcast.
     Object.assign(user, next);
     broadcast({ type: "userUpserted", user });
     return user;
@@ -3143,8 +3167,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowPosting: update.allowPosting ?? channel.allowPosting,
       allowReplies: update.allowReplies ?? channel.allowReplies,
       archived: update.archived === undefined ? channel.archived : update.archived,
+      pinned: update.pinned === undefined ? channel.pinned : update.pinned,
+      // `null` clears the per-channel TTL (back to the node default); a number sets it; omitted leaves it.
+      messageTtlMs:
+        update.messageTtlMs === undefined ? channel.messageTtlMs : (update.messageTtlMs ?? undefined),
+      // Stamp the metadata-change time so a peer that IMPORTED this channel can re-sync the rename/archive
+      // newer-wins (C1). Only ever applied to channels the peer marked as synced-origin (see syncWithPeer).
+      updatedAt: Date.now(),
     });
     store.upsertChannel(next);
+    // A cleared `messageTtlMs` (null → undefined) is kept by Zod as an undefined-valued key; Object.assign
+    // copies it onto the live record (so `ttlForMessage` falls back to the node default) and JSON.stringify
+    // omits it on persist/broadcast — no explicit key-delete needed.
     Object.assign(channel, next);
     broadcast({ type: "channelUpserted", channel });
     return channel;
@@ -3172,6 +3206,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const clone = { ...user };
     delete clone.shadowBanned;
     delete clone.roles;
+    // A moderator timeout is moderation metadata, like shadowBanned/banned: don't broadcast "X is muted
+    // until T" to every peer. The subject still learns their own via rolesVisibleUser (so the composer
+    // disables), and moderators see it there too — this only strips it from the fully-public record.
+    delete clone.timeoutUntil;
     return clone;
   }
 
@@ -3615,6 +3653,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (authorAccessError) {
       return { error: authorAccessError, forbidden: true };
+    }
+
+    // A moderator timeout blocks posting (but not reading) until it expires — the bot has none.
+    const authorTimeoutError = timeoutError(author);
+
+    if (authorTimeoutError) {
+      return { error: authorTimeoutError, forbidden: true };
     }
 
     if (
@@ -4081,6 +4126,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     for (const id of store.loadTombstones()) {
       tombstones.add(id);
+    }
+
+    syncedChannelIds.clear();
+
+    for (const id of store.loadSyncedChannelIds()) {
+      syncedChannelIds.add(id);
     }
 
     transportIdentity = undefined;
@@ -4692,14 +4743,35 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     reapExpiredSealed();
     pruneTombstonesHorizon();
 
-    const ttl = appConfig.retention.messageTtlMs;
+    const globalTtl = appConfig.retention.messageTtlMs;
+    // A channel may override the node default with its own `messageTtlMs` (P12). Fast-path out only when
+    // there is neither a global TTL nor any per-channel override, so a channel TTL works even with the
+    // node default off.
+    const anyChannelTtl = data.channels.some((channel) => channel.messageTtlMs);
 
-    if (!ttl) {
+    if (!globalTtl && !anyChannelTtl) {
       return;
     }
 
-    const cutoff = Date.now() - ttl;
-    const expired = data.messages.filter((message) => message.createdAt < cutoff && !message.meta?.streaming);
+    const now = Date.now();
+    // Index channels once per cycle so the per-message TTL lookup is O(1), not an O(channels) find each.
+    const channelsById = new Map(data.channels.map((channel) => [channel.id, channel]));
+    /** The retention TTL that applies to a message: its channel's override if set, else the node default. */
+    const ttlForMessage = (message: Message): number | undefined => {
+      const channelId =
+        message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined;
+      const channelTtl = channelId ? channelsById.get(channelId)?.messageTtlMs : undefined;
+      // `|| undefined` (not `??`) so a zero/NaN global TTL is treated as OFF, never as "expire everything
+      // now" — a 0 would make `createdAt < now - 0` true for every message in a non-TTL channel.
+      return channelTtl ?? (globalTtl || undefined);
+    };
+    const expired = data.messages.filter((message) => {
+      if (message.meta?.streaming) {
+        return false;
+      }
+      const ttl = ttlForMessage(message);
+      return ttl !== undefined && message.createdAt < now - ttl;
+    });
 
     if (!expired.length) {
       return;
@@ -4876,7 +4948,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   /** What this node advertises to pulling peers (see SyncDigestSchema). */
   function buildSyncDigest(): SyncDigest {
     return {
-      channels: data.channels.filter((channel) => channel.visibility === "public" && !channel.archived),
+      // Public channels INCLUDING archived ones (C1) — a peer that imported this channel must see the
+      // archived flag to converge. Archived is public metadata (no members leak); their messages are still
+      // withheld by `isSyncableMessage` below, so this carries channel metadata only. Strip the LOCAL-only
+      // `pinned`/`messageTtlMs` (a peer's retention/pin policy is its own business; import ignores them too).
+      channels: data.channels
+        .filter((channel) => channel.visibility === "public")
+        .map((channel) => {
+          const exported = { ...channel };
+          delete exported.pinned;
+          delete exported.messageTtlMs;
+          return exported;
+        }),
       messages: data.messages
         .filter((message) => message.type !== "sealed" && isSyncableMessage(message))
         .map((message) => ({
@@ -5823,20 +5906,76 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       for (const channel of digest.channels) {
-        // Create-only import: a channel we already have (by id) is left untouched. Channel metadata does NOT
-        // re-sync across nodes (C1, deferred) — ids are human SLUGS, so two nodes' independently-created
-        // same-named channels (notably the default `general`/`announcements`) collide on id; a newer-wins
-        // merge there would let one node's admin rename/archive clobber a peer's distinct channel. The correct
-        // fix needs per-channel provenance (only update channels actually imported from that peer) + peer
-        // timestamp clamping; until then this stays create-only, which is safe. See docs/11 / docs/25 (C1).
-        if (channel.visibility !== "public" || ensureChannel(channel.id)) {
+        if (channel.visibility !== "public") {
           continue;
         }
 
-        const created = ChannelSchema.parse({ ...channel, memberUserIds: undefined });
-        store.upsertChannel(created);
-        data.channels.push(created);
-        broadcast({ type: "channelUpserted", channel: created });
+        const existing = ensureChannel(channel.id);
+
+        if (!existing) {
+          // Never seen it: import it and RECORD it as synced-origin (so its later metadata edits can
+          // re-sync — C1). Skip a fresh channel that arrives already-archived: no messages sync for an
+          // archived channel, so we'd only materialise an empty dead channel.
+          if (channel.archived) {
+            continue;
+          }
+          // Strip the peer's LOCAL-only choices: private roster (never public here anyway), pin, and the
+          // per-channel retention TTL — retention is a local policy, so an importer must not inherit the
+          // source's TTL and silently expire its own copy.
+          const created = ChannelSchema.parse({
+            ...channel,
+            // Clamp the imported stamp to now, exactly like the merge path — otherwise a future/
+            // clock-skewed peer stamp would freeze the channel on import and block every later correction.
+            updatedAt: Math.min(channel.updatedAt ?? channel.createdAt, Date.now()),
+            // Never trust the peer's `ownerUserId` — it could name a LOCAL authoritative user (making the
+            // imported channel appear owned by this node's admin) or a foreign id. Imported channels are
+            // ownerless here; the local admin manages them via /api/admin/channels.
+            ownerUserId: undefined,
+            memberUserIds: undefined,
+            pinned: undefined,
+            messageTtlMs: undefined,
+          });
+          store.upsertChannel(created);
+          store.markChannelSynced(created.id);
+          syncedChannelIds.add(created.id);
+          data.channels.push(created);
+          broadcast({ type: "channelUpserted", channel: created });
+          continue;
+        }
+
+        // C1 provenance gate: only re-sync metadata for a channel THIS node imported from a peer. A
+        // locally-created channel — including the fixed-id default `general`/`announcements` every node
+        // ships — is never in `syncedChannelIds`, so a same-slug collision on a peer can never clobber it.
+        // (A private local channel colliding with a peer's public id is also excluded — never public here.)
+        if (existing.visibility !== "public" || !syncedChannelIds.has(existing.id)) {
+          continue;
+        }
+
+        // Newer-wins on the metadata-change stamp, with the peer stamp CLAMPED to now so a future/
+        // clock-skewed peer timestamp (off-grid nodes have no NTP) can't win permanently and lock out a
+        // legitimate local correction. Only a strictly-newer peer copy applies.
+        const peerStamp = Math.min(channel.updatedAt ?? channel.createdAt, Date.now());
+        const localStamp = existing.updatedAt ?? existing.createdAt;
+
+        if (peerStamp <= localStamp) {
+          continue;
+        }
+
+        // Merge ONLY the public metadata a peer is authoritative-enough to carry; never let sync rewrite
+        // local ownership, visibility, membership, or creation time.
+        const merged = ChannelSchema.parse({
+          ...existing,
+          name: channel.name,
+          description: channel.description,
+          allowPosting: channel.allowPosting,
+          allowReplies: channel.allowReplies,
+          discoverable: channel.discoverable,
+          archived: channel.archived,
+          updatedAt: peerStamp,
+        });
+        store.upsertChannel(merged);
+        Object.assign(existing, merged);
+        broadcast({ type: "channelUpserted", channel: existing });
       }
 
       const localById = new Map(data.messages.map((message) => [message.id, message]));
@@ -6725,7 +6864,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("You cannot moderate an admin or yourself"));
     }
 
-    const changes: Partial<Pick<User, "banned" | "shadowBanned">> = {};
+    const changes: Partial<Pick<User, "banned" | "shadowBanned" | "timeoutUntil">> = {};
 
     if (body.data.banned !== undefined) {
       changes.banned = body.data.banned;
@@ -6733,6 +6872,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (body.data.shadowBanned !== undefined) {
       changes.shadowBanned = body.data.shadowBanned;
+    }
+
+    if (body.data.timeoutUntil !== undefined) {
+      // `null` lifts the timeout (cleared to undefined); a number sets it. A past value is harmless (the
+      // posting gate treats only a future `timeoutUntil` as active).
+      changes.timeoutUntil = body.data.timeoutUntil ?? undefined;
     }
 
     // Broadcast the userUpserted first (so the target's own client learns it is banned), then tear
@@ -6757,6 +6902,171 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     return data.users.filter((user) => user.type === "human");
   });
+
+  // File a member abuse report (docs/26). Private by design: never broadcast, never in the message stream,
+  // and the reporter id never leaves the moderator queue below. Any participating member may report a
+  // message they can SEE or any human user. Rate-limited to blunt report spam.
+  server.post(
+    "/api/reports",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const body = ReportCreateRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid report"));
+      }
+
+      const { targetType, targetId, reason, note } = body.data;
+
+      if (targetType === "user") {
+        const target = data.users.find((candidate) => candidate.id === targetId);
+
+        if (!target || target.type !== "human") {
+          return reply.code(404).send(errorBody("Report target does not exist"));
+        }
+      } else {
+        const target = data.messages.find((candidate) => candidate.id === targetId);
+        // The reporter must be able to SEE the message: a restricted audience (DM / private channel) must
+        // include them; a public message (undefined audience) is reportable by anyone. 404 identically for
+        // "no such message" and "not visible to you" so report can't be used to probe for hidden content.
+        const audience = target ? messageAudienceUserIds(target) : undefined;
+
+        if (!target || (audience !== undefined && !audience.has(currentUser.id))) {
+          return reply.code(404).send(errorBody("Report target does not exist"));
+        }
+      }
+
+      const report = ReportSchema.parse({
+        id: newMessageId("rpt"),
+        targetType,
+        targetId,
+        reporterUserId: currentUser.id,
+        reason,
+        ...(note ? { note } : {}),
+        createdAt: Date.now(),
+        status: "open",
+      });
+      store.upsertReport(report);
+      // Intentionally no broadcast and no reporter detail in the response — reports are moderator-private.
+      return reply.code(201).send({ ok: true });
+    },
+  );
+
+  // The open-report queue for moderators/admins, newest first. Reporter ids are included here (mod-only) —
+  // this endpoint is the ONLY place a report or its reporter is ever exposed.
+  server.get("/api/moderation/reports", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+    if (!canModerate(currentUser)) {
+      return reply.code(403).send(errorBody("Moderator access required"));
+    }
+
+    return store.loadOpenReports();
+  });
+
+  // Resolve a report: record the action taken and close it. The enforcement itself (remove message /
+  // timeout / ban) is done via its own endpoint; this closes the loop so the queue clears. Mods/admins.
+  server.post<{ Params: { reportId: string } }>(
+    "/api/moderation/reports/:reportId/resolve",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+      if (!canModerate(currentUser)) {
+        return reply.code(403).send(errorBody("Moderator access required"));
+      }
+
+      const body = ReportResolveRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid resolution"));
+      }
+
+      const existing = store.getReport(request.params.reportId);
+
+      if (!existing) {
+        return reply.code(404).send(errorBody("Report does not exist"));
+      }
+
+      const resolved: Report = ReportSchema.parse({
+        ...existing,
+        status: "resolved",
+        resolution: body.data.resolution,
+        // The moderator's note goes in `resolutionNote` — never overwrite the reporter's original `note`.
+        ...(body.data.note ? { resolutionNote: body.data.note } : {}),
+        resolvedByUserId: currentUser.id,
+        resolvedAt: Date.now(),
+      });
+      store.upsertReport(resolved);
+      return resolved;
+    },
+  );
+
+  // Moderator removal of a message — the "honest tombstone": blank the body + attachments and mark it
+  // removed with an optional sanitized public reason, rather than a silent delete. Broadcast so readers
+  // see "removed by a moderator" (a private-channel tombstone still reaches only its members). Mods/admins.
+  server.post<{ Params: { messageId: string } }>(
+    "/api/moderation/messages/:messageId/remove",
+    // Per-route rate limit: this handler touches the filesystem (deletes attachment files), and CodeQL
+    // (js/missing-rate-limiting) only credits the per-route config, not the global limiter.
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+      if (!canModerate(currentUser)) {
+        return reply.code(403).send(errorBody("Moderator access required"));
+      }
+
+      const body = MessageRemoveRequestSchema.safeParse(request.body ?? {});
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid removal request"));
+      }
+
+      const message = data.messages.find((candidate) => candidate.id === request.params.messageId);
+
+      if (!message || !("body" in message)) {
+        return reply.code(404).send(errorBody("Message does not exist"));
+      }
+
+      // Actually destroy the removed content's attachment files — blanking the record alone would leave
+      // the images fetchable by id from GET /api/attachments/:fileName, exactly the wrong outcome for
+      // removing abuse imagery (mirrors the author-delete path in deleteMessages). `message` is already
+      // narrowed to a body-bearing type (post/reply/dm) by the `"body" in message` guard above. Best-effort.
+      for (const attachment of message.attachments ?? []) {
+        rm(join(attachmentsDir, attachmentFileName(attachment)), { force: true }).catch((error: unknown) =>
+          server.log.warn(error),
+        );
+      }
+
+      const removed = MessageSchema.parse({
+        ...message,
+        body: "",
+        attachments: [],
+        // Drop a shared location too — the tombstone must carry no residual content on the wire.
+        location: undefined,
+        editedAt: Date.now(),
+        meta: {
+          ...message.meta,
+          removedByModerator: true,
+          ...(body.data.reason ? { removalReason: body.data.reason } : {}),
+          streaming: false,
+        },
+      });
+      store.updateMessage(removed);
+      // `removed.location` is `undefined`; Object.assign copies that onto the live record and JSON omits it
+      // on the wire, so no residual location egresses.
+      Object.assign(message, removed);
+      broadcast({ type: "messageUpdated", message });
+      return message;
+    },
+  );
 
   // Users awaiting approval under the `approval` join policy. Admins and greeters.
   server.get("/api/access/pending", async (request, reply) => {
