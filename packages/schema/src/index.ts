@@ -665,6 +665,17 @@ export const MessageRemoveRequestSchema = z.object({
 });
 export type MessageRemoveRequest = z.infer<typeof MessageRemoveRequestSchema>;
 
+/** Ephemeral "I'm typing" ping (P14): exactly one of a channel or a DM recipient. Never persisted. */
+export const TypingRequestSchema = z
+  .object({
+    channelId: IdSchema.optional(),
+    recipientUserId: IdSchema.optional(),
+  })
+  .refine((value) => (value.channelId === undefined) !== (value.recipientUserId === undefined), {
+    message: "Provide exactly one of channelId or recipientUserId",
+  });
+export type TypingRequest = z.infer<typeof TypingRequestSchema>;
+
 export const AvatarImageUploadRequestSchema = z.object({
   mimeType: AvatarImageMimeTypeSchema,
   data: z.string().min(1).max(256_000),

@@ -187,6 +187,20 @@ describe("parseSocketEvent", () => {
     expect(parseSocketEvent(frame({ type: "presence" }))).toBeUndefined();
   });
 
+  it("parses typing events (channel + DM) and rejects a missing userId", () => {
+    expect(parseSocketEvent(frame({ type: "typing", userId: "user.1", channelId: "general" }))).toEqual({
+      type: "typing",
+      userId: "user.1",
+      channelId: "general",
+    });
+    expect(parseSocketEvent(frame({ type: "typing", userId: "user.2", dmUserId: "user.9" }))).toEqual({
+      type: "typing",
+      userId: "user.2",
+      dmUserId: "user.9",
+    });
+    expect(parseSocketEvent(frame({ type: "typing", channelId: "general" }))).toBeUndefined();
+  });
+
   it("wraps LLM stream events", () => {
     expect(parseSocketEvent(frame({ type: "start", messageId: "llm_1" }))).toEqual({
       type: "stream",

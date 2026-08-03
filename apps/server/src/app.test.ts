@@ -5108,6 +5108,22 @@ describe("message search", () => {
   });
 });
 
+describe("typing indicator (P14)", () => {
+  it("accepts a channel typing ping (204), rejects an invalid body, and no-ops an inaccessible channel", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+    const typing = (payload: Record<string, unknown>) =>
+      app.server.inject({ method: "POST", url: "/api/typing", headers: { cookie: session.cookie }, payload });
+
+    expect((await typing({ channelId: "general" })).statusCode).toBe(204);
+    // Exactly one of channelId / recipientUserId — both (or neither) is a 400.
+    expect((await typing({ channelId: "general", recipientUserId: "user.1234" })).statusCode).toBe(400);
+    expect((await typing({})).statusCode).toBe(400);
+    // A channel the caller can't see is a silent no-op (still 204 — never leaks existence, never broadcasts).
+    expect((await typing({ channelId: "does-not-exist" })).statusCode).toBe(204);
+  });
+});
+
 describe("member reports + timeout + honest tombstone (docs/26)", () => {
   function setRoles(app: LoamApp, cookie: string, userId: string, roles: string[]): Promise<InjectResponse> {
     return app.server.inject({

@@ -1498,6 +1498,16 @@ a {
   font-size: 0.85rem;
 }
 
+/* Typing indicator (P14) */
+.typing-indicator {
+  margin: 0;
+  padding: 2px 12px;
+  min-height: 1.2em;
+  color: var(--c-text-2);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
 .moderation-identity {
   display: flex;
   flex-wrap: wrap;

@@ -623,6 +623,9 @@ export const en = {
   "admin.peerKey": "Pinned key (optional)",
   "admin.peerKeyPlaceholder": "Peer's transport key (from its join QR)",
   "admin.peerKeyPinned": "key pinned",
+  "typing.one": "{name} is typing…",
+  "typing.two": "{a} and {b} are typing…",
+  "typing.many": "Several people are typing…",
 };
 
 /**

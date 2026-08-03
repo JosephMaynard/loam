@@ -57,6 +57,7 @@ import {
   SyncMessagesRequestSchema,
   SyncMessagesResponseSchema,
   TransportHandshakeRequestSchema,
+  TypingRequestSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -173,6 +174,15 @@ type ClientEvent =
   | {
       type: "presence";
       onlineUserIds: string[];
+    }
+  | {
+      // Ephemeral "someone is composing" signal (P14). Never persisted. `channelId` set for channel typing;
+      // `dmUserId` (the OTHER participant) set for DM typing. Scoped to the conversation audience, minus
+      // the typist, by socketCanReceiveEvent.
+      type: "typing";
+      userId: string;
+      channelId?: string;
+      dmUserId?: string;
     }
   | {
       type: "configUpdated";
@@ -3505,6 +3515,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (event.type === "presence") {
       // Contains only visible users' ids; the banned/pending recipient gates above already ran.
       return true;
+    }
+
+    if (event.type === "typing") {
+      // Never echo the typist their own signal. Channel typing goes to anyone who can access the channel;
+      // DM typing goes only to the other participant.
+      if (userId === event.userId) {
+        return false;
+      }
+      if (event.channelId) {
+        const channel = ensureChannel(event.channelId);
+        return !!channel && canAccessChannel(channel, userId);
+      }
+      return userId === event.dmUserId;
     }
 
     const message = event.message;
@@ -7065,6 +7088,39 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       Object.assign(message, removed);
       broadcast({ type: "messageUpdated", message });
       return message;
+    },
+  );
+
+  // Ephemeral typing ping (P14): broadcast "userId is typing" to the conversation audience (minus the
+  // typist). Never persisted. Silently no-ops (204) for anyone who can't actually post there — banned/
+  // pending/timed-out, or a channel/DM they can't access — so a stale "typing…" can't be spoofed. The
+  // client throttles these; the per-route cap is the server-side backstop.
+  server.post(
+    "/api/typing",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+      if (participationError(currentUser) || timeoutError(currentUser)) {
+        return reply.code(204).send();
+      }
+
+      const body = TypingRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid typing request"));
+      }
+
+      if (body.data.channelId) {
+        const channel = ensureChannel(body.data.channelId);
+        if (channel && canAccessChannel(channel, currentUser.id)) {
+          broadcast({ type: "typing", userId: currentUser.id, channelId: channel.id });
+        }
+      } else if (appConfig.features.enableDMs && body.data.recipientUserId) {
+        broadcast({ type: "typing", userId: currentUser.id, dmUserId: body.data.recipientUserId });
+      }
+
+      return reply.code(204).send();
     },
   );
 
