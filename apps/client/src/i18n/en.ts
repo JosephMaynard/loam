@@ -48,6 +48,7 @@ export const en = {
   "message.editedTag": "(edited)",
   "message.editAriaLabel": "Edit message",
   "message.attachedImageAlt": "Attached image",
+  "message.attachedFile": "Attached file",
   "message.streaming": "Streaming",
   "message.reply": "Reply",
   "message.replyCount": { one: "{n} reply", other: "{n} replies" },
@@ -91,6 +92,13 @@ export const en = {
   "members.choosePerson": "Choose a person…",
   "members.allMembers": "Everyone is already a member",
   "members.invite": "Invite",
+  "members.allowJoinRequests": "Let people request to join (they need the channel link)",
+  "members.joinRequestsHeading": "Join requests",
+  "members.approve": "Approve",
+  "members.deny": "Deny",
+  "members.updateError": "Could not update the channel",
+  "members.approveError": "Could not approve the request",
+  "members.denyError": "Could not deny the request",
 
   // Thread side panel.
   "thread.eyebrow": "Thread",
@@ -623,6 +631,9 @@ export const en = {
   "admin.peerKey": "Pinned key (optional)",
   "admin.peerKeyPlaceholder": "Peer's transport key (from its join QR)",
   "admin.peerKeyPinned": "key pinned",
+  "typing.one": "{name} is typing…",
+  "typing.two": "{a} and {b} are typing…",
+  "typing.many": "Several people are typing…",
 };
 
 /**

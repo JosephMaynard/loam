@@ -57,6 +57,7 @@ import {
   SyncMessagesRequestSchema,
   SyncMessagesResponseSchema,
   TransportHandshakeRequestSchema,
+  TypingRequestSchema,
   UserSchema,
   UserUpdateRequestSchema,
   type AvatarImageMimeType,
@@ -173,6 +174,15 @@ type ClientEvent =
   | {
       type: "presence";
       onlineUserIds: string[];
+    }
+  | {
+      // Ephemeral "someone is composing" signal (P14). Never persisted. `channelId` set for channel typing;
+      // `dmUserId` (the OTHER participant) set for DM typing. Scoped to the conversation audience, minus
+      // the typist, by socketCanReceiveEvent.
+      type: "typing";
+      userId: string;
+      channelId?: string;
+      dmUserId?: string;
     }
   | {
       type: "configUpdated";
@@ -928,26 +938,74 @@ function newAttachmentId(): string {
 }
 
 /** Filename an attachment is stored (and served) under: `att_<16hex>.<ext>`. */
-function attachmentFileName(attachment: Pick<MessageAttachment, "id" | "mimeType">): string {
-  return `${attachment.id}.${avatarImageExtension(attachment.mimeType)}`;
+/** Whether an attachment MIME is one of the inline-renderable image types (vs a download-only file). */
+function isImageAttachmentMime(mimeType: string | undefined): mimeType is AvatarImageMimeType {
+  return mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/webp";
 }
 
-/** Parses an attachment filename (`att_<16hex>.<ext>`) into its id and MIME type. */
-function parseAttachmentFileName(value: string): { id: string; mimeType: AvatarImageMimeType } | undefined {
-  const match = value.match(/^(att_[a-f0-9]{16})\.(png|jpg|webp)$/);
+/**
+ * Sanitise a user-supplied attachment filename before it goes into a `Content-Disposition` header (and the
+ * client's escaped display): strip path separators, quotes, and control chars (header-injection / traversal
+ * vectors), bound the length, and fall back to `file` if nothing usable remains.
+ */
+function sanitizeAttachmentName(name: string | undefined): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = (name ?? "").replace(/["\\/\u0000-\u001f]/g, "_").trim().slice(0, 255);
+  return cleaned || "file";
+}
+
+function attachmentFileName(attachment: { id: string; mimeType?: MessageAttachment["mimeType"] }): string {
+  // Images keep their real extension (served inline). Non-image files are stored under a generic `.bin` so
+  // the on-disk name can never carry an executable/renderable extension, and they're served octet-stream.
+  return isImageAttachmentMime(attachment.mimeType)
+    ? `${attachment.id}.${avatarImageExtension(attachment.mimeType)}`
+    : `${attachment.id}.bin`;
+}
+
+/**
+ * Parses an attachment filename (`att_<16hex>.<ext>`) into its id + kind. For an image, the MIME is derived
+ * from the extension (safe to serve inline). For a `.bin` file, no MIME is derived — it is always served as
+ * `application/octet-stream` + `Content-Disposition: attachment`, so a mislabelled upload can't be rendered.
+ */
+function parseAttachmentFileName(
+  value: string,
+): { id: string; isImage: boolean; mimeType?: AvatarImageMimeType } | undefined {
+  const match = value.match(/^(att_[a-f0-9]{16})\.(png|jpg|webp|bin)$/);
 
   if (!match) {
     return undefined;
   }
 
   const extension = match[2];
+
+  if (extension === "bin") {
+    return { id: match[1] ?? "", isImage: false };
+  }
+
   const mimeType =
     extension === "png" ? "image/png" : extension === "jpg" ? "image/jpeg" : "image/webp";
 
-  return { id: match[1] ?? "", mimeType };
+  return { id: match[1] ?? "", isImage: true, mimeType };
 }
 
-const attachmentMaxBytes = 256 * 1024;
+const attachmentMaxBytes = 256 * 1024; // image cap (images are downscaled client-side first)
+
+/**
+ * Whether fetched attachment bytes are an acceptable copy: an image must be within the image cap AND match
+ * its declared type's magic bytes (it's served inline); a non-image file must be within the (larger) file
+ * cap — its MIME is already allowlisted by the schema and it's served octet-stream, so no signature check is
+ * meaningful. Shared by the sync import + retry paths so both agree.
+ */
+function isAcceptableAttachmentBytes(bytes: Buffer, mimeType: MessageAttachment["mimeType"]): boolean {
+  if (bytes.length === 0) {
+    return false;
+  }
+  if (isImageAttachmentMime(mimeType)) {
+    return bytes.length <= attachmentMaxBytes && avatarImageHasExpectedSignature(bytes, mimeType);
+  }
+  return bytes.length <= attachmentFileMaxBytes;
+}
+const attachmentFileMaxBytes = 1024 * 1024; // non-image file cap (no downscale) — modest for an off-grid LAN
 
 // Retry policy for a missing-attachment work item (docs/15 A6, F1). `retryMissingAttachments` runs on
 // the 30s reaper tick, but it must NOT actually contact the peer on every tick — that burned through
@@ -3168,6 +3226,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowReplies: update.allowReplies ?? channel.allowReplies,
       archived: update.archived === undefined ? channel.archived : update.archived,
       pinned: update.pinned === undefined ? channel.pinned : update.pinned,
+      allowJoinRequests:
+        update.allowJoinRequests === undefined ? channel.allowJoinRequests : update.allowJoinRequests,
       // `null` clears the per-channel TTL (back to the node default); a number sets it; omitted leaves it.
       messageTtlMs:
         update.messageTtlMs === undefined ? channel.messageTtlMs : (update.messageTtlMs ?? undefined),
@@ -3176,6 +3236,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       updatedAt: Date.now(),
     });
     store.upsertChannel(next);
+    // Turning join requests OFF clears any pending queue (they can no longer be fulfilled via the flow).
+    if (update.allowJoinRequests === false) {
+      store.removeJoinRequestsForChannel(channel.id);
+    }
     // A cleared `messageTtlMs` (null → undefined) is kept by Zod as an undefined-valued key; Object.assign
     // copies it onto the live record (so `ttlForMessage` falls back to the node default) and JSON.stringify
     // omits it on persist/broadcast — no explicit key-delete needed.
@@ -3505,6 +3569,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (event.type === "presence") {
       // Contains only visible users' ids; the banned/pending recipient gates above already ran.
       return true;
+    }
+
+    if (event.type === "typing") {
+      // Never echo the typist their own signal. Channel typing goes to anyone who can access the channel;
+      // DM typing goes only to the other participant.
+      if (userId === event.userId) {
+        return false;
+      }
+      // A shadow-banned user is hidden from everyone but themselves — their "typing…" must not leak either
+      // (it would reveal they're active), matching how their messages are withheld.
+      const typist = data.users.find((candidate) => candidate.id === event.userId);
+      if (typist?.shadowBanned) {
+        return false;
+      }
+      if (event.channelId) {
+        const channel = ensureChannel(event.channelId);
+        return !!channel && canAccessChannel(channel, userId);
+      }
+      return userId === event.dmUserId;
     }
 
     const message = event.message;
@@ -5306,11 +5389,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       try {
         const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment);
 
-        if (
-          bytes.length > attachmentMaxBytes ||
-          !bytes.length ||
-          !avatarImageHasExpectedSignature(bytes, attachment.mimeType)
-        ) {
+        if (!isAcceptableAttachmentBytes(bytes, attachment.mimeType)) {
           // Fetched something, but it isn't usable — record it as missing too (docs/15 A6) rather
           // than silently dropping it: a peer mid-write or serving a truncated/corrupt copy today can
           // look fine on a later retry.
@@ -5452,11 +5531,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             return;
           }
 
-          if (
-            bytes.length > attachmentMaxBytes ||
-            !bytes.length ||
-            !avatarImageHasExpectedSignature(bytes, record.mimeType)
-          ) {
+          if (!isAcceptableAttachmentBytes(bytes, record.mimeType)) {
             store.bumpMissingAttachmentAttempts(
               record.messageId,
               record.attachmentId,
@@ -7068,6 +7143,43 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     },
   );
 
+  // Ephemeral typing ping (P14): broadcast "userId is typing" to the conversation audience (minus the
+  // typist). Never persisted. Silently no-ops (204) for a banned/pending/timed-out sender, a channel the
+  // sender can't access, or an unknown DM recipient — so a stale "typing…" can't be spoofed at someone who
+  // can't see the conversation. The client throttles these; the per-route cap is the server-side backstop.
+  server.post(
+    "/api/typing",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+
+      if (participationError(currentUser) || timeoutError(currentUser)) {
+        return reply.code(204).send();
+      }
+
+      const body = TypingRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid typing request"));
+      }
+
+      if (body.data.channelId) {
+        const channel = ensureChannel(body.data.channelId);
+        if (channel && canAccessChannel(channel, currentUser.id)) {
+          broadcast({ type: "typing", userId: currentUser.id, channelId: channel.id });
+        }
+      } else if (
+        appConfig.features.enableDMs &&
+        body.data.recipientUserId &&
+        data.users.some((user) => user.id === body.data.recipientUserId)
+      ) {
+        broadcast({ type: "typing", userId: currentUser.id, dmUserId: body.data.recipientUserId });
+      }
+
+      return reply.code(204).send();
+    },
+  );
+
   // Users awaiting approval under the `approval` join policy. Admins and greeters.
   server.get("/api/access/pending", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
@@ -7174,24 +7286,30 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.code(400).send(errorBody("Invalid attachment upload request"));
       }
 
-      const image = Buffer.from(body.data.data, "base64");
+      const bytes = Buffer.from(body.data.data, "base64");
+      const isImage = isImageAttachmentMime(body.data.mimeType);
+      const cap = isImage ? attachmentMaxBytes : attachmentFileMaxBytes;
 
-      if (image.length === 0 || image.length > attachmentMaxBytes) {
-        return reply.code(400).send(errorBody("Attachment image must be 256KB or smaller"));
+      if (bytes.length === 0 || bytes.length > cap) {
+        return reply.code(400).send(errorBody("Attachment is empty or too large"));
       }
 
-      if (!avatarImageHasExpectedSignature(image, body.data.mimeType)) {
+      // Images must actually be the image they claim (magic bytes) since they're served INLINE. Non-image
+      // files carry an allowlisted MIME (schema-enforced) and are served octet-stream + attachment, so a
+      // mislabelled file can never be rendered — a magic-byte check per arbitrary type isn't needed.
+      if (isImageAttachmentMime(body.data.mimeType) && !avatarImageHasExpectedSignature(bytes, body.data.mimeType)) {
         return reply.code(400).send(errorBody("Attachment image type does not match the uploaded data"));
       }
 
       const attachment: MessageAttachment = {
         id: newAttachmentId(),
         mimeType: body.data.mimeType,
-        ...(body.data.width !== undefined ? { width: body.data.width } : {}),
-        ...(body.data.height !== undefined ? { height: body.data.height } : {}),
+        ...(isImage && body.data.width !== undefined ? { width: body.data.width } : {}),
+        ...(isImage && body.data.height !== undefined ? { height: body.data.height } : {}),
+        ...(isImage ? {} : { name: sanitizeAttachmentName(body.data.name) }),
       };
       await mkdir(attachmentsDir, { recursive: true });
-      await writeFile(join(attachmentsDir, attachmentFileName(attachment)), image);
+      await writeFile(join(attachmentsDir, attachmentFileName(attachment)), bytes);
       attachmentOwners.set(attachment.id, { userId: currentUser.id, uploadedAt: Date.now() });
       return reply.code(201).send(attachment);
     },
@@ -7251,11 +7369,36 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       try {
-        // Rebuild the filename from the parsed id + MIME type (like the avatar route) rather than
-        // joining the raw request param — the served path is then provably derived from the
-        // whitelisted pattern, never from user input.
-        const image = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
-        return reply.type(attachment.mimeType).header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff").send(image);
+        // Rebuild the filename from the parsed id + kind (like the avatar route) rather than joining the
+        // raw request param — the served path is then provably derived from the whitelisted pattern, never
+        // from user input.
+        const fileBytes = await readFile(join(attachmentsDir, attachmentFileName(attachment)));
+        reply.header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff");
+
+        // Images render inline with their real type (safe — images aren't executable). A NON-image file is
+        // ALWAYS served as `application/octet-stream` + `Content-Disposition: attachment`, so the browser
+        // downloads it and never renders it — an uploaded HTML/SVG/etc. can't execute. The download name
+        // comes from the owning message's (sanitised) attachment record.
+        if (attachment.isImage && attachment.mimeType) {
+          return reply.type(attachment.mimeType).send(fileBytes);
+        }
+
+        const record =
+          owningMessage && "attachments" in owningMessage
+            ? owningMessage.attachments?.find((entry) => entry.id === attachment.id)
+            : undefined;
+        const downloadName = sanitizeAttachmentName(record?.name);
+        // RFC 6266: an ASCII-folded `filename=` (a header value may not carry a byte > 0xFF, which would
+        // make Node throw ERR_INVALID_CHAR → 500 for any CJK/emoji/Cyrillic name) PLUS a `filename*` that
+        // percent-encodes the real UTF-8 name, so modern browsers still get the correct international name.
+        const asciiName = downloadName.replace(/[^\x20-\x7e]/g, "_");
+        return reply
+          .type("application/octet-stream")
+          .header(
+            "content-disposition",
+            `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
+          )
+          .send(fileBytes);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
           return reply.code(404).send(errorBody("Attachment does not exist"));
@@ -7414,6 +7557,125 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       applyChannelMembers(channel, [...members]);
       sendEventToUsers(new Set([targetId]), { type: "channelRemoved", channelId: channel.id });
       return { ok: true };
+    },
+  );
+
+  // Request to join a private channel that opted into join requests (P10). The requester must already know
+  // the channel id (shared out-of-band). A channel that doesn't exist, isn't private, or hasn't opted in
+  // 404s identically, so this never reveals a channel's existence — no discoverability change.
+  server.post<{ Params: { channelId: string } }>(
+    "/api/channels/:channelId/join-requests",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const channel = ensureChannel(request.params.channelId);
+
+      // 404-parity: unknown / public / archived / not-opted-in are all indistinguishable.
+      if (!channel || channel.visibility !== "private" || channel.archived || !channel.allowJoinRequests) {
+        return reply.code(404).send(errorBody("Channel does not exist"));
+      }
+
+      // Already a member (or the owner): nothing to request.
+      if (channelMemberIds(channel).has(currentUser.id)) {
+        return reply.code(204).send();
+      }
+
+      store.addJoinRequest(channel.id, currentUser.id);
+      return reply.code(201).send({ ok: true });
+    },
+  );
+
+  // List pending join requesters for a private channel (owner/admin) — sanitised user records.
+  server.get<{ Params: { channelId: string } }>("/api/channels/:channelId/join-requests", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
+    const channel = ensureChannel(request.params.channelId);
+
+    if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+      return reply.code(404).send(errorBody("Channel does not exist"));
+    }
+
+    if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+      return reply.code(403).send(errorBody("Only the channel owner or an admin can review join requests"));
+    }
+
+    const requesterIds = new Set(store.loadJoinRequests(channel.id));
+    return data.users
+      .filter((user) => requesterIds.has(user.id) && user.type === "human" && !user.banned && !user.pending)
+      .map((user) => sanitizeUserFor(currentUser, user));
+  });
+
+  // Approve a pending join request → add the user to the private channel's roster (owner/admin).
+  server.post<{ Params: { channelId: string; userId: string } }>(
+    "/api/channels/:channelId/join-requests/:userId/approve",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const channel = ensureChannel(request.params.channelId);
+
+      if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+        return reply.code(404).send(errorBody("Channel does not exist"));
+      }
+
+      if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+        return reply.code(403).send(errorBody("Only the channel owner or an admin can approve join requests"));
+      }
+
+      if (!new Set(store.loadJoinRequests(channel.id)).has(request.params.userId)) {
+        return reply.code(404).send(errorBody("No such join request"));
+      }
+
+      const target = data.users.find((user) => user.id === request.params.userId);
+      store.removeJoinRequest(channel.id, request.params.userId);
+
+      if (!target || target.type !== "human" || target.banned) {
+        return reply.code(400).send(errorBody("That user cannot be added"));
+      }
+
+      const members = channelMemberIds(channel);
+      return members.has(target.id) ? channel : applyChannelMembers(channel, [...members, target.id]);
+    },
+  );
+
+  // Deny (or cancel) a pending join request (owner/admin).
+  server.delete<{ Params: { channelId: string; userId: string } }>(
+    "/api/channels/:channelId/join-requests/:userId",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const channel = ensureChannel(request.params.channelId);
+
+      if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+        return reply.code(404).send(errorBody("Channel does not exist"));
+      }
+
+      if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+        return reply.code(403).send(errorBody("Only the channel owner or an admin can deny join requests"));
+      }
+
+      store.removeJoinRequest(channel.id, request.params.userId);
+      return reply.code(204).send();
     },
   );
 

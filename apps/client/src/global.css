@@ -1498,6 +1498,30 @@ a {
   font-size: 0.85rem;
 }
 
+/* Non-image file attachment (P11): a download link */
+.attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+/* Typing indicator (P14) */
+.typing-indicator {
+  margin: 0;
+  padding: 2px 12px;
+  min-height: 1.2em;
+  color: var(--c-text-2);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
 .moderation-identity {
   display: flex;
   flex-wrap: wrap;

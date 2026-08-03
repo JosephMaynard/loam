@@ -335,6 +335,10 @@ function conversationKey(conversation: Conversation): string {
   return `${conversation.kind}:${conversation.id}`;
 }
 
+/** How long a typing signal counts as "still typing" before it's pruned (client sends one every ~2.5s). */
+const TYPING_TTL_MS = 5000;
+const TYPING_THROTTLE_MS = 2500;
+
 // (Removed the dead `notifyIfHidden` OS-notification path — docs/25 D2. It could never fire:
 // Notification.requestPermission() was never called, so permission was never "granted", and web-push
 // needs a secure context that a plain-HTTP LAN origin doesn't provide. The in-app `pushToast` is the
@@ -476,6 +480,36 @@ function LoamApp() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   // Who is connected right now (server presence events; empty when the node disables presence).
   const [onlineUserIds, setOnlineUserIds] = useState<ReadonlySet<string>>(new Set());
+  // Ephemeral typing signals (P14): conversationKey → (userId → last-seen ms). Pruned on a timer.
+  const [typing, setTyping] = useState<Record<string, Record<string, number>>>({});
+
+  // Prune stale typing entries on a timer while any are present, so "typing…" clears itself. Keyed on a
+  // boolean (not the whole `typing` object) so the interval is created only on the empty↔non-empty
+  // transitions, not torn down and rebuilt on every incoming ping.
+  const hasTyping = Object.keys(typing).length > 0;
+  useEffect(() => {
+    if (!hasTyping) {
+      return;
+    }
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      setTyping((previous) => {
+        const next: Record<string, Record<string, number>> = {};
+        let changed = false;
+        for (const [key, users] of Object.entries(previous)) {
+          const fresh = Object.fromEntries(Object.entries(users).filter(([, at]) => now - at < TYPING_TTL_MS));
+          if (Object.keys(fresh).length !== Object.keys(users).length) {
+            changed = true;
+          }
+          if (Object.keys(fresh).length) {
+            next[key] = fresh;
+          }
+        }
+        return changed ? next : previous;
+      });
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [hasTyping]);
 
   // Refs let the long-lived WebSocket handler read the latest active conversation / users / channels
   // without re-subscribing the socket on every navigation or roster change.
@@ -1064,30 +1098,39 @@ function LoamApp() {
    * attachment. Returns the descriptor to include in the message create request.
    */
   const uploadAttachment = useCallback(async (file: File): Promise<MessageAttachment> => {
-    const prepared = await prepareImageAttachment(file);
-    const buffer = await prepared.blob.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
+    const toBase64 = (bytes: Uint8Array): string => {
+      let binary = "";
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+      return btoa(binary);
+    };
 
-    for (const byte of bytes) {
-      binary += String.fromCharCode(byte);
+    // Images are downscaled + re-encoded (existing path). Any other file uploads as-is with its name; the
+    // server enforces the type allowlist + size cap and serves non-images as a forced download (never inline).
+    let uploadBody: { mimeType: string; data: string; width?: number; height?: number; name?: string };
+
+    if (file.type.startsWith("image/")) {
+      const prepared = await prepareImageAttachment(file);
+      uploadBody = {
+        mimeType: prepared.blob.type || "image/png",
+        data: toBase64(new Uint8Array(await prepared.blob.arrayBuffer())),
+        width: prepared.width,
+        height: prepared.height,
+      };
+    } else {
+      uploadBody = {
+        mimeType: file.type,
+        data: toBase64(new Uint8Array(await file.arrayBuffer())),
+        name: file.name,
+      };
     }
 
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await encryptedFetch(
-        "POST",
-        "/api/attachments",
-        {
-          mimeType: prepared.blob.type || "image/png",
-          data: btoa(binary),
-          width: prepared.width,
-          height: prepared.height,
-        },
-        { signal: controller.signal },
-      );
+      const response = await encryptedFetch("POST", "/api/attachments", uploadBody, { signal: controller.signal });
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
@@ -1570,6 +1613,17 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "typing") {
+          // The conversation key is the channel, or — for a DM ping (I'm the recipient) — the DM with the
+          // typist. Record their last-seen time; the prune timer clears stale entries.
+          const key = payload.channelId ? `channel:${payload.channelId}` : `dm:${payload.userId}`;
+          setTyping((previous) => ({
+            ...previous,
+            [key]: { ...previous[key], [payload.userId]: Date.now() },
+          }));
+          return;
+        }
+
         if (payload.type === "wipe") {
           void purgeLocalData();
           // Server-initiated node wipe (kill switch) — distinct from a self-service "wipe this
@@ -1622,6 +1676,25 @@ function LoamApp() {
     return indexed;
   }, [currentUser, users]);
   usersByIdRef.current = usersById;
+
+  // The other users currently typing in the active conversation (fresh, excluding myself), as display names.
+  const activeTypers = activeConversation
+    ? Object.entries(typing[conversationKey(activeConversation)] ?? {})
+        .filter(([userId, at]) => userId !== currentUser.id && Date.now() - at < TYPING_TTL_MS)
+        .map(([userId]) => usersById.get(userId)?.displayName ?? generateDisplayName(userId))
+    : [];
+
+  // Fire-and-forget, throttled "I'm typing" ping for the active conversation (P14).
+  const lastTypingSentRef = useRef(0);
+  const sendTyping = useCallback((conversation: Conversation) => {
+    const now = Date.now();
+    if (now - lastTypingSentRef.current < TYPING_THROTTLE_MS) {
+      return;
+    }
+    lastTypingSentRef.current = now;
+    const body = conversation.kind === "channel" ? { channelId: conversation.id } : { recipientUserId: conversation.id };
+    void requestJson("POST", "/api/typing", body).catch(() => {});
+  }, []);
   const selectedMessages = useMemo(
     () =>
       activeConversation
@@ -1799,6 +1872,12 @@ function LoamApp() {
           channels={channels}
           conversation={activeConversation}
           currentUser={currentUser}
+          onTyping={() => {
+            if (activeConversation) {
+              sendTyping(activeConversation);
+            }
+          }}
+          typers={activeTypers}
           messages={selectedMessages}
           onChannelUpsert={upsertChannels}
           onDelete={deleteMessage}
@@ -1910,7 +1989,9 @@ interface ConversationViewProps {
     attachments?: MessageAttachment[],
     location?: MessageLocation,
   ) => Promise<void>;
+  onTyping: () => void;
   onUploadAttachment: (file: File) => Promise<MessageAttachment>;
+  typers: string[];
   users: User[];
   usersById: Map<string, User>;
 }
@@ -1921,6 +2002,8 @@ function ConversationView({
   channels,
   conversation,
   currentUser,
+  onTyping,
+  typers,
   messages,
   onChannelUpsert,
   onDelete,
@@ -2025,11 +2108,21 @@ function ConversationView({
           topMessages={topMessages}
           usersById={usersById}
         />
+        {typers.length ? (
+          <p className="typing-indicator" aria-live="polite">
+            {typers.length === 1
+              ? t("typing.one", { name: typers[0]! })
+              : typers.length === 2
+                ? t("typing.two", { a: typers[0]!, b: typers[1]! })
+                : t("typing.many")}
+          </p>
+        ) : null}
         <MessageComposer
           allowLocationSharing={allowLocationSharing}
           disabledReason={timedOut ? t("composer.timedOut") : undefined}
           label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
           onSend={onSend}
+          onTyping={onTyping}
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
           placeholder={
             conversation.kind === "channel"

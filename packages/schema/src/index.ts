@@ -12,6 +12,31 @@ export type AvatarMode = z.infer<typeof AvatarModeSchema>;
 export const AvatarImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/webp"]);
 export type AvatarImageMimeType = z.infer<typeof AvatarImageMimeTypeSchema>;
 
+/**
+ * Non-image file attachments (P11). A deliberately small allowlist of common, non-executable document types
+ * — and deliberately WITHOUT `text/html`, `image/svg+xml`, or `application/xml`, which are script-execution
+ * / XSS vectors if a browser ever rendered them. As defence-in-depth the server ALSO serves every non-image
+ * attachment as `application/octet-stream` with `Content-Disposition: attachment`, so nothing uploaded is
+ * ever rendered inline regardless of type.
+ */
+export const AttachmentFileMimeTypeSchema = z.enum([
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "text/markdown",
+  "application/json",
+  "application/zip",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+]);
+export type AttachmentFileMimeType = z.infer<typeof AttachmentFileMimeTypeSchema>;
+
+/** Any attachment MIME: an inline-safe image or an allowlisted (download-only) file. */
+export const AttachmentMimeTypeSchema = z.union([AvatarImageMimeTypeSchema, AttachmentFileMimeTypeSchema]);
+export type AttachmentMimeType = z.infer<typeof AttachmentMimeTypeSchema>;
+
 export const UserAvatarSchema = z.object({
   kind: z.enum(["generated", "image"]).optional(),
   seed: z.string().min(1).max(128).optional(),
@@ -214,6 +239,13 @@ export const ChannelSchema = z.object({
   /** Pinned channels sort to the top of the client's channel list. Owner/admin toggled. */
   pinned: z.boolean().optional(),
   /**
+   * For a PRIVATE channel: accept join requests from non-members who have the channel id (P10). Opt-in and
+   * off by default, so a strictly invite-only channel is unchanged. It does NOT make the channel
+   * discoverable — a requester must already know the id (shared out-of-band, like an invite); the request
+   * endpoint 404s identically to an unknown channel when this is off, so existence never leaks.
+   */
+  allowJoinRequests: z.boolean().optional(),
+  /**
    * Per-channel message retention override (ms). When set, messages in this channel expire after this
    * long instead of the node-wide `retention.messageTtlMs`; `null`/absent = use the node default. Lets an
    * operator make one channel more (or less) ephemeral than the rest. Enforced by the retention reaper.
@@ -267,6 +299,7 @@ export const ChannelUpdateRequestSchema = z
     archived: z.boolean(),
     pinned: z.boolean(),
     messageTtlMs: z.number().int().positive().nullable(),
+    allowJoinRequests: z.boolean(),
   })
   .partial();
 export type ChannelUpdateRequest = z.infer<typeof ChannelUpdateRequestSchema>;
@@ -665,6 +698,17 @@ export const MessageRemoveRequestSchema = z.object({
 });
 export type MessageRemoveRequest = z.infer<typeof MessageRemoveRequestSchema>;
 
+/** Ephemeral "I'm typing" ping (P14): exactly one of a channel or a DM recipient. Never persisted. */
+export const TypingRequestSchema = z
+  .object({
+    channelId: IdSchema.optional(),
+    recipientUserId: IdSchema.optional(),
+  })
+  .refine((value) => (value.channelId === undefined) !== (value.recipientUserId === undefined), {
+    message: "Provide exactly one of channelId or recipientUserId",
+  });
+export type TypingRequest = z.infer<typeof TypingRequestSchema>;
+
 export const AvatarImageUploadRequestSchema = z.object({
   mimeType: AvatarImageMimeTypeSchema,
   data: z.string().min(1).max(256_000),
@@ -674,10 +718,12 @@ export type AvatarImageUploadRequest = z.infer<typeof AvatarImageUploadRequestSc
 /** An image attached to a message. The file itself is uploaded first via `POST /api/attachments`. */
 export const MessageAttachmentSchema = z.object({
   id: z.string().regex(/^att_[a-f0-9]{16}$/),
-  mimeType: AvatarImageMimeTypeSchema,
+  mimeType: AttachmentMimeTypeSchema,
   /** Pixel dimensions of the stored image (client-reported, cosmetic — used to reserve layout). */
   width: z.number().int().positive().max(10_000).optional(),
   height: z.number().int().positive().max(10_000).optional(),
+  /** Original filename, for a non-image file attachment (shown as the download link + Content-Disposition). */
+  name: z.string().min(1).max(255).optional(),
 });
 export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 
@@ -686,10 +732,14 @@ export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
  * uploading — the server enforces a 256KB binary cap and magic-byte/MIME agreement.
  */
 export const AttachmentUploadRequestSchema = z.object({
-  mimeType: AvatarImageMimeTypeSchema,
-  data: z.string().min(1).max(400_000),
+  mimeType: AttachmentMimeTypeSchema,
+  // base64 of the file bytes. ~1.4M chars ≈ 1MB raw — enough for a small PDF/doc while staying modest for
+  // an off-grid LAN; the server enforces the real per-kind byte cap after decoding.
+  data: z.string().min(1).max(1_400_000),
   width: z.number().int().positive().max(10_000).optional(),
   height: z.number().int().positive().max(10_000).optional(),
+  /** Original filename for a non-image file (sanitised server-side before use). */
+  name: z.string().min(1).max(255).optional(),
 });
 export type AttachmentUploadRequest = z.infer<typeof AttachmentUploadRequestSchema>;
 

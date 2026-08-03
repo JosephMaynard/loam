@@ -5108,6 +5108,22 @@ describe("message search", () => {
   });
 });
 
+describe("typing indicator (P14)", () => {
+  it("accepts a channel typing ping (204), rejects an invalid body, and no-ops an inaccessible channel", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+    const typing = (payload: Record<string, unknown>) =>
+      app.server.inject({ method: "POST", url: "/api/typing", headers: { cookie: session.cookie }, payload });
+
+    expect((await typing({ channelId: "general" })).statusCode).toBe(204);
+    // Exactly one of channelId / recipientUserId — both (or neither) is a 400.
+    expect((await typing({ channelId: "general", recipientUserId: "user.1234" })).statusCode).toBe(400);
+    expect((await typing({})).statusCode).toBe(400);
+    // A channel the caller can't see is a silent no-op (still 204 — never leaks existence, never broadcasts).
+    expect((await typing({ channelId: "does-not-exist" })).statusCode).toBe(204);
+  });
+});
+
 describe("member reports + timeout + honest tombstone (docs/26)", () => {
   function setRoles(app: LoamApp, cookie: string, userId: string, roles: string[]): Promise<InjectResponse> {
     return app.server.inject({
@@ -5269,6 +5285,75 @@ describe("member reports + timeout + honest tombstone (docs/26)", () => {
       await app.server.inject({ method: "GET", url: "/api/moderation/reports", headers: { cookie: admin.cookie } })
     ).json() as unknown[];
     expect(after).toHaveLength(0);
+  });
+});
+
+describe("private channel join requests (P10)", () => {
+  it("gates requests behind opt-in, then owner-approves a requester into the roster", async () => {
+    const app = await makeApp();
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const channelId = ((await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Ops", visibility: "private" },
+    })).json() as { id: string }).id;
+
+    const requestJoin = (cookie: string) =>
+      app.server.inject({ method: "POST", url: `/api/channels/${channelId}/join-requests`, headers: { cookie } });
+
+    // Not opted in yet → 404-parity (never reveals the channel exists).
+    expect((await requestJoin(outsider.cookie)).statusCode).toBe(404);
+
+    // Owner opts the channel into join requests.
+    expect(
+      (await app.server.inject({
+        method: "PATCH",
+        url: `/api/channels/${channelId}`,
+        headers: { cookie: owner.cookie },
+        payload: { allowJoinRequests: true },
+      })).statusCode,
+    ).toBe(200);
+
+    // Now the outsider can request; the outsider still can't read the channel yet.
+    expect((await requestJoin(outsider.cookie)).statusCode).toBe(201);
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie: outsider.cookie } }))
+        .statusCode,
+    ).toBe(404);
+
+    // The owner sees the pending request; a non-owner/admin can't review it.
+    const queue = (
+      await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/join-requests`, headers: { cookie: owner.cookie } })
+    ).json() as { id: string }[];
+    expect(queue.map((u) => u.id)).toContain(outsider.userId);
+    // A non-member requester can't review the queue — the private channel 404s for them (never 403, which
+    // would confirm existence). Only a member-who-isn't-owner would get 403.
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/join-requests`, headers: { cookie: outsider.cookie } }))
+        .statusCode,
+    ).toBe(404);
+
+    // Approve → the requester joins and can now read the channel; the request clears.
+    expect(
+      (await app.server.inject({
+        method: "POST",
+        url: `/api/channels/${channelId}/join-requests/${outsider.userId}/approve`,
+        headers: { cookie: owner.cookie },
+      })).statusCode,
+    ).toBe(200);
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie: outsider.cookie } }))
+        .statusCode,
+    ).toBe(200);
+    expect(
+      (
+        (await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/join-requests`, headers: { cookie: owner.cookie } }))
+          .json() as unknown[]
+      ).length,
+    ).toBe(0);
   });
 });
 
@@ -5685,6 +5770,45 @@ describe("message attachments", () => {
       payload: { mimeType, data, width: 1, height: 1 },
     });
   }
+
+  it("uploads a non-image file, serves it as a forced download, and rejects a script/XSS type (P11)", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+
+    // A non-Latin1 filename (CJK/emoji) must not crash the download header (RFC 6266 filename*).
+    const uploaded = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: session.cookie },
+      payload: { mimeType: "text/plain", data: Buffer.from("hello, world").toString("base64"), name: "报告😀.txt" },
+    });
+    expect(uploaded.statusCode).toBe(201);
+    const attachment = uploaded.json() as { id: string; mimeType: string; name?: string };
+    expect(attachment.mimeType).toBe("text/plain");
+    expect(attachment.name).toBe("报告😀.txt");
+
+    // The uploader fetches their pending file — served as a FORCED DOWNLOAD (octet-stream + attachment),
+    // never inline, so an uploaded HTML/SVG could not execute in a browser. The unicode name round-trips via
+    // filename* (a bare filename="…" with those bytes would make Node throw ERR_INVALID_CHAR → 500).
+    const served = await app.server.inject({
+      method: "GET",
+      url: `/api/attachments/${attachment.id}.bin`,
+      headers: { cookie: session.cookie },
+    });
+    expect(served.statusCode).toBe(200);
+    expect(served.headers["content-type"]).toContain("application/octet-stream");
+    expect(String(served.headers["content-disposition"])).toContain("attachment");
+    expect(String(served.headers["content-disposition"])).toContain("filename*=UTF-8''");
+
+    // A script-executable type is not in the allowlist → rejected at upload.
+    const html = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: session.cookie },
+      payload: { mimeType: "text/html", data: Buffer.from("<script>alert(1)</script>").toString("base64") },
+    });
+    expect(html.statusCode).toBe(400);
+  });
 
   it("uploads, attaches, serves, and allows an image-only message", async () => {
     const app = await makeApp();

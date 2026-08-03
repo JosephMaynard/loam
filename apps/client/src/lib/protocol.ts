@@ -80,6 +80,12 @@ export type SocketEvent =
       onlineUserIds: string[];
     }
   | {
+      type: "typing";
+      userId: string;
+      channelId?: string;
+      dmUserId?: string;
+    }
+  | {
       type: "configUpdated";
       networkConfig: NetworkConfig;
     }
@@ -201,6 +207,8 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
     channelId?: unknown;
     onlineUserIds?: unknown;
     networkConfig?: unknown;
+    userId?: unknown;
+    dmUserId?: unknown;
   };
 
   if (candidate.type === "messageCreated") {
@@ -239,6 +247,17 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
     return Array.isArray(candidate.onlineUserIds) &&
       candidate.onlineUserIds.every((id) => typeof id === "string")
       ? { type: "presence", onlineUserIds: candidate.onlineUserIds as string[] }
+      : undefined;
+  }
+
+  if (candidate.type === "typing") {
+    return typeof candidate.userId === "string"
+      ? {
+          type: "typing",
+          userId: candidate.userId,
+          ...(typeof candidate.channelId === "string" ? { channelId: candidate.channelId } : {}),
+          ...(typeof candidate.dmUserId === "string" ? { dmUserId: candidate.dmUserId } : {}),
+        }
       : undefined;
   }
 

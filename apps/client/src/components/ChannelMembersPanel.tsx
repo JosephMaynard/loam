@@ -2,7 +2,7 @@ import type { Channel, User } from "@loam/schema";
 import { useEffect, useState } from "preact/hooks";
 
 import { errorText, t } from "../i18n";
-import { fetchJson, parseUserList, REQUEST_TIMEOUT_MS, requestChannel } from "../lib/api";
+import { fetchJson, parseUserList, requestChannel, requestJson, REQUEST_TIMEOUT_MS } from "../lib/api";
 import { encryptedFetch } from "../lib/transport";
 import { Avatar } from "./Avatar";
 
@@ -31,6 +31,7 @@ export function ChannelMembersPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [inviteId, setInviteId] = useState("");
+  const [joinRequests, setJoinRequests] = useState<User[]>([]);
   const canManage = currentUser.isAdmin || channel.ownerUserId === currentUser.id;
   const memberIds = new Set(channel.memberUserIds ?? []);
 
@@ -64,6 +65,77 @@ export function ChannelMembersPanel({
       active = false;
     };
   }, [channel.id, rosterKey]);
+
+  // Pending join requests (owner/admin only, and only when the channel opted in). Re-fetched when the
+  // roster changes (an approval adds a member) or the opt-in toggles.
+  useEffect(() => {
+    if (!canManage || !channel.allowJoinRequests) {
+      setJoinRequests([]);
+      return;
+    }
+    let active = true;
+    fetchJson<unknown>(`/api/channels/${encodeURIComponent(channel.id)}/join-requests`)
+      .then((payload) => {
+        if (active) {
+          setJoinRequests(parseUserList(payload));
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          setJoinRequests([]);
+          setError(loadError instanceof Error ? loadError.message : t("members.loadError"));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [channel.id, channel.allowJoinRequests, canManage, rosterKey]);
+
+  async function toggleJoinRequests(): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const updated = await requestChannel("PATCH", `/api/channels/${encodeURIComponent(channel.id)}`, {
+        allowJoinRequests: !channel.allowJoinRequests,
+      });
+      onChannelUpsert([updated]);
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : t("members.updateError"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function approveRequest(userId: string): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const updated = await requestChannel(
+        "POST",
+        `/api/channels/${encodeURIComponent(channel.id)}/join-requests/${encodeURIComponent(userId)}/approve`,
+        {},
+      );
+      onChannelUpsert([updated]);
+      setJoinRequests((previous) => previous.filter((user) => user.id !== userId));
+    } catch (approveError) {
+      setError(approveError instanceof Error ? approveError.message : t("members.approveError"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function denyRequest(userId: string): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await requestJson("DELETE", `/api/channels/${encodeURIComponent(channel.id)}/join-requests/${encodeURIComponent(userId)}`);
+      setJoinRequests((previous) => previous.filter((user) => user.id !== userId));
+    } catch (denyError) {
+      setError(denyError instanceof Error ? denyError.message : t("members.denyError"));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function invite(): Promise<void> {
     if (!inviteId) {
@@ -191,6 +263,43 @@ export function ChannelMembersPanel({
             </li>
           ))}
         </ul>
+      ) : null}
+      {canManage ? (
+        <label className="admin-toggle">
+          <input
+            checked={!!channel.allowJoinRequests}
+            disabled={busy}
+            onInput={() => void toggleJoinRequests()}
+            type="checkbox"
+          />
+          {t("members.allowJoinRequests")}
+        </label>
+      ) : null}
+      {canManage && joinRequests.length ? (
+        <div className="join-requests">
+          <h3>{t("members.joinRequestsHeading")}</h3>
+          <ul className="moderation-list">
+            {joinRequests.map((requester) => (
+              <li className="moderation-row" key={requester.id}>
+                <div className="moderation-identity">
+                  <Avatar avatar={requester.avatar} id={requester.id} />
+                  <div className="moderation-name">
+                    <strong>{requester.displayName}</strong>
+                    <span>{requester.id}</span>
+                  </div>
+                </div>
+                <div className="moderation-actions">
+                  <button disabled={busy} onClick={() => void approveRequest(requester.id)} type="button">
+                    {t("members.approve")}
+                  </button>
+                  <button className="danger-button" disabled={busy} onClick={() => void denyRequest(requester.id)} type="button">
+                    {t("members.deny")}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
       {canManage ? (
         <form

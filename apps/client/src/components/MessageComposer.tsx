@@ -35,6 +35,8 @@ interface MessageComposerProps {
   disabledReason?: string;
   label: string;
   onSend: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
+  /** Fired (throttled by the caller) as the user types, to emit an ephemeral "typing…" signal (P14). */
+  onTyping?: () => void;
   /** When present, the composer offers image attachments (resized on-device before upload). */
   onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
   placeholder: string;
@@ -71,7 +73,7 @@ function buildDraftLocation(label: string, latText: string, lngText: string): Me
   };
 }
 
-export function MessageComposer({ allowLocationSharing, disabledReason, label, onSend, onUploadAttachment, placeholder }: MessageComposerProps) {
+export function MessageComposer({ allowLocationSharing, disabledReason, label, onSend, onTyping, onUploadAttachment, placeholder }: MessageComposerProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState<PendingAttachment[]>([]);
@@ -290,7 +292,7 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
           {onUploadAttachment ? (
             <>
               <input
-                accept="image/png,image/jpeg,image/webp,image/*"
+                accept="image/*,.pdf,.txt,.csv,.md,.json,.zip,.doc,.docx,.xlsx,.pptx"
                 className="sr-only"
                 multiple
                 onInput={(event) => {
@@ -342,7 +344,12 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
       <textarea
         dir="auto"
         id={composerId}
-        onInput={(event) => setValue(event.currentTarget.value)}
+        onInput={(event) => {
+          setValue(event.currentTarget.value);
+          if (event.currentTarget.value.trim()) {
+            onTyping?.();
+          }
+        }}
         onKeyDown={(event) => {
           // Enter-to-send on devices with a PRECISE pointer (desktop/laptop hosts, incl. the Electron
           // target): Enter submits, Shift+Enter inserts a newline. On touch (coarse pointer) Enter stays a
