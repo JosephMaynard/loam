@@ -3568,6 +3568,8 @@ function ModerationUserRow({
   const [error, setError] = useState<string>();
   const protectedTarget = isProtectedTarget(user, currentUser);
   const roles = new Set<Role>(user.roles ?? []);
+  // Reactive so the timeout button flips to "time out" the moment the timeout expires (not on next render).
+  const timedOut = useIsTimedOut(user);
 
   async function run(action: () => Promise<User>): Promise<void> {
     setBusy(true);
@@ -3658,7 +3660,7 @@ function ModerationUserRow({
             <button disabled={busy} onClick={() => setModeration({ shadowBanned: !user.shadowBanned })} type="button">
               {user.shadowBanned ? t("moderation.unshadowban") : t("moderation.shadowban")}
             </button>
-            {isTimedOut(user) ? (
+            {timedOut ? (
               <button disabled={busy} onClick={() => setModeration({ timeoutUntil: null })} type="button">
                 {t("moderation.timeoutClear")}
               </button>
@@ -3691,6 +3693,8 @@ function ModerationUserRow({
  */
 function UserStateBadges({ user }: { user: User }) {
   const badges: { key: string; label: string; className: string }[] = [];
+  // Reactive so a "timed out" badge clears itself when the timeout expires.
+  const timedOut = useIsTimedOut(user);
 
   if (user.isAdmin) {
     badges.push({ key: "admin", label: t("moderation.badgeAdmin"), className: "badge-admin" });
@@ -3716,7 +3720,7 @@ function UserStateBadges({ user }: { user: User }) {
     badges.push({ key: "shadow", label: t("moderation.badgeShadow"), className: "badge-shadow" });
   }
 
-  if (isTimedOut(user)) {
+  if (timedOut) {
     badges.push({ key: "timeout", label: t("moderation.timedOutBadge"), className: "badge-shadow" });
   }
 
