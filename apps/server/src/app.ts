@@ -3236,6 +3236,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       updatedAt: Date.now(),
     });
     store.upsertChannel(next);
+    // Turning join requests OFF clears any pending queue (they can no longer be fulfilled via the flow).
+    if (update.allowJoinRequests === false) {
+      store.removeJoinRequestsForChannel(channel.id);
+    }
     // A cleared `messageTtlMs` (null → undefined) is kept by Zod as an undefined-valued key; Object.assign
     // copies it onto the live record (so `ttlForMessage` falls back to the node default) and JSON.stringify
     // omits it on persist/broadcast — no explicit key-delete needed.
@@ -7134,9 +7138,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   );
 
   // Ephemeral typing ping (P14): broadcast "userId is typing" to the conversation audience (minus the
-  // typist). Never persisted. Silently no-ops (204) for anyone who can't actually post there — banned/
-  // pending/timed-out, or a channel/DM they can't access — so a stale "typing…" can't be spoofed. The
-  // client throttles these; the per-route cap is the server-side backstop.
+  // typist). Never persisted. Silently no-ops (204) for a banned/pending/timed-out sender, a channel the
+  // sender can't access, or an unknown DM recipient — so a stale "typing…" can't be spoofed at someone who
+  // can't see the conversation. The client throttles these; the per-route cap is the server-side backstop.
   server.post(
     "/api/typing",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
@@ -7158,7 +7162,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         if (channel && canAccessChannel(channel, currentUser.id)) {
           broadcast({ type: "typing", userId: currentUser.id, channelId: channel.id });
         }
-      } else if (appConfig.features.enableDMs && body.data.recipientUserId) {
+      } else if (
+        appConfig.features.enableDMs &&
+        body.data.recipientUserId &&
+        data.users.some((user) => user.id === body.data.recipientUserId)
+      ) {
         broadcast({ type: "typing", userId: currentUser.id, dmUserId: body.data.recipientUserId });
       }
 
@@ -7374,9 +7382,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             ? owningMessage.attachments?.find((entry) => entry.id === attachment.id)
             : undefined;
         const downloadName = sanitizeAttachmentName(record?.name);
+        // RFC 6266: an ASCII-folded `filename=` (a header value may not carry a byte > 0xFF, which would
+        // make Node throw ERR_INVALID_CHAR → 500 for any CJK/emoji/Cyrillic name) PLUS a `filename*` that
+        // percent-encodes the real UTF-8 name, so modern browsers still get the correct international name.
+        const asciiName = downloadName.replace(/[^\x20-\x7e]/g, "_");
         return reply
           .type("application/octet-stream")
-          .header("content-disposition", `attachment; filename="${downloadName}"`)
+          .header(
+            "content-disposition",
+            `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
+          )
           .send(fileBytes);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -7555,7 +7570,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       const channel = ensureChannel(request.params.channelId);
 
-      if (!channel || channel.visibility !== "private" || !channel.allowJoinRequests) {
+      // 404-parity: unknown / public / archived / not-opted-in are all indistinguishable.
+      if (!channel || channel.visibility !== "private" || channel.archived || !channel.allowJoinRequests) {
         return reply.code(404).send(errorBody("Channel does not exist"));
       }
 
@@ -7584,7 +7600,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const requesterIds = new Set(store.loadJoinRequests(channel.id));
     return data.users
-      .filter((user) => requesterIds.has(user.id) && user.type === "human")
+      .filter((user) => requesterIds.has(user.id) && user.type === "human" && !user.banned && !user.pending)
       .map((user) => sanitizeUserFor(currentUser, user));
   });
 

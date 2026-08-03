@@ -5775,19 +5775,21 @@ describe("message attachments", () => {
     const app = await makeApp();
     const session = await newSession(app);
 
+    // A non-Latin1 filename (CJK/emoji) must not crash the download header (RFC 6266 filename*).
     const uploaded = await app.server.inject({
       method: "POST",
       url: "/api/attachments",
       headers: { cookie: session.cookie },
-      payload: { mimeType: "text/plain", data: Buffer.from("hello, world").toString("base64"), name: "notes.txt" },
+      payload: { mimeType: "text/plain", data: Buffer.from("hello, world").toString("base64"), name: "报告😀.txt" },
     });
     expect(uploaded.statusCode).toBe(201);
     const attachment = uploaded.json() as { id: string; mimeType: string; name?: string };
     expect(attachment.mimeType).toBe("text/plain");
-    expect(attachment.name).toBe("notes.txt");
+    expect(attachment.name).toBe("报告😀.txt");
 
     // The uploader fetches their pending file — served as a FORCED DOWNLOAD (octet-stream + attachment),
-    // never inline, so an uploaded HTML/SVG could not execute in a browser.
+    // never inline, so an uploaded HTML/SVG could not execute in a browser. The unicode name round-trips via
+    // filename* (a bare filename="…" with those bytes would make Node throw ERR_INVALID_CHAR → 500).
     const served = await app.server.inject({
       method: "GET",
       url: `/api/attachments/${attachment.id}.bin`,
@@ -5796,6 +5798,7 @@ describe("message attachments", () => {
     expect(served.statusCode).toBe(200);
     expect(served.headers["content-type"]).toContain("application/octet-stream");
     expect(String(served.headers["content-disposition"])).toContain("attachment");
+    expect(String(served.headers["content-disposition"])).toContain("filename*=UTF-8''");
 
     // A script-executable type is not in the allowlist → rejected at upload.
     const html = await app.server.inject({

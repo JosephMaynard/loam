@@ -3,10 +3,11 @@ import { generateDisplayName } from "@loam/display-name";
 import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
-import { attachmentPath, isImageAttachment } from "../lib/attachments";
+import { isImageAttachment } from "../lib/attachments";
 import { renderMarkdownCached } from "../lib/markdown";
 import { bodyFor, displayTime } from "../lib/message-format";
 import { isJumboEmoji, type ReactionSummary } from "../lib/messages";
+import { AttachmentFile } from "./AttachmentFile";
 import { AttachmentImage } from "./AttachmentImage";
 import { Avatar } from "./Avatar";
 import { LocationCard } from "./LocationCard";
@@ -242,17 +243,9 @@ export function MessageItem({
                 isImageAttachment(attachment) ? (
                   <AttachmentImage attachment={attachment} alt={t("message.attachedImageAlt")} key={attachment.id} />
                 ) : (
-                  // Non-image file: a plain download link. The server serves it octet-stream + attachment,
-                  // so the browser downloads rather than renders it (no inline HTML/SVG execution).
-                  <a
-                    className="attachment-file"
-                    download={attachment.name ?? "file"}
-                    href={attachmentPath(attachment)}
-                    key={attachment.id}
-                    rel="noreferrer"
-                  >
-                    📎 {attachment.name ?? t("message.attachedFile")}
-                  </a>
+                  // Non-image file: a download link. Served octet-stream + attachment (never rendered);
+                  // AttachmentFile routes the fetch through the transport tunnel so it works in required mode.
+                  <AttachmentFile attachment={attachment} key={attachment.id} />
                 ),
               )}
             </div>
