@@ -3226,6 +3226,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowReplies: update.allowReplies ?? channel.allowReplies,
       archived: update.archived === undefined ? channel.archived : update.archived,
       pinned: update.pinned === undefined ? channel.pinned : update.pinned,
+      allowJoinRequests:
+        update.allowJoinRequests === undefined ? channel.allowJoinRequests : update.allowJoinRequests,
       // `null` clears the per-channel TTL (back to the node default); a number sets it; omitted leaves it.
       messageTtlMs:
         update.messageTtlMs === undefined ? channel.messageTtlMs : (update.messageTtlMs ?? undefined),
@@ -7534,6 +7536,106 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       applyChannelMembers(channel, [...members]);
       sendEventToUsers(new Set([targetId]), { type: "channelRemoved", channelId: channel.id });
       return { ok: true };
+    },
+  );
+
+  // Request to join a private channel that opted into join requests (P10). The requester must already know
+  // the channel id (shared out-of-band). A channel that doesn't exist, isn't private, or hasn't opted in
+  // 404s identically, so this never reveals a channel's existence — no discoverability change.
+  server.post<{ Params: { channelId: string } }>(
+    "/api/channels/:channelId/join-requests",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const channel = ensureChannel(request.params.channelId);
+
+      if (!channel || channel.visibility !== "private" || !channel.allowJoinRequests) {
+        return reply.code(404).send(errorBody("Channel does not exist"));
+      }
+
+      // Already a member (or the owner): nothing to request.
+      if (channelMemberIds(channel).has(currentUser.id)) {
+        return reply.code(204).send();
+      }
+
+      store.addJoinRequest(channel.id, currentUser.id);
+      return reply.code(201).send({ ok: true });
+    },
+  );
+
+  // List pending join requesters for a private channel (owner/admin) — sanitised user records.
+  server.get<{ Params: { channelId: string } }>("/api/channels/:channelId/join-requests", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const channel = ensureChannel(request.params.channelId);
+
+    if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+      return reply.code(404).send(errorBody("Channel does not exist"));
+    }
+
+    if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+      return reply.code(403).send(errorBody("Only the channel owner or an admin can review join requests"));
+    }
+
+    const requesterIds = new Set(store.loadJoinRequests(channel.id));
+    return data.users
+      .filter((user) => requesterIds.has(user.id) && user.type === "human")
+      .map((user) => sanitizeUserFor(currentUser, user));
+  });
+
+  // Approve a pending join request → add the user to the private channel's roster (owner/admin).
+  server.post<{ Params: { channelId: string; userId: string } }>(
+    "/api/channels/:channelId/join-requests/:userId/approve",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const channel = ensureChannel(request.params.channelId);
+
+      if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+        return reply.code(404).send(errorBody("Channel does not exist"));
+      }
+
+      if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+        return reply.code(403).send(errorBody("Only the channel owner or an admin can approve join requests"));
+      }
+
+      if (!new Set(store.loadJoinRequests(channel.id)).has(request.params.userId)) {
+        return reply.code(404).send(errorBody("No such join request"));
+      }
+
+      const target = data.users.find((user) => user.id === request.params.userId);
+      store.removeJoinRequest(channel.id, request.params.userId);
+
+      if (!target || target.type !== "human" || target.banned) {
+        return reply.code(400).send(errorBody("That user cannot be added"));
+      }
+
+      const members = channelMemberIds(channel);
+      return members.has(target.id) ? channel : applyChannelMembers(channel, [...members, target.id]);
+    },
+  );
+
+  // Deny (or cancel) a pending join request (owner/admin).
+  server.delete<{ Params: { channelId: string; userId: string } }>(
+    "/api/channels/:channelId/join-requests/:userId",
+    async (request, reply) => {
+      const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const channel = ensureChannel(request.params.channelId);
+
+      if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
+        return reply.code(404).send(errorBody("Channel does not exist"));
+      }
+
+      if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+        return reply.code(403).send(errorBody("Only the channel owner or an admin can deny join requests"));
+      }
+
+      store.removeJoinRequest(channel.id, request.params.userId);
+      return reply.code(204).send();
     },
   );
 

@@ -5288,6 +5288,75 @@ describe("member reports + timeout + honest tombstone (docs/26)", () => {
   });
 });
 
+describe("private channel join requests (P10)", () => {
+  it("gates requests behind opt-in, then owner-approves a requester into the roster", async () => {
+    const app = await makeApp();
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const channelId = ((await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Ops", visibility: "private" },
+    })).json() as { id: string }).id;
+
+    const requestJoin = (cookie: string) =>
+      app.server.inject({ method: "POST", url: `/api/channels/${channelId}/join-requests`, headers: { cookie } });
+
+    // Not opted in yet → 404-parity (never reveals the channel exists).
+    expect((await requestJoin(outsider.cookie)).statusCode).toBe(404);
+
+    // Owner opts the channel into join requests.
+    expect(
+      (await app.server.inject({
+        method: "PATCH",
+        url: `/api/channels/${channelId}`,
+        headers: { cookie: owner.cookie },
+        payload: { allowJoinRequests: true },
+      })).statusCode,
+    ).toBe(200);
+
+    // Now the outsider can request; the outsider still can't read the channel yet.
+    expect((await requestJoin(outsider.cookie)).statusCode).toBe(201);
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie: outsider.cookie } }))
+        .statusCode,
+    ).toBe(404);
+
+    // The owner sees the pending request; a non-owner/admin can't review it.
+    const queue = (
+      await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/join-requests`, headers: { cookie: owner.cookie } })
+    ).json() as { id: string }[];
+    expect(queue.map((u) => u.id)).toContain(outsider.userId);
+    // A non-member requester can't review the queue — the private channel 404s for them (never 403, which
+    // would confirm existence). Only a member-who-isn't-owner would get 403.
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/join-requests`, headers: { cookie: outsider.cookie } }))
+        .statusCode,
+    ).toBe(404);
+
+    // Approve → the requester joins and can now read the channel; the request clears.
+    expect(
+      (await app.server.inject({
+        method: "POST",
+        url: `/api/channels/${channelId}/join-requests/${outsider.userId}/approve`,
+        headers: { cookie: owner.cookie },
+      })).statusCode,
+    ).toBe(200);
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie: outsider.cookie } }))
+        .statusCode,
+    ).toBe(200);
+    expect(
+      (
+        (await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/join-requests`, headers: { cookie: owner.cookie } }))
+          .json() as unknown[]
+      ).length,
+    ).toBe(0);
+  });
+});
+
 describe("participation gating (banned / pending read access)", () => {
   const readPaths = ["/api/channels", "/api/users", "/api/messages/general", "/api/search?q=x"];
 

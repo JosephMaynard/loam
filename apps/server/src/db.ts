@@ -233,6 +233,14 @@ export interface LoamStore {
    */
   markChannelSynced(channelId: string): void;
   loadSyncedChannelIds(): string[];
+  /**
+   * Pending join requests for private channels (P10). Idempotent add; per-channel load (the requester ids);
+   * removal on approve/deny; bulk removal when a channel is deleted. Wiped by the kill switch.
+   */
+  addJoinRequest(channelId: string, userId: string): void;
+  loadJoinRequests(channelId: string): string[];
+  removeJoinRequest(channelId: string, userId: string): void;
+  removeJoinRequestsForChannel(channelId: string): void;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -435,6 +443,12 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     CREATE TABLE IF NOT EXISTS synced_channels (
       channel_id TEXT PRIMARY KEY
     );
+    CREATE TABLE IF NOT EXISTS channel_join_requests (
+      channel_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (channel_id, user_id)
+    );
   `);
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
@@ -513,6 +527,16 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
   );
   const loadSyncedChannelIdsStmt = db.prepare("SELECT channel_id FROM synced_channels");
+  const addJoinRequestStmt = db.prepare(
+    "INSERT INTO channel_join_requests (channel_id, user_id, created_at) VALUES (?, ?, ?) ON CONFLICT(channel_id, user_id) DO NOTHING",
+  );
+  const loadJoinRequestsStmt = db.prepare(
+    "SELECT user_id FROM channel_join_requests WHERE channel_id = ? ORDER BY created_at ASC, rowid ASC",
+  );
+  const removeJoinRequestStmt = db.prepare(
+    "DELETE FROM channel_join_requests WHERE channel_id = ? AND user_id = ?",
+  );
+  const removeJoinRequestsForChannelStmt = db.prepare("DELETE FROM channel_join_requests WHERE channel_id = ?");
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -692,6 +716,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     loadSyncedChannelIds() {
       return loadSyncedChannelIdsStmt.all().map((row) => (row as { channel_id: string }).channel_id);
     },
+    addJoinRequest(channelId, userId) {
+      addJoinRequestStmt.run(channelId, userId, Date.now());
+    },
+    loadJoinRequests(channelId) {
+      return loadJoinRequestsStmt.all(channelId).map((row) => (row as { user_id: string }).user_id);
+    },
+    removeJoinRequest(channelId, userId) {
+      removeJoinRequestStmt.run(channelId, userId);
+    },
+    removeJoinRequestsForChannel(channelId) {
+      removeJoinRequestsForChannelStmt.run(channelId);
+    },
     wipeAll() {
       store.transaction(() => {
         db.exec("DELETE FROM messages");
@@ -705,6 +741,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM missing_attachments");
         db.exec("DELETE FROM reports");
         db.exec("DELETE FROM synced_channels");
+        db.exec("DELETE FROM channel_join_requests");
       });
     },
     checkpoint() {

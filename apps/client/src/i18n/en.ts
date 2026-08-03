@@ -92,6 +92,13 @@ export const en = {
   "members.choosePerson": "Choose a person…",
   "members.allMembers": "Everyone is already a member",
   "members.invite": "Invite",
+  "members.allowJoinRequests": "Let people request to join (they need the channel link)",
+  "members.joinRequestsHeading": "Join requests",
+  "members.approve": "Approve",
+  "members.deny": "Deny",
+  "members.updateError": "Could not update the channel",
+  "members.approveError": "Could not approve the request",
+  "members.denyError": "Could not deny the request",
 
   // Thread side panel.
   "thread.eyebrow": "Thread",

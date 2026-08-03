@@ -239,6 +239,13 @@ export const ChannelSchema = z.object({
   /** Pinned channels sort to the top of the client's channel list. Owner/admin toggled. */
   pinned: z.boolean().optional(),
   /**
+   * For a PRIVATE channel: accept join requests from non-members who have the channel id (P10). Opt-in and
+   * off by default, so a strictly invite-only channel is unchanged. It does NOT make the channel
+   * discoverable — a requester must already know the id (shared out-of-band, like an invite); the request
+   * endpoint 404s identically to an unknown channel when this is off, so existence never leaks.
+   */
+  allowJoinRequests: z.boolean().optional(),
+  /**
    * Per-channel message retention override (ms). When set, messages in this channel expire after this
    * long instead of the node-wide `retention.messageTtlMs`; `null`/absent = use the node default. Lets an
    * operator make one channel more (or less) ephemeral than the rest. Enforced by the retention reaper.
@@ -292,6 +299,7 @@ export const ChannelUpdateRequestSchema = z
     archived: z.boolean(),
     pinned: z.boolean(),
     messageTtlMs: z.number().int().positive().nullable(),
+    allowJoinRequests: z.boolean(),
   })
   .partial();
 export type ChannelUpdateRequest = z.infer<typeof ChannelUpdateRequestSchema>;
