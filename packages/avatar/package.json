@@ -24,11 +24,11 @@
   },
   "devDependencies": {
     "@preact/preset-vite": "catalog:",
-    "@tailwindcss/vite": "^4.3.2",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "catalog:",
     "jsdom": "catalog:",
     "preact": "catalog:",
-    "tailwindcss": "^4.3.2",
+    "tailwindcss": "^4.3.3",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:"
