@@ -1935,6 +1935,7 @@ function ConversationView({
 }: ConversationViewProps) {
   const location = useLocation();
   const [membersOpen, setMembersOpen] = useState(false);
+  const timedOut = useIsTimedOut(currentUser);
   const topMessages = useMemo(
     () => (conversation ? topLevelMessages(messages, conversation) : []),
     [conversation, messages],
@@ -2026,7 +2027,7 @@ function ConversationView({
         />
         <MessageComposer
           allowLocationSharing={allowLocationSharing}
-          disabledReason={isTimedOut(currentUser) ? t("composer.timedOut") : undefined}
+          disabledReason={timedOut ? t("composer.timedOut") : undefined}
           label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
           onSend={onSend}
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
@@ -2102,6 +2103,25 @@ interface MessageListProps {
 /** Whether a user is currently under an active (not-yet-expired) moderator timeout. */
 function isTimedOut(user: User): boolean {
   return user.timeoutUntil !== undefined && user.timeoutUntil > Date.now();
+}
+
+/**
+ * Reactive `isTimedOut`: schedules a single re-render at the exact moment the timeout expires, so a
+ * disabled composer re-enables on its own instead of waiting for an unrelated re-render.
+ */
+function useIsTimedOut(user: User): boolean {
+  const [, force] = useState(0);
+  const until = user.timeoutUntil;
+
+  useEffect(() => {
+    if (until === undefined || until <= Date.now()) {
+      return;
+    }
+    const id = window.setTimeout(() => force((n) => n + 1), until - Date.now());
+    return () => window.clearTimeout(id);
+  }, [until]);
+
+  return isTimedOut(user);
 }
 
 function MessageList({
@@ -2228,6 +2248,8 @@ function ThreadPanel({
   repliesByParent,
   usersById,
 }: ThreadPanelProps) {
+  const timedOut = useIsTimedOut(currentUser);
+  const [reportMessage, setReportMessage] = useState<Message | undefined>(undefined);
   const replies = repliesFor(repliesByParent.get(parent.id) ?? EMPTY_MESSAGES, parent.id);
 
   return (
@@ -2251,6 +2273,7 @@ function ThreadPanel({
           onDelete={onDelete}
           onEdit={onEdit}
           onReact={onReact}
+          onReport={setReportMessage}
           reactions={reactionSummary(reactionsByTarget.get(parent.id) ?? EMPTY_MESSAGES, parent.id, currentUser.id)}
           usersById={usersById}
         />
@@ -2265,6 +2288,7 @@ function ThreadPanel({
             onDelete={onDelete}
             onEdit={onEdit}
             onReact={onReact}
+            onReport={setReportMessage}
             reactions={reactionSummary(reactionsByTarget.get(reply.id) ?? EMPTY_MESSAGES, reply.id, currentUser.id)}
             usersById={usersById}
           />
@@ -2272,12 +2296,15 @@ function ThreadPanel({
       </div>
       <MessageComposer
         allowLocationSharing={allowLocationSharing}
-        disabledReason={isTimedOut(currentUser) ? t("composer.timedOut") : undefined}
+        disabledReason={timedOut ? t("composer.timedOut") : undefined}
         label={t("thread.replyLabel")}
         onSend={onReply}
         onUploadAttachment={onUploadAttachment}
         placeholder={t("thread.replyLabel")}
       />
+      {reportMessage ? (
+        <ReportDialog targetType="message" targetId={reportMessage.id} onClose={() => setReportMessage(undefined)} />
+      ) : null}
     </aside>
   );
 }

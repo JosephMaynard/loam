@@ -1486,9 +1486,9 @@ a {
   font-size: 0.9rem;
 }
 
-/* @mentions-lite: attention cue when a message names you */
+/* @mentions-lite: attention cue when a message names you (logical inline-start edge so it's RTL-correct) */
 .message.mentions-you .message-bubble {
-  box-shadow: inset 3px 0 0 var(--c-accent, #4f8cff);
+  border-inline-start: 3px solid var(--c-accent, #4f8cff);
 }
 
 .admin-channel-ttl {

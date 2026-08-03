@@ -5907,7 +5907,11 @@ describe("node-to-node sync", () => {
 
     // First sync imports relief-ops → it's recorded as synced-origin.
     await runSync(puller, pullerAdmin.cookie);
-    expect(puller.store.loadChannels().find((channel) => channel.id === "relief-ops")?.name).toBe("Relief Ops");
+    const imported = puller.store.loadChannels().find((channel) => channel.id === "relief-ops");
+    expect(imported?.name).toBe("Relief Ops");
+    // The peer's ownerUserId is stripped — an imported channel is ownerless here, never attributed to a
+    // (possibly locally-authoritative) foreign id.
+    expect(imported?.ownerUserId).toBeUndefined();
 
     // Rename + archive on the source, then sync again — the imported copy tracks the change.
     await source.server.inject({

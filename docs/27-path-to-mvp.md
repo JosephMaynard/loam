@@ -42,6 +42,13 @@ chat app into a platform" phase — none of them block the anonymous/ephemeral c
 The "a real community can run, govern itself, and it feels finished" PR. Software-only, no gates. Large by
 design (owner wants few big PRs), split into commit-groups. Built in this order:
 
+> **Delivered in [#109](https://github.com/JosephMaynard/loam/pull/109):** groups A (report loop), B (C1),
+> the pin/per-channel-TTL/@mentions subset of C, E (S5), and F (i18n en-fallback + D2). **Deferred to
+> follow-ups** (each with rationale in §5): group D (OpenRouter cloud-LLM — pending the Sol consent review),
+> typing indicators / join-request / non-image file attachments (rest of C), S7 (rest of E), and the full
+> 15-locale translation batch. So the list below is the *plan*; the PR shipped the safe, self-contained
+> subset.
+
 **A. Governance (new — Buzz prior-art `docs/26` idea 3):** moderation **report loop** — private member
 reports (category + note, never broadcast, reporter id never leaves the mod queue) → admin/mod queue
 grouped by target → act in one motion (dismiss / delete / **timeout** / ban / escalate). Adds a **timeout**

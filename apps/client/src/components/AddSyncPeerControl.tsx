@@ -1,3 +1,4 @@
+import { SyncPeerSchema, type SyncPeer } from "@loam/schema";
 import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
@@ -8,16 +9,20 @@ export function AddSyncPeerControl({
   onAdd,
 }: {
   disabled: boolean;
-  onAdd: (peer: { url: string; label?: string; transportKey?: string }) => void;
+  onAdd: (peer: SyncPeer) => void;
 }) {
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
   const [transportKey, setTransportKey] = useState("");
   const trimmedUrl = url.trim().replace(/\/+$/, "");
   const trimmedKey = transportKey.trim();
-  const validUrl = /^https?:\/\/.+/.test(trimmedUrl);
-  // Optional; when present it must be base64url within the server's length bound (SyncPeerSchema, max 64).
-  const validKey = trimmedKey === "" || (/^[A-Za-z0-9_-]+$/.test(trimmedKey) && trimmedKey.length <= 64);
+  // Validate the WHOLE candidate peer against the shared schema (URL protocol, key charset+length, label
+  // bound) — the same shape the server stores — instead of hand-rolled partial checks.
+  const candidate = SyncPeerSchema.safeParse({
+    url: trimmedUrl,
+    ...(label.trim() ? { label: label.trim() } : {}),
+    ...(trimmedKey ? { transportKey: trimmedKey } : {}),
+  });
 
   return (
     <div className="sync-peer-add">
@@ -50,13 +55,12 @@ export function AddSyncPeerControl({
         />
       </label>
       <button
-        disabled={disabled || !validUrl || !validKey}
+        disabled={disabled || !candidate.success}
         onClick={() => {
-          onAdd({
-            url: trimmedUrl,
-            ...(label.trim() ? { label: label.trim() } : {}),
-            ...(trimmedKey ? { transportKey: trimmedKey } : {}),
-          });
+          if (!candidate.success) {
+            return;
+          }
+          onAdd(candidate.data);
           setUrl("");
           setLabel("");
           setTransportKey("");

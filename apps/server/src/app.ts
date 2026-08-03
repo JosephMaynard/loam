@@ -4761,7 +4761,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const channelId =
         message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined;
       const channelTtl = channelId ? channelsById.get(channelId)?.messageTtlMs : undefined;
-      return channelTtl ?? globalTtl ?? undefined;
+      // `|| undefined` (not `??`) so a zero/NaN global TTL is treated as OFF, never as "expire everything
+      // now" — a 0 would make `createdAt < now - 0` true for every message in a non-TTL channel.
+      return channelTtl ?? (globalTtl || undefined);
     };
     const expired = data.messages.filter((message) => {
       if (message.meta?.streaming) {
@@ -5925,6 +5927,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
             // Clamp the imported stamp to now, exactly like the merge path — otherwise a future/
             // clock-skewed peer stamp would freeze the channel on import and block every later correction.
             updatedAt: Math.min(channel.updatedAt ?? channel.createdAt, Date.now()),
+            // Never trust the peer's `ownerUserId` — it could name a LOCAL authoritative user (making the
+            // imported channel appear owned by this node's admin) or a foreign id. Imported channels are
+            // ownerless here; the local admin manages them via /api/admin/channels.
+            ownerUserId: undefined,
             memberUserIds: undefined,
             pinned: undefined,
             messageTtlMs: undefined,
@@ -7007,6 +7013,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // see "removed by a moderator" (a private-channel tombstone still reaches only its members). Mods/admins.
   server.post<{ Params: { messageId: string } }>(
     "/api/moderation/messages/:messageId/remove",
+    // Per-route rate limit: this handler touches the filesystem (deletes attachment files), and CodeQL
+    // (js/missing-rate-limiting) only credits the per-route config, not the global limiter.
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 

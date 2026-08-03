@@ -1,5 +1,5 @@
 import { ReportReasonSchema, type ReportReason, type ReportTargetType } from "@loam/schema";
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { requestJson } from "../lib/api";
@@ -21,6 +21,12 @@ export function ReportDialog({ targetType, targetId, onClose }: ReportDialogProp
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [sent, setSent] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Move focus into the dialog on open (accessibility), so keyboard/screen-reader users land in it.
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
 
   async function submit(): Promise<void> {
     setBusy(true);
@@ -50,7 +56,19 @@ export function ReportDialog({ targetType, targetId, onClose }: ReportDialogProp
         }
       }}
     >
-      <div aria-labelledby="report-dialog-title" aria-modal="true" className="invite-modal report-dialog" role="dialog" tabIndex={-1}>
+      <div
+        aria-labelledby="report-dialog-title"
+        aria-modal="true"
+        className="invite-modal report-dialog"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            onClose();
+          }
+        }}
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+      >
         <div className="invite-modal-header">
           <h2 id="report-dialog-title">
             {targetType === "message" ? t("report.messageTitle") : t("report.userTitle")}
