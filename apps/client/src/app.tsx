@@ -483,9 +483,12 @@ function LoamApp() {
   // Ephemeral typing signals (P14): conversationKey → (userId → last-seen ms). Pruned on a timer.
   const [typing, setTyping] = useState<Record<string, Record<string, number>>>({});
 
-  // Prune stale typing entries on a timer while any are present, so "typing…" clears itself.
+  // Prune stale typing entries on a timer while any are present, so "typing…" clears itself. Keyed on a
+  // boolean (not the whole `typing` object) so the interval is created only on the empty↔non-empty
+  // transitions, not torn down and rebuilt on every incoming ping.
+  const hasTyping = Object.keys(typing).length > 0;
   useEffect(() => {
-    if (Object.keys(typing).length === 0) {
+    if (!hasTyping) {
       return;
     }
     const id = window.setInterval(() => {
@@ -506,7 +509,7 @@ function LoamApp() {
       });
     }, 2000);
     return () => window.clearInterval(id);
-  }, [typing]);
+  }, [hasTyping]);
 
   // Refs let the long-lived WebSocket handler read the latest active conversation / users / channels
   // without re-subscribing the socket on every navigation or roster change.

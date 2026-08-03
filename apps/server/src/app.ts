@@ -3577,6 +3577,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (userId === event.userId) {
         return false;
       }
+      // A shadow-banned user is hidden from everyone but themselves — their "typing…" must not leak either
+      // (it would reveal they're active), matching how their messages are withheld.
+      const typist = data.users.find((candidate) => candidate.id === event.userId);
+      if (typist?.shadowBanned) {
+        return false;
+      }
       if (event.channelId) {
         const channel = ensureChannel(event.channelId);
         return !!channel && canAccessChannel(channel, userId);
@@ -7588,6 +7594,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // List pending join requesters for a private channel (owner/admin) — sanitised user records.
   server.get<{ Params: { channelId: string } }>("/api/channels/:channelId/join-requests", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
     const channel = ensureChannel(request.params.channelId);
 
     if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -7609,6 +7621,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/channels/:channelId/join-requests/:userId/approve",
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
       const channel = ensureChannel(request.params.channelId);
 
       if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {
@@ -7640,6 +7658,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/channels/:channelId/join-requests/:userId",
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+      const accessError = participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
       const channel = ensureChannel(request.params.channelId);
 
       if (!channel || (channel.visibility === "private" && !canAccessChannel(channel, currentUser.id) && !currentUser.isAdmin)) {

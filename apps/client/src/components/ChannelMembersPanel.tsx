@@ -80,7 +80,12 @@ export function ChannelMembersPanel({
           setJoinRequests(parseUserList(payload));
         }
       })
-      .catch(() => {});
+      .catch((loadError: unknown) => {
+        if (active) {
+          setJoinRequests([]);
+          setError(loadError instanceof Error ? loadError.message : t("members.loadError"));
+        }
+      });
     return () => {
       active = false;
     };
