@@ -960,6 +960,27 @@ a {
   accent-color: var(--c-moss);
 }
 
+/* The "open the admin area" entry is a single-child text link, so it must NOT reuse .nav-link — that
+   is the sidebar's 3-column (icon | label | badge) grid, which squeezes lone text into the 22px icon
+   column and wraps it one word per line. Style it as a self-sized primary action button instead. */
+.admin-open-link {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  border-radius: 8px;
+  background: var(--c-accent);
+  color: var(--c-white);
+  padding: 8px 14px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.admin-open-link:hover {
+  filter: brightness(1.06);
+}
+
 .profile-panel input:focus,
 .profile-panel select:focus,
 .profile-panel textarea:focus {
