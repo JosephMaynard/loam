@@ -37,10 +37,6 @@ import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hots
 // WebView loads it over loopback. Remote joiners use the hotspot IP (below).
 const SERVER_PORT = 3000;
 const LOAM_URL = `http://localhost:${SERVER_PORT}`;
-// Fallback join address: stock Android LocalOnlyHotspot puts the host at this fixed gateway IP, but
-// that isn't guaranteed across devices. The launcher reports the host's real addresses over the
-// `loam-hostinfo` channel and we prefer those; this is the last-resort default so a QR always renders.
-const HOTSPOT_GATEWAY_FALLBACK = `http://192.168.49.1:${SERVER_PORT}`;
 // Cold start is ~80s (docs/04); give it comfortably more before declaring the runtime hung.
 const STARTUP_TIMEOUT_MS = 150_000;
 // How long to wait for GET /api/bootstrap to resolve before mounting the WebView anyway (G7): in
@@ -90,24 +86,6 @@ const DB_LOCKED_CODE = 'db_encryption_locked';
  * a fresh-started database, is exactly the kind of thing the operator must not lose sight of once the
  * WebView is up and everything otherwise looks normal. */
 type BootNotice = { code: string; message?: string };
-
-/**
- * Build the Step-2 join URL from the host's real reported addresses, in order of how likely a joiner
- * is to reach it: (1) the stock LocalOnlyHotspot AP address; (2) a regular LAN address — the common
- * case when the host is on an existing WiFi (home/office/venue), which is what actually works when
- * everyone shares that network; (3) any other private address; (4) whatever was reported. Only when
- * nothing has been reported yet do we fall back to the documented hotspot default.
- */
-function hotspotJoinUrl(addresses: string[]): string {
-  const isPrivate10or172 = (address: string) =>
-    address.startsWith('10.') || /^172\.(1[6-9]|2\d|3[01])\./.test(address);
-  const preferred =
-    addresses.find((address) => address.startsWith('192.168.49.')) ??
-    addresses.find((address) => address.startsWith('192.168.')) ??
-    addresses.find(isPrivate10or172) ??
-    addresses[0];
-  return preferred ? `http://${preferred}:${SERVER_PORT}` : HOTSPOT_GATEWAY_FALLBACK;
-}
 
 /** True when `url` belongs to the embedded server's origin (compares origins, not string prefixes). */
 function isLoamUrl(url: string | undefined): boolean {
@@ -1059,7 +1037,7 @@ export default function HostScreen() {
         <HostShareOverlay
           visible={shareOpen}
           onClose={() => setShareOpen(false)}
-          serverUrl={`${hotspotJoinUrl(hostAddresses)}${transportKeyFragment}`}
+          transportKeyFragment={transportKeyFragment}
           addresses={hostAddresses}
           keepAwake={keepAwake}
           onKeepAwakeChange={setKeepAwake}
