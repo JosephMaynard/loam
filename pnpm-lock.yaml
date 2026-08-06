@@ -124,8 +124,8 @@ importers:
         specifier: ~57.0.2
         version: 57.0.2(expo@57.0.9)(react-native@0.86.2(@babel/core@7.29.7)(@react-native/metro-config@0.86.2(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.8))
       js-sha256:
-        specifier: ^0.11.1
-        version: 0.11.1
+        specifier: ^1.0.0
+        version: 1.0.0
       llama.rn:
         specifier: ^0.12.6
         version: 0.12.6(patch_hash=cfb0780f93041a3250fd30607ea843e17efb34ee8d164a40f8a6827ae488d8c6)(react-native@0.86.2(@babel/core@7.29.7)(@react-native/metro-config@0.86.2(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.8))(react@19.2.8)
@@ -3281,8 +3281,8 @@ packages:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
     hasBin: true
 
-  js-sha256@0.11.1:
-    resolution: {integrity: sha512-o6WSo/LUvY2uC4j7mO50a2ms7E/EAdbP0swigLV+nzHKTTaYnaLIWJ02VdXrsJX0vGedDESQnLsOekr94ryfjg==}
+  js-sha256@1.0.0:
+    resolution: {integrity: sha512-Bqxf6ENUzYIMzuELCmRNrJOVbjKH1oMgbfYJBKVr/W1Xf9fazpahqCbb24v1pR7XV1isuqhM+w9KWpK7zCyUQw==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -6494,7 +6494,9 @@ snapshots:
       metro-runtime: 0.84.4
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
 
   '@react-native/normalize-colors@0.74.89': {}
 
@@ -8077,7 +8079,7 @@ snapshots:
 
   jiti@2.7.0: {}
 
-  js-sha256@0.11.1: {}
+  js-sha256@1.0.0: {}
 
   js-tokens@4.0.0: {}
 
