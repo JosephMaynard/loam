@@ -20,7 +20,7 @@
 <p align="center">
   <a href="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml"><img src="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" />
-  <img src="https://img.shields.io/badge/node-24.13.1-brightgreen" alt="Node 24.13.1" />
+  <img src="https://img.shields.io/badge/node-24.15.0-brightgreen" alt="Node 24.15.0" />
   <img src="https://img.shields.io/badge/PWA-installable-5a7d5a" alt="Installable PWA" />
 </p>
 
@@ -85,7 +85,7 @@ native SQLCipher driver; skip it and storage stays plain). See [`loam --help`](d
 
 ### Develop from source (git clone)
 
-For hacking on LOAM you'll want the repo. You'll need [Node 24.13.1](.node-version) and
+For hacking on LOAM you'll want the repo. You'll need [Node 24.15.0](.node-version) and
 [pnpm 10](https://pnpm.io) (`corepack enable` will set pnpm up for you).
 
 ```bash

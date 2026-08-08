@@ -35,7 +35,7 @@
 The `apps/app` Expo app builds an installable Android APK that runs the embedded server + WebView.
 
 ### Prerequisites
-- Node `24.13.1`, pnpm `10.30.2` (repo pins). A real JDK (Android Studio's JBR:
+- Node `24.15.0`, pnpm `10.30.2` (repo pins). A real JDK (Android Studio's JBR:
   `/Applications/Android Studio.app/Contents/jbr/Contents/Home` on macOS — a bare JRE fails "No Java
   compiler found"). Android SDK with platform-tools + NDK r27+ (16KB page alignment). `ANDROID_HOME`
   set; `adb`/`emulator` on `PATH`.

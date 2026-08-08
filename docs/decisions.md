@@ -26,7 +26,7 @@ Update the "Decision" column as they're settled.
 
 ## Notes captured during research (2026)
 
-- `node:sqlite` is present and working on the repo's Node **24.13.1** (`DatabaseSync`, sync API,
+- `node:sqlite` is present and working on the repo's Node **24.15.0** (`DatabaseSync`, sync API,
   ExperimentalWarning) — it powers the interim Phase-A DAL. **Verified ABSENT under nodejs-mobile**
   (embedded Node is 18.20.4; `ERR_UNKNOWN_BUILTIN_MODULE` on-device), so it cannot be the final
   Android-host driver.

@@ -52,7 +52,7 @@ way comparable apps (Bridgefy, FireChat) failed.
 
 ## Layout
 
-pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `24.13.1`
+pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `24.15.0`
 (`.node-version`), package manager `pnpm@10.30.2`.
 
 | Path | Role |
