@@ -1,7 +1,7 @@
 {
   "name": "app",
   "main": "expo-router/entry",
-  "version": "1.0.0",
+  "version": "0.4.0",
   "dependencies": {
     "@comapeo/nodejs-mobile-react-native": "18.20.4-2",
     "@expo/ui": "~57.0.8",
