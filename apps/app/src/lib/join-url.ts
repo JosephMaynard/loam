@@ -50,3 +50,21 @@ export function joinUrl(opts: { addresses: string[]; hotspotRunning: boolean; fr
   const host = hotspotRunning ? HOTSPOT_GATEWAY : (preferredLanAddress(addresses) ?? HOTSPOT_GATEWAY);
   return `http://${host}:${SERVER_PORT}${fragment}`;
 }
+
+/**
+ * The Step-2 display for the host Share overlay: the join URL plus the addresses to list as "also at"
+ * fallbacks. When the hotspot is running, joiners are on it, so we target the gateway (see {@link
+ * joinUrl}) AND drop the host's other LAN addresses — they're on the wrong network, and listing them
+ * sends a joiner to a dead address (the STA+AP bug this fixes). Off the hotspot, the real addresses are
+ * the fallbacks a same-network joiner needs. Kept as a pure function so the overlay's derivation is
+ * testable without the RN render tree.
+ */
+export function hostJoinDisplay(opts: { addresses: string[]; hotspotRunning: boolean; fragment?: string }): {
+  serverUrl: string;
+  addresses: string[];
+} {
+  return {
+    serverUrl: joinUrl(opts),
+    addresses: opts.hotspotRunning ? [] : opts.addresses,
+  };
+}

@@ -13,6 +13,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { SERVER_PORT } from '@/lib/join-url';
 import {
   applyDbModeChange,
   clearStoredDbKeys,
@@ -35,7 +36,6 @@ import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hots
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot IP (below).
-const SERVER_PORT = 3000;
 const LOAM_URL = `http://localhost:${SERVER_PORT}`;
 // Cold start is ~80s (docs/04); give it comfortably more before declaring the runtime hung.
 const STARTUP_TIMEOUT_MS = 150_000;

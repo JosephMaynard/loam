@@ -8,7 +8,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ensureHotspot, useHotspot, type HotspotState } from '@/hooks/use-hotspot';
-import { joinUrl } from '@/lib/join-url';
+import { hostJoinDisplay } from '@/lib/join-url';
 
 /** Project the hotspot lifecycle onto the presentational HostPanel state (docs/04 two-step flow). */
 function toHostState(hotspot: HotspotState, serverUrl: string, addresses: string[]): HostState {
@@ -75,9 +75,12 @@ export function HostShareOverlay({
   // (unreachable-from-the-hotspot) LAN addresses from the "also at" list so we don't send a joiner to
   // an address on the wrong network. Off the hotspot (shared-WiFi / Pi / laptop), the real addresses
   // are correct.
-  const hotspotRunning = hotspot.phase === 'running';
-  const serverUrl = joinUrl({ addresses, hotspotRunning, fragment: transportKeyFragment });
-  const state = toHostState(hotspot, serverUrl, hotspotRunning ? [] : addresses);
+  const { serverUrl, addresses: shownAddresses } = hostJoinDisplay({
+    addresses,
+    hotspotRunning: hotspot.phase === 'running',
+    fragment: transportKeyFragment,
+  });
+  const state = toHostState(hotspot, serverUrl, shownAddresses);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
