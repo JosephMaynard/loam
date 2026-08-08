@@ -46,8 +46,12 @@ adb install -r apps/app/loam-host.apk
 
 - [ ] **Persistent mode.** Set `persistent`, restart. Pull `.loam/loam.db` off the device and confirm it is
   NOT readable as plaintext SQLite (the header is encrypted).
-- [ ] **Passphrase mode.** Set a passphrase, restart, unlock. Then change the passphrase: the DB rekeys in
-  place and the old passphrase no longer opens it.
+- [ ] **Passphrase mode.** Set a passphrase, restart, and confirm the host **refuses to start** until the
+  correct passphrase is entered; a wrong passphrase is rejected **without** clobbering the stored one (the
+  DB stays recoverable for another attempt). NOTE: **changing** a passphrase is *not* an in-place rekey
+  today — `apps/app/src/lib/db-encryption.ts` only changes it via the delete-and-start-fresh path (an
+  authenticated in-place passphrase rekey is a documented future enhancement, not built). So do not verify
+  an in-place rekey; verify set → restart → correct unlocks / wrong rejected instead.
 - [ ] **Ephemeral mode.** Trigger the kill switch / Emergency Reset: the key is rotated and the previous
   ciphertext is unreadable afterwards.
 - [ ] **Wipe lifecycle under process kill.** On API 31+ / 34, start a wipe and force-kill the app mid-wipe
