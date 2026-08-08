@@ -3048,69 +3048,73 @@ function SettingsView({
             <p>{currentUser.id}</p>
           </div>
         </div>
-        <form
-          className="profile-panel"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void saveProfile();
-          }}
-        >
-          <div>
-            <p className="eyebrow">{t("settings.profileEyebrow")}</p>
-            <h2>{t("settings.profileTitle")}</h2>
-          </div>
-          <label>
-            {t("settings.displayName")}
-            <input
-              disabled={!allowDisplayNameEdit || saving}
-              maxLength={80}
-              onInput={(event) => setDisplayName(event.currentTarget.value)}
-              value={displayName}
-            />
-          </label>
-          <label>
-            {t("settings.avatarStyle")}
-            <select
-              disabled={!allowAvatarEdit || saving || avatarKind === "image"}
-              onInput={(event) => {
-                setAvatarKind("generated");
-                setAvatarMode(event.currentTarget.value as (typeof AVATAR_MODES)[number]);
-              }}
-              value={avatarMode}
-            >
-              {AVATAR_MODES.map((mode) => (
-                <option key={mode} value={mode}>
-                  {mode}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="profile-actions">
-            <button disabled={!allowAvatarEdit || saving} onClick={randomizeAvatar} type="button">
-              {t("settings.newAvatar")}
-            </button>
-            <button disabled={saving || (!allowDisplayNameEdit && !allowAvatarEdit)} type="submit">
-              {saving ? t("common.saving") : t("settings.saveProfile")}
-            </button>
-          </div>
-          <div className="avatar-upload-panel">
+        {/* Editing controls render only when the node actually allows them — a section that would be
+            entirely disabled is hidden rather than shown greyed-out (no FOMO). The read-only identity
+            panel above always stays, so a user still sees who they are. */}
+        {allowDisplayNameEdit || allowAvatarEdit ? (
+          <form
+            className="profile-panel"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveProfile();
+            }}
+          >
             <div>
-              <p className="eyebrow">{t("settings.imageAvatarEyebrow")}</p>
-              <h2>{t("settings.cropUpload")}</h2>
+              <p className="eyebrow">{t("settings.profileEyebrow")}</p>
+              <h2>{t("settings.profileTitle")}</h2>
             </div>
-            <AvatarImageEditor
-              disabled={!allowAvatarEdit || !allowAvatarUpload || saving}
-              onUpload={onUploadAvatarImage}
-            />
-            {!allowAvatarUpload ? (
-              <p className="form-note">{t("settings.avatarUploadDisabled")}</p>
+            {allowDisplayNameEdit ? (
+              <label>
+                {t("settings.displayName")}
+                <input
+                  disabled={saving}
+                  maxLength={80}
+                  onInput={(event) => setDisplayName(event.currentTarget.value)}
+                  value={displayName}
+                />
+              </label>
             ) : null}
-          </div>
-          {!allowDisplayNameEdit && !allowAvatarEdit ? (
-            <p className="form-note">{t("settings.profileEditingDisabled")}</p>
-          ) : null}
-          {profileError ? <p className="form-error">{profileError}</p> : null}
-        </form>
+            {allowAvatarEdit ? (
+              <label>
+                {t("settings.avatarStyle")}
+                <select
+                  disabled={saving || avatarKind === "image"}
+                  onInput={(event) => {
+                    setAvatarKind("generated");
+                    setAvatarMode(event.currentTarget.value as (typeof AVATAR_MODES)[number]);
+                  }}
+                  value={avatarMode}
+                >
+                  {AVATAR_MODES.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {mode}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            <div className="profile-actions">
+              {allowAvatarEdit ? (
+                <button disabled={saving} onClick={randomizeAvatar} type="button">
+                  {t("settings.newAvatar")}
+                </button>
+              ) : null}
+              <button disabled={saving} type="submit">
+                {saving ? t("common.saving") : t("settings.saveProfile")}
+              </button>
+            </div>
+            {allowAvatarEdit && allowAvatarUpload ? (
+              <div className="avatar-upload-panel">
+                <div>
+                  <p className="eyebrow">{t("settings.imageAvatarEyebrow")}</p>
+                  <h2>{t("settings.cropUpload")}</h2>
+                </div>
+                <AvatarImageEditor disabled={saving} onUpload={onUploadAvatarImage} />
+              </div>
+            ) : null}
+            {profileError ? <p className="form-error">{profileError}</p> : null}
+          </form>
+        ) : null}
         <AdminAccessPanel
           allowAdminClaim={config?.networkConfig.allowAdminClaim ?? false}
           currentUser={currentUser}
@@ -3213,7 +3217,7 @@ function AdminAccessPanel({
         <h2>{currentUser.isAdmin ? t("settings.adminTools") : t("settings.adminAccess")}</h2>
       </div>
       {currentUser.isAdmin ? (
-        <NavLink active={false} className="nav-link" href="/admin">
+        <NavLink active={false} className="admin-open-link" href="/admin">
           {t("settings.openAdmin")}
         </NavLink>
       ) : allowAdminClaim ? (

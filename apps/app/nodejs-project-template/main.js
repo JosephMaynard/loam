@@ -145,11 +145,11 @@ function isTunnelInterfaceName(name) {
 
 /**
  * The host's non-internal IPv4 addresses, excluding VPN/tunnel/virtual interfaces (P2-3) — the native
- * Share QR (`hotspotJoinUrl` in apps/app/src/app/index.tsx) picks from this FLAT list, so filtering
- * happens here rather than trusting the picker to know which addresses are real. The hotspot's AP
- * interface (192.168.49.1 on stock Android LocalOnlyHotspot, but not guaranteed) only appears once the
- * hotspot is up, so we re-post these periodically — the host UI builds the Step-2 join QR from the real
- * address rather than a guess.
+ * Share QR (`joinUrl` in apps/app/src/lib/join-url.ts) uses this FLAT list for the shared-WiFi / Pi
+ * case, so filtering happens here rather than trusting the picker to know which addresses are real.
+ * When the LocalOnlyHotspot is running, the QR instead targets the fixed gateway (192.168.49.1) — the
+ * AP interface never appears in os.networkInterfaces() anyway. We still re-post these periodically so
+ * the shared-WiFi Step-2 QR reflects the real address rather than a guess.
  */
 function lanAddresses() {
   const addresses = [];

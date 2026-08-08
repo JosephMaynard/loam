@@ -59,7 +59,7 @@ a discriminated union on `type`). `SessionRecord = { token, userId }` is defined
 
 | Option | Native build? | Encryption at rest | Notes |
 |--------|---------------|--------------------|-------|
-| **`node:sqlite`** (built-in) | None | No | Verified working on the repo's Node **24.13.1** (`DatabaseSync`, sync API, emits an ExperimentalWarning). Zero deps — powers the interim Phase-A DAL. **Verified ABSENT under nodejs-mobile** (Node 18.20.4) — cannot be the Android-host driver. |
+| **`node:sqlite`** (built-in) | None | No | Verified working on the repo's Node **24.15.0** (`DatabaseSync`, sync API, emits an ExperimentalWarning). Zero deps — powers the interim Phase-A DAL. **Verified ABSENT under nodejs-mobile** (Node 18.20.4) — cannot be the Android-host driver. |
 | **better-sqlite3** family | Yes (prebuilt binaries for common targets; ABI-108 Android prebuilds proven by digidem) | Via **better-sqlite3-multiple-ciphers** (no OpenSSL) | Mature, fast, synchronous. **Chosen path** — see spike verdict below. |
 | **libsql / @libsql/client** | Yes | Yes (encryption at rest) | **Ruled out**: ships no Android prebuilds (darwin/linux/win32 only); would need an unprecedented Rust cross-compile against Node 18 ABI 108. |
 

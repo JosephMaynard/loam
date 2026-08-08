@@ -8,6 +8,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ensureHotspot, useHotspot, type HotspotState } from '@/hooks/use-hotspot';
+import { hostJoinDisplay } from '@/lib/join-url';
 
 /** Project the hotspot lifecycle onto the presentational HostPanel state (docs/04 two-step flow). */
 function toHostState(hotspot: HotspotState, serverUrl: string, addresses: string[]): HostState {
@@ -26,11 +27,12 @@ type HostShareOverlayProps = {
   visible: boolean;
   onClose: () => void;
   /**
-   * The LAN URL joiners open once connected — built from the host's real hotspot address when the
-   * launcher has reported it, else the documented LocalOnlyHotspot fallback. Renders even before the
-   * hotspot is up so Step 2's QR always shows.
+   * The transport `#k=` key fragment to append to the join URL (empty when transport encryption is off).
+   * The join URL host itself is chosen here from the live hotspot phase (see {@link joinUrl}), so a
+   * joiner on the hotspot always gets the reachable gateway rather than a home-WiFi address the host
+   * happens to be on under STA+AP concurrency.
    */
-  serverUrl: string;
+  transportKeyFragment: string;
   /** All of the host's detected IPv4 addresses, shown under Step 2 so a joiner can try alternatives. */
   addresses: string[];
   /** Whether to keep the screen on while hosting (for a host left on display). */
@@ -50,7 +52,7 @@ type HostShareOverlayProps = {
 export function HostShareOverlay({
   visible,
   onClose,
-  serverUrl,
+  transportKeyFragment,
   addresses,
   keepAwake,
   onKeepAwakeChange,
@@ -69,7 +71,16 @@ export function HostShareOverlay({
     }
   }, [visible]);
 
-  const state = toHostState(hotspot, serverUrl, addresses);
+  // When the hotspot is up, joiners are on it — target the gateway, and drop the host's other
+  // (unreachable-from-the-hotspot) LAN addresses from the "also at" list so we don't send a joiner to
+  // an address on the wrong network. Off the hotspot (shared-WiFi / Pi / laptop), the real addresses
+  // are correct.
+  const { serverUrl, addresses: shownAddresses } = hostJoinDisplay({
+    addresses,
+    hotspotRunning: hotspot.phase === 'running',
+    fragment: transportKeyFragment,
+  });
+  const state = toHostState(hotspot, serverUrl, shownAddresses);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>

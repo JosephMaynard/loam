@@ -15,11 +15,12 @@ function isTunnelInterface(name: string): boolean {
   return TUNNEL_INTERFACE_PREFIXES.some((prefix) => lower.startsWith(prefix));
 }
 
-// Preference tiers over the private-LAN (RFC1918) ranges, matching the order the Android host's own
-// join-QR heuristic uses (`hotspotJoinUrl` in apps/app/src/app/index.tsx): the stock Android
-// LocalOnlyHotspot gateway first (the common case on-device), then any 192.168.*, then 10.*/172.16-31.*.
-// Kept in sync deliberately — both pick "the address a nearby joiner can actually reach" from the same
-// set of live interfaces, just via different OS APIs (RN's `os.networkInterfaces()` vs this module's).
+// Preference tiers over the private-LAN (RFC1918) ranges, to pick "the address a nearby joiner can
+// actually reach" on the desktop/Pi host (where the server enumerates its own interfaces): the stock
+// LocalOnlyHotspot gateway first, then any 192.168.*, then 10.*/172.16-31.*. NOTE: the Android host no
+// longer shares this exact heuristic — it selects the hotspot gateway from the live hotspot phase in
+// `joinUrl` (apps/app/src/lib/join-url.ts), because the embedded Node can't enumerate the SoftAP
+// interface at all. This module's own logic (server.ts / app.ts join-host resolution) is unchanged.
 const isHotspotGateway = (address: string): boolean => address.startsWith("192.168.49.");
 const isPrivate192 = (address: string): boolean => address.startsWith("192.168.");
 const isPrivate10or172 = (address: string): boolean =>
