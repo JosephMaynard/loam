@@ -1,6 +1,6 @@
 {
   "name": "loamnet",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Run a local, off-grid LOAM messaging node from the terminal — server + installable PWA, no internet or accounts. Scan the printed QR to join over your LAN.",
   "keywords": [
     "loam",
