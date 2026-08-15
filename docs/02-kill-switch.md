@@ -5,7 +5,7 @@
 > `{ "confirm": "wipe" }` when confirmation is on) and unauthenticated `POST /api/panic` (404
 > unless a token ≥16 chars is configured; rate-limited; the token is stored **scrypt-hashed**, so
 > a seized node's config does not reveal it). The wipe empties all tables via the DAL's `wipeAll()`,
-> deletes `avatars/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
+> deletes `avatars/` and `attachments/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
 > re-seeds defaults — config survives so the switch can fire again. Clients purge IndexedDB,
 > localStorage, service worker + caches, and show a neutral "Disconnected" screen. Admin UI has a
 > Safety panel with type-to-confirm arming. **Now with a cryptographic wipe when encryption at rest

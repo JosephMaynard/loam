@@ -12,9 +12,12 @@ import { deleteChannelRequest, fetchJson, requestChannel } from "../lib/api";
  */
 export function AdminChannelsPanel({
   currentUser,
+  onChannelRemoved,
   onChannelUpsert,
 }: {
   currentUser: User;
+  /** App-level purge for a deleted channel (state + IndexedDB) — not just this panel's list. */
+  onChannelRemoved?: (channelId: string) => void;
   onChannelUpsert: (channels: Channel[]) => void;
 }) {
   const [adminChannels, setAdminChannels] = useState<Channel[]>([]);
@@ -41,10 +44,16 @@ export function AdminChannelsPanel({
     [onChannelUpsert],
   );
 
-  /** Drop a deleted channel from the local admin list; the sidebar purges via `channelRemoved`. */
-  const removeChannelRow = useCallback((channelId: string) => {
-    setAdminChannels((previous) => previous.filter((entry) => entry.id !== channelId));
-  }, []);
+  /** Drop a deleted channel from the admin list AND purge it from app state/IndexedDB directly —
+   * the targeted `channelRemoved` event does the same, but calling the app purge here makes this
+   * client's cleanup immediate even if its socket happens to be down. */
+  const removeChannelRow = useCallback(
+    (channelId: string) => {
+      setAdminChannels((previous) => previous.filter((entry) => entry.id !== channelId));
+      onChannelRemoved?.(channelId);
+    },
+    [onChannelRemoved],
+  );
 
   useEffect(() => {
     if (!currentUser.isAdmin) {

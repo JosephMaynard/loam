@@ -44,7 +44,7 @@ service, Wi-Fi Aware publish/subscribe + data-path socket, BLE-only chunked fall
 `MeshTransport` + `mesh-courier` RN↔launcher bridge (`apps/app/src/mesh/`), the launcher courier brain
 (`nodejs-project-template/main.js`), and two **loopback-only** server endpoints (`GET /api/mesh/outbound`,
 `POST /api/mesh/inbound`) that shuttle sealed blobs between the radio and the existing relay — a radio-fed
-mirror of `/api/sync/*` reusing `acceptSealedFromPeer` (desktop-tested; the Kotlin has NOT been compiled
+mirror of `/api/sync/*` reusing `acceptSealedFromPeer` (desktop-tested; the Kotlin compiles in APK builds but has NOT been run
 against radios — no CI hardware). **Still not built:** the Wi-Fi Aware handshake/port-exchange finish +
 BLE fallback + Phase 4 background/battery duty-cycling (all real-device work), an in-band contact-request
 flow, group fan-out, and tombstone GC. Do not rush the unbuilt crypto/transport — that's the documented
@@ -80,7 +80,7 @@ which has a dedicated `typecheck` script (`pnpm --filter app typecheck`). A `.st
 exists but is not wired to any script. CI (`.github/workflows/ci.yml`) runs `pnpm build`, `pnpm
 test`, then the apps/app typecheck on push/PR to `master`.
 
-**Tests**: `packages/*` (schema, display-name, avatar, qr), `apps/server` (`src/db.test.ts` for the
+**Tests**: `packages/*` (schema, display-name, avatar, qr, crypto), `apps/server` (`src/db.test.ts` for the
 DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
 matrix, config API, flag enforcement, kill switch, retention, private channels, search, WebSocket
 privacy filtering via a real listener — plus `src/embedded.test.ts`), and `apps/client` (Vitest + jsdom:

@@ -9,11 +9,12 @@
 > of every remaining item is [docs/29-next-phase.md](29-next-phase.md) §5** — read that first;
 > this file remains the per-item detail reference.
 
-**Status: living index.** One deduplicated, code-verified list of everything **not yet built**, replacing
-the scattered per-doc "future work" sections. Every item was cross-checked against the current code (July
-2026); already-shipped work is excluded, and stale/contradictory doc claims are collected in §8 for
-correction. Read `CLAUDE.md` for the built baseline. Per-topic design detail still lives in its own doc
-(cited in each row).
+**Status: historical detail reference.** Originally the deduplicated, code-verified list of everything
+not yet built (cross-checked July 2026); rows called out in the banner above have SINCE SHIPPED and are
+kept for their design notes, so this file no longer claims to exclude shipped work — **the active
+disposition of every item is `docs/29` §5**. Stale/contradictory doc claims found by the consolidation
+sweep are in §8. Read `CLAUDE.md` for the built baseline. Per-topic design detail still lives in each
+row's cited doc.
 
 Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · **epic** ≈ multi-session/branch.
 

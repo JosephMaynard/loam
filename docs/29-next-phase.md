@@ -54,7 +54,7 @@ personas (Buzz pattern).
 
 ## 3. The plan — six tracks
 
-### Track 0 — Stabilize the RC *(now; this branch; blocks everything)*
+### Track 0 — Stabilize the RC *(STATUS: DELIVERED — PR #118, this branch; kept as the record of scope)*
 The security/correctness pass from Sol's review, all buildable blind, one branch → one PR:
 1. **One shared mutation policy** — "may this user create *or alter* content in this channel right
    now" (membership/audience, timeout, ban/pending, archived, flags) applied uniformly to post,

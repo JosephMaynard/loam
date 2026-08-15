@@ -111,9 +111,9 @@ trade-offs — not open bugs:
 
 ### 2026-08-15 — external full-codebase review (Sol)
 
-An independent external review of v0.4.0-era code (commit `7cd5558`) reproduced four
-authorization-lifecycle gaps and one bootstrap gap, all confirmed and fixed on the
-`feat/pre-tester-hardening` branch:
+An independent external review of v0.4.0-era code (commit `7cd5558`) reproduced six findings —
+three authorization-lifecycle gaps, a join-bootstrap gap, and two resource-limit gaps — all
+confirmed and fixed on the `feat/pre-tester-hardening` branch:
 
 **Fixed:** members removed from a private channel could still edit/delete their old messages there;
 timed-out users could bypass moderation by editing existing messages; archived channels remained

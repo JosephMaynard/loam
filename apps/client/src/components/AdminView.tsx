@@ -78,11 +78,16 @@ function securityProfileLabels(): Record<SecurityProfile, { title: string; summa
 export function AdminView({
   currentUser,
   joinUrl,
+  onChannelRemoved,
   onChannelUpsert,
   onWiped,
 }: {
   currentUser: User;
   joinUrl?: string;
+  /** Purge a permanently deleted channel from app state + IndexedDB (the WS `channelRemoved` does
+   * the same for other clients; calling it directly makes the deleting admin's own purge immediate
+   * and socket-independent). */
+  onChannelRemoved: (channelId: string) => void;
   onChannelUpsert: (channels: Channel[]) => void;
   onWiped: () => Promise<void>;
 }) {
@@ -725,7 +730,7 @@ export function AdminView({
           </div>
         </form>
       ) : null}
-      <AdminChannelsPanel currentUser={currentUser} onChannelUpsert={onChannelUpsert} />
+      <AdminChannelsPanel currentUser={currentUser} onChannelRemoved={onChannelRemoved} onChannelUpsert={onChannelUpsert} />
     </section>
   );
 }

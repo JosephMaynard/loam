@@ -1845,6 +1845,7 @@ function LoamApp() {
         <AdminView
           currentUser={currentUser}
           joinUrl={config?.joinUrl}
+          onChannelRemoved={removeChannel}
           onChannelUpsert={upsertChannels}
           onWiped={purgeLocalData}
         />

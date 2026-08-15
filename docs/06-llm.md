@@ -54,10 +54,12 @@ unaffected. Correlation ids keep concurrent DMs from crossing streams.
 listener (`registerOnDeviceLlm`). Server tests cover the on-device path via a faked
 `globalThis.__loamOnDeviceChat` (streaming + the graceful absent-hook error + bot hidden when off).
 
-**The one device-gated step — wiring real inference. _STALE: this is now BUILT._**
-`apps/app/src/lib/on-device-llm.ts` fully wires `llama.rn` (model download with on-device SHA-256
-verification, load, streaming inference — verified working on a physical S21 Ultra, docs/21/25);
-only ongoing device *re-verification* remains. The original plan is kept below for the record:
+**The one device-gated step — wiring real inference. _DONE._** `apps/app/src/lib/on-device-llm.ts`
+fully wires `llama.rn` (model download with on-device SHA-256 verification, load, streaming
+inference), verified on a physical Galaxy S21 Ultra (Android 15, 2026-08-04 device session:
+download → verify → activate → coherent DM reply, CPU backend honestly reported — see docs/21).
+Ongoing re-verification of new builds remains part of the docs/21 device checklist. The original
+build plan is kept below for the record:
 
 1. `pnpm --filter app add llama.rn expo-document-picker expo-file-system`, add the `llama.rn` Expo
    config plugin to `app.json` (verify the arm64-v8a prebuild against `with-loam-host.js`'s ABI pin).
@@ -66,9 +68,8 @@ only ongoing device *re-verification* remains. The original plan is kept below f
 3. Add a model-file picker (SAF via `expo-document-picker`) to the host UI that copies the GGUF into
    app-private storage and PATCHes `llm.onDevice.modelPath`; gate the offer on `Device.totalMemory`.
 
-This step is deliberately left unbuilt: it **cannot be built or verified without a physical arm64
-phone and a GGUF model**, and adding an unverified native dependency (`llama.rn`) to the committed
-build would jeopardize the working APK. Everything up to the inference call is wired and tested.
+_(Historical caveat, since resolved: this step was deliberately held back until a physical arm64
+phone and a GGUF model were available — that verification has now happened, see above.)_
 
 Runtime choice: **`llama.rn`** (llama.cpp, GGUF) over MediaPipe LLM Inference (less mature RN bindings)
 and over `node-llama-cpp` inside nodejs-mobile (a non-starter — an N-API addon cross-compiled for the

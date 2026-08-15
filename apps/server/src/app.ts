@@ -8118,8 +8118,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     return buildSyncDigest();
   };
-  server.get("/api/sync/digest", semanticRateLimit(60), syncDigestHandler);
-  server.post("/api/sync/digest", semanticRateLimit(60), syncDigestHandler);
+  // INLINE config literals (not `semanticRateLimit(60)`): CodeQL's js/missing-rate-limiting query
+  // can't resolve the helper call and reports these authorization-performing routes as unlimited.
+  // The object is the exact expansion of `semanticRateLimit(60)` — keep them in lockstep.
+  server.get(
+    "/api/sync/digest",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute", allowList: () => false } } },
+    syncDigestHandler,
+  );
+  server.post(
+    "/api/sync/digest",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute", allowList: () => false } } },
+    syncDigestHandler,
+  );
 
   server.post(
     "/api/sync/messages",
