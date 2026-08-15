@@ -29,3 +29,18 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@noble/ciphers"
         update-types: ["version-update:semver-major"]
+      # apps/app is version-LOCKED to the Expo SDK 57 compatibility matrix (`expo install --check`
+      # must stay clean — 2026-08 review found Dependabot had drifted react, gesture-handler (a whole
+      # major), reanimated, worklets, and safe-area-context past Expo's locks, a native build/runtime
+      # risk that only surfaces on a device). These move ONLY via an Expo SDK upgrade, never an
+      # auto-bump. `react`/`react-dom` are ignored entirely: the workspace root doesn't use them and
+      # RN's renderer is version-locked to an exact react version.
+      - dependency-name: "expo"
+      - dependency-name: "expo-*"
+      - dependency-name: "@expo/*"
+      - dependency-name: "react"
+      - dependency-name: "react-dom"
+      - dependency-name: "react-native"
+      - dependency-name: "react-native-*"
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
