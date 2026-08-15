@@ -72,7 +72,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 pnpm install          # install workspace deps
 pnpm dev              # root: runs server + client together, prints join QR (see ports below)
 pnpm build            # pnpm -r build: builds all packages, then server (tsc) and client (tsc -b && vite build)
-pnpm test             # pnpm -r --if-present test: runs vitest in the 4 packages + apps/server + apps/client
+pnpm test             # pnpm -r --if-present test: runs vitest in the 4 packages + apps/server + apps/client + apps/app
 ```
 
 There is **no lint script**. Type-checking happens as part of `build` (`tsc`), except `apps/app`,
@@ -90,8 +90,8 @@ parsers). Client tests use a standalone `vitest.config.ts` (jsdom + `@preact/pre
 mount real components into jsdom); `*.test.ts`/`*.test.tsx` are excluded from the `tsc -b` build. The
 pure route/protocol parsers live in `src/lib/protocol.ts` (extracted from `app.tsx`); rendered
 components extracted to `src/components/` (`Avatar`, `UnreadBadge`, `InviteControl`, `SearchResult`) have `.test.tsx`
-suites. `apps/app` has no test script, so `pnpm test` skips it — validate with
-`pnpm --filter app typecheck` (CI runs this as its own step).
+suites. `apps/app` has its own vitest suite (`src/**/*.test.ts`, included in `pnpm test`); also
+validate it with `pnpm --filter app typecheck` (CI runs this as its own step).
 
 ## How dev mode wires together (important)
 

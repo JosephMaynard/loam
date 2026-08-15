@@ -1,5 +1,10 @@
 # LOAM roadmap — planning notes for Fable
 
+> **STATUS (2026-08): historical.** The four initiatives below and most of the investigations are
+> **shipped** (see CLAUDE.md for the built baseline). The active plan of record is
+> **[docs/29-next-phase.md](29-next-phase.md)**; the live backlog disposition is its §5. This file
+> is kept as the original orientation map for the per-initiative briefing docs.
+
 These docs are a **briefing pack**, not prescriptive specs. They capture the current state (grounded
 in real files/functions), the goal, design options with a recommendation, a task breakdown, and open
 questions. Fable decides how to execute. Read `CLAUDE.md` first for the architecture baseline. For the

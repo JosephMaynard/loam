@@ -6,7 +6,38 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
 ## [Unreleased]
 
-_Nothing yet._
+- **Pre-tester hardening** (from an external full-codebase review, 2026-08-15): one shared
+  content-mutation policy (removed private-channel members, timed-out users, and archived channels
+  can no longer be edited/reacted around); archive is now uniformly **read-only but available** and
+  channels gain a first-class **permanent delete** (cascade + sync tombstone); the `npx loamnet`
+  join QR now carries the `#k=` transport key (CLI first-joins get the same MITM protection as the
+  browser/Android surfaces); the 1 MB attachment limit is actually reachable (request body cap
+  raised to fit the base64 envelope); semantic rate limits apply inside the encrypted tunnel;
+  SECURITY.md corrected (shipped encryption features were still described as planned; plaintext
+  media files now documented honestly).
+
+## [0.4.0] - 2026-08-08
+
+The device-feedback release, and the first version published to npm as
+[`loamnet`](https://www.npmjs.com/package/loamnet) (`npx loamnet` runs a node on a laptop/Pi). All
+workspace versions aligned to 0.4.0 (Android `versionCode` 6).
+
+### Fixed
+- **Hotspot join QR pointed at an unreachable address** on phones with STA+AP concurrency (host on
+  home WiFi *and* hotspot): the join URL now targets the hotspot gateway (`192.168.49.1`) while the
+  LocalOnlyHotspot is running, and the real LAN address otherwise (`apps/app/src/lib/join-url.ts`).
+- Settings screen: profile-edit controls now render only when the node allows them (no more
+  greyed-out "disabled" noise); the "Open the admin area" button no longer renders as a one-word-
+  per-line column.
+- `docs/21` corrected: passphrase change is delete-and-start-fresh; in-place rekey is unbuilt.
+
+### Changed
+- Delivered the `docs/27` "PR 1" completeness arc (#109/#110): moderation **report loop** (private
+  reports → mod queue → dismiss/delete/timeout/ban/escalate, honest tombstones, composer countdown),
+  channel-metadata re-sync with per-peer provenance, general **@mentions**, per-channel retention
+  TTL, lock/pin channels, **typing indicators**, private-channel **join requests**, non-image **file
+  attachments** (1 MB), pinned-peer-key admin field, i18n en-fallback.
+- Dependencies: jsdom 30, js-sha256 1.0, Node pin 24.15.0.
 
 ## [0.3.0] - 2026-07-31
 

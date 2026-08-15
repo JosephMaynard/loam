@@ -54,9 +54,10 @@ unaffected. Correlation ids keep concurrent DMs from crossing streams.
 listener (`registerOnDeviceLlm`). Server tests cover the on-device path via a faked
 `globalThis.__loamOnDeviceChat` (streaming + the graceful absent-hook error + bot hidden when off).
 
-**The one device-gated step — wiring real inference.** `apps/app/src/lib/on-device-llm.ts`'s
-`runInference` is a graceful **stub** ("no model configured"). To make it run a model, on a physical
-arm64 phone:
+**The one device-gated step — wiring real inference. _STALE: this is now BUILT._**
+`apps/app/src/lib/on-device-llm.ts` fully wires `llama.rn` (model download with on-device SHA-256
+verification, load, streaming inference — verified working on a physical S21 Ultra, docs/21/25);
+only ongoing device *re-verification* remains. The original plan is kept below for the record:
 
 1. `pnpm --filter app add llama.rn expo-document-picker expo-file-system`, add the `llama.rn` Expo
    config plugin to `app.json` (verify the arm64-v8a prebuild against `with-loam-host.js`'s ABI pin).

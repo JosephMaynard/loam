@@ -549,8 +549,9 @@ pnpm build      # build every package, then server and client (also type-checks 
 pnpm test       # run the workspace test suite
 ```
 
-CI runs `pnpm build` then `pnpm test` on every push and PR to `master`. There's no separate lint or
-typecheck script; type-checking happens as part of `pnpm build`. If you're new to the codebase,
+CI runs `pnpm build`, then `pnpm test`, then `pnpm --filter app typecheck` (the Android host app
+type-checks as its own CI step) on every push and PR to `master`. There's no lint script;
+type-checking happens as part of `pnpm build`. If you're new to the codebase,
 [`CLAUDE.md`](CLAUDE.md) is the fastest way in, and a server or client test harness is a
 high-value first contribution.
 

@@ -1,5 +1,14 @@
 # 25 — Consolidated backlog (single source of outstanding work)
 
+> **2026-08 UPDATE — several rows below are now SHIPPED (kept for their design notes; verified
+> against code 2026-08-15):** C1 (per-peer provenance re-sync), P4 (general @mentions), P10
+> (join requests), P11 (file attachments — 1 MB), P12 (per-channel TTL), P13 (lock/pin), P14
+> (typing indicators), the S5 admin-UI pinned-key field (the L-sized "per-peer signed authors"
+> half remains), most S7 surfaces (the remaining keyed-join gap is the **CLI** QR), D2/P15
+> (resolved-removed), and the moderation report loop (docs/26 → #109). **The active disposition
+> of every remaining item is [docs/29-next-phase.md](29-next-phase.md) §5** — read that first;
+> this file remains the per-item detail reference.
+
 **Status: living index.** One deduplicated, code-verified list of everything **not yet built**, replacing
 the scattered per-doc "future work" sections. Every item was cross-checked against the current code (July
 2026); already-shipped work is excluded, and stale/contradictory doc claims are collected in §8 for
