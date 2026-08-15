@@ -1,158 +1,186 @@
-# 29 — Next phase: prove, then extend
+# 29 — Next phase: stabilize, prove, then extend
 
-**Status: plan of record for the post-MVP phase.** Successor to `docs/27` (Path to MVP), written as
-that plan's two PRs close out. Every open item in the consolidated backlog (`docs/25`) is
-dispositioned in §5 so nothing is silently lost. Sizes use the `docs/25` key (S ≈ hours–1d ·
-M ≈ days · L ≈ 1–2wk · epic ≈ multi-session).
+**Status: plan of record for the post-v0.4.0 phase — revision 2, incorporating Sol's full-codebase
+review (2026-08-15, `sol-review/REVIEW-RESULT-full-codebase-2026-08-15.md`).** Successor to `docs/27`
+(Path to MVP). Every open item in the consolidated backlog (`docs/25`) is dispositioned in §5 so
+nothing is silently lost. Sizes use the `docs/25` key (S ≈ hours–1d · M ≈ days · L ≈ 1–2wk ·
+epic ≈ multi-session).
 
-## 1. Where LOAM is (verified against the tree and git history, August 2026)
+Revision 1 assumed LOAM was one hardware-verification pass from MVP. Sol's review showed it is **one
+security/correctness pass plus one hardware pass**: the create-path checks (membership, timeout,
+flags) are solid, but the *mutation* paths (edit/delete/react) don't re-check them, archive semantics
+are internally inconsistent, media files sit outside the at-rest encryption story, and the flagship
+`npx loamnet` join QR lacks the `#k=` transport key. Those findings — all independently code-verified —
+are now Track 0.
 
-`docs/27`'s **PR 1 is delivered** — #109 (report loop/governance, C1 provenance re-sync, pin +
-per-channel TTL + @mentions, S5 pinned-key UI, i18n en-fallback) and #110 (typing indicators,
-non-image file attachments, private-channel join requests) — **except group D** (the
-OpenAI-compatible cloud-LLM provider + in-channel @mention bot), which awaits the Sol consent-design
-review, plus the S7 join-QR follow-ups and the 15-locale translation batch (deferred in #109).
+## 1. Where LOAM is (verified, August 2026)
 
-**PR 2 (the device gate) is mid-flight**: v0.4.0 is cut and in the field as an RC, and real-device
-feedback already caught and fixed the hotspot join-address blocker (#114) — but per #114's own
-verification note, the on-device re-test of those fixes, the STA+AP two-phone re-test, and the rest
-of the `docs/21` gauntlet (S1 SQLCipher runtime, I3 signed-install verify, T3 on-device LLM, I2
-webview 14) remain open.
-
-So: **LOAM is one verification pass away from "MVP shipped."** This plan is about what that pass
-unblocks.
+`docs/27`'s **PR 1 is delivered** (#109 + #110: report loop/governance, C1 provenance re-sync,
+@mentions, per-channel TTL, lock/pin, typing, file attachments, join requests, S5 pinned-key UI)
+**except group D** (cloud-LLM provider + in-channel bot — awaits the consent design, now Track 3) and
+the S7 join-QR follow-ups. **PR 2 (device verification) is mid-flight**: v0.4.0 is tagged, released,
+and `loamnet@0.4.0` is on npm; the first device-feedback round (#114) fixed the hotspot join-address
+blocker; the on-device re-test of those fixes, the STA+AP two-phone re-test, and the rest of the
+`docs/21` checklist remain open. **Sol's stabilization findings (Track 0) now precede all of it.**
 
 ## 2. How the pieces fit together — three convergences
 
-The backlog's epics are not independent. They cluster around three centres of gravity — and the three
-prior-art reviews (`docs/22`/`23` AT Proto, `docs/26` Buzz/Nostr, `docs/28` Reticulum) each point at
-one of them:
+The backlog's epics are not independent; they cluster around three centres of gravity, one per
+prior-art review (`docs/22`/`23` AT Proto, `docs/26` Buzz/Nostr, `docs/28` Reticulum):
 
 **Convergence 1 — signed content is one foundation shared by four tracked items.** M4 (portable
 identity + signed repos), C2 (delete/moderation propagation), the long-term half of S5 (per-peer
-signed authors), and the Nostr corroboration in `docs/26` are all the same capability: *messages and
-tombstones carrying author signatures verifiable without trusting the relaying node*. `docs/27` §4
-already queues the right question for Sol ("is a lighter signed-sync slice worth doing pre-epic?").
-This plan assumes the answer is yes: **signed sync messages + signed tombstones** is a bounded
-M-sized slice that delivers C2 on its own merits *and* is the natural Phase 0 of M4 — the
-canonicalization/signature contract gets field-tested on public data before the identity epic bets
-on it.
+signed authors), and the sync-peer impersonation finding are all the same capability: content
+carrying signatures verifiable without trusting the relaying node. **Caveat (Sol):** the convergence
+is real but the *slice size* is not settled — "signed messages" only beat impersonation if the
+verifier knows which key legitimately belongs to which author, and that binding question (who signs?
+node or user? how does an anonymous `user.<8hex>` acquire a key? who may sign a tombstone?) may pull
+in most of M4. A **node-signed provenance** slice ("node A asserts this message came from A") is
+honestly M-sized, fixes peer impersonation, and defers the user-identity questions entirely. Sol
+round 2 decides which slice is real; do not force the prettier one (§ Track 4).
 
 **Convergence 2 — Reticulum reframes the transport epics and challenges their ordering.** M3 (LoRa)
-was an epic because LOAM would build framing/routing/bandwidth-budgeting itself; `docs/28` collapses
-it to a thin adapter + a ~£150 hardware spike (Pi + two RNodes). More strategically: M1/M2 (phone
-BLE/Wi-Fi Aware native + battery duty-cycling) are the highest-risk items on the board — "where
-Briar stalled," with seven known unverified native defects (PH1–PH7) and multi-phone dependencies.
-If the spike shows *range* comes cheaply from a host-side radio bridge, and *store-and-forward* is
-already covered by courier sync (P9, works on every phone) plus the shipped sealed-mail relay, then
-M1/M2 stop being the critical path to the mesh vision and can be **deliberately demoted rather than
-silently stalled**. The spike buys evidence for that call.
+collapses from an epic to a thin adapter + a ~£150 spike (Pi + two RNodes, `docs/28`). If the spike
+shows range comes from a host-side radio bridge, and store-and-forward from courier sync (P9) + the
+shipped sealed-mail relay, then M1/M2 (phone BLE/Wi-Fi Aware + battery — "where Briar stalled", with
+known deterministic defects PH1–PH7) stop being the mesh critical path and can be deliberately
+demoted rather than silently stalled.
 
-**Convergence 3 — the LLM track has one decided-but-unbuilt piece, then a fork.** Group D is
-designed, owner-approved, and gated only on Sol's consent check; it is the most tester-visible
-improvement available. Beyond it, P1 (RAG/semantic search — the standout off-grid feature) is the
-next big LLM bet; P6 personas follow the Buzz pattern (`docs/26` idea 2) if the LLM becomes a focus.
+**Convergence 3 — the LLM track has one designed-but-unbuilt piece, then a fork.** The cloud
+provider + bot (ex group D) is the most tester-visible improvement available, but it is also the
+product's largest trust-model exception, so it runs as its own explicitly-labelled experiment
+(Track 3) and never delays reliability work. Beyond it: P1 RAG (the off-grid differentiator), P6
+personas (Buzz pattern).
 
-## 3. The plan — four tracks
+## 3. The plan — six tracks
 
-### Track 0 — Close the device gate *(now; blocks MVP declaration)*
-Finish `docs/27` PR 2: on-device re-test of the #114 fixes + the STA+AP two-phone re-test, then the
-remaining `docs/21` gauntlet — S1 (SQLCipher `PRAGMA key`/rekey/wipe on physical arm64 Node-18), I3
-(signed release installed + `apksigner`-verified), T3 (on-device LLM load/switch/delete), I2
-(webview 13→14 + device verify), the HW1 `bridge0` ROM check, and a several-device scale spot-check.
-The owner runs the phones; fixes get built for whatever breaks. **Exit: MVP declared, testers
+### Track 0 — Stabilize the RC *(now; this branch; blocks everything)*
+The security/correctness pass from Sol's review, all buildable blind, one branch → one PR:
+1. **One shared mutation policy** — "may this user create *or alter* content in this channel right
+   now" (membership/audience, timeout, ban/pending, archived, flags) applied uniformly to post,
+   edit, delete, react, attach, and typing. Fixes: removed members editing old private-channel
+   messages; timed-out users editing; mutations in archived channels.
+2. **Archive/delete semantics (owner-decided 2026-08-15):** archive = **read-only but still
+   available** to its prior audience (listed, readable, nothing new — no posts/edits/reactions/
+   attachments); delete = **permanent** — a first-class channel delete with cascade (messages +
+   attachments), a sync tombstone so peers can't re-import it, and a targeted `channelRemoved`.
+   Applied centrally: history, reactions, edit/delete, attachments, search, sync.
+3. **CLI keyed join** — `npx loamnet` obtains the host transport key and prints the `#k=` join URL/QR
+   (closes the first-join MITM gap on the flagship CLI path; the concrete missing S7 surface).
+4. **Attachment body-limit fix** — set the Fastify `bodyLimit` so the decoded 1 MB cap is actually
+   reachable through base64+JSON framing; regression-test at realistic sizes.
+5. **Tunnel semantic rate limits** — per-IP limits on the expensive inner routes (uploads, mesh,
+   search) charged under `/api/transport/tunnel`; conservative configurable engineering defaults,
+   no owner numbers needed.
+6. **Media-at-rest honesty** — correct SECURITY.md/`docs/02`/profile docs: media files are plaintext
+   on disk and key destruction does not cryptographically erase them; kill-switch deletion is
+   best-effort. (Actual media encryption is Track 2 — deliberate crypto is not rushed pre-freeze.)
+7. **Expo dependency triage** — reconcile `expo install --check` drift *with judgment*: revert
+   accidental Dependabot drift, keep deliberate pins (webview 13.16.1 is SDK 57's expectation),
+   document each call. Precondition for trusting Track 1 results.
+8. **Lifecycle regression tests** for every transition above (removal×edit, archive×everything,
+   timeout×mutations, realistic attachment sizes).
+9. **Doc-drift sweep** (same branch): SECURITY.md stale claims (transport encryption/peer auth/
+   Android encryption are *shipped*), CHANGELOG 0.4.0, `docs/roadmap.md`/`docs/25`/`docs/27`
+   statuses, `docs/06`/`docs/16`/`decisions.md`, CLAUDE.md/README.
+
+### Track 1 — Device verification gate *(the MVP gate; owner's phones)*
+**Freeze discipline (explicit):** once Track 0 merges, tag an RC and rebuild the APK; the RC takes
+**only** fixes for bugs Track 1 itself finds. All feature work happens on branches and merges only
+after the checklist completes. Contents: on-device re-test of the #114 fixes + STA+AP two-phone
+re-test; the remaining `docs/21` items — S1 SQLCipher runtime (`PRAGMA key`/rekey/wipe,
+wipe-under-process-kill, locked-DB recovery), I3 signed-install verify, T3 on-device LLM
+(switch/delete/RAM), webview verify (I2 = verify-in-place; no bump — SDK 57 pins 13.16.1), HW1
+`bridge0` ROM check, several-device scale spot-check. **Exit: MVP declared, tag shipped, testers
 onboarded.**
 
-### Track A — Tester-driven polish + LLM group D *(software; parallel with Track 0)*
-- **Group D as designed in `docs/27`** once Sol's consent review clears: `llm.provider`
-  (`ollama` | `openai` | `on-device`), OpenRouter/OpenAI-compatible backend, in-channel @mention bot
-  via `createMessage()` + audience-scoped streaming, the loud "cloud model — messages leave your
-  network" badge, key handled like `sync.token`. Fold in P2 (token budget) and P3 (cancellation +
-  concurrency caps) while in that code; P7 (backend health in UI) if trivial.
-- **S7** join-QR `#k=` follow-ups (the deferred rest of PR 1-E).
-- **Reactive polish**: the RC is in the field for the first time — tester feedback outranks the
-  backlog for this track. Sweep the deferred PR 1-F remainder (T1/T2/D1 — verify what #109 actually
-  closed, finish the rest) and the misc sweep nits (`.tmp-*` model files, aborted-download feedback,
-  QR `role="img"`, `stopHostService` affordance) opportunistically.
-- **SW1** (tunnel-bypass semantic rate limits) once the owner picks the budget numbers (§4).
+### Track 2 — Tester support & reliability *(post-MVP; feedback outranks this list)*
+- **Field feedback first** — the RC is in front of real users for the first time.
+- **Media encryption at rest** (the deferred half of Track 0 §6): encrypt attachment/avatar files
+  with a key held in the encrypted DB (`@loam/crypto`), restoring the cryptographic-erase story.
+- **Courier ("data mule") sync (P9)** — promoted (Sol concurs): works on every phone, exercises the
+  sync model, provides store-and-forward with zero radio risk, and field-validates delivery-ack +
+  signed-sync designs before any radio carries them. Pair with S4 mesh acks (design decided) and
+  storage quotas.
+- **Operator diagnostics + storage budgets** (Sol's feature list): disk/encryption/sync health,
+  attachment orphans, upload quotas, low-disk protection; a guided pre-event "field drill" check.
+- Remainder: T1/T2/D1 test-debt, sweep nits, accessibility pass.
 
-### Track B — Signed-sync slice → M4 *(the strategic software epic; starts as review, not code)*
-1. **Sol round 2** on `docs/23` (per-device operation logs, genesis-doc identity, fork-freeze,
-   the §13 design flags) + the lighter-slice question — already queued in `docs/27` §4.
-2. If green: build **signed sync messages + signed tombstones** behind a flag → **C2** (delete/
-   moderation propagation) lands as the user-visible payoff; S5's "per-peer signed authors" follows
-   from the same machinery.
-3. Then, with the MVP proven and the signature contract field-tested, open the **full M4 epic**
-   (identity Option A pending owner confirmation, §4). P17 (key verification UX) and the mesh
-   follow-ups that depend on identity decisions (S8) slot in here.
+### Track 3 — Cloud LLM experiment *(separate branch; optional, loud, off by default)*
+The ex-group-D provider work (`llm.provider`: `ollama` | `openai` | `on-device`; OpenRouter et al),
+**DM-only initially**, with the consent model tightened per Sol: an in-channel bot requires
+**channel-level admin enablement + persistent participant-visible disclosure** — a mention exports
+*other participants'* messages, so mentioner consent is not consent. Cloud stays disabled in
+`hardened`. P2 token budget + P3 cancellation ride along. Never delays Track 2.
 
-### Track C — Reticulum spike *(the strategic hardware experiment; independent of everything)*
-Per `docs/28`: Pi + two RNodes, an `rnsd` sidecar, a thin transport adapter running digest→diff→fetch
-over an RNS Link; measure convergence and bandwidth against `docs/11` batching. **The result decides
-M3** (adopt / steal-ideas-only / reject) **and informs whether M1/M2 stay epics or get demoted** in
-favour of courier (P9) + radio bridge. Independent of the spike's outcome, three `docs/28` steals
-stand on their own: announce-based peer discovery (removes `sync.peers` hand-typing), compact binary
-sync framing (the 111-byte LXMF benchmark), and paper/QR message transport (cheap given
-`packages/qr`).
+### Track 4 — Signed sync → portable identity *(starts as review, not code)*
+1. **Sol round 2** on `docs/23` + the slice question, now sharpened: settle the key↔author binding
+   (user- vs node-signed; tombstone authority; rotation/revocation/replay/legacy-unsigned) before
+   sizing. Candidate outcomes: (a) author-signed slice separates cleanly → build it; (b) it doesn't →
+   build **node-signed provenance** (M-sized, fixes peer impersonation, no identity questions);
+   (c) neither pre-epic.
+2. The chosen slice → C2 delete/moderation propagation as the user-visible payoff.
+3. The full M4 epic (identity Option A — portable pseudonym + encrypted backup — pending owner
+   confirmation) only after MVP feedback stabilizes.
+
+### Track 5 — Reticulum spike *(independent; ~£150 hardware)*
+Per `docs/28`: Pi + two RNodes, `rnsd` sidecar, thin adapter, digest→diff→fetch over an RNS link;
+measure. Result decides M3 (adopt / ideas-only / reject) and informs the M1/M2 demotion call. The
+spike-independent steals stand regardless: announce-based peer discovery, compact binary sync
+framing, paper/QR message transport.
 
 ### Parked — with reasons
-- **S2 E2EE**: needs the product call `docs/27` flags — its honest value depends on the signed-APK
-  distribution story (a malicious host serves the PWA JS). Revisit after M4 Phase 0, which builds
-  related client-key muscle.
-- **S3 optional auth, P8 offline maps, P16 backup/export**: product decisions with no dependency
-  pressure; P8 is the largest single product feature and deserves its own phase when chosen.
-- **M1/M2 + the PH1–PH7 native defects**: pending Track C evidence. Exception: **PH1** (BLE advertise
-  31-byte overflow) is deterministic and fixable blind — do it whenever adjacent, so the scaffold
-  isn't known-broken.
-- **P9 courier phases 1–3**: desktop-testable and M-sized — the first candidate to pull forward if a
-  tester community actually runs multi-node.
-- **P19 sealed fan-out, P18 contact requests, S4 mesh acks** (design decided, ready to build), **S6
-  rotating sync creds**: the mesh product track — sequence after Track C settles the transport story.
-- **I4 32-bit ABI** (low value), **I5 @noble 2.x** (Node-18-blocked), **D3 i18n native review**
-  (needs speakers): unchanged deferrals.
+- **S2 E2EE**: strongest in a signed native client (a host-served PWA can replace its own JS);
+  defer until identity + native distribution are stable. **S3 auth / P8 maps / P16 backup**: product
+  decisions, no dependency pressure; P8's tiles should be an optional operator-installed pack.
+- **M1/M2 + PH2–PH7**: pending Track 5 evidence. **PH1 + the unimplemented BLE fallback are
+  deterministic implementation gaps, not hardware unknowns** — fix whenever adjacent; docs describe
+  Phase 3 as "compiled (in APK builds) but not radio-validated".
+- **P18 contact requests · P19 sealed fan-out** (verify partial status vs the mesh broadcast path
+  before restating) · **S6 rotating sync creds**: mesh product track, after Track 5.
+- **I4 32-bit ABI · I5 @noble 2.x (Node-18-blocked) · D3 i18n native review**: unchanged deferrals.
 
 ## 4. Decisions reserved for the owner
 
-1. **Spend order for Tracks B vs C** if serialized: B is higher product value (moderated mesh); C is
-   cheaper and retires more uncertainty per pound. (Both can run — B starts as Sol review.)
-2. **Identity Option A vs B** for M4 (`docs/23` §9; A — portable pseudonym + encrypted backup — is
-   the recorded lean; Sol round 2 pressure-tests it).
-3. **The M1/M2 demotion question** after the Track C spike — a direction change from `docs/16`'s
-   phased plan, so it is the owner's call, made on the spike's evidence.
-4. **Track C hardware purchase** (~£150: Pi + 2× RNode-flashed Heltec/LilyGO).
-5. **SW1 rate-limit numbers** (per-IP budgets for tunnel-wrapped expensive routes).
-6. **S8 mesh key lifecycle** (does a `hardened` panic wipe destroy the mesh keyseed — likely yes).
+1. **Spend order for Tracks 4 vs 5** if serialized (4 = product value; 5 = cheapest risk retirement).
+2. **Identity Option A vs B** for M4 (`docs/23` §9; A is the recorded lean; round 2 pressure-tests it).
+3. **The M1/M2 demotion question** — decided on Track 5's evidence, owner's call.
+4. **Track 5 hardware purchase** (~£150: Pi + 2× RNode-flashed boards).
+
+*Removed from the list (Sol, agreed):* tunnel rate-limit numbers → conservative configurable
+engineering defaults; mesh-key-wipe-on-panic → a security **invariant** (hardened panic wipe
+destroys every locally held identity/decryption key) rather than a choice. *Decided 2026-08-15:*
+archive = read-only-available, delete = permanent (§3 Track 0.2).
 
 ## 5. Full backlog disposition (every open `docs/25` item)
 
 | Item | Disposition |
 |---|---|
-| S1 SQLCipher runtime · I3 signed install · T3 on-device LLM · I2 webview 14 · I1 checklist · HW1 bridge0 | **Track 0** (device gate) |
-| Group D (P5 provider + @mention bot) · P2 · P3 · P7 | **Track A** (post-Sol-consent) |
-| S7 join-QR follow-ups · T1/T2/D1 remainder · SW1 (needs §4.5) · sweep nits | **Track A** |
-| Sol round 2 (`docs/23` + lighter slice) | **Track B step 1** (already queued) |
-| C2 delete propagation · S5 long-term (signed authors) | **Track B step 2** (signed-sync slice) |
-| M4 portable identity epic · P17 key verify · S8 (after §4.6) | **Track B step 3** |
-| M3 LoRa | **Track C** (spike decides: adopt RNS / ideas-only / reject) |
-| Announce-based peer discovery · binary sync framing · paper/QR transport (`docs/28`) | **Track C** side-steals (spike-independent) |
-| M1 mesh Phase 3 · M2 Phase 4 battery · PH2–PH7 | **Parked pending Track C** (§4.3) |
-| PH1 BLE advertise overflow | Fix blind when adjacent (deterministic) |
-| P9 courier | Parked; first pull-forward if testers run multi-node |
-| S4 mesh acks · S6 rotating creds · P18 contact requests · P19 sealed fan-out | Mesh product track, after Track C |
-| S2 E2EE · S3 auth · P8 map · P16 backup | **Parked** (product decisions; §3 Parked) |
-| P1 RAG · P6 personas | LLM fork after group D beds in (P1 first — the off-grid differentiator) |
-| P15 web-push | Resolved as removed for LAN joiners (`docs/27` PR 1-F); revisit only for the Android host |
-| I4 · I5 · D3 | **Deferred** (unchanged) |
+| Sol P1 1–3 (mutation authz) + archive/delete semantics + lifecycle tests | **Track 0.1–2, 0.8** |
+| Sol P1 5 / S7 remainder (CLI `#k=`) | **Track 0.3** (browser/Android surfaces already built) |
+| Sol P2 body-limit · SW1 tunnel limits | **Track 0.4–5** (engineering defaults) |
+| Sol P1 4 (media at rest) | honesty **Track 0.6** → encryption **Track 2** |
+| Expo matrix triage · doc drift | **Track 0.7, 0.9** |
+| S1 SQLCipher runtime · I3 signed install · T3 on-device LLM · I2 webview verify · I1 checklist · HW1 | **Track 1** |
+| P9 courier · S4 mesh acks · media encryption · diagnostics/quotas · T1/T2/D1 · accessibility | **Track 2** |
+| Ex-group-D provider (P5) + bot · P2 · P3 · P7 | **Track 3** |
+| Sol P2 peer impersonation · C2 delete propagation · S5 long-term · M4 · P17 | **Track 4** (slice per round 2) |
+| M3 LoRa · announce discovery · binary framing · paper/QR transport | **Track 5** |
+| M1 · M2 · PH2–PH7 | Parked pending Track 5 (PH1 + BLE fallback: fix when adjacent) |
+| S2 E2EE · S3 auth · P8 map · P16 backup · P18 · P19 (verify) · S6 | Parked (§3) |
+| S8 | Resolved as invariant (§4) · P15 web-push: resolved-removed (`docs/27`) |
+| I4 · I5 · D3 | Deferred (unchanged) |
 
 ## 6. Why this shape
 
-The MVP gate stays first and alone because the freeze-then-prove logic of `docs/27` §6 still holds —
-hardware verification mustn't chase a moving target. After it, the phase deliberately splits *reactive*
-work (Track A: testers now exist; listen to them) from *strategic* work (Tracks B and C), and both
-strategic tracks are structured to spend a little before committing a lot: B starts as an external
-design review, C as a bounded spike — because the two biggest risks on the board (rushed identity
-crypto, and phone-radio work "where Briar stalled") are exactly the failure modes of comparable apps
-(`CLAUDE.md`, Bridgefy/FireChat). The convergences in §2 are the reason this isn't just a priority
-list: one signed-content foundation serves four backlog items, and one cheap spike can retire or
-redirect three hardware epics. Sequencing them as tracks means each expensive commitment is made on
-evidence the phase itself produces.
+Track 0 exists because Sol's review found the create-path/mutation-path asymmetry that 999 green
+tests missed — coverage concentrated on steady-state, not transitions; the fix and its regression
+tests are cheap *now* and expensive after testers hit them. The freeze rule in Track 1 resolves the
+revision-1 contradiction between "parallel work" and "don't chase a moving target": parallel work is
+fine, *merging it into the RC under test is not*. Tracks 2–5 keep the revision-1 logic — reactive
+work split from strategic work, and both strategic tracks spend a little before committing a lot
+(round 2 review before signed-sync code; a £150 spike before any radio epic) — because rushed
+identity crypto and phone-radio background work are exactly how comparable apps died
+(`CLAUDE.md`, Bridgefy/FireChat). The cloud LLM is quarantined in its own track because it is the
+one feature that *weakens* a security promise rather than strengthening one; it must never be a
+dependency of anything else.
