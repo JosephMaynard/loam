@@ -1157,6 +1157,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const server = Fastify({
     // Developer Mode turns on verbose (`debug`) logging unless the caller passed an explicit logger.
     logger: options.logger ?? (devMode ? { level: "debug" } : true),
+    // Transport ceiling for a request body. Fastify's 1 MiB default silently made the advertised
+    // 1 MiB attachment cap unreachable (Sol P2-7): the JSON envelope base64-inflates the raw bytes
+    // (×4/3), and a tunnelled upload wraps that AGAIN in a sealed+base64 `{ s, b }` envelope — so a
+    // 1 MiB file needs ≈2 MiB of envelope headroom. 4 MiB keeps the ceiling bounded while the real,
+    // decoded limits stay enforced semantically per route (avatar 128 KiB, image 256 KiB, file 1 MiB).
+    bodyLimit: 4 * 1024 * 1024,
     serverFactory: (handler) => createServer(handler),
   });
   if (devModeRequested && isProductionBuild) {
@@ -6490,10 +6496,25 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     global: true,
     max: 300,
     timeWindow: "1 minute",
-    // Internal tunnel re-dispatches are already bounded by the outer tunnel request that spawned them
-    // (and all share the loopback IP), so exempt them rather than double-counting / self-throttling.
+    // Internal tunnel re-dispatches are exempt from the GLOBAL limiter only: the outer tunnel request
+    // already counted once against it, so counting the inner dispatch would double-charge every
+    // tunnelled call. The tighter per-route semantic caps below use `semanticRateLimit()`, which
+    // deliberately does NOT inherit this exemption.
     allowList: (request) => isInternalTunnelRequest(request as FastifyRequest),
   });
+
+  /**
+   * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches (Sol P2-6).
+   * Route configs inherit the global registration's `allowList`, which exempts tunnel dispatches —
+   * correct for the blanket limiter (see above), but on the expensive routes it silently lifted the
+   * tighter caps for any client using the encrypted tunnel (e.g. ~200 MB/min of upload attempts
+   * inside the 300/min tunnel budget). Overriding the allowList here counts every arrival path; the
+   * tunnel forwards the real caller's address (`remoteAddress: request.ip`), so the per-IP key is
+   * the true client either way. Conservative defaults, tunable per route at the call sites.
+   */
+  function semanticRateLimit(max: number): { config: { rateLimit: { max: number; timeWindow: string; allowList: () => boolean } } } {
+    return { config: { rateLimit: { max, timeWindow: "1 minute", allowList: () => false } } };
+  }
   await server.register(fastifyWebsocket);
   await registerStaticFiles();
 
@@ -6854,7 +6875,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   });
   server.put(
     "/api/users/me/avatar-image",
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    semanticRateLimit(10),
     async (request, reply) => {
     if (!appConfig.identity.allowUserAvatarEdit || !appConfig.identity.allowUserAvatarUpload) {
       return reply.code(403).send(errorBody("User avatar uploads are disabled on this LOAM node"));
@@ -7061,7 +7082,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // message they can SEE or any human user. Rate-limited to blunt report spam.
   server.post(
     "/api/reports",
-    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    semanticRateLimit(20),
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
       const accessError = participationError(currentUser);
@@ -7168,7 +7189,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/moderation/messages/:messageId/remove",
     // Per-route rate limit: this handler touches the filesystem (deletes attachment files), and CodeQL
     // (js/missing-rate-limiting) only credits the per-route config, not the global limiter.
-    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    semanticRateLimit(60),
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
@@ -7227,7 +7248,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // can't see the conversation. The client throttles these; the per-route cap is the server-side backstop.
   server.post(
     "/api/typing",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    semanticRateLimit(120),
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
@@ -7322,7 +7343,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.get<{ Params: { fileName: string } }>(
     "/api/avatars/:fileName",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    semanticRateLimit(120),
     async (request, reply) => {
     const avatar = parseAvatarImageId(request.params.fileName);
 
@@ -7346,7 +7367,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // is bound to this uploader and consumed by the message that references it (see createMessage).
   server.post(
     "/api/attachments",
-    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    semanticRateLimit(20),
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
       const accessError = participationError(currentUser);
@@ -7404,7 +7425,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.get<{ Params: { fileName: string } }>(
     "/api/attachments/:fileName",
-    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    semanticRateLimit(240),
     async (request, reply) => {
       const attachment = parseAttachmentFileName(request.params.fileName);
 
@@ -7655,7 +7676,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // 404s identically, so this never reveals a channel's existence — no discoverability change.
   server.post<{ Params: { channelId: string } }>(
     "/api/channels/:channelId/join-requests",
-    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    semanticRateLimit(30),
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
       const accessError = participationError(currentUser);
@@ -7841,7 +7862,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Case-insensitive substring search over message bodies, scoped strictly to what the caller may
   // read: channel messages in channels they can access (including archived — read-only), and their own DMs.
   // Shadow-banned authors' messages stay visible only to themselves, matching the broadcast filter.
-  server.get<{ Querystring: { q?: string; limit?: string } }>("/api/search", async (request, reply) => {
+  // Substring search scans the whole message mirror per call, so it gets its own semantic cap
+  // (counted through the tunnel too — see semanticRateLimit) on top of the global limiter.
+  server.get<{ Querystring: { q?: string; limit?: string } }>(
+    "/api/search",
+    semanticRateLimit(60),
+    async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
     const accessError = participationError(currentUser);
 

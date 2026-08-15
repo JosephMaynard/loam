@@ -9821,3 +9821,58 @@ describe("content-mutation lifecycle (Sol review 2026-08-15)", () => {
     ).toBe(200);
   });
 });
+
+describe("body limit + tunnel semantic rate limits (Sol review 2026-08-15)", () => {
+  it("accepts a non-image attachment near the advertised 1 MiB cap; over-cap rejects semantically", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+
+    // ~1 MiB raw → ≈1.37 MiB as a base64 JSON envelope: over Fastify's old 1 MiB default transport
+    // cap (which made the advertised limit unreachable from ~790 KB — Sol P2-7), inside the new one.
+    const nearCap = Buffer.alloc(1024 * 1024 - 16, 7);
+    const ok = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: admin.cookie },
+      payload: { mimeType: "application/pdf", data: nearCap.toString("base64") },
+    });
+    expect(ok.statusCode).toBe(201);
+
+    // One byte over the DECODED cap: the semantic 400, never the transport 413.
+    const overCap = Buffer.alloc(1024 * 1024 + 1, 7);
+    const rejected = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: admin.cookie },
+      payload: { mimeType: "application/pdf", data: overCap.toString("base64") },
+    });
+    expect(rejected.statusCode).toBe(400);
+  });
+
+  it("counts tunnelled requests against the per-route semantic caps (search: 60/min)", async () => {
+    const app = await makeApp();
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1);
+    expect(bound.status).toBe(200);
+
+    // 61 tunnelled searches: the first 60 pass, the 61st trips the route's semantic cap — the cap
+    // the tunnel used to bypass entirely (internal dispatches inherited the global allowList).
+    let okCount = 0;
+    let limited = 0;
+
+    for (let i = 0; i < 61; i += 1) {
+      const inner = await tunnelInner(app, session, 2 + i, { m: "GET", p: "/api/search?q=x" });
+      expect(inner.outerStatus).toBe(200);
+
+      if (inner.status === 429) {
+        limited += 1;
+      } else {
+        expect(inner.status).toBe(200);
+        okCount += 1;
+      }
+    }
+
+    expect(okCount).toBe(60);
+    expect(limited).toBe(1);
+  });
+});
