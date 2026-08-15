@@ -142,7 +142,9 @@ try {
     // No QR to carry the key out-of-band, so hand out the KEYED link here — copy/paste keeps the
     // MITM protection; only the plain printed URL above loses it. (The normal path deliberately
     // shows the plain URL as text: the key rides the QR image, not the human-readable line.)
-    console.log("(Join address too long to render as a QR.)");
+    // Generic on purpose: this catch covers ANY encode/render failure (an over-capacity join
+    // address is merely the most likely cause).
+    console.log("(Couldn't render a join QR for this address.)");
     if (transportKey) {
       console.log("Share this exact link instead — copied whole, it keeps the encryption key:");
       console.log(qrUrl);
