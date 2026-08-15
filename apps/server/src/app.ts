@@ -435,6 +435,12 @@ export type LoamApp = {
   pruneExpiredRateLimiters(): void;
   /** Test/introspection hook: current entry counts of the per-IP rate-limit maps. */
   rateLimiterEntryCounts(): { claim: number; panic: number; identity: number };
+  /** The host's static transport public key (docs/08) for building a keyed `#k=` join QR, or
+   * `undefined` when the effective transport-encryption posture is `off` (Developer Mode). Lets
+   * embedding hosts (the `loamnet` CLI, the Android launcher) print a MITM-resistant join QR
+   * without an HTTP round-trip that would mint a session (and could consume the `firstUser`
+   * admin grant). */
+  getTransportPublicKey(): string | undefined;
   close(): Promise<void>;
 };
 
@@ -9010,6 +9016,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       panic: panicAttempts.size,
       identity: identityMintCounters.size,
     }),
+    getTransportPublicKey: () =>
+      effectiveTransportEncryption() === "off" ? undefined : ensureTransportIdentity().publicKey,
     async close() {
       clearInterval(reaperTimer);
       clearInterval(syncTimer);

@@ -9585,6 +9585,14 @@ describe("location sharing (docs/10)", () => {
 });
 
 describe("content-mutation lifecycle (Sol review 2026-08-15)", () => {
+  it("exposes the transport public key for embedding hosts (keyed #k= join QR, no HTTP round-trip)", async () => {
+    const app = await makeApp();
+    const key = app.getTransportPublicKey();
+    // base64url X25519 public key — what the loamnet CLI appends as the QR's #k= fragment.
+    expect(key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+
   /** POST a channel message as `cookie`, returning the created message id. */
   async function postIn(app: LoamApp, cookie: string, channelId: string, body: string): Promise<string> {
     const response = await app.server.inject({

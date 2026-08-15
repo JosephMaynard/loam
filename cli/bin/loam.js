@@ -113,14 +113,27 @@ const joinUrl = `http://${joinHost}:${port}`;
 
 console.log("");
 console.log(`LOAM node — data in ${dataDir}`);
-console.log(`Open on this device:  http://localhost:${port}`);
-console.log(`Join from your phone: ${joinUrl}`);
-console.log("");
-console.log(renderQRToTerminal(encodeQR(joinUrl), { quietZone: 2 }));
-console.log("");
 
 try {
-  await startEmbeddedServer();
+  // Start FIRST, then print the QR: the QR must carry the host's transport public key as a
+  // `#k=<key>` fragment (docs/08) so a scanner learns the key out-of-band and the first join is
+  // MITM-resistant — the same guarantee the browser and Android join QRs already give. The key
+  // only exists once the server has booted, and it's read straight off the app (never via an HTTP
+  // call, which would mint a session and could consume the `firstUser` admin grant).
+  const app = await startEmbeddedServer();
+  const transportKey = app.getTransportPublicKey?.();
+  const qrUrl = transportKey ? `${joinUrl}#k=${transportKey}` : joinUrl;
+
+  console.log(`Open on this device:  http://localhost:${port}`);
+  console.log(`Join from your phone: ${joinUrl}`);
+  console.log("");
+  console.log(renderQRToTerminal(encodeQR(qrUrl), { quietZone: 2 }));
+  console.log("");
+  if (transportKey) {
+    console.log("Scan the QR to join — it carries this node's encryption key, so scanned joins are");
+    console.log("protected against impersonation. A hand-typed URL still works, but without that key.");
+    console.log("");
+  }
 } catch (error) {
   // Only treat this as a missing-driver case when the error actually names the SQLCipher module —
   // a bare `Cannot find module` match would misreport any unrelated missing dependency.

@@ -77,8 +77,31 @@ function codewordsToBits(codewords: Uint8Array): number[] {
 }
 
 export function encodeQRDetailed(input: string, options: EncodeOptions = {}): EncodedDetails {
-  const ecLevel = options.ecLevel ?? "H";
   const inputBytes = new TextEncoder().encode(input);
+  // No explicit EC level: use the strongest level the payload still fits at (H, then M — the two
+  // levels this encoder implements) before giving up. The encoder caps at version 6, so a fixed
+  // default of "H" (≈58 bytes) silently broke longer payloads — notably join URLs carrying the
+  // `#k=` transport key (docs/08, ≈70 bytes) — when level M (≈106 bytes) encodes them fine. An
+  // explicitly requested level stays strict: no silent weakening behind a caller's back.
+  let ecLevel = options.ecLevel;
+
+  if (ecLevel === undefined && options.version === undefined) {
+    for (const candidate of ["H", "M"] as const) {
+      try {
+        chooseVersion(inputBytes.length, candidate);
+        ecLevel = candidate;
+        break;
+      } catch {
+        // Doesn't fit at this level — try the next-weaker one.
+      }
+    }
+
+    // Nothing fits even at M: fall through as M so the size error below names the REAL ceiling
+    // (6-M, 106 bytes), not the stronger level the caller never asked for.
+    ecLevel ??= "M";
+  }
+
+  ecLevel ??= "H";
   const version = options.version ?? chooseVersion(inputBytes.length, ecLevel);
   const versionInfo = getVersionInfo(version, ecLevel);
 
