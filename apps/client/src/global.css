@@ -205,6 +205,18 @@ a {
   white-space: nowrap;
 }
 
+/* Archived channels stay listed (read-only) but visually recede. */
+.nav-label.archived-channel {
+  opacity: 0.55;
+}
+
+.archived-tag {
+  font-size: 0.68rem;
+  opacity: 0.55;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .unread-badge {
   display: inline-flex;
   align-items: center;

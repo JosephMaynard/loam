@@ -82,9 +82,13 @@ export function Sidebar({
       <section className="nav-section">
         <h2>{t("sidebar.channels")}</h2>
         <nav aria-label={t("sidebar.channels")}>
-          {/* Pinned channels sort to the top (P13); stable otherwise so the existing order is preserved. */}
+          {/* Pinned channels sort to the top (P13); archived (read-only) sink to the bottom; stable
+              otherwise so the existing order is preserved. */}
           {[...channels]
-            .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
+            .sort(
+              (a, b) =>
+                Number(!!a.archived) - Number(!!b.archived) || Number(!!b.pinned) - Number(!!a.pinned),
+            )
             .map((channel) => (
             <NavLink
               active={activeConversation?.kind === "channel" && activeConversation.id === channel.id}
@@ -94,8 +98,14 @@ export function Sidebar({
               <span aria-label={channel.visibility === "private" ? t("members.eyebrow") : undefined} className="nav-glyph">
                 {channel.visibility === "private" ? "🔒" : "#"}
               </span>
-              <span className="nav-label">{channel.name}</span>
-              <UnreadBadge count={unreadByConversation.get(`channel:${channel.id}`) ?? 0} />
+              <span className={channel.archived ? "nav-label archived-channel" : "nav-label"}>{channel.name}</span>
+              {channel.archived ? (
+                <span className="archived-tag" title={t("sidebar.archivedTag")}>
+                  {t("sidebar.archivedTag")}
+                </span>
+              ) : (
+                <UnreadBadge count={unreadByConversation.get(`channel:${channel.id}`) ?? 0} />
+              )}
             </NavLink>
           ))}
         </nav>

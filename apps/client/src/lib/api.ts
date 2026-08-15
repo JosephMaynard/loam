@@ -36,6 +36,32 @@ export async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS)
 }
 
 /**
+ * Permanently delete a channel (`DELETE /api/channels/:id`). Resolves on success; throws a
+ * localized error otherwise. Distinct from archiving — delete is gone-for-good (server cascades
+ * messages/attachments and tombstones the ids).
+ */
+export async function deleteChannelRequest(channelId: string): Promise<void> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await encryptedFetch(
+      "DELETE",
+      `/api/channels/${encodeURIComponent(channelId)}`,
+      undefined,
+      { signal: controller.signal },
+    );
+
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => undefined);
+      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
+    }
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+/**
  * POST/PATCH a channel endpoint and return the validated `Channel` from the response. Throws a
  * localized error when the request fails or the payload isn't a recognisable channel.
  */

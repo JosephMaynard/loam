@@ -3450,6 +3450,56 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * One shared gate for altering EXISTING content (edit / delete / react-to): the actor's moderation
+   * state (ban / pending / timeout) plus the target's *current* conversation state (channel still
+   * exists, actor still in its audience, channel not archived). The create path enforces the same
+   * rules via `channelPostingError` and the audience checks; this is their mirror for mutations, so a
+   * state *transition* — a member removed from a private channel, a moderator timeout, an archive —
+   * can never be bypassed by editing or reacting to pre-transition messages (Sol review 2026-08-15).
+   *
+   * `adminOverride` preserves the trusted-host moderation model for DELETE only: an admin may remove
+   * content anywhere (including archived channels and private channels they aren't a member of),
+   * because moderating history is not "altering content" in the impersonation sense.
+   *
+   * Returns an HTTP status + message, or `undefined` when the mutation may proceed. Inaccessible
+   * targets answer 404 with the same body as a missing message (the read paths' existence-hiding
+   * parity); archived answers an honest 403 — archive is visible state to everyone who can read it.
+   */
+  function messageMutationError(
+    actor: User,
+    target: Message,
+    opts: { adminOverride?: boolean } = {},
+  ): { code: number; error: string } | undefined {
+    const accessError = participationError(actor);
+
+    if (accessError) {
+      return { code: 403, error: accessError };
+    }
+
+    if (!opts.adminOverride) {
+      const actorTimeout = timeoutError(actor);
+
+      if (actorTimeout) {
+        return { code: 403, error: actorTimeout };
+      }
+    }
+
+    if (target.type === "channelPost" || target.type === "channelReply") {
+      const channel = ensureChannel(target.channelId);
+
+      if (!channel || (!opts.adminOverride && !canAccessChannel(channel, actor.id))) {
+        return { code: 404, error: "Message does not exist" };
+      }
+
+      if (channel.archived && !opts.adminOverride) {
+        return { code: 403, error: "Channel is archived" };
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
    * Hide messages (and reactions) authored by a shadow-banned user from everyone but that author —
    * the same rule `socketCanReceiveEvent` and search apply. Without this, the REST read paths (which
    * the client refetches on every channel open and reconnect) would return a shadow-banned author's
@@ -3827,6 +3877,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (audience && !audience.has(authorId)) {
         return { error: "Cannot react to this message" };
+      }
+
+      // A channel-scoped target is only reactable while the reactor can still write there: the
+      // channel must exist, be accessible, and not be archived (archive = read-only). Mirrors
+      // channelPostingError for posts — without this, reactions were the one create path that
+      // ignored the channel's current state (Sol review 2026-08-15).
+      if (target.type === "channelPost" || target.type === "channelReply") {
+        const targetChannel = ensureChannel(target.channelId);
+
+        if (!targetChannel || !canAccessChannel(targetChannel, authorId)) {
+          return { error: "Target message does not exist" };
+        }
+
+        if (targetChannel.archived) {
+          return { error: "Channel is archived" };
+        }
       }
 
       const existingIndex = data.messages.findIndex(
@@ -5988,6 +6054,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         const existing = ensureChannel(channel.id);
 
         if (!existing) {
+          // A locally deleted channel is tombstoned by its id — a peer that still lists it must
+          // never resurrect it here (delete is permanent; archive is the recoverable state).
+          if (tombstones.has(channel.id)) {
+            continue;
+          }
+
           // Never seen it: import it and RECORD it as synced-origin (so its later metadata edits can
           // re-sync — C1). Skip a fresh channel that arrives already-archived: no messages sync for an
           // archived channel, so we'd only materialise an empty dead channel.
@@ -7165,7 +7237,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (body.data.channelId) {
         const channel = ensureChannel(body.data.channelId);
-        if (channel && canAccessChannel(channel, currentUser.id)) {
+        // No typing signal in an archived channel — nothing can be composed there (read-only).
+        if (channel && !channel.archived && canAccessChannel(channel, currentUser.id)) {
           broadcast({ type: "typing", userId: currentUser.id, channelId: channel.id });
         }
       } else if (
@@ -7274,6 +7347,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (accessError) {
         return reply.code(403).send(errorBody(accessError));
+      }
+
+      // A timed-out user can't post, so they can't stage uploads either — same policy as
+      // createMessage, checked here so the file never lands on disk.
+      const uploadTimeoutError = timeoutError(currentUser);
+
+      if (uploadTimeoutError) {
+        return reply.code(403).send(errorBody(uploadTimeoutError));
       }
 
       if (!appConfig.features.enableAttachments) {
@@ -7417,7 +7498,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody(accessError));
     }
 
-    return data.channels.filter((channel) => !channel.archived && canAccessChannel(channel, currentUser.id));
+    // Archived channels ARE returned (to their normal audience): archive means read-only-but-
+    // available — the mutation paths refuse writes, the client renders them read-only. Removing a
+    // channel outright is `DELETE /api/channels/:id`. (Owner decision, 2026-08-15.)
+    return data.channels.filter((channel) => canAccessChannel(channel, currentUser.id));
   });
   server.get<{ Params: { channelId: string } }>("/api/messages/:channelId", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
@@ -7749,7 +7833,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   });
 
   // Case-insensitive substring search over message bodies, scoped strictly to what the caller may
-  // read: channel messages in channels they can access (never archived ones), and their own DMs.
+  // read: channel messages in channels they can access (including archived — read-only), and their own DMs.
   // Shadow-banned authors' messages stay visible only to themselves, matching the broadcast filter.
   server.get<{ Querystring: { q?: string; limit?: string } }>("/api/search", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
@@ -7792,7 +7876,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       } else {
         const channel = channelsById.get(message.channelId);
 
-        if (!channel || channel.archived || !canAccessChannel(channel, currentUser.id)) {
+        // Archived channels stay searchable — archive is read-only-but-available, and search is a read.
+        if (!channel || !canAccessChannel(channel, currentUser.id)) {
           continue;
         }
       }
@@ -8262,6 +8347,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(409).send(errorBody("This message is still being written"));
     }
 
+    // Non-admins must still be allowed to write in the target's conversation *now* (not timed out,
+    // still in the audience, not archived); admins keep the trusted-host moderation override.
+    const mutationError = messageMutationError(currentUser, target, { adminOverride: currentUser.isAdmin });
+
+    if (mutationError) {
+      return reply.code(mutationError.code).send(errorBody(mutationError.error));
+    }
+
     const deletionSet = collectDeletionSet(target);
 
     if (!currentUser.isAdmin) {
@@ -8305,6 +8398,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // admin can (admins moderate by deleting instead).
     if (target.authorId !== currentUser.id) {
       return reply.code(403).send(errorBody("You can only edit your own messages"));
+    }
+
+    // Authorship is not enough: the author must still be allowed to write *here, now* — not timed
+    // out, still in the channel's audience, channel not archived (see messageMutationError).
+    const mutationError = messageMutationError(currentUser, target);
+
+    if (mutationError) {
+      return reply.code(mutationError.code).send(errorBody(mutationError.error));
     }
 
     if (target.type === "reaction") {
@@ -8615,6 +8716,71 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     return applyChannelUpdate(channel, body.data);
+  });
+
+  // Permanently delete a channel (owner or admin). Archive means read-only-but-available; DELETE
+  // means gone and not coming back (owner decision, 2026-08-15): the channel, every message in it
+  // (and reactions on those messages), and their attachment files are removed; every id — including
+  // the channel's own — is tombstoned so a sync peer that still holds the content can never hand it
+  // back; the audience gets a targeted `channelRemoved` (clients purge caches and navigate away).
+  server.delete<{ Params: { channelId: string } }>("/api/channels/:channelId", async (request, reply) => {
+    const currentUser = ensureSessionUser(getSessionUserId(request, reply));
+    const accessError = participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
+    const channel = ensureChannel(request.params.channelId);
+
+    // 404-parity: a private channel an outsider can't see answers exactly like a missing one.
+    if (!channel || (!currentUser.isAdmin && !canAccessChannel(channel, currentUser.id))) {
+      return reply.code(404).send(errorBody("Channel does not exist"));
+    }
+
+    if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
+      return reply.code(403).send(errorBody("Only the channel owner or an admin can delete this channel"));
+    }
+
+    // Refuse while any message in the channel is mid-stream — its in-flight writer would re-persist.
+    const channelScoped = data.messages.filter(
+      (message) => (message.type === "channelPost" || message.type === "channelReply") && message.channelId === channel.id,
+    );
+
+    if (channelScoped.some((message) => message.meta?.streaming)) {
+      return reply.code(409).send(errorBody("A message in this channel is still being written"));
+    }
+
+    // Cascade: the channel's posts/replies plus every reaction targeting them. deleteMessages
+    // handles per-id tombstones, attachment-file removal, and messageDeleted broadcasts.
+    const channelMessageIds = new Set(channelScoped.map((message) => message.id));
+    const reactions = data.messages.filter(
+      (message) => message.type === "reaction" && channelMessageIds.has(message.targetMessageId),
+    );
+    deleteMessages([...channelScoped, ...reactions]);
+
+    // Audience computed BEFORE removal: private → roster + owner; public → everyone.
+    const audience =
+      channel.visibility === "private"
+        ? new Set(
+            [...(channel.memberUserIds ?? []), channel.ownerUserId].filter(
+              (id): id is string => typeof id === "string",
+            ),
+          )
+        : new Set(data.users.map((user) => user.id));
+
+    store.transaction(() => {
+      store.deleteChannel(channel.id);
+      // Tombstone the channel id itself: the sync channel-import path refuses to (re)create a
+      // tombstoned channel, so a peer that still lists it can't resurrect it here (docs/11).
+      store.addTombstone(channel.id);
+    });
+    tombstones.add(channel.id);
+    syncedChannelIds.delete(channel.id);
+    data.channels = data.channels.filter((candidate) => candidate.id !== channel.id);
+
+    sendEventToUsers(audience, { type: "channelRemoved", channelId: channel.id });
+    return reply.send({ deletedChannelId: channel.id });
   });
 
   server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {

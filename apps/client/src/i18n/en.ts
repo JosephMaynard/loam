@@ -372,6 +372,9 @@ export const en = {
   "admin.rename": "Rename",
   "admin.restore": "Restore",
   "admin.archive": "Archive",
+  "admin.deleteChannel": "Delete",
+  "admin.deleteChannelConfirm":
+    "Permanently delete #{name}? Every message and attachment in it is removed and cannot be restored — unlike archiving, there is no undo.",
 
   // Sidebar.
   "sidebar.channels": "Channels",
@@ -603,6 +606,8 @@ export const en = {
   "report.error": "Could not send the report",
   "report.cancel": "Cancel",
   "composer.timedOut": "You're timed out by a moderator and can't post right now.",
+  "composer.archived": "This channel is archived — you can read it, but nothing new can be posted.",
+  "sidebar.archivedTag": "archived",
   "moderation.timeout": "Time out (1h)",
   "moderation.timeoutClear": "Clear timeout",
   "moderation.timedOutBadge": "Timed out",

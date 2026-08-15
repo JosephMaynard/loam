@@ -153,6 +153,8 @@ export interface LoamStore {
    * the caller removes any messages that reference the user separately. */
   deleteUser(userId: string): void;
   upsertChannel(channel: Channel): void;
+  /** Delete a single channel row by id. The caller cascades (messages, attachments, tombstones). */
+  deleteChannel(channelId: string): void;
   insertMessage(message: Message): void;
   updateMessage(message: Message): void;
   deleteMessage(messageId: string): void;
@@ -460,6 +462,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   const upsertChannelStmt = db.prepare(
     "INSERT INTO channels (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
   );
+  const deleteChannelStmt = db.prepare("DELETE FROM channels WHERE id = ?");
   const insertMessageStmt = db.prepare(
     `INSERT INTO messages (id, type, author_id, channel_id, recipient_user_id, target_message_id, created_at, data)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -596,6 +599,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     upsertChannel(channel) {
       upsertChannelStmt.run(channel.id, JSON.stringify(channel));
+    },
+    deleteChannel(channelId) {
+      deleteChannelStmt.run(channelId);
     },
     insertMessage(message) {
       insertMessageStmt.run(message.id, ...messageColumns(message), JSON.stringify(message));

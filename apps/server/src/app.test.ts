@@ -3767,14 +3767,16 @@ describe("channels API", () => {
     expect((await updateChannel(app, stranger.cookie, channel.id, { name: "Hijack" })).statusCode).toBe(403);
   });
 
-  it("lists archived channels for admins even though the public list hides them", async () => {
+  it("keeps archived channels in both the public and admin lists (read-only-but-available)", async () => {
     const app = await makeApp();
     const admin = await newSession(app);
     const created = (await createChannel(app, admin.cookie, { name: "Hidden" })).json() as ChannelBody;
     await updateChannel(app, admin.cookie, created.id, { archived: true });
 
-    // Public list omits it, admin list keeps it (so it can be restored).
-    expect((await listChannels(app, admin.cookie)).some((entry) => entry.id === created.id)).toBe(false);
+    // Archive means read-only, not invisible: the public list still returns it (flagged), so
+    // clients can render it read-only; the admin list keeps it restorable.
+    const listed = (await listChannels(app, admin.cookie)).find((entry) => entry.id === created.id);
+    expect(listed?.archived).toBe(true);
 
     const adminList = await app.server.inject({
       method: "GET",
@@ -3851,13 +3853,14 @@ describe("channels API", () => {
     expect(renamed.statusCode).toBe(200);
     expect((renamed.json() as ChannelBody).name).toBe("Renamed");
 
+    // Archiving keeps the channel listed (read-only) — the flag flips, the channel never vanishes.
     const archived = await updateChannel(app, admin.cookie, created.id, { archived: true });
     expect(archived.statusCode).toBe(200);
-    expect((await listChannels(app, admin.cookie)).some((entry) => entry.id === created.id)).toBe(false);
+    expect((await listChannels(app, admin.cookie)).find((entry) => entry.id === created.id)?.archived).toBe(true);
 
     const restored = await updateChannel(app, admin.cookie, created.id, { archived: false });
     expect(restored.statusCode).toBe(200);
-    expect((await listChannels(app, admin.cookie)).some((entry) => entry.id === created.id)).toBe(true);
+    expect((await listChannels(app, admin.cookie)).find((entry) => entry.id === created.id)?.archived).toBe(false);
   });
 
   it("returns 404 when updating a channel that does not exist", async () => {
@@ -5044,7 +5047,7 @@ describe("message search", () => {
     expect(results(await search(app, eve.cookie, "rendezvous")).length).toBe(0);
   });
 
-  it("keeps private-channel messages scoped to members and skips archived channels", async () => {
+  it("keeps private-channel messages scoped to members and still searches archived channels", async () => {
     const app = await makeApp();
     const admin = await newSession(app);
     const owner = await newSession(app);
@@ -5063,7 +5066,7 @@ describe("message search", () => {
     expect(results(await search(app, outsider.cookie, "quiet spot")).length).toBe(0);
     expect(results(await search(app, admin.cookie, "quiet spot")).length).toBe(0);
 
-    // Archiving a channel removes its messages from search results too.
+    // Archived channels stay searchable — archive is read-only-but-available, and search is a read.
     await post(app, admin.cookie, "general", "archive me please");
     await app.server.inject({
       method: "PATCH",
@@ -5071,7 +5074,7 @@ describe("message search", () => {
       headers: { cookie: admin.cookie },
       payload: { archived: true },
     });
-    expect(results(await search(app, admin.cookie, "archive me")).length).toBe(0);
+    expect(results(await search(app, admin.cookie, "archive me")).length).toBe(1);
   });
 
   it("shows a shadow-banned author's messages only to themselves", async () => {
@@ -6131,6 +6134,45 @@ describe("node-to-node sync", () => {
     expect(bodies).not.toContain("private words");
     expect(bodies).not.toContain("dm words");
     expect(bodies).not.toContain("shadow words");
+  });
+
+  it("a locally deleted channel is tombstoned and never re-imported from a peer that still has it", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { name: "Persistent Topic" },
+    });
+    await post(source, sourceAdmin.cookie, "persistent-topic", "peer still holds this");
+    const sourceUrl = await listenApp(source);
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await runSync(puller, pullerAdmin.cookie);
+
+    const listed = async () =>
+      (
+        (
+          await puller.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: pullerAdmin.cookie } })
+        ).json() as { id: string }[]
+      ).some((entry) => entry.id === "persistent-topic");
+    expect(await listed()).toBe(true);
+
+    // Delete the imported channel locally — permanent, so a re-sync from the still-holding peer
+    // must NOT resurrect it (channel-id tombstone, docs/11).
+    const deleted = await puller.server.inject({
+      method: "DELETE",
+      url: "/api/channels/persistent-topic",
+      headers: { cookie: pullerAdmin.cookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+
+    await runSync(puller, pullerAdmin.cookie);
+    expect(await listed()).toBe(false);
   });
 
   it("tombstones keep locally deleted messages from re-importing, and edits propagate", async () => {
@@ -9539,5 +9581,235 @@ describe("location sharing (docs/10)", () => {
       payload: { type: "channelPost", channelId: "general", body: "x", location: { lat: 51.5 } },
     });
     expect(res.statusCode).toBe(400);
+  });
+});
+
+describe("content-mutation lifecycle (Sol review 2026-08-15)", () => {
+  /** POST a channel message as `cookie`, returning the created message id. */
+  async function postIn(app: LoamApp, cookie: string, channelId: string, body: string): Promise<string> {
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+    expect(response.statusCode).toBe(201);
+    return (response.json() as { message: { id: string } }).message.id;
+  }
+
+  function edit(app: LoamApp, cookie: string, messageId: string, body: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "PATCH",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie },
+      payload: { body },
+    });
+  }
+
+  function del(app: LoamApp, cookie: string, messageId: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "DELETE", url: `/api/messages/${messageId}`, headers: { cookie } });
+  }
+
+  function react(app: LoamApp, cookie: string, targetMessageId: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "reaction", targetMessageId, reaction: "👍" },
+    });
+  }
+
+  it("blocks a removed private-channel member from editing or deleting their old messages", async () => {
+    const app = await makeApp();
+    const owner = await newSession(app);
+    const member = await newSession(app);
+
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Quiet Ops", visibility: "private" },
+    });
+    const channelId = (created.json() as { id: string }).id;
+    await app.server.inject({
+      method: "POST",
+      url: `/api/channels/${channelId}/members`,
+      headers: { cookie: owner.cookie },
+      payload: { userId: member.userId },
+    });
+
+    const messageId = await postIn(app, member.cookie, channelId, "original words");
+    // Still a member: editing works.
+    expect((await edit(app, member.cookie, messageId, "edited while member")).statusCode).toBe(200);
+
+    await app.server.inject({
+      method: "DELETE",
+      url: `/api/channels/${channelId}/members/${member.userId}`,
+      headers: { cookie: owner.cookie },
+    });
+
+    // Removed: edit and delete both answer like the message no longer exists (404-parity), and the
+    // content is unchanged for those still inside.
+    expect((await edit(app, member.cookie, messageId, "injected after removal")).statusCode).toBe(404);
+    expect((await del(app, member.cookie, messageId)).statusCode).toBe(404);
+    const visible = await app.server.inject({
+      method: "GET",
+      url: `/api/messages/${channelId}`,
+      headers: { cookie: owner.cookie },
+    });
+    const bodies = (visible.json() as { body?: string }[]).map((entry) => entry.body);
+    expect(bodies).toContain("edited while member");
+    expect(bodies).not.toContain("injected after removal");
+  });
+
+  it("blocks a timed-out user from editing, deleting, reacting, and uploading — but not reading", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const user = await newSession(app);
+    const userMessageId = await postIn(app, user.cookie, "general", "before the timeout");
+    const adminMessageId = await postIn(app, admin.cookie, "general", "react to me");
+
+    const timeout = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${user.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { timeoutUntil: Date.now() + 60_000 },
+    });
+    expect(timeout.statusCode).toBe(200);
+
+    expect((await edit(app, user.cookie, userMessageId, "rewritten during timeout")).statusCode).toBe(403);
+    expect((await del(app, user.cookie, userMessageId)).statusCode).toBe(403);
+    expect((await react(app, user.cookie, adminMessageId)).statusCode).toBe(403);
+    const upload = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: user.cookie },
+      payload: { mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64") },
+    });
+    expect(upload.statusCode).toBe(403);
+
+    // Reading stays open — a timeout is a write-block, not an exile.
+    const read = await app.server.inject({
+      method: "GET",
+      url: "/api/messages/general",
+      headers: { cookie: user.cookie },
+    });
+    expect(read.statusCode).toBe(200);
+  });
+
+  it("makes an archived channel read-only: no posts, edits, or reactions — but reads, search, and listing work", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const user = await newSession(app);
+    const userMessageId = await postIn(app, user.cookie, "general", "posted before archive");
+
+    await app.server.inject({
+      method: "PATCH",
+      url: "/api/channels/general",
+      headers: { cookie: admin.cookie },
+      payload: { archived: true },
+    });
+
+    // Writes of every kind refuse.
+    const newPost = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: user.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "into the archive" },
+    });
+    expect(newPost.statusCode).toBe(400);
+    expect((await edit(app, user.cookie, userMessageId, "rewriting history")).statusCode).toBe(403);
+    expect((await react(app, user.cookie, userMessageId)).statusCode).toBe(400);
+
+    // Reads keep working, and the channel stays listed with its flag.
+    const read = await app.server.inject({
+      method: "GET",
+      url: "/api/messages/general",
+      headers: { cookie: user.cookie },
+    });
+    expect(read.statusCode).toBe(200);
+    const channels = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { cookie: user.cookie },
+    });
+    const general = (channels.json() as { id: string; archived?: boolean }[]).find((entry) => entry.id === "general");
+    expect(general?.archived).toBe(true);
+
+    // An admin may still moderate archived history (delete), the one deliberate override.
+    expect((await del(app, admin.cookie, userMessageId)).statusCode).toBe(200);
+  });
+
+  it("deletes a channel permanently: owner/admin only, full cascade, 404 afterwards", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const user = await newSession(app);
+
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: admin.cookie },
+      payload: { name: "Doomed" },
+    });
+    const channelId = (created.json() as { id: string }).id;
+    await postIn(app, user.cookie, channelId, "soon to be gone");
+
+    // A non-owner non-admin cannot delete.
+    expect(
+      (await app.server.inject({ method: "DELETE", url: `/api/channels/${channelId}`, headers: { cookie: user.cookie } }))
+        .statusCode,
+    ).toBe(403);
+
+    const deleted = await app.server.inject({
+      method: "DELETE",
+      url: `/api/channels/${channelId}`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect((deleted.json() as { deletedChannelId: string }).deletedChannelId).toBe(channelId);
+
+    // Gone for good: history 404s, the lists no longer carry it, a second delete 404s.
+    expect(
+      (await app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie: user.cookie } }))
+        .statusCode,
+    ).toBe(404);
+    const channels = await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: user.cookie } });
+    expect((channels.json() as { id: string }[]).some((entry) => entry.id === channelId)).toBe(false);
+    expect(
+      (await app.server.inject({ method: "DELETE", url: `/api/channels/${channelId}`, headers: { cookie: admin.cookie } }))
+        .statusCode,
+    ).toBe(404);
+  });
+
+  it("hides private-channel deletion behind 404-parity and lets a non-member admin delete", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Hidden Room", visibility: "private" },
+    });
+    const channelId = (created.json() as { id: string }).id;
+
+    // An outsider gets the same answer as a missing channel — never a 403 that confirms existence.
+    expect(
+      (
+        await app.server.inject({
+          method: "DELETE",
+          url: `/api/channels/${channelId}`,
+          headers: { cookie: outsider.cookie },
+        })
+      ).statusCode,
+    ).toBe(404);
+
+    // An admin who is NOT a member may still delete (manage-without-reading, like rename/archive).
+    expect(
+      (await app.server.inject({ method: "DELETE", url: `/api/channels/${channelId}`, headers: { cookie: admin.cookie } }))
+        .statusCode,
+    ).toBe(200);
   });
 });
