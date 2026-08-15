@@ -6933,6 +6933,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody(accessError));
     }
 
+    // A profile edit broadcasts to the whole roster (`userUpserted`), so a moderator timeout blocks
+    // it like every other content-publishing surface — matching avatar-image uploads (Sol round 4).
+    const profileTimeoutError = timeoutError(user);
+
+    if (profileTimeoutError) {
+      return reply.code(403).send(errorBody(profileTimeoutError));
+    }
+
     return applyUserUpdate(user, body.data);
   });
   server.put(
@@ -7775,6 +7783,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (accessError) {
         return reply.code(403).send(errorBody(accessError));
       }
+
+      // DELIBERATE (Sol round 4): a moderator timeout does NOT block join requests. A request
+      // carries no free-form text, is idempotent, and grants nothing without the owner's explicit
+      // approval — it's asking for access, not publishing. Blocking it would extend a write-block
+      // into a participation penalty. Pinned by a regression test.
 
       const channel = ensureChannel(request.params.channelId);
 

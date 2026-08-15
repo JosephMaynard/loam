@@ -10246,6 +10246,57 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
     expect((upload.json() as { error: string }).error).toMatch(/timed out/);
   });
 
+  it("blocks a timed-out user's profile edits, but deliberately not their join requests", async () => {
+    const app = await makeApp({ identity: { allowUserDisplayNameEdit: true } });
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const user = await newSession(app);
+
+    // A private channel accepting join requests, set up before the timeout.
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Requestable Room", visibility: "private" },
+    });
+    const channelId = (created.json() as { id: string }).id;
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/channels/${channelId}`,
+      headers: { cookie: owner.cookie },
+      payload: { allowJoinRequests: true },
+    });
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${user.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { timeoutUntil: Date.now() + 60_000 },
+    });
+
+    // A profile edit broadcasts to the roster — blocked like every publishing surface.
+    const rename = await app.server.inject({
+      method: "PATCH",
+      url: "/api/users/me",
+      headers: { cookie: user.cookie },
+      payload: { displayName: "look at me anyway" },
+    });
+    expect(rename.statusCode).toBe(403);
+    expect((rename.json() as { error: string }).error).toMatch(/timed out/);
+
+    // A join request publishes nothing and grants nothing without approval — DELIBERATELY allowed
+    // during a timeout (a write block, not a participation penalty). This pins the policy choice.
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: `/api/channels/${channelId}/join-requests`,
+          headers: { cookie: user.cookie },
+        })
+      ).statusCode,
+    ).toBe(201);
+  });
+
   it("blocks edits of DMs and replies after their feature is switched off — deletes stay for cleanup", async () => {
     const app = await makeApp();
     const admin = await newSession(app);
