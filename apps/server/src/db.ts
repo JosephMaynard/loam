@@ -234,6 +234,10 @@ export interface LoamStore {
    * can't clobber it. Idempotent. Wiped with everything else by the kill switch.
    */
   markChannelSynced(channelId: string): void;
+  /** Forget a channel's synced-origin mark (channel delete) — otherwise a restart re-hydrates the
+   * mark and a later same-slug LOCAL channel would falsely count as synced-origin, letting a peer's
+   * metadata clobber it (C1 provenance inversion). */
+  unmarkChannelSynced(channelId: string): void;
   loadSyncedChannelIds(): string[];
   /**
    * Pending join requests for private channels (P10). Idempotent add; per-channel load (the requester ids);
@@ -529,6 +533,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   const markChannelSyncedStmt = db.prepare(
     "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
   );
+  const unmarkChannelSyncedStmt = db.prepare("DELETE FROM synced_channels WHERE channel_id = ?");
   const loadSyncedChannelIdsStmt = db.prepare("SELECT channel_id FROM synced_channels");
   const addJoinRequestStmt = db.prepare(
     "INSERT INTO channel_join_requests (channel_id, user_id, created_at) VALUES (?, ?, ?) ON CONFLICT(channel_id, user_id) DO NOTHING",
@@ -718,6 +723,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     markChannelSynced(channelId) {
       markChannelSyncedStmt.run(channelId);
+    },
+    unmarkChannelSynced(channelId) {
+      unmarkChannelSyncedStmt.run(channelId);
     },
     loadSyncedChannelIds() {
       return loadSyncedChannelIdsStmt.all().map((row) => (row as { channel_id: string }).channel_id);

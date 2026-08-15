@@ -41,24 +41,7 @@ export async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS)
  * messages/attachments and tombstones the ids).
  */
 export async function deleteChannelRequest(channelId: string): Promise<void> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await encryptedFetch(
-      "DELETE",
-      `/api/channels/${encodeURIComponent(channelId)}`,
-      undefined,
-      { signal: controller.signal },
-    );
-
-    if (!response.ok) {
-      const payload: unknown = await response.json().catch(() => undefined);
-      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
-    }
-  } finally {
-    window.clearTimeout(timeout);
-  }
+  await requestJson("DELETE", `/api/channels/${encodeURIComponent(channelId)}`);
 }
 
 /**

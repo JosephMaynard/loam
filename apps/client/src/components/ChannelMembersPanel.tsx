@@ -33,6 +33,9 @@ export function ChannelMembersPanel({
   const [inviteId, setInviteId] = useState("");
   const [joinRequests, setJoinRequests] = useState<User[]>([]);
   const canManage = currentUser.isAdmin || channel.ownerUserId === currentUser.id;
+  // Roster GROWTH (invite / transfer / approve requests / the join-request toggle) is frozen while
+  // the channel is archived — the server 403s these; removals and leaving stay available.
+  const canGrow = canManage && !channel.archived;
   const memberIds = new Set(channel.memberUserIds ?? []);
 
   if (channel.ownerUserId) {
@@ -252,9 +255,11 @@ export function ChannelMembersPanel({
               </div>
               {canManage && member.id !== channel.ownerUserId ? (
                 <div className="moderation-actions">
-                  <button className="ghost-button" disabled={busy} onClick={() => void transfer(member.id)} type="button">
-                    {t("members.makeOwner")}
-                  </button>
+                  {canGrow ? (
+                    <button className="ghost-button" disabled={busy} onClick={() => void transfer(member.id)} type="button">
+                      {t("members.makeOwner")}
+                    </button>
+                  ) : null}
                   <button className="danger-button" disabled={busy} onClick={() => void remove(member.id)} type="button">
                     {t("common.remove")}
                   </button>
@@ -264,7 +269,7 @@ export function ChannelMembersPanel({
           ))}
         </ul>
       ) : null}
-      {canManage ? (
+      {canGrow ? (
         <label className="admin-toggle">
           <input
             checked={!!channel.allowJoinRequests}
@@ -275,7 +280,7 @@ export function ChannelMembersPanel({
           {t("members.allowJoinRequests")}
         </label>
       ) : null}
-      {canManage && joinRequests.length ? (
+      {canGrow && joinRequests.length ? (
         <div className="join-requests">
           <h3>{t("members.joinRequestsHeading")}</h3>
           <ul className="moderation-list">
@@ -301,7 +306,7 @@ export function ChannelMembersPanel({
           </ul>
         </div>
       ) : null}
-      {canManage ? (
+      {canGrow ? (
         <form
           className="member-invite-form"
           onSubmit={(event) => {

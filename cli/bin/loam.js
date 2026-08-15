@@ -127,11 +127,19 @@ try {
   console.log(`Open on this device:  http://localhost:${port}`);
   console.log(`Join from your phone: ${joinUrl}`);
   console.log("");
-  console.log(renderQRToTerminal(encodeQR(qrUrl), { quietZone: 2 }));
-  console.log("");
-  if (transportKey) {
-    console.log("Scan the QR to join — it carries this node's encryption key, so scanned joins are");
-    console.log("protected against impersonation. A hand-typed URL still works, but without that key.");
+  // A QR that won't fit (the encoder caps at ~106 bytes; a long LOAM_JOIN_HOST can exceed it) must
+  // never take down a server that is already listening — degrade to the printed URL instead.
+  try {
+    console.log(renderQRToTerminal(encodeQR(qrUrl), { quietZone: 2 }));
+    console.log("");
+    if (transportKey) {
+      console.log("Scan the QR to join — it carries this node's encryption key, so scanned joins are");
+      console.log("protected against impersonation. Depending on this node's security settings, a");
+      console.log("hand-typed URL may connect without that protection, or be refused entirely.");
+      console.log("");
+    }
+  } catch {
+    console.log("(Join address too long to render as a QR — share the URL above instead.)");
     console.log("");
   }
 } catch (error) {

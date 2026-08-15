@@ -72,7 +72,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 pnpm install          # install workspace deps
 pnpm dev              # root: runs server + client together, prints join QR (see ports below)
 pnpm build            # pnpm -r build: builds all packages, then server (tsc) and client (tsc -b && vite build)
-pnpm test             # pnpm -r --if-present test: runs vitest in the 4 packages + apps/server + apps/client + apps/app
+pnpm test             # pnpm -r --if-present test: runs vitest in the 5 packages + apps/server + apps/client + apps/app
 ```
 
 There is **no lint script**. Type-checking happens as part of `build` (`tsc`), except `apps/app`,

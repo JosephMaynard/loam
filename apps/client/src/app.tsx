@@ -622,20 +622,33 @@ function LoamApp() {
 
   /**
    * Drop a channel this user can no longer see (removed from a private channel, or the channel was
-   * archived): purge the channel and its cached messages locally, and leave the conversation if it
-   * is on screen.
+   * permanently deleted): purge the channel, its cached messages, AND the reactions targeting them
+   * (reactions carry only a targetMessageId, no channelId — without the second pass they'd linger
+   * in IndexedDB forever after a "gone for good" delete), then leave the conversation if it is on
+   * screen. Archiving no longer calls this — archived channels stay cached, read-only.
    */
   const removeChannel = useCallback((channelId: string) => {
     setChannels((previous) => previous.filter((channel) => channel.id !== channelId));
     void deleteRecord("channels", channelId);
 
     setMessages((previous) => {
-      const keep: Message[] = [];
+      const purgedIds = new Set<string>();
 
       for (const message of previous) {
         if (
           (message.type === "channelPost" || message.type === "channelReply") &&
           message.channelId === channelId
+        ) {
+          purgedIds.add(message.id);
+        }
+      }
+
+      const keep: Message[] = [];
+
+      for (const message of previous) {
+        if (
+          purgedIds.has(message.id) ||
+          (message.type === "reaction" && purgedIds.has(message.targetMessageId))
         ) {
           void deleteRecord("messages", message.id);
         } else {
@@ -2095,6 +2108,7 @@ function ConversationView({
             }
           }}
           onReact={onReact}
+          readOnly={!!activeChannel?.archived}
           reactionsByTarget={reactionsByTarget}
           repliesByParent={repliesByParent}
           topMessages={topMessages}
@@ -2133,6 +2147,7 @@ function ConversationView({
           onEdit={onEdit}
           onReact={onReact}
           composerDisabledReason={activeChannel?.archived ? t("composer.archived") : undefined}
+          readOnly={!!activeChannel?.archived}
           onReply={(body, attachments, messageLocation) =>
             onThreadReply(threadParent.id, body, attachments, messageLocation)
           }
@@ -2180,6 +2195,8 @@ interface MessageListProps {
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
+  /** Archived (read-only) channel: per-message mutation affordances are hidden (see MessageItem). */
+  readOnly?: boolean;
   reactionsByTarget: Map<string, Message[]>;
   repliesByParent: Map<string, Message[]>;
   topMessages: Message[];
@@ -2217,6 +2234,7 @@ function MessageList({
   onEdit,
   onOpenThread,
   onReact,
+  readOnly = false,
   reactionsByTarget,
   repliesByParent,
   topMessages,
@@ -2268,6 +2286,7 @@ function MessageList({
                 onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
                 onReact={onReact}
                 onReport={setReportMessage}
+                readOnly={readOnly}
                 reactions={reactionSummary(
                   reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES,
                   message.id,
@@ -2298,6 +2317,8 @@ interface ThreadPanelProps {
   onDelete: (messageId: string) => void;
   /** Set when the surrounding channel is archived — the reply composer disables with this reason. */
   composerDisabledReason?: string;
+  /** Archived (read-only) channel: hide per-message mutation affordances in the thread too. */
+  readOnly?: boolean;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onReply: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
@@ -2334,6 +2355,7 @@ function ThreadPanel({
   onUploadAttachment,
   parent,
   reactionsByTarget,
+  readOnly = false,
   repliesByParent,
   usersById,
 }: ThreadPanelProps) {
@@ -2363,6 +2385,7 @@ function ThreadPanel({
           onEdit={onEdit}
           onReact={onReact}
           onReport={setReportMessage}
+          readOnly={readOnly}
           reactions={reactionSummary(reactionsByTarget.get(parent.id) ?? EMPTY_MESSAGES, parent.id, currentUser.id)}
           usersById={usersById}
         />
@@ -2378,6 +2401,7 @@ function ThreadPanel({
             onEdit={onEdit}
             onReact={onReact}
             onReport={setReportMessage}
+            readOnly={readOnly}
             reactions={reactionSummary(reactionsByTarget.get(reply.id) ?? EMPTY_MESSAGES, reply.id, currentUser.id)}
             usersById={usersById}
           />

@@ -373,8 +373,9 @@ export const en = {
   "admin.restore": "Restore",
   "admin.archive": "Archive",
   "admin.deleteChannel": "Delete",
+  "admin.deleteChannelAria": "Permanently delete the channel {name}",
   "admin.deleteChannelConfirm":
-    "Permanently delete #{name}? Every message and attachment in it is removed and cannot be restored — unlike archiving, there is no undo.",
+    "Permanently delete “{name}”? Every message and attachment in it is removed and cannot be restored — unlike archiving, there is no undo.",
 
   // Sidebar.
   "sidebar.channels": "Channels",

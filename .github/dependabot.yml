@@ -42,5 +42,9 @@ updates:
       - dependency-name: "react-dom"
       - dependency-name: "react-native"
       - dependency-name: "react-native-*"
+      - dependency-name: "@types/react"
+      # NOTE: this single directory:"/" entry covers the WHOLE workspace, so the typescript
+      # major-ignore also holds the root catalog's TS — intended: a TS major is a manual,
+      # reviewed migration everywhere, never an auto-bump.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]

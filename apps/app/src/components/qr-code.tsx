@@ -8,9 +8,10 @@ type QRCodeProps = {
   /** Overall pixel size of the square rendered box, including the quiet-zone border. Default 220. */
   size?: number;
   /**
-   * Error correction level; defaults to `"H"`. The WiFi step passes `"M"` — a `LocalOnlyHotspot`
-   * SSID plus a longer/escaped passphrase can exceed level H's version-6 ceiling (docs/15 #10),
-   * and `M` roughly doubles capacity at each version.
+   * Error correction level. When omitted, the encoder auto-selects the strongest level the payload
+   * fits at (H, degrading to M — keyed `#k=` join URLs need M's ≈106-byte ceiling). The WiFi step
+   * passes an explicit `"M"` — a `LocalOnlyHotspot` SSID plus a longer/escaped passphrase can
+   * exceed level H's version-6 ceiling (docs/15 #10) — which stays strict (no auto-degrade).
    */
   ecLevel?: QRErrorCorrectionLevel;
 };

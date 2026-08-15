@@ -4,7 +4,7 @@
 > against code 2026-08-15):** C1 (per-peer provenance re-sync), P4 (general @mentions), P10
 > (join requests), P11 (file attachments — 1 MB), P12 (per-channel TTL), P13 (lock/pin), P14
 > (typing indicators), the S5 admin-UI pinned-key field (the L-sized "per-peer signed authors"
-> half remains), most S7 surfaces (the remaining keyed-join gap is the **CLI** QR), D2/P15
+> half remains), **all** S7 keyed-join surfaces (the last gap — the CLI QR — closed on `feat/pre-tester-hardening`), D2/P15
 > (resolved-removed), and the moderation report loop (docs/26 → #109). **The active disposition
 > of every remaining item is [docs/29-next-phase.md](29-next-phase.md) §5** — read that first;
 > this file remains the per-item detail reference.

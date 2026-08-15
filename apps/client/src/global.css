@@ -207,14 +207,15 @@ a {
 
 /* Archived channels stay listed (read-only) but visually recede. */
 .nav-label.archived-channel {
-  opacity: 0.55;
+  opacity: 0.7;
 }
 
 .archived-tag {
   font-size: 0.68rem;
-  opacity: 0.55;
+  opacity: 0.7;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .unread-badge {

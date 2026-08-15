@@ -1157,14 +1157,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const server = Fastify({
     // Developer Mode turns on verbose (`debug`) logging unless the caller passed an explicit logger.
     logger: options.logger ?? (devMode ? { level: "debug" } : true),
-    // Transport ceiling for a request body. Fastify's 1 MiB default silently made the advertised
-    // 1 MiB attachment cap unreachable (Sol P2-7): the JSON envelope base64-inflates the raw bytes
-    // (×4/3), and a tunnelled upload wraps that AGAIN in a sealed+base64 `{ s, b }` envelope — so a
-    // 1 MiB file needs ≈2 MiB of envelope headroom. 4 MiB keeps the ceiling bounded while the real,
-    // decoded limits stay enforced semantically per route (avatar 128 KiB, image 256 KiB, file 1 MiB).
-    bodyLimit: 4 * 1024 * 1024,
+    // The global body ceiling stays at Fastify's 1 MiB default. Only the two routes that genuinely
+    // carry large envelopes — `POST /api/attachments` and `POST /api/transport/tunnel` — raise it
+    // per-route (`LARGE_BODY_LIMIT`); a blanket 4 MiB would hand every endpoint (including the
+    // unauthenticated ones) a 4× transient-allocation amplifier on a Pi/phone host.
     serverFactory: (handler) => createServer(handler),
   });
+  // Per-route body ceiling for the upload paths (Sol P2-7): the advertised 1 MiB attachment cap
+  // base64-inflates (×4/3) inside its JSON envelope, and a tunnelled upload wraps that AGAIN in a
+  // sealed+base64 `{ s, b }` envelope — so a 1 MiB file needs ≈2 MiB of headroom. 4 MiB keeps the
+  // ceiling bounded while the real, decoded limits stay enforced semantically (avatar 128 KiB,
+  // image 256 KiB, file 1 MiB).
+  const LARGE_BODY_LIMIT = 4 * 1024 * 1024;
   if (devModeRequested && isProductionBuild) {
     server.log.error(
       "LOAM_DEV_MODE is set but IGNORED: refusing to disable transport encryption in a production build (NODE_ENV=production).",
@@ -3351,7 +3355,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       .replace(/^-+|-+$/g, "")
       .slice(0, 40);
 
-    if (slug && !ensureChannel(slug)) {
+    // A tombstoned slug is never reused: delete is permanent, and a recreated channel with the SAME
+    // id would inherit the old channel's ghosts — a peer's undelivered copies, stale references —
+    // and would itself be refused by peers still holding the tombstone. Suffixed ids below are
+    // random enough that a tombstone collision is not a practical concern.
+    if (slug && !ensureChannel(slug) && !tombstones.has(slug)) {
       return slug;
     }
 
@@ -3496,15 +3504,48 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    if (target.type === "channelPost" || target.type === "channelReply") {
-      const channel = ensureChannel(target.channelId);
+    // A reaction has no channelId of its own — its conversation is its TARGET's. Without resolving
+    // it, deleting a reaction skipped every channel check (review finding: an ex-member or a user in
+    // an archived channel could still toggle reactions off via DELETE). A reaction on a vanished
+    // target has no live conversation to protect — deleting it is pure cleanup, so it falls through.
+    const channelScoped =
+      target.type === "channelPost" || target.type === "channelReply"
+        ? target
+        : target.type === "reaction"
+          ? data.messages.find(
+              (candidate): candidate is Message & { channelId: string } =>
+                candidate.id === target.targetMessageId &&
+                (candidate.type === "channelPost" || candidate.type === "channelReply"),
+            )
+          : undefined;
+
+    if (channelScoped) {
+      const channel = ensureChannel(channelScoped.channelId);
 
       if (!channel || (!opts.adminOverride && !canAccessChannel(channel, actor.id))) {
         return { code: 404, error: "Message does not exist" };
       }
 
-      if (channel.archived && !opts.adminOverride) {
-        return { code: 403, error: "Channel is archived" };
+      if (!opts.adminOverride) {
+        // The FULL "may write here, now" policy, not just the archived bit: a channel locked down
+        // after the fact (allowPosting owner/admins, replies disabled, channel posting disabled
+        // node-wide) must also stop edits of pre-lockdown content — otherwise lockdown doesn't stop
+        // content injection through PATCH (review finding). Reactions check their own posting rules
+        // at create; for mutation purposes they inherit the target's channel state checked here.
+        if (!appConfig.features.enablePublicChannels) {
+          return { code: 403, error: "Channel posting is disabled on this LOAM node" };
+        }
+
+        const policyError =
+          channelScoped === target
+            ? channelPostingError(channel, actor.id, target.type === "channelReply")
+            : channel.archived
+              ? "Channel is archived"
+              : undefined;
+
+        if (policyError) {
+          return { code: 403, error: policyError };
+        }
       }
     }
 
@@ -4315,7 +4356,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     if (!data.channels.length) {
-      data.channels = defaultChannels.map((channel) => ({ ...channel }));
+      // Re-seed the defaults on an empty node — but never resurrect one the operator DELETED
+      // (delete is permanent; its tombstone survives restarts). A kill-switch wipe clears the
+      // tombstones along with everything else, so a post-reset node still seeds fresh defaults.
+      data.channels = defaultChannels
+        .filter((channel) => !tombstones.has(channel.id))
+        .map((channel) => ({ ...channel }));
       store.transaction(() => {
         for (const channel of data.channels) {
           store.upsertChannel(channel);
@@ -6510,7 +6556,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * tighter caps for any client using the encrypted tunnel (e.g. ~200 MB/min of upload attempts
    * inside the 300/min tunnel budget). Overriding the allowList here counts every arrival path; the
    * tunnel forwards the real caller's address (`remoteAddress: request.ip`), so the per-IP key is
-   * the true client either way. Conservative defaults, tunable per route at the call sites.
+   * the true client either way. Note a per-route config REPLACES the global limiter for that route
+   * (they don't stack) — the route's own cap is its whole budget; tunnelled calls additionally cost
+   * one outer tunnel request each against the global cap. Conservative defaults, tunable per route.
    */
   function semanticRateLimit(max: number): { config: { rateLimit: { max: number; timeWindow: string; allowList: () => boolean } } } {
     return { config: { rateLimit: { max, timeWindow: "1 minute", allowList: () => false } } };
@@ -6726,7 +6774,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // `onSend` hook then seals, so status, headers, and body (base64 → binary images tunnel losslessly)
   // are all ciphertext on the wire. Replay protection rides the same `{ s, b }` envelope as any sealed
   // request (the `s` is checked in preValidation before this handler runs).
-  server.post("/api/transport/tunnel", async (request, reply) => {
+  server.post("/api/transport/tunnel", { bodyLimit: LARGE_BODY_LIMIT }, async (request, reply) => {
     // Only a request whose body was actually sealed (so preValidation resolved a session key) may
     // tunnel — refuse a plaintext hit so the endpoint can never dispatch on an attacker-supplied path
     // outside an authenticated session.
@@ -6886,6 +6934,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (accessError) {
       return reply.code(403).send(errorBody(accessError));
+    }
+
+    // Same policy as attachment uploads: a timed-out user can't push new content — including a new
+    // avatar image (it broadcasts to everyone) — so the file never lands on disk.
+    const uploaderTimeoutError = timeoutError(uploader);
+
+    if (uploaderTimeoutError) {
+      return reply.code(403).send(errorBody(uploaderTimeoutError));
     }
 
     const body = AvatarImageUploadRequestSchema.safeParse(request.body);
@@ -7343,7 +7399,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.get<{ Params: { fileName: string } }>(
     "/api/avatars/:fileName",
-    semanticRateLimit(120),
+    // Read cap set well above the write caps: in `required` mode EVERY image load is a tunnelled
+    // dispatch, and a crowded People page fetches a hundred-plus avatars in one render — throttling
+    // reads paints sticky blank images client-side.
+    semanticRateLimit(300),
     async (request, reply) => {
     const avatar = parseAvatarImageId(request.params.fileName);
 
@@ -7367,7 +7426,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // is bound to this uploader and consumed by the message that references it (see createMessage).
   server.post(
     "/api/attachments",
-    semanticRateLimit(20),
+    { bodyLimit: LARGE_BODY_LIMIT, ...semanticRateLimit(20) },
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
       const accessError = participationError(currentUser);
@@ -7425,7 +7484,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   server.get<{ Params: { fileName: string } }>(
     "/api/attachments/:fileName",
-    semanticRateLimit(240),
+    // Read cap set well above the write caps: a media-heavy channel history fetches every image
+    // through the tunnel in `required` mode (see the avatars note above).
+    semanticRateLimit(600),
     async (request, reply) => {
       const attachment = parseAttachmentFileName(request.params.fileName);
 
@@ -7600,6 +7661,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("Only the channel owner or an admin can invite members"));
     }
 
+    // Membership growth is a mutation too: inviting someone into an archived private channel would
+    // grant a NEW reader its whole history while the channel is supposedly frozen (review finding).
+    // Removal/leave stays allowed — shrinking access is always safe.
+    if (channel.archived) {
+      return reply.code(403).send(errorBody("Channel is archived"));
+    }
+
     const body = ChannelMemberAddRequestSchema.safeParse(request.body);
 
     if (!body.success) {
@@ -7748,6 +7816,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.code(403).send(errorBody("Only the channel owner or an admin can approve join requests"));
       }
 
+      // Approving a pre-archive request would grow the roster of a frozen channel — same rule as
+      // member add/transfer: restore the channel first.
+      if (channel.archived) {
+        return reply.code(403).send(errorBody("Channel is archived"));
+      }
+
       if (!new Set(store.loadJoinRequests(channel.id)).has(request.params.userId)) {
         return reply.code(404).send(errorBody("No such join request"));
       }
@@ -7810,6 +7884,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
       return reply.code(403).send(errorBody("Only the channel owner or an admin can transfer ownership"));
+    }
+
+    // No ownership hand-offs while archived: a transfer can grow a private roster (the new owner
+    // joins it → reads the frozen history), and archive means nothing about this channel changes.
+    // Restore it first — an explicit, visible step.
+    if (channel.archived) {
+      return reply.code(403).send(errorBody("Channel is archived"));
     }
 
     const body = ChannelTransferRequestSchema.safeParse(request.body);
@@ -7983,12 +8064,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     return buildSyncDigest();
   };
-  server.get("/api/sync/digest", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, syncDigestHandler);
-  server.post("/api/sync/digest", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, syncDigestHandler);
+  server.get("/api/sync/digest", semanticRateLimit(60), syncDigestHandler);
+  server.post("/api/sync/digest", semanticRateLimit(60), syncDigestHandler);
 
   server.post(
     "/api/sync/messages",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    semanticRateLimit(120),
     async (request, reply) => {
       if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
@@ -8018,7 +8099,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // messages export — so DM / private-channel attachments never cross.
   server.post(
     "/api/sync/attachment",
-    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    semanticRateLimit(240),
     async (request, reply) => {
       if (!appConfig.sync.enabled || !syncPeerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
@@ -8085,7 +8166,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // can't be added and later sealed to. 404 unless mesh is enabled (indistinguishable from absent).
   server.post(
     "/api/mesh/contacts",
-    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    semanticRateLimit(60),
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
       const accessError = participationError(currentUser);
@@ -8136,13 +8217,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/mesh/messages",
     // Sealing runs public-key crypto and consumes relay/storage capacity across the mesh, so cap it
     // well below the global limit (like avatar/attachment uploads).
-    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    semanticRateLimit(20),
     async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
     const accessError = participationError(currentUser);
 
     if (accessError) {
       return reply.code(403).send(errorBody(accessError));
+    }
+
+    // A moderator timeout blocks mesh sends like any other content creation.
+    const meshTimeoutError = timeoutError(currentUser);
+
+    if (meshTimeoutError) {
+      return reply.code(403).send(errorBody(meshTimeoutError));
     }
 
     if (!appConfig.mesh.enabled) {
@@ -8193,13 +8281,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/mesh/broadcast",
     // Same per-route cap as the single-send route — a broadcast still costs one request, but seals up
     // to `MeshBroadcastRequestSchema`'s cap (50) worth of public-key crypto, so keep it tightly limited.
-    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    semanticRateLimit(20),
     async (request, reply) => {
       const currentUser = ensureSessionUser(getSessionUserId(request, reply));
       const accessError = participationError(currentUser);
 
       if (accessError) {
         return reply.code(403).send(errorBody(accessError));
+      }
+
+      // A moderator timeout blocks mesh sends like any other content creation.
+      const broadcastTimeoutError = timeoutError(currentUser);
+
+      if (broadcastTimeoutError) {
+        return reply.code(403).send(errorBody(broadcastTimeoutError));
       }
 
       if (!appConfig.mesh.enabled) {
@@ -8683,8 +8778,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return redactedConfig();
   });
 
-  // Unlike GET /api/channels (which hides archived channels from everyone), the admin list returns
-  // every channel so an admin can see and restore archived ones.
+  // Unlike GET /api/channels (which returns only the channels the caller can ACCESS — archived
+  // included, private-member-scoped), the admin list returns every channel, so an admin can manage
+  // (rename / restore / delete) private channels without being in their audience.
   server.get("/api/admin/channels", async (request, reply) => {
     const currentUser = ensureSessionUser(getSessionUserId(request, reply));
 
@@ -8783,6 +8879,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(409).send(errorBody("A message in this channel is still being written"));
     }
 
+    // Mirror the message-delete policy at channel scale (review finding): a NON-ADMIN owner may not
+    // cascade away other people's words — otherwise "you can only delete your own messages" is
+    // defeated by deleting (or being transferred) the whole channel. Admins moderate; owners of a
+    // channel that only holds their own content (or none) may still remove it themselves.
+    if (!currentUser.isAdmin && channelScoped.some((message) => message.authorId !== currentUser.id)) {
+      return reply
+        .code(403)
+        .send(errorBody("This channel has messages from other people — only an admin can delete it"));
+    }
+
     // Cascade: the channel's posts/replies plus every reaction targeting them. deleteMessages
     // handles per-id tombstones, attachment-file removal, and messageDeleted broadcasts.
     const channelMessageIds = new Set(channelScoped.map((message) => message.id));
@@ -8791,7 +8897,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     );
     deleteMessages([...channelScoped, ...reactions]);
 
-    // Audience computed BEFORE removal: private → roster + owner; public → everyone.
+    // Audience computed BEFORE removal: private → roster + owner; public → every user who can
+    // currently receive events (banned/pending sockets are excluded — the one other
+    // `sendEventToUsers` call site is already naturally member-scoped).
     const audience =
       channel.visibility === "private"
         ? new Set(
@@ -8799,13 +8907,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
               (id): id is string => typeof id === "string",
             ),
           )
-        : new Set(data.users.map((user) => user.id));
+        : new Set(data.users.filter((user) => !user.banned && !user.pending).map((user) => user.id));
 
     store.transaction(() => {
       store.deleteChannel(channel.id);
       // Tombstone the channel id itself: the sync channel-import path refuses to (re)create a
       // tombstoned channel, so a peer that still lists it can't resurrect it here (docs/11).
       store.addTombstone(channel.id);
+      // Pending join requests die with the channel — left behind, a recreated same-slug channel
+      // would inherit strangers' stale requests as one-click members (review finding).
+      store.removeJoinRequestsForChannel(channel.id);
+      // And forget the synced-origin mark, or a restart re-hydrates it and a later same-slug LOCAL
+      // channel would falsely count as peer-owned for the C1 metadata merge (review finding).
+      store.unmarkChannelSynced(channel.id);
     });
     tombstones.add(channel.id);
     syncedChannelIds.delete(channel.id);

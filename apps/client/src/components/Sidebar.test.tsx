@@ -112,6 +112,43 @@ describe("Sidebar", () => {
     expect(host.querySelector(".status-pill")?.className).toContain("status-offline");
   });
 
+  it("keeps archived channels listed — badged, sunk to the bottom, unread badge suppressed", () => {
+    const archivedChannel: Channel = {
+      id: "channel.retired",
+      name: "retired",
+      visibility: "public",
+      archived: true,
+      createdAt: 1,
+    } as Channel;
+    const unread = new Map<string, number>([
+      ["channel:channel.retired", 7],
+      ["channel:channel.general", 2],
+    ]);
+    const host = mount(
+      <Sidebar {...baseProps()} channels={[archivedChannel, generalChannel, privateChannel]} unreadByConversation={unread} />,
+    );
+
+    // Archived sinks below the active channels despite being first in the input order.
+    const labels = Array.from(host.querySelectorAll('a[href^="/channel/"] .nav-label')).map(
+      (label) => label.textContent,
+    );
+    expect(labels).toEqual(["general", "secret", "retired"]);
+
+    // It is marked, dimmed, and shows the archived tag INSTEAD of an unread badge...
+    const retired = Array.from(host.querySelectorAll('a[href^="/channel/"]')).find((link) =>
+      link.textContent?.includes("retired"),
+    );
+    expect(retired?.querySelector(".nav-label")?.className).toContain("archived-channel");
+    expect(retired?.querySelector(".archived-tag")).not.toBeNull();
+    expect(retired?.querySelector(".unread-badge")).toBeNull();
+
+    // ...while active channels keep their unread badges.
+    const general = Array.from(host.querySelectorAll('a[href^="/channel/"]')).find((link) =>
+      link.textContent?.includes("general"),
+    );
+    expect(general?.querySelector(".unread-badge")).not.toBeNull();
+  });
+
   it("reveals the new-channel form only when channel creation is allowed", async () => {
     const withoutCreate = mount(<Sidebar {...baseProps()} />);
     expect(withoutCreate.querySelector(".new-channel-toggle")).toBeNull();

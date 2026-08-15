@@ -90,6 +90,76 @@ describe("AdminChannelsPanel", () => {
     expect(names).toEqual(["general", "old"]);
   });
 
+  it("deletes a channel only after the confirm, removing its row on success", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "DELETE") {
+        return new Response(JSON.stringify({ deletedChannelId: "channel.general" }), { status: 200 });
+      }
+      return new Response(JSON.stringify(channels), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+
+    const host = mount(<AdminChannelsPanel currentUser={admin} onChannelUpsert={() => {}} />);
+    await flush();
+
+    const generalRow = Array.from(host.querySelectorAll(".admin-channel")).find((row) =>
+      (row.querySelector("input") as HTMLInputElement).value === "general",
+    ) as HTMLElement;
+    const deleteButton = Array.from(generalRow.querySelectorAll("button")).find(
+      (button) => button.textContent === "Delete",
+    ) as HTMLButtonElement;
+    expect(deleteButton).not.toBeUndefined();
+    // The destructive control names its channel for assistive tech.
+    expect(deleteButton.getAttribute("aria-label")).toContain("general");
+
+    // Cancelled confirm: no DELETE leaves the client, the row stays.
+    act(() => deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "DELETE")).toBe(false);
+    expect(host.querySelectorAll(".admin-channel")).toHaveLength(2);
+
+    // Accepted confirm: the DELETE goes to the right channel id and the row disappears.
+    confirmMock.mockReturnValue(true);
+    act(() => deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+    const deleteCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "DELETE");
+    expect(String(deleteCall?.[0])).toContain("/api/channels/channel.general");
+    expect(host.querySelectorAll(".admin-channel")).toHaveLength(1);
+  });
+
+  it("surfaces a delete failure inline and re-enables the row", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          return new Response(JSON.stringify({ error: "This channel has messages from other people" }), { status: 403 });
+        }
+        return new Response(JSON.stringify(channels), { status: 200 });
+      }),
+    );
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    const host = mount(<AdminChannelsPanel currentUser={admin} onChannelUpsert={() => {}} />);
+    await flush();
+
+    const generalRow = Array.from(host.querySelectorAll(".admin-channel")).find((row) =>
+      (row.querySelector("input") as HTMLInputElement).value === "general",
+    ) as HTMLElement;
+    const deleteButton = Array.from(generalRow.querySelectorAll("button")).find(
+      (button) => button.textContent === "Delete",
+    ) as HTMLButtonElement;
+    act(() => deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+
+    expect(host.querySelectorAll(".admin-channel")).toHaveLength(2);
+    expect(generalRow.querySelector(".form-error")?.textContent).toContain("other people");
+    expect(deleteButton.disabled).toBe(false);
+  });
+
   it("keeps the create button disabled until a name is entered", async () => {
     const host = mount(<AdminChannelsPanel currentUser={admin} onChannelUpsert={() => {}} />);
     await flush();

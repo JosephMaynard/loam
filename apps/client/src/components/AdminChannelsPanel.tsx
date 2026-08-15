@@ -298,6 +298,7 @@ function AdminChannelRow({
           {channel.archived ? t("admin.restore") : t("admin.archive")}
         </button>
         <button
+          aria-label={t("admin.deleteChannelAria", { name: channel.name })}
           className="danger-button"
           disabled={busy}
           onClick={() => void remove()}
@@ -324,6 +325,9 @@ function AdminChannelRow({
       onRemove(channel.id);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : t("admin.channelUpdateError"));
+    } finally {
+      // Symmetric with `patch()`: on success the row unmounts anyway, and a no-op state set on an
+      // unmounted component is harmless — while a future kept-mounted row won't wedge as busy.
       setBusy(false);
     }
   }
