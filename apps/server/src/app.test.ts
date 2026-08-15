@@ -10196,6 +10196,7 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
     try {
       const ownerFeed = await connectFor(owner.cookie);
       const outsiderFeed = await connectFor(outsider.cookie);
+      const adminFeed = await connectFor(admin.cookie);
 
       const deleted = await app.server.inject({
         method: "DELETE",
@@ -10211,6 +10212,11 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
         ownerFeed.events.some((event) => event.type === "channelRemoved" && event.channelId === channelId),
       ).toBe(true);
       expect(outsiderFeed.events.some((event) => event.type === "channelRemoved")).toBe(false);
+      // The ACTING admin (not a member) must hear it too — their admin panel had upserted the
+      // channel into their own client state, which only this event purges (Sol round 2, P2).
+      expect(
+        adminFeed.events.some((event) => event.type === "channelRemoved" && event.channelId === channelId),
+      ).toBe(true);
     } finally {
       for (const socket of sockets) {
         socket.close();
@@ -10238,5 +10244,154 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
     });
     expect(upload.statusCode).toBe(403);
     expect((upload.json() as { error: string }).error).toMatch(/timed out/);
+  });
+
+  it("blocks edits of DMs and replies after their feature is switched off — deletes stay for cleanup", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "dm", recipientUserId: bob.userId, body: "sent while DMs were on" },
+    });
+    expect(dm.statusCode).toBe(201);
+    const dmId = (dm.json() as { message: { id: string } }).message.id;
+
+    const parentId = await postIn(app, alice.cookie, "general", "thread root");
+    const reply = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "channelReply", channelId: "general", parentMessageId: parentId, body: "replied while on" },
+    });
+    expect(reply.statusCode).toBe(201);
+    const replyId = (reply.json() as { message: { id: string } }).message.id;
+
+    const flip = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { features: { enableDMs: false, enableReplies: false } },
+    });
+    expect(flip.statusCode).toBe(200);
+
+    // A runtime shutdown must stop fresh content broadcasting through PATCH on old messages...
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: `/api/messages/${dmId}`,
+          headers: { cookie: alice.cookie },
+          payload: { body: "fresh DM content after shutdown" },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: `/api/messages/${replyId}`,
+          headers: { cookie: alice.cookie },
+          payload: { body: "fresh reply content after shutdown" },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    // ...while deleting the feature's leftovers remains available (cleanup, not use).
+    expect(
+      (await app.server.inject({ method: "DELETE", url: `/api/messages/${dmId}`, headers: { cookie: alice.cookie } }))
+        .statusCode,
+    ).toBe(200);
+  });
+
+  it("blocks a timed-out user from channel creation, metadata edits, and roster growth — but not shrinking", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const user = await newSession(app);
+    const member = await newSession(app);
+
+    // Pre-timeout: the user owns a private channel with one member.
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: user.cookie },
+      payload: { name: "Owned Room", visibility: "private" },
+    });
+    expect(created.statusCode).toBe(201);
+    const channelId = (created.json() as { id: string }).id;
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: `/api/channels/${channelId}/members`,
+          headers: { cookie: user.cookie },
+          payload: { userId: member.userId },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${user.userId}`,
+      headers: { cookie: admin.cookie },
+      payload: { timeoutUntil: Date.now() + 60_000 },
+    });
+
+    // The write block covers every publishing/coordination surface channels offer...
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/channels",
+          headers: { cookie: user.cookie },
+          payload: { name: "Fresh Soapbox" },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: `/api/channels/${channelId}`,
+          headers: { cookie: user.cookie },
+          payload: { description: "coordinating through metadata" },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: `/api/channels/${channelId}/members`,
+          headers: { cookie: user.cookie },
+          payload: { userId: admin.userId },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: `/api/channels/${channelId}/transfer`,
+          headers: { cookie: user.cookie },
+          payload: { userId: member.userId },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    // ...but access-REDUCING actions stay available: the timed-out owner may still remove a member.
+    expect(
+      (
+        await app.server.inject({
+          method: "DELETE",
+          url: `/api/channels/${channelId}/members/${member.userId}`,
+          headers: { cookie: user.cookie },
+        })
+      ).statusCode,
+    ).toBe(200);
   });
 });

@@ -14,7 +14,9 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   — invite/transfer/join-request-approval — frozen); channels gain a first-class **permanent
   delete** (cascade incl. reactions + attachment files, sync tombstone, join-request cleanup,
   slug never reused, survives restarts — and a non-admin owner cannot delete a channel holding
-  other people's messages); the `npx loamnet` join QR carries the `#k=` transport key (and the QR
+  other people's messages); moderator timeouts also cover channel creation, metadata edits, and
+  roster growth (invite/transfer/approval — shrinking access stays available); switching DMs or
+  replies off blocks edits of pre-shutdown messages (deletion stays, as cleanup); the `npx loamnet` join QR carries the `#k=` transport key (and the QR
   encoder auto-degrades EC level so keyed URLs actually render — this also silently broke the
   browser invite QR); the 1 MB attachment limit is actually reachable (per-route body ceilings on
   the upload + tunnel paths only); semantic rate limits apply inside the encrypted tunnel across

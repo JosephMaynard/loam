@@ -121,7 +121,11 @@ readable and mutable through direct routes (archive semantics are now uniform: r
 available, with a separate permanent channel delete); the `npx loamnet` join QR omitted the `#k=`
 transport key, leaving CLI first-joins open to an active MITM the QR key exists to prevent; the
 advertised 1 MB attachment limit was unreachable (the default request body cap rejected the base64
-envelope from ~790 KB); tunneled requests bypassed per-route semantic rate limits.
+envelope from ~790 KB); tunneled requests bypassed per-route semantic rate limits. Two further
+review rounds over the fixes closed the follow-on gaps: reaction deletion bypassing the new gate,
+edits bypassing posting-policy lockdowns and runtime feature shutdowns (DMs/replies), moderator
+timeouts not covering channel creation/metadata/roster growth, and a non-member admin's client
+retaining a deleted private channel.
 
 **Documented (not silently promised):** uploaded media files live outside the encrypted database —
 see the threat-model list above.

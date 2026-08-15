@@ -3488,7 +3488,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function messageMutationError(
     actor: User,
     target: Message,
-    opts: { adminOverride?: boolean } = {},
+    opts: { adminOverride?: boolean; isDelete?: boolean } = {},
   ): { code: number; error: string } | undefined {
     const accessError = participationError(actor);
 
@@ -3501,6 +3501,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (actorTimeout) {
         return { code: 403, error: actorTimeout };
+      }
+
+      // A runtime feature SHUTDOWN blocks edits — switching DMs or replies off must stop fresh
+      // content broadcasting through PATCH on pre-shutdown messages (Sol round 2, P1) — but not
+      // deletes: removing content a disabled feature created is cleanup, not use of the feature.
+      if (!opts.isDelete) {
+        if (target.type === "dm" && !appConfig.features.enableDMs) {
+          return { code: 403, error: "Direct messages are disabled on this LOAM node" };
+        }
+
+        if (target.type === "channelReply" && !appConfig.features.enableReplies) {
+          return { code: 403, error: "Replies are disabled on this LOAM node" };
+        }
       }
     }
 
@@ -3532,7 +3545,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // node-wide) must also stop edits of pre-lockdown content — otherwise lockdown doesn't stop
         // content injection through PATCH (review finding). Reactions check their own posting rules
         // at create; for mutation purposes they inherit the target's channel state checked here.
-        if (!appConfig.features.enablePublicChannels) {
+        // Like the type-specific flags above, the node-wide shutdown blocks edits but not deletes.
+        if (!opts.isDelete && !appConfig.features.enablePublicChannels) {
           return { code: 403, error: "Channel posting is disabled on this LOAM node" };
         }
 
@@ -7661,6 +7675,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("Only the channel owner or an admin can invite members"));
     }
 
+    // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
+    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // actions (leave, remove) stay available; admins are never timeout-able in practice.
+    const channelTimeoutError = timeoutError(currentUser);
+
+    if (channelTimeoutError) {
+      return reply.code(403).send(errorBody(channelTimeoutError));
+    }
+
     // Membership growth is a mutation too: inviting someone into an archived private channel would
     // grant a NEW reader its whole history while the channel is supposedly frozen (review finding).
     // Removal/leave stays allowed — shrinking access is always safe.
@@ -7816,6 +7839,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return reply.code(403).send(errorBody("Only the channel owner or an admin can approve join requests"));
       }
 
+      // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
+      // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+      // actions (leave, remove) stay available; admins are never timeout-able in practice.
+      const channelTimeoutError = timeoutError(currentUser);
+
+      if (channelTimeoutError) {
+        return reply.code(403).send(errorBody(channelTimeoutError));
+      }
+
       // Approving a pre-archive request would grow the roster of a frozen channel — same rule as
       // member add/transfer: restore the channel first.
       if (channel.archived) {
@@ -7884,6 +7916,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (!currentUser.isAdmin && channel.ownerUserId !== currentUser.id) {
       return reply.code(403).send(errorBody("Only the channel owner or an admin can transfer ownership"));
+    }
+
+    // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
+    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // actions (leave, remove) stay available; admins are never timeout-able in practice.
+    const channelTimeoutError = timeoutError(currentUser);
+
+    if (channelTimeoutError) {
+      return reply.code(403).send(errorBody(channelTimeoutError));
     }
 
     // No ownership hand-offs while archived: a transfer can grow a private roster (the new owner
@@ -8476,7 +8517,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     // Non-admins must still be allowed to write in the target's conversation *now* (not timed out,
     // still in the audience, not archived); admins keep the trusted-host moderation override.
-    const mutationError = messageMutationError(currentUser, target, { adminOverride: currentUser.isAdmin });
+    // `isDelete` relaxes only the feature-SHUTDOWN checks — removing content is cleanup.
+    const mutationError = messageMutationError(currentUser, target, {
+      adminOverride: currentUser.isAdmin,
+      isDelete: true,
+    });
 
     if (mutationError) {
       return reply.code(mutationError.code).send(errorBody(mutationError.error));
@@ -8801,6 +8846,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody(accessError));
     }
 
+    // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
+    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // actions (leave, remove) stay available; admins are never timeout-able in practice.
+    const channelTimeoutError = timeoutError(currentUser);
+
+    if (channelTimeoutError) {
+      return reply.code(403).send(errorBody(channelTimeoutError));
+    }
+
     if (!currentUser.isAdmin && !appConfig.features.enableUserChannels) {
       return reply.code(403).send(errorBody("Creating channels is disabled on this LOAM node"));
     }
@@ -8837,6 +8891,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("Only the channel owner or an admin can change this channel"));
     }
 
+    // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
+    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // actions (leave, remove) stay available; admins are never timeout-able in practice.
+    const channelTimeoutError = timeoutError(currentUser);
+
+    if (channelTimeoutError) {
+      return reply.code(403).send(errorBody(channelTimeoutError));
+    }
+
     const body = ChannelUpdateRequestSchema.safeParse(request.body);
 
     if (!body.success) {
@@ -8870,6 +8933,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(403).send(errorBody("Only the channel owner or an admin can delete this channel"));
     }
 
+    // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
+    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // actions (leave, remove) stay available; admins are never timeout-able in practice.
+    const channelTimeoutError = timeoutError(currentUser);
+
+    if (channelTimeoutError) {
+      return reply.code(403).send(errorBody(channelTimeoutError));
+    }
+
     // Refuse while any message in the channel is mid-stream — its in-flight writer would re-persist.
     const channelScoped = data.messages.filter(
       (message) => (message.type === "channelPost" || message.type === "channelReply") && message.channelId === channel.id,
@@ -8897,13 +8969,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     );
     deleteMessages([...channelScoped, ...reactions]);
 
-    // Audience computed BEFORE removal: private → roster + owner; public → every user who can
-    // currently receive events (banned/pending sockets are excluded — the one other
-    // `sendEventToUsers` call site is already naturally member-scoped).
+    // Audience computed BEFORE removal: private → roster + owner + the ACTING admin (a non-member
+    // admin who managed this channel has it in their own client state via the admin panel's
+    // upserts — without the event their sidebar/IndexedDB keeps a dead channel until reload,
+    // Sol round 2 P2); public → every user who can currently receive events (banned/pending
+    // sockets are excluded — the one other `sendEventToUsers` call site is naturally member-scoped).
     const audience =
       channel.visibility === "private"
         ? new Set(
-            [...(channel.memberUserIds ?? []), channel.ownerUserId].filter(
+            [...(channel.memberUserIds ?? []), channel.ownerUserId, currentUser.id].filter(
               (id): id is string => typeof id === "string",
             ),
           )
