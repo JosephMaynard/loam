@@ -5,7 +5,7 @@
 > `{ "confirm": "wipe" }` when confirmation is on) and unauthenticated `POST /api/panic` (404
 > unless a token ≥16 chars is configured; rate-limited; the token is stored **scrypt-hashed**, so
 > a seized node's config does not reveal it). The wipe empties all tables via the DAL's `wipeAll()`,
-> deletes `avatars/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
+> deletes `avatars/` and `attachments/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
 > re-seeds defaults — config survives so the switch can fire again. Clients purge IndexedDB,
 > localStorage, service worker + caches, and show a neutral "Disconnected" screen. Admin UI has a
 > Safety panel with type-to-confirm arming. **Now with a cryptographic wipe when encryption at rest
@@ -13,8 +13,12 @@
 > the DB files (`loam.db`/`-wal`/`-shm`), and — in `ephemeral` mode — rotates to a fresh random key,
 > so any bytes still physically present on flash become unreadable. Reboot in `ephemeral` mode also
 > loses the key permanently. Known limitation: Node strings can't be reliably zeroed in RAM, so a
-> device seized *while running* remains the weak case (documented honestly). Remaining (future):
-> duress/decoy passphrase; RAM key-zeroing via a native buffer.
+> device seized *while running* remains the weak case (documented honestly). **Second known
+> limitation (Sol 2026-08-15): uploaded media — avatar and attachment files — live OUTSIDE the
+> encrypted DB as plaintext files, so the cryptographic wipe does not apply to them; the kill switch
+> deletes the files, which on flash is best-effort removal, not secure erasure.** Media-at-rest
+> encryption is tracked in `docs/29` (Track 2). Remaining (future): duress/decoy passphrase; RAM
+> key-zeroing via a native buffer.
 
 ## Goal & threat model
 

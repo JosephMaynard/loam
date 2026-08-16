@@ -113,14 +113,46 @@ const joinUrl = `http://${joinHost}:${port}`;
 
 console.log("");
 console.log(`LOAM node — data in ${dataDir}`);
-console.log(`Open on this device:  http://localhost:${port}`);
-console.log(`Join from your phone: ${joinUrl}`);
-console.log("");
-console.log(renderQRToTerminal(encodeQR(joinUrl), { quietZone: 2 }));
-console.log("");
 
 try {
-  await startEmbeddedServer();
+  // Start FIRST, then print the QR: the QR must carry the host's transport public key as a
+  // `#k=<key>` fragment (docs/08) so a scanner learns the key out-of-band and the first join is
+  // MITM-resistant — the same guarantee the browser and Android join QRs already give. The key
+  // only exists once the server has booted, and it's read straight off the app (never via an HTTP
+  // call, which would mint a session and could consume the `firstUser` admin grant).
+  const app = await startEmbeddedServer();
+  const transportKey = app.getTransportPublicKey?.();
+  const qrUrl = transportKey ? `${joinUrl}#k=${transportKey}` : joinUrl;
+
+  console.log(`Open on this device:  http://localhost:${port}`);
+  console.log(`Join from your phone: ${joinUrl}`);
+  console.log("");
+  // A QR that won't fit (the encoder caps at ~106 bytes; a long LOAM_JOIN_HOST can exceed it) must
+  // never take down a server that is already listening — degrade to the printed URL instead.
+  try {
+    console.log(renderQRToTerminal(encodeQR(qrUrl), { quietZone: 2 }));
+    console.log("");
+    if (transportKey) {
+      console.log("Scan the QR to join — it carries this node's encryption key, so scanned joins are");
+      console.log("protected against impersonation. Depending on this node's security settings, a");
+      console.log("hand-typed URL may connect without that protection, or be refused entirely.");
+      console.log("");
+    }
+  } catch {
+    // No QR to carry the key out-of-band, so hand out the KEYED link here — copy/paste keeps the
+    // MITM protection; only the plain printed URL above loses it. (The normal path deliberately
+    // shows the plain URL as text: the key rides the QR image, not the human-readable line.)
+    // Generic on purpose: this catch covers ANY encode/render failure (an over-capacity join
+    // address is merely the most likely cause).
+    console.log("(Couldn't render a join QR for this address.)");
+    if (transportKey) {
+      console.log("Share this exact link instead — copied whole, it keeps the encryption key:");
+      console.log(qrUrl);
+    } else {
+      console.log("Share the URL above instead.");
+    }
+    console.log("");
+  }
 } catch (error) {
   // Only treat this as a missing-driver case when the error actually names the SQLCipher module —
   // a bare `Cannot find module` match would misreport any unrelated missing dependency.

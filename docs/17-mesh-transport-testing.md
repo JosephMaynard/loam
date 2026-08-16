@@ -3,8 +3,9 @@
 > **Status: SCAFFOLDED, native-unverified.** This documents the Phase-3 opportunistic transport built
 > in `feat/mesh-transport-phase3` — the code that carries the already-built sealed-sender blobs
 > (docs/16 Phases 0–2) between nearby Android hosts over BLE + Wi-Fi Aware, with no AP and no internet.
-> The TypeScript/JS compiles and the server bridge is desktop-tested; **the Kotlin has not been
-> compiled or run against radios** (CI has none, and an emulator has no BLE/Wi-Fi-Aware). This file is
+> The TypeScript/JS compiles and the server bridge is desktop-tested; **the Kotlin compiles (it rides
+> every release APK build) but has never been run against radios** (CI has none, and an emulator has no
+> BLE/Wi-Fi-Aware). This file is
 > the exact procedure a human with two phones runs to verify it, and the honest list of what is stubbed.
 
 ## What was built
@@ -115,8 +116,10 @@ that path stays the token-guarded `/api/sync/*`.
 
 ## Stubs, TODOs, and risks (be honest)
 
-1. **All Kotlin is native-unverified.** It follows the AOSP BLE + Wi-Fi Aware samples but has never been
-   compiled by Gradle or run on a radio. Expect the first real build to surface API/import fixes.
+1. **All Kotlin is radio-unverified.** It follows the AOSP BLE + Wi-Fi Aware samples and DOES compile
+   (the v0.2.0+ release APKs build and install with the module autolinked — an earlier version of this
+   note predated those builds), but it has never been RUN against a radio. Expect the first real
+   two-device session to surface runtime fixes (see the PH1–PH7 findings in docs/25 §9).
 2. **Wi-Fi Aware data-path handshake + port exchange is the likeliest thing to need rework.**
    `MeshWifiAwareController.sendBlob`/`writeOverNetwork` assume the responder's listen port is learned
    from `WifiAwareNetworkInfo.port` or a fixed convention; a correct implementation must exchange the

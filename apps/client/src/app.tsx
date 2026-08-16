@@ -622,20 +622,33 @@ function LoamApp() {
 
   /**
    * Drop a channel this user can no longer see (removed from a private channel, or the channel was
-   * archived): purge the channel and its cached messages locally, and leave the conversation if it
-   * is on screen.
+   * permanently deleted): purge the channel, its cached messages, AND the reactions targeting them
+   * (reactions carry only a targetMessageId, no channelId — without the second pass they'd linger
+   * in IndexedDB forever after a "gone for good" delete), then leave the conversation if it is on
+   * screen. Archiving no longer calls this — archived channels stay cached, read-only.
    */
   const removeChannel = useCallback((channelId: string) => {
     setChannels((previous) => previous.filter((channel) => channel.id !== channelId));
     void deleteRecord("channels", channelId);
 
     setMessages((previous) => {
-      const keep: Message[] = [];
+      const purgedIds = new Set<string>();
 
       for (const message of previous) {
         if (
           (message.type === "channelPost" || message.type === "channelReply") &&
           message.channelId === channelId
+        ) {
+          purgedIds.add(message.id);
+        }
+      }
+
+      const keep: Message[] = [];
+
+      for (const message of previous) {
+        if (
+          purgedIds.has(message.id) ||
+          (message.type === "reaction" && purgedIds.has(message.targetMessageId))
         ) {
           void deleteRecord("messages", message.id);
         } else {
@@ -653,39 +666,23 @@ function LoamApp() {
     }
   }, []);
 
-  const upsertChannels = useCallback(
-    (incomingChannels: Channel[]) => {
-      setChannels((previous) => {
-        // Map upsert preserves insertion order: existing channels stay put, new ones append. No
-        // re-sort, so the seeded Announcements/General keep their position. Archived channels are
-        // dropped from the nav, so archiving hides a channel live and restoring re-adds it.
-        const next = new Map(previous.map((channel) => [channel.id, channel]));
-
-        for (const channel of incomingChannels) {
-          if (channel.archived) {
-            next.delete(channel.id);
-          } else {
-            next.set(channel.id, channel);
-          }
-        }
-
-        return Array.from(next.values());
-      });
+  const upsertChannels = useCallback((incomingChannels: Channel[]) => {
+    setChannels((previous) => {
+      // Map upsert preserves insertion order: existing channels stay put, new ones append. No
+      // re-sort, so the seeded Announcements/General keep their position. Archived channels are
+      // KEPT — archive means read-only-but-available (the composer disables, the sidebar marks
+      // them); only a true removal (`channelRemoved`: deleted, or membership revoked) purges.
+      const next = new Map(previous.map((channel) => [channel.id, channel]));
 
       for (const channel of incomingChannels) {
-        if (channel.archived) {
-          // Archiving revokes visibility: purge like a removal (cached message bodies included —
-          // an archived private channel's history must not linger in IndexedDB).
-          removeChannel(channel.id);
-        }
+        next.set(channel.id, channel);
       }
-      void putRecords(
-        "channels",
-        incomingChannels.filter((channel) => !channel.archived),
-      );
-    },
-    [removeChannel],
-  );
+
+      return Array.from(next.values());
+    });
+
+    void putRecords("channels", incomingChannels);
+  }, []);
 
   const upsertMessages = useCallback((incomingMessages: Message[]) => {
     // The history is always kept sorted, so merge in order (in-place update / splice) instead of
@@ -1362,8 +1359,9 @@ function LoamApp() {
         upsertUsers([nextConfig.currentUser, ...nextUsers]);
         void putRecords("channels", nextChannels);
 
-        // Drop cached channels the server no longer returns (deleted, archived, or access revoked
-        // while this client was offline) — and their message bodies with them.
+        // Drop cached channels the server no longer returns (deleted, or access revoked while this
+        // client was offline) — and their message bodies with them. Archived channels ARE returned
+        // (read-only), so they survive this reconcile.
         const keep = new Set(nextChannels.map((channel) => channel.id));
         const cached = await getAllRecords<Channel>("channels").catch(() => [] as Channel[]);
 
@@ -1847,6 +1845,7 @@ function LoamApp() {
         <AdminView
           currentUser={currentUser}
           joinUrl={config?.joinUrl}
+          onChannelRemoved={removeChannel}
           onChannelUpsert={upsertChannels}
           onWiped={purgeLocalData}
         />
@@ -2055,6 +2054,13 @@ function ConversationView({
       ? channels.find((channel) => channel.id === conversation.id)
       : undefined;
   const isPrivateChannel = activeChannel?.visibility === "private";
+  // Archived channels are readable but read-only: the composer (and the thread panel's) disable
+  // with an explanation instead of letting a send fail server-side.
+  const composerDisabledReason = activeChannel?.archived
+    ? t("composer.archived")
+    : timedOut
+      ? t("composer.timedOut")
+      : undefined;
   const title =
     conversation.kind === "channel"
       ? `${isPrivateChannel ? "🔒" : "#"} ${activeChannel?.name ?? conversation.id}`
@@ -2103,6 +2109,7 @@ function ConversationView({
             }
           }}
           onReact={onReact}
+          readOnly={!!activeChannel?.archived}
           reactionsByTarget={reactionsByTarget}
           repliesByParent={repliesByParent}
           topMessages={topMessages}
@@ -2119,7 +2126,7 @@ function ConversationView({
         ) : null}
         <MessageComposer
           allowLocationSharing={allowLocationSharing}
-          disabledReason={timedOut ? t("composer.timedOut") : undefined}
+          disabledReason={composerDisabledReason}
           label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
           onSend={onSend}
           onTyping={onTyping}
@@ -2140,6 +2147,8 @@ function ConversationView({
           onDelete={onDelete}
           onEdit={onEdit}
           onReact={onReact}
+          composerDisabledReason={activeChannel?.archived ? t("composer.archived") : undefined}
+          readOnly={!!activeChannel?.archived}
           onReply={(body, attachments, messageLocation) =>
             onThreadReply(threadParent.id, body, attachments, messageLocation)
           }
@@ -2187,6 +2196,8 @@ interface MessageListProps {
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
+  /** Archived (read-only) channel: per-message mutation affordances are hidden (see MessageItem). */
+  readOnly?: boolean;
   reactionsByTarget: Map<string, Message[]>;
   repliesByParent: Map<string, Message[]>;
   topMessages: Message[];
@@ -2224,6 +2235,7 @@ function MessageList({
   onEdit,
   onOpenThread,
   onReact,
+  readOnly = false,
   reactionsByTarget,
   repliesByParent,
   topMessages,
@@ -2275,6 +2287,7 @@ function MessageList({
                 onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
                 onReact={onReact}
                 onReport={setReportMessage}
+                readOnly={readOnly}
                 reactions={reactionSummary(
                   reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES,
                   message.id,
@@ -2303,6 +2316,10 @@ interface ThreadPanelProps {
   currentUser: User;
   onClose: () => void;
   onDelete: (messageId: string) => void;
+  /** Set when the surrounding channel is archived — the reply composer disables with this reason. */
+  composerDisabledReason?: string;
+  /** Archived (read-only) channel: hide per-message mutation affordances in the thread too. */
+  readOnly?: boolean;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onReply: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
@@ -2329,6 +2346,7 @@ interface ThreadPanelProps {
  */
 function ThreadPanel({
   allowLocationSharing,
+  composerDisabledReason,
   currentUser,
   onClose,
   onDelete,
@@ -2338,6 +2356,7 @@ function ThreadPanel({
   onUploadAttachment,
   parent,
   reactionsByTarget,
+  readOnly = false,
   repliesByParent,
   usersById,
 }: ThreadPanelProps) {
@@ -2367,6 +2386,7 @@ function ThreadPanel({
           onEdit={onEdit}
           onReact={onReact}
           onReport={setReportMessage}
+          readOnly={readOnly}
           reactions={reactionSummary(reactionsByTarget.get(parent.id) ?? EMPTY_MESSAGES, parent.id, currentUser.id)}
           usersById={usersById}
         />
@@ -2382,6 +2402,7 @@ function ThreadPanel({
             onEdit={onEdit}
             onReact={onReact}
             onReport={setReportMessage}
+            readOnly={readOnly}
             reactions={reactionSummary(reactionsByTarget.get(reply.id) ?? EMPTY_MESSAGES, reply.id, currentUser.id)}
             usersById={usersById}
           />
@@ -2389,7 +2410,7 @@ function ThreadPanel({
       </div>
       <MessageComposer
         allowLocationSharing={allowLocationSharing}
-        disabledReason={timedOut ? t("composer.timedOut") : undefined}
+        disabledReason={composerDisabledReason ?? (timedOut ? t("composer.timedOut") : undefined)}
         label={t("thread.replyLabel")}
         onSend={onReply}
         onUploadAttachment={onUploadAttachment}

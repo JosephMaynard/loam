@@ -119,5 +119,19 @@ describe("encodeQR", () => {
       const result = encodeQRDetailed("http://loam.local/user/aZ4kP2");
       expect(result.matrix.version).toBe(encodeQRDetailed("http://loam.local/user/aZ4kP2", { ecLevel: "H" }).matrix.version);
     });
+
+    it("auto-degrades the EC level for payloads that overflow 6-H, so keyed join URLs encode", () => {
+      // A realistic `#k=` join URL: ~71 UTF-8 bytes — over 6-H (58) but comfortably inside 6-M (106).
+      const keyedJoinUrl = `http://192.168.49.1:3000#k=${"a".repeat(43)}`;
+      const keyed = encodeQRDetailed(keyedJoinUrl);
+      expect(keyed.matrix.version).toBeLessThanOrEqual(6);
+
+      // The version-6-M ceiling (106 bytes) still encodes...
+      expect(() => encodeQRDetailed("x".repeat(106))).not.toThrow();
+      // ...but truly oversized payloads still throw (auto-degrade is not unbounded),
+      expect(() => encodeQRDetailed("x".repeat(107))).toThrow(/exceeds QR version 6-M capacity/);
+      // and an EXPLICIT level stays strict — no silent weakening behind a caller's back.
+      expect(() => encodeQRDetailed(keyedJoinUrl, { ecLevel: "H" })).toThrow(/exceeds QR version 6-H capacity/);
+    });
   });
 });

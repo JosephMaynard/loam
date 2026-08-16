@@ -81,7 +81,11 @@ hotspot running too if the phone's chipset allows it".
 
 ## Known v1 limitations
 
-- Deletes/moderation don't propagate (tombstones only stop re-import locally).
+- Deletes/moderation don't propagate (tombstones only stop re-import locally). This includes
+  **permanent channel deletes** (the channel id is tombstoned too): within the tombstone horizon
+  (30-day GC, docs/15 #7) a peer can never hand the channel back; a peer offline *longer* than the
+  horizon can — the same accepted DTN limitation as message tombstones, now worth knowing because
+  the UI presents channel deletion as permanent.
 - **Channel metadata doesn't re-sync after first import** (a rename/archive on A won't reach B). Deferred
   on purpose (C1): channel ids are human slugs, so two nodes' independently-created same-named channels
   (notably the default `general`/`announcements`) collide on id — a naive newer-wins merge would let one

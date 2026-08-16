@@ -90,6 +90,10 @@ interface MessageItemProps {
   /** Open the report dialog for this message (omitted → no report affordance, e.g. for the current user's own). */
   onReport?: (message: Message) => void;
   reactions: ReactionSummary[];
+  /** The surrounding channel is archived (read-only): hide edit/delete/react affordances — the
+   * server refuses them anyway — while keeping the content, existing reactions, thread access, and
+   * (for admins) moderation delete. */
+  readOnly?: boolean;
   replyCount?: number;
   usersById: Map<string, User>;
 }
@@ -115,6 +119,7 @@ export function MessageItem({
   onReact,
   onReport,
   reactions,
+  readOnly = false,
   replyCount = 0,
   usersById,
 }: MessageItemProps) {
@@ -129,7 +134,7 @@ export function MessageItem({
   const isMine = message.authorId === currentUser.id;
   // A moderator-removed message is an honest tombstone: shown, but with no body/attachments/actions.
   const removed = message.meta?.removedByModerator === true;
-  const canEdit = isMine && !removed && !message.meta?.streaming && message.type !== "reaction";
+  const canEdit = isMine && !removed && !readOnly && !message.meta?.streaming && message.type !== "reaction";
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
@@ -158,7 +163,10 @@ export function MessageItem({
   ]
     .filter(Boolean)
     .join(" ");
-  const canDelete = (isMine || currentUser.isAdmin) && !removed && !message.meta?.streaming;
+  // In a read-only (archived) channel only the admin moderation-delete survives — mirroring the
+  // server's adminOverride on the delete route.
+  const canDelete =
+    (readOnly ? currentUser.isAdmin : isMine || currentUser.isAdmin) && !removed && !message.meta?.streaming;
   // Report anyone else's non-removed, non-streaming message (never your own; reactions carry no content).
   const canReport =
     !!onReport && !isMine && !removed && !message.meta?.streaming && message.type !== "reaction";
@@ -259,6 +267,7 @@ export function MessageItem({
           {!message.meta?.streaming && reactions.map((reaction) => (
             <button
               className={reaction.active ? "reaction active" : "reaction"}
+              disabled={readOnly}
               key={reaction.reaction}
               onClick={() => void onReact(message.id, reaction.reaction).catch(() => {})}
               type="button"
@@ -266,7 +275,7 @@ export function MessageItem({
               {reaction.reaction} {reaction.count}
             </button>
           ))}
-          {!message.meta?.streaming && QUICK_REACTIONS.filter(
+          {!readOnly && !message.meta?.streaming && QUICK_REACTIONS.filter(
             (reaction) => !reactions.some((summary) => summary.reaction === reaction),
           ).map((reaction) => (
             <button

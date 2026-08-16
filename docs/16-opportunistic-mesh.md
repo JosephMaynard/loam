@@ -549,6 +549,8 @@ only after Android Phases 3–4 prove the model; expect a foreground-only experi
 
 ## Where to pick up next session
 
-Start at **Phase 0**. Read this file and the Architecture section, then the existing sync engine in
-`apps/server/src/app.ts` and `packages/schema/src/index.ts`. The first concrete deliverable is the
-**`packages/crypto`** primitive with tests — nothing wired into the running app yet.
+_(STALE — kept for the record: Phases 0–2 + v2 secure addressing are **built & tested**, and the
+Phase 3 native transport is **compiled in APK builds but not radio-validated**; see the
+"Implementation status" boxes at the top of this doc and `docs/29` for current sequencing.)_
+The original bootstrap instruction was: start at **Phase 0** — the **`packages/crypto`** primitive
+with tests, wired into nothing.

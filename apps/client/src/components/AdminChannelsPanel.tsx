@@ -2,19 +2,22 @@ import { ChannelSchema, type Channel, type ChannelPostingPolicy, type User } fro
 import { useCallback, useEffect, useState } from "preact/hooks";
 
 import { t } from "../i18n";
-import { fetchJson, requestChannel } from "../lib/api";
+import { deleteChannelRequest, fetchJson, requestChannel } from "../lib/api";
 
 /**
- * Admin-only channel management: create public channels and rename/archive existing ones. Channels
- * are created public + discoverable (private channels need a membership model that does not exist
- * yet). Fetches its own full list from `/api/admin/channels` so archived channels remain visible
- * and restorable here even though they are hidden from the sidebar. The server is the enforcer.
+ * Admin-only channel management: create public channels; rename, archive/restore (read-only-but-
+ * available), or permanently delete existing ones. Fetches its own full list from
+ * `/api/admin/channels` (which includes private channels the admin isn't a member of — they manage
+ * without reading). The server is the enforcer.
  */
 export function AdminChannelsPanel({
   currentUser,
+  onChannelRemoved,
   onChannelUpsert,
 }: {
   currentUser: User;
+  /** App-level purge for a deleted channel (state + IndexedDB) — not just this panel's list. */
+  onChannelRemoved?: (channelId: string) => void;
   onChannelUpsert: (channels: Channel[]) => void;
 }) {
   const [adminChannels, setAdminChannels] = useState<Channel[]>([]);
@@ -39,6 +42,17 @@ export function AdminChannelsPanel({
       onChannelUpsert([channel]);
     },
     [onChannelUpsert],
+  );
+
+  /** Drop a deleted channel from the admin list AND purge it from app state/IndexedDB directly —
+   * the targeted `channelRemoved` event does the same, but calling the app purge here makes this
+   * client's cleanup immediate even if its socket happens to be down. */
+  const removeChannelRow = useCallback(
+    (channelId: string) => {
+      setAdminChannels((previous) => previous.filter((entry) => entry.id !== channelId));
+      onChannelRemoved?.(channelId);
+    },
+    [onChannelRemoved],
   );
 
   useEffect(() => {
@@ -198,7 +212,7 @@ export function AdminChannelsPanel({
         {adminChannels.length > 0 ? (
           <ul className="admin-channel-list">
             {adminChannels.map((channel) => (
-              <AdminChannelRow channel={channel} key={channel.id} onApply={applyChannel} />
+              <AdminChannelRow channel={channel} key={channel.id} onApply={applyChannel} onRemove={removeChannelRow} />
             ))}
           </ul>
         ) : null}
@@ -208,15 +222,18 @@ export function AdminChannelsPanel({
 }
 
 /**
- * One row in the admin channel list: rename the channel or archive/restore it. Holds its own draft
+ * One row in the admin channel list: rename the channel, archive/restore it (read-only-but-
+ * available), or permanently delete it (gone for good — confirmed first). Holds its own draft
  * name so editing one channel never disturbs another.
  */
 function AdminChannelRow({
   channel,
   onApply,
+  onRemove,
 }: {
   channel: Channel;
   onApply: (channel: Channel) => void;
+  onRemove: (channelId: string) => void;
 }) {
   const [name, setName] = useState(channel.name);
   const [busy, setBusy] = useState(false);
@@ -289,8 +306,38 @@ function AdminChannelRow({
         >
           {channel.archived ? t("admin.restore") : t("admin.archive")}
         </button>
+        <button
+          aria-label={t("admin.deleteChannelAria", { name: channel.name })}
+          className="danger-button"
+          disabled={busy}
+          onClick={() => void remove()}
+          type="button"
+        >
+          {t("admin.deleteChannel")}
+        </button>
       </div>
       {error ? <p className="form-error">{error}</p> : null}
     </li>
   );
+
+  /** Permanently delete this channel after an explicit confirm — unlike archive, there is no undo. */
+  async function remove(): Promise<void> {
+    if (!window.confirm(t("admin.deleteChannelConfirm", { name: channel.name }))) {
+      return;
+    }
+
+    setBusy(true);
+    setError(undefined);
+
+    try {
+      await deleteChannelRequest(channel.id);
+      onRemove(channel.id);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t("admin.channelUpdateError"));
+    } finally {
+      // Symmetric with `patch()`: on success the row unmounts anyway, and a no-op state set on an
+      // unmounted component is harmless — while a future kept-mounted row won't wedge as busy.
+      setBusy(false);
+    }
+  }
 }

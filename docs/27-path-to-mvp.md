@@ -1,6 +1,11 @@
 # 27 — Path to MVP
 
-**Status: plan of record for the pre-tester push.** One sequenced plan that takes LOAM from "feature-rich
+> **STATUS (2026-08): superseded by [docs/29-next-phase.md](29-next-phase.md).** PR 1 is delivered
+> (#109/#110, minus the cloud-LLM group D — now docs/29 Track 3); PR 2's device checklist is
+> mid-flight and continues as docs/29 Track 1, preceded by the Track 0 stabilization pass from the
+> 2026-08-15 external review. Kept as the record of the MVP definition and the PR-1 design detail.
+
+**Status (historical): was the plan of record for the pre-tester push — superseded per the banner above.** One sequenced plan that takes LOAM from "feature-rich
 but unproven" to "ready to hand to real testers." Supersedes the ad-hoc "next PR" planning. Every item in
 the consolidated backlog (`docs/25`) is dispositioned here (§5), so nothing is silently lost. Sizes use the
 `docs/25` key (S ≈ hours–1d · M ≈ days · L ≈ 1–2wk · epic ≈ multi-session).
