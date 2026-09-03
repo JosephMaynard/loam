@@ -10,13 +10,13 @@ packages:
 catalog:
   "@preact/preset-vite": ^2.10.6
   "@types/node": ^24.13.3
-  esbuild: ^0.28.1
+  esbuild: ^0.28.2
   jsdom: ^30.0.1
   preact: ^10.29.8
-  tsx: ^4.23.5
+  tsx: ^4.23.13
   typescript: ~7.0.2
-  vite: ^8.2.0
-  vitest: ^4.1.10
+  vite: ^8.2.2
+  vitest: ^4.1.11
 
 onlyBuiltDependencies:
   - better-sqlite3-multiple-ciphers

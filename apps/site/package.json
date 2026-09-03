@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "posthog-js": "^1.410.6"
+    "posthog-js": "^1.422.5"
   },
   "devDependencies": {
     "vite": "catalog:"
