@@ -10446,3 +10446,266 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
     ).toBe(200);
   });
 });
+
+describe("review fixes 2026-09-04 (server)", () => {
+  const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000, maxContacts: 1000 };
+  const HOST_TOKEN = "host-token-for-tests-0123456789abcdefghijklmn";
+
+  type WireEvent = { type?: string; userId?: string; channelId?: string };
+  const openSockets: WebSocket[] = [];
+
+  afterEach(() => {
+    for (const socket of openSockets) {
+      socket.close();
+    }
+    openSockets.length = 0;
+  });
+
+  /** A plaintext cookie socket (transport `optional`, no `?enc=`) — admitted directly, no challenge. */
+  function connect(
+    baseUrl: string,
+    cookie: string,
+  ): Promise<{ socket: WebSocket; events: WireEvent[]; closed: Promise<number> }> {
+    return new Promise((resolve, reject) => {
+      const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+        `${baseUrl.replace("http", "ws")}/ws`,
+        { headers: { cookie } },
+      );
+      const events: WireEvent[] = [];
+      const closed = new Promise<number>((resolveClose) => {
+        socket.addEventListener("close", (event) => resolveClose((event as CloseEvent).code));
+      });
+      socket.addEventListener("message", (event) => {
+        events.push(JSON.parse(String((event as MessageEvent).data)) as WireEvent);
+      });
+      socket.addEventListener("open", () => {
+        openSockets.push(socket);
+        resolve({ socket, events, closed });
+      });
+      socket.addEventListener("error", () => reject(new Error("websocket failed to connect")));
+    });
+  }
+
+  async function waitFor(check: () => boolean, timeoutMs = 3_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (check()) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return check();
+  }
+
+  const settle = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function patchChannel(app: LoamApp, cookie: string, channelId: string, payload: Record<string, unknown>): Promise<InjectResponse> {
+    return app.server.inject({ method: "PATCH", url: `/api/channels/${channelId}`, headers: { cookie }, payload });
+  }
+
+  function post(app: LoamApp, cookie: string, channelId: string, body: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+  }
+
+  async function bodiesIn(app: LoamApp, cookie: string, channelId: string): Promise<string[]> {
+    const response = await app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie } });
+    return (response.json() as { body?: string }[]).map((message) => message.body ?? "");
+  }
+
+  it("closes a WebSocket that sends a frame over the 16 KiB inbound cap (1009) and keeps a small one open", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const small = await connect(baseUrl, user.cookie);
+    small.socket.send("x".repeat(1024));
+    await settle();
+    expect(small.socket.readyState).toBe(WebSocket.OPEN);
+
+    const big = await connect(baseUrl, user.cookie);
+    big.socket.send("x".repeat(32 * 1024));
+    expect(await big.closed).toBe(1009);
+  });
+
+  it("answers a non-member's PATCH on a private channel exactly like a missing channel (404 parity)", async () => {
+    const app = await makeApp();
+    await newSession(app); // firstUser admin
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Leadership", visibility: "private" },
+    });
+    expect(created.statusCode).toBe(201);
+    const channelId = (created.json() as { id: string }).id;
+
+    const missing = await patchChannel(app, outsider.cookie, "no-such-channel", { name: "Renamed" });
+    const hidden = await patchChannel(app, outsider.cookie, channelId, { name: "Renamed" });
+    expect(missing.statusCode).toBe(404);
+    expect(hidden.statusCode).toBe(404);
+    expect(hidden.body).toBe(missing.body);
+
+    // The owner (and an admin) can still change it — only outsiders get parity.
+    expect((await patchChannel(app, owner.cookie, channelId, { name: "Renamed" })).statusCode).toBe(200);
+  });
+
+  it("sync import honours a local channel's posting policy and the node's feature flags", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    expect((await post(source, sourceAdmin.cookie, "announcements", "peer announcement")).statusCode).toBe(201);
+    const general = await post(source, sourceAdmin.cookie, "general", "peer general");
+    expect(general.statusCode).toBe(201);
+    const generalId = (general.json() as { message: { id: string } }).message.id;
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { type: "reaction", targetMessageId: generalId, reaction: "👍" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl, label: "source" }], intervalMs: 3_600_000 },
+      features: { enableReactions: false },
+    });
+    const pullerAdmin = await newSession(puller);
+    // The puller's OWN announcements channel is admins-only; the source's admin arrives as a plain user.
+    expect((await patchChannel(puller, pullerAdmin.cookie, "announcements", { allowPosting: "admins" })).statusCode).toBe(200);
+
+    const run = await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    expect(run.statusCode).toBe(200);
+
+    expect(await bodiesIn(puller, pullerAdmin.cookie, "general")).toContain("peer general");
+    expect(await bodiesIn(puller, pullerAdmin.cookie, "announcements")).not.toContain("peer announcement");
+    expect(puller.store.loadMessages().some((message) => message.type === "reaction")).toBe(false);
+  });
+
+  it("does not broadcast a typing signal from a member the channel's posting policy excludes", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const member = await newSession(app);
+    const viewer = await newSession(app);
+    expect((await patchChannel(app, admin.cookie, "announcements", { allowPosting: "admins" })).statusCode).toBe(200);
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const { events } = await connect(baseUrl, viewer.cookie);
+
+    const typing = (cookie: string) =>
+      app.server.inject({ method: "POST", url: "/api/typing", headers: { cookie }, payload: { channelId: "announcements" } });
+    expect((await typing(member.cookie)).statusCode).toBe(204); // silent no-op, never leaks
+    expect((await typing(admin.cookie)).statusCode).toBe(204); // control: an allowed poster does broadcast
+
+    expect(await waitFor(() => events.some((event) => event.type === "typing" && event.userId === admin.userId))).toBe(true);
+    expect(events.some((event) => event.type === "typing" && event.userId === member.userId)).toBe(false);
+  });
+
+  it("drops sealed mesh mail on a node with direct messages disabled instead of materialising a DM", async () => {
+    const app = await makeApp({ mesh: MESH, features: { enableDMs: false } });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const card = await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie: bob.cookie } });
+    expect(card.statusCode).toBe(200);
+    expect(
+      (await app.server.inject({ method: "POST", url: "/api/mesh/contacts", headers: { cookie: alice.cookie }, payload: card.json() }))
+        .statusCode,
+    ).toBe(200);
+
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: alice.cookie },
+      payload: { toMeshId: (card.json() as { meshId: string }).meshId, body: "not deliverable here" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    const stored = app.store.loadMessages();
+    expect(stored.some((message) => message.type === "dm")).toBe(false);
+    // Tombstoned and dropped — not left in the carried queue either.
+    expect(stored.some((message) => message.type === "sealed")).toBe(false);
+    const dms = await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: bob.cookie } });
+    expect((dms.json() as { id: string }[]).some((user) => user.id.startsWith("mesh."))).toBe(false);
+  });
+
+  it("reaps avatar image files no user references (boot sweep) and keeps referenced ones", async () => {
+    const { app, dataDir } = await makeApp({ identity: { allowUserAvatarEdit: true, allowUserAvatarUpload: true } });
+    const session = await newSession(app);
+    const webp = Buffer.from("RIFF\0\0\0\0WEBP").toString("base64");
+    const upload = await app.server.inject({
+      method: "PUT",
+      url: "/api/users/me/avatar-image",
+      headers: { cookie: session.cookie },
+      payload: { mimeType: "image/webp", data: webp },
+    });
+    expect(upload.statusCode).toBe(200);
+    const imageId = (upload.json() as { avatar: { imageId: string } }).avatar.imageId;
+    const stray = join(dataDir, "avatars", "avt_0123456789abcdef.webp");
+    writeFileSync(stray, "RIFF\0\0\0\0WEBP");
+
+    await app.reapOrphanedAvatars();
+    expect(existsSync(stray)).toBe(false);
+    expect(existsSync(join(dataDir, "avatars", `${imageId}.webp`))).toBe(true);
+
+    // An ephemeral-style restart: the database vanishes, the avatar file must not outlive it.
+    await app.close();
+    for (const name of ["loam.db", "loam.db-wal", "loam.db-shm"]) {
+      rmSync(join(dataDir, name), { force: true });
+    }
+    const reopened = await buildApp({ dataDir, logger: false });
+    cleanups.push(() => reopened.close());
+    expect(await waitFor(() => !existsSync(join(dataDir, "avatars", `${imageId}.webp`)))).toBe(true);
+  });
+
+  it("hostDevice: with a launcher host token no LAN session becomes admin, and only the token claims", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const first = await newSession(app);
+    expect(first.isAdmin).toBe(false);
+    const second = await newSession(app);
+    expect(second.isAdmin).toBe(false);
+
+    const config = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: first.cookie } });
+    expect((config.json() as { networkConfig: { allowAdminClaim: boolean } }).networkConfig.allowAdminClaim).toBe(false);
+
+    const claim = (cookie: string, secret: string) =>
+      app.server.inject({ method: "POST", url: "/api/admin/claim", headers: { cookie }, payload: { secret } });
+    expect((await claim(first.cookie, "not-the-token")).statusCode).toBe(403);
+    const promoted = await claim(first.cookie, HOST_TOKEN);
+    expect(promoted.statusCode).toBe(200);
+    expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+
+    // A read-time projection: the persisted strategy is untouched (the same data dir booted without a
+    // token on a desktop resolves to it), and a plain session still can't claim.
+    const adminConfig = await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: first.cookie } });
+    expect((adminConfig.json() as { admin: { bootstrap: string } }).admin.bootstrap).toBe("firstUser");
+    expect((await claim(second.cookie, "guess")).statusCode).toBe(403);
+  });
+
+  it("requires the host token on the loopback mesh bridge when the launcher configured one", async () => {
+    const app = await makeApp({ mesh: MESH }, { hostToken: HOST_TOKEN });
+    const outbound = (headers?: Record<string, string>) =>
+      app.server.inject({ method: "GET", url: "/api/mesh/outbound", headers });
+    expect((await outbound()).statusCode).toBe(404);
+    expect((await outbound({ "x-loam-host-token": "wrong" })).statusCode).toBe(404);
+    expect((await outbound({ "x-loam-host-token": HOST_TOKEN })).statusCode).toBe(200);
+    // Still loopback-only even with the token.
+    expect(
+      (
+        await app.server.inject({
+          method: "GET",
+          url: "/api/mesh/outbound",
+          headers: { "x-loam-host-token": HOST_TOKEN },
+          remoteAddress: "192.168.4.7",
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+});

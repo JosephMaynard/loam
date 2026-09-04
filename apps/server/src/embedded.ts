@@ -137,6 +137,9 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     // The Android host / npm CLI inject the app version via LOAM_VERSION (no package.json on the
     // bundle path); "dev" if unset.
     version: process.env.LOAM_VERSION?.trim() || "dev",
+    // The launcher's per-boot host token (`LOAM_HOST_TOKEN`, minted in main.js): forces the `hostDevice`
+    // admin bootstrap and gates the loopback mesh bridge — see `AppOptions.hostToken`. Never logged.
+    hostToken: process.env.LOAM_HOST_TOKEN || undefined,
   });
 
   if (app.adminSetupCode) {

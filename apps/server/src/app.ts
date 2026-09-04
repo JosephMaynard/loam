@@ -60,6 +60,7 @@ import {
   TypingRequestSchema,
   UserSchema,
   UserUpdateRequestSchema,
+  type AdminBootstrapStrategy,
   type AvatarImageMimeType,
   type Channel,
   type ChannelCreateRequest,
@@ -138,6 +139,14 @@ const WS_UNCONFIRMED_CAP = 128;
 /** Tighter PER-IP cap on unconfirmed sockets, so a few LAN hosts can't exhaust the global pool and lock
  * everyone out. A real client confirms in milliseconds, so it never holds more than one or two at once. */
 const WS_UNCONFIRMED_PER_IP_CAP = 8;
+/**
+ * Largest client→server WebSocket frame the server will assemble (review 2026-09-04). The only frame a
+ * client ever legitimately sends is the ~200-byte sealed key-confirmation proof (confirmed sockets are
+ * ignored, plaintext sockets register no listener) — but `ws` still buffers every inbound frame in full
+ * before emitting it, and its default cap is 100 MiB, so an admitted socket could push several of those
+ * at a Pi/phone host concurrently. 16 KiB leaves generous headroom for the proof envelope.
+ */
+const WS_MAX_INBOUND_FRAME_BYTES = 16 * 1024;
 
 type AppData = {
   users: User[];
@@ -347,6 +356,16 @@ export type AppOptions = {
    * the default.
    */
   tombstoneHorizonMs?: number;
+  /**
+   * A per-boot secret proving a caller IS the host process (review 2026-09-04). Set by the Android
+   * launcher (`LOAM_HOST_TOKEN`, minted fresh every boot in `main.js` and handed only to the host's own
+   * WebView + courier). When present it (1) forces the effective admin bootstrap to `hostDevice` — see
+   * `effectiveAdminBootstrap` — so admin is claimable ONLY by presenting this token, never by being the
+   * first LAN session; and (2) is REQUIRED (header `x-loam-host-token`) on the loopback mesh bridge
+   * routes, since on Android loopback is reachable by every installed app, not just the launcher.
+   * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged.
+   */
+  hostToken?: string;
   logger?: boolean;
 };
 
@@ -427,6 +446,8 @@ export type LoamApp = {
   reapExpiredMessages(): void;
   /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
   reapOrphanedAttachments(): Promise<void>;
+  /** Delete avatar image files no user references now (also runs once at boot). */
+  reapOrphanedAvatars(): Promise<void>;
   /** Retry attachments that failed to copy during a sync import now (also runs on the reaper timer;
    * docs/15 A6) — re-fetches missing files from their source peer without re-importing the message. */
   retryMissingAttachments(): Promise<void>;
@@ -1396,6 +1417,32 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   function effectiveTransportEncryption(): TransportEncryption {
     return devMode ? "off" : appConfig.security.transportEncryption;
+  }
+
+  /**
+   * The admin-bootstrap strategy actually ENFORCED right now (review 2026-09-04). A launcher that hands
+   * `buildApp` a per-boot `hostToken` (the Android host) forces `hostDevice`: admin is granted only to
+   * the caller that presents that token via `POST /api/admin/claim`, never to "the first session". Like
+   * `effectiveTransportEncryption` this is a read-time projection that never mutates `appConfig` — the
+   * configured strategy stays the operator's persisted intent, and the same data dir booted without a
+   * token (desktop/Pi) resolves to it unchanged. Why: the embedded server listens on every interface from
+   * the moment it boots, but the host's own WebView (the operator) only reaches `/api/config` after the
+   * readiness probe + bootstrap fetch + client load — under `firstUser` that gap let any LAN peer polling
+   * the endpoint mint the admin identity on every fresh-DB boot (every boot in ephemeral mode).
+   */
+  function effectiveAdminBootstrap(): AdminBootstrapStrategy {
+    return options.hostToken ? "hostDevice" : appConfig.admin.bootstrap;
+  }
+
+  /** Whether `request` presents the launcher's per-boot host token (constant-time). Always false when no
+   * token was configured — callers must gate on `options.hostToken` to decide whether one is REQUIRED. */
+  function presentsHostToken(request: FastifyRequest): boolean {
+    const token = options.hostToken;
+    const header = request.headers["x-loam-host-token"];
+    if (!token || typeof header !== "string" || Buffer.byteLength(header) !== Buffer.byteLength(token)) {
+      return false;
+    }
+    return timingSafeEqual(Buffer.from(header), Buffer.from(token));
   }
 
   let data: AppData = {
@@ -2768,7 +2815,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * awaiting a greeter/admin's approval before they can participate. Admins are never pending.
    */
   function ensureSessionUser(id: string): User {
-    const isAdmin = appConfig.admin.bootstrap === "firstUser" && !anyAdminExists();
+    const isAdmin = effectiveAdminBootstrap() === "firstUser" && !anyAdminExists();
     const pending = !isAdmin && appConfig.access.joinPolicy === "approval";
     const user = ensureUser(id, isAdmin, pending);
     // Give a real local user a mesh identity the first time we see them under mesh mode, so they can
@@ -2854,10 +2901,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       allowUserAvatarEdit: appConfig.identity.allowUserAvatarEdit,
       allowUserAvatarUpload: appConfig.identity.allowUserAvatarUpload,
       // Only advertise claiming when a usable secret actually exists (the setup code is
-      // single-use, and passphrase mode may have no passphrase configured).
+      // single-use, and passphrase mode may have no passphrase configured). `hostDevice` is deliberately
+      // NOT advertised: its token reaches only the host's own WebView, which claims without a form.
       allowAdminClaim:
-        (appConfig.admin.bootstrap === "setupCode" && adminSetupCode !== undefined) ||
-        (appConfig.admin.bootstrap === "passphrase" && !!appConfig.admin.passphrase),
+        (effectiveAdminBootstrap() === "setupCode" && adminSetupCode !== undefined) ||
+        (effectiveAdminBootstrap() === "passphrase" && !!appConfig.admin.passphrase),
       joinPolicy: appConfig.access.joinPolicy,
       securityProfile: appConfig.security.profile,
       // Report the EFFECTIVE posture (Developer Mode forces "off"), matching what's actually enforced.
@@ -4892,7 +4940,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // Drop cached puller-side sessions to peers too — RAM hygiene during an emergency wipe (docs/08).
     peerTransportSessions.clear();
 
-    if (appConfig.admin.bootstrap === "setupCode") {
+    if (effectiveAdminBootstrap() === "setupCode") {
       adminSetupCode = makeAdminSetupCode();
       server.log.info(`Admin setup code (single use): ${adminSetupCode}`);
     }
@@ -5059,6 +5107,42 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       await rm(join(attachmentsDir, fileName), { force: true }).catch((error: unknown) =>
         server.log.warn(error),
       );
+    }
+  }
+
+  /**
+   * Boot-time sweep of avatar image files no user record references (review 2026-09-04). Avatars are
+   * written to disk on upload and only ever removed with their user or by the kill switch — so any path
+   * that drops user rows without touching the files (an ephemeral-mode restart deleting the DB, a
+   * preserve-and-start-fresh recovery, a crash between the file write and the user upsert) strands
+   * plaintext images on disk indefinitely. Mirrors `reapOrphanedAttachments`; runs once at boot, after
+   * the store is loaded, so `data.users` is authoritative. Best-effort — a delete failure is logged.
+   */
+  async function reapOrphanedAvatars(): Promise<void> {
+    let files: string[];
+
+    try {
+      files = await readdir(avatarsDir);
+    } catch {
+      return; // No avatars directory yet — nothing uploaded.
+    }
+
+    const referenced = new Set<string>();
+
+    for (const user of data.users) {
+      if (user.avatar?.imageId) {
+        referenced.add(user.avatar.imageId);
+      }
+    }
+
+    for (const fileName of files) {
+      const parsed = parseAvatarImageId(fileName);
+
+      if (!parsed || referenced.has(parsed.imageId)) {
+        continue;
+      }
+
+      await rm(join(avatarsDir, fileName), { force: true }).catch((error: unknown) => server.log.warn(error));
     }
   }
 
@@ -5882,7 +5966,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (!opened) {
         continue; // not actually ours, or tampered
       }
-      deliverSealedAsDm(recipientUserId, opened.senderMeshId, opened.plaintext, now);
+      // Sealed mail lands as a DM, so it obeys the node's DM policy like every other DM
+      // (`createMessage` refuses DMs when the flag is off). With DMs disabled the mail is ours but
+      // undeliverable: drop it — and tombstone it so it isn't carried/re-offered forever — rather than
+      // materialise a DM the operator switched off (review 2026-09-04, mirrors the shadow-ban drop).
+      if (appConfig.features.enableDMs) {
+        deliverSealedAsDm(recipientUserId, opened.senderMeshId, opened.plaintext, now);
+      } else {
+        server.log.info({ messageId: message.id }, "Dropped sealed mesh mail: direct messages are disabled on this node");
+      }
       store.addTombstone(message.id);
       tombstones.add(message.id);
       return true;
@@ -6043,6 +6135,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         continue;
       }
 
+      // Node-wide feature flags govern what content may EXIST on this node, not just what local users may
+      // create (review 2026-09-04): a node that has switched channel posting, replies, or reactions off
+      // must not acquire that content from a peer either — `createMessage` refuses the same three.
+      if (
+        ((message.type === "channelPost" || message.type === "channelReply") && !appConfig.features.enablePublicChannels) ||
+        (message.type === "channelReply" && !appConfig.features.enableReplies) ||
+        (message.type === "reaction" && !appConfig.features.enableReactions)
+      ) {
+        continue;
+      }
+
       if (message.type === "reaction") {
         const target = data.messages.find((candidate) => candidate.id === message.targetMessageId);
 
@@ -6054,6 +6157,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         const channel = ensureChannel(message.channelId);
 
         if (!channel || channel.visibility !== "public" || channel.archived) {
+          continue;
+        }
+
+        // A LOCALLY-authoritative channel's posting policy (owner-only / admins-only / replies off) applies
+        // to imports too — otherwise a peer could land posts in a local read-only announcements channel
+        // under any ordinary author id, bypassing the lockdown (review 2026-09-04). Peer-origin channels
+        // (`syncedChannelIds`) are governed by their origin's policy, which already gated the post there,
+        // and their owner is a remote id `channelPostingError` couldn't evaluate anyway.
+        if (
+          !syncedChannelIds.has(channel.id) &&
+          channelPostingError(channel, message.authorId, message.type === "channelReply") !== undefined
+        ) {
           continue;
         }
 
@@ -6335,11 +6450,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     throw error;
   }
 
-  if (appConfig.admin.bootstrap === "setupCode" && !anyAdminExists()) {
+  if (effectiveAdminBootstrap() === "setupCode" && !anyAdminExists()) {
     adminSetupCode = makeAdminSetupCode();
   }
 
   void reapOrphanedAttachments();
+  void reapOrphanedAvatars().catch((error: unknown) => server.log.error(error));
 
   const reaperTimer = setInterval(() => {
     // P1-2(c): once a fixed-key kill switch has handed off to the launcher for a restart, `store` is
@@ -6577,7 +6693,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function semanticRateLimit(max: number): { config: { rateLimit: { max: number; timeWindow: string; allowList: () => boolean } } } {
     return { config: { rateLimit: { max, timeWindow: "1 minute", allowList: () => false } } };
   }
-  await server.register(fastifyWebsocket);
+  // `maxPayload` bounds what `ws` will buffer per inbound frame (see WS_MAX_INBOUND_FRAME_BYTES); a
+  // larger frame closes the socket with 1009 before any handler sees it.
+  await server.register(fastifyWebsocket, { options: { maxPayload: WS_MAX_INBOUND_FRAME_BYTES } });
   await registerStaticFiles();
 
   // Liveness probe that mints NO identity — the Android host launcher polls this before loading the
@@ -7342,8 +7460,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (body.data.channelId) {
         const channel = ensureChannel(body.data.channelId);
-        // No typing signal in an archived channel — nothing can be composed there (read-only).
-        if (channel && !channel.archived && canAccessChannel(channel, currentUser.id)) {
+        // A typing signal is only meaningful where the user could actually post: not in an archived
+        // channel (read-only), and not for a member the channel's posting policy excludes (owner-only /
+        // admins-only) — otherwise a non-poster broadcasts "X is typing…" to every reader at 120/min
+        // (review 2026-09-04). `channelPostingError` is the same gate `createMessage` applies.
+        if (
+          channel &&
+          canAccessChannel(channel, currentUser.id) &&
+          channelPostingError(channel, currentUser.id, false) === undefined
+        ) {
           broadcast({ type: "typing", userId: currentUser.id, channelId: channel.id });
         }
       } else if (
@@ -8080,6 +8205,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
   }
 
+  /**
+   * Who may drive the mesh transport bridge: a loopback caller — and, when the launcher configured a
+   * per-boot `hostToken`, ONLY a loopback caller that also presents it (review 2026-09-04). On Android
+   * "loopback" is not process-private: every installed app (and `adb forward`) can reach 127.0.0.1, so the
+   * IP check alone let a co-located app read the sealed outbound queue's routing metadata and inject blobs.
+   */
+  function meshBridgeCallerAuthorized(request: FastifyRequest): boolean {
+    if (!requestFromLoopback(request)) {
+      return false;
+    }
+    return options.hostToken ? presentsHostToken(request) : true;
+  }
+
   function syncPeerAuthorized(request: FastifyRequest): boolean {
     const required = appConfig.sync.token;
     if (!required) {
@@ -8423,7 +8561,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/mesh/outbound",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-      if (!appConfig.mesh.enabled || !requestFromLoopback(request)) {
+      if (!appConfig.mesh.enabled || !meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
       }
 
@@ -8440,7 +8578,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     "/api/mesh/inbound",
     { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
     async (request, reply) => {
-      if (!appConfig.mesh.enabled || !requestFromLoopback(request)) {
+      if (!appConfig.mesh.enabled || !meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
       }
 
@@ -8643,9 +8781,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return currentUser;
     }
 
-    const strategy = appConfig.admin.bootstrap;
+    const strategy = effectiveAdminBootstrap();
 
-    if (strategy !== "setupCode" && strategy !== "passphrase") {
+    if (strategy !== "setupCode" && strategy !== "passphrase" && strategy !== "hostDevice") {
       return reply.code(403).send(errorBody("Admin claiming is not enabled on this LOAM node"));
     }
 
@@ -8654,10 +8792,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return reply.code(429).send(errorBody("Too many claim attempts; try again later"));
     }
 
-    const expected = strategy === "setupCode" ? adminSetupCode : appConfig.admin.passphrase;
+    // `hostDevice` (review 2026-09-04): the secret is the launcher's per-boot host token, which only the
+    // host's own WebView receives — never a config value, never advertised, never persisted.
+    const expected =
+      strategy === "setupCode" ? adminSetupCode : strategy === "hostDevice" ? options.hostToken : appConfig.admin.passphrase;
     const secretMatches =
       !!expected &&
-      (strategy === "setupCode"
+      (strategy === "setupCode" || strategy === "hostDevice"
         ? timingSafeEqualStrings(body.data.secret, expected)
         : verifySecret(body.data.secret, expected));
 
@@ -8907,7 +9048,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const channel = ensureChannel(request.params.channelId);
 
-    if (!channel) {
+    // 404-parity (review 2026-09-04): a private channel an outsider can't see answers exactly like a
+    // missing one. Channel ids are name slugs, so a 403 here confirmed a guessed private channel existed.
+    if (!channel || (!currentUser.isAdmin && !canAccessChannel(channel, currentUser.id))) {
       return reply.code(404).send(errorBody("Channel does not exist"));
     }
 
@@ -9247,6 +9390,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     getAdminSetupCode: () => adminSetupCode,
     reapExpiredMessages,
     reapOrphanedAttachments,
+    reapOrphanedAvatars,
     retryMissingAttachments,
     pruneExpiredRateLimiters,
     rateLimiterEntryCounts: () => ({
