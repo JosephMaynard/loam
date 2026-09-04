@@ -10,12 +10,12 @@ import type { Runtime } from "./runtime.js";
 export function createMeshLayer(rt: Runtime) {
   /**
    * Delete messages older than the configured retention TTL (ephemeral messages): remove them from
-   * memory and the rt.store, and rt.broadcast `messageDeleted` so connected clients drop them from their
+   * memory and the store, and broadcast `messageDeleted` so connected clients drop them from their
    * local caches too. In-flight streaming messages are spared until they finish. No-op when no TTL
    * is configured.
    */
   /** Drop sealed mailbox mail past its own `ttlExpiresAt` (independent of retention). Deleted +
-   * tombstoned so a peer can't re-hand it; never rt.broadcast (clients never saw the blob). This, with
+   * tombstoned so a peer can't re-hand it; never broadcast (clients never saw the blob). This, with
    * the hop limit and per-carrier cap, is what makes carried mail converge instead of flood. Runs
    * regardless of `mesh.enabled` so turning mesh off doesn't strand already-expired sealed rows. */
   function reapExpiredSealed(): void {
@@ -42,7 +42,7 @@ export function createMeshLayer(rt: Runtime) {
 
   const MESH_EPOCH_WINDOW_MS = 24 * 3_600_000; // daily routing-tag epoch
   const MESH_SENTINEL_AUTHOR = "mesh.sealed"; // opaque authorId on a sealed message (real sender is inside)
-  // Local users' mesh keypairs (userId → identity), mirrored from the rt.store. Secret keys stay here.
+  // Local users' mesh keypairs (userId → identity), mirrored from the store. Secret keys stay here.
   const meshIdentities = new Map<string, MeshIdentity>();
 
   function loadMeshIdentities(): void {
@@ -160,13 +160,13 @@ export function createMeshLayer(rt: Runtime) {
   }
 
   /** Ensure a display record exists for a remote mesh sender and make it resolvable to `recipientUserId`
-   * ONLY — never via the shared roster or a global rt.broadcast. Putting a mesh sender on the public
-   * roster would leak that some local user just received sealed mail (docs/16); `rt.visibleUsers` hides
+   * ONLY — never via the shared roster or a global broadcast. Putting a mesh sender on the public
+   * roster would leak that some local user just received sealed mail (docs/16); `visibleUsers` hides
    * these ids from everyone but the recipients they've mailed, and this notifies just the recipient. */
   function ensureMeshSenderUser(meshId: string, recipientUserId: string): void {
     let user = rt.data.users.find((candidate) => candidate.id === meshId);
     if (!user) {
-      // Persist first, then mirror in memory — but no global rt.broadcast (unlike rt.ensureUser).
+      // Persist first, then mirror in memory — but no global broadcast (unlike ensureUser).
       user = makeUser(meshId);
       rt.store.upsertUser(user);
       rt.data.users.push(user);
@@ -211,7 +211,7 @@ export function createMeshLayer(rt: Runtime) {
         continue; // not actually ours, or tampered
       }
       // Sealed mail lands as a DM, so it obeys the node's DM policy like every other DM
-      // (`rt.createMessage` refuses DMs when the flag is off). With DMs disabled the mail is ours but
+      // (`createMessage` refuses DMs when the flag is off). With DMs disabled the mail is ours but
       // undeliverable: drop it — and tombstone it so it isn't carried/re-offered forever — rather than
       // materialise a DM the operator switched off (review 2026-09-04, mirrors the shadow-ban drop).
       if (rt.appConfig.features.enableDMs) {
@@ -227,7 +227,7 @@ export function createMeshLayer(rt: Runtime) {
   }
 
   /** Handle a sealed message pulled from a peer: deliver locally, else relay onward (hop-decremented,
-   * bounded), else drop. Never rt.broadcast to clients. Returns true when accepted (delivered or carried). */
+   * bounded), else drop. Never broadcast to clients. Returns true when accepted (delivered or carried). */
   function acceptSealedFromPeer(message: SealedMessage): boolean {
     if (!rt.appConfig.mesh.enabled) {
       return false;
@@ -253,10 +253,10 @@ export function createMeshLayer(rt: Runtime) {
     const relayed = MessageSchema.parse({ ...message, hopLimit: message.hopLimit - 1 });
     rt.store.insertMessage(relayed);
     rt.data.messages.push(relayed);
-    return true; // opaque — no client rt.broadcast
+    return true; // opaque — no client broadcast
   }
 
-  /** Verify and rt.store a mesh contact card in `ownerUserId`'s address book. Rejects a card whose
+  /** Verify and store a mesh contact card in `ownerUserId`'s address book. Rejects a card whose
    * self-certifying `meshId` doesn't derive from its signing key, or whose `kxSig` doesn't bind its
    * agreement key — the two checks that make sealing to a contact immune to key substitution. The
    * card (name included) stays in the caller's private address book; it is NOT promoted to a shared
@@ -279,7 +279,7 @@ export function createMeshLayer(rt: Runtime) {
     if (!book.has(card.meshId) && book.size >= rt.appConfig.mesh.maxContacts) {
       return "Your mesh contact list is full.";
     }
-    // Persist first, then mirror in memory — if the rt.store write throws, the book doesn't diverge.
+    // Persist first, then mirror in memory — if the store write throws, the book doesn't diverge.
     rt.store.upsertMeshContact(ownerUserId, card.meshId, JSON.stringify(card));
     book.set(card.meshId, card);
     return undefined;
@@ -304,7 +304,7 @@ export function createMeshLayer(rt: Runtime) {
    * string on failure. */
   function sendSealed(sender: MeshIdentity, contact: MeshIdentityCard, body: string): string | undefined {
     // Bound self-originated mail by the same per-node storage cap as relayed mail, so a local
-    // participant can't fill the rt.store with undeliverable sealed blobs (they persist until TTL).
+    // participant can't fill the store with undeliverable sealed blobs (they persist until TTL).
     const carried = rt.data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
     if (carried >= rt.appConfig.mesh.maxCarried) {
       return "This node's sealed-mail queue is full; try again later.";
@@ -330,7 +330,7 @@ export function createMeshLayer(rt: Runtime) {
       createdAt: now,
     }) as SealedMessage;
 
-    // If the recipient is local, deliver now; otherwise rt.store it so the sync layer carries it.
+    // If the recipient is local, deliver now; otherwise store it so the sync layer carries it.
     if (!tryDeliverSealed(message)) {
       rt.store.insertMessage(message);
       rt.data.messages.push(message);

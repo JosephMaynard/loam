@@ -26,7 +26,7 @@ export function createLlmLayer(rt: Runtime) {
   }
 
   /**
-   * Ensures the assistant bot user exists in the in-memory user rt.store and is up to date. The bot's
+   * Ensures the assistant bot user exists in the in-memory user store and is up to date. The bot's
    * identity (id, display name) is shared from `llm.ollama` regardless of which backend answers, so
    * switching between the laptop-Ollama and on-device backends keeps the same DM contact.
    *
@@ -329,7 +329,7 @@ export function createLlmLayer(rt: Runtime) {
         body += delta;
 
         // Keep the in-memory copy current for mid-stream REST reads, but defer persistence and the
-        // full-message rt.broadcast to the end — clients follow the incremental delta events instead.
+        // full-message broadcast to the end — clients follow the incremental delta events instead.
         if ("body" in assistantMessage) {
           assistantMessage.body = body;
         }

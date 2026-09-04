@@ -27,10 +27,8 @@ export type StoreLifecycleDeps = {
   attachmentsDir: string;
   options: AppOptions;
   log: FastifyBaseLogger;
-  /** Persist a config snapshot (from the wipe journal) to config.json durably; false if it could not. */
-  persistConfigForRestart: (config: LoamConfig) => boolean;
-  /** The launcher's wipe-restart bridge hook, when running embedded. */
-  wipeRestartHook: () => (() => void) | undefined;
+  /** Path of config.json — where a wipe's config snapshot is persisted for the restart. */
+  configPath: string;
   /** Flip the app into the "restart pending after a fixed-key wipe" state (every route 503s). */
   markAwaitingWipeRestart: () => void;
 };
@@ -43,7 +41,7 @@ export type WipePhase = "delete-pending" | "key-clear-ready";
 export type WipeJournal = { phase: WipePhase; config?: LoamConfig; configInvalid?: boolean; corrupt?: boolean };
 
 export function createStoreLifecycle(deps: StoreLifecycleDeps) {
-  const { dataDir, avatarsDir, attachmentsDir, options, log } = deps;
+  const { dataDir, avatarsDir, attachmentsDir, configPath, options, log } = deps;
 
   const dbPath = join(dataDir, "loam.db");
   const ephemeralDbKey = options.ephemeralDbKey ?? false;
@@ -1128,7 +1126,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     // before it), the current admin config (armed kill switch, panic token, security profile, retention…) is
     // recovered here rather than reverting to defaults. If we can't persist it yet, do NOT proceed (a later
     // clear would lose the only copy) — stay locked; a later boot retries from the still-intact journal.
-    if (config !== undefined && !deps.persistConfigForRestart(config)) {
+    if (config !== undefined && !persistConfigForRestart(config)) {
       const message =
         "Resuming an interrupted emergency wipe: the config snapshot in the wipe journal could NOT be persisted " +
         "to config.json yet — refusing to proceed (a later journal clear would lose the current admin config). " +
@@ -1138,7 +1136,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       throw new WipeResumeInProgressError(message);
     }
 
-    const hook = deps.wipeRestartHook();
+    const hook = wipeRestartHook();
 
     // Both phases need the artifacts PROVEN gone (and the deletion made DURABLE — dir fsync) before any
     // device-key clear. For `delete-pending` this is the retry the whole redesign hinges on; for
@@ -1220,9 +1218,66 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     throw new WipeResumeInProgressError(message);
   }
 
+  /**
+   * The RN launcher's wipe-restart hook (P1-2, docs/15), if installed. `nodejs-project-template/main.js`
+   * sets this on `globalThis` before requiring the server bundle, same pattern as `__loamReportBootError`
+   * and `__loamOnDeviceChat` — absent on every other host (desktop/Pi/CI), where it's simply undefined.
+   * Exposed as a getter rather than an eager call so the caller can decide whether it's even worth
+   * writing the durable handoff marker (P1-2b) BEFORE actually signaling.
+   */
+  function wipeRestartHook(): (() => void) | undefined {
+    return (globalThis as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart;
+  }
+
+  /**
+   * Persist `config` to `configPath` (P1-3/P1-4, Sol rounds 4/5): the fixed-key kill-switch branch below
+   * deletes the whole DB — and with it, its `config` table — without ever recreating one in-process; the
+   * fresh DB only exists once the NEXT boot resolves a rotated key. Without this, admin-set values (an
+   * armed kill switch, the panic token, the security profile, retention, sync/mesh, feature flags…)
+   * would silently revert to config.json/defaults on that next boot, DISARMING the kill switch along
+   * with everything else. Writes atomically (temp file + rename) so a crash mid-write can never leave
+   * `config.json` truncated/corrupt and brick the next boot — `loadAppConfig` fails CLOSED on an
+   * unparseable file. Blanks `sync.token`, the one plaintext bearer secret in `LoamConfig`
+   * (`admin.passphrase`/`killSwitch.panicToken` are already scrypt-hashed and safe to persist as-is) —
+   * `config.json` is a plain, unprotected file, unlike the DB `config` table it would otherwise only
+   * ever have lived in.
+   *
+   * Retries once on failure (a transient fs error shouldn't cost the operator their config) and returns
+   * whether it EVENTUALLY succeeded. FULLY SYNCHRONOUS (P1-4, Sol round-9): the caller must persist config
+   * BEFORE writing the `delete-pending` phase and before any destruction — config.json must be durable ahead
+   * of the phase so that a boot-time resume (which DELETES the DB, and with it the DB `config` table) always
+   * has the CURRENT effective config to fall back to on config.json. Being sync (not async) also keeps the
+   * whole kill-switch critical section await-free, so there is no interleaving window between the in-memory
+   * lockdown and the phase write.
+   */
+  function persistConfigForRestart(config: LoamConfig): boolean {
+    const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
+    const contents = JSON.stringify(sanitized, null, 2);
+    // DURABLE write (P2-1, Sol round-8): staging write + file fsync + atomic rename + parent-dir fsync, via
+    // `durableWriteFileSync`. A bare writeFile+rename is atomic but NOT power-loss-durable — it could return
+    // "success" while a crash then discards the new bytes or the rename, silently reverting admin settings
+    // (the armed kill switch, panic token, security profile…) to config.json/defaults after the wipe deletes
+    // the DB `config` table. Retries once (a transient fs error shouldn't cost the config).
+    if (durableWriteFileSync(configPath, contents)) {
+      return true;
+    }
+    log.error(
+      "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe (attempt 1 of 2) — retrying once",
+    );
+    if (durableWriteFileSync(configPath, contents)) {
+      return true;
+    }
+    log.error(
+      "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe after a retry — giving up " +
+        "(the caller proceeds with the wipe regardless and reports a distinct notice)",
+    );
+    return false;
+  }
 
   return {
     state,
+    wipeRestartHook,
+    persistConfigForRestart,
     dbPath,
     ephemeralDbKey,
     openLoamStore,

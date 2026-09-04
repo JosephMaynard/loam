@@ -252,7 +252,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
    * GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. Transparently
    * routes through the peer's transport session when it advertises encryption (docs/08) — so the sync
    * digest/messages request+response DATA travels sealed (the `x-loam-sync-token` bearer header does NOT
-   * — it rides plaintext, gating public-rt.data-only reads; see docs/08) — and stays a plain HTTP request
+   * — it rides plaintext, gating public-data-only reads; see docs/08) — and stays a plain HTTP request
    * against a peer running transport `off`.
    */
   async function fetchPeerJson<T>(
@@ -482,7 +482,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
    * new pass starts while a kill-switch wipe is in progress.
    *
    * (P2-2, docs/15 A6/F1, Sol round 3) The per-pass cap (`missingAttachmentMaxRecordsPerPass`) is
-   * applied by `rt.store.loadDueMissingAttachments` at the SQL level — `WHERE next_attempt_at <= now
+   * applied by `store.loadDueMissingAttachments` at the SQL level — `WHERE next_attempt_at <= now
    * ORDER BY next_attempt_at ASC LIMIT`, so it selects from the records actually ELIGIBLE for a retry
    * right now, fairly ordered by how overdue they are. The old code loaded EVERY record in creation
    * (rowid) order and sliced the first `missingAttachmentMaxRecordsPerPass` BEFORE checking each one's
@@ -498,8 +498,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       return;
     }
 
-    // SF3: never START a new pass while a kill-switch wipe is in flight — `rt.wipeGeneration` alone only
-    // catches a pass that was ALREADY RUNNING when the wipe began (see the comment on `rt.wipeInProgress`).
+    // SF3: never START a new pass while a kill-switch wipe is in flight — `wipeGeneration` alone only
+    // catches a pass that was ALREADY RUNNING when the wipe began (see the comment on `wipeInProgress`).
     if (rt.wipeInProgress) {
       return;
     }
@@ -523,7 +523,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
     try {
       // Snapshot the wipe generation, same defense as importPeerAttachments/syncWithPeer: if a kill
-      // switch fires mid-pass, stop touching the rt.store/disk it just wiped (docs/15 #2).
+      // switch fires mid-pass, stop touching the store/disk it just wiped (docs/15 #2).
       const generation = rt.wipeGeneration;
       const activePeerUrls = new Set(rt.appConfig.sync.peers.map((peer) => peer.url));
 
@@ -594,9 +594,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
           rt.store.clearMissingAttachment(record.messageId, record.attachmentId);
         } catch {
-          // F6: match the rt.wipeGeneration re-check every other write site in this function has — a kill
+          // F6: match the wipeGeneration re-check every other write site in this function has — a kill
           // switch that lands while `fetchPeerAttachmentBytes` was in flight must not re-persist a bumped
-          // attempt count onto the rt.store it just wiped.
+          // attempt count onto the store it just wiped.
           if (rt.wipeGeneration !== generation) {
             return;
           }
@@ -616,7 +616,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   // ---- Opportunistic mesh: sealed mailbox (docs/16) ----------------------------------------------
   // Sealed mail is end-to-end encrypted to a single recipient's key: intermediaries carry opaque
   // bytes, only the recipient's home node can open it. All of this is gated on `mesh.enabled`; with
-  // it off nothing below runs and the public-rt.data flow is byte-identical to today.
+  // it off nothing below runs and the public-data flow is byte-identical to today.
 
   /**
    * Import a batch of peer messages: posts before replies before reactions (so parents/targets
@@ -650,8 +650,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       }
 
       // Sealed mailbox mail (opportunistic-mesh, docs/16) is handled entirely apart from the public
-      // flow: it's never rt.broadcast to clients — it's decrypted-and-delivered to a local recipient, or
-      // relayed onward (hop-decremented, bounded), or dropped. Never falls through to rt.store+rt.broadcast.
+      // flow: it's never broadcast to clients — it's decrypted-and-delivered to a local recipient, or
+      // relayed onward (hop-decremented, bounded), or dropped. Never falls through to store+broadcast.
       if (message.type === "sealed") {
         if (mesh.acceptSealedFromPeer(message)) {
           imported += 1;
@@ -661,7 +661,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
       // Node-wide feature flags govern what content may EXIST on this node, not just what local users may
       // create (review 2026-09-04): a node that has switched channel posting, replies, or reactions off
-      // must not acquire that content from a peer either — `rt.createMessage` refuses the same three.
+      // must not acquire that content from a peer either — `createMessage` refuses the same three.
       if (
         ((message.type === "channelPost" || message.type === "channelReply") && !rt.appConfig.features.enablePublicChannels) ||
         (message.type === "channelReply" && !rt.appConfig.features.enableReplies) ||
@@ -687,8 +687,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // A LOCALLY-authoritative channel's posting policy (owner-only / admins-only / replies off) applies
         // to imports too — otherwise a peer could land posts in a local read-only announcements channel
         // under any ordinary author id, bypassing the lockdown (review 2026-09-04). Peer-origin channels
-        // (`rt.syncedChannelIds`) are governed by their origin's policy, which already gated the post there,
-        // and their owner is a remote id `rt.channelPostingError` couldn't evaluate anyway.
+        // (`syncedChannelIds`) are governed by their origin's policy, which already gated the post there,
+        // and their owner is a remote id `channelPostingError` couldn't evaluate anyway.
         if (
           !rt.syncedChannelIds.has(channel.id) &&
           rt.channelPostingError(channel, message.authorId, message.type === "channelReply") !== undefined
@@ -708,7 +708,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         }
 
         await importPeerAttachments(peerUrl, message, generation);
-        // A kill switch during the attachment fetch just wiped the rt.store — stop before we insert
+        // A kill switch during the attachment fetch just wiped the store — stop before we insert
         // this (and any later) message back onto it (docs/15 #2).
         if (rt.wipeGeneration !== generation) {
           return imported;
@@ -742,10 +742,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     return imported;
   }
 
-  /** One pull round against one peer: digest → diff (skipping rt.tombstones) → fetch → import. */
+  /** One pull round against one peer: digest → diff (skipping tombstones) → fetch → import. */
   async function syncWithPeer(peer: SyncPeer): Promise<void> {
     // Snapshot the wipe generation: if a kill switch fires mid-round, every post-await check below
-    // abandons the round rather than writing peer rt.data back onto the wiped rt.store (docs/15 #2).
+    // abandons the round rather than writing peer data back onto the wiped store (docs/15 #2).
     const generation = rt.wipeGeneration;
     const status = peerSyncStatus.get(peer.url) ?? { imported: 0 };
     peerSyncStatus.set(peer.url, status);
@@ -803,7 +803,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
         // C1 provenance gate: only re-sync metadata for a channel THIS node imported from a peer. A
         // locally-created channel — including the fixed-id default `general`/`announcements` every node
-        // ships — is never in `rt.syncedChannelIds`, so a same-slug collision on a peer can never clobber it.
+        // ships — is never in `syncedChannelIds`, so a same-slug collision on a peer can never clobber it.
         // (A private local channel colliding with a peer's public id is also excluded — never public here.)
         if (existing.visibility !== "public" || !rt.syncedChannelIds.has(existing.id)) {
           continue;
