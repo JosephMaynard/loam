@@ -73,6 +73,12 @@ export function renderMarkdown(markdown: string): string {
 const markdownCache = new Map<string, string>();
 const MARKDOWN_CACHE_LIMIT = 500;
 
+/** Drop every cached rendering — part of a device/node wipe, so rendered message bodies don't linger in
+ * memory after the on-disk copy is gone (review 2026-09-04). */
+export function clearMarkdownCache(): void {
+  markdownCache.clear();
+}
+
 /**
  * Cached wrapper around {@link renderMarkdown} for message bodies. Returns byte-identical HTML to a
  * direct `renderMarkdown(body)` call; the cache is invalidated whenever the body or `editedAt`

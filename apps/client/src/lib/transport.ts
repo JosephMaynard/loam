@@ -40,9 +40,22 @@ export function apiUrl(path: string): string {
  * main app — there is no safe way to talk to a `required` node without it.
  */
 export class TransportNeedsQrError extends Error {
-  constructor() {
-    super("This node requires a scanned join QR to connect securely.");
+  /**
+   * Why a scan is needed: `"missing"` — no host key at all; `"changed"` — the key this client had pinned
+   * (a cached QR key) no longer matches the key the node actually holds (the node rotated it, e.g. an
+   * Emergency Reset, or the cached poster is stale), so the cache was dropped and a fresh scan is the
+   * only way back (review 2026-09-04).
+   */
+  readonly reason: "missing" | "changed";
+
+  constructor(reason: "missing" | "changed" = "missing") {
+    super(
+      reason === "changed"
+        ? "This node's key no longer matches the one you scanned (the host may have reset it, or this network is not what it claims); scan its current join QR to reconnect."
+        : "This node requires a scanned join QR to connect securely.",
+    );
     this.name = "TransportNeedsQrError";
+    this.reason = reason;
   }
 }
 
@@ -158,7 +171,12 @@ let lastParams: { mode: TransportEncryption; hostKey?: string } | undefined;
 /** The server origin a cached host key is namespaced under — the configured override if set, else
  * this page's own origin. */
 function keyStorageOrigin(): string {
-  return localStorage.getItem(SERVER_URL_KEY) || window.location.origin;
+  try {
+    return localStorage.getItem(SERVER_URL_KEY) || window.location.origin;
+  } catch {
+    // Storage entirely blocked (a browser with site data disabled): the page origin is the only origin.
+    return window.location.origin;
+  }
 }
 
 /**
@@ -175,7 +193,18 @@ function consumeHashKey(): string | undefined {
   }
 
   const key = match[1];
-  localStorage.setItem(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin(), key);
+  // A fresh scan is the ONE thing that (re)establishes the pin: it replaces the cached key and clears any
+  // "pin broken" marker left by a mismatching handshake (see `handshake`). Kept in memory as well as
+  // localStorage so a storage failure (quota, blocked site data) can't downgrade a just-scanned join to
+  // an unpinned one for this load (review 2026-09-04).
+  memoryHostKey = key;
+  memoryPinBroken = false;
+  try {
+    localStorage.setItem(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin(), key);
+    localStorage.removeItem(PIN_BROKEN_STORAGE_PREFIX + keyStorageOrigin());
+  } catch {
+    // In-memory copy still pins this load.
+  }
 
   const url = new URL(window.location.href);
   url.hash = "";
@@ -184,9 +213,63 @@ function consumeHashKey(): string | undefined {
   return key;
 }
 
+/** In-memory mirrors of the per-origin pin state, so the pin survives a localStorage failure within a
+ * page load (never across loads — that is what the storage copy is for). */
+let memoryHostKey: string | undefined;
+let memoryPinBroken = false;
+
+/** Where "the node's handshake reported a different key than this client's pin" is durably recorded
+ * (review 2026-09-04). While set, the pinned key is neither trusted for a handshake nor replaced by the
+ * node's advertised key: the client gates on a fresh `#k=` scan, the only channel that can legitimately
+ * re-establish trust. Cleared by `consumeHashKey`. */
+const PIN_BROKEN_STORAGE_PREFIX = "loam.transportPinBroken.";
+
+function readStorage(key: string): string | undefined {
+  try {
+    return localStorage.getItem(key) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The cached (or just-scanned-this-load) host public key for the current server origin, if any. */
 export function getCachedHostPublicKey(): string | undefined {
-  return localStorage.getItem(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin()) ?? undefined;
+  // The in-memory copy wins: it is set only by a scan on THIS load, so it is never staler than the stored
+  // copy — and if the storage write failed, the stored copy may be a PREVIOUS key that must not outrank
+  // the one just scanned (it would break the new pin as "changed"). (CodeRabbit, PR #122)
+  return memoryHostKey ?? readStorage(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin());
+}
+
+/** Whether the pinned key for this origin has been contradicted by the node (see `handshake`). */
+export function isHostKeyPinBroken(): boolean {
+  return memoryPinBroken || readStorage(PIN_BROKEN_STORAGE_PREFIX + keyStorageOrigin()) === "1";
+}
+
+function markHostKeyPinBroken(): void {
+  memoryPinBroken = true;
+  try {
+    localStorage.setItem(PIN_BROKEN_STORAGE_PREFIX + keyStorageOrigin(), "1");
+  } catch {
+    // The in-memory flag still gates this load.
+  }
+}
+
+/**
+ * Forget the pinned host public key (and any broken-pin marker) for the current origin. Used ONLY by a
+ * wipe: a node wipe rotates the host's transport key, a device wipe discards this browser's relationship
+ * with the node, and either way the verified rejoin needs a fresh `#k=` scan (review 2026-09-04). A
+ * MISMATCHING handshake deliberately does NOT call this — dropping the pin there would let an on-path
+ * attacker convert a QR-pinned client into an unpinned one that then trusts the advertised key.
+ */
+export function clearCachedHostPublicKey(): void {
+  memoryHostKey = undefined;
+  memoryPinBroken = false;
+  try {
+    localStorage.removeItem(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin());
+    localStorage.removeItem(PIN_BROKEN_STORAGE_PREFIX + keyStorageOrigin());
+  } catch {
+    // Nothing durable to clear.
+  }
 }
 
 /** Whether the QR-delivered key and the node's advertised config key disagree (see `hostKeyMismatch`). */
@@ -227,7 +310,48 @@ export function fingerprint(hostPublicKey?: string): string | undefined {
 
 /** Run the client↔host handshake against a known host public key and store the resulting session.
  * Throws on any network/validation failure — callers treat that like any other bootstrap failure. */
-async function handshake(hostPublicKey: string): Promise<void> {
+/** Listeners told when the live session is REPLACED by a transparent re-handshake (see
+ * `subscribeSessionReplaced`) — the WebSocket owner uses this to drop a socket sealed under the old key. */
+const sessionReplacedListeners = new Set<() => void>();
+
+/**
+ * Subscribe to "the module session was replaced by a re-handshake". A socket confirmed under the previous
+ * session key would otherwise decrypt every later frame against the wrong key and go silently deaf while
+ * the server (which still holds the old session) keeps it open and the UI shows "live" — a single forged
+ * unsealed 401 on a GET was enough to trigger that (review 2026-09-04). The subscriber closes its socket
+ * so the normal reconnect path reopens one under the current session. Returns an unsubscribe.
+ */
+export function subscribeSessionReplaced(listener: () => void): () => void {
+  sessionReplacedListeners.add(listener);
+  return () => {
+    sessionReplacedListeners.delete(listener);
+  };
+}
+
+function notifySessionReplaced(): void {
+  for (const listener of sessionReplacedListeners) {
+    try {
+      listener();
+    } catch {
+      // A listener failure must never break the re-handshake that just succeeded.
+    }
+  }
+}
+
+/**
+ * Run the X25519 handshake against `hostPublicKey`. `qrPinned` says whether that key came from the join
+ * QR (fresh `#k=` or the per-origin cache) rather than the node's own advertisement. The node returns the
+ * public key it actually used; if that differs from the one we derived against, the session key is wrong
+ * and nothing sealed under it can ever open — so rather than let the caller's retry paths loop forever on
+ * `400 Malformed encrypted request` (the post-Emergency-Reset stranding, review 2026-09-04) we fail here.
+ * For a QR-pinned key the pin is marked BROKEN (kept, not dropped): the live session — if any — is left
+ * exactly as it was, and the caller is told a fresh scan is needed. The pin must never be discarded or
+ * replaced from this path, and the returned key is NEVER adopted for the derivation: either would let
+ * an on-path attacker who forges one handshake response turn a QR-pinned client into one that trusts
+ * the advertised key, the downgrade the QR exists to prevent. A merely advertised (config) key just
+ * errors, so the optional-mode caller retries later.
+ */
+async function handshake(hostPublicKey: string, qrPinned: boolean): Promise<void> {
   const hello = transportClientHello();
   const response = await fetch(apiUrl("/api/transport/handshake"), {
     method: "POST",
@@ -245,6 +369,14 @@ async function handshake(hostPublicKey: string): Promise<void> {
 
   if (!parsed.success) {
     throw new Error("Transport handshake returned an invalid response");
+  }
+
+  if (parsed.data.hostPublicKey !== hostPublicKey) {
+    if (qrPinned) {
+      markHostKeyPinBroken();
+      throw new TransportNeedsQrError("changed");
+    }
+    throw new Error("Transport handshake returned a different host key than advertised");
   }
 
   const key = transportClientDerive({
@@ -287,6 +419,15 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   const effectiveMode: TransportEncryption = qrKey ? "required" : mode;
   lastParams = { mode: effectiveMode, hostKey: configHostKey };
 
+  // A pinned key the node has contradicted (see `handshake`) is neither trusted nor replaced: gate until a
+  // fresh scan. A `#k=` consumed on THIS load already cleared the marker, so this only fires for a cached
+  // pin — the post-Emergency-Reset case, or an attacker who forged a handshake response earlier.
+  if (qrKey && !hashKey && isHostKeyPinBroken()) {
+    session = undefined;
+    sessionQrVerified = false;
+    throw new TransportNeedsQrError("changed");
+  }
+
   if (effectiveMode === "off") {
     session = undefined;
     hostKeyMismatch = false;
@@ -317,8 +458,28 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
     return;
   }
 
-  await handshake(hostPublicKey);
+  await handshake(hostPublicKey, hostPublicKey === qrKey);
   sessionQrVerified = hostPublicKey === qrKey;
+}
+
+/**
+ * Whether a boot that could not establish a transport session may proceed in plaintext under the
+ * node's ADVERTISED mode (review 2026-09-04). Only when the advertisement is `optional` AND this client
+ * holds no QR key: a QR key pins the join to `required` (see `ensureSession`'s `effectiveMode`), and the
+ * advertisement comes from the unauthenticated bootstrap, so an on-path attacker who fails one handshake
+ * POST must not be able to drop a QR-joined client into plaintext + cookie identity with no warning. Call
+ * only after `ensureSession` has run (it records the effective mode even when it throws).
+ */
+export function mayFallBackToPlaintext(advertisedMode: TransportEncryption): boolean {
+  // Both checks: `lastParams` is what `ensureSession` recorded, and the cached pin is re-read directly so a
+  // storage hiccup that left `lastParams` stale can never authorise plaintext for a pinned origin.
+  return advertisedMode === "optional" && lastParams?.mode !== "required" && getCachedHostPublicKey() === undefined;
+}
+
+/** Thrown by the fetch/WebSocket entry points when the effective mode is `required` but no session exists
+ * (the QR gate is showing, or a pin was broken mid-session): plaintext is never an option there. */
+function requiredSessionMissing(): Error {
+  return new Error("This node requires an encrypted session and none is established — scan its join QR to reconnect.");
 }
 
 /** A single in-flight re-handshake, shared by all concurrent callers (docs/20 §5.6/§9). Without this, a
@@ -355,7 +516,7 @@ async function doReHandshake(): Promise<boolean> {
   }
 
   try {
-    await handshake(hostPublicKey);
+    await handshake(hostPublicKey, hostPublicKey === cachedKey);
     sessionQrVerified = hostPublicKey === cachedKey;
     // A fresh transport session starts `anonymous` server-side; a bound/required client must re-bind
     // its identity before content or the WebSocket will work again (docs/20). Re-resume with the stored
@@ -364,9 +525,15 @@ async function doReHandshake(): Promise<boolean> {
       try {
         await resumeAttempt(session, storedIdentityToken(), {}, false);
       } catch {
+        // `handshake` has ALREADY replaced the module session — the socket owner must still be told, or a
+        // socket confirmed under the previous key stays open and deaf (CodeRabbit, PR #122).
+        notifySessionReplaced();
         return false;
       }
     }
+    // The module session is now a different one: tell the socket owner so a socket confirmed under the
+    // old key is closed and reopened under this one (see `subscribeSessionReplaced`).
+    notifySessionReplaced();
     return true;
   } catch {
     return false;
@@ -529,6 +696,13 @@ async function attemptFetch(
   const active = session;
 
   if (!active) {
+    // FAIL CLOSED (review 2026-09-04): under an effective `required` mode (the node requires it, or this
+    // client is QR-pinned) a missing session must never degrade to a plaintext cookie request — that was
+    // exactly the hole a forged 401 + forged handshake could open. `off`/unpinned-`optional` keep the
+    // pass-through shape.
+    if (lastParams?.mode === "required") {
+      throw requiredSessionMissing();
+    }
     return fetch(apiUrl(path), {
       method,
       credentials: "include",
@@ -799,6 +973,10 @@ export function wsUrl(base: string): string {
     session.wsConnectionId = undefined;
     session.wsServerSeq = 0;
   }
+  // Same fail-closed rule as `attemptFetch`: no plaintext socket under an effective `required` mode.
+  if (!session && lastParams?.mode === "required") {
+    throw requiredSessionMissing();
+  }
   return session ? `${base}${base.includes("?") ? "&" : "?"}enc=${encodeURIComponent(session.sessionId)}` : base;
 }
 
@@ -1004,6 +1182,8 @@ export function resetTransportStateForTests(): void {
   hostKeyMismatch = false;
   sessionQrVerified = false;
   lastParams = undefined;
+  memoryHostKey = undefined;
+  memoryPinBroken = false;
   reHandshakeInFlight = undefined;
   mintSuppressed = false;
   wipeTokenSnapshot = undefined;

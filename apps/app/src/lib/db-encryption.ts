@@ -22,24 +22,39 @@ export const DB_ENCRYPTION_MODE_DESCRIPTIONS: Record<DbEncryptionMode, string> =
   off: 'The on-device database is stored in plain SQLite — the default.',
   ephemeral: 'A random key generated at each launch, held only in memory. Wipes the database on every restart — nothing survives a reboot.',
   persistent: 'A random key generated once and stored in the device Keystore. Survives reboots; the database stays encrypted at rest.',
-  passphrase: 'A key derived from an operator-chosen passphrase, stored in the device Keystore. Survives reboots; anyone who knows the passphrase can also derive the key.',
+  passphrase:
+    'A key derived from a passphrase you enter every time the host app starts, mixed with a device secret held in the Keystore. The passphrase itself is never stored on the device: the database survives reboots but stays locked until it is entered.',
 };
 
 const MODE_ITEM = 'loam-db-encryption-mode';
 const PERSISTENT_KEY_ITEM = 'loam-db-encryption-persistent-key';
+/**
+ * LEGACY (review 2026-09-04): installs from before this date COMMITTED the operator's passphrase here, so
+ * every boot auto-unlocked from the device — which made passphrase mode protect nothing beyond `persistent`
+ * (anyone holding the unlocked phone had both the device secret and the passphrase). It is NEVER written any
+ * more. It is still READ, once: an existing install's DB opens under it for that boot, and the confirmed-open
+ * ack ({@link markPassphraseKeyMigrated}) then deletes it — from then on the passphrase is asked for at every
+ * start and is at rest on the device only as a transient boot {@link PASSPHRASE_CANDIDATE_ITEM}.
+ */
 const PASSPHRASE_ITEM = 'loam-db-encryption-passphrase';
 /**
- * A boot-time unlock CANDIDATE passphrase (P2-a, Sol round 6). Entered on the `db_encryption_locked`
- * screen and stored HERE — deliberately separate from {@link PASSPHRASE_ITEM} — so it is TRIED without
- * being COMMITTED as the stored passphrase: `resolveDbKey('passphrase')` falls back to it only when no
- * passphrase is committed, and it is promoted to {@link PASSPHRASE_ITEM} by
- * {@link markPassphraseKeyMigrated} ONLY once the DB actually opens under it. That is what lets a WRONG
- * guess leave an intact stored passphrase (and its database) untouched and recoverable for another
- * attempt, instead of overwriting the stored passphrase and stranding the DB under the old key. NOTE:
- * an authenticated, in-place passphrase-REKEY transaction — atomically changing the stored passphrase
- * AND `PRAGMA rekey`ing the existing DB so its data survives the change — is a documented FUTURE
- * enhancement (docs/21); it does not exist today, so CHANGING a passphrase is only possible via the
- * explicit destructive start-fresh flow (which discards the existing encrypted data).
+ * Non-secret marker (`'1'`) that a passphrase GOVERNS this database — set once the DB has actually opened
+ * under one (the confirmed-open ack). Replaces "is a passphrase committed?" as the settings UI's notion of
+ * "set" now that the passphrase itself is never stored (review 2026-09-04). Cleared by Forget.
+ */
+const PASSPHRASE_SET_ITEM = 'loam-db-encryption-passphrase-set';
+/**
+ * The boot-time passphrase ENTRY (P2-a, Sol round 6; review 2026-09-04). Entered on the `db_encryption_locked`
+ * / unreadable recovery screens (or pre-entered in Settings for the next start) and stored HERE only until
+ * `resolveDbKey('passphrase')` reads it — which CONSUMES it. It is tried, never committed: a WRONG entry
+ * fails to open the intact database (recoverable — the operator enters it again), and a RIGHT one needs
+ * nothing further. So the passphrase is at rest on the device only between the operator typing it and the
+ * next key resolution, never across a boot: every start asks for it again, which is what makes this mode
+ * actually stronger than `persistent` (a stolen unlocked phone holds the device secret but not the
+ * passphrase). NOTE: an authenticated, in-place passphrase-REKEY transaction — atomically re-keying the
+ * existing DB so its data survives a passphrase change — is a documented FUTURE enhancement (docs/21); it
+ * does not exist today, so CHANGING a passphrase is only possible via the explicit destructive start-fresh
+ * flow (which discards the existing encrypted data).
  */
 const PASSPHRASE_CANDIDATE_ITEM = 'loam-db-encryption-passphrase-candidate';
 /**
@@ -63,17 +78,16 @@ const DEVICE_SECRET_ITEM = 'loam-db-encryption-device-secret';
 const PASSPHRASE_KEY_VERSION_ITEM = 'loam-db-passphrase-key-version';
 const CURRENT_PASSPHRASE_KEY_VERSION = '2';
 
-// Boot-time unlock CANDIDATE passphrases keyed by the launcher's opaque per-request id, so a promotion
-// commits the EXACT value the accepted DB open verified — never a process-global "last resolve" that a
-// later/overlapping/late resolve could have overwritten (Sol Fable-round P1-1). The flow is fully
-// correlated end-to-end: main.js posts `loam-db-key-request { requestId }`; `resolveDbKey` records the
-// candidate it actually used under that id here; main.js accepts exactly the response whose id matches,
-// remembers it, and echoes it back in the `loam-db-key-migrated { requestId }` ack; `markPassphraseKeyMigrated`
-// then promotes ONLY `pendingPassphraseAttempts.get(requestId)` — the candidate the open under this exact
-// attempt verified. A candidate replacement (`setPassphraseCandidate`) or a forget (`clearStoredPassphrase`)
-// INVALIDATES every outstanding attempt, so a stale/late migration ack can neither commit an old guess nor
-// resurrect a forgotten passphrase. Bounded so a run of timed-out attempts can't grow it without limit.
-const pendingPassphraseAttempts = new Map<string, string>();
+// Outstanding passphrase-mode key-handoff attempts keyed by the launcher's opaque per-request id (Sol
+// Fable-round P1-1). The flow is correlated end-to-end: main.js posts `loam-db-key-request { requestId }`;
+// the responder records the attempt id here (only the id — never the entry itself); main.js accepts exactly the response whose
+// id matches and echoes it back in the `loam-db-key-migrated { requestId }` ack; `markPassphraseKeyMigrated`
+// then acts ONLY for an attempt still present here — recording that a passphrase governs the DB and retiring
+// any legacy stored copy (it never stores the passphrase, review 2026-09-04). A candidate replacement
+// (`setPassphraseCandidate`) or a forget (`clearStoredPassphrase`) INVALIDATES every outstanding attempt, so
+// a stale/late ack can neither confirm an attempt the operator moved past nor resurrect a forgotten
+// passphrase's "set" state. Bounded so a run of timed-out attempts can't grow it without limit.
+const pendingPassphraseAttempts = new Set<string>();
 const MAX_PENDING_PASSPHRASE_ATTEMPTS = 16;
 
 // Passphrase-state MUTEX (Sol Fable-round-2 P1). Invalidating `pendingPassphraseAttempts` only clears
@@ -82,7 +96,7 @@ const MAX_PENDING_PASSPHRASE_ATTEMPTS = 16;
 // deletion. Both let a forgotten/replaced candidate get resurrected. So EVERY operation that touches
 // passphrase candidate/commit state runs to completion under this single lock: the responder's resolve+
 // remember (as one critical section — locking the resolve alone leaves a gap before the remember),
-// `setPassphraseCandidate`, `clearStoredPassphrase`, `setStoredPassphrase`, and `markPassphraseKeyMigrated`.
+// `setPassphraseCandidate`, `clearStoredPassphrase`, and `markPassphraseKeyMigrated`.
 // Serialized, none can interleave across an await, so the invalidate-then-resolve ordering is linearizable.
 let passphraseStateChain: Promise<unknown> = Promise.resolve();
 
@@ -100,13 +114,15 @@ function runPassphraseExclusive<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Record the candidate a resolve used, keyed by its request id, evicting the oldest if over the cap. */
-function rememberPassphraseAttempt(requestId: string, candidate: string): void {
-  // Re-inserting refreshes recency (delete-then-set moves it to the end of the Map's insertion order).
+/** Record an issued passphrase-mode attempt by its request id (evicting the oldest past the cap). Only the
+ * id is kept — never the entry itself (round-2 review): the value was dead weight once promotion went away,
+ * and a module whose guarantee is "never at rest" must not hold plaintext passphrases in the heap either. */
+function rememberPassphraseAttempt(requestId: string): void {
+  // Re-inserting refreshes recency (delete-then-add moves it to the end of the Set's insertion order).
   pendingPassphraseAttempts.delete(requestId);
-  pendingPassphraseAttempts.set(requestId, candidate);
+  pendingPassphraseAttempts.add(requestId);
   while (pendingPassphraseAttempts.size > MAX_PENDING_PASSPHRASE_ATTEMPTS) {
-    const oldest = pendingPassphraseAttempts.keys().next().value;
+    const oldest = pendingPassphraseAttempts.values().next().value;
     if (oldest === undefined) {
       break;
     }
@@ -131,14 +147,6 @@ export type ResolvedDbKey = {
    * success. Never present for any other mode.
    */
   legacyKey?: string;
-  /**
-   * The exact boot-time CANDIDATE passphrase this resolve used to derive `key` (Sol Fable-round P1-1),
-   * present ONLY when `resolveDbKey('passphrase')` fell back to an uncommitted candidate. It is RN-side
-   * bookkeeping — the responder records it against the request id so `markPassphraseKeyMigrated` can promote
-   * the verified value, and NEVER puts it in the bridge payload (raw passphrases don't cross the bridge; only
-   * the derived `key`/`legacyKey` do). Absent when a committed passphrase (or no passphrase) was used.
-   */
-  attemptCandidate?: string;
 };
 
 /** The subset of the nodejs-mobile bridge channel this module uses (kept loose, matching the other
@@ -210,52 +218,32 @@ export async function setDbEncryptionMode(mode: DbEncryptionMode): Promise<SetDb
 }
 
 /**
- * Tri-state presence of a COMMITTED operator passphrase (P1-3, Sol round 7). Deliberately NOT a boolean:
- * a SecureStore READ FAILURE is `'error'`, NEVER `'absent'`. Collapsing a read error to `'absent'`/
- * `false` (as this used to) let the picker show "No passphrase set" on a transient Keystore hiccup and
- * expose a first-time-entry path that could OVERWRITE the committed passphrase — reintroducing the
- * passphrase-replacement bug while the existing DB is still under the OLD key. `'present'` = a non-empty
- * committed passphrase; `'absent'` = a SUCCESSFUL read that came back null/empty; `'error'` = the read
- * threw. The UI must not expose any committed-overwrite affordance on `'error'`. Never returns the
- * passphrase itself. */
+ * Tri-state answer to "does a passphrase GOVERN this database?" (P1-3, Sol round 7; review 2026-09-04).
+ * Deliberately NOT a boolean: a SecureStore READ FAILURE is `'error'`, NEVER `'absent'`. Collapsing a read
+ * error to `'absent'`/`false` (as this used to) let the picker show "No passphrase set" on a transient
+ * Keystore hiccup and expose a first-time-entry path. `'present'` = the {@link PASSPHRASE_SET_ITEM} marker is
+ * recorded (a DB opened under a passphrase) OR a legacy committed passphrase still exists (an install that
+ * hasn't booted since the change); `'absent'` = successful reads found neither; `'error'` = a read threw.
+ * The passphrase itself is never stored, so this never returns (or reveals) it. */
 export type PassphrasePresence = 'present' | 'absent' | 'error';
 
 export async function hasStoredPassphrase(): Promise<PassphrasePresence> {
-  let raw: string | null;
+  let marker: string | null;
+  let legacy: string | null;
   try {
-    raw = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
+    marker = await SecureStore.getItemAsync(PASSPHRASE_SET_ITEM);
+    legacy = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
   } catch {
     return 'error';
   }
-  return typeof raw === 'string' && raw.length > 0 ? 'present' : 'absent';
-}
-
-/** Store (COMMIT) the operator's passphrase in the Keystore-backed secure store. Never written anywhere
- * else — no AsyncStorage, no plain file, no log line.
- *
- * P1-3 (Sol round 7): this COMMITS the passphrase DIRECTLY, so it is no longer used by any UI entry
- * path — the settings picker AND the boot-time unlock prompt both go through the CANDIDATE flow
- * ({@link setPassphraseCandidate} → promoted by {@link markPassphraseKeyMigrated} only once the DB
- * actually opens under it), so neither can ever overwrite a committed passphrase and strand the DB under
- * the old key. Retained as the low-level commit primitive (and exercised by tests); prefer the candidate
- * flow for anything reachable while a DB may exist. */
-export async function setStoredPassphrase(passphrase: string): Promise<void> {
-  await runPassphraseExclusive(async () => {
-    // Commit FIRST, then invalidate every outstanding issued attempt (CodeRabbit): once a committed
-    // passphrase replacement has landed, a delayed ack for a prior attempt must not promote/clear against the
-    // newer state. A thrown write skips the invalidation, so prior attempts survive if nothing actually changed.
-    await SecureStore.setItemAsync(PASSPHRASE_ITEM, passphrase);
-    invalidatePassphraseAttempts();
-  });
+  return marker === '1' || (typeof legacy === 'string' && legacy.length > 0) ? 'present' : 'absent';
 }
 
 /**
- * Store a boot-time unlock CANDIDATE passphrase (P2-a, Sol round 6) — see {@link PASSPHRASE_CANDIDATE_ITEM}.
- * Kept separate from {@link setStoredPassphrase}: the candidate is TRIED by `resolveDbKey('passphrase')`
- * (only when no passphrase is committed) but NOT treated as the stored passphrase until the DB actually
- * opens under it, at which point {@link markPassphraseKeyMigrated} promotes it. A wrong guess therefore
- * leaves any intact stored passphrase — and its database — untouched and recoverable for another attempt.
- * Never logged; never written anywhere but the Keystore-backed secure store.
+ * Store the boot-time passphrase ENTRY (P2-a, Sol round 6) — see {@link PASSPHRASE_CANDIDATE_ITEM}. It is
+ * TRIED (and consumed) by the next `resolveDbKey('passphrase')`, never committed: a wrong entry leaves the
+ * database untouched and recoverable for another attempt, and a right one is simply not needed again until
+ * the next start asks. Never logged; never written anywhere but the Keystore-backed secure store.
  */
 export async function setPassphraseCandidate(passphrase: string): Promise<void> {
   await runPassphraseExclusive(async () => {
@@ -269,14 +257,14 @@ export async function setPassphraseCandidate(passphrase: string): Promise<void> 
 }
 
 /**
- * Forget the stored passphrase AND any pending unlock candidate (e.g. the operator switches away from
- * passphrase mode), VERIFYING each is actually gone afterward (P1-3, Sol round 7). Returns a REAL
+ * Forget everything passphrase-related on the device: the "a passphrase governs this DB" marker, any LEGACY
+ * committed passphrase, any pending boot entry, and the key-version marker (e.g. the operator switches away
+ * from passphrase mode), VERIFYING each is actually gone afterward (P1-3, Sol round 7). The database itself
+ * is untouched — it still opens under the same passphrase at the next start. Returns a REAL
  * `{ ok, error? }` result rather than swallowing delete failures: the old best-effort version always
- * "succeeded", so `handleForgetPassphrase` reported "forgotten" even when the delete silently failed —
- * which then re-enabled the first-time-entry path and let a NEW passphrase overwrite the still-committed
- * old one while the DB was under the OLD key. The caller must only report "forgotten" (and re-expose
- * entry) when this resolves `{ ok: true }`. `error` is a human-readable summary — only item names and
- * generic error messages, NEVER the passphrase material itself. */
+ * "succeeded", so `handleForgetPassphrase` reported "forgotten" even when a delete silently failed. The
+ * caller must only report "forgotten" (and re-expose entry) when this resolves `{ ok: true }`. `error` is a
+ * human-readable summary — only item names and generic error messages, NEVER the passphrase material itself. */
 export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
   // The WHOLE forget runs under the passphrase-state lock (Sol Fable-round-2 P1) so a promotion can't be
   // paused mid-way across this deletion and then write a passphrase back after we've reported it gone.
@@ -294,7 +282,7 @@ export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
     // key and `markPassphraseKeyMigrated` never fires to promote it — the node then boots forever on an
     // unpromoted candidate while Settings misreports "no passphrase set". Clearing the marker lets the next
     // candidate re-run the migrate/promote path cleanly.
-    for (const item of [PASSPHRASE_ITEM, PASSPHRASE_CANDIDATE_ITEM, PASSPHRASE_KEY_VERSION_ITEM]) {
+    for (const item of [PASSPHRASE_SET_ITEM, PASSPHRASE_ITEM, PASSPHRASE_CANDIDATE_ITEM, PASSPHRASE_KEY_VERSION_ITEM]) {
       try {
         await SecureStore.deleteItemAsync(item);
       } catch (err) {
@@ -318,59 +306,36 @@ export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
 }
 
 /**
- * Record that the server CONFIRMED a passphrase-mode DB is now encrypted under the current key
- * derivation (P1-1, Sol round 5) — called from `registerDbEncryption`'s `loam-db-key-migrated` listener
- * once the server signals a successful `PRAGMA rekey` (or reports that the current key already opened
- * the DB directly, e.g. a fresh install). After this resolves, `resolveDbKey('passphrase')` stops
- * offering the legacy key on future boots. Best-effort: a failed write just means the legacy key keeps
- * getting offered unnecessarily on later boots — self-healing (the current key still opens the DB first
- * every time, and `openInitialStore` re-signals migrated again) rather than a correctness problem, so
- * this deliberately does not surface a failure the way {@link setDbEncryptionMode} does.
+ * Record that the server CONFIRMED a passphrase-mode DB opened under the current key derivation (P1-1,
+ * Sol round 5) — called from `registerDbEncryption`'s `loam-db-key-migrated` listener once the server
+ * signals a successful `PRAGMA rekey` (or reports that the current key already opened the DB directly).
+ * Three effects, none of which stores the passphrase (review 2026-09-04):
+ *   - the {@link PASSPHRASE_SET_ITEM} marker is recorded ("a passphrase governs this database");
+ *   - any LEGACY committed passphrase ({@link PASSPHRASE_ITEM}) is retired — that pre-change install has now
+ *     opened under it once, and from here on every start prompts;
+ *   - the key-version marker is set, so `resolveDbKey('passphrase')` stops offering the legacy derivation.
+ * Best-effort: a failed write just means the legacy key keeps getting offered unnecessarily on later boots —
+ * self-healing rather than a correctness problem — so this deliberately does not surface a failure.
  *
  * `requestId` is the launcher's opaque id for the key-handoff attempt whose DB open THIS ack confirms
- * (Sol Fable-round P1-1). Promotion commits ONLY the candidate `resolveDbKey` recorded under that exact id
- * — never a process-global "last resolve" that an overlapping/late/timed-out attempt could have overwritten,
- * and never a value a concurrent Settings edit swapped in. A missing/unknown id (older launcher, or an
- * attempt invalidated by a candidate replacement / forget) promotes nothing — fail-safe.
+ * (Sol Fable-round P1-1). It acts ONLY for an attempt still outstanding under that exact id — a
+ * delayed/duplicate/unknown ack, or one already invalidated by a candidate replacement / Forget, is a
+ * complete no-op — so a stale ack can neither confirm an attempt the operator moved past nor resurrect a
+ * forgotten passphrase's "set" state. A candidate entered AFTER this attempt resolved is a newer operator
+ * action and is deliberately left for the next boot.
  */
 export async function markPassphraseKeyMigrated(requestId?: string): Promise<void> {
-  // The ENTIRE promotion — the attempt lookup AND every SecureStore read/write/delete — runs under the
-  // passphrase-state lock (Sol Fable-round-2 P1). Otherwise this could capture `openedWith`, pause at the
-  // first `await`, let a Forget complete and report the passphrase absent, then resume and write it back.
+  // The whole confirmation — the attempt lookup AND every SecureStore write/delete — runs under the
+  // passphrase-state lock (Sol Fable-round-2 P1), so it can never interleave with a Forget.
   await runPassphraseExclusive(async () => {
     try {
-      // Act ONLY on a request THIS process actually issued (CodeRabbit): a migration ack whose id matches no
-      // outstanding attempt — a delayed/duplicate/unknown ack, or one already invalidated by a candidate
-      // replacement / Forget / committed replacement — changes nothing (no promote, no candidate clear, no
-      // version marker). Consume the entry so a duplicate ack can't act on it twice.
       if (requestId === undefined || !pendingPassphraseAttempts.has(requestId)) {
         return;
       }
-      const openedWith = pendingPassphraseAttempts.get(requestId);
       pendingPassphraseAttempts.delete(requestId);
-      const committed = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
-      const hadCommitted = typeof committed === 'string' && committed.length > 0;
-      if (typeof openedWith === 'string' && openedWith.length > 0 && !hadCommitted) {
-        // A DB open under the current key is PROOF this exact passphrase is correct — promote the VERIFIED
-        // candidate. Guarded on "nothing committed" so it can never clobber a committed passphrase that
-        // itself opened the DB.
-        await SecureStore.setItemAsync(PASSPHRASE_ITEM, openedWith);
-      }
-      // Whether a passphrase is committed AFTER this call: either one already was, or we just promoted the
-      // verified candidate. Only then is the DB confirmed migrated and a pending candidate moot — so gate BOTH
-      // the candidate cleanup AND the version marker on it. This makes a stale/forgotten-race ack (no attempt,
-      // nothing committed) a complete no-op: it can't drop a candidate, resurrect a passphrase, or falsely
-      // mark migrated.
-      const committedNow = hadCommitted || (typeof openedWith === 'string' && openedWith.length > 0);
-      if (committedNow) {
-        const storedCandidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
-        if (typeof storedCandidate === 'string' && storedCandidate.length > 0) {
-          // The open succeeded, so `resolveDbKey` will prefer the committed passphrase from now on — the
-          // pending candidate is moot; clear it.
-          await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
-        }
-        await SecureStore.setItemAsync(PASSPHRASE_KEY_VERSION_ITEM, CURRENT_PASSPHRASE_KEY_VERSION);
-      }
+      await SecureStore.deleteItemAsync(PASSPHRASE_ITEM);
+      await SecureStore.setItemAsync(PASSPHRASE_SET_ITEM, '1');
+      await SecureStore.setItemAsync(PASSPHRASE_KEY_VERSION_ITEM, CURRENT_PASSPHRASE_KEY_VERSION);
     } catch {
       // best-effort — see doc comment above.
     }
@@ -515,7 +480,7 @@ async function clearStoredDbKeysUnlocked(): Promise<ClearDbKeysResult> {
  *                    fixed-length pragma value ahead of that. A stronger app-side KDF is still a
  *                    documented follow-up (docs/21), but "no KDF at all" would overstate the gap. If no
  *                    passphrase has been entered yet, resolves with no key (the UI must collect one
- *                    first via `setStoredPassphrase`) — this module NEVER falls back to plaintext for
+ *                    first via `setPassphraseCandidate`) — this module NEVER falls back to plaintext for
  *                    this mode itself; that decision belongs to main.js/index.tsx (see `resolveDbEncryptionAndBoot`'s
  *                    `db_encryption_locked` handling), which must also refuse to boot plaintext here.
  *                    UNTIL a confirmed migration is recorded (`markPassphraseKeyMigrated`, P1-1 Sol
@@ -546,26 +511,30 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     }
 
     // mode === 'passphrase'
-    let passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
-    // The exact candidate this resolve uses (if it falls back to one) — returned so the responder can map it
-    // to the request id and `markPassphraseKeyMigrated` promotes THIS verified value, never a global.
-    let attemptCandidate: string | undefined;
-    if (typeof passphrase !== 'string' || passphrase.length === 0) {
-      // P2-a (Sol round 6): no COMMITTED passphrase — fall back to a boot-time unlock CANDIDATE if one is
-      // pending (entered on the locked screen). It is tried WITHOUT being committed; only once the DB
-      // opens under it does `markPassphraseKeyMigrated` promote it (the exact value used, tracked below).
-      // So a wrong guess can't overwrite an intact stored passphrase.
-      const candidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
-      if (typeof candidate === 'string' && candidate.length > 0) {
-        passphrase = candidate;
-        attemptCandidate = candidate;
-      }
+    // A LEGACY committed passphrase (pre-2026-09 install) is honoured so the existing database still opens.
+    // It is NOT touched here: it is retired only by the server's confirmed-open ack
+    // (`markPassphraseKeyMigrated`, which the server now sends on EVERY successful passphrase-mode open).
+    // Retiring at read time was a data-loss hole (round-2 review): a resolve whose result the launcher
+    // DISCARDS — its 5 s bridge timeout on a slow cold start, or a driver-unavailable plaintext downgrade —
+    // would have deleted the only copy of a passphrase the operator never had to remember. New installs
+    // never write it, so this is normally null.
+    // The boot-time ENTRY (P2-a, Sol round 6) comes FIRST — it is the operator's newest intent (typed on the
+    // locked/unreadable screen, or pre-entered in Settings, which promises it is used at the next start
+    // even on a legacy install — CodeRabbit, PR #122). Tried WITHOUT being committed — a wrong entry can't
+    // strand the intact database — and CONSUMED right here (review 2026-09-04), so the passphrase is at
+    // rest only between the operator typing it and this read, never across a boot: every start prompts
+    // again. A consumed entry whose boot then fails simply has to be typed again (the recovery screens
+    // offer that) — and on a legacy install the untouched legacy item still opens the DB at the next start.
+    let passphrase = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+    if (typeof passphrase === 'string' && passphrase.length > 0) {
+      await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+    } else {
+      passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
     }
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
-      // No passphrase entered yet (neither committed nor a pending candidate) — the picker UI (or the
-      // boot-time unlock prompt, see index.tsx) is responsible for collecting one. Returning no key here
-      // is what makes main.js treat this as locked (db_encryption_locked) rather than silently booting
-      // plaintext.
+      // No passphrase entered for this start — the boot-time unlock prompt (index.tsx) collects one.
+      // Returning no key here is what makes main.js treat this as locked (db_encryption_locked) rather
+      // than silently booting plaintext.
       return { mode };
     }
     const deviceSecret = await getOrCreateDeviceSecret();
@@ -573,7 +542,7 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
 
     const migratedVersion = await SecureStore.getItemAsync(PASSPHRASE_KEY_VERSION_ITEM);
     if (migratedVersion === CURRENT_PASSPHRASE_KEY_VERSION) {
-      return { mode, key: digest, attemptCandidate };
+      return { mode, key: digest };
     }
 
     // P1-1 (Sol round 5): no confirmed migration recorded yet — this could be an existing pre-round-4
@@ -583,7 +552,7 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     // in place on success and signalling back so `markPassphraseKeyMigrated` sets this marker and future
     // boots skip the extra key entirely.
     const legacyKey = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, passphrase);
-    return { mode, key: digest, legacyKey, attemptCandidate };
+    return { mode, key: digest, legacyKey };
   } catch {
     return { mode };
   }
@@ -627,12 +596,12 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
           // deliberately NOT copied into the bridge payload below (only the derived key/legacyKey cross).
           response = await runPassphraseExclusive(async () => {
             const resolved = await resolveDbKey(mode);
-            // Record EVERY issued passphrase request (CodeRabbit) — a candidate open stores the candidate to
-            // promote, a COMMITTED open stores the empty sentinel (nothing to promote, but a matching entry
-            // still authorizes the migration marker). `markPassphraseKeyMigrated` then acts ONLY on a request
-            // it actually issued, so a delayed/unknown ack can never touch newer state.
+            // Record EVERY issued passphrase request (CodeRabbit) by id — a matching entry is what authorizes
+            // the confirmed-open ack to retire a legacy stored passphrase and set the "set" + version markers.
+            // `markPassphraseKeyMigrated` then acts ONLY on a request it actually issued, so a delayed/unknown
+            // ack can never touch newer state.
             if (requestId !== undefined && mode === 'passphrase') {
-              rememberPassphraseAttempt(requestId, resolved.attemptCandidate ?? '');
+              rememberPassphraseAttempt(requestId);
             }
             return resolved;
           });
@@ -762,7 +731,7 @@ export type DbUnlockResult = { ok: boolean; error?: string };
  * passphrase was ever entered) and, per the "never boot plaintext for these modes" rule, refused to
  * start the server at all rather than silently downgrade. `index.tsx` calls this after the operator has
  * done something that might now produce a key — for passphrase mode, having just called
- * `setStoredPassphrase`; for persistent mode, as a plain manual retry (e.g. after a transient Keystore
+ * `setPassphraseCandidate`; for persistent mode, as a plain manual retry (e.g. after a transient Keystore
  * hiccup). Mirrors `requestDbStartFresh`'s request/response round trip.
  *
  * This only ever ACKS that the retry was kicked off — the retry's real outcome (ready / still locked /

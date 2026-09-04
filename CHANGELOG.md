@@ -6,6 +6,35 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
 ## [Unreleased]
 
+- **Review fixes (2026-09-04 full-codebase review).** Client: a QR-joined client can no longer fall back
+  to plaintext on an `optional` node when its handshake fails (the decision now comes from the transport
+  layer's QR-pinned effective mode, not the unauthenticated advertisement); a node whose transport key
+  changed (Emergency Reset, stale poster) marks the pinned key broken and shows a "scan the current join
+  QR" gate instead of looping on a doomed resume — the pin is kept (never replaced by an advertised key)
+  and only a fresh scan clears it, and a pinned client refuses plaintext fetches/sockets outright; a transparent re-handshake closes the socket sealed under the old
+  key; a wipe also forgets the cached host key, revokes decrypted image `blob:` URLs and clears the
+  rendered-markdown cache; a live transport-mode flip re-runs session setup. Server: WebSocket inbound
+  frames capped at 16 KiB (was the 100 MiB library default, buffered even on pre-auth sockets); a
+  non-member's PATCH on a private channel answers 404 like every sibling route; sync import honours a
+  locally-authoritative channel's posting policy and the node's channel/reply/reaction flags; typing
+  signals respect the posting policy; sealed mesh mail is dropped (and tombstoned) when DMs are off; avatar
+  files no user references are reaped at boot. Android host: **`hostDevice` admin bootstrap** — the
+  launcher mints a per-boot host token and the host's own WebView claims admin with it, so no LAN session
+  can take `firstUser` in the boot window; the loopback mesh bridge requires the same token;
+  **passphrase mode asks for the passphrase at every start and never stores it** (a legacy stored copy is
+  retired only once the server confirms the database opened under it — never on a discarded attempt; the
+  unreadable-DB recovery screen offers "enter it again" for a typo, and "start fresh" re-asks for the
+  passphrase so a fresh database is never keyed by a mistyped one; the host's own admin claim is honoured
+  ahead of the per-IP attempt limiter and retried on later passes; after a node wipe the host screen
+  rejoins under the new key and re-claims admin without an app restart); a
+  system-stopped hotspot (tethering, Wi-Fi toggle) is reflected in the share screen and restarts on reopen;
+  ephemeral mode removes avatars/attachments with the database; the native SQLite wrappers' transitive
+  deps are pinned. `docs/21` gains host-claim and system-stopped-hotspot checks.
+- **Server split.** `apps/server/src/app.ts` (9.4k lines) is now a ~2k-line composition root + domain
+  core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain
+  routes are sibling modules over one `AppContext` (CLAUDE.md "Server architecture"). No behaviour change.
+- README and the site no longer claim an installable offline PWA on the plain-http hotspot path (a
+  hotspot address is not a browser secure context); the copy now says what joiners actually get.
 - **Pre-tester hardening** (from an external full-codebase review, 2026-08-15, plus a three-agent
   adversarial pass over the fixes): one shared content-mutation policy — removed private-channel
   members, timed-out users, archived channels, and post-hoc posting-policy lockdowns can no longer
@@ -26,7 +55,13 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 - **Upgrade notes:** channels archived under the old semantics were *hidden*; after this release
   they reappear for their audience as read-only (archive was never an access control — direct
   reads always worked — but it *was* a visibility control; use **Delete** for gone-for-good).
-  Archiving also no longer purges members' local caches — **Delete is the purge lever** now.
+  Archiving also no longer purges members' local caches — **Delete is the purge lever** now. PR #122 review follow-ups: an Emergency Reset on a fixed-key node without the launcher hook now
+  re-persists the FULL config (sync token included) into the fresh encrypted DB row, matching the ephemeral
+  branch (the plaintext `config.json` copy stays sanitized); the Android passphrase entry is tried before a
+  legacy stored passphrase so a pre-change install can change it (the legacy value is retired only on the
+  server's confirmed-open ack); a key scanned this session always wins over a stale stored pin; a failed
+  sealed resume also closes the socket sealed under the old key; the Android wipe handler re-gates the
+  WebView before re-bootstrapping; per-route rate limits are inline literals so CodeQL can see them.
 
 ## [0.4.0] - 2026-08-08
 

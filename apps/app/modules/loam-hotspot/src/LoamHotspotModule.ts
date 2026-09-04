@@ -1,8 +1,8 @@
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 
-import type { HotspotCredentials } from './LoamHotspot.types';
+import type { HotspotCredentials, LoamHotspotEvents } from './LoamHotspot.types';
 
-declare class LoamHotspotModule extends NativeModule {
+declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
   /**
    * Starts a `WifiManager.LocalOnlyHotspot` and resolves with its generated credentials.
    * Rejects (code `ERR_HOTSPOT`) if the hotspot can't start — no WiFi hardware (emulator),

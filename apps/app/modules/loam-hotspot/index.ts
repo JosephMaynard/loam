@@ -29,6 +29,22 @@ export async function startHotspot(): Promise<HotspotCredentials> {
   return LoamHotspotModule.startHotspot();
 }
 
+/**
+ * Subscribe to the system stopping the hotspot out from under us (review 2026-09-04) — see
+ * `LoamHotspotEvents.onHotspotStopped`. Returns an unsubscribe; a no-op subscription when unsupported.
+ */
+export function addHotspotStoppedListener(handler: () => void): () => void {
+  if (!LoamHotspotModule) {
+    return () => undefined;
+  }
+  try {
+    const subscription = LoamHotspotModule.addListener('onHotspotStopped', handler);
+    return () => subscription.remove();
+  } catch {
+    return () => undefined;
+  }
+}
+
 /** Stops the hotspot if one is running. A no-op when unsupported, and never throws. */
 export function stopHotspot(): void {
   try {

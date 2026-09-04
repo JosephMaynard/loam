@@ -38,6 +38,11 @@ class LoamHotspotModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("LoamHotspot")
 
+    // Fired when the SYSTEM tears the local-only hotspot down (the user enabled tethering — Android allows
+    // one or the other — Wi-Fi was toggled, an OEM power policy). Without it JS kept reporting "running"
+    // and showing a dead SSID/QR until the app was killed (review 2026-09-04).
+    Events("onHotspotStopped")
+
     AsyncFunction("startHotspot") { promise: Promise ->
       startHotspot(promise)
     }
@@ -147,7 +152,14 @@ class LoamHotspotModule : Module() {
     val settled = AtomicBoolean(false)
 
     val callback = object : WifiManager.LocalOnlyHotspotCallback() {
+      // The reservation THIS callback instance started. Every startHotspot registers a fresh callback and
+      // Android keeps the old ones alive until their reservation closes, so a stale callback's onStopped
+      // must only ever act on its own (already-replaced) reservation — never clobber a newer start's state.
+      @Volatile
+      private var mine: WifiManager.LocalOnlyHotspotReservation? = null
+
       override fun onStarted(res: WifiManager.LocalOnlyHotspotReservation) {
+        mine = res
         reservation = res
         starting.set(false)
         if (!settled.compareAndSet(false, true)) {
@@ -170,7 +182,19 @@ class LoamHotspotModule : Module() {
       }
 
       override fun onStopped() {
+        // Only the callback that owns the LIVE reservation reports a stop; a stale one (its reservation was
+        // replaced by a newer start, or released by stopHotspot) is ignored. `starting` is deliberately not
+        // touched here — it belongs to an in-flight start, which a stop of an OLD reservation says nothing about.
+        val owned = mine ?: return
+        if (reservation !== owned) {
+          return
+        }
         reservation = null
+        try {
+          sendEvent("onHotspotStopped")
+        } catch (error: Throwable) {
+          android.util.Log.w("LoamHotspot", "onHotspotStopped event failed", error)
+        }
       }
     }
 

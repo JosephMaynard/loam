@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -1913,14 +1914,14 @@ describe("encryption at rest + key-discard kill switch", () => {
       { killSwitch: { enabled: true } },
     );
     const admin = await session(app);
-    // DB-only admin change: retention TTL, which lives in the DB config table.
+    // DB-only admin changes: retention TTL + a sync bearer token, both of which live in the DB config table.
     expect(
       (
         await app.server.inject({
           method: "PATCH",
           url: "/api/admin/config",
           headers: { cookie: admin.cookie },
-          payload: { retention: { messageTtlMs: 3_600_000 } },
+          payload: { retention: { messageTtlMs: 3_600_000 }, sync: { enabled: true, token: "a-plaintext-bearer-sync-token-nohook" } },
         })
       ).statusCode,
     ).toBe(200);
@@ -1940,8 +1941,16 @@ describe("encryption at rest + key-discard kill switch", () => {
     };
     expect(persisted.retention.messageTtlMs).toBe(3_600_000);
 
-    // Restart under the same key (no-hook can't rotate): the fresh DB's config table is empty, so config.json
-    // is the source — the retention change survives.
+    // CodeRabbit (PR #122): the plaintext config.json blanks the sync bearer token, but the fresh DB's config
+    // row — encrypted under the same fixed key — must keep the FULL config (token included), exactly like
+    // the ephemeral branch does: that row overrides config.json on the next boot, so a sanitized row would
+    // have silently dropped the token.
+    expect((persisted as { sync: { token?: string } }).sync.token).toBeUndefined();
+    const dbRow = JSON.parse(app.store.getConfigValue("config") ?? "{}") as { sync: { token?: string } };
+    expect(dbRow.sync.token).toBe("a-plaintext-bearer-sync-token-nohook");
+
+    // Restart under the same key (no-hook can't rotate): the re-persisted DB row is the source — the retention
+    // change AND the sync token survive.
     const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
     cleanups.push(() => restarted.close());
     const restartedAdmin = await session(restarted);
@@ -1949,6 +1958,8 @@ describe("encryption at rest + key-discard kill switch", () => {
       await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
     ).json() as { retention: { messageTtlMs?: number } };
     expect(config.retention.messageTtlMs).toBe(3_600_000);
+    const restartedRow = JSON.parse(restarted.store.getConfigValue("config") ?? "{}") as { sync: { token?: string } };
+    expect(restartedRow.sync.token).toBe("a-plaintext-bearer-sync-token-nohook");
   });
 
   it("P1-4 (Sol round 10): a config.json persist failure during a fixed-key wipe does NOT lose config or signal the launcher — the journal retains the config snapshot and a reopen recovers it", async () => {
@@ -2800,8 +2811,15 @@ describe("encryption at rest + key-discard kill switch", () => {
   describe("P1-1 (Sol round 5): passphrase key-derivation migration (dbEncryptionMigrateFromKey / PRAGMA rekey)", () => {
     /** Install the `globalThis.__loamReportDbKeyMigrated` bridge (main.js's migration-confirmed signal,
      *  see db-encryption.ts's `markPassphraseKeyMigrated`) and count every invocation. Auto-uninstalled. */
-    function installFakeMigratedHook(): { calls: number; requestIds: (string | undefined)[] } {
-      const state: { calls: number; requestIds: (string | undefined)[] } = { calls: 0, requestIds: [] };
+    function installFakeMigratedHook(): { calls: number; requestIds: (string | undefined)[]; reset: () => void } {
+      const state: { calls: number; requestIds: (string | undefined)[]; reset: () => void } = {
+        calls: 0,
+        requestIds: [],
+        reset() {
+          state.calls = 0;
+          state.requestIds.length = 0;
+        },
+      };
       (globalThis as unknown as { __loamReportDbKeyMigrated?: (requestId?: string) => void }).__loamReportDbKeyMigrated =
         (requestId?: string) => {
           state.calls += 1;
@@ -2832,7 +2850,11 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect((await post(original, admin.cookie, "MIGRATE_ME")).statusCode).toBe(201);
       await original.close();
 
-      expect(migrated.calls).toBe(0);
+      // Every successful passphrase-mode open acks (2026-09-04 — the launcher retires a legacy stored
+      // passphrase only on this confirmation), so creating the legacy DB counted one. Reset so the
+      // assertions below isolate the MIGRATION boot's ack.
+      expect(migrated.calls).toBe(1);
+      migrated.reset();
 
       // Boot with the CURRENT key plus the legacy key as a migration fallback — mirrors main.js offering
       // both because it hasn't recorded a confirmed migration yet.
@@ -2889,6 +2911,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       });
       const admin = await session(original);
       expect((await post(original, admin.cookie, "SURVIVE_INTERRUPTED_REKEY")).statusCode).toBe(201);
+      migrated.reset(); // the legacy-DB creation acked once (every passphrase-mode open does, 2026-09-04)
       await original.close();
 
       // Simulate a rekey interrupted by an OS-kill AFTER the pre-migration backup was taken but BEFORE
@@ -2947,6 +2970,7 @@ describe("encryption at rest + key-discard kill switch", () => {
         dbEncryptionMode: "passphrase",
       });
       const admin = await session(original);
+      migrated.reset(); // the legacy-DB creation acked once (every passphrase-mode open does, 2026-09-04)
       expect((await post(original, admin.cookie, "SURVIVE_CLEANUP_FAILURE")).statusCode).toBe(201);
       await original.close();
 
@@ -10444,5 +10468,443 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
         })
       ).statusCode,
     ).toBe(200);
+  });
+});
+
+describe("review fixes 2026-09-04 (server)", () => {
+  const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000, maxContacts: 1000 };
+  const HOST_TOKEN = "host-token-for-tests-0123456789abcdefghijklmn";
+
+  type WireEvent = { type?: string; userId?: string; channelId?: string };
+  const openSockets: WebSocket[] = [];
+
+  afterEach(() => {
+    for (const socket of openSockets) {
+      socket.close();
+    }
+    openSockets.length = 0;
+  });
+
+  /** A plaintext cookie socket (transport `optional`, no `?enc=`) — admitted directly, no challenge. */
+  function connect(
+    baseUrl: string,
+    cookie: string,
+  ): Promise<{ socket: WebSocket; events: WireEvent[]; closed: Promise<number> }> {
+    return new Promise((resolve, reject) => {
+      const socket = new (WebSocket as unknown as new (url: string, opts: unknown) => WebSocket)(
+        `${baseUrl.replace("http", "ws")}/ws`,
+        { headers: { cookie } },
+      );
+      const events: WireEvent[] = [];
+      const closed = new Promise<number>((resolveClose) => {
+        socket.addEventListener("close", (event) => resolveClose((event as CloseEvent).code));
+      });
+      socket.addEventListener("message", (event) => {
+        events.push(JSON.parse(String((event as MessageEvent).data)) as WireEvent);
+      });
+      socket.addEventListener("open", () => {
+        openSockets.push(socket);
+        resolve({ socket, events, closed });
+      });
+      socket.addEventListener("error", () => reject(new Error("websocket failed to connect")));
+    });
+  }
+
+  async function waitFor(check: () => boolean, timeoutMs = 3_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (check()) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return check();
+  }
+
+  const settle = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function patchChannel(app: LoamApp, cookie: string, channelId: string, payload: Record<string, unknown>): Promise<InjectResponse> {
+    return app.server.inject({ method: "PATCH", url: `/api/channels/${channelId}`, headers: { cookie }, payload });
+  }
+
+  function post(app: LoamApp, cookie: string, channelId: string, body: string): Promise<InjectResponse> {
+    return app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie },
+      payload: { type: "channelPost", channelId, body },
+    });
+  }
+
+  async function bodiesIn(app: LoamApp, cookie: string, channelId: string): Promise<string[]> {
+    const response = await app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie } });
+    return (response.json() as { body?: string }[]).map((message) => message.body ?? "");
+  }
+
+  it("closes a WebSocket that sends a frame over the 16 KiB inbound cap (1009) and keeps a small one open", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const small = await connect(baseUrl, user.cookie);
+    small.socket.send("x".repeat(1024));
+    await settle();
+    expect(small.socket.readyState).toBe(WebSocket.OPEN);
+
+    const big = await connect(baseUrl, user.cookie);
+    big.socket.send("x".repeat(32 * 1024));
+    expect(await big.closed).toBe(1009);
+  });
+
+  it("answers a non-member's PATCH on a private channel exactly like a missing channel (404 parity)", async () => {
+    const app = await makeApp();
+    await newSession(app); // firstUser admin
+    const owner = await newSession(app);
+    const outsider = await newSession(app);
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Leadership", visibility: "private" },
+    });
+    expect(created.statusCode).toBe(201);
+    const channelId = (created.json() as { id: string }).id;
+
+    const missing = await patchChannel(app, outsider.cookie, "no-such-channel", { name: "Renamed" });
+    const hidden = await patchChannel(app, outsider.cookie, channelId, { name: "Renamed" });
+    expect(missing.statusCode).toBe(404);
+    expect(hidden.statusCode).toBe(404);
+    expect(hidden.body).toBe(missing.body);
+
+    // The owner (and an admin) can still change it — only outsiders get parity.
+    expect((await patchChannel(app, owner.cookie, channelId, { name: "Renamed" })).statusCode).toBe(200);
+  });
+
+  it("sync import honours a local channel's posting policy and the node's feature flags", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    expect((await post(source, sourceAdmin.cookie, "announcements", "peer announcement")).statusCode).toBe(201);
+    const general = await post(source, sourceAdmin.cookie, "general", "peer general");
+    expect(general.statusCode).toBe(201);
+    const generalId = (general.json() as { message: { id: string } }).message.id;
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { type: "reaction", targetMessageId: generalId, reaction: "👍" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: sourceUrl, label: "source" }], intervalMs: 3_600_000 },
+      features: { enableReactions: false },
+    });
+    const pullerAdmin = await newSession(puller);
+    // The puller's OWN announcements channel is admins-only; the source's admin arrives as a plain user.
+    expect((await patchChannel(puller, pullerAdmin.cookie, "announcements", { allowPosting: "admins" })).statusCode).toBe(200);
+
+    const run = await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    expect(run.statusCode).toBe(200);
+
+    expect(await bodiesIn(puller, pullerAdmin.cookie, "general")).toContain("peer general");
+    expect(await bodiesIn(puller, pullerAdmin.cookie, "announcements")).not.toContain("peer announcement");
+    expect(puller.store.loadMessages().some((message) => message.type === "reaction")).toBe(false);
+  });
+
+  it("does not broadcast a typing signal from a member the channel's posting policy excludes", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const member = await newSession(app);
+    const viewer = await newSession(app);
+    expect((await patchChannel(app, admin.cookie, "announcements", { allowPosting: "admins" })).statusCode).toBe(200);
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const { events } = await connect(baseUrl, viewer.cookie);
+
+    const typing = (cookie: string) =>
+      app.server.inject({ method: "POST", url: "/api/typing", headers: { cookie }, payload: { channelId: "announcements" } });
+    expect((await typing(member.cookie)).statusCode).toBe(204); // silent no-op, never leaks
+    expect((await typing(admin.cookie)).statusCode).toBe(204); // control: an allowed poster does broadcast
+
+    expect(await waitFor(() => events.some((event) => event.type === "typing" && event.userId === admin.userId))).toBe(true);
+    expect(events.some((event) => event.type === "typing" && event.userId === member.userId)).toBe(false);
+  });
+
+  it("drops sealed mesh mail on a node with direct messages disabled instead of materialising a DM", async () => {
+    const app = await makeApp({ mesh: MESH, features: { enableDMs: false } });
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const card = await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie: bob.cookie } });
+    expect(card.statusCode).toBe(200);
+    expect(
+      (await app.server.inject({ method: "POST", url: "/api/mesh/contacts", headers: { cookie: alice.cookie }, payload: card.json() }))
+        .statusCode,
+    ).toBe(200);
+
+    const send = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/messages",
+      headers: { cookie: alice.cookie },
+      payload: { toMeshId: (card.json() as { meshId: string }).meshId, body: "not deliverable here" },
+    });
+    expect(send.statusCode).toBe(200);
+
+    const stored = app.store.loadMessages();
+    expect(stored.some((message) => message.type === "dm")).toBe(false);
+    // Tombstoned and dropped — not left in the carried queue either.
+    expect(stored.some((message) => message.type === "sealed")).toBe(false);
+    const dms = await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: bob.cookie } });
+    expect((dms.json() as { id: string }[]).some((user) => user.id.startsWith("mesh."))).toBe(false);
+  });
+
+  it("reaps avatar image files no user references (boot sweep) and keeps referenced ones", async () => {
+    const { app, dataDir } = await makeApp({ identity: { allowUserAvatarEdit: true, allowUserAvatarUpload: true } });
+    const session = await newSession(app);
+    const webp = Buffer.from("RIFF\0\0\0\0WEBP").toString("base64");
+    const upload = await app.server.inject({
+      method: "PUT",
+      url: "/api/users/me/avatar-image",
+      headers: { cookie: session.cookie },
+      payload: { mimeType: "image/webp", data: webp },
+    });
+    expect(upload.statusCode).toBe(200);
+    const imageId = (upload.json() as { avatar: { imageId: string } }).avatar.imageId;
+    const stray = join(dataDir, "avatars", "avt_0123456789abcdef.webp");
+    writeFileSync(stray, "RIFF\0\0\0\0WEBP");
+    // Files younger than the in-flight grace window are never swept (an upload writes its file before the
+    // user record references it) — age both past it so the sweep's decision is about references alone.
+    const old = new Date(Date.now() - 60 * 60_000);
+    utimesSync(stray, old, old);
+    utimesSync(join(dataDir, "avatars", `${imageId}.webp`), old, old);
+
+    await app.reapOrphanedAvatars();
+    expect(existsSync(stray)).toBe(false);
+    expect(existsSync(join(dataDir, "avatars", `${imageId}.webp`))).toBe(true);
+
+    // An ephemeral-style restart: the database vanishes, the avatar file must not outlive it.
+    await app.close();
+    for (const name of ["loam.db", "loam.db-wal", "loam.db-shm"]) {
+      rmSync(join(dataDir, name), { force: true });
+    }
+    utimesSync(join(dataDir, "avatars", `${imageId}.webp`), old, old);
+    const reopened = await buildApp({ dataDir, logger: false });
+    cleanups.push(() => reopened.close());
+    expect(await waitFor(() => !existsSync(join(dataDir, "avatars", `${imageId}.webp`)))).toBe(true);
+  });
+
+  it("hostDevice: with a launcher host token no LAN session becomes admin, and only the token claims", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const first = await newSession(app);
+    expect(first.isAdmin).toBe(false);
+    const second = await newSession(app);
+    expect(second.isAdmin).toBe(false);
+
+    const config = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: first.cookie } });
+    expect((config.json() as { networkConfig: { allowAdminClaim: boolean } }).networkConfig.allowAdminClaim).toBe(false);
+
+    const claim = (cookie: string, secret: string) =>
+      app.server.inject({ method: "POST", url: "/api/admin/claim", headers: { cookie }, payload: { secret } });
+    expect((await claim(first.cookie, "not-the-token")).statusCode).toBe(403);
+    const promoted = await claim(first.cookie, HOST_TOKEN);
+    expect(promoted.statusCode).toBe(200);
+    expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+
+    // A read-time projection: the persisted strategy is untouched (the same data dir booted without a
+    // token on a desktop resolves to it), and a plain session still can't claim.
+    const adminConfig = await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: first.cookie } });
+    expect((adminConfig.json() as { admin: { bootstrap: string } }).admin.bootstrap).toBe("firstUser");
+    expect((await claim(second.cookie, "guess")).statusCode).toBe(403);
+  });
+
+  it("requires the host token on the loopback mesh bridge when the launcher configured one", async () => {
+    const app = await makeApp({ mesh: MESH }, { hostToken: HOST_TOKEN });
+    const outbound = (headers?: Record<string, string>) =>
+      app.server.inject({ method: "GET", url: "/api/mesh/outbound", headers });
+    expect((await outbound()).statusCode).toBe(404);
+    expect((await outbound({ "x-loam-host-token": "wrong" })).statusCode).toBe(404);
+    expect((await outbound({ "x-loam-host-token": HOST_TOKEN })).statusCode).toBe(200);
+    // Still loopback-only even with the token.
+    expect(
+      (
+        await app.server.inject({
+          method: "GET",
+          url: "/api/mesh/outbound",
+          headers: { "x-loam-host-token": HOST_TOKEN },
+          remoteAddress: "192.168.4.7",
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+});
+
+describe("review fixes 2026-09-04 (server) — round 2", () => {
+  const MESH_OFF_SYNC = (peers: { url: string; label?: string }[]) => ({
+    sync: { enabled: true, peers, intervalMs: 3_600_000 },
+  });
+  const HOST_TOKEN = "host-token-round-two-0123456789abcdefghijklmnop";
+
+  function claim(app: LoamApp, cookie: string, secret: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/admin/claim", headers: { cookie }, payload: { secret } });
+  }
+
+  it("hostDevice: the CORRECT host token is honoured even after the per-IP attempt budget is spent on wrong guesses", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const host = await newSession(app);
+    // A co-located app (same loopback IP) burns the semantic attempt budget (5 per 5 min) with guesses.
+    for (let i = 0; i < 5; i += 1) {
+      expect((await claim(app, host.cookie, `guess-${i}`)).statusCode).toBe(403);
+    }
+    expect((await claim(app, host.cookie, "guess-6")).statusCode).toBe(429);
+    // The host's own claim with the real token still succeeds — a 256-bit token can't be guessed, so the
+    // limiter has nothing to protect there, and a hostDevice node has no other way to gain an admin.
+    const promoted = await claim(app, host.cookie, HOST_TOKEN);
+    expect(promoted.statusCode).toBe(200);
+    expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+  });
+
+  it("hostDevice CONFIGURED on a node with no launcher token behaves like `none` and never touches the limiter", async () => {
+    const app = await makeApp({ admin: { bootstrap: "hostDevice" } });
+    const user = await newSession(app);
+    expect(user.isAdmin).toBe(false);
+    const response = await claim(app, user.cookie, "anything");
+    expect(response.statusCode).toBe(403);
+    expect((response.json() as { error: string }).error).toBe("Admin claiming is not enabled on this LOAM node");
+    expect(app.rateLimiterEntryCounts().claim).toBe(0);
+  });
+
+  it("a host-token node that PATCHes admin.bootstrap to setupCode saves the intent but mints no unusable code", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const host = await newSession(app);
+    expect((await claim(app, host.cookie, HOST_TOKEN)).statusCode).toBe(200);
+    const patched = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: host.cookie },
+      payload: { admin: { bootstrap: "setupCode" } },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect((patched.json() as { admin: { bootstrap: string } }).admin.bootstrap).toBe("setupCode"); // persisted intent
+    expect(app.getAdminSetupCode()).toBeUndefined(); // nothing minted/logged — it could never be claimed here
+    const config = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: host.cookie } });
+    expect((config.json() as { networkConfig: { allowAdminClaim: boolean } }).networkConfig.allowAdminClaim).toBe(false);
+  });
+
+  it("a passphrase-mode open acks the launcher even without a legacy key to migrate from", async () => {
+    const calls: (string | undefined)[] = [];
+    (globalThis as unknown as { __loamReportDbKeyMigrated?: (requestId?: string) => void }).__loamReportDbKeyMigrated = (
+      requestId?: string,
+    ) => {
+      calls.push(requestId);
+    };
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamReportDbKeyMigrated?: unknown }).__loamReportDbKeyMigrated;
+    });
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-ack-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const app = await buildApp({
+      dataDir,
+      logger: false,
+      dbEncryptionKey: "a passphrase-derived key",
+      dbEncryptionMode: "passphrase",
+      dbKeyRequestId: "dbkey-42",
+    });
+    cleanups.push(() => app.close());
+    // The launcher retires a pre-change install's stored passphrase ONLY on this ack — so it must fire on
+    // every successful passphrase-mode open, not just when a legacy key was offered.
+    expect(calls).toEqual(["dbkey-42"]);
+
+    // A persistent-mode open (no passphrase) still acks nothing.
+    const other = mkdtempSync(join(tmpdir(), "loam-ack-test-"));
+    cleanups.push(() => rmSync(other, { recursive: true, force: true }));
+    const persistent = await buildApp({ dataDir: other, logger: false, dbEncryptionKey: "device secret", dbEncryptionMode: "persistent" });
+    cleanups.push(() => persistent.close());
+    expect(calls).toEqual(["dbkey-42"]);
+  });
+
+  it("sync import honours a locally-tightened posting policy on an IMPORTED channel and refuses reactions into a locally archived one", async () => {
+    const source = await makeApp(MESH_OFF_SYNC([]));
+    const sourceAdmin = await newSession(source);
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/channels",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { name: "Relief Ops" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    const first = await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "relief-ops", body: "first" },
+    });
+    expect(first.statusCode).toBe(201);
+    const firstId = (first.json() as { message: { id: string } }).message.id;
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const puller = await makeApp(MESH_OFF_SYNC([{ url: sourceUrl, label: "source" }]));
+    const pullerAdmin = await newSession(puller);
+    const sync = () => puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    const bodies = async () =>
+      ((await puller.server.inject({ method: "GET", url: "/api/messages/relief-ops", headers: { cookie: pullerAdmin.cookie } })).json() as {
+        body?: string;
+        type: string;
+      }[]);
+    expect((await sync()).statusCode).toBe(200);
+    expect((await bodies()).map((m) => m.body)).toContain("first"); // the channel + post imported
+
+    // The local admin locks the IMPORTED channel to admins-only. The source's admin is an ordinary user
+    // here, so its later posts must not land.
+    expect(
+      (
+        await puller.server.inject({
+          method: "PATCH",
+          url: "/api/channels/relief-ops",
+          headers: { cookie: pullerAdmin.cookie },
+          payload: { allowPosting: "admins" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { type: "channelPost", channelId: "relief-ops", body: "after lockdown" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    expect((await sync()).statusCode).toBe(200);
+    expect((await bodies()).map((m) => m.body)).not.toContain("after lockdown");
+
+    // Now the local admin ARCHIVES it; a peer reaction on the already-imported post must not land either.
+    expect(
+      (
+        await puller.server.inject({
+          method: "PATCH",
+          url: "/api/channels/relief-ops",
+          headers: { cookie: pullerAdmin.cookie },
+          payload: { archived: true },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { type: "reaction", targetMessageId: firstId, reaction: "👍" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    expect((await sync()).statusCode).toBe(200);
+    expect(puller.store.loadMessages().some((message) => message.type === "reaction")).toBe(false);
   });
 });

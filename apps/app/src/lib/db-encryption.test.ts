@@ -34,7 +34,6 @@ const {
   setDbEncryptionMode,
   setDbModeHint,
   setPassphraseCandidate,
-  setStoredPassphrase,
 } = await import("@/lib/db-encryption");
 type BridgeChannel = import("@/lib/db-encryption").BridgeChannel;
 type DbEncryptionMode = import("@/lib/db-encryption").DbEncryptionMode;
@@ -42,8 +41,11 @@ type DbEncryptionModeOrError = import("@/lib/db-encryption").DbEncryptionModeOrE
 type SetDbEncryptionModeResult = import("@/lib/db-encryption").SetDbEncryptionModeResult;
 type SetDbModeHintResult = import("@/lib/db-encryption").SetDbModeHintResult;
 
+// LEGACY committed-passphrase item (review 2026-09-04): never written any more; seeded directly in the
+// tests that model a pre-change install.
 const PASSPHRASE_ITEM = "loam-db-encryption-passphrase";
 const PASSPHRASE_CANDIDATE_ITEM = "loam-db-encryption-passphrase-candidate";
+const PASSPHRASE_SET_ITEM = "loam-db-encryption-passphrase-set";
 
 function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
@@ -119,24 +121,86 @@ describe("resolveDbKey", () => {
     expect(second.key).toBe(first.key);
   });
 
-  it("passphrase mode derives SHA256(passphrase + ':' + deviceSecret)", async () => {
-    await setStoredPassphrase("hunter2");
+  it("passphrase mode derives SHA256(passphrase + ':' + deviceSecret) from the boot-time entry", async () => {
+    await setPassphraseCandidate("hunter2");
     const { key: deviceSecret } = await resolveDbKey("persistent");
     expect(deviceSecret).toBeTruthy();
 
     const { key } = await resolveDbKey("passphrase");
-    const expected = sha256Hex(`hunter2:${deviceSecret}`);
-    expect(key).toBe(expected);
+    expect(key).toBe(sha256Hex(`hunter2:${deviceSecret}`));
   });
 
-  it("passphrase mode resolves with no key when no passphrase has been stored", async () => {
+  it("passphrase mode CONSUMES the entry: the next resolve has no key, so every start prompts again (review 2026-09-04)", async () => {
+    await setPassphraseCandidate("hunter2");
+    expect((await resolveDbKey("passphrase")).key).toBeTruthy();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+    expect((await resolveDbKey("passphrase")).key).toBeUndefined();
+    // Nothing passphrase-shaped is left at rest anywhere.
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+  });
+
+  it("passphrase mode resolves with no key when no passphrase has been entered", async () => {
     const { key } = await resolveDbKey("passphrase");
     expect(key).toBeUndefined();
   });
 
+  it("a LEGACY committed passphrase (pre-change install) keeps opening the database until a CONFIRMED open retires it", async () => {
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "hunter2");
+    const { key: deviceSecret } = await resolveDbKey("persistent");
+    const { key } = await resolveDbKey("passphrase");
+    expect(key).toBe(sha256Hex(`hunter2:${deviceSecret}`));
+    // NOT retired at read time (round-2 review): a resolve the launcher discards — its 5 s bridge timeout, a
+    // driver-unavailable plaintext downgrade — must not delete the only copy of a passphrase the operator
+    // never had to remember. It still opens the DB on the next attempt.
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("hunter2");
+    expect((await resolveDbKey("passphrase")).key).toBe(sha256Hex(`hunter2:${deviceSecret}`));
+    expect(await hasStoredPassphrase()).toBe("present"); // the legacy item counts as "set" meanwhile
+
+    // The server's confirmed-open ack is what retires it: from then on every start prompts.
+    await setDbEncryptionMode("passphrase");
+    await runMigrationHandoff("r1");
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_SET_ITEM)).toBe("1");
+    expect(await hasStoredPassphrase()).toBe("present");
+    expect((await resolveDbKey("passphrase")).key).toBeUndefined();
+  });
+
+  it("a discarded resolve (request issued, no ack) leaves a legacy passphrase untouched", async () => {
+    await setDbEncryptionMode("passphrase");
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "hunter2");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "timed-out" });
+      await flushMicrotasks();
+      // main.js gave up on this request (timeout / downgrade): no ack ever arrives.
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("hunter2");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_SET_ITEM)).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a settings entry takes precedence over a legacy committed passphrase for that one boot: the entry is consumed, the legacy value is left untouched for the next", async () => {
+    // CodeRabbit (PR #122): a pre-change install (legacy item present) must still be able to CHANGE its
+    // passphrase from Settings — so the entry is tried first. It is one-shot (consumed here), and the legacy
+    // value is retired only on the server's confirmed-open ack, so a wrong entry falls back to the legacy
+    // passphrase on the very next boot instead of locking the operator out of an intact DB.
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "committed");
+    await setPassphraseCandidate("new-entry");
+    const { key: deviceSecret } = await resolveDbKey("persistent");
+    const { key } = await resolveDbKey("passphrase");
+    expect(key).toBe(sha256Hex(`new-entry:${deviceSecret}`));
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("committed");
+    // Next boot, no entry left: the legacy passphrase opens the DB again.
+    const { key: next } = await resolveDbKey("passphrase");
+    expect(next).toBe(sha256Hex(`committed:${deviceSecret}`));
+  });
+
   describe("P1-1 (Sol round 5): passphrase key-derivation migration", () => {
     it("includes legacyKey = SHA256(passphrase) alongside the current key when no migration is recorded yet", async () => {
-      await setStoredPassphrase("hunter2");
+      await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "hunter2");
       const result = await resolveDbKey("passphrase");
 
       expect(result.legacyKey).toBe(sha256Hex("hunter2"));
@@ -147,25 +211,29 @@ describe("resolveDbKey", () => {
 
     it("omits legacyKey once a migration handoff completes", async () => {
       await setDbEncryptionMode("passphrase");
-      await setStoredPassphrase("hunter2");
-      // Sanity: legacyKey is offered before migration is recorded.
+      await setPassphraseCandidate("hunter2");
+      // Sanity: legacyKey is offered before migration is recorded (the entry is consumed by this probe).
       expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
 
+      await setPassphraseCandidate("hunter2");
       await runMigrationHandoff("r1");
 
+      await setPassphraseCandidate("hunter2");
       const migrated = await resolveDbKey("passphrase");
       expect(migrated.legacyKey).toBeUndefined();
       expect(migrated.key).toBeTruthy();
     });
 
-    it("a fresh install (passphrase set, migration never needed) still offers legacyKey until a migration handoff completes — mirrors the server's 'never needed but still confirms' path", async () => {
+    it("a fresh install (entry made, migration never needed) still offers legacyKey until a migration handoff completes — mirrors the server's 'never needed but still confirms' path", async () => {
       // No pre-existing DB simulation needed here — this module has no DB awareness; it just reflects
       // whether ITS OWN migration marker has been recorded, regardless of whether a legacy key would
       // ever actually be useful server-side.
       await setDbEncryptionMode("passphrase");
-      await setStoredPassphrase("a brand new passphrase");
+      await setPassphraseCandidate("a brand new passphrase");
       expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
+      await setPassphraseCandidate("a brand new passphrase");
       await runMigrationHandoff("r1");
+      await setPassphraseCandidate("a brand new passphrase");
       expect((await resolveDbKey("passphrase")).legacyKey).toBeUndefined();
     });
   });
@@ -234,7 +302,7 @@ describe("registerDbEncryption", () => {
   });
 
   it("LOW-6: echoes the launcher's requestId so a late reply can't satisfy a later request", async () => {
-    await setStoredPassphrase("hunter2");
+    await setPassphraseCandidate("hunter2");
     await setDbEncryptionMode("passphrase");
     const channel = makeFakeChannel();
     const cleanup = registerDbEncryption(channel);
@@ -268,7 +336,7 @@ describe("registerDbEncryption", () => {
 
   it("P1-1: records a confirmed migration for an ISSUED request's ack, and ignores an ack with no matching request", async () => {
     await setDbEncryptionMode("passphrase");
-    await setStoredPassphrase("hunter2");
+    await setPassphraseCandidate("hunter2");
     expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
 
     const channel = makeFakeChannel();
@@ -277,13 +345,20 @@ describe("registerDbEncryption", () => {
       // An ack with NO issued request (no prior loam-db-key-request) changes nothing (CodeRabbit).
       channel.emit("loam-db-key-migrated", { requestId: "never-issued" });
       await flushMicrotasks();
+      await setPassphraseCandidate("hunter2");
       expect((await resolveDbKey("passphrase")).legacyKey).toBeTruthy();
+      expect(await hasStoredPassphrase()).toBe("absent");
 
-      // A real handoff — request then ack for the same id — records the migration.
+      // A real handoff — request then ack for the same id — records the migration (and that a passphrase
+      // now governs the DB), without ever storing the passphrase.
+      await setPassphraseCandidate("hunter2");
       channel.emit("loam-db-key-request", { requestId: "r1" });
       await flushMicrotasks();
       channel.emit("loam-db-key-migrated", { requestId: "r1" });
       await flushMicrotasks();
+      expect(await hasStoredPassphrase()).toBe("present");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+      await setPassphraseCandidate("hunter2");
       expect((await resolveDbKey("passphrase")).legacyKey).toBeUndefined();
     } finally {
       cleanup();
@@ -291,7 +366,7 @@ describe("registerDbEncryption", () => {
   });
 
   it("a normal request posts the resolved mode/key (and legacyKey when offered) back over the bridge", async () => {
-    await setStoredPassphrase("hunter2");
+    await setPassphraseCandidate("hunter2");
     // Select passphrase mode via the persisted selection this responder actually reads.
     await setDbEncryptionMode("passphrase");
 
@@ -617,64 +692,47 @@ describe("requestDbStartFresh intent threading (Sol P1 / release blocker)", () =
   });
 });
 
-describe("passphrase unlock CANDIDATE (P2-a, Sol round 6)", () => {
+describe("boot-time passphrase entry (P2-a, Sol round 6 — never at rest across a boot, review 2026-09-04)", () => {
   beforeEach(() => {
     resetSecureStoreMock();
     resetCryptoMock();
   });
 
-  it("setPassphraseCandidate does NOT commit the passphrase (hasStoredPassphrase stays 'absent')", async () => {
+  it("setPassphraseCandidate does NOT mark a passphrase as set, and never writes the legacy item", async () => {
     await setPassphraseCandidate("a-guess");
     expect(await hasStoredPassphrase()).toBe("absent");
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
   });
 
-  it("resolveDbKey('passphrase') falls back to the candidate when nothing is committed", async () => {
-    await setPassphraseCandidate("a-guess");
-    const { key: deviceSecret } = await resolveDbKey("persistent");
-    const { key } = await resolveDbKey("passphrase");
-    expect(key).toBe(sha256Hex(`a-guess:${deviceSecret}`));
-  });
-
-  it("a committed passphrase takes precedence over a leftover candidate", async () => {
-    await setStoredPassphrase("committed");
-    await setPassphraseCandidate("stale-guess");
-    const { key: deviceSecret } = await resolveDbKey("persistent");
-    const { key } = await resolveDbKey("passphrase");
-    expect(key).toBe(sha256Hex(`committed:${deviceSecret}`));
-  });
-
-  it("markPassphraseKeyMigrated PROMOTES a verified candidate to the committed passphrase and clears it", async () => {
-    // Drive the FULL correlated handoff (Sol Fable-round P1-1): the responder records the candidate under
-    // the request id; the migration ack for that same id promotes exactly it.
+  it("a confirmed open (request → ack) records that a passphrase governs the DB without storing it", async () => {
     await setDbEncryptionMode("passphrase");
     await setPassphraseCandidate("verified-guess");
+    await runMigrationHandoff("r1");
+
+    expect(await hasStoredPassphrase()).toBe("present");
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_SET_ITEM)).toBe("1");
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+    // Nothing on the device derives the key without the operator: the next resolve has no key.
+    expect((await resolveDbKey("passphrase")).key).toBeUndefined();
+  });
+
+  it("an entry made AFTER an attempt resolved is a newer operator action — that attempt's ack leaves it for the next boot", async () => {
+    await setDbEncryptionMode("passphrase");
+    await setPassphraseCandidate("first");
     const channel = makeFakeChannel();
     const cleanup = registerDbEncryption(channel);
     try {
-      channel.emit("loam-db-key-request", { requestId: "r1" });
+      channel.emit("loam-db-key-request", { requestId: "r1" }); // consumes "first"
       await flushMicrotasks();
+      await setPassphraseCandidate("second"); // invalidates r1
       channel.emit("loam-db-key-migrated", { requestId: "r1" });
       await flushMicrotasks();
-
-      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("verified-guess");
-      expect(await hasStoredPassphrase()).toBe("present");
-      expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBe("second");
+      expect(await hasStoredPassphrase()).toBe("absent");
     } finally {
       cleanup();
     }
-  });
-
-  it("a migration handoff never CLOBBERS a committed passphrase, and drops a stale candidate", async () => {
-    await setDbEncryptionMode("passphrase");
-    await setStoredPassphrase("correct");
-    await setPassphraseCandidate("wrong-leftover");
-    // The committed passphrase opened the DB (the responder records the empty sentinel for r1), so the ack
-    // promotes nothing but still confirms migration and drops the now-moot candidate.
-    await runMigrationHandoff("r1");
-
-    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("correct");
-    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
   });
 });
 
@@ -684,35 +742,36 @@ describe("correlated passphrase attempts (Sol Fable-round P1-1)", () => {
     resetCryptoMock();
   });
 
-  it("promotes ONLY the accepted attempt's candidate when two overlap with different candidates", async () => {
+  it("only the ACCEPTED attempt's ack records the passphrase as set; a late ack for an invalidated attempt is a no-op", async () => {
     await setDbEncryptionMode("passphrase");
     const channel = makeFakeChannel();
     const cleanup = registerDbEncryption(channel);
     try {
-      // R1 resolves candidate A (records r1→A).
+      // R1 resolves entry A.
       await setPassphraseCandidate("A");
       channel.emit("loam-db-key-request", { requestId: "r1" });
       await flushMicrotasks();
-      // The operator replaces the pending candidate with B (invalidates r1's attempt) and R2 resolves B.
+      // The operator replaces the entry with B (invalidates r1's attempt) and R2 resolves B.
       await setPassphraseCandidate("B");
       channel.emit("loam-db-key-request", { requestId: "r2" });
       await flushMicrotasks();
 
-      // The server confirms the ACCEPTED attempt R2 → commit B, the value that actually opened the DB.
-      channel.emit("loam-db-key-migrated", { requestId: "r2" });
-      await flushMicrotasks();
-      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("B");
-
-      // A LATE migration ack for the ignored R1 must NOT overwrite B with A (or resurrect A).
+      // A LATE ack for the ignored R1 records nothing.
       channel.emit("loam-db-key-migrated", { requestId: "r1" });
       await flushMicrotasks();
-      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("B");
+      expect(await hasStoredPassphrase()).toBe("absent");
+
+      // The server confirms the ACCEPTED attempt R2 → a passphrase governs the DB. Still nothing stored.
+      channel.emit("loam-db-key-migrated", { requestId: "r2" });
+      await flushMicrotasks();
+      expect(await hasStoredPassphrase()).toBe("present");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
     } finally {
       cleanup();
     }
   });
 
-  it("a migration ack with an unknown/mismatched id promotes nothing", async () => {
+  it("a migration ack with an unknown/mismatched id records nothing", async () => {
     await setDbEncryptionMode("passphrase");
     await setPassphraseCandidate("guess");
     const channel = makeFakeChannel();
@@ -720,7 +779,7 @@ describe("correlated passphrase attempts (Sol Fable-round P1-1)", () => {
     try {
       channel.emit("loam-db-key-request", { requestId: "r1" });
       await flushMicrotasks();
-      // An ack for a DIFFERENT request id (or none) never promotes r1's candidate.
+      // An ack for a DIFFERENT request id (or none) never confirms r1's attempt.
       channel.emit("loam-db-key-migrated", { requestId: "not-r1" });
       await flushMicrotasks();
       expect(await hasStoredPassphrase()).toBe("absent");
@@ -730,7 +789,7 @@ describe("correlated passphrase attempts (Sol Fable-round P1-1)", () => {
     }
   });
 
-  it("Forget racing a delayed migration ack does NOT re-create the passphrase", async () => {
+  it("Forget racing a delayed migration ack does NOT record the passphrase as set", async () => {
     await setDbEncryptionMode("passphrase");
     await setPassphraseCandidate("guess");
     const channel = makeFakeChannel();
@@ -738,12 +797,12 @@ describe("correlated passphrase attempts (Sol Fable-round P1-1)", () => {
     try {
       channel.emit("loam-db-key-request", { requestId: "r1" });
       await flushMicrotasks();
-      // The operator forgets the passphrase BEFORE the (delayed) migration ack for r1 arrives.
+      // The operator forgets BEFORE the (delayed) migration ack for r1 arrives.
       expect((await clearStoredPassphrase()).ok).toBe(true);
       channel.emit("loam-db-key-migrated", { requestId: "r1" });
       await flushMicrotasks();
 
-      // The forgotten passphrase stays forgotten — the invalidated attempt can't resurrect it.
+      // The forgotten state stays forgotten — the invalidated attempt can't resurrect it.
       expect(await hasStoredPassphrase()).toBe("absent");
       expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
     } finally {
@@ -758,25 +817,26 @@ describe("passphrase-state linearizability under the mutex (Sol Fable-round-2 P1
     resetCryptoMock();
   });
 
-  it("a candidate replacement that FULLY resolves before a stale ack prevents the old candidate's promotion", async () => {
+  it("an entry replacement that FULLY resolves before a stale ack prevents that attempt's confirmation", async () => {
     await setDbEncryptionMode("passphrase");
     await setPassphraseCandidate("A");
     const channel = makeFakeChannel();
     const cleanup = registerDbEncryption(channel);
     try {
-      channel.emit("loam-db-key-request", { requestId: "r1" }); // r1 → A
+      channel.emit("loam-db-key-request", { requestId: "r1" }); // r1 consumes A
       await flushMicrotasks();
       await setPassphraseCandidate("B"); // fully resolves → invalidates r1's attempt (under the lock)
       channel.emit("loam-db-key-migrated", { requestId: "r1" });
       await flushMicrotasks();
-      // r1's attempt was invalidated before its ack ran; A is never committed (B is only a candidate).
-      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+      // r1's attempt was invalidated before its ack ran: nothing recorded; B waits for the next boot.
+      expect(await hasStoredPassphrase()).toBe("absent");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBe("B");
     } finally {
       cleanup();
     }
   });
 
-  it("Forget and a stale migration ack fired CONCURRENTLY never resurrect the passphrase (either serialization)", async () => {
+  it("Forget and a stale migration ack fired CONCURRENTLY never leave a passphrase marked as set (either serialization)", async () => {
     await setDbEncryptionMode("passphrase");
     await setPassphraseCandidate("A");
     const channel = makeFakeChannel();
@@ -790,7 +850,7 @@ describe("passphrase-state linearizability under the mutex (Sol Fable-round-2 P1
       const forgetResult = await forget;
       await flushMicrotasks();
       expect(forgetResult.ok).toBe(true);
-      // mark-then-Forget deletes the just-promoted value; Forget-then-mark finds no attempt — either way absent.
+      // mark-then-Forget deletes the just-recorded marker; Forget-then-mark finds no attempt — either way absent.
       expect(await hasStoredPassphrase()).toBe("absent");
       expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
     } finally {
@@ -798,7 +858,7 @@ describe("passphrase-state linearizability under the mutex (Sol Fable-round-2 P1
     }
   });
 
-  it("a candidate-replacement WRITE FAILURE preserves the prior attempt (no invalidation without a landed replacement)", async () => {
+  it("an entry-replacement WRITE FAILURE preserves the prior attempt (no invalidation without a landed replacement)", async () => {
     await setDbEncryptionMode("passphrase");
     await setPassphraseCandidate("A");
     const channel = makeFakeChannel();
@@ -806,15 +866,15 @@ describe("passphrase-state linearizability under the mutex (Sol Fable-round-2 P1
     try {
       channel.emit("loam-db-key-request", { requestId: "r1" }); // r1 → A
       await flushMicrotasks();
-      // The replacement's write to the candidate item fails: it must NOT invalidate the still-valid r1 → A
+      // The replacement's write to the entry item fails: it must NOT invalidate the still-valid r1 → A
       // (write-before-invalidate), since no replacement actually landed.
       failSecureStoreItem(PASSPHRASE_CANDIDATE_ITEM, new Error("Keystore busy"));
       await expect(setPassphraseCandidate("B")).rejects.toThrow();
       clearSecureStoreFailure(PASSPHRASE_CANDIDATE_ITEM);
-      // r1's attempt survives, so its legitimate ack still promotes the value the DB actually opened under.
+      // r1's attempt survives, so its legitimate ack still records that the DB opened under a passphrase.
       channel.emit("loam-db-key-migrated", { requestId: "r1" });
       await flushMicrotasks();
-      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("A");
+      expect(await hasStoredPassphrase()).toBe("present");
     } finally {
       cleanup();
     }
@@ -827,20 +887,27 @@ describe("hasStoredPassphrase tri-state (P1-3, Sol round 7)", () => {
     resetCryptoMock();
   });
 
-  it("returns 'absent' after a SUCCESSFUL read that finds nothing committed", async () => {
+  it("returns 'absent' after successful reads that find neither the set-marker nor a legacy passphrase", async () => {
     await expect(hasStoredPassphrase()).resolves.toBe("absent");
   });
 
-  it("returns 'present' when a committed passphrase exists", async () => {
-    await setStoredPassphrase("committed");
+  it("returns 'present' once a confirmed open recorded the marker — with NO passphrase at rest", async () => {
+    await setDbEncryptionMode("passphrase");
+    await setPassphraseCandidate("committed-by-open");
+    await runMigrationHandoff("r1");
+    await expect(hasStoredPassphrase()).resolves.toBe("present");
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+  });
+
+  it("returns 'present' for a pre-change install that still holds a legacy committed passphrase", async () => {
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "legacy");
     await expect(hasStoredPassphrase()).resolves.toBe("present");
   });
 
-  it("returns 'error' (NEVER 'absent') on a SecureStore read failure — the UI must not expose overwrite entry", async () => {
+  it("returns 'error' (NEVER 'absent') on a SecureStore read failure — the UI must not expose the entry path", async () => {
     // A transient read failure used to collapse to `false`/'absent', which showed "No passphrase set" and
-    // re-exposed the first-time-entry (committed-overwrite) path even though a passphrase was in fact set.
-    await setStoredPassphrase("still-committed");
-    failSecureStoreItem(PASSPHRASE_ITEM, new Error("Keystore unavailable"));
+    // re-exposed the first-time-entry path even though a passphrase was in fact set.
+    failSecureStoreItem(PASSPHRASE_SET_ITEM, new Error("Keystore unavailable"));
     await expect(hasStoredPassphrase()).resolves.toBe("error");
   });
 });
@@ -851,48 +918,51 @@ describe("clearStoredPassphrase verified deletion (P1-3, Sol round 7)", () => {
     resetCryptoMock();
   });
 
-  it("reports ok:true and removes BOTH the committed passphrase and any pending candidate on success", async () => {
-    await setStoredPassphrase("committed");
+  it("reports ok:true and removes the set-marker, any legacy passphrase, and any pending entry on success", async () => {
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "legacy");
+    await secureStoreMock.setItemAsync(PASSPHRASE_SET_ITEM, "1");
     await setPassphraseCandidate("pending");
     await expect(clearStoredPassphrase()).resolves.toEqual({ ok: true });
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_SET_ITEM)).toBeNull();
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+    await expect(hasStoredPassphrase()).resolves.toBe("absent");
   });
 
-  it("reports ok:false on a delete failure — and the committed passphrase is NOT removed (no false 'forgotten')", async () => {
-    await setStoredPassphrase("committed");
+  it("reports ok:false on a delete failure — and the legacy passphrase is NOT removed (no false 'forgotten')", async () => {
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "committed");
     failSecureStoreItem(PASSPHRASE_ITEM, new Error("Keystore unavailable"));
 
     const result = await clearStoredPassphrase();
     expect(result.ok).toBe(false);
     expect(result.error).toContain(PASSPHRASE_ITEM);
 
-    // Clear the injected failure and confirm the committed passphrase is still there — so the UI, which
-    // only reports "forgotten" on ok:true, keeps `hasStoredPassphrase === 'present'` and never re-exposes
-    // the first-time-entry path that would overwrite it.
+    // Clear the injected failure and confirm the legacy passphrase is still there — so the UI, which
+    // only reports "forgotten" on ok:true, keeps `hasStoredPassphrase === 'present'`.
     clearSecureStoreFailure(PASSPHRASE_ITEM);
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("committed");
   });
 });
 
-describe("passphrase settings entry uses the CANDIDATE flow (P1-3, Sol round 7)", () => {
+describe("passphrase settings entry uses the ENTRY flow (P1-3, Sol round 7)", () => {
   beforeEach(() => {
     resetSecureStoreMock();
     resetCryptoMock();
   });
 
-  it("an existing DB + no committed SecureStore entry: a settings passphrase entry never overwrites the committed value", async () => {
-    // Simulate the locked-settings path: a passphrase was previously committed (the DB is encrypted under
-    // it), and the operator opens settings and types a DIFFERENT passphrase. The settings entry stores a
-    // CANDIDATE (setPassphraseCandidate) — it must NOT clobber the committed passphrase, so the DB stays
-    // recoverable under the original.
-    await setStoredPassphrase("original-committed");
+  it("a legacy committed passphrase is never overwritten by a settings entry: the entry is tried once, the legacy value stays for the boot after", async () => {
+    // A pre-change install whose DB is encrypted under "original-committed"; the operator types a
+    // DIFFERENT passphrase into Settings. The entry is stored separately and must NOT clobber the legacy
+    // value: it is tried for exactly one boot (consumed), and if that open fails the launcher falls back to
+    // the legacy value at the next start — the DB stays reachable under the original.
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "original-committed");
     await setPassphraseCandidate("new-entry-from-settings");
 
-    // The committed value is untouched; resolveDbKey still derives from the COMMITTED passphrase.
-    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("original-committed");
     const { key: deviceSecret } = await resolveDbKey("persistent");
     const { key } = await resolveDbKey("passphrase");
-    expect(key).toBe(sha256Hex(`original-committed:${deviceSecret}`));
+    expect(key).toBe(sha256Hex(`new-entry-from-settings:${deviceSecret}`));
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("original-committed");
+    const { key: fallback } = await resolveDbKey("passphrase");
+    expect(fallback).toBe(sha256Hex(`original-committed:${deviceSecret}`));
   });
 });

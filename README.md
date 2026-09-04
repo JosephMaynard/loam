@@ -21,7 +21,7 @@
   <a href="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml"><img src="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" />
   <img src="https://img.shields.io/badge/node-24.15.0-brightgreen" alt="Node 24.15.0" />
-  <img src="https://img.shields.io/badge/PWA-installable-5a7d5a" alt="Installable PWA" />
+  <img src="https://img.shields.io/badge/joiners-nothing%20to%20install-5a7d5a" alt="Joiners: nothing to install" />
 </p>
 
 ---
@@ -60,7 +60,7 @@ development on the same transport-agnostic layer.
 - 🛡️ **Host controls**: optional join approval, plus greeter and moderator roles to vet newcomers and ban or shadow-ban when needed.
 - 🕸️ **Node-to-node sync (optional)**: two LOAM nodes that can reach each other sync their public channels, so separate hotspots converge into one conversation ([docs/11](docs/11-node-sync.md)).
 - 🤖 **Optional local AI**: point it at a laptop's [Ollama](https://ollama.com) model, or run a small downloadable model on the Android host itself (via llama.rn). Either way a bot appears as a DM contact and its replies stream in. Off by default, operator-installed, and entirely local.
-- 🔌 **Works offline**: the client is an installable PWA that keeps working against its local cache when the connection drops.
+- 🔌 **Rides out connection drops**: the client keeps what it has seen in the browser's local database and reconnects on its own when the hotspot blips. (A home-screen install and the offline app shell need a browser "secure context", which a plain-`http://` hotspot address is not — so joiners get them only from the Android host's own screen or an HTTPS self-host. See [Security](#security).)
 - 🌍 **Minimal by design**: an intentionally sparse interface that stays out of the way and renders text in any language, including right-to-left scripts.
 - 🌗 **Light & dark**: the client follows your system theme automatically.
 - 🔐 **Encrypted in transit by default**: when you join by scanning the QR code (the normal path), traffic between your device and the host is sealed, so others on the same Wi-Fi can't read it — no setup needed. (The default `optional` mode still lets a client that skips the QR connect in plaintext; a `required`/hardened node refuses those. Either way the host itself sees messages — it's the server; end-to-end encryption that hides content from the host is future work.) See [Security](#security).
@@ -259,8 +259,12 @@ flowchart TB
     Server -.->|uses| Helpers
 ```
 
-The **client** is a PWA, which is a website you can install like an app and that keeps working offline
-against a local cache. The **server** is a single [Fastify](https://fastify.dev) process. The
+The **client** is a small browser app. It keeps what it has seen in the browser's local database and
+reconnects automatically, so a dropped connection is a pause rather than a loss; on a secure origin (the
+Android host's own screen, or an HTTPS self-host) it also registers as an installable PWA with an
+offline app shell. On a plain-`http://` hotspot address browsers refuse both of those by design, which
+is why LOAM does its own transport encryption instead (see [Security](#security)). The **server** is a
+single [Fastify](https://fastify.dev) process. The
 **schema** package is the single source of truth for what a message, channel, or user looks like;
 because both sides import it and validate against it, the wire format cannot drift. The **helper
 libraries** are deliberately tiny and dependency-free: one turns an id into a memorable name, one turns
@@ -515,6 +519,12 @@ There is also **app-layer transport encryption** (an X25519 handshake bootstrapp
 **on by default** (`optional`), that seals request and WebSocket traffic on top of plain HTTP on the LAN
 — so a normal QR joiner is encrypted with no setup. A `required`/hardened node additionally refuses
 plaintext clients and hides request paths. See [docs/08](docs/08-transport-security.md).
+
+Why app-layer rather than HTTPS: an off-grid hotspot has no way to get a browser-trusted certificate, so
+joiners reach the node at a plain `http://` address. Browsers treat that as an *insecure context* and
+withhold WebCrypto, service workers, and the home-screen install prompt there. LOAM therefore ships its
+own encryption in JavaScript and accepts that joiners on a hotspot don't get an installable, offline app
+shell — the Android host's own screen (loopback) and an HTTPS self-host do.
 
 **Honest limitations.** This raises the bar; it is not a guarantee of safety. The host processes
 messages in plaintext while running, so a compromised host, a device seized while powered on with the

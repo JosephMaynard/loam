@@ -109,6 +109,53 @@ trade-offs — not open bugs:
 
 ## Review history
 
+### 2026-09-04 — full-codebase review (Fable 5.1)
+
+A second full read of the post-#118 code (server, client, Android host) with three parallel adversarial
+audits, each finding re-verified against the source. **Fixed on `feat/review-fixes-and-server-split`:**
+
+**High** — a QR-joined client on the default `optional` transport mode silently continued in plaintext
+with a cookie identity when its handshake failed once: the fallback keyed off the *unauthenticated*
+advertised mode rather than the QR-pinned effective mode, so an on-path attacker only had to drop one
+handshake POST.
+
+**Medium** — the Android host's `firstUser` grant was raceable from the LAN on every fresh-DB boot (the
+server listens on all interfaces before the operator's own WebView loads); replaced by a `hostDevice`
+bootstrap keyed on a per-boot launcher token that only the host's WebView receives. Passphrase mode
+auto-unlocked from the device on every boot (the passphrase was stored beside the device secret), so it
+protected nothing beyond `persistent`; the passphrase is now asked for at every start and never stored.
+The WebSocket accepted 100 MiB inbound frames (library default) on pre-auth sockets — capped at 16 KiB.
+An Emergency Reset stranded previously QR-joined clients in a resume loop (nothing detected the changed
+host key — now a mismatching handshake marks the pin broken and gates on a rescan, keeping the pin); a forged unsealed 401 on a GET could leave a socket silently deaf after the re-handshake;
+ephemeral mode left uploaded avatars on disk across restarts; a system-stopped hotspot kept showing a
+dead SSID/QR.
+
+**Low** — a non-member's PATCH on a private channel returned 403 where a missing channel returned 404
+(an existence oracle); sync import bypassed a local channel's posting policy and the node's feature
+flags; typing signals ignored the posting policy; sealed mesh mail materialised DMs on a node with DMs
+disabled; the "loopback-only" mesh bridge is reachable by any app on Android (now also token-gated);
+decrypted image blobs and rendered markdown outlived a wipe in memory; the native SQLite wrappers'
+transitive dependencies were unpinned.
+
+**Found clean:** the transport hooks, tunnel path checks and replay window; identity resolution and
+revocation; the WebSocket challenge and audience filtering; the mutation policy across every mutating
+route; the markdown sanitiser and every HTML sink; `#k=` fragment handling; the key handoff, wipe resume
+and supply-chain pinning on the Android host.
+
+**Round 2 (same day) — three independent reviews of the fixes themselves** found, and this branch
+closed, two regressions the first pass had introduced: the client's "key changed" handling could drop a
+QR pin and then fall back to plaintext mid-session (now: the pin is kept and marked broken, the client
+gates on a rescan, and a pinned client refuses plaintext outright); and the Android passphrase rework
+retired a pre-change install's stored passphrase at read time, so a boot whose key attempt was discarded
+(the launcher's 5 s bridge timeout) would have lost the only copy (now: retired only on the server's
+confirmed-open ack, which every passphrase-mode open sends). Also closed: "start fresh" after a mistyped
+passphrase keyed the new database with the typo; a co-located app could exhaust the host's own admin-claim
+budget (a correct host token is now honoured ahead of the limiter, and the client keeps the token until a
+claim succeeds); sync import skipped the posting policy on imported channels and reactions into locally
+archived ones; a setup code was minted on a host-token node where it could never be claimed. The server
+split was verified by a normalised per-function diff against master: no function or route missing or
+altered beyond the intended fixes.
+
 ### 2026-08-15 — external full-codebase review (Sol)
 
 An independent external review of v0.4.0-era code (commit `7cd5558`) reproduced six findings —

@@ -59,7 +59,11 @@ editing `config.json` before boot), and, in a build that ships it, the admin UI 
 convenience wrapper over the same PATCH. With mesh off the endpoint `404`s and the courier stays idle (one cheap loopback
 GET per 30 s). The endpoints are **loopback-only** (`request.ip` must be `127.0.0.1`/`::1`; `trustProxy`
 is off, so this is unspoofable) — a joiner on the hotspot LAN cannot drain or inject the sealed queue;
-that path stays the token-guarded `/api/sync/*`.
+that path stays the token-guarded `/api/sync/*`. On Android, loopback is reachable by every installed
+app (and `adb forward`), so the launcher additionally sends its per-boot host token
+(`x-loam-host-token`, minted in `main.js` and handed to the server as `LOAM_HOST_TOKEN`) and the
+server requires it whenever one is configured — a co-located app can neither read the queue's routing
+metadata nor inject blobs (review 2026-09-04).
 
 ## Device requirements
 
@@ -110,7 +114,9 @@ that path stays the token-guarded `/api/sync/*`.
 - **Mesh off:** turn `mesh.enabled` off on B → its `/api/mesh/outbound` `404`s and the radios stop
   (logcat: `loam-mesh-stop`); a blob pushed to it is dropped.
 - **Loopback guard:** from another device on the LAN, `curl http://<B-ip>:3000/api/mesh/outbound` →
-  `404` (only B's own launcher, over 127.0.0.1, may read it).
+  `404` (only B's own launcher, over 127.0.0.1, may read it). On the phone itself,
+  `adb shell curl http://127.0.0.1:3000/api/mesh/outbound` → `404` too (no host token); only the
+  launcher, which sends `x-loam-host-token`, gets `200`.
 - **Idempotence:** re-enter range repeatedly → B never shows a duplicate DM (dedup by id + tombstone).
 - **Battery sanity:** leave both advertising/scanning 30 min foregrounded, note drain — informs Phase 4.
 

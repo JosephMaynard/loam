@@ -142,7 +142,7 @@ below.**
 | `off` | none | — | n/a — plaintext DB (today's default) |
 | `ephemeral` | random 32-byte key, generated fresh **every launch** | No — see "ephemeral wipe" below | RAM only, held in the RN/embedded process for the life of the process; never written to disk |
 | `persistent` | the random 32-byte **device secret** itself | Yes | `expo-secure-store` (Android Keystore-backed) |
-| `passphrase` | `SHA-256(passphrase + ":" + deviceSecret)`, hex-encoded | Yes | the passphrase and the device secret both live in `expo-secure-store`; the derived key is recomputed each boot, never stored |
+| `passphrase` | `SHA-256(passphrase + ":" + deviceSecret)`, hex-encoded | Yes | the device secret lives in `expo-secure-store`; the **passphrase is entered at every start and never stored** (it sits in the secure store only between the operator typing it and the boot consuming it); the derived key is recomputed each boot, never stored |
 
 The passphrase pre-key is `SHA-256(passphrase + ":" + deviceSecret)` — it mixes the operator's passphrase
 with a random 32-byte **device secret** held in the Keystore (introduced in the Sol round-4 redesign). Two

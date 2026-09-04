@@ -496,6 +496,7 @@ export const en = {
   // by a scanned join QR — there is no safe way to connect without one.
   "gate.needsQrTitle": "Scan the join QR to connect securely",
   "gate.needsQrBody": "Scan this node's join QR code with your device to connect — there's no other way to connect securely.",
+  "gate.needsQrKeyChanged": "This node's key no longer matches the one you scanned — the host may have reset it, or this network is not what it claims to be. Scan the node's current join QR code to reconnect.",
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",
