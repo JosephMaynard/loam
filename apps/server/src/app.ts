@@ -1,7 +1,7 @@
 import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
 import fastifyRateLimit from "@fastify/rate-limit";
@@ -23,7 +23,6 @@ import {
   type MeshIdentity,
   type TransportIdentity,
 } from "@loam/crypto";
-import { generateDisplayName } from "@loam/display-name";
 import {
   AdminClaimRequestSchema,
   AttachmentUploadRequestSchema,
@@ -50,7 +49,6 @@ import {
   ReportResolveRequestSchema,
   ReportSchema,
   RolesUpdateRequestSchema,
-  securityProfilePreset,
   SyncAttachmentRequestSchema,
   SyncAttachmentResponseSchema,
   SyncDigestSchema,
@@ -65,7 +63,6 @@ import {
   type Channel,
   type ChannelCreateRequest,
   type ChannelUpdateRequest,
-  type DbEncryptionMode,
   type LoamConfig,
   type LoamConfigUpdate,
   type Message,
@@ -76,19 +73,17 @@ import {
   type Report,
   type SealedMessage,
   type NetworkConfig,
-  type OllamaConfig,
   type StreamEvent,
   type SyncDigest,
-  type ServerErrorCode,
   type SyncPeer,
   type SyncStatusReport,
   type TransportEncryption,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-import { importLegacyJsonData, openStore, type LoamStore, type StoreDriver } from "./db.js";
+import { importLegacyJsonData, openStore, type LoamStore } from "./db.js";
 import { resolveLanIPv4 } from "./net.js";
 import {
   fetchPeerTransportPosture,
@@ -97,34 +92,20 @@ import {
   type PeerTransportPosture,
   type PeerTransportSession,
 } from "./sync-transport.js";
+import type { SocketClient, SocketSession, AppData, ClientEvent, OnDeviceChatHook, AppOptions, LoamApp } from "./types.js";
+import { reportBootNotice, reportDbKeyMigrated } from "./boot-bridge.js";
+import { IdentityLimitError, DbEncryptionUnreadableError, DbEncryptionPlaintextUnconvertedError, WipeResumeInProgressError, errorBody } from "./errors.js";
+import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds, MAX_LLM_CONTEXT_MESSAGES } from "./defaults.js";
+import { defaultLoamConfig, isRecord, mergeConfig, reconcileLegacyProfile } from "./config.js";
+import { timingSafeEqualStrings, verifySecret } from "./secrets.js";
+import { makeUser, makeBotUser, makeSessionUserId, makeSessionToken, makeIdentityToken, hashIdentityToken, makeAdminSetupCode, encodeCookieValue, readCookie } from "./identity.js";
+import { newAvatarImageId, newAttachmentId, isImageAttachmentMime, sanitizeAttachmentName, attachmentFileName, parseAttachmentFileName, attachmentMaxBytes, isAcceptableAttachmentBytes, attachmentFileMaxBytes, missingAttachmentMaxAgeMs, missingAttachmentMaxRecordsPerPass, missingAttachmentBackoffMs, avatarImageExtension, parseAvatarImageId, avatarImageHasExpectedSignature } from "./media.js";
+import { isChannelMessage, newMessageId } from "./ids.js";
 
-type SocketClient = {
-  OPEN: number;
-  readyState: number;
-  send: (payload: string) => void;
-  close: () => void;
-  on: {
-    (event: "close", listener: () => void): void;
-    (event: "message", listener: (data: unknown) => void): void;
-  };
-};
-type SocketSession = {
-  socket: SocketClient;
-  userId: string;
-  /** Transport session key (docs/08) when the client connected `/ws?enc=<sid>`; outbound frames are
-   * then XChaCha20-Poly1305-sealed. Undefined = plaintext frames (transport off / no session). */
-  transportKey?: string;
-  /** Fresh per-socket id (docs/20 §7). Application frames are sealed under an AAD that includes it, so
-   * a frame captured on one connection can't be replayed on a reconnected socket sharing the same
-   * transport session. Set only for an encrypted, key-confirmed socket. */
-  connectionId?: string;
-  /** Monotonic server→client frame sequence for this connection (docs/20 §7) — the client rejects a
-   * replayed/stale frame. Starts at 0; `wsSend` pre-increments. */
-  frameSeq?: number;
-  /** The transport session id this (encrypted) socket rides, so it can be torn down when that session is
-   * evicted/pruned (docs/20 §7 — a confirmed socket must not outlive its session key). */
-  transportSessionId?: string;
-};
+export { ALL_ERROR_CODES } from "./errors.js";
+export { defaultLoamConfig } from "./config.js";
+export type { AppOptions, LoamApp, OnDeviceChatHook } from "./types.js";
+
 
 /** Direction-separated AADs for the reflection-safe WS key-confirmation (docs/20 §7): the challenge
  * and the proof seal under DIFFERENT constants, so a keyless attacker can't reflect the server's
@@ -148,997 +129,56 @@ const WS_UNCONFIRMED_PER_IP_CAP = 8;
  */
 const WS_MAX_INBOUND_FRAME_BYTES = 16 * 1024;
 
-type AppData = {
-  users: User[];
-  channels: Channel[];
-  messages: Message[];
-};
-
-type ClientEvent =
-  | {
-      type: "messageCreated";
-      message: Message;
-    }
-  | {
-      type: "messageUpdated";
-      message: Message;
-    }
-  | {
-      type: "messageDeleted";
-      messageId: string;
-      message: Message;
-    }
-  | {
-      type: "userUpserted";
-      user: User;
-    }
-  | {
-      type: "channelUpserted";
-      channel: Channel;
-    }
-  | {
-      type: "channelRemoved";
-      channelId: string;
-    }
-  | {
-      type: "presence";
-      onlineUserIds: string[];
-    }
-  | {
-      // Ephemeral "someone is composing" signal (P14). Never persisted. `channelId` set for channel typing;
-      // `dmUserId` (the OTHER participant) set for DM typing. Scoped to the conversation audience, minus
-      // the typist, by socketCanReceiveEvent.
-      type: "typing";
-      userId: string;
-      channelId?: string;
-      dmUserId?: string;
-    }
-  | {
-      type: "configUpdated";
-      networkConfig: NetworkConfig;
-    }
-  | {
-      type: "wipe";
-    };
-
-/**
- * Streaming callbacks for on-device LLM inference. The Android host's launcher
- * (`apps/app/nodejs-project-template/main.js`) installs a function of this shape on
- * `globalThis.__loamOnDeviceChat` before requiring the server bundle; it forwards chat messages to
- * the RN/native model over the `rn-bridge` channel and streams the reply back through these
- * callbacks. It is **absent on every other host** (desktop, Pi, CI) — the server checks for it and
- * degrades gracefully — so the server bundle never depends on `rn-bridge` or any native module.
- */
-export type OnDeviceChatHook = (
-  messages: { role: "system" | "user" | "assistant"; content: string }[],
-  callbacks: {
-    onDelta: (text: string) => void;
-    onEnd: () => void;
-    onError: (message: string) => void;
-  },
-) => void;
-
-/**
- * Best-effort report of a NON-FATAL boot notice to the RN host bridge (F4, docs/15). Reuses the same
- * `globalThis.__loamReportBootError` hook `embedded-main.ts` uses for fatal startup failures — the
- * launcher (`apps/app/nodejs-project-template/main.js`) installs it on `global` before requiring the
- * server bundle, same pattern as {@link OnDeviceChatHook} above. Absent on every other host
- * (desktop/Pi/CI, and most tests), so this is a silent no-op there. Used when the encrypted-DB open
- * degrades instead of failing boot outright (`db_encryption_open_failed` / `db_encryption_unreadable`)
- * so the RN host screen can still surface a "change encryption settings" action even though boot
- * itself succeeded. Never pass the key or any derived secret in `message`.
- */
-function reportBootNotice(message: string, code: string): void {
-  try {
-    const reporter = (globalThis as { __loamReportBootError?: (message: string, code: string) => void })
-      .__loamReportBootError;
-    reporter?.(message, code);
-  } catch (reportError) {
-    console.error("Failed to report boot notice to the RN host:", reportError);
-  }
-}
-
-/**
- * Best-effort signal to the RN host bridge that a passphrase-mode DB was just migrated to the current
- * key derivation (P1-1, Sol round 5 — see `AppOptions.dbEncryptionMigrateFromKey` and `openInitialStore`
- * below). `globalThis.__loamReportDbKeyMigrated` is installed by `nodejs-project-template/main.js`
- * before requiring the server bundle, same pattern as {@link reportBootNotice}; on the Android host it
- * forwards to `db-encryption.ts`'s `markPassphraseKeyMigrated()` so future boots stop offering the
- * legacy key. Absent (a silent no-op) on every other host and in tests that don't install it. Never
- * passes any key material — this is a bare signal, not a payload.
- *
- * `requestId` is the launcher's IMMUTABLE per-boot key-handoff id (Sol Fable-round-2 P1-B), threaded from
- * `AppOptions.dbKeyRequestId` (which `embedded.ts` reads from `LOAM_DB_KEY_REQUEST_ID` once at boot). The RN
- * side promotes only the candidate bound to THIS id, so a duplicate/later unlock can't mis-tag the report.
- * It is NOT key material — just the correlation id already visible in the clear on the bridge.
- */
-function reportDbKeyMigrated(requestId?: string): void {
-  try {
-    const reporter = (globalThis as { __loamReportDbKeyMigrated?: (requestId?: string) => void })
-      .__loamReportDbKeyMigrated;
-    reporter?.(requestId);
-  } catch (reportError) {
-    console.error("Failed to report DB key migration to the RN host:", reportError);
-  }
-}
-
-export type AppOptions = {
-  /** Directory holding the SQLite DB, avatars, and (by default) config.json. */
-  dataDir: string;
-  /** Config file path; defaults to `<dataDir>/config.json`. */
-  configPath?: string;
-  /** Built client directory to serve statically; skipped when absent. */
-  clientDistDir?: string;
-  /**
-   * Host used in the join URL returned by /api/bootstrap and /api/config. When set, it's used
-   * verbatim on every response (the desktop/Pi CLI resolves its LAN address once at boot and passes
-   * it here — fine, since that address is up before the process starts). When left unset, the join
-   * host is instead re-resolved via `resolveLanAddress` on every request (docs/15 A7) — the embedded
-   * Android host needs this because its Wi-Fi hotspot interface comes up *after* boot, so a
-   * boot-frozen address served a stale (or missing) host to a QR generated once the hotspot is live.
-   */
-  joinHost?: string;
-  /**
-   * Resolves the current best LAN address for the join URL when `joinHost` isn't set. Defaults to a
-   * live network-interface scan (`resolveLanIPv4`); overridable so tests can simulate the address
-   * changing between requests without touching real interfaces.
-   */
-  resolveLanAddress?: () => string;
-  /** Port used in the join URL returned by /api/config. */
-  clientPort?: number;
-  /** When set, encrypt the database at rest (SQLCipher). Requires a real data dir, not in-memory. */
-  dbEncryptionKey?: string;
-  /**
-   * A PRIOR key derivation to fall back to if `dbEncryptionKey` can't open the database on boot (P1-1,
-   * Sol round 5): the Android launcher's passphrase-mode key derivation changed from `SHA256(passphrase)`
-   * (pre-round-4) to `SHA256(passphrase + ':' + deviceSecret)` (round 4+), so an existing passphrase DB
-   * only opens under the OLD derivation. `embedded.ts` threads its `LOAM_DB_KEY_MIGRATE_FROM` env
-   * through here. `openInitialStore` tries `dbEncryptionKey` first; only on failure, and only when this
-   * is set, does it retry with this key — and on THAT success, `PRAGMA rekey`s the database to
-   * `dbEncryptionKey` in place (see `LoamStore.rekey`) so every later boot uses the current key
-   * directly, and reports the migration back to the launcher. Never logged.
-   */
-  dbEncryptionMigrateFromKey?: string;
-  /**
-   * Encrypt at rest with a **random, RAM-only key** generated at startup and never written to disk
-   * (takes precedence over `dbEncryptionKey`). Data is readable only while this process runs — a
-   * reboot loses the key permanently — and the kill switch rotates to a fresh key so any
-   * flash-recoverable ciphertext becomes unreadable. See `docs/02-kill-switch.md`.
-   */
-  ephemeralDbKey?: boolean;
-  /**
-   * The caller's declared at-rest key strategy (P1-1/P2-1, docs/15) — the Android launcher threads its
-   * `LOAM_DB_ENCRYPTION_MODE` env through here (`embedded.ts`). This is the AUTHORITATIVE mode for
-   * `networkConfig.dbEncryption` reporting when present: unlike `appConfig.security.dbEncryption` (a
-   * declarative admin-config axis that a headless launcher never PATCHes to match reality), this is
-   * what the caller actually did with the key. When absent (desktop/Pi CLI, most tests), reporting
-   * falls back to the declarative config axis as before. Never changes what encryption is actually
-   * used — only `dbEncryptionKey`/`ephemeralDbKey` do that.
-   */
-  dbEncryptionMode?: DbEncryptionMode;
-  /**
-   * The launcher's IMMUTABLE per-boot key-handoff request id (Sol Fable-round-2 P1-B) — `embedded.ts`
-   * reads it from `LOAM_DB_KEY_REQUEST_ID` once at boot. Captured here at buildApp time and forwarded in
-   * the passphrase-migration ack ({@link reportDbKeyMigrated}) so the RN side promotes only the candidate
-   * bound to the attempt that actually opened THIS DB, never a mutable global a later attempt overwrote.
-   * Absent on non-launcher hosts (desktop/Pi CLI, tests) — the ack is then an un-correlated no-op RN-side.
-   */
-  dbKeyRequestId?: string;
-  /**
-   * Plaintext SQLite backend to use when no encryption key is set. Defaults to `node:sqlite`; the
-   * Android host passes `"better-sqlite3"` because its embedded Node 18 lacks `node:sqlite`
-   * (see `apps/server/src/db.ts` and docs/04). Ignored when a DB key is set (SQLCipher is used).
-   */
-  dbDriver?: StoreDriver;
-  /** Node version string shown to clients (via `/api/config`). Defaults to `"dev"`. */
-  version?: string;
-  /**
-   * Cap on how many *new* anonymous identities a single client IP may mint within
-   * `identityWindowMs`, bounding the user-row/session growth an attacker can force by discarding its
-   * session cookie and re-requesting. A device that keeps its cookie mints once and is unaffected; on
-   * a LAN each device has its own IP, so this is effectively per-device. Defaults to 60.
-   */
-  maxNewIdentitiesPerWindow?: number;
-  /** Sliding window (ms) for `maxNewIdentitiesPerWindow`. Defaults to 10 minutes. */
-  identityWindowMs?: number;
-  /**
-   * Hard cap on live transport-encryption sessions (docs/08) — `POST /api/transport/handshake` is
-   * deliberately unauthenticated (it's the bootstrap step before any session exists), so without a
-   * real bound a flood of handshakes could grow the session map without limit. Expired sessions are
-   * pruned on every handshake; once still at/over the cap, the oldest live sessions are evicted to
-   * make room. Defaults to 5,000; lowered in tests to exercise eviction without 5,000 iterations.
-   */
-  transportSessionCap?: number;
-  /**
-   * How long (ms) a tombstone blocks re-import before the reaper GCs it (docs/15 #7). Defaults to
-   * 30 days — deliberately generous, longer than any realistic sync/courier window. Overridable
-   * only so tests can exercise the GC without waiting; production deployments should leave it at
-   * the default.
-   */
-  tombstoneHorizonMs?: number;
-  /**
-   * A per-boot secret proving a caller IS the host process (review 2026-09-04). Set by the Android
-   * launcher (`LOAM_HOST_TOKEN`, minted fresh every boot in `main.js` and handed only to the host's own
-   * WebView + courier). When present it (1) forces the effective admin bootstrap to `hostDevice` — see
-   * `effectiveAdminBootstrap` — so admin is claimable ONLY by presenting this token, never by being the
-   * first LAN session; and (2) is REQUIRED (header `x-loam-host-token`) on the loopback mesh bridge
-   * routes, since on Android loopback is reachable by every installed app, not just the launcher.
-   * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged.
-   */
-  hostToken?: string;
-  logger?: boolean;
-};
-
-/**
- * Thrown by `getSessionUserId` when a client IP exceeds its new-identity budget. The `statusCode`
- * makes Fastify's default error handler answer `429 Too Many Requests` without a custom handler.
- */
-class IdentityLimitError extends Error {
-  readonly statusCode = 429;
-  constructor() {
-    super("Too many new identities from this address");
-    this.name = "IdentityLimitError";
-  }
-}
-
-/**
- * Thrown by `openInitialStore` (P1-1, docs/15) when a database is genuinely unopenable (wrong/lost
- * key, or an unreadable file) and no start-fresh confirmation was present for THIS boot attempt. The
- * typed `.code` lets `embedded-main.ts` tell this specific, recoverable-without-a-process-restart
- * failure apart from every other boot error — see its `hasStayAliveBootErrorCode` — without
- * string-matching the human-readable message.
- */
-class DbEncryptionUnreadableError extends Error {
-  readonly code = "db_encryption_unreadable" as const;
-  constructor(message: string) {
-    super(message);
-    this.name = "DbEncryptionUnreadableError";
-  }
-}
-
-/**
- * Thrown by `openInitialStore` (P1-4-server, Sol round 8) when an EXISTING PLAINTEXT database is found
- * while an encrypted mode is configured (a `dbKey` is set): the keyed open failed but a plaintext open
- * succeeds. Serving that plaintext file while the persisted mode/hint say encrypted is a silent
- * confidentiality downgrade, so instead of falling through to a plaintext boot the store open LOCKS with
- * this distinct code. `embedded-main.ts` keeps the runtime alive for it (same as the unreadable path) so
- * the RN launcher bridge can offer the destructive "delete data and start encrypted" flow — consuming the
- * start-fresh marker DELETES the plaintext DB so the next boot creates a fresh encrypted database. The
- * plaintext-fallback-to-serving is only allowed when NO encrypted mode is configured (no `dbKey`).
- */
-class DbEncryptionPlaintextUnconvertedError extends Error {
-  readonly code = "db_encryption_plaintext_unconverted" as const;
-  constructor(message: string) {
-    super(message);
-    this.name = "DbEncryptionPlaintextUnconvertedError";
-  }
-}
-
-/**
- * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
- * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
- * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still
- * unverifiable → stay `delete-pending`, do not signal), or deletion is now proven complete and the
- * launcher has been signaled to clear the device key + restart (`key-clear-ready`). In both cases the
- * process must NOT serve under the old key, so the resume throws this and `embedded-main.ts` keeps the
- * runtime alive (like the unreadable path) rather than exiting — the imminent launcher restart, or a
- * later reopen, drives it forward.
- */
-class WipeResumeInProgressError extends Error {
-  readonly code = "db_encryption_wipe_resume" as const;
-  constructor(message: string) {
-    super(message);
-    this.name = "WipeResumeInProgressError";
-  }
-}
-
-export type LoamApp = {
-  server: FastifyInstance;
-  store: LoamStore;
-  /** One-time admin claim code, present when bootstrap is `setupCode` and no admin exists yet. A
-   * boot-time snapshot; use `getAdminSetupCode()` to read the value after it's re-minted/cleared at
-   * runtime. */
-  adminSetupCode?: string;
-  /** The live one-time admin claim code (re-minted/cleared at runtime by the kill switch or a config
-   * PATCH entering/leaving setupCode bootstrap) — survives the test wrapper's object spread. */
-  getAdminSetupCode(): string | undefined;
-  /** Delete messages older than the configured retention TTL now (also runs on a timer). */
-  reapExpiredMessages(): void;
-  /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
-  reapOrphanedAttachments(): Promise<void>;
-  /** Delete avatar image files no user references now (also runs once at boot). */
-  reapOrphanedAvatars(): Promise<void>;
-  /** Retry attachments that failed to copy during a sync import now (also runs on the reaper timer;
-   * docs/15 A6) — re-fetches missing files from their source peer without re-importing the message. */
-  retryMissingAttachments(): Promise<void>;
-  /** Drop expired per-IP rate-limit entries (identity budget + claim/panic attempt limiters) now
-   * (also runs on the reaper timer) so the maps stay bounded to the IPs active within a window. */
-  pruneExpiredRateLimiters(): void;
-  /** Test/introspection hook: current entry counts of the per-IP rate-limit maps. */
-  rateLimiterEntryCounts(): { claim: number; panic: number; identity: number };
-  /** The host's static transport public key (docs/08) for building a keyed `#k=` join QR, or
-   * `undefined` when the effective transport-encryption posture is `off` (Developer Mode). Lets
-   * embedding hosts (the `loamnet` CLI, the Android launcher) print a MITM-resistant join QR
-   * without an HTTP round-trip that would mint a session (and could consume the `firstUser`
-   * admin grant). */
-  getTransportPublicKey(): string | undefined;
-  close(): Promise<void>;
-};
-
-const sessionCookieName = "loam_session";
-const sessionCookieMaxAge = 60 * 60 * 24 * 365;
-const defaultChannelCreatedAt = 1_704_067_200_000;
-const claimAttemptLimit = 5;
-const claimAttemptWindowMs = 5 * 60_000;
-// Default for `AppOptions.tombstoneHorizonMs` (docs/15 #7): how long a tombstone blocks re-import
-// before it's GC'd. Deliberately generous — far longer than any realistic sync/courier interval —
-// so within the horizon a deleted message can never resurface from a peer or a mesh carrier; only
-// a peer offline longer than this window can hand it back, an accepted DTN limitation (not gated
-// on `sync.enabled`: a delete made while sync is off must still stick once a peer/mesh link
-// appears later, or moderation is bypassable).
-const defaultTombstoneHorizonMs = 30 * 24 * 60 * 60 * 1000;
-
-const defaultChannels: Channel[] = [
-  {
-    id: "announcements",
-    name: "Announcements",
-    description: "Local broadcast notes and coordination updates.",
-    visibility: "public",
-    allowPosting: "everyone",
-    allowReplies: true,
-    discoverable: true,
-    createdAt: defaultChannelCreatedAt,
-  },
-  {
-    id: "general",
-    name: "General",
-    description: "Open room for everyone on this local LOAM node.",
-    visibility: "public",
-    allowPosting: "everyone",
-    allowReplies: true,
-    discoverable: true,
-    createdAt: defaultChannelCreatedAt,
-  },
-];
-
-/** Fixed ids of the legacy demo users early builds planted so a fresh node had example DM contacts. A
- * live node must never ship fake users, so these are no longer seeded — and any that a pre-existing DB
- * still carries are removed at boot (see the cleanup in the store initializer). Real users are always
- * `user.<hex>`, so these constant ids are unambiguously the old seeds and safe to delete. */
-const legacyDemoUserIds = ["user.1234", "user.5678"];
-
-/** Upper bound on how many of the most-recent DM messages between a user and the LLM bot are sent to the
- * model as context on each turn (see `llmMessagesForUser`). Prevents an unbounded history from growing the
- * request every turn and overflowing the model's context window. Deliberately generous — most models hold
- * far more, and dropping the oldest turns preserves what matters. */
-const MAX_LLM_CONTEXT_MESSAGES = 40;
-
-/**
- * Stable snake_case code for every error message the server can return, so clients can localize the
- * message from a catalog while the English `error` string stays as the fallback (unknown codes → the
- * client shows `error` verbatim). Keep these codes stable across releases — they are a wire contract
- * with a mixed-version mesh. The canonical set of codes is `SERVER_ERROR_CODES` in `@loam/schema`
- * (values here are typed against it, so a typo or unlisted code fails to compile); every code must
- * also have a matching `error.<code>` key in the client i18n catalogs (enforced by
- * `apps/client/src/i18n/i18n.test.ts`, which asserts against the same `SERVER_ERROR_CODES` list).
- */
-const ERROR_CODES: Record<string, ServerErrorCode> = {
-  "Admin access required": "admin_required",
-  "Admin claiming is not enabled on this LOAM node": "admin_claim_disabled",
-  "Admin user editing is disabled on this LOAM node": "admin_user_edit_disabled",
-  "Approve or unban this user before promoting them": "promote_requires_active",
-  "Attachment does not exist": "attachment_not_found",
-  "Attachment image must be 256KB or smaller": "attachment_too_large",
-  "Attachment image type does not match the uploaded data": "attachment_type_mismatch",
-  "Attachments are disabled on this LOAM node": "attachments_disabled",
-  "Avatar image does not exist": "avatar_not_found",
-  "Avatar image must be 128KB or smaller": "avatar_too_large",
-  "Avatar image type does not match the uploaded data": "avatar_type_mismatch",
-  "Cannot change the roles of an admin": "roles_admin_immutable",
-  "Cannot react to this message": "reaction_not_allowed",
-  "Channel does not exist": "channel_not_found",
-  "Channel posting is disabled on this LOAM node": "channel_posting_disabled",
-  "Creating channels is disabled on this LOAM node": "channel_create_disabled",
-  'Confirmation required: send { "confirm": "wipe" }': "confirmation_required",
-  "Direct messages are disabled on this LOAM node": "dms_disabled",
-  "Enable sync and add at least one peer first": "sync_requires_peer",
-  "Greeter access required": "greeter_required",
-  "Invalid admin claim request": "invalid_admin_claim",
-  "Invalid admin secret": "invalid_admin_secret",
-  "Invalid attachment upload request": "invalid_attachment_upload",
-  "Invalid avatar image upload request": "invalid_avatar_upload",
-  "Invalid channel create request": "invalid_channel_create",
-  "Invalid channel update request": "invalid_channel_update",
-  "Invalid config update request": "invalid_config_update",
-  "Invalid config values": "invalid_config_values",
-  "Invalid kill-switch request": "invalid_kill_switch",
-  "Invalid member request": "invalid_member_request",
-  "Invalid transfer request": "invalid_transfer_request",
-  "Invalid message edit request": "invalid_message_edit",
-  "Invalid message request": "invalid_message_request",
-  "Invalid moderation request": "invalid_moderation_request",
-  "Invalid request": "invalid_request",
-  "Invalid roles update request": "invalid_roles_update",
-  "Invalid sync request": "invalid_sync_request",
-  "Invalid token": "invalid_token",
-  "Invalid user update request": "invalid_user_update",
-  "Message does not exist": "message_not_found",
-  "Moderator access required": "moderator_required",
-  "Not found": "not_found",
-  "Only pending users can be denied": "deny_requires_pending",
-  "Only people can be admins": "admin_humans_only",
-  "Only private channels have a member list": "member_list_private_only",
-  "Only the channel owner or an admin can change this channel": "channel_change_forbidden",
-  "Only the channel owner or an admin can invite members": "member_invite_forbidden",
-  "Only the channel owner or an admin can remove members": "member_remove_forbidden",
-  "Only the channel owner or an admin can transfer ownership": "channel_transfer_forbidden",
-  "Parent message belongs to a different channel": "parent_wrong_channel",
-  "Parent message does not exist": "parent_not_found",
-  "Private channels are disabled on this LOAM node": "private_channels_disabled",
-  "Provide a search query (?q=)": "search_query_required",
-  "Reactions are disabled on this LOAM node": "reactions_disabled",
-  "Reactions cannot be edited": "reaction_not_editable",
-  "Recipient user does not exist": "recipient_not_found",
-  "Replies are disabled on this LOAM node": "replies_disabled",
-  "Target message does not exist": "target_not_found",
-  "That user has been removed from this node": "user_removed",
-  "That user is not a member of this channel": "not_channel_member",
-  "The channel owner cannot be removed from their own channel": "owner_not_removable",
-  "The kill switch is not enabled on this LOAM node": "kill_switch_disabled",
-  "The passphrase bootstrap strategy requires a passphrase": "passphrase_required",
-  "This message is still being written": "message_streaming",
-  "This session is no longer valid": "session_invalid",
-  "This thread has replies from other people — only an admin can delete it": "thread_has_replies",
-  "Too many attempts": "too_many_attempts",
-  "Too many claim attempts; try again later": "too_many_claim_attempts",
-  "Unable to create message": "message_create_failed",
-  "Unauthenticated websocket": "websocket_unauthenticated",
-  "Unknown attachment": "unknown_attachment",
-  "User avatar uploads are disabled on this LOAM node": "user_avatar_upload_disabled",
-  "User does not exist": "user_not_found",
-  "User profile editing is disabled on this LOAM node": "user_profile_edit_disabled",
-  "You can only delete your own messages": "delete_own_only",
-  "You can only edit your own messages": "edit_own_only",
-  "You cannot deny an admin or yourself": "deny_forbidden",
-  "You cannot moderate an admin or yourself": "moderate_forbidden",
-  // Participation gate (banned/pending) and channel-posting policy — these are returned via
-  // participationError()/channelPostingError() and must localize like every other error.
-  "You have been removed from this node": "removed_from_node",
-  "Your join is awaiting approval": "awaiting_approval",
-  "Channel is archived": "channel_archived",
-  "Replies are disabled in this channel": "channel_replies_disabled",
-  "Only the channel owner can post in this channel": "channel_owner_post_only",
-  "Only admins can post in this channel": "channel_admins_post_only",
-};
-
-/** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */
-export const ALL_ERROR_CODES: readonly ServerErrorCode[] = Object.values(ERROR_CODES);
-
-/**
- * Build an error response envelope, attaching the stable `code` for known messages. Unknown messages
- * carry no code, so the client falls back to the English `error` string. The `error` field is always
- * present and unchanged, so existing clients keep working.
- */
-function errorBody(message: string | undefined): { error: string; code?: string } {
-  const text = message ?? "Unknown error";
-  const code = ERROR_CODES[text];
-  return code ? { error: text, code } : { error: text };
-}
-
-/**
- * Create the default LOAM configuration: conservative identity permissions, all core messaging
- * features on, Ollama disabled, `firstUser` admin bootstrap, and the `standard` security profile.
- */
-export function defaultLoamConfig(): LoamConfig {
-  return {
-    node: {
-      name: "LOAM local",
-      locale: "en",
-    },
-    identity: {
-      allowUserDisplayNameEdit: false,
-      allowUserAvatarEdit: false,
-      allowUserAvatarUpload: false,
-      allowAdminUserEdit: true,
-    },
-    features: {
-      enablePublicChannels: true,
-      enablePrivateChannels: true,
-      enableUserChannels: true,
-      enableReplies: true,
-      enableDMs: true,
-      enableReactions: true,
-      enableMarkdown: true,
-      enableAttachments: true,
-      enableLocationSharing: false,
-      enablePresence: true,
-    },
-    llm: {
-      ollama: {
-        enabled: false,
-        baseUrl: "http://localhost:11434",
-        model: "gemma4",
-        botId: "llm.ollama.gemma4",
-        botDisplayName: "Gemma",
-      },
-      // On-device backend, off by default. Enabling it is a no-op unless the host provides the
-      // inference hook (the Android host) AND a model has been added — otherwise a graceful error.
-      onDevice: {
-        enabled: false,
-      },
-    },
-    admin: {
-      bootstrap: "firstUser",
-    },
-    killSwitch: {
-      enabled: false,
-      requireConfirmation: true,
-    },
-    retention: {},
-    security: {
-      // Default to `custom` (individual axes, no forcing) so a fresh node behaves exactly as its raw
-      // defaults and an operator can set join/retention/kill-switch directly without a named profile
-      // silently overriding them. Selecting open/standard/hardened opts into the coherent bundle.
-      profile: "custom",
-      // Secure by default (docs/08): a fresh node encrypts app-layer traffic. `optional` is seamless —
-      // clients that joined via the QR (the normal path) get its `#k=` key and encrypt automatically, while
-      // plaintext clients (a manually-typed URL, curl, dev) still work — so this closes the "plaintext on
-      // the LAN by default" gap with zero UX cost. `off` is no longer an operator-settable posture; the only
-      // way to run plaintext is Developer Mode (LOAM_DEV_MODE, dev-only, self-announcing banner).
-      transportEncryption: "optional",
-      // Off by default so existing unencrypted deployments are unchanged; the actual DB keying is
-      // driven by LOAM_DB_KEY / openStore, wired separately (Android host key handoff). This is the
-      // declared/displayed posture, and it is not forced by a security profile (see SecurityConfigSchema).
-      dbEncryption: "off",
-    },
-    access: {
-      joinPolicy: "open",
-    },
-    sync: {
-      enabled: false,
-      peers: [],
-      intervalMs: 30_000,
-    },
-    // Opportunistic sealed-mailbox mesh, off by default (docs/16). Inert until an operator enables it.
-    mesh: {
-      enabled: false,
-      relay: false,
-      ttlMs: 72 * 3_600_000,
-      hopLimit: 6,
-      maxCarried: 5_000,
-      maxContacts: 1_000,
-    },
-  };
-}
-
-/**
- * Checks whether a value is a non-null object that is not an array.
- *
- * @param value - The value to test
- * @returns `true` if `value` is a non-null object and not an array, `false` otherwise.
- */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-/**
- * Merge a partial config update onto a base config, normalising clearable string fields
- * (empty `systemPrompt`/`passphrase` become unset) and validating the result.
- *
- * @param base - The current full configuration
- * @param update - A validated partial update
- * @returns The merged, schema-validated configuration
- */
-function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamConfig {
-  const merged = {
-    node: { ...base.node, ...update.node },
-    identity: { ...base.identity, ...update.identity },
-    features: { ...base.features, ...update.features },
-    llm: {
-      ollama: { ...base.llm.ollama, ...update.llm?.ollama },
-      onDevice: { ...base.llm.onDevice, ...update.llm?.onDevice },
-    },
-    admin: { ...base.admin, ...update.admin },
-    killSwitch: { ...base.killSwitch, ...update.killSwitch },
-    retention: { ...base.retention, ...update.retention },
-    security: { ...base.security, ...update.security },
-    access: { ...base.access, ...update.access },
-    sync: { ...base.sync, ...update.sync },
-    mesh: { ...base.mesh, ...update.mesh },
-  };
-  const systemPrompt = merged.llm.ollama.systemPrompt?.trim();
-  merged.llm.ollama.systemPrompt = systemPrompt || undefined;
-
-  // Secrets are stored scrypt-hashed, never in the clear; plaintext arriving from a config file or
-  // an admin update is hashed here (already-hashed values pass through unchanged).
-  const passphrase = merged.admin.passphrase?.trim();
-  merged.admin.passphrase = passphrase ? (isHashedSecret(passphrase) ? passphrase : hashSecret(passphrase)) : undefined;
-  const panicToken = merged.killSwitch.panicToken?.trim();
-  merged.killSwitch.panicToken = panicToken
-    ? isHashedSecret(panicToken)
-      ? panicToken
-      : hashSecret(panicToken)
-    : undefined;
-
-  merged.retention.messageTtlMs = merged.retention.messageTtlMs ?? undefined;
-
-  // The sync token is a bearer secret the node must transmit to peers, so it's stored in the clear
-  // (not hashed like the passphrase/panic token). An empty string clears it back to open sync.
-  const syncToken = merged.sync.token?.trim();
-  merged.sync.token = syncToken || undefined;
-
-  // A named security profile (anything but `custom`) is authoritative for the axes it bundles: force
-  // them onto the effective config so the profile actually drives behaviour and can't be silently
-  // contradicted by a stale or hand-edited individual axis. `custom` leaves the raw axes untouched.
-  const preset = securityProfilePreset(merged.security.profile);
-  if (preset) {
-    merged.access.joinPolicy = preset.joinPolicy;
-    merged.retention.messageTtlMs = preset.messageTtlMs ?? undefined;
-    merged.killSwitch.enabled = preset.killSwitchEnabled;
-    merged.security.transportEncryption = preset.transportEncryption;
-  }
-
-  return LoamConfigSchema.parse(merged);
-}
-
-/**
- * One-time migration for configs written before the security profile became authoritative. Back then
- * the profile was inert, so an operator could arm the kill switch, set a message TTL, or require
- * approval while the profile sat at its `standard` default. Now a named profile *forces* those axes,
- * which could silently undo such settings — including disarming a kill switch. If a persisted update
- * pins a non-`custom` profile yet also carries a bundled axis that diverges from what the profile
- * would force, we preserve the operator's explicit intent by switching the profile to `custom`.
- *
- * @returns the (possibly rewritten) update and whether it was changed, so the caller can re-persist.
- */
-function reconcileLegacyProfile(update: LoamConfigUpdate): { update: LoamConfigUpdate; changed: boolean } {
-  const preset = update.security?.profile ? securityProfilePreset(update.security.profile) : null;
-  if (!preset) {
-    return { update, changed: false };
-  }
-  const killSwitchDiverges =
-    update.killSwitch?.enabled !== undefined && update.killSwitch.enabled !== preset.killSwitchEnabled;
-  const joinDiverges =
-    update.access?.joinPolicy !== undefined && update.access.joinPolicy !== preset.joinPolicy;
-  const ttl = update.retention?.messageTtlMs;
-  const ttlDiverges = ttl !== undefined && (ttl ?? null) !== preset.messageTtlMs;
-  const transportDiverges =
-    update.security?.transportEncryption !== undefined &&
-    update.security.transportEncryption !== preset.transportEncryption;
-
-  if (killSwitchDiverges || joinDiverges || ttlDiverges || transportDiverges) {
-    return { update: { ...update, security: { ...update.security, profile: "custom" } }, changed: true };
-  }
-  return { update, changed: false };
-}
-
-const secretHashPrefix = "scrypt:";
-const secretHashPattern = /^scrypt:[0-9a-f]{32}:[0-9a-f]{64}$/;
-const secretCompareLength = 256;
-
-/**
- * Compare two short secrets in constant time by padding both to a fixed length. Suitable only for
- * high-entropy, memory-only values (the one-time setup code) — stored secrets use scrypt instead.
- */
-function timingSafeEqualStrings(left: string, right: string): boolean {
-  const leftPadded = Buffer.alloc(secretCompareLength);
-  const rightPadded = Buffer.alloc(secretCompareLength);
-  Buffer.from(left).copy(leftPadded);
-  Buffer.from(right).copy(rightPadded);
-  return timingSafeEqual(leftPadded, rightPadded) && left.length === right.length;
-}
-
-/**
- * Hash a user-chosen secret (admin passphrase / panic token) for storage, so a seized node's
- * config never reveals the secret itself.
- *
- * @returns A self-describing `scrypt:<salt-hex>:<hash-hex>` string
- */
-function hashSecret(secret: string): string {
-  const salt = randomBytes(16);
-  const hash = scryptSync(secret, salt, 32);
-  return `${secretHashPrefix}${salt.toString("hex")}:${hash.toString("hex")}`;
-}
-
-function isHashedSecret(value: string): boolean {
-  // Match the full format, not just the prefix — a malformed "scrypt:…" value is treated as a
-  // plaintext secret and hashed, rather than stored unverifiable.
-  return secretHashPattern.test(value);
-}
-
-/**
- * Verify a candidate secret against a stored `scrypt:` hash in constant time.
- */
-function verifySecret(candidate: string, stored: string): boolean {
-  if (!isHashedSecret(stored)) {
-    return timingSafeEqualStrings(candidate, stored);
-  }
-
-  const [saltHex = "", hashHex = ""] = stored.slice(secretHashPrefix.length).split(":");
-  const expected = Buffer.from(hashHex, "hex");
-  const actual = scryptSync(candidate, Buffer.from(saltHex, "hex"), expected.length);
-  return timingSafeEqual(actual, expected);
-}
-
-/**
- * Create a human user record with a generated display name and creation timestamp.
- *
- * @param id - The unique user identifier
- * @param isAdmin - Whether the user has administrative privileges
- * @param pending - Whether the user is awaiting approval (approval join policy); omitted when false
- * @returns A validated `User` object constructed from the provided values
- */
-function makeUser(id: string, isAdmin = false, pending = false): User {
-  return UserSchema.parse({
-    id,
-    displayName: generateDisplayName(id),
-    type: "human",
-    isAdmin,
-    createdAt: Date.now(),
-    ephemeral: false,
-    ...(pending ? { pending: true } : {}),
-  });
-}
-
-/**
- * Create a User record representing the configured Ollama bot.
- *
- * @param config - Ollama integration config containing the bot identifiers and display name
- * @returns A `User` object for the bot with `type: "bot"`, `isAdmin: false`, a patterned avatar seeded from the bot ID, and the current timestamp as `createdAt`
- */
-function makeBotUser(config: OllamaConfig): User {
-  return UserSchema.parse({
-    id: config.botId,
-    displayName: config.botDisplayName,
-    avatar: {
-      seed: config.botId,
-      mode: "pattern",
-    },
-    type: "bot",
-    isAdmin: false,
-    createdAt: Date.now(),
-    ephemeral: false,
-  });
-}
-
-/**
- * Create a new user identifier for an anonymous session.
- *
- * @returns A string of the form `user.<8hex>` where the suffix is the first 8 hexadecimal characters of a UUID with dashes removed.
- */
-function makeSessionUserId(): string {
-  return `user.${randomUUID().replaceAll("-", "").slice(0, 8)}`;
-}
-
-function makeSessionToken(): string {
-  return randomUUID();
-}
-
-/** A fresh 256-bit secure identity token (docs/20) — high-entropy, so a fast hash (not scrypt) is the
- * right at-rest protection. */
-function makeIdentityToken(): string {
-  return randomBytes(32).toString("base64url");
-}
-
-/** SHA-256 of an identity token, base64url — what's stored/looked-up, never the bearer value. */
-function hashIdentityToken(token: string): string {
-  return createHash("sha256").update(token).digest("base64url");
-}
-
-function makeAdminSetupCode(): string {
-  return randomUUID().replaceAll("-", "").slice(0, 12);
-}
-
-function encodeCookieValue(value: string): string {
-  return encodeURIComponent(value);
-}
-
-function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
-  for (const cookie of cookieHeader?.split(";") ?? []) {
-    const [rawName, ...rawValue] = cookie.trim().split("=");
-
-    if (rawName !== name) {
-      continue;
-    }
-
-    try {
-      return decodeURIComponent(rawValue.join("="));
-    } catch {
-      return undefined;
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Generates a new unique avatar image identifier.
- *
- * @returns A string in the form `avt_<16-hex-chars>` suitable for use as an avatar image filename base
- */
-function newAvatarImageId(): string {
-  return `avt_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-}
-
-function newAttachmentId(): string {
-  return `att_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-}
-
-/** Filename an attachment is stored (and served) under: `att_<16hex>.<ext>`. */
-/** Whether an attachment MIME is one of the inline-renderable image types (vs a download-only file). */
-function isImageAttachmentMime(mimeType: string | undefined): mimeType is AvatarImageMimeType {
-  return mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/webp";
-}
-
-/**
- * Sanitise a user-supplied attachment filename before it goes into a `Content-Disposition` header (and the
- * client's escaped display): strip path separators, quotes, and control chars (header-injection / traversal
- * vectors), bound the length, and fall back to `file` if nothing usable remains.
- */
-function sanitizeAttachmentName(name: string | undefined): string {
-  // eslint-disable-next-line no-control-regex
-  const cleaned = (name ?? "").replace(/["\\/\u0000-\u001f]/g, "_").trim().slice(0, 255);
-  return cleaned || "file";
-}
-
-function attachmentFileName(attachment: { id: string; mimeType?: MessageAttachment["mimeType"] }): string {
-  // Images keep their real extension (served inline). Non-image files are stored under a generic `.bin` so
-  // the on-disk name can never carry an executable/renderable extension, and they're served octet-stream.
-  return isImageAttachmentMime(attachment.mimeType)
-    ? `${attachment.id}.${avatarImageExtension(attachment.mimeType)}`
-    : `${attachment.id}.bin`;
-}
-
-/**
- * Parses an attachment filename (`att_<16hex>.<ext>`) into its id + kind. For an image, the MIME is derived
- * from the extension (safe to serve inline). For a `.bin` file, no MIME is derived — it is always served as
- * `application/octet-stream` + `Content-Disposition: attachment`, so a mislabelled upload can't be rendered.
- */
-function parseAttachmentFileName(
-  value: string,
-): { id: string; isImage: boolean; mimeType?: AvatarImageMimeType } | undefined {
-  const match = value.match(/^(att_[a-f0-9]{16})\.(png|jpg|webp|bin)$/);
-
-  if (!match) {
-    return undefined;
-  }
-
-  const extension = match[2];
-
-  if (extension === "bin") {
-    return { id: match[1] ?? "", isImage: false };
-  }
-
-  const mimeType =
-    extension === "png" ? "image/png" : extension === "jpg" ? "image/jpeg" : "image/webp";
-
-  return { id: match[1] ?? "", isImage: true, mimeType };
-}
-
-const attachmentMaxBytes = 256 * 1024; // image cap (images are downscaled client-side first)
-
-/**
- * Whether fetched attachment bytes are an acceptable copy: an image must be within the image cap AND match
- * its declared type's magic bytes (it's served inline); a non-image file must be within the (larger) file
- * cap — its MIME is already allowlisted by the schema and it's served octet-stream, so no signature check is
- * meaningful. Shared by the sync import + retry paths so both agree.
- */
-function isAcceptableAttachmentBytes(bytes: Buffer, mimeType: MessageAttachment["mimeType"]): boolean {
-  if (bytes.length === 0) {
-    return false;
-  }
-  if (isImageAttachmentMime(mimeType)) {
-    return bytes.length <= attachmentMaxBytes && avatarImageHasExpectedSignature(bytes, mimeType);
-  }
-  return bytes.length <= attachmentFileMaxBytes;
-}
-const attachmentFileMaxBytes = 1024 * 1024; // non-image file cap (no downscale) — modest for an off-grid LAN
-
-// Retry policy for a missing-attachment work item (docs/15 A6, F1). `retryMissingAttachments` runs on
-// the 30s reaper tick, but it must NOT actually contact the peer on every tick — that burned through
-// `attempts` in ~10 minutes with no backoff, making `missingAttachmentMaxAgeMs` (a days-scale bound)
-// dead: it could never be reached before attempts exhausted first. Instead, `attempts` only drives a
-// growing backoff (`missingAttachmentBackoffMs`) between actual fetch attempts, and the age bound
-// below is the sole thing that governs giving up — deliberately generous, so a peer flapping in and
-// out over several hours or even days still converges.
-const missingAttachmentMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
-const missingAttachmentRetryBaseMs = 60_000; // first backoff step: 1 minute
-const missingAttachmentRetryMaxIntervalMs = 6 * 3_600_000; // cap: retry at most every 6 hours
-// SF3, docs/15: without a per-pass cap, a node with many stuck records could have each one consume up
-// to the full 10s peer-fetch timeout in a single pass, so a handful of unreachable records already
-// outlasts the 30s reaper tick on its own. Capping how many work items one pass even LOOKS at bounds
-// that worst case regardless of how many records are queued; the rest are simply due again on the next
-// tick (each record's own backoff still governs whether that next look actually contacts a peer).
-const missingAttachmentMaxRecordsPerPass = 25;
-
-/**
- * Exponential backoff (capped) between retry attempts for one missing-attachment work item, keyed on
- * its current `attempts` count. `attempts` 0 → 1 minute, doubling each attempt, capped at 6 hours —
- * so a persistently-unreachable peer settles into a sane cadence instead of being hammered every 30s,
- * while a briefly-flapping one still converges within a few ticks.
- */
-function missingAttachmentBackoffMs(attempts: number): number {
-  return Math.min(missingAttachmentRetryBaseMs * 2 ** attempts, missingAttachmentRetryMaxIntervalMs);
-}
-
-/**
- * Map an avatar image MIME type to its canonical file extension.
- *
- * @param mimeType - The avatar image MIME type
- * @returns The corresponding file extension: `png` for `image/png`, `jpg` for `image/jpeg`, otherwise `webp`
- */
-function avatarImageExtension(mimeType: AvatarImageMimeType): string {
-  if (mimeType === "image/png") {
-    return "png";
-  }
-
-  if (mimeType === "image/jpeg") {
-    return "jpg";
-  }
-
-  return "webp";
-}
-
-/**
- * Parses an avatar filename into its image ID and MIME type.
- *
- * @param value - Avatar filename expected in the form `avt_<16-hex>.<ext>` where `<ext>` is `png`, `jpg`, or `webp`
- * @returns An object with `imageId` and `mimeType` when `value` matches the expected pattern, `undefined` otherwise
- */
-function parseAvatarImageId(value: string): { imageId: string; mimeType: AvatarImageMimeType } | undefined {
-  const match = value.match(/^(avt_[a-f0-9]{16})\.(png|jpg|webp)$/);
-
-  if (!match) {
-    return undefined;
-  }
-
-  const extension = match[2];
-  const mimeType =
-    extension === "png" ? "image/png" : extension === "jpg" ? "image/jpeg" : "image/webp";
-
-  return {
-    imageId: match[1] ?? "",
-    mimeType,
-  };
-}
-
-/**
- * Checks that a binary image buffer matches the expected file signature for the provided MIME type.
- *
- * Supports `image/png`, `image/jpeg`, and `image/webp`.
- *
- * @param buffer - The image file data to inspect
- * @param mimeType - The expected MIME type of the image
- * @returns `true` if the buffer's file signature matches the expected MIME type, `false` otherwise
- */
-function avatarImageHasExpectedSignature(buffer: Buffer, mimeType: AvatarImageMimeType): boolean {
-  if (mimeType === "image/png") {
-    return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  }
-
-  if (mimeType === "image/jpeg") {
-    return (
-      buffer.length >= 4 &&
-      buffer[0] === 0xff &&
-      buffer[1] === 0xd8 &&
-      buffer[buffer.length - 2] === 0xff &&
-      buffer[buffer.length - 1] === 0xd9
-    );
-  }
-
-  return buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
-}
-
-function isChannelMessage(message: Message, channelId: string): boolean {
-  return (
-    (message.type === "channelPost" || message.type === "channelReply") &&
-    message.channelId === channelId
-  );
-}
-
-function newMessageId(prefix = "msg"): string {
-  return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /**
  * Build the LOAM Fastify application: opens the SQLite store, loads config (defaults ← config
