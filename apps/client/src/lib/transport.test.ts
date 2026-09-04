@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   apiUrl,
+  clearCachedHostPublicKey,
   clearStoredIdentityToken,
   encryptedFetch,
   encryptedImageUrl,
@@ -14,10 +15,12 @@ import {
   handleWsFrame,
   isTunnelActive,
   logoutSecureIdentity,
+  mayFallBackToPlaintext,
   resumeIdentity,
   resetTransportStateForTests,
   setMintSuppressed,
   snapshotForWipe,
+  subscribeSessionReplaced,
   wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
@@ -1314,6 +1317,130 @@ describe("transport", () => {
 
       await ensureSession("optional", host.publicKey);
       expect(fingerprint()).toBe(fingerprint(host.publicKey));
+    });
+  });
+});
+
+describe("review fixes 2026-09-04 (client transport)", () => {
+  beforeEach(() => {
+    resetTransportStateForTests();
+    localStorage.clear();
+    window.location.hash = "";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    window.location.hash = "";
+  });
+
+  function handshakeResponder(host: ReturnType<typeof createTransportIdentity>) {
+    return async (_url: string, init: RequestInit) => {
+      const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+      return new Response(JSON.stringify(json), { status });
+    };
+  }
+
+  describe("no plaintext fallback for a QR-pinned client (the optional-mode downgrade hole)", () => {
+    it("a cached QR key + a failed handshake on an advertised-optional node must NOT fall back to plaintext", async () => {
+      const host = createTransportIdentity();
+      localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, host.publicKey);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("network dropped the handshake");
+        }),
+      );
+
+      await expect(ensureSession("optional", host.publicKey)).rejects.toThrow("network dropped the handshake");
+      expect(getSession()).toBeUndefined();
+      // The advertisement says optional, but the QR key pinned this join: no fallback.
+      expect(mayFallBackToPlaintext("optional")).toBe(false);
+    });
+
+    it("with NO QR key an advertised-optional node may fall back to plaintext; required never does", async () => {
+      const host = createTransportIdentity();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("network dropped the handshake");
+        }),
+      );
+
+      await expect(ensureSession("optional", host.publicKey)).rejects.toThrow();
+      expect(mayFallBackToPlaintext("optional")).toBe(true);
+      expect(mayFallBackToPlaintext("required")).toBe(false);
+      expect(mayFallBackToPlaintext("off")).toBe(false);
+    });
+  });
+
+  describe("host key changed since the QR was scanned (post-Emergency-Reset stranding)", () => {
+    it("a QR-pinned handshake against a node holding a DIFFERENT key drops the cache and demands a rescan", async () => {
+      const scanned = createTransportIdentity(); // what the (stale) QR / cache says
+      const current = createTransportIdentity(); // what the node actually holds now
+      localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, scanned.publicKey);
+      vi.stubGlobal("fetch", vi.fn(handshakeResponder(current)));
+
+      const failure = await ensureSession("optional", current.publicKey).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(TransportNeedsQrError);
+      expect((failure as TransportNeedsQrError).reason).toBe("changed");
+      // Fail closed: no session (never derived against the node's advertised key), cache dropped so the next
+      // boot reaches the rescan gate instead of looping on a doomed resume.
+      expect(getSession()).toBeUndefined();
+      expect(getCachedHostPublicKey()).toBeUndefined();
+    });
+
+    it("a config-key (non-QR) handshake that returns a different key is a plain retryable error", async () => {
+      const advertised = createTransportIdentity();
+      const current = createTransportIdentity();
+      vi.stubGlobal("fetch", vi.fn(handshakeResponder(current)));
+
+      const failure = await ensureSession("optional", advertised.publicKey).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(TransportNeedsQrError);
+      expect(getSession()).toBeUndefined();
+    });
+
+    it("clearCachedHostPublicKey forgets the per-origin cached key", () => {
+      localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, "abc");
+      expect(getCachedHostPublicKey()).toBe("abc");
+      clearCachedHostPublicKey();
+      expect(getCachedHostPublicKey()).toBeUndefined();
+    });
+  });
+
+  describe("session replacement notifies the socket owner (forged-401 deaf-socket hole)", () => {
+    it("fires subscribers exactly once per successful re-handshake, and unsubscribe stops it", async () => {
+      const host = createTransportIdentity();
+      let contentCalls = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init: RequestInit) => {
+          if (url === "/api/transport/handshake") {
+            return handshakeResponder(host)(url, init);
+          }
+          contentCalls += 1;
+          if (contentCalls === 1) {
+            return new Response(null, { status: 401 }); // an unsealed (forgeable) 401 on a GET
+          }
+          const session = getSession();
+          const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}`);
+          return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
+        }),
+      );
+
+      const replaced = vi.fn();
+      const unsubscribe = subscribeSessionReplaced(replaced);
+      await ensureSession("optional", host.publicKey);
+      expect(replaced).not.toHaveBeenCalled(); // the initial handshake replaces nothing
+
+      await encryptedFetch("GET", "/api/channels");
+      expect(replaced).toHaveBeenCalledTimes(1);
+
+      unsubscribe();
+      contentCalls = 0;
+      await encryptedFetch("GET", "/api/channels");
+      expect(replaced).toHaveBeenCalledTimes(1);
     });
   });
 });

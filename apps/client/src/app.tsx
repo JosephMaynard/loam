@@ -72,6 +72,8 @@ import {
 import { bodyFor, displayTime } from "./lib/message-format";
 import {
   apiUrl,
+  clearCachedHostPublicKey,
+  clearImageObjectUrls,
   clearStoredIdentityToken,
   encryptedFetch,
   ensureSession,
@@ -81,15 +83,29 @@ import {
   isSessionQrVerified,
   isTunnelActive,
   joinQrUrl,
+  mayFallBackToPlaintext,
   reestablishSession,
   resumeIdentity,
   SERVER_URL_KEY,
   setMintSuppressed,
   snapshotForWipe,
+  subscribeSessionReplaced,
   TransportNeedsQrError,
   wipeServerCredentials,
   wsUrl,
 } from "./lib/transport";
+import { clearMarkdownCache } from "./lib/markdown";
+
+declare global {
+  interface Window {
+    /**
+     * Set by the Android host on its OWN WebView only (`injectedJavaScriptBeforeContentLoaded`): the
+     * launcher's per-boot host token, which claims admin under the `hostDevice` bootstrap (review
+     * 2026-09-04). Never present for a LAN joiner. Consumed on first use.
+     */
+    __loamHostDeviceToken?: string;
+  }
+}
 import {
   RTL_LOCALES,
   errorText,
@@ -252,12 +268,15 @@ async function loadConfig(): Promise<Config> {
     if (sessionError instanceof TransportNeedsQrError) {
       throw sessionError; // caller renders the "scan the join QR" gate
     }
-    if (mode !== "optional") {
-      // `required` where a key WAS available but the handshake failed (node unreachable) — surface it
-      // rather than silently degrading to plaintext.
+    if (!mayFallBackToPlaintext(mode)) {
+      // `required` — or an advertised `optional` on a client that holds a QR key, which pins the join to
+      // required — where a key WAS available but the handshake failed (node unreachable, or an on-path
+      // attacker dropping the handshake POST): surface it and retry rather than silently degrading a
+      // QR-joined client to plaintext + a cookie identity. `mode` is the UNAUTHENTICATED advertisement,
+      // so it alone must never decide this (review 2026-09-04).
       throw sessionError;
     }
-    // `optional`: proceed without a session (plaintext) rather than stranding the user.
+    // `optional` with no QR key: proceed without a session (plaintext) rather than stranding the user.
   }
 
   if (isTunnelActive()) {
@@ -467,7 +486,7 @@ function LoamApp() {
   );
   // Set when this node requires transport encryption (docs/08) but no host public key is available
   // from a scanned join QR — there is no safe way to talk to it, so the app renders a gate instead.
-  const [needsQr, setNeedsQr] = useState(false);
+  const [needsQr, setNeedsQr] = useState<false | "missing" | "changed">(false);
   // Bumped to force a full server re-sync: on WebSocket reconnect (missed events don't replay) and
   // on a failed boot fetch (retry with backoff instead of stranding the app offline).
   const [syncTick, setSyncTick] = useState(0);
@@ -915,9 +934,17 @@ function LoamApp() {
     // server revocation below authenticates on the in-memory transport session + the browser cookie, which
     // both survive local-storage erasure, so clearing the token here doesn't weaken it.)
     clearStoredIdentityToken();
+    // The cached host transport key goes too (review 2026-09-04): a NODE wipe rotates the host's key, so
+    // keeping the old one would loop the next boot on a failed resume instead of reaching the rescan
+    // gate; a DEVICE wipe's verified rejoin needs a fresh `#k=` scan anyway.
+    clearCachedHostPublicKey();
     localStorage.removeItem(CURRENT_USER_KEY);
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
+    // In-memory residue: decrypted avatar/attachment `blob:` URLs and rendered message HTML would
+    // otherwise outlive the wipe in the still-open tab (review 2026-09-04).
+    clearImageObjectUrls();
+    clearMarkdownCache();
 
     // Delete the DB. If deletion is DEFERRED (another tab holds a connection) it throws, but that's not a
     // failure to hide: `markLocalStoreWiped` persisted a durable flag, so the store stays un-hydratable now
@@ -1329,6 +1356,18 @@ function LoamApp() {
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
 
+        // The Android host's own WebView (never a LAN joiner) carries the launcher's per-boot host token:
+        // claim admin with it exactly once (`hostDevice` bootstrap, review 2026-09-04). Consumed first so
+        // a resync can never re-send it; a failed claim just leaves the operator un-promoted, visibly.
+        const hostToken = window.__loamHostDeviceToken;
+        if (typeof hostToken === "string" && hostToken.length > 0 && !nextConfig.currentUser.isAdmin) {
+          window.__loamHostDeviceToken = undefined;
+          await claimAdmin(hostToken).catch(() => undefined);
+          if (!active) {
+            return;
+          }
+        }
+
         if (nextConfig.currentUser.banned || nextConfig.currentUser.pending) {
           // Gated sessions must not keep previously hydrated content around (a banned user's
           // cached history stays readable otherwise): clear memory and the IndexedDB caches.
@@ -1377,10 +1416,11 @@ function LoamApp() {
         }
 
         if (nextError instanceof TransportNeedsQrError) {
-          // `required` mode with no host key available (no QR scanned, none cached): there is no safe
-          // way to talk to this node — gate the whole app instead of falling back to plaintext. Not an
-          // error to retry: the user must scan the join QR.
-          setNeedsQr(true);
+          // `required` mode with no host key available (no QR scanned, none cached) — or a cached QR key
+          // the node no longer holds (it rotated, e.g. an Emergency Reset): there is no safe way to talk
+          // to this node — gate the whole app instead of falling back to plaintext. Not an error to
+          // retry: the user must scan the (current) join QR.
+          setNeedsQr(nextError.reason);
           return;
         }
 
@@ -1401,7 +1441,7 @@ function LoamApp() {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [currentUser.id, currentUser.banned, currentUser.pending, removeChannel, syncTick, upsertUsers, wiped]);
+  }, [claimAdmin, currentUser.id, currentUser.banned, currentUser.pending, removeChannel, syncTick, upsertUsers, wiped]);
 
   useEffect(() => {
     if (!activeConversation) {
@@ -1469,6 +1509,17 @@ function LoamApp() {
     let reconnectTimer: number | undefined;
     let socket: WebSocket | undefined;
     let socketAttempt = 0;
+
+    // A transparent REST re-handshake replaced the module session (review 2026-09-04): a socket confirmed
+    // under the previous key would decrypt every later frame against the wrong key and go silently deaf
+    // while still showing "live". Close it; `onclose` schedules the normal reconnect, which reopens a
+    // socket under the current session. (The reconnect path's own `reestablishSession` fires this too —
+    // at that point `socket` is the already-closed previous one, so this is a no-op there.)
+    const unsubscribeSessionReplaced = subscribeSessionReplaced(() => {
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        socket.close();
+      }
+    });
 
     function scheduleReconnect(): void {
       if (disposed || reconnectTimer !== undefined) {
@@ -1594,9 +1645,15 @@ function LoamApp() {
         }
 
         if (payload.type === "configUpdated") {
-          setConfig((previous) =>
-            previous ? { ...previous, networkConfig: payload.networkConfig } : previous,
-          );
+          setConfig((previous) => {
+            // A live transport-mode flip only takes effect through `ensureSession`, which runs on the
+            // boot/resync path — so re-run it (review 2026-09-04): an `optional`→`required` flip then
+            // shows the QR gate instead of erroring until a reload, and the fetch path re-evaluates.
+            if (previous && previous.networkConfig.transportEncryption !== payload.networkConfig.transportEncryption) {
+              queueMicrotask(() => setSyncTick((tick) => tick + 1));
+            }
+            return previous ? { ...previous, networkConfig: payload.networkConfig } : previous;
+          });
 
           // Presence switched off: clear the dots immediately (no further events will arrive).
           if (!payload.networkConfig.enablePresence) {
@@ -1649,6 +1706,7 @@ function LoamApp() {
 
     return () => {
       disposed = true;
+      unsubscribeSessionReplaced();
 
       if (reconnectTimer !== undefined) {
         window.clearTimeout(reconnectTimer);
@@ -1742,7 +1800,7 @@ function LoamApp() {
         <div>
           <p className="brand-title">LOAM</p>
           <h1>{t("gate.needsQrTitle")}</h1>
-          <p>{t("gate.needsQrBody")}</p>
+          <p>{t(needsQr === "changed" ? "gate.needsQrKeyChanged" : "gate.needsQrBody")}</p>
         </div>
       </main>
     );
