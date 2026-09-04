@@ -125,8 +125,8 @@ bootstrap keyed on a per-boot launcher token that only the host's WebView receiv
 auto-unlocked from the device on every boot (the passphrase was stored beside the device secret), so it
 protected nothing beyond `persistent`; the passphrase is now asked for at every start and never stored.
 The WebSocket accepted 100 MiB inbound frames (library default) on pre-auth sockets — capped at 16 KiB.
-An Emergency Reset stranded previously QR-joined clients in a resume loop (the cached host key was never
-dropped); a forged unsealed 401 on a GET could leave a socket silently deaf after the re-handshake;
+An Emergency Reset stranded previously QR-joined clients in a resume loop (nothing detected the changed
+host key — now a mismatching handshake marks the pin broken and gates on a rescan, keeping the pin); a forged unsealed 401 on a GET could leave a socket silently deaf after the re-handshake;
 ephemeral mode left uploaded avatars on disk across restarts; a system-stopped hotspot kept showing a
 dead SSID/QR.
 

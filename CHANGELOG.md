@@ -9,8 +9,9 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 - **Review fixes (2026-09-04 full-codebase review).** Client: a QR-joined client can no longer fall back
   to plaintext on an `optional` node when its handshake fails (the decision now comes from the transport
   layer's QR-pinned effective mode, not the unauthenticated advertisement); a node whose transport key
-  changed (Emergency Reset, stale poster) drops the cached key and shows a "scan the current join QR" gate
-  instead of looping on a doomed resume; a transparent re-handshake closes the socket sealed under the old
+  changed (Emergency Reset, stale poster) marks the pinned key broken and shows a "scan the current join
+  QR" gate instead of looping on a doomed resume — the pin is kept (never replaced by an advertised key)
+  and only a fresh scan clears it, and a pinned client refuses plaintext fetches/sockets outright; a transparent re-handshake closes the socket sealed under the old
   key; a wipe also forgets the cached host key, revokes decrypted image `blob:` URLs and clears the
   rendered-markdown cache; a live transport-mode flip re-runs session setup. Server: WebSocket inbound
   frames capped at 16 KiB (was the 100 MiB library default, buffered even on pre-auth sockets); a

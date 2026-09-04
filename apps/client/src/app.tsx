@@ -1564,7 +1564,17 @@ function LoamApp() {
         }
       }
 
-      const nextSocket = new WebSocket(wsUrl(socketUrl));
+      let nextSocket: WebSocket;
+      try {
+        nextSocket = new WebSocket(wsUrl(socketUrl));
+      } catch {
+        // No encrypted session on a node whose effective mode is `required` (the QR gate is showing, or a
+        // pin was broken mid-session): never open a plaintext socket — stay offline and let the next boot
+        // pass / rescan re-establish a session first (review 2026-09-04).
+        setConnection("offline");
+        scheduleReconnect();
+        return;
+      }
       socket = nextSocket;
       setConnection("connecting");
 

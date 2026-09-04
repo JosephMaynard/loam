@@ -12,6 +12,7 @@ import {
   getCachedHostPublicKey,
   getHostKeyMismatch,
   getSession,
+  isHostKeyPinBroken,
   handleWsFrame,
   isTunnelActive,
   logoutSecureIdentity,
@@ -1375,7 +1376,7 @@ describe("review fixes 2026-09-04 (client transport)", () => {
   });
 
   describe("host key changed since the QR was scanned (post-Emergency-Reset stranding)", () => {
-    it("a QR-pinned handshake against a node holding a DIFFERENT key drops the cache and demands a rescan", async () => {
+    it("a QR-pinned handshake against a node holding a DIFFERENT key marks the pin broken (keeps it) and demands a rescan", async () => {
       const scanned = createTransportIdentity(); // what the (stale) QR / cache says
       const current = createTransportIdentity(); // what the node actually holds now
       localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, scanned.publicKey);
@@ -1384,10 +1385,12 @@ describe("review fixes 2026-09-04 (client transport)", () => {
       const failure = await ensureSession("optional", current.publicKey).catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(TransportNeedsQrError);
       expect((failure as TransportNeedsQrError).reason).toBe("changed");
-      // Fail closed: no session (never derived against the node's advertised key), cache dropped so the next
-      // boot reaches the rescan gate instead of looping on a doomed resume.
+      // Fail closed: no session (never derived against the node's advertised key); the pin is KEPT and marked
+      // broken, so the next boot reaches the rescan gate instead of looping on a doomed resume — and never
+      // handshakes against whatever key the node (or an attacker) advertises (round-2 review).
       expect(getSession()).toBeUndefined();
-      expect(getCachedHostPublicKey()).toBeUndefined();
+      expect(getCachedHostPublicKey()).toBe(scanned.publicKey);
+      expect(isHostKeyPinBroken()).toBe(true);
     });
 
     it("a config-key (non-QR) handshake that returns a different key is a plain retryable error", async () => {
@@ -1442,5 +1445,127 @@ describe("review fixes 2026-09-04 (client transport)", () => {
       await encryptedFetch("GET", "/api/channels");
       expect(replaced).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("review fixes 2026-09-04 (client transport) — round 2: a broken pin fails CLOSED", () => {
+  beforeEach(() => {
+    resetTransportStateForTests();
+    localStorage.clear();
+    window.location.hash = "";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    window.location.hash = "";
+  });
+
+  function handshakeResponder(host: ReturnType<typeof createTransportIdentity>) {
+    return async (_url: string, init: RequestInit) => {
+      const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+      return new Response(JSON.stringify(json), { status });
+    };
+  }
+
+  it("a mid-session re-handshake against a DIFFERENT key keeps the live session, keeps the pin, and never sends plaintext", async () => {
+    const real = createTransportIdentity();
+    const impostor = createTransportIdentity();
+    localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, real.publicKey);
+    let handshakes = 0;
+    const contentRequests: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          handshakes += 1;
+          // The first handshake is the genuine node; every later one is an on-path attacker's.
+          return handshakeResponder(handshakes === 1 ? real : impostor)(url, init);
+        }
+        contentRequests.push(init);
+        return new Response(null, { status: 401 }); // a forged, unsealed 401 on a GET
+      }),
+    );
+
+    await ensureSession("optional", real.publicKey);
+    const original = getSession();
+    expect(original?.hostPublicKey).toBe(real.publicKey);
+
+    const response = await encryptedFetch("GET", "/api/channels");
+    expect(response.status).toBe(401); // the request fails; it is NOT retried in plaintext
+    expect(handshakes).toBe(2);
+    // The still-valid session is untouched (the server never dropped it) and the pin is intact.
+    expect(getSession()).toBe(original);
+    expect(getCachedHostPublicKey()).toBe(real.publicKey);
+    expect(isHostKeyPinBroken()).toBe(true);
+    // Every content request went out under the session (tunnelled — a QR-pinned join is effective-required),
+    // none as a bare cookie fetch.
+    for (const init of contentRequests) {
+      expect(init.credentials).toBe("omit");
+      expect((init.headers as Record<string, string>)["x-loam-enc"]).toBe(original!.sessionId);
+    }
+  });
+
+  it("a broken pin gates the NEXT boot with 'changed' without ever handshaking against the advertised key; a fresh scan clears it", async () => {
+    const real = createTransportIdentity();
+    const impostor = createTransportIdentity();
+    localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, real.publicKey);
+    localStorage.setItem(`loam.transportPinBroken.${window.location.origin}`, "1");
+    const fetchMock = vi.fn(async () => {
+      throw new Error("must not handshake while the pin is broken");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // A reload (module state reset) on an advertised-optional node that now advertises the attacker's key.
+    resetTransportStateForTests();
+    const failure = await ensureSession("optional", impostor.publicKey).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TransportNeedsQrError);
+    expect((failure as TransportNeedsQrError).reason).toBe("changed");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(getCachedHostPublicKey()).toBe(real.publicKey); // the pin is kept, not replaced
+    expect(mayFallBackToPlaintext("optional")).toBe(false);
+    // Nothing goes out in plaintext while gated.
+    await expect(encryptedFetch("GET", "/api/channels")).rejects.toThrow(/encrypted session/);
+    expect(() => wsUrl("ws://x/ws")).toThrow(/encrypted session/);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The operator's CURRENT QR (say, after an Emergency Reset the node is `real2`) re-establishes trust.
+    const real2 = createTransportIdentity();
+    window.location.hash = `#k=${real2.publicKey}`;
+    vi.stubGlobal("fetch", vi.fn(handshakeResponder(real2)));
+    await ensureSession("optional", real2.publicKey);
+    expect(getSession()?.hostPublicKey).toBe(real2.publicKey);
+    expect(isHostKeyPinBroken()).toBe(false);
+    expect(getCachedHostPublicKey()).toBe(real2.publicKey);
+  });
+
+  it("required mode with no session never fetches or connects in plaintext", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(ensureSession("required")).rejects.toBeInstanceOf(TransportNeedsQrError);
+    await expect(encryptedFetch("GET", "/api/channels")).rejects.toThrow(/encrypted session/);
+    expect(() => wsUrl("ws://x/ws")).toThrow(/encrypted session/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a just-scanned pin survives a localStorage failure for this load (no plaintext fallback)", async () => {
+    const host = createTransportIdentity();
+    window.location.hash = `#k=${host.publicKey}`;
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("handshake dropped");
+        }),
+      );
+      await expect(ensureSession("optional", host.publicKey)).rejects.toThrow("handshake dropped");
+      expect(getCachedHostPublicKey()).toBe(host.publicKey); // in-memory pin
+      expect(mayFallBackToPlaintext("optional")).toBe(false);
+    } finally {
+      setItem.mockRestore();
+    }
   });
 });
