@@ -10,6 +10,7 @@ import { type PeerTransportPosture, type PeerTransportSession, fetchPeerTranspor
 import type { MeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
 
+/** Build the node-to-node sync engine over the runtime view and the mesh layer it hands sealed mail to. */
 export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   // Per-peer sync bookkeeping for the admin UI (RAM-only).
   type PeerSyncStatus = {

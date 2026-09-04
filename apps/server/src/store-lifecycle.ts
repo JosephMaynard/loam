@@ -40,6 +40,7 @@ export type WipePhase = "delete-pending" | "key-clear-ready";
 /** The on-disk wipe journal: the phase plus the effective config snapshot committed with it. */
 export type WipeJournal = { phase: WipePhase; config?: LoamConfig; configInvalid?: boolean; corrupt?: boolean };
 
+/** Build the store lifecycle over its dependencies: key state, resilient open, wipe journal, boot-time wipe resume. */
 export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   const { dataDir, avatarsDir, attachmentsDir, configPath, options, log } = deps;
 

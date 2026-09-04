@@ -4,6 +4,7 @@ import type { AppContext } from "./app-context.js";
 import { sessionCookieName } from "./defaults.js";
 import { readCookie } from "./identity.js";
 
+/** Register liveness, public bootstrap, authenticated config, and cookie session end. */
 export function registerSessionRoutes(ctx: AppContext): void {
   // Liveness probe that mints NO identity — the Android host launcher polls this before loading the
   // WebView. Polling /api/config here would consume the one-time `firstUser` admin grant with a

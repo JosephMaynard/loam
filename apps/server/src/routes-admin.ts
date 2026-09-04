@@ -7,6 +7,7 @@ import { errorBody } from "./errors.js";
 import { makeAdminSetupCode } from "./identity.js";
 import { timingSafeEqualStrings, verifySecret } from "./secrets.js";
 
+/** Register the admin routes: claim, config get/patch, kill switch, panic token. */
 export function registerAdminRoutes(ctx: AppContext): void {
   ctx.server.post(
     "/api/admin/claim",

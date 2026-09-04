@@ -30,6 +30,7 @@ const WS_UNCONFIRMED_PER_IP_CAP = 8;
  */
 export const WS_MAX_INBOUND_FRAME_BYTES = 16 * 1024;
 
+/** Build the live-event layer over the app context: socket set, audience filtering, sealed frames, presence, `/ws`. */
 export function createRealtime(ctx: AppContext) {
   const sockets = new Set<SocketSession>();
 
@@ -59,6 +60,7 @@ export function createRealtime(ctx: AppContext) {
     }
   }
 
+  /** Whether the socket of `userId` may receive `event` — the single audience/privacy filter for every broadcast. */
   function socketCanReceiveEvent(userId: string, event: ClientEvent): boolean {
     const recipient = ctx.data.users.find((candidate) => candidate.id === userId);
 
@@ -162,6 +164,7 @@ export function createRealtime(ctx: AppContext) {
     session.socket.send(payload);
   }
 
+  /** Send an event to every connected socket whose user may receive it (see `socketCanReceiveEvent`). */
   function broadcast(event: ClientEvent): void {
     if (event.type === "userUpserted") {
       // Two shapes: `roles` (moderator/greeter) reach only the subject (so their own client can gate

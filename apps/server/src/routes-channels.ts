@@ -5,6 +5,7 @@ import { ChannelCreateRequestSchema, ChannelMemberAddRequestSchema, ChannelSchem
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 
+/** Register the channel routes: listing, history, members, join requests, transfer, create/update/delete, admin view. */
 export function registerChannelRoutes(ctx: AppContext): void {
   ctx.server.get("/api/channels", async (request, reply) => {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));

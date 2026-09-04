@@ -531,6 +531,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     appConfig = config;
   }
 
+  /** Whether any admin identity exists yet (the `firstUser` bootstrap grants admin only while none does). */
   function anyAdminExists(): boolean {
     return data.users.some((user) => user.isAdmin);
   }
@@ -554,6 +555,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return entry.count <= maxNewIdentitiesPerWindow;
   }
 
+  /** Resolve the caller's user id: a bound transport identity first, else the session cookie, else mint a new
+   * identity (within the per-IP budget) and set the cookie. */
   function getSessionUserId(request: FastifyRequest, reply: FastifyReply): string {
     // A bound session's identity arrives via the internal tunnel (docs/20 §10) — trusted over any
     // cookie, and it mints nothing (the identity already exists from resume). Checked first so a
@@ -595,6 +598,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return userId;
   }
 
+  /** Like `getSessionUserId`, but never mints: undefined when the request carries no valid identity. */
   function getSessionUserIdFromRequest(request: FastifyRequest): string | undefined {
     const boundUserId = tunnelBoundUserId(request);
     if (boundUserId) {
@@ -974,6 +978,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       .map((user) => sanitizeUserFor(viewer, user));
   }
 
+  /** Absolute path of an uploaded avatar image file. */
   function avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string {
     return join(avatarsDir, `${imageId}.${avatarImageExtension(mimeType)}`);
   }
@@ -1221,6 +1226,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     });
   }
 
+  /** A channel's history as `viewerId` may see it: shadow-banned authors hidden, reactions only on visible roots. */
   function channelMessages(channelId: string, viewerId: string): Message[] {
     // Filter the root messages by shadow-ban FIRST, then keep only reactions that target a still-
     // visible root (and whose own author isn't shadow-banned). Deriving the reaction ids from the
@@ -1238,6 +1244,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return [...roots, ...reactions].sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  /** The DM thread between two users as `currentUserId` may see it (same shadow-ban rules as channels). */
   function dmMessages(peerId: string, currentUserId: string): Message[] {
     // Same ordering as channelMessages: shadow-ban the roots first, then only reactions on visible
     // roots survive, so a hidden DM never leaks via a dangling reaction.
@@ -1258,6 +1265,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return [...roots, ...reactions].sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  /** The restricted audience of a message (DM participants, private-channel members), or undefined when public. */
   function messageAudienceUserIds(message: Message): Set<string> | undefined {
     if (message.type === "dm") {
       return new Set([message.authorId, message.recipientUserId]);
@@ -1675,6 +1683,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
   }
 
+  /** Delete messages past the configured retention TTL (global or per-channel) and broadcast their removal. */
   function reapExpiredMessages(): void {
     reapExpiredSealed();
     pruneTombstonesHorizon();

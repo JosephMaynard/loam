@@ -9,6 +9,7 @@ import { errorBody } from "./errors.js";
 import { attachmentFileName, parseAttachmentFileName } from "./media.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
+/** Register the node-to-node sync endpoints and the opportunistic-mesh endpoints (cards, contacts, send, bridge, admin sync). */
 export function registerSyncMeshRoutes(ctx: AppContext): void {
   // GET for a plaintext (`off`-mode) peer; POST for a sealed peer, which carries the `{ s, b, tok }`
   // envelope so the sync token is sealed and the request proves session-key possession (docs/08). The
@@ -39,7 +40,7 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
 
   ctx.server.post(
     "/api/sync/messages",
-    ctx.semanticRateLimit(120),
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       if (!ctx.appConfig.sync.enabled || !ctx.syncPeerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
@@ -69,7 +70,7 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
   // messages export — so DM / private-channel attachments never cross.
   ctx.server.post(
     "/api/sync/attachment",
-    ctx.semanticRateLimit(240),
+    { config: { rateLimit: { max: 240, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       if (!ctx.appConfig.sync.enabled || !ctx.syncPeerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));

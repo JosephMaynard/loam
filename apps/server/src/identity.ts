@@ -55,6 +55,7 @@ export function makeSessionUserId(): string {
   return `user.${randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
+/** A fresh session-cookie bearer token (256 random bits, base64url). */
 export function makeSessionToken(): string {
   return randomUUID();
 }
@@ -70,14 +71,17 @@ export function hashIdentityToken(token: string): string {
   return createHash("sha256").update(token).digest("base64url");
 }
 
+/** A fresh one-time admin setup code for the `setupCode` bootstrap. */
 export function makeAdminSetupCode(): string {
   return randomUUID().replaceAll("-", "").slice(0, 12);
 }
 
+/** Percent-encode a cookie value so it survives `Set-Cookie` framing. */
 export function encodeCookieValue(value: string): string {
   return encodeURIComponent(value);
 }
 
+/** Read one named cookie's decoded value from a `Cookie` header, or undefined. */
 export function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
   for (const cookie of cookieHeader?.split(";") ?? []) {
     const [rawName, ...rawValue] = cookie.trim().split("=");

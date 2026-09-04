@@ -13,6 +13,7 @@ export function newAvatarImageId(): string {
   return `avt_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
+/** Mint an attachment id (`att_<16 hex>`). */
 export function newAttachmentId(): string {
   return `att_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
@@ -34,6 +35,7 @@ export function sanitizeAttachmentName(name: string | undefined): string {
   return cleaned || "file";
 }
 
+/** The on-disk file name for an attachment (id plus the extension its MIME type maps to). */
 export function attachmentFileName(attachment: { id: string; mimeType?: MessageAttachment["mimeType"] }): string {
   // Images keep their real extension (served inline). Non-image files are stored under a generic `.bin` so
   // the on-disk name can never carry an executable/renderable extension, and they're served octet-stream.

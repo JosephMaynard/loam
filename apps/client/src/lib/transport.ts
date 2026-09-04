@@ -234,7 +234,10 @@ function readStorage(key: string): string | undefined {
 
 /** The cached (or just-scanned-this-load) host public key for the current server origin, if any. */
 export function getCachedHostPublicKey(): string | undefined {
-  return readStorage(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin()) ?? memoryHostKey;
+  // The in-memory copy wins: it is set only by a scan on THIS load, so it is never staler than the stored
+  // copy — and if the storage write failed, the stored copy may be a PREVIOUS key that must not outrank
+  // the one just scanned (it would break the new pin as "changed"). (CodeRabbit, PR #122)
+  return memoryHostKey ?? readStorage(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin());
 }
 
 /** Whether the pinned key for this origin has been contradicted by the node (see `handshake`). */
@@ -522,6 +525,9 @@ async function doReHandshake(): Promise<boolean> {
       try {
         await resumeAttempt(session, storedIdentityToken(), {}, false);
       } catch {
+        // `handshake` has ALREADY replaced the module session — the socket owner must still be told, or a
+        // socket confirmed under the previous key stays open and deaf (CodeRabbit, PR #122).
+        notifySessionReplaced();
         return false;
       }
     }

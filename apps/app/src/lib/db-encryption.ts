@@ -518,19 +518,18 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
     // DISCARDS — its 5 s bridge timeout on a slow cold start, or a driver-unavailable plaintext downgrade —
     // would have deleted the only copy of a passphrase the operator never had to remember. New installs
     // never write it, so this is normally null.
-    let passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
-    if (typeof passphrase !== 'string' || passphrase.length === 0) {
-      // The boot-time ENTRY (P2-a, Sol round 6): typed on the locked/unreadable screen or pre-entered in
-      // Settings. Tried WITHOUT being committed — a wrong entry can't strand the intact database — and
-      // CONSUMED right here (review 2026-09-04), so the passphrase is at rest only between the operator
-      // typing it and this read, never across a boot: every start prompts again. A consumed entry whose
-      // boot then fails simply has to be typed again (the recovery screens offer that) — unlike the legacy
-      // item above, nothing irreplaceable is lost.
-      const candidate = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
-      if (typeof candidate === 'string' && candidate.length > 0) {
-        passphrase = candidate;
-        await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
-      }
+    // The boot-time ENTRY (P2-a, Sol round 6) comes FIRST — it is the operator's newest intent (typed on the
+    // locked/unreadable screen, or pre-entered in Settings, which promises it is used at the next start
+    // even on a legacy install — CodeRabbit, PR #122). Tried WITHOUT being committed — a wrong entry can't
+    // strand the intact database — and CONSUMED right here (review 2026-09-04), so the passphrase is at
+    // rest only between the operator typing it and this read, never across a boot: every start prompts
+    // again. A consumed entry whose boot then fails simply has to be typed again (the recovery screens
+    // offer that) — and on a legacy install the untouched legacy item still opens the DB at the next start.
+    let passphrase = await SecureStore.getItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+    if (typeof passphrase === 'string' && passphrase.length > 0) {
+      await SecureStore.deleteItemAsync(PASSPHRASE_CANDIDATE_ITEM);
+    } else {
+      passphrase = await SecureStore.getItemAsync(PASSPHRASE_ITEM);
     }
     if (typeof passphrase !== 'string' || passphrase.length === 0) {
       // No passphrase entered for this start — the boot-time unlock prompt (index.tsx) collects one.

@@ -31,6 +31,7 @@ export function hashSecret(secret: string): string {
   return `${secretHashPrefix}${salt.toString("hex")}:${hash.toString("hex")}`;
 }
 
+/** Whether a stored secret is already in the `scrypt:<salt>:<hash>` form (vs plaintext from a config file / PATCH). */
 export function isHashedSecret(value: string): boolean {
   // Match the full format, not just the prefix — a malformed "scrypt:…" value is treated as a
   // plaintext secret and hashed, rather than stored unverifiable.

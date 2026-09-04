@@ -8,6 +8,7 @@ import { errorBody } from "./errors.js";
 import { newMessageId } from "./ids.js";
 import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, avatarImageHasExpectedSignature, isImageAttachmentMime, newAttachmentId, newAvatarImageId, parseAttachmentFileName, parseAvatarImageId, sanitizeAttachmentName } from "./media.js";
 
+/** Register user, profile/avatar, roles, moderation/report, join-approval, typing, and attachment routes. */
 export function registerUserRoutes(ctx: AppContext): void {
   ctx.server.get("/api/users", async (request, reply) => {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
@@ -54,7 +55,7 @@ export function registerUserRoutes(ctx: AppContext): void {
 
   ctx.server.put(
     "/api/users/me/avatar-image",
-    ctx.semanticRateLimit(10),
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
     if (!ctx.appConfig.identity.allowUserAvatarEdit || !ctx.appConfig.identity.allowUserAvatarUpload) {
       return reply.code(403).send(errorBody("User avatar uploads are disabled on this LOAM node"));
@@ -377,7 +378,7 @@ export function registerUserRoutes(ctx: AppContext): void {
     "/api/moderation/messages/:messageId/remove",
     // Per-route rate limit: this handler touches the filesystem (deletes attachment files), and CodeQL
     // (js/missing-rate-limiting) only credits the per-route config, not the global limiter.
-    ctx.semanticRateLimit(60),
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
 
@@ -541,7 +542,7 @@ export function registerUserRoutes(ctx: AppContext): void {
     // Read cap set well above the write caps: in `required` mode EVERY image load is a tunnelled
     // dispatch, and a crowded People page fetches a hundred-plus avatars in one render — throttling
     // reads paints sticky blank images client-side.
-    ctx.semanticRateLimit(300),
+    { config: { rateLimit: { max: 300, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
     const avatar = parseAvatarImageId(request.params.fileName);
 
@@ -566,7 +567,7 @@ export function registerUserRoutes(ctx: AppContext): void {
   // is bound to this uploader and consumed by the message that references it (see createMessage).
   ctx.server.post(
     "/api/attachments",
-    { bodyLimit: ctx.LARGE_BODY_LIMIT, ...ctx.semanticRateLimit(20) },
+    { bodyLimit: ctx.LARGE_BODY_LIMIT, config: { rateLimit: { max: 20, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
       const accessError = ctx.participationError(currentUser);
@@ -626,7 +627,7 @@ export function registerUserRoutes(ctx: AppContext): void {
     "/api/attachments/:fileName",
     // Read cap set well above the write caps: a media-heavy channel history fetches every image
     // through the tunnel in `required` mode (see the avatars note above).
-    ctx.semanticRateLimit(600),
+    { config: { rateLimit: { max: 600, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       const attachment = parseAttachmentFileName(request.params.fileName);
 

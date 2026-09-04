@@ -1914,14 +1914,14 @@ describe("encryption at rest + key-discard kill switch", () => {
       { killSwitch: { enabled: true } },
     );
     const admin = await session(app);
-    // DB-only admin change: retention TTL, which lives in the DB config table.
+    // DB-only admin changes: retention TTL + a sync bearer token, both of which live in the DB config table.
     expect(
       (
         await app.server.inject({
           method: "PATCH",
           url: "/api/admin/config",
           headers: { cookie: admin.cookie },
-          payload: { retention: { messageTtlMs: 3_600_000 } },
+          payload: { retention: { messageTtlMs: 3_600_000 }, sync: { enabled: true, token: "a-plaintext-bearer-sync-token-nohook" } },
         })
       ).statusCode,
     ).toBe(200);
@@ -1941,8 +1941,16 @@ describe("encryption at rest + key-discard kill switch", () => {
     };
     expect(persisted.retention.messageTtlMs).toBe(3_600_000);
 
-    // Restart under the same key (no-hook can't rotate): the fresh DB's config table is empty, so config.json
-    // is the source — the retention change survives.
+    // CodeRabbit (PR #122): the plaintext config.json blanks the sync bearer token, but the fresh DB's config
+    // row — encrypted under the same fixed key — must keep the FULL config (token included), exactly like
+    // the ephemeral branch does: that row overrides config.json on the next boot, so a sanitized row would
+    // have silently dropped the token.
+    expect((persisted as { sync: { token?: string } }).sync.token).toBeUndefined();
+    const dbRow = JSON.parse(app.store.getConfigValue("config") ?? "{}") as { sync: { token?: string } };
+    expect(dbRow.sync.token).toBe("a-plaintext-bearer-sync-token-nohook");
+
+    // Restart under the same key (no-hook can't rotate): the re-persisted DB row is the source — the retention
+    // change AND the sync token survive.
     const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
     cleanups.push(() => restarted.close());
     const restartedAdmin = await session(restarted);
@@ -1950,6 +1958,8 @@ describe("encryption at rest + key-discard kill switch", () => {
       await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
     ).json() as { retention: { messageTtlMs?: number } };
     expect(config.retention.messageTtlMs).toBe(3_600_000);
+    const restartedRow = JSON.parse(restarted.store.getConfigValue("config") ?? "{}") as { sync: { token?: string } };
+    expect(restartedRow.sync.token).toBe("a-plaintext-bearer-sync-token-nohook");
   });
 
   it("P1-4 (Sol round 10): a config.json persist failure during a fixed-key wipe does NOT lose config or signal the launcher — the journal retains the config snapshot and a reopen recovers it", async () => {

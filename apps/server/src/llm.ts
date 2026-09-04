@@ -8,6 +8,7 @@ import { newMessageId } from "./ids.js";
 import type { OnDeviceChatHook } from "./types.js";
 import type { Runtime } from "./runtime.js";
 
+/** Build the LLM layer over the runtime view: bot user, backend selection, and the streaming assistant reply. */
 export function createLlmLayer(rt: Runtime) {
   /** Whether any LLM backend is active — the laptop Ollama connection or the on-device model. The
    * bot DM contact, streaming, and all LLM routes are gated on this, so it stays off unless the
@@ -103,6 +104,7 @@ export function createLlmLayer(rt: Runtime) {
       : messages;
   }
 
+  /** Resolve a path against the configured Ollama base URL. */
   function ollamaUrl(path: string): string {
     return `${rt.appConfig.llm.ollama.baseUrl.replace(/\/+$/, "")}${path}`;
   }

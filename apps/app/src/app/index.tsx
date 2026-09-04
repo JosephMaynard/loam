@@ -862,6 +862,10 @@ export default function HostScreen() {
         // `webViewKey`). Still a native no-op for key material — that stays with the acked protocol below.
         setTimeout(() => {
           remountAfterBootstrapRef.current = true;
+          // Gate the WebView again while the re-bootstrap runs: if that attempt fails, `gate()` surfaces the
+          // existing Retry control instead of leaving the stale WebView mounted with no way to rejoin
+          // (CodeRabbit, PR #122). A success re-mounts it under the new key.
+          setWebViewReady(false);
           retryBootstrap();
         }, 1500);
       }

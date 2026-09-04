@@ -87,6 +87,7 @@ export function resolveEphemeralDbKey(dbKeyEnv: string | undefined): boolean {
   return dbKeyEnv === "ephemeral";
 }
 
+/** Build and start the server from environment variables — the Android host's boot path (see the module note). */
 export async function startEmbeddedServer(): Promise<LoamApp> {
   const dataDir = process.env.LOAM_DATA_DIR;
 

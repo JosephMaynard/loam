@@ -7,6 +7,7 @@ import { makeUser } from "./identity.js";
 import { newMessageId } from "./ids.js";
 import type { Runtime } from "./runtime.js";
 
+/** Build the sealed-mail mesh layer over the runtime view (identities, contacts, seal/deliver/relay, expiry). */
 export function createMeshLayer(rt: Runtime) {
   /**
    * Delete messages older than the configured retention TTL (ephemeral messages): remove them from
@@ -45,6 +46,7 @@ export function createMeshLayer(rt: Runtime) {
   // Local users' mesh keypairs (userId → identity), mirrored from the store. Secret keys stay here.
   const meshIdentities = new Map<string, MeshIdentity>();
 
+  /** Load every persisted per-user mesh identity into the in-memory map. */
   function loadMeshIdentities(): void {
     for (const { userId, data: json } of rt.store.loadMeshIdentities()) {
       try {
@@ -62,6 +64,7 @@ export function createMeshLayer(rt: Runtime) {
   // identityKey couldn't (docs/16).
   const meshContacts = new Map<string, Map<string, MeshIdentityCard>>();
 
+  /** Load every persisted mesh contact (per local user) into the in-memory map. */
   function loadMeshContacts(): void {
     for (const { ownerUserId, meshId, data: json } of rt.store.loadMeshContacts()) {
       let parsed: unknown;

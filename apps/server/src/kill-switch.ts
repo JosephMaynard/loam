@@ -18,6 +18,7 @@ import type { WipePhase } from "./store-lifecycle.js";
  */
 export type KillSwitchResult = { complete: boolean; phase?: WipePhase };
 
+/** Build the kill-switch layer over the app context: `executeKillSwitch` (single-flight) and its body. */
 export function createKillSwitch(ctx: AppContext) {
   /**
    * Execute the kill switch: wipe all persisted and in-memory data (messages, users, channels,
@@ -280,8 +281,11 @@ export function createKillSwitch(ctx: AppContext) {
       }
       ctx.store = ctx.lifecycle.openLoamStore();
       // The wipe destroys data, not settings; the fresh encrypted DB starts with an empty config table, so
-      // re-persist the effective config into it (config.json above is the crash-recovery copy).
-      ctx.store.setConfigValue("config", JSON.stringify(sanitized));
+      // re-persist the effective config into it — the FULL config, sync token included: the DB row is
+      // encrypted under the same fixed key as before, and on the next boot it overrides config.json, so
+      // storing the sanitized copy here would silently drop the token (CodeRabbit, PR #122). Only the
+      // plaintext config.json above (the crash-recovery copy) has the bearer secret blanked.
+      ctx.store.setConfigValue("config", JSON.stringify(ctx.appConfig));
     } else if (ctx.dbState.encryptionEnabled) {
       // Ephemeral (RAM-only key) OR a legacy keyed node with no declared mode: rotate the RAM key (only when
       // there IS one — never rotate a legacy FIXED key) and recreate. No durable phase: an ephemeral key is

@@ -181,13 +181,21 @@ describe("resolveDbKey", () => {
     }
   });
 
-  it("a legacy committed passphrase takes precedence over a leftover entry for that one boot, leaving the entry for the next", async () => {
+  it("a settings entry takes precedence over a legacy committed passphrase for that one boot: the entry is consumed, the legacy value is left untouched for the next", async () => {
+    // CodeRabbit (PR #122): a pre-change install (legacy item present) must still be able to CHANGE its
+    // passphrase from Settings — so the entry is tried first. It is one-shot (consumed here), and the legacy
+    // value is retired only on the server's confirmed-open ack, so a wrong entry falls back to the legacy
+    // passphrase on the very next boot instead of locking the operator out of an intact DB.
     await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "committed");
-    await setPassphraseCandidate("stale-guess");
+    await setPassphraseCandidate("new-entry");
     const { key: deviceSecret } = await resolveDbKey("persistent");
     const { key } = await resolveDbKey("passphrase");
-    expect(key).toBe(sha256Hex(`committed:${deviceSecret}`));
-    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBe("stale-guess");
+    expect(key).toBe(sha256Hex(`new-entry:${deviceSecret}`));
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_CANDIDATE_ITEM)).toBeNull();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("committed");
+    // Next boot, no entry left: the legacy passphrase opens the DB again.
+    const { key: next } = await resolveDbKey("passphrase");
+    expect(next).toBe(sha256Hex(`committed:${deviceSecret}`));
   });
 
   describe("P1-1 (Sol round 5): passphrase key-derivation migration", () => {
@@ -942,16 +950,19 @@ describe("passphrase settings entry uses the ENTRY flow (P1-3, Sol round 7)", ()
     resetCryptoMock();
   });
 
-  it("a legacy committed passphrase is never overwritten by a settings entry: the legacy value opens the DB for that boot", async () => {
+  it("a legacy committed passphrase is never overwritten by a settings entry: the entry is tried once, the legacy value stays for the boot after", async () => {
     // A pre-change install whose DB is encrypted under "original-committed"; the operator types a
     // DIFFERENT passphrase into Settings. The entry is stored separately and must NOT clobber the legacy
-    // value, so the DB still opens under the original at the next start.
+    // value: it is tried for exactly one boot (consumed), and if that open fails the launcher falls back to
+    // the legacy value at the next start — the DB stays reachable under the original.
     await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "original-committed");
     await setPassphraseCandidate("new-entry-from-settings");
 
-    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("original-committed");
     const { key: deviceSecret } = await resolveDbKey("persistent");
     const { key } = await resolveDbKey("passphrase");
-    expect(key).toBe(sha256Hex(`original-committed:${deviceSecret}`));
+    expect(key).toBe(sha256Hex(`new-entry-from-settings:${deviceSecret}`));
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("original-committed");
+    const { key: fallback } = await resolveDbKey("passphrase");
+    expect(fallback).toBe(sha256Hex(`original-committed:${deviceSecret}`));
   });
 });

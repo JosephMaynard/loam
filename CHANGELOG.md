@@ -55,7 +55,13 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 - **Upgrade notes:** channels archived under the old semantics were *hidden*; after this release
   they reappear for their audience as read-only (archive was never an access control — direct
   reads always worked — but it *was* a visibility control; use **Delete** for gone-for-good).
-  Archiving also no longer purges members' local caches — **Delete is the purge lever** now.
+  Archiving also no longer purges members' local caches — **Delete is the purge lever** now. PR #122 review follow-ups: an Emergency Reset on a fixed-key node without the launcher hook now
+  re-persists the FULL config (sync token included) into the fresh encrypted DB row, matching the ephemeral
+  branch (the plaintext `config.json` copy stays sanitized); the Android passphrase entry is tried before a
+  legacy stored passphrase so a pre-change install can change it (the legacy value is retired only on the
+  server's confirmed-open ack); a key scanned this session always wins over a stale stored pin; a failed
+  sealed resume also closes the socket sealed under the old key; the Android wipe handler re-gates the
+  WebView before re-bootstrapping; per-route rate limits are inline literals so CodeQL can see them.
 
 ## [0.4.0] - 2026-08-08
 

@@ -4,6 +4,7 @@ import { type Message, MessageCreateRequestSchema, MessageEditRequestSchema, Mes
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 
+/** Register the message routes: DMs, search, create, edit, delete. */
 export function registerMessageRoutes(ctx: AppContext): void {
   ctx.server.get<{ Params: { userId: string } }>("/api/dms/:userId", async (request, reply) => {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));

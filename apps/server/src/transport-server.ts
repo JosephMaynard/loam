@@ -34,6 +34,7 @@ export interface TransportSession {
   resumeResult?: { s?: number; m: string; p: string; currentUser: unknown; token: string };
 }
 
+/** Build the transport session layer over the app context: identity, sessions, replay windows, request-auth helpers. */
 export function createTransportServer(ctx: AppContext) {
   const transportSessions = new Map<string, TransportSession>();
 
@@ -343,6 +344,7 @@ export function createTransportServer(ctx: AppContext) {
     return ctx.options.hostToken ? ctx.presentsHostToken(request) : true;
   }
 
+  /** Whether a sync request presents the configured `sync.token` (sealed in the envelope on an encrypted session, header on plaintext). */
   function syncPeerAuthorized(request: FastifyRequest): boolean {
     const required = ctx.appConfig.sync.token;
     if (!required) {
@@ -400,6 +402,7 @@ export function createTransportServer(ctx: AppContext) {
   };
 }
 
+/** Add the global transport hooks (decrypt/encrypt/enforce, security headers) and the global rate limiter. */
 export async function registerTransportHooks(ctx: AppContext): Promise<void> {
   // Security headers on every response. A strict CSP is defense-in-depth behind the already-hardened
   // markdown sanitizer: the client is fully self-contained (its own JS/CSS, images from this origin,
@@ -589,6 +592,7 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
   });
 }
 
+/** Register the handshake, sealed resume, logout, and path-hiding tunnel routes. */
 export function registerTransportRoutes(ctx: AppContext): void {
   // Transport handshake (docs/08): client sends its ephemeral X25519 public key; the host derives a
   // session key against its static transport key + a fresh ephemeral and returns its ephemeral public
