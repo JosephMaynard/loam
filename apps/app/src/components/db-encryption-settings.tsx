@@ -261,7 +261,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     setPassphraseInput('');
     setCandidatePending(true);
     setStatusMessage(
-      'Passphrase saved. It is tried the next time the host app is restarted, and confirmed once the database opens under it.',
+      'Passphrase entered for the next start. It is used once and confirmed if the database opens under it; every later start asks for it again.',
     );
   };
 
@@ -278,18 +278,18 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     }
     setPassphrasePresence('absent');
     setCandidatePending(false);
-    setStatusMessage('Passphrase forgotten. Encrypted-passphrase mode has no key until a new one is entered.');
+    setStatusMessage('Passphrase record cleared. The database still needs the same passphrase at the next start.');
   };
 
-  // Confirm before forgetting (Fable review LOW-6): forgetting is destructive to ACCESS — the node locks at
-  // the next restart until the passphrase is re-entered (and the data is only recoverable if it's remembered),
-  // so it gets the same explicit confirmation as every other destructive action in this screen.
+  // Confirm before forgetting (Fable review LOW-6): the passphrase itself is never stored (review 2026-09-04),
+  // so this only clears the "a passphrase governs this DB" record and any pending entry — but it still gets
+  // the same explicit confirmation as every other destructive-looking action in this screen.
   const handleForgetPassphrase = () => {
     Alert.alert(
       'Forget the passphrase?',
-      'The stored passphrase is removed from this device. The database is NOT deleted, but the node will be ' +
-        'LOCKED at the next restart until you re-enter the passphrase — if you have forgotten it, the data can ' +
-        'no longer be opened. Continue?',
+      'The passphrase is never stored on this device, so this only clears the record that one is set and any ' +
+        'pending entry. The database is NOT deleted and still needs the same passphrase at the next start — if ' +
+        'you have forgotten it, the data can no longer be opened. Continue?',
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Forget passphrase', style: 'destructive', onPress: () => void forgetPassphrase() },
@@ -379,12 +379,13 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                     // one is entered) and is likewise destructive to access of the existing DB.
                     <>
                       <ThemedText type="small" themeColor="textSecondary">
-                        A passphrase is set. It can&apos;t be changed here: there is no in-place passphrase
-                        rekey, so replacing it would make the existing encrypted database permanently
-                        unreadable. To change the passphrase you must start fresh (from the boot Encryption
-                        recovery screen), which discards the existing encrypted data — this cannot be
-                        undone. &quot;Forget&quot; disables passphrase mode and also leaves the existing
-                        database inaccessible until a passphrase is re-entered.
+                        A passphrase governs this database. You are asked for it every time the host app
+                        starts; it is never stored on this device. It can&apos;t be changed here: there is no
+                        in-place passphrase rekey, so a different passphrase would make the existing encrypted
+                        database permanently unreadable. To change it you must start fresh (from the boot
+                        Encryption recovery screen), which discards the existing encrypted data — this cannot
+                        be undone. &quot;Forget&quot; only clears this record and any pending entry; the
+                        database itself still needs the same passphrase at the next start.
                       </ThemedText>
                       <View style={styles.passphraseActions}>
                         <Pressable onPress={() => void handleForgetPassphrase()} accessibilityRole="button" style={styles.buttonSecondary}>
@@ -412,8 +413,8 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                     <>
                       <ThemedText type="small" themeColor="textSecondary">
                         {candidatePending
-                          ? 'A passphrase has been entered and will be tried the next time the host app is restarted; it is confirmed once the database opens under it. Enter a different one to replace the pending passphrase.'
-                          : 'No passphrase set yet — encryption stays off until one is entered.'}
+                          ? 'A passphrase has been entered for the NEXT start only: it is used once, confirmed if the database opens under it, and you will be asked for it again at every later start. Enter a different one to replace the pending entry.'
+                          : 'No passphrase entered yet — the host asks for one when it next starts (you can pre-enter it here for that one start). It is never stored on this device.'}
                       </ThemedText>
                       <TextInput
                         value={passphraseInput}

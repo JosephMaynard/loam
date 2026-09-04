@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { PermissionsAndroid, Platform } from 'react-native';
 
 import {
+  addHotspotStoppedListener,
   isHotspotSupported,
   startHotspot,
   stopHotspot,
@@ -118,6 +119,7 @@ export async function ensureHotspot(): Promise<void> {
     });
     return;
   }
+  subscribeToSystemStops();
 
   const myGen = ++generation;
   inFlight = true;
@@ -159,6 +161,42 @@ export async function ensureHotspot(): Promise<void> {
       inFlight = false;
     }
   }
+}
+
+// Whether the native "the system stopped the hotspot" listener is installed (once per process — the
+// hotspot store is module-scoped, so the subscription is too).
+let systemStopSubscribed = false;
+
+/**
+ * Reflect a SYSTEM-initiated hotspot stop (review 2026-09-04): Android tears a LocalOnlyHotspot down
+ * when the user enables the phone's own tethering (Android permits one or the other), toggles Wi-Fi, or
+ * an OEM power policy fires. Previously nothing reached JS, so the phase stayed `running` forever — the
+ * share screen kept showing the dead SSID/password QR and the hotspot-gateway join URL, and
+ * `ensureHotspot` no-op'd on every reopen. Now the phase becomes an `error` with the reason: the panel
+ * shows the LAN join addresses again, and reopening the share screen (which calls `ensureHotspot`, which
+ * retries from `error`) starts a fresh hotspot. Deliberately NOT an automatic restart — the stop is
+ * usually the operator's own doing (tethering), and fighting it would loop.
+ */
+function subscribeToSystemStops(): void {
+  if (systemStopSubscribed) {
+    return;
+  }
+  systemStopSubscribed = true;
+  addHotspotStoppedListener(() => {
+    // Only a running (or starting) hotspot can be stopped by the system; an explicit `shutdownHotspot`
+    // already published `idle` and bumped the generation, so ignore anything else.
+    if (sharedState.phase !== 'running' && sharedState.phase !== 'starting') {
+      return;
+    }
+    generation += 1; // invalidate an in-flight start whose reservation the system just closed
+    inFlight = false;
+    publish({
+      phase: 'error',
+      error:
+        'The system stopped the hotspot (turning on the phone’s own hotspot/tethering or toggling Wi-Fi does this). ' +
+        'Close and reopen this screen to start it again. LOAM is still reachable on any network the phone is on.',
+    });
+  });
 }
 
 /** Stop the hotspot and return to idle, invalidating any in-flight start. */

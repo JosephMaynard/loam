@@ -195,7 +195,7 @@ type HostStatus = 'starting' | 'ready' | 'error';
 // see the `BootNotice` comment above) that deliberately does NOT drive `HostStatus`/the screen switch:
 // it only ever updates the separate `notice` state below, so it can never regress a 'ready' host back
 // to a spinner/error screen, and — unlike 'error' before this fix — is never cleared by a later 'ready'.
-type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string };
+type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string; hostToken?: string };
 type HostInfoPayload = { port?: number; addresses?: string[] };
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
@@ -203,6 +203,11 @@ type HostInfoPayload = { port?: number; addresses?: string[] };
 // so a remount reflects reality instead of resetting to "starting" forever.
 let nodeStarted = false;
 let nodeStatus: HostStatus = 'starting';
+// The launcher's per-boot HOST TOKEN (review 2026-09-04), delivered with `ready`. Injected into THIS
+// screen's own WebView only, where the LOAM client claims admin with it under the `hostDevice` bootstrap
+// — so admin never depends on being the first LAN session to reach the server. Kept at module scope for
+// the same remount reasoning as `nodeStatus` (the runtime won't re-emit `ready`). Never logged.
+let nodeHostToken: string | undefined;
 // Same "survive a remount" reasoning as `nodeStatus` above, but for the persistent boot notice (AF2):
 // once set it's never cleared by a status change, only by the operator dismissing it in this render.
 let nodeNotice: BootNotice | undefined;
@@ -268,6 +273,8 @@ export default function HostScreen() {
   // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
   // the join QR carry the key a `required`-mode handshake needs (docs/08).
   const [transportKeyFragment, setTransportKeyFragment] = useState('');
+  // See `nodeHostToken` — the per-boot host token the WebView hands to the LOAM client to claim admin.
+  const [hostAdminToken, setHostAdminToken] = useState<string | undefined>(() => nodeHostToken);
   // Whether it's safe to mount the WebView yet (G7): held back until the bootstrap key fetch below
   // resolves (or times out) so the FIRST load already carries `#k=` when transport encryption is
   // `required` — otherwise the WebView loads a bare URL, gets blocked, then reloads with the fragment,
@@ -322,13 +329,18 @@ export default function HostScreen() {
   // fatal block's visibility in the render. Computed here (rather than after the `status === 'ready'`
   // early return) so the effect that depends on it obeys the Rules of Hooks.
   const dbLocked = status === 'error' && errorCode === DB_LOCKED_CODE;
+  // Same hook-ordering reasoning: the unreadable-DB recovery (below the ready-return) also wants to know
+  // whether the mode is `passphrase`, to offer a "mistyped it? enter it again" path (review 2026-09-04 —
+  // with the passphrase prompted at EVERY start, a typo now lands here rather than auto-unlocking).
+  const dbUnreadableForMode = status === 'error' && errorCode === DB_UNREADABLE_CODE;
 
-  // Once the locked state becomes active, learn which mode is actually locked (purely to decide whether
-  // to show the passphrase input, which only makes sense for 'passphrase' mode). A read-error sentinel
-  // (P1-3, Sol round 5) is deliberately NOT stored here — this is cosmetic (which recovery input to
-  // show), so a transient read failure just leaves the plain-Retry UI rather than a bogus mode value.
+  // Once the locked (or unreadable) state becomes active, learn which mode is actually configured (purely
+  // to decide whether to show the passphrase input, which only makes sense for 'passphrase' mode). A
+  // read-error sentinel (P1-3, Sol round 5) is deliberately NOT stored here — this is cosmetic (which
+  // recovery input to show), so a transient read failure just leaves the plain-Retry UI rather than a
+  // bogus mode value.
   useEffect(() => {
-    if (!dbLocked) {
+    if (!dbLocked && !dbUnreadableForMode) {
       return;
     }
     let cancelled = false;
@@ -340,7 +352,7 @@ export default function HostScreen() {
     return () => {
       cancelled = true;
     };
-  }, [dbLocked]);
+  }, [dbLocked, dbUnreadableForMode]);
 
   // P1-2(b), Sol round 4: clear the device key material and, ONLY on a VERIFIED success, ack the
   // launcher (`loam-wipe-complete`) so it deletes its durable `.loam-wipe-phase` file. On ANY
@@ -422,6 +434,10 @@ export default function HostScreen() {
         setStatus('ready');
         setErrorMessage(undefined);
         setErrorCode(undefined);
+        if (typeof payload.hostToken === 'string' && payload.hostToken.length > 0) {
+          nodeHostToken = payload.hostToken;
+          setHostAdminToken(payload.hostToken);
+        }
         // P1-1 (Sol round 3): clear any leftover start-fresh confirmation state from a PRIOR
         // `db_encryption_unreadable` recovery — that fatal block only exists in the non-ready view
         // (see DB_UNREADABLE_CODE's comment), so once `ready` fires the operator can no longer see it,
@@ -960,6 +976,13 @@ export default function HostScreen() {
             ref={webViewRef}
             source={{ uri: `${LOAM_URL}${transportKeyFragment}` }}
             style={styles.flex}
+            // Hand the launcher's per-boot host token to the LOAM client running in THIS WebView (and only
+            // here — a LAN joiner never sees it): the client claims admin with it on its first boot under the
+            // `hostDevice` bootstrap (review 2026-09-04). `originWhitelist` + `onShouldStartLoadWithRequest`
+            // below pin this frame to the loopback origin, so the injected global can't reach another page.
+            injectedJavaScriptBeforeContentLoaded={
+              hostAdminToken ? `window.__loamHostDeviceToken = ${JSON.stringify(hostAdminToken)}; true;` : undefined
+            }
             // The LOAM client relies on the loam_session cookie, localStorage/IndexedDB, and a
             // WebSocket — enable all of them, and allow the cleartext localhost origin.
             javaScriptEnabled
@@ -1115,6 +1138,41 @@ export default function HostScreen() {
             The old database is never deleted automatically. Preserve it and start a fresh one below, or
             open Encryption settings to change the mode back.
           </ThemedText>
+          {lockedMode === 'passphrase' ? (
+            // A wrong passphrase is the common cause here now that it is asked for at EVERY start (review
+            // 2026-09-04): offer a retry with the same candidate flow as the locked screen — the new entry is
+            // tried on the intact database, never committed, and nothing is deleted.
+            <>
+              <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                Mistyped the passphrase? Enter it again to retry with the existing database.
+              </ThemedText>
+              <TextInput
+                value={unlockPassphraseInput}
+                onChangeText={setUnlockPassphraseInput}
+                placeholder="Enter the passphrase"
+                placeholderTextColor={theme.textSecondary}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
+              />
+              <ThemedView style={styles.noticeBannerActions}>
+                <Pressable
+                  onPress={() => void handleUnlockWithPassphrase()}
+                  disabled={unlockBusy || startFreshBusy || !unlockPassphraseInput}
+                  accessibilityRole="button">
+                  <ThemedView type="backgroundElement" style={styles.retry}>
+                    <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry with this passphrase'}</ThemedText>
+                  </ThemedView>
+                </Pressable>
+              </ThemedView>
+              {unlockMessage ? (
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {unlockMessage}
+                </ThemedText>
+              ) : null}
+            </>
+          ) : null}
           <ThemedView style={styles.noticeBannerActions}>
             <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>

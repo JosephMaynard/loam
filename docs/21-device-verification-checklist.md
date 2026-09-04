@@ -46,12 +46,22 @@ adb install -r apps/app/loam-host.apk
 
 - [ ] **Persistent mode.** Set `persistent`, restart. Pull `.loam/loam.db` off the device and confirm it is
   NOT readable as plaintext SQLite (the header is encrypted).
-- [ ] **Passphrase mode.** Set a passphrase, restart, and confirm the host **refuses to start** until the
-  correct passphrase is entered; a wrong passphrase is rejected **without** clobbering the stored one (the
-  DB stays recoverable for another attempt). NOTE: **changing** a passphrase is *not* an in-place rekey
-  today — `apps/app/src/lib/db-encryption.ts` only changes it via the delete-and-start-fresh path (an
-  authenticated in-place passphrase rekey is a documented future enhancement, not built). So do not verify
-  an in-place rekey; verify set → restart → correct unlocks / wrong rejected instead.
+- [ ] **Passphrase mode.** Select it, restart, and confirm the host **refuses to start** until the
+  passphrase is entered — on **every** start, not just the first (since 2026-09-04 the passphrase is never
+  stored on the device; only the Keystore device secret it is mixed with is). Then: enter a **wrong**
+  passphrase and confirm it is rejected **without** touching the existing database — the recovery screen
+  offers "enter it again", and the correct one then opens it. Pull `.loam/loam.db` and confirm it is not
+  plaintext. NOTE: **changing** a passphrase is *not* an in-place rekey today —
+  `apps/app/src/lib/db-encryption.ts` only changes it via the delete-and-start-fresh path (an authenticated
+  in-place passphrase rekey is a documented future enhancement, not built). So do not verify an in-place
+  rekey; verify every-start prompt → correct unlocks / wrong rejected-and-retryable instead.
+- [ ] **Host admin claim (`hostDevice`).** On a fresh install, join from a *second* device and open
+  `/api/config` **before** the host screen finishes loading its WebView: that LAN session must NOT be admin.
+  The host's own WebView must show the admin area without any claim form (the launcher's per-boot token is
+  injected into it). Repeat after an Emergency Reset.
+- [ ] **System-stopped hotspot.** With the share screen open, turn on the phone's own hotspot/tethering:
+  the share screen must switch to the "system stopped the hotspot" message with the LAN addresses (not the
+  dead SSID/QR); close and reopen it after turning tethering off and the hotspot restarts.
 - [ ] **Ephemeral mode.** Trigger the kill switch / Emergency Reset: the key is rotated and the previous
   ciphertext is unreadable afterwards.
 - [ ] **Wipe lifecycle under process kill.** On API 31+ / 34, start a wipe and force-kill the app mid-wipe

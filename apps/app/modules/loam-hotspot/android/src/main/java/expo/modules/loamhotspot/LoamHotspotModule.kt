@@ -38,6 +38,11 @@ class LoamHotspotModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("LoamHotspot")
 
+    // Fired when the SYSTEM tears the local-only hotspot down (the user enabled tethering — Android allows
+    // one or the other — Wi-Fi was toggled, an OEM power policy). Without it JS kept reporting "running"
+    // and showing a dead SSID/QR until the app was killed (review 2026-09-04).
+    Events("onHotspotStopped")
+
     AsyncFunction("startHotspot") { promise: Promise ->
       startHotspot(promise)
     }
@@ -171,6 +176,12 @@ class LoamHotspotModule : Module() {
 
       override fun onStopped() {
         reservation = null
+        starting.set(false)
+        try {
+          sendEvent("onHotspotStopped")
+        } catch (error: Throwable) {
+          android.util.Log.w("LoamHotspot", "onHotspotStopped event failed", error)
+        }
       }
     }
 

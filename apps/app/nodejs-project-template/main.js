@@ -12,6 +12,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const rnBridge = require('rn-bridge');
 // P1-2 (Sol round 5): the pure "may a key be resolved this boot?" decision, split out so it can be
 // unit-tested directly (this file itself can't be — see db-key-gate.js's doc comment).
@@ -40,6 +41,16 @@ process.env.LOAM_DATA_DIR = dataDir;
 process.env.LOAM_CLIENT_DIST = path.join(projectDir, 'client');
 // The embedded Node 18 has no node:sqlite — use the plain better-sqlite3 prebuild (docs/01, docs/04).
 process.env.LOAM_DB_DRIVER = 'better-sqlite3';
+// Per-boot HOST TOKEN (review 2026-09-04): proves a caller is THIS host process. The server (a) forces the
+// `hostDevice` admin bootstrap while it is set — admin is granted only to whoever presents it via
+// `POST /api/admin/claim`, never to "the first session" (the server listens on 0.0.0.0 from boot, but the
+// operator's own WebView only reaches it after the readiness probe + bootstrap fetch + client load, so
+// under `firstUser` any LAN peer polling `/api/config` could take admin on every fresh-DB boot — every boot
+// in ephemeral mode); and (b) requires it on the loopback mesh bridge, since on Android loopback is
+// reachable by every installed app. Minted fresh each boot; handed ONLY to the RN host screen (which
+// injects it into its own WebView) and attached to this file's own bridge requests. Never logged.
+const hostToken = crypto.randomBytes(32).toString('base64url');
+process.env.LOAM_HOST_TOKEN = hostToken;
 
 /** Post a status update to the React Native host screen (best-effort; never throws). */
 function notify(status, extra) {
@@ -193,7 +204,9 @@ function announceReady() {
     return;
   }
   serverReadyAnnounced = true;
-  notify('ready', { port: PORT });
+  // `hostToken` rides the in-process bridge to the RN host screen, which injects it into its OWN WebView
+  // so the operator's client claims admin under the `hostDevice` bootstrap (see the token's comment).
+  notify('ready', { port: PORT, hostToken: hostToken });
   postHostInfo();
   // Refresh addresses so the hotspot AP interface is reported once it appears (the user opens
   // "Share · Host" after boot, which is when the hotspot starts).
@@ -375,9 +388,10 @@ function meshRequest(method, path, body, callback) {
       path: path,
       method: method,
       timeout: 5000,
+      // The bridge routes require the per-boot host token as well as a loopback peer (review 2026-09-04).
       headers: payload
-        ? { 'content-type': 'application/json', 'content-length': payload.length }
-        : {},
+        ? { 'content-type': 'application/json', 'content-length': payload.length, 'x-loam-host-token': hostToken }
+        : { 'x-loam-host-token': hostToken },
     },
     (response) => {
       const chunks = [];
@@ -1243,6 +1257,17 @@ function deleteStaleEphemeralDb() {
       fs.unlinkSync(path.join(dataDir, name));
     } catch (err) {
       // best-effort — ENOENT is the expected/common case
+    }
+  });
+  // Uploaded media lives OUTSIDE the database as plaintext files (avatars/, attachments/) — with the DB
+  // gone every one of them is an orphan, and "nothing survives a reboot" must hold for them too (review
+  // 2026-09-04: avatars in particular were never reaped, so they outlived every ephemeral restart). The
+  // server's boot sweeps are the backstop; this is the direct guarantee.
+  ['avatars', 'attachments'].forEach(function (name) {
+    try {
+      fs.rmSync(path.join(dataDir, name), { recursive: true, force: true });
+    } catch (err) {
+      console.warn('Failed to remove stale ephemeral media dir ' + name, err);
     }
   });
   writeEphemeralMarker();
