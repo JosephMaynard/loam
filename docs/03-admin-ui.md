@@ -1,7 +1,8 @@
 # 03 — Admin UI
 
 > **Status: part A landed.** Admin bootstrap (`firstUser` default / `setupCode` / `passphrase` /
-> `none`; `hostDevice` reserved for initiative 4), `POST /api/admin/claim` (rate-limited,
+> `none`; `hostDevice` built 2026-09-04 — the Android launcher's per-boot token forces it and the
+> host's own WebView claims with it, see CLAUDE.md), `POST /api/admin/claim` (rate-limited,
 > constant-time), `GET`/`PATCH /api/admin/config` (layered defaults ← file ← DB, hot-reload,
 > `configUpdated` broadcast), the messaging feature flags wired to config and **enforced in
 > `createMessage()`**, shared `LoamConfigSchema` in `packages/schema` (with the doc-09

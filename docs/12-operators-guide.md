@@ -64,7 +64,7 @@ or in **Admin → Bootstrap**:
 | `setupCode` | A one-time code is logged to the server console at startup; enter it in **Settings → Admin access**. |
 | `passphrase` | A reusable secret from config; same **Settings → Admin access** box. |
 | `none` | No in-app claiming; nobody becomes admin. |
-| `hostDevice` | Reserved for the Android host. |
+| `hostDevice` | The Android host. The launcher mints a per-boot token that only the host's own screen receives, and that screen claims admin with it automatically — no form, and nobody on the LAN can take admin by being first. |
 
 `setupCode`/`passphrase` are exchanged via **Settings → Admin access → "Setup code or passphrase" →
 Unlock admin**. Claiming is rate-limited and the secret is constant-time compared; a stored passphrase

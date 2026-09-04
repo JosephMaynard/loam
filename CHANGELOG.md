@@ -6,6 +6,30 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
 ## [Unreleased]
 
+- **Review fixes (2026-09-04 full-codebase review).** Client: a QR-joined client can no longer fall back
+  to plaintext on an `optional` node when its handshake fails (the decision now comes from the transport
+  layer's QR-pinned effective mode, not the unauthenticated advertisement); a node whose transport key
+  changed (Emergency Reset, stale poster) drops the cached key and shows a "scan the current join QR" gate
+  instead of looping on a doomed resume; a transparent re-handshake closes the socket sealed under the old
+  key; a wipe also forgets the cached host key, revokes decrypted image `blob:` URLs and clears the
+  rendered-markdown cache; a live transport-mode flip re-runs session setup. Server: WebSocket inbound
+  frames capped at 16 KiB (was the 100 MiB library default, buffered even on pre-auth sockets); a
+  non-member's PATCH on a private channel answers 404 like every sibling route; sync import honours a
+  locally-authoritative channel's posting policy and the node's channel/reply/reaction flags; typing
+  signals respect the posting policy; sealed mesh mail is dropped (and tombstoned) when DMs are off; avatar
+  files no user references are reaped at boot. Android host: **`hostDevice` admin bootstrap** — the
+  launcher mints a per-boot host token and the host's own WebView claims admin with it, so no LAN session
+  can take `firstUser` in the boot window; the loopback mesh bridge requires the same token;
+  **passphrase mode asks for the passphrase at every start and never stores it** (a legacy stored copy is
+  retired on its next boot; the unreadable-DB recovery screen offers "enter it again" for a typo); a
+  system-stopped hotspot (tethering, Wi-Fi toggle) is reflected in the share screen and restarts on reopen;
+  ephemeral mode removes avatars/attachments with the database; the native SQLite wrappers' transitive
+  deps are pinned. `docs/21` gains host-claim and system-stopped-hotspot checks.
+- **Server split.** `apps/server/src/app.ts` (9.4k lines) is now a ~2k-line composition root + domain
+  core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain
+  routes are sibling modules over one `AppContext` (CLAUDE.md "Server architecture"). No behaviour change.
+- README and the site no longer claim an installable offline PWA on the plain-http hotspot path (a
+  hotspot address is not a browser secure context); the copy now says what joiners actually get.
 - **Pre-tester hardening** (from an external full-codebase review, 2026-08-15, plus a three-agent
   adversarial pass over the fixes): one shared content-mutation policy — removed private-channel
   members, timed-out users, archived channels, and post-hoc posting-policy lockdowns can no longer

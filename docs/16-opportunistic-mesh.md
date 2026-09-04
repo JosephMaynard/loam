@@ -95,6 +95,7 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    (Kotlin BLE advertise/scan + a fixed LOAM GATT service, Wi-Fi Aware publish/subscribe + a data-path
    socket, a BLE-only chunked *fallback* left as a marked TODO), a TS `MeshTransport` abstraction +
    RN↔launcher courier bridge (`apps/app/src/mesh/`), and two **loopback-only** server endpoints
+   (on Android also gated by the launcher's per-boot host token — docs/17)
    (`GET /api/mesh/outbound` + `POST /api/mesh/inbound`) that let the in-process launcher shuttle sealed
    blobs between the radio and the existing relay — a radio-fed mirror of the `/api/sync/*` sealed path,
    reusing `acceptSealedFromPeer` verbatim so no new crypto/relay trust is introduced. The bridge

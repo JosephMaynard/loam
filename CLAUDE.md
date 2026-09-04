@@ -42,7 +42,8 @@ it on and tunes it (relay/TTL/hop/caps) from the **admin UI Mesh panel** (`PATCH
 `apps/app/modules/loam-mesh-transport` Expo module (Kotlin BLE advertise/scan + a fixed LOAM GATT
 service, Wi-Fi Aware publish/subscribe + data-path socket, BLE-only chunked fallback = TODO), a TS
 `MeshTransport` + `mesh-courier` RN↔launcher bridge (`apps/app/src/mesh/`), the launcher courier brain
-(`nodejs-project-template/main.js`), and two **loopback-only** server endpoints (`GET /api/mesh/outbound`,
+(`nodejs-project-template/main.js`), and two **loopback-only** server endpoints (on Android additionally
+gated by the launcher's per-boot `x-loam-host-token`, since loopback is reachable by every installed app there) (`GET /api/mesh/outbound`,
 `POST /api/mesh/inbound`) that shuttle sealed blobs between the radio and the existing relay — a radio-fed
 mirror of `/api/sync/*` reusing `acceptSealedFromPeer` (desktop-tested; the Kotlin compiles in APK builds but has NOT been run
 against radios — no CI hardware). **Still not built:** the Wi-Fi Aware handshake/port-exchange finish +
@@ -57,7 +58,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 
 | Path | Role |
 |------|------|
-| `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. App factory: `src/app.ts` (`buildApp()`, all routes/logic — testable via `inject`); `src/server.ts` is the thin entry point (env, listen, SIGINT). |
+| `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. `src/app.ts` is the composition root (`buildApp()`, testable via `inject`) plus the domain core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain routes are sibling modules over one `AppContext` (see "Server architecture"). `src/server.ts` is the thin entry point (env, listen, SIGINT). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2k lines, all components). Libs in `src/lib/`. |
 | `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored) and the host UI (`HostPanel`, `QRCode`). Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
@@ -142,7 +143,29 @@ package, so schema edits are invisible to the running server until you rebuild i
 via **Vite aliases to `src/`** (see `vite.config.ts` / `tsconfig.app.json` `paths`), so it picks up
 edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-name, qr).
 
-## Server architecture (`apps/server/src/app.ts`)
+## Server architecture (`apps/server/src/`)
+
+`buildApp()` in `src/app.ts` (~2k lines) is the composition root plus the domain core (session identity,
+users + moderation policy, channels, messages, the reapers, static files). Everything else is a sibling
+module (2026-09-04 split of the former 9.4k-line monolith):
+
+| Module | Owns |
+|---|---|
+| `app-context.ts` | `AppContext`, the composition seam: accessor-backed views of `buildApp`'s mutable state (`appConfig`, `data`, `store`, `adminSetupCode`, the wipe counters…), the shared containers, the subsystems, and every domain helper with its signature. `buildApp` builds one, hands it to every module below, and a compile-time check asserts the assembled object is complete. |
+| `runtime.ts` | `Runtime`, the smaller live view handed to `llm.ts` / `mesh.ts` / `sync.ts`. |
+| `store-lifecycle.ts` | Opening the DB under the resolved key (passphrase-derivation migration, unreadable / plaintext-unconverted recovery, the start-fresh marker), the durable wipe journal, boot-time wipe resume, `persistConfigForRestart`. |
+| `kill-switch.ts` | Emergency Reset: the single-flight wipe, ephemeral-key rotation vs the fixed-key launcher handoff. |
+| `transport-server.ts` | Host transport identity, sessions + replay windows, the internal tunnel token, request-auth helpers (`requestFromLoopback`, `syncPeerAuthorized`…), the global hooks + rate limiter, and the handshake / resume / logout / tunnel routes. |
+| `realtime.ts` | Sockets, audience filtering, sealed WS frames, presence, and `/ws` with its key-confirmation. |
+| `sync.ts` · `mesh.ts` · `llm.ts` | The node-to-node sync engine; the sealed-mail mesh layer; the LLM assistant. |
+| `routes-session.ts` · `routes-users.ts` · `routes-channels.ts` · `routes-messages.ts` · `routes-sync-mesh.ts` · `routes-admin.ts` | REST routes by domain (users also covers moderation, reports, join approval, typing, attachments). |
+| `config.ts` · `secrets.ts` · `identity.ts` · `media.ts` · `ids.ts` · `defaults.ts` · `errors.ts` · `types.ts` · `boot-bridge.ts` | Pure helpers with no closure state. |
+
+Conventions for the modules: bodies reach shared state only through `ctx.<name>` (or `rt.<name>`), never a
+captured copy — the mutable members are accessors, so `ctx.data = …` lands on the live binding. A new
+helper that routes need goes into `AppContext` (with its signature) and the `base` literal in `buildApp`;
+the completeness check fails to compile if a member is declared but never provided. `app.test.ts` still
+drives everything through `buildApp()` + `inject`, so the split is invisible to tests.
 
 - **Storage**: reads are served from in-memory arrays (`data.users/channels/messages`) + a
   `sessions` Map; every mutation **writes through synchronously** to SQLite (`.loam/loam.db`, WAL
@@ -163,8 +186,12 @@ edits live. This asymmetry applies to all `packages/*` (schema, avatar, display-
 - **Admin**: comes only from the config-selected **bootstrap strategy** (`admin.bootstrap`):
   `firstUser` (default — the first session on a fresh node becomes admin), `setupCode` (a one-time
   code logged at startup, exchanged via `POST /api/admin/claim`, rate-limited + constant-time
-  compared), `passphrase` (same endpoint, reusable secret from config), `hostDevice` (reserved for
-  the Android host, initiative 4), or `none`. Seed users `user.1234`/`user.5678` still exist but are
+  compared), `passphrase` (same endpoint, reusable secret from config), `hostDevice` (the Android
+  host: the launcher mints a per-boot token — `LOAM_HOST_TOKEN` → `AppOptions.hostToken` — which
+  forces this strategy as a read-time projection over the persisted one; only a claim presenting that
+  token becomes admin, and only the host's own WebView receives it, injected as
+  `window.__loamHostDeviceToken`, so no LAN session can take `firstUser` during the boot window), or
+  `none`. Seed users `user.1234`/`user.5678` still exist but are
   **never admins** (legacy admin seeds are demoted at boot). Admin-only endpoints check
   `currentUser.isAdmin`; client gating is cosmetic.
 - **Config**: layered defaults ← `config.json` ← DB-persisted admin edits (`config` table), all
