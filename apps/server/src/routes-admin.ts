@@ -25,9 +25,32 @@ export function registerAdminRoutes(ctx: AppContext): void {
     }
 
     const strategy = ctx.effectiveAdminBootstrap();
+    const hostToken = ctx.options.hostToken;
 
-    if (strategy !== "setupCode" && strategy !== "passphrase" && strategy !== "hostDevice") {
+    // `hostDevice` is claimable only when a launcher actually minted a token this boot — a desktop node
+    // merely CONFIGURED with the strategy has nothing to claim against, so it answers like `none` and never
+    // touches the attempt limiter (round-2 review).
+    if (
+      (strategy !== "setupCode" && strategy !== "passphrase" && strategy !== "hostDevice") ||
+      (strategy === "hostDevice" && !hostToken)
+    ) {
       return reply.code(403).send(errorBody("Admin claiming is not enabled on this LOAM node"));
+    }
+
+    const promote = () => {
+      currentUser.isAdmin = true;
+      ctx.store.upsertUser(currentUser);
+      ctx.broadcast({ type: "userUpserted", user: currentUser });
+      return currentUser;
+    };
+
+    // `hostDevice` (review 2026-09-04): the secret is the launcher's per-boot host token, which only the
+    // host's own WebView receives — never a config value, never advertised, never persisted. A CORRECT
+    // token is honoured BEFORE the per-IP attempt limiter (round-2 review): the host's own claim arrives from
+    // loopback, a bucket every co-located Android app can also hit, and a 256-bit random token cannot be
+    // brute-forced, so exempting a match costs nothing — while a wrong guess still counts against the bucket.
+    if (strategy === "hostDevice" && hostToken && timingSafeEqualStrings(body.data.secret, hostToken)) {
+      return promote();
     }
 
     // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie.
@@ -35,15 +58,10 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(429).send(errorBody("Too many claim attempts; try again later"));
     }
 
-    // `hostDevice` (review 2026-09-04): the secret is the launcher's per-boot host token, which only the
-    // host's own WebView receives — never a config value, never advertised, never persisted.
-    const expected =
-      strategy === "setupCode" ? ctx.adminSetupCode : strategy === "hostDevice" ? ctx.options.hostToken : ctx.appConfig.admin.passphrase;
+    const expected = strategy === "setupCode" ? ctx.adminSetupCode : strategy === "passphrase" ? ctx.appConfig.admin.passphrase : undefined;
     const secretMatches =
       !!expected &&
-      (strategy === "setupCode" || strategy === "hostDevice"
-        ? timingSafeEqualStrings(body.data.secret, expected)
-        : verifySecret(body.data.secret, expected));
+      (strategy === "setupCode" ? timingSafeEqualStrings(body.data.secret, expected) : verifySecret(body.data.secret, expected));
 
     if (!secretMatches) {
       return reply.code(403).send(errorBody("Invalid admin secret"));
@@ -53,10 +71,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       ctx.adminSetupCode = undefined;
     }
 
-    currentUser.isAdmin = true;
-    ctx.store.upsertUser(currentUser);
-    ctx.broadcast({ type: "userUpserted", user: currentUser });
-    return currentUser;
+    return promote();
   });
 
   ctx.server.get("/api/admin/config", async (request, reply) => {
@@ -214,7 +229,15 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // (docs/15 #8). Only on the transition (not every PATCH while already in setupCode), so a code
     // consumed by an earlier claim isn't silently re-minted. `/api/admin/claim` grants admin against
     // a valid code regardless of existing admins, so this is the intended "let someone claim" lever.
-    if (switchedToSetupCode && ctx.adminSetupCode === undefined) {
+    if (ctx.effectiveAdminBootstrap() === "hostDevice" && next.admin.bootstrap !== "hostDevice") {
+      // This host device pins the effective strategy to `hostDevice` (its launcher's per-boot token — see
+      // `effectiveAdminBootstrap`). The PATCH is persisted as the operator's intent (it applies the moment
+      // this data dir runs without a host token), but minting/advertising a setup code or passphrase claim
+      // here would announce a claim path that can never succeed on this device (round-2 review).
+      ctx.server.log.warn(
+        `admin.bootstrap "${next.admin.bootstrap}" saved, but this host device enforces "hostDevice" — the setting takes effect only where no host token is minted`,
+      );
+    } else if (switchedToSetupCode && ctx.adminSetupCode === undefined) {
       ctx.adminSetupCode = makeAdminSetupCode();
       ctx.server.log.info(`Admin setup code (single use): ${ctx.adminSetupCode}`);
     } else if (switchedAwayFromSetupCode) {

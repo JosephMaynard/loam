@@ -144,16 +144,41 @@ describe("resolveDbKey", () => {
     expect(key).toBeUndefined();
   });
 
-  it("a LEGACY committed passphrase (pre-change install) opens the database for ONE boot, then is retired", async () => {
+  it("a LEGACY committed passphrase (pre-change install) keeps opening the database until a CONFIRMED open retires it", async () => {
     await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "hunter2");
     const { key: deviceSecret } = await resolveDbKey("persistent");
     const { key } = await resolveDbKey("passphrase");
     expect(key).toBe(sha256Hex(`hunter2:${deviceSecret}`));
-    // Retired at read time: the stored copy is gone, the "a passphrase governs this DB" marker recorded.
+    // NOT retired at read time (round-2 review): a resolve the launcher discards — its 5 s bridge timeout, a
+    // driver-unavailable plaintext downgrade — must not delete the only copy of a passphrase the operator
+    // never had to remember. It still opens the DB on the next attempt.
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("hunter2");
+    expect((await resolveDbKey("passphrase")).key).toBe(sha256Hex(`hunter2:${deviceSecret}`));
+    expect(await hasStoredPassphrase()).toBe("present"); // the legacy item counts as "set" meanwhile
+
+    // The server's confirmed-open ack is what retires it: from then on every start prompts.
+    await setDbEncryptionMode("passphrase");
+    await runMigrationHandoff("r1");
     expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBeNull();
+    expect(await secureStoreMock.getItemAsync(PASSPHRASE_SET_ITEM)).toBe("1");
     expect(await hasStoredPassphrase()).toBe("present");
-    // The next boot prompts (no key without an entry).
     expect((await resolveDbKey("passphrase")).key).toBeUndefined();
+  });
+
+  it("a discarded resolve (request issued, no ack) leaves a legacy passphrase untouched", async () => {
+    await setDbEncryptionMode("passphrase");
+    await secureStoreMock.setItemAsync(PASSPHRASE_ITEM, "hunter2");
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      channel.emit("loam-db-key-request", { requestId: "timed-out" });
+      await flushMicrotasks();
+      // main.js gave up on this request (timeout / downgrade): no ack ever arrives.
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_ITEM)).toBe("hunter2");
+      expect(await secureStoreMock.getItemAsync(PASSPHRASE_SET_ITEM)).toBeNull();
+    } finally {
+      cleanup();
+    }
   });
 
   it("a legacy committed passphrase takes precedence over a leftover entry for that one boot, leaving the entry for the next", async () => {

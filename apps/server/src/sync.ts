@@ -677,6 +677,17 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (!target || rt.messageAudienceUserIds(message) !== undefined) {
           continue;
         }
+
+        // ...and its channel must still accept new content here — `createMessage` refuses a reaction in an
+        // archived channel, so an import must too (round-2 review): a peer that hasn't archived the channel
+        // must not keep landing reactions into one this node has.
+        if (target.type === "channelPost" || target.type === "channelReply") {
+          const targetChannel = rt.ensureChannel(target.channelId);
+
+          if (!targetChannel || targetChannel.archived) {
+            continue;
+          }
+        }
       } else {
         const channel = rt.ensureChannel(message.channelId);
 
@@ -684,15 +695,20 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           continue;
         }
 
-        // A LOCALLY-authoritative channel's posting policy (owner-only / admins-only / replies off) applies
-        // to imports too — otherwise a peer could land posts in a local read-only announcements channel
-        // under any ordinary author id, bypassing the lockdown (review 2026-09-04). Peer-origin channels
-        // (`syncedChannelIds`) are governed by their origin's policy, which already gated the post there,
-        // and their owner is a remote id `channelPostingError` couldn't evaluate anyway.
-        if (
-          !rt.syncedChannelIds.has(channel.id) &&
-          rt.channelPostingError(channel, message.authorId, message.type === "channelReply") !== undefined
-        ) {
+        // The channel's posting policy (owner-only / admins-only / replies off) applies to imports too —
+        // otherwise a peer could land posts in a read-only announcements channel under any ordinary author
+        // id, bypassing the lockdown (review 2026-09-04) — including a PEER-ORIGIN channel, whose policy
+        // the peer's metadata merge or a local admin may have tightened since. The one rule that can't be
+        // evaluated for a peer-origin channel is `owner`: imports strip `ownerUserId` (a peer must never
+        // name a local authority), so for those the origin's owner check is trusted and only the
+        // evaluable rules (archived, replies off) apply here (round-2 review).
+        const isReply = message.type === "channelReply";
+        const ownerRuleUnavailable = rt.syncedChannelIds.has(channel.id) && channel.allowPosting === "owner";
+        if (ownerRuleUnavailable) {
+          if (channel.archived || (isReply && !channel.allowReplies)) {
+            continue;
+          }
+        } else if (rt.channelPostingError(channel, message.authorId, isReply) !== undefined) {
           continue;
         }
 

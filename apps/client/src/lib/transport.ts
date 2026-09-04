@@ -171,7 +171,12 @@ let lastParams: { mode: TransportEncryption; hostKey?: string } | undefined;
 /** The server origin a cached host key is namespaced under — the configured override if set, else
  * this page's own origin. */
 function keyStorageOrigin(): string {
-  return localStorage.getItem(SERVER_URL_KEY) || window.location.origin;
+  try {
+    return localStorage.getItem(SERVER_URL_KEY) || window.location.origin;
+  } catch {
+    // Storage entirely blocked (a browser with site data disabled): the page origin is the only origin.
+    return window.location.origin;
+  }
 }
 
 /**

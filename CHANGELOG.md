@@ -22,7 +22,11 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   launcher mints a per-boot host token and the host's own WebView claims admin with it, so no LAN session
   can take `firstUser` in the boot window; the loopback mesh bridge requires the same token;
   **passphrase mode asks for the passphrase at every start and never stores it** (a legacy stored copy is
-  retired on its next boot; the unreadable-DB recovery screen offers "enter it again" for a typo); a
+  retired only once the server confirms the database opened under it — never on a discarded attempt; the
+  unreadable-DB recovery screen offers "enter it again" for a typo, and "start fresh" re-asks for the
+  passphrase so a fresh database is never keyed by a mistyped one; the host's own admin claim is honoured
+  ahead of the per-IP attempt limiter and retried on later passes; after a node wipe the host screen
+  rejoins under the new key and re-claims admin without an app restart); a
   system-stopped hotspot (tethering, Wi-Fi toggle) is reflected in the share screen and restarts on reopen;
   ephemeral mode removes avatars/attachments with the database; the native SQLite wrappers' transitive
   deps are pinned. `docs/21` gains host-claim and system-stopped-hotspot checks.

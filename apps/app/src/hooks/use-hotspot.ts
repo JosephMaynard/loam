@@ -183,13 +183,13 @@ function subscribeToSystemStops(): void {
   }
   systemStopSubscribed = true;
   addHotspotStoppedListener(() => {
-    // Only a running (or starting) hotspot can be stopped by the system; an explicit `shutdownHotspot`
-    // already published `idle` and bumped the generation, so ignore anything else.
-    if (sharedState.phase !== 'running' && sharedState.phase !== 'starting') {
+    // The native side only reports a stop for the LIVE reservation, and a live reservation only exists in
+    // the `running` phase (`ensureHotspot` no-ops while running, so no start is in flight then). Anything
+    // else — an explicit `shutdownHotspot` already published `idle`, or a stop that raced a newer start —
+    // is ignored; the in-flight start's own generation logic owns that reservation.
+    if (sharedState.phase !== 'running') {
       return;
     }
-    generation += 1; // invalidate an in-flight start whose reservation the system just closed
-    inFlight = false;
     publish({
       phase: 'error',
       error:

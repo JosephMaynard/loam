@@ -20,6 +20,13 @@
 > Fastify hooks) + seals WS frames for `/ws?enc=<sid>`. The client routes every fetch and the WebSocket
 > through `apps/client/src/lib/transport.ts`, which does the QR-bootstrapped handshake, seals/opens
 > frames, and gates `required` mode behind a "scan the join QR" screen when no QR key is available.
+> **Broken pin (2026-09-04):** if the node's handshake ever reports a key other than the one this client
+> pinned from a QR, the pin is marked *broken* (kept, not replaced) and the client gates on a fresh scan —
+> it never falls back to the advertised key or to plaintext, and a pinned client refuses plaintext fetches
+> and sockets outright. This is fail-closed by design: an on-path forger can lock a client out of that node
+> (denial only, never disclosure), and the ways back are a real rescan of the host's current QR or
+> Settings → "erase this device". The same mechanism is what makes an Emergency Reset (which rotates the
+> host key) show a "scan the current QR" screen instead of looping.
 > Gated by `security.transportEncryption` (**`optional` default — secure by default** / `required`; `off`
 > is no longer operator-settable, reachable only via Developer Mode `LOAM_DEV_MODE`, which self-announces a
 > plaintext banner to every client and refuses to run under `NODE_ENV=production`). `optional` is seamless

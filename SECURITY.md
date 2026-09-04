@@ -142,6 +142,20 @@ revocation; the WebSocket challenge and audience filtering; the mutation policy 
 route; the markdown sanitiser and every HTML sink; `#k=` fragment handling; the key handoff, wipe resume
 and supply-chain pinning on the Android host.
 
+**Round 2 (same day) — three independent reviews of the fixes themselves** found, and this branch
+closed, two regressions the first pass had introduced: the client's "key changed" handling could drop a
+QR pin and then fall back to plaintext mid-session (now: the pin is kept and marked broken, the client
+gates on a rescan, and a pinned client refuses plaintext outright); and the Android passphrase rework
+retired a pre-change install's stored passphrase at read time, so a boot whose key attempt was discarded
+(the launcher's 5 s bridge timeout) would have lost the only copy (now: retired only on the server's
+confirmed-open ack, which every passphrase-mode open sends). Also closed: "start fresh" after a mistyped
+passphrase keyed the new database with the typo; a co-located app could exhaust the host's own admin-claim
+budget (a correct host token is now honoured ahead of the limiter, and the client keeps the token until a
+claim succeeds); sync import skipped the posting policy on imported channels and reactions into locally
+archived ones; a setup code was minted on a host-token node where it could never be claimed. The server
+split was verified by a normalised per-function diff against master: no function or route missing or
+altered beyond the intended fixes.
+
 ### 2026-08-15 — external full-codebase review (Sol)
 
 An independent external review of v0.4.0-era code (commit `7cd5558`) reproduced six findings —

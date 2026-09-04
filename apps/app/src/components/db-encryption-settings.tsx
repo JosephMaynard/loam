@@ -387,7 +387,31 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                         be undone. &quot;Forget&quot; only clears this record and any pending entry; the
                         database itself still needs the same passphrase at the next start.
                       </ThemedText>
+                      <ThemedText type="small" themeColor="textSecondary">
+                        {candidatePending
+                          ? 'A passphrase is entered for the NEXT start only (used once; if it is wrong you are simply asked again). Enter a different one to replace it.'
+                          : 'Optional: enter the passphrase here for the next start so that start does not have to ask. Used once; if it is wrong you are simply asked again.'}
+                      </ThemedText>
+                      <TextInput
+                        value={passphraseInput}
+                        onChangeText={setPassphraseInput}
+                        placeholder="Passphrase for the next start"
+                        placeholderTextColor={theme.textSecondary}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        secureTextEntry
+                        style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
+                      />
                       <View style={styles.passphraseActions}>
+                        <Pressable
+                          onPress={() => void handleSavePassphrase()}
+                          disabled={!passphraseInput}
+                          accessibilityRole="button"
+                          style={[styles.button, !passphraseInput && styles.buttonDisabled]}>
+                          <ThemedText type="smallBold" style={styles.buttonLabel}>
+                            Use at next start
+                          </ThemedText>
+                        </Pressable>
                         <Pressable onPress={() => void handleForgetPassphrase()} accessibilityRole="button" style={styles.buttonSecondary}>
                           <ThemedText type="smallBold">Forget</ThemedText>
                         </Pressable>

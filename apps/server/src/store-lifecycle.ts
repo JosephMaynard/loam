@@ -908,12 +908,15 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
 
     try {
       const opened = openLoamStore();
-      if (keyWasResolved && options.dbEncryptionMigrateFromKey !== undefined) {
+      if (keyWasResolved && (options.dbEncryptionMigrateFromKey !== undefined || options.dbEncryptionMode === "passphrase")) {
         // P1-1 (Sol round 5): the current key opened it directly — either this is already migrated, or
         // it's a genuinely fresh install that never needed the legacy key at all. Either way, the
         // launcher offered a legacy key because it hasn't recorded a confirmed migration yet (see
         // db-encryption.ts's passphrase key-version marker) — tell it to stop, so later boots skip this
-        // extra key entirely.
+        // extra key entirely. Since 2026-09-04 the ack is ALSO sent for every successful passphrase-mode
+        // open: it is the launcher's "the database opened under this attempt's passphrase" confirmation,
+        // which is what retires a pre-change install's stored passphrase and records that a passphrase
+        // governs the database — never at read time, where a discarded attempt would lose it.
         reportDbKeyMigrated(options.dbKeyRequestId);
       }
       return opened;

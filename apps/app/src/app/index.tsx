@@ -275,6 +275,13 @@ export default function HostScreen() {
   const [transportKeyFragment, setTransportKeyFragment] = useState('');
   // See `nodeHostToken` — the per-boot host token the WebView hands to the LOAM client to claim admin.
   const [hostAdminToken, setHostAdminToken] = useState<string | undefined>(() => nodeHostToken);
+  // After a NODE wipe (the client posts `loam-wipe`), the server has rotated its transport key and dropped
+  // every identity — the client shows its "node no longer available" screen and the injected host token
+  // was consumed. Re-fetch the bootstrap (new `#k=`) and REMOUNT the WebView (`key`) so the host's own
+  // screen rejoins under the new key and re-claims admin, instead of needing an app restart (round-2
+  // review). `remountAfterBootstrapRef` makes the remount wait for the fresh fragment.
+  const [webViewKey, setWebViewKey] = useState(0);
+  const remountAfterBootstrapRef = useRef(false);
   // Whether it's safe to mount the WebView yet (G7): held back until the bootstrap key fetch below
   // resolves (or times out) so the FIRST load already carries `#k=` when transport encryption is
   // `required` — otherwise the WebView loads a bare URL, gets blocked, then reloads with the fragment,
@@ -589,6 +596,10 @@ export default function HostScreen() {
       setTransportKeyFragment(fragment);
       setBootstrapError(false);
       setWebViewReady(true);
+      if (remountAfterBootstrapRef.current) {
+        remountAfterBootstrapRef.current = false;
+        setWebViewKey((key) => key + 1);
+      }
     };
     // Failure: we never learned the transport posture (timeout / network error / non-2xx). Keep the
     // WebView GATED — mounting an unkeyed URL in `required` mode would defeat the `#k=` MITM protection —
@@ -846,6 +857,14 @@ export default function HostScreen() {
         setShareOpen(true);
         return;
       }
+      if (parsed && parsed.type === 'loam-wipe') {
+        // Give the client's own local purge a moment, then rejoin under the node's NEW transport key (see
+        // `webViewKey`). Still a native no-op for key material — that stays with the acked protocol below.
+        setTimeout(() => {
+          remountAfterBootstrapRef.current = true;
+          retryBootstrap();
+        }, 1500);
+      }
     } catch {
       // Not JSON / not ours — fall through to the wipe-protocol classifier.
     }
@@ -973,6 +992,7 @@ export default function HostScreen() {
         ) : null}
         {webViewReady ? (
           <WebView
+            key={webViewKey}
             ref={webViewRef}
             source={{ uri: `${LOAM_URL}${transportKeyFragment}` }}
             style={styles.flex}

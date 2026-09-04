@@ -286,7 +286,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // accessor-backed views of the mutable bindings above, the shared containers, the subsystems, and the
   // domain helpers (hoisted function declarations below). Modules created after this add their own
   // members via Object.assign — they are only ever dereferenced at call time.
-  const base = {
+  const baseContext = {
     server,
     options,
     dataDir,
@@ -432,7 +432,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     deleteMessages,
     registerStaticFiles,
   };
-  const ctx = base as unknown as AppContext;
+  const ctx = baseContext as unknown as AppContext;
   const transport = createTransportServer(ctx);
   Object.assign(ctx, transport);
   const { ensureTransportIdentity, transportSessions, identityTokens, tunnelBoundUserId } = transport;
@@ -445,7 +445,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Compile-time completeness check: every AppContext member is provided by one of the parts above.
   type MissingFromContext = Exclude<
     keyof AppContext,
-    keyof typeof base | keyof typeof transport | keyof typeof realtime | keyof typeof killSwitch
+    keyof typeof baseContext | keyof typeof transport | keyof typeof realtime | keyof typeof killSwitch
   >;
   const contextIsComplete: MissingFromContext extends never ? true : MissingFromContext = true;
   void contextIsComplete;
@@ -1802,6 +1802,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    const now = Date.now();
+
     for (const fileName of files) {
       const parsed = parseAvatarImageId(fileName);
 
@@ -1809,7 +1811,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         continue;
       }
 
-      await rm(join(avatarsDir, fileName), { force: true }).catch((error: unknown) => server.log.warn(error));
+      // Same in-flight grace as the attachment sweep (round-2 review): an upload writes its file BEFORE the
+      // user record references it, so a file younger than the grace window is a live upload, not an orphan.
+      const path = join(avatarsDir, fileName);
+      const info = await stat(path).catch(() => undefined);
+
+      if (!info || now - info.mtimeMs < attachmentPendingGraceMs) {
+        continue;
+      }
+
+      await rm(path, { force: true }).catch((error: unknown) => server.log.warn(error));
     }
   }
 

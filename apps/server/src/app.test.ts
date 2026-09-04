@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -2800,8 +2801,15 @@ describe("encryption at rest + key-discard kill switch", () => {
   describe("P1-1 (Sol round 5): passphrase key-derivation migration (dbEncryptionMigrateFromKey / PRAGMA rekey)", () => {
     /** Install the `globalThis.__loamReportDbKeyMigrated` bridge (main.js's migration-confirmed signal,
      *  see db-encryption.ts's `markPassphraseKeyMigrated`) and count every invocation. Auto-uninstalled. */
-    function installFakeMigratedHook(): { calls: number; requestIds: (string | undefined)[] } {
-      const state: { calls: number; requestIds: (string | undefined)[] } = { calls: 0, requestIds: [] };
+    function installFakeMigratedHook(): { calls: number; requestIds: (string | undefined)[]; reset: () => void } {
+      const state: { calls: number; requestIds: (string | undefined)[]; reset: () => void } = {
+        calls: 0,
+        requestIds: [],
+        reset() {
+          state.calls = 0;
+          state.requestIds.length = 0;
+        },
+      };
       (globalThis as unknown as { __loamReportDbKeyMigrated?: (requestId?: string) => void }).__loamReportDbKeyMigrated =
         (requestId?: string) => {
           state.calls += 1;
@@ -2832,7 +2840,11 @@ describe("encryption at rest + key-discard kill switch", () => {
       expect((await post(original, admin.cookie, "MIGRATE_ME")).statusCode).toBe(201);
       await original.close();
 
-      expect(migrated.calls).toBe(0);
+      // Every successful passphrase-mode open acks (2026-09-04 — the launcher retires a legacy stored
+      // passphrase only on this confirmation), so creating the legacy DB counted one. Reset so the
+      // assertions below isolate the MIGRATION boot's ack.
+      expect(migrated.calls).toBe(1);
+      migrated.reset();
 
       // Boot with the CURRENT key plus the legacy key as a migration fallback — mirrors main.js offering
       // both because it hasn't recorded a confirmed migration yet.
@@ -2889,6 +2901,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       });
       const admin = await session(original);
       expect((await post(original, admin.cookie, "SURVIVE_INTERRUPTED_REKEY")).statusCode).toBe(201);
+      migrated.reset(); // the legacy-DB creation acked once (every passphrase-mode open does, 2026-09-04)
       await original.close();
 
       // Simulate a rekey interrupted by an OS-kill AFTER the pre-migration backup was taken but BEFORE
@@ -2947,6 +2960,7 @@ describe("encryption at rest + key-discard kill switch", () => {
         dbEncryptionMode: "passphrase",
       });
       const admin = await session(original);
+      migrated.reset(); // the legacy-DB creation acked once (every passphrase-mode open does, 2026-09-04)
       expect((await post(original, admin.cookie, "SURVIVE_CLEANUP_FAILURE")).statusCode).toBe(201);
       await original.close();
 
@@ -10650,6 +10664,11 @@ describe("review fixes 2026-09-04 (server)", () => {
     const imageId = (upload.json() as { avatar: { imageId: string } }).avatar.imageId;
     const stray = join(dataDir, "avatars", "avt_0123456789abcdef.webp");
     writeFileSync(stray, "RIFF\0\0\0\0WEBP");
+    // Files younger than the in-flight grace window are never swept (an upload writes its file before the
+    // user record references it) — age both past it so the sweep's decision is about references alone.
+    const old = new Date(Date.now() - 60 * 60_000);
+    utimesSync(stray, old, old);
+    utimesSync(join(dataDir, "avatars", `${imageId}.webp`), old, old);
 
     await app.reapOrphanedAvatars();
     expect(existsSync(stray)).toBe(false);
@@ -10660,6 +10679,7 @@ describe("review fixes 2026-09-04 (server)", () => {
     for (const name of ["loam.db", "loam.db-wal", "loam.db-shm"]) {
       rmSync(join(dataDir, name), { force: true });
     }
+    utimesSync(join(dataDir, "avatars", `${imageId}.webp`), old, old);
     const reopened = await buildApp({ dataDir, logger: false });
     cleanups.push(() => reopened.close());
     expect(await waitFor(() => !existsSync(join(dataDir, "avatars", `${imageId}.webp`)))).toBe(true);
@@ -10707,5 +10727,174 @@ describe("review fixes 2026-09-04 (server)", () => {
         })
       ).statusCode,
     ).toBe(404);
+  });
+});
+
+describe("review fixes 2026-09-04 (server) — round 2", () => {
+  const MESH_OFF_SYNC = (peers: { url: string; label?: string }[]) => ({
+    sync: { enabled: true, peers, intervalMs: 3_600_000 },
+  });
+  const HOST_TOKEN = "host-token-round-two-0123456789abcdefghijklmnop";
+
+  function claim(app: LoamApp, cookie: string, secret: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/admin/claim", headers: { cookie }, payload: { secret } });
+  }
+
+  it("hostDevice: the CORRECT host token is honoured even after the per-IP attempt budget is spent on wrong guesses", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const host = await newSession(app);
+    // A co-located app (same loopback IP) burns the semantic attempt budget (5 per 5 min) with guesses.
+    for (let i = 0; i < 5; i += 1) {
+      expect((await claim(app, host.cookie, `guess-${i}`)).statusCode).toBe(403);
+    }
+    expect((await claim(app, host.cookie, "guess-6")).statusCode).toBe(429);
+    // The host's own claim with the real token still succeeds — a 256-bit token can't be guessed, so the
+    // limiter has nothing to protect there, and a hostDevice node has no other way to gain an admin.
+    const promoted = await claim(app, host.cookie, HOST_TOKEN);
+    expect(promoted.statusCode).toBe(200);
+    expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+  });
+
+  it("hostDevice CONFIGURED on a node with no launcher token behaves like `none` and never touches the limiter", async () => {
+    const app = await makeApp({ admin: { bootstrap: "hostDevice" } });
+    const user = await newSession(app);
+    expect(user.isAdmin).toBe(false);
+    const response = await claim(app, user.cookie, "anything");
+    expect(response.statusCode).toBe(403);
+    expect((response.json() as { error: string }).error).toBe("Admin claiming is not enabled on this LOAM node");
+    expect(app.rateLimiterEntryCounts().claim).toBe(0);
+  });
+
+  it("a host-token node that PATCHes admin.bootstrap to setupCode saves the intent but mints no unusable code", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const host = await newSession(app);
+    expect((await claim(app, host.cookie, HOST_TOKEN)).statusCode).toBe(200);
+    const patched = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: host.cookie },
+      payload: { admin: { bootstrap: "setupCode" } },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect((patched.json() as { admin: { bootstrap: string } }).admin.bootstrap).toBe("setupCode"); // persisted intent
+    expect(app.getAdminSetupCode()).toBeUndefined(); // nothing minted/logged — it could never be claimed here
+    const config = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: host.cookie } });
+    expect((config.json() as { networkConfig: { allowAdminClaim: boolean } }).networkConfig.allowAdminClaim).toBe(false);
+  });
+
+  it("a passphrase-mode open acks the launcher even without a legacy key to migrate from", async () => {
+    const calls: (string | undefined)[] = [];
+    (globalThis as unknown as { __loamReportDbKeyMigrated?: (requestId?: string) => void }).__loamReportDbKeyMigrated = (
+      requestId?: string,
+    ) => {
+      calls.push(requestId);
+    };
+    cleanups.push(() => {
+      delete (globalThis as unknown as { __loamReportDbKeyMigrated?: unknown }).__loamReportDbKeyMigrated;
+    });
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-ack-test-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const app = await buildApp({
+      dataDir,
+      logger: false,
+      dbEncryptionKey: "a passphrase-derived key",
+      dbEncryptionMode: "passphrase",
+      dbKeyRequestId: "dbkey-42",
+    });
+    cleanups.push(() => app.close());
+    // The launcher retires a pre-change install's stored passphrase ONLY on this ack — so it must fire on
+    // every successful passphrase-mode open, not just when a legacy key was offered.
+    expect(calls).toEqual(["dbkey-42"]);
+
+    // A persistent-mode open (no passphrase) still acks nothing.
+    const other = mkdtempSync(join(tmpdir(), "loam-ack-test-"));
+    cleanups.push(() => rmSync(other, { recursive: true, force: true }));
+    const persistent = await buildApp({ dataDir: other, logger: false, dbEncryptionKey: "device secret", dbEncryptionMode: "persistent" });
+    cleanups.push(() => persistent.close());
+    expect(calls).toEqual(["dbkey-42"]);
+  });
+
+  it("sync import honours a locally-tightened posting policy on an IMPORTED channel and refuses reactions into a locally archived one", async () => {
+    const source = await makeApp(MESH_OFF_SYNC([]));
+    const sourceAdmin = await newSession(source);
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/channels",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { name: "Relief Ops" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    const first = await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "relief-ops", body: "first" },
+    });
+    expect(first.statusCode).toBe(201);
+    const firstId = (first.json() as { message: { id: string } }).message.id;
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const puller = await makeApp(MESH_OFF_SYNC([{ url: sourceUrl, label: "source" }]));
+    const pullerAdmin = await newSession(puller);
+    const sync = () => puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    const bodies = async () =>
+      ((await puller.server.inject({ method: "GET", url: "/api/messages/relief-ops", headers: { cookie: pullerAdmin.cookie } })).json() as {
+        body?: string;
+        type: string;
+      }[]);
+    expect((await sync()).statusCode).toBe(200);
+    expect((await bodies()).map((m) => m.body)).toContain("first"); // the channel + post imported
+
+    // The local admin locks the IMPORTED channel to admins-only. The source's admin is an ordinary user
+    // here, so its later posts must not land.
+    expect(
+      (
+        await puller.server.inject({
+          method: "PATCH",
+          url: "/api/channels/relief-ops",
+          headers: { cookie: pullerAdmin.cookie },
+          payload: { allowPosting: "admins" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { type: "channelPost", channelId: "relief-ops", body: "after lockdown" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    expect((await sync()).statusCode).toBe(200);
+    expect((await bodies()).map((m) => m.body)).not.toContain("after lockdown");
+
+    // Now the local admin ARCHIVES it; a peer reaction on the already-imported post must not land either.
+    expect(
+      (
+        await puller.server.inject({
+          method: "PATCH",
+          url: "/api/channels/relief-ops",
+          headers: { cookie: pullerAdmin.cookie },
+          payload: { archived: true },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await source.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: sourceAdmin.cookie },
+          payload: { type: "reaction", targetMessageId: firstId, reaction: "👍" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    expect((await sync()).statusCode).toBe(200);
+    expect(puller.store.loadMessages().some((message) => message.type === "reaction")).toBe(false);
   });
 });

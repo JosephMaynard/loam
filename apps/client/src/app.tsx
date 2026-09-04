@@ -487,6 +487,8 @@ function LoamApp() {
   // Set when this node requires transport encryption (docs/08) but no host public key is available
   // from a scanned join QR — there is no safe way to talk to it, so the app renders a gate instead.
   const [needsQr, setNeedsQr] = useState<false | "missing" | "changed">(false);
+  // Guards the Android host's one-at-a-time admin claim (see the boot effect).
+  const hostClaimInFlightRef = useRef(false);
   // Bumped to force a full server re-sync: on WebSocket reconnect (missed events don't replay) and
   // on a failed boot fetch (retry with backoff instead of stranding the app offline).
   const [syncTick, setSyncTick] = useState(0);
@@ -1357,12 +1359,21 @@ function LoamApp() {
         );
 
         // The Android host's own WebView (never a LAN joiner) carries the launcher's per-boot host token:
-        // claim admin with it exactly once (`hostDevice` bootstrap, review 2026-09-04). Consumed first so
-        // a resync can never re-send it; a failed claim just leaves the operator un-promoted, visibly.
+        // claim admin with it (`hostDevice` bootstrap, review 2026-09-04). The token is consumed only on
+        // SUCCESS — a transient failure (a rate-limited claim, a blip) keeps it for the next boot pass, since
+        // with `hostDevice` there is no other way for this node to gain an admin (round-2 review). One claim
+        // at a time; the server treats a claim by an existing admin as a no-op anyway.
         const hostToken = window.__loamHostDeviceToken;
-        if (typeof hostToken === "string" && hostToken.length > 0 && !nextConfig.currentUser.isAdmin) {
-          window.__loamHostDeviceToken = undefined;
-          await claimAdmin(hostToken).catch(() => undefined);
+        if (typeof hostToken === "string" && hostToken.length > 0 && !nextConfig.currentUser.isAdmin && !hostClaimInFlightRef.current) {
+          hostClaimInFlightRef.current = true;
+          try {
+            await claimAdmin(hostToken);
+            window.__loamHostDeviceToken = undefined;
+          } catch {
+            // Keep the token; retried on the next resync (WS reconnect / boot retry).
+          } finally {
+            hostClaimInFlightRef.current = false;
+          }
           if (!active) {
             return;
           }

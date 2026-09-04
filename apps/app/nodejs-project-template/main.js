@@ -1028,38 +1028,32 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   // stays alive specifically so it can receive this event and drive the retry; before that fix, the
   // process backing this listener was already dead by the time the operator could ever tap the button.
   // `global.__loamBootEmbeddedServer` is the hook loam-server.js (embedded-main.ts's bundle entry)
-  // installs on `global` — idempotent-safe to call again.
-  var reboot = global.__loamBootEmbeddedServer;
-  if (typeof reboot === 'function') {
-    // Cleared once the retry's OUTCOME (resolve or reject) is actually observed — NOT synchronously
-    // after this call — so a duplicate message that arrives while the retry is still mid-flight hits
-    // the debounce above instead of triggering a second overlapping boot (RF2).
-    startFreshRebootInFlight = true;
-    try {
-      reboot()
-        .then(function () {
-          startFreshRebootInFlight = false;
-          // P2 (Sol round 4): start a FRESH readiness-probe chain for this retry — the original poll
-          // (from the very first boot attempt) may already have given up (~5 minutes) long before the
-          // operator got around to confirming "Preserve old database & start fresh", and it never
-          // restarts itself. Without this, a successful recovery here would never tell the host screen
-          // it's ready (embedded-main.ts's direct `__loamReportBootReady` signal covers the SAME case
-          // from the server side too — this is belt-and-suspenders on the client-poll side).
-          startReadinessProbe();
-        })
-        .catch(function (err) {
-          startFreshRebootInFlight = false;
-          console.error('Retry boot after start-fresh confirmation failed', err);
-        });
-    } catch (err) {
+  // Re-run the WHOLE key-resolution-and-boot pipeline, exactly like the `loam-db-unlock` retry below —
+  // never the bare boot hook (round-2 review). The failed attempt's `LOAM_DB_KEY` is still installed in
+  // `process.env`, and in passphrase mode it was derived from an entry that has since been CONSUMED and is
+  // stored nowhere: booting straight into the start-fresh marker would create the fresh database under a
+  // key nobody can reproduce (a mistyped passphrase the operator never sees again). Going through
+  // `bootWithWipeResume` → `resolveDbEncryptionAndBoot` asks RN for the key again — in passphrase mode that
+  // means the locked prompt, so the fresh database is keyed by a passphrase the operator knowingly types —
+  // and keeps the wipe-phase gate in the loop. `resolveDbEncryptionAndBoot` re-requires the (cached)
+  // server bundle and drives the SAME re-entrant `__loamBootEmbeddedServer` hook underneath.
+  startFreshRebootInFlight = true;
+  bootWithWipeResume().then(
+    function () {
       startFreshRebootInFlight = false;
-      console.error('Failed to invoke the retry-boot hook after start-fresh confirmation', err);
-    }
-  } else {
-    console.error(
-      'No retry-boot hook installed (unexpected — loam-server.js should have set global.__loamBootEmbeddedServer)',
-    );
-  }
+      // P2 (Sol round 4): start a FRESH readiness-probe chain for this retry — the original poll
+      // (from the very first boot attempt) may already have given up (~5 minutes) long before the
+      // operator got around to confirming "Preserve old database & start fresh", and it never
+      // restarts itself. Without this, a successful recovery here would never tell the host screen
+      // it's ready (embedded-main.ts's direct `__loamReportBootReady` signal covers the SAME case
+      // from the server side too — this is belt-and-suspenders on the client-poll side).
+      startReadinessProbe();
+    },
+    function (err) {
+      startFreshRebootInFlight = false;
+      console.error('Retry boot after start-fresh confirmation failed', err);
+    },
+  );
 });
 
 // ---- `db_encryption_locked` unlock retry (P1-1, Sol round 4) -----------------------------------------
@@ -1068,7 +1062,7 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
 // without ever requiring the server bundle at all (see its 'locked' outcome) — so there is no running
 // server/listener to "reboot" here, just the whole key-resolution pipeline to re-run from scratch. RN
 // (index.tsx) posts this after the operator has done something that might now produce a key: for
-// passphrase mode, having just called `setStoredPassphrase`; for persistent mode, as a plain manual
+// passphrase mode, having just called `setPassphraseCandidate`; for persistent mode, as a plain manual
 // retry (e.g. after a transient Keystore hiccup).
 //
 // P1-2 (Sol round 5): this MUST go through `bootWithWipeResume()`, never call
@@ -1415,8 +1409,11 @@ notify('starting');
 // P1-1 (Sol round 8): route on the durable wipe PHASE, not mere marker presence.
 //   - phase `undefined`      → no wipe pending → resolve a key + boot normally.
 //   - phase `delete-pending` → an earlier fixed-key wipe never PROVED its artifacts gone. DEFER to the
-//                              server's boot-time retry: resolve the OLD key (RN still holds it — we do NOT
-//                              clear it here) + boot the server, which re-runs artifact deletion before
+//                              server's boot-time retry: resolve a key + boot the server, which re-runs artifact
+//                              deletion before serving (persistent: RN still holds the device secret — we do NOT
+//                              clear it here; passphrase: the operator is asked for the passphrase first, since
+//                              the device never keeps it — the resume then continues once they enter it) and,
+//                              once verified,
 //                              serving and, once verified, signals the wipe-restart hook itself. So this is
 //                              still a normal `resolveDbEncryptionAndBoot()` call — the server does the rest.
 //   - phase `key-clear-ready`→ artifacts are PROVEN gone; the ONLY step left is clearing the device key.
