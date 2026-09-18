@@ -6530,6 +6530,34 @@ describe("attachment + sync review hardening", () => {
     expect(stored?.type).toBe("dm");
     expect(stored && "body" in stored ? stored.body : undefined).toBe("PRIVATE");
 
+    // The identity check runs BEFORE any attachment work: a refused import must not fetch bytes or
+    // queue a retry under the local message's id (the peer 404s this file, which used to record one).
+    offered = [
+      {
+        id: dm.id, type: "channelPost", authorId: sender.userId, channelId: "general", body: "with file",
+        createdAt: dm.createdAt, editedAt: Date.now() + 2000, attachments: [{ id: "att_0123456789abcdef", mimeType: "image/png" }],
+      },
+    ];
+    await runSync();
+    expect(app.store.loadMissingAttachments()).toEqual([]);
+    expect(app.store.loadMessages().find((message) => message.id === dm.id)?.type).toBe("dm");
+
+    // A reply can't be re-parented, and ids inside the mesh replay-key namespace are never imported.
+    const post = async (payload: Record<string, unknown>) =>
+      ((await app.server.inject({ method: "POST", url: "/api/messages", headers: { cookie: sender.cookie }, payload })).json() as {
+        message: { id: string; createdAt: number };
+      }).message;
+    const parentA = await post({ type: "channelPost", channelId: "general", body: "parent A" });
+    const parentB = await post({ type: "channelPost", channelId: "general", body: "parent B" });
+    const child = await post({ type: "channelReply", channelId: "general", parentMessageId: parentA.id, body: "child" });
+    offered = [
+      { id: child.id, type: "channelReply", authorId: sender.userId, channelId: "general", parentMessageId: parentB.id, body: "moved", createdAt: child.createdAt, editedAt: Date.now() + 3000 },
+      { id: `sealed.${"a".repeat(64)}`, type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "planted", createdAt: 2 },
+    ];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === child.id)).toMatchObject({ parentMessageId: parentA.id, body: "child" });
+    expect(app.store.loadMessages().some((message) => message.id.startsWith("sealed."))).toBe(false);
+
     offered = [
       { id: "msg.peer-alias", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "alias", createdAt: 1, attachments: [attachment] },
     ];
@@ -8220,8 +8248,52 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       expect(await deliver(reopened, { ...original, id: "seal_renamed_after_restart" })).toBe(0);
       expect(reopened.store.loadMessages().filter((message) => message.type === "dm" && message.body === "only once")).toHaveLength(1);
 
+      // Re-SPELLING the ciphertext doesn't help either: the base64url decoder tolerates `=` + trailing junk
+      // and ignores the final character's unused bits, so these decode to the very same envelope.
+      const sealed = original.sealed as string;
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+      const lastFlipped = sealed.slice(0, -1) + alphabet[alphabet.indexOf(sealed.at(-1)!) ^ 1];
+      for (const [index, respelled] of [`${sealed}=junk`, ...(sealed.length % 4 === 0 ? [] : [lastFlipped])].entries()) {
+        expect(await deliver(reopened, { ...original, id: `seal_respelled_${index}`, sealed: respelled })).toBe(0);
+        expect(await deliver(nodeC, { ...original, id: `seal_respelled_relay_${index}`, sealed: respelled })).toBe(0);
+      }
+      expect(reopened.store.loadMessages().filter((message) => message.type === "dm" && message.body === "only once")).toHaveLength(1);
+      expect(nodeC.store.loadMessages().filter((message) => message.type === "sealed")).toHaveLength(1);
+
       // A lifetime no honest sender can request is refused outright.
       expect(await deliver(nodeC, { ...original, id: "seal_far_future", ttlExpiresAt: Date.now() + 30 * 24 * 3_600_000 })).toBe(0);
+    });
+
+    it("can't be censored by a carrier pre-offering the genuine blob with a fake TTL, or a planted replay-key id", async () => {
+      const nodeA = await makeApp({ mesh: MESH });
+      const nodeB = await makeApp({ mesh: MESH });
+      const alice = await adminOf(nodeA);
+      const bob = await adminOf(nodeB);
+      const bobCard = await meshCard(nodeB, bob.cookie);
+      expect((await addContact(nodeA, alice.cookie, bobCard)).statusCode).toBe(200);
+      await nodeA.server.inject({
+        method: "POST",
+        url: "/api/mesh/messages",
+        headers: { cookie: alice.cookie },
+        payload: { toMeshId: bobCard.meshId, body: "must arrive" },
+      });
+      const [genuine] = ((await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
+        messages: Record<string, unknown>[];
+      }).messages;
+      const deliver = async (message: Record<string, unknown>) =>
+        ((await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
+          accepted: number;
+        }).accepted;
+
+      // The TTL is cleartext a relay can't verify: the forged copy fails to open (AAD mismatch) and is
+      // merely carried. It must not shadow the genuine message that arrives afterwards.
+      expect(await deliver({ ...genuine, id: "seal_fake_ttl", ttlExpiresAt: (genuine.ttlExpiresAt as number) + 1 })).toBe(1);
+      // Ids inside the replay-key namespace are refused outright, so none can be planted as a tombstone.
+      expect(await deliver({ ...genuine, id: `sealed.${"0".repeat(64)}` })).toBe(0);
+
+      expect(await deliver(genuine)).toBe(1);
+      const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+      expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toEqual(["must arrive"]);
     });
 
     it("relays through a carrier that cannot read the blob (bridge A→C→B)", async () => {

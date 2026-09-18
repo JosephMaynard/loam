@@ -1171,7 +1171,8 @@ function LoamApp() {
         );
 
         if (!response.ok) {
-          throw new Error(`Avatar upload failed: ${response.status}`);
+          const payload: unknown = await response.json().catch(() => undefined);
+          throw new Error(errorText(payload, `Avatar upload failed: ${response.status}`));
         }
 
         const user = UserSchema.parse(await response.json());

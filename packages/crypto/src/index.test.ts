@@ -5,6 +5,7 @@ import {
   verifyKxBinding,
   sealMailbox,
   openMailbox,
+  isCanonicalSealedBlob,
   mailboxTag,
   currentEpoch,
   createTransportIdentity,
@@ -79,6 +80,22 @@ describe("sealed mailbox", () => {
     expect(opened!.senderMeshId).toBe(alice.meshId);
     expect(opened!.senderSignPublic).toBe(alice.signPublic);
     expect(opened!.senderKxPublic).toBe(alice.kxPublic);
+  });
+
+  it("recognises only the canonical spelling of a blob (the decoder tolerates others)", () => {
+    const alice = createMeshIdentity();
+    const bob = createMeshIdentity();
+    const blob = sealMailbox({ recipientKxPublic: bob.kxPublic, sender: senderOf(alice), plaintext: "hi", aad: "a" });
+    expect(isCanonicalSealedBlob(blob)).toBe(true);
+
+    // Both re-spellings still OPEN — which is exactly why string-keyed dedupe must refuse them.
+    const padded = `${blob}=anything`;
+    expect(openMailbox({ blob: padded, recipientKxSecret: bob.kxSecret, aad: "a" })?.plaintext).toBe("hi");
+    expect(isCanonicalSealedBlob(padded)).toBe(false);
+    expect(isCanonicalSealedBlob("A".repeat(3) + "B")).toBe(true); // 3 whole bytes, no spare bits
+    expect(isCanonicalSealedBlob("AB")).toBe(false); // 1 byte + non-zero unused bits
+    expect(isCanonicalSealedBlob("AA")).toBe(true);
+    expect(isCanonicalSealedBlob("***")).toBe(false);
   });
 
   it("returns null for the wrong recipient key", () => {

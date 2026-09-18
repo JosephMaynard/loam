@@ -21,7 +21,12 @@ Each node *pulls* from its configured peers on an interval (or via "Sync now"). 
 schema-validated and defensive: messages only land in channels that are public *locally* (a
 malicious peer can't inject into a private channel id), imported user profiles are stripped of
 `isAdmin`/roles/moderation state (a peer's admin is a stranger here), and edits apply only when
-strictly newer. An imported message body over **256KB** is skipped (`maxSyncImportBodyBytes`): the stored
+strictly newer **and only to the same message** — an incoming record that reuses an existing id must match
+its type, author, `createdAt` and routing (channel / parent / target), checked before any attachment is
+fetched, so a peer that learns a private message's id can't re-type it into the public flow. A message
+naming an attachment id that another local message (or a pending upload) already owns is refused, and ids
+in the mesh replay-key namespace (`sealed.`) are never imported. (Body rewrites of a *public* message by a
+configured peer remain possible — sync is unsigned; signed sync, docs/29 Track B, is the fix.) An imported message body over **256KB** is skipped (`maxSyncImportBodyBytes`): the stored
 body schema is deliberately uncapped so long *local* LLM replies round-trip, but a hostile peer must not be
 able to amplify ~8MB bodies onto a syncing node (docs/25 SW2). Message ids are globally unique, so gossip is
 idempotent and loop-safe; content propagates transitively (A←B←C) without coordination.

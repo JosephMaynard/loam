@@ -100,6 +100,12 @@ export function registerUserRoutes(ctx: AppContext): void {
     // wipe, so applying it afterwards would write the wiped account (admin flag and all) back into
     // the fresh store and leave an avatar file the wipe was meant to destroy — the same generation
     // guard the sync writers use.
+    // ...and one already under way when this handler starts (the global 503 gate runs in `onRequest`,
+    // BEFORE the body is read, so a wipe can begin while a large upload body is still arriving).
+    if (ctx.wipeInProgress || ctx.awaitingWipeRestart) {
+      return reply.code(503).send(errorBody("This LOAM node is resetting"));
+    }
+
     const generation = ctx.wipeGeneration;
     await mkdir(ctx.avatarsDir, { recursive: true });
     await writeFile(imagePath, image);
@@ -630,6 +636,10 @@ export function registerUserRoutes(ctx: AppContext): void {
       const filePath = join(ctx.attachmentsDir, attachmentFileName(attachment));
       // Same Emergency Reset guard as the avatar upload: never leave a file (or an owner entry for a
       // wiped user) behind a wipe that landed during the write.
+      if (ctx.wipeInProgress || ctx.awaitingWipeRestart) {
+        return reply.code(503).send(errorBody("This LOAM node is resetting"));
+      }
+
       const generation = ctx.wipeGeneration;
       await mkdir(ctx.attachmentsDir, { recursive: true });
       await writeFile(filePath, bytes);

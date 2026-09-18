@@ -267,6 +267,21 @@ export function sealMailbox(input: {
 }
 
 /**
+ * True when `blob` is exactly the string {@link sealMailbox} would emit for its bytes. The base64url
+ * decoder is deliberately tolerant (it stops at `=` padding and ignores the unused low bits of the final
+ * character), so MANY strings decode to one envelope. Anything that identifies a sealed blob by its
+ * string — replay protection, carried-mail dedupe — must refuse the non-canonical spellings, or a
+ * carrier can mint unlimited "different" copies of one authentic message.
+ */
+export function isCanonicalSealedBlob(blob: string): boolean {
+  try {
+    return b64urlEncode(b64urlDecode(blob)) === blob;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Open and verify a sealed blob. Returns the authenticated sender identity + plaintext, or `null` on
  * ANY failure: malformed blob, decrypt/tag failure (wrong recipient key, tampered blob, or `aad` that
  * differs from the sealed one), an invalid inner sender signature, or a `from` that doesn't derive

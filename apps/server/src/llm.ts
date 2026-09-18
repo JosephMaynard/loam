@@ -323,11 +323,18 @@ export function createLlmLayer(rt: Runtime) {
     rt.broadcast({ type: "messageCreated", message: assistantMessage });
 
     const audience = new Set([bot.id, userMessage.authorId]);
+    // An Emergency Reset mid-stream destroys this conversation; abandon the reply rather than keep
+    // writing a pre-wipe message (today a no-op UPDATE, but never worth depending on).
+    const generation = rt.wipeGeneration;
     let body = "";
     rt.broadcastStreamEvent(audience, { type: "start", messageId: assistantMessage.id });
 
     try {
       for await (const delta of streamChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
+        if (rt.wipeGeneration !== generation) {
+          return;
+        }
+
         body += delta;
 
         // Keep the in-memory copy current for mid-stream REST reads, but defer persistence and the
@@ -339,9 +346,17 @@ export function createLlmLayer(rt: Runtime) {
         rt.broadcastStreamEvent(audience, { type: "delta", messageId: assistantMessage.id, text: delta });
       }
 
+      if (rt.wipeGeneration !== generation) {
+        return;
+      }
+
       rt.updateMessage(assistantMessage, body.trim() || "(No response.)", false);
       rt.broadcastStreamEvent(audience, { type: "end", messageId: assistantMessage.id });
     } catch (error) {
+      if (rt.wipeGeneration !== generation) {
+        return;
+      }
+
       const message = error instanceof Error ? error.message : "Unknown LLM error.";
       rt.updateMessage(assistantMessage, `${body}\n\nLLM error: ${message}`.trim(), false);
       rt.broadcastStreamEvent(audience, { type: "error", messageId: assistantMessage.id, error: message });
