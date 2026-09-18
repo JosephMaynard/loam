@@ -259,6 +259,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     log: server.log,
     options,
     attachmentsDir,
+    attachmentOwners,
     tombstones,
     syncedChannelIds,
     broadcast: (event) => broadcast(event),

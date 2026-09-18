@@ -472,10 +472,10 @@ describe("schema refinements", () => {
       expect(ok("****")).toBe(false); // outside the alphabet
     });
 
-    it("rejects a payload beyond the 256 KiB decoded cap", () => {
-      // 349532 is a valid 4-char-quantum length just past the 349528 cap, so this isolates the max check.
-      expect(ok("A".repeat(349_532))).toBe(false);
-      expect(ok("A".repeat(349_528))).toBe(true);
+    it("rejects a payload beyond the 1 MiB decoded cap (the largest attachment — a non-image file)", () => {
+      // 1398108 is a valid 4-char-quantum length just past the 1398104 cap, so this isolates the max check.
+      expect(ok("A".repeat(1_398_108))).toBe(false);
+      expect(ok("A".repeat(1_398_104))).toBe(true);
     });
   });
 });

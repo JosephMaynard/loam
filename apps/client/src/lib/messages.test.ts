@@ -13,6 +13,7 @@ import {
   mergeMessagesInOrder,
   messageConversationKey,
   reactionSummary,
+  reconcileConversationSnapshot,
   repliesFor,
   topLevelMessages,
 } from "./messages";
@@ -405,5 +406,36 @@ describe("isJumboEmoji", () => {
 
   it("tolerates surrounding whitespace between emoji", () => {
     expect(isJumboEmoji("  👍   🎉  ")).toBe(true);
+  });
+});
+
+describe("reconcileConversationSnapshot", () => {
+  it("prunes a deleted message even when it was the newest in the conversation", () => {
+    const previous = [post("older", 100), post("deleted-latest", 200)];
+    const result = reconcileConversationSnapshot(
+      previous,
+      CHANNEL,
+      [post("older", 100)],
+      new Set(["older", "deleted-latest"]),
+      ME,
+    );
+    expect(result.messages.map((message) => message.id)).toEqual(["older"]);
+    expect(result.prunedIds).toEqual(["deleted-latest"]);
+  });
+
+  it("prunes reactions that targeted a pruned conversation message", () => {
+    const previous = [post("a", 100), reaction("x", 150, "a", "👍", ME)];
+    const result = reconcileConversationSnapshot(previous, CHANNEL, [], new Set(["a", "x"]), ME);
+    expect(result.messages).toEqual([]);
+    expect(result.prunedIds.sort()).toEqual(["a", "x"]);
+  });
+
+  it("keeps a message that arrived while the fetch was in flight, and other conversations", () => {
+    const elsewhere = dm("d", 50, ME, "user.peer");
+    const previous = [elsewhere, post("a", 100), post("raced", 300)];
+    const result = reconcileConversationSnapshot(previous, CHANNEL, [post("a", 100, "edited")], new Set(["d", "a"]), ME);
+    expect(result.messages.map((message) => message.id)).toEqual(["d", "a", "raced"]);
+    expect(result.messages[1]).toMatchObject({ body: "edited" });
+    expect(result.prunedIds).toEqual([]);
   });
 });

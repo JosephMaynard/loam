@@ -32,6 +32,8 @@ export type Runtime = {
   log: FastifyBaseLogger;
   options: AppOptions;
   attachmentsDir: string;
+  /** Uploads not yet consumed by a message, keyed by attachment id (uploader-bound). */
+  attachmentOwners: Map<string, { userId: string; uploadedAt: number }>;
   /** Message ids deliberately deleted on this node — never re-imported. */
   tombstones: Set<string>;
   /** Channel ids imported from a sync peer (C1 provenance). */

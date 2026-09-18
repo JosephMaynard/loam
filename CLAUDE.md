@@ -26,7 +26,8 @@ law-enforcement avoidance as the purpose.
 (A→C→B) delivery. **Phases 0–2 + v2 secure addressing are BUILT & TESTED** (see the doc's
 "Implementation status"): `packages/crypto` (`@loam/crypto`) is the Ed25519/X25519 sealed-sender
 primitive; the server has a `sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL
-table), and bounded relay (TTL/hop/cap, no acks). **v2** addresses mail by the recipient's
+table), and bounded relay (TTL/hop/cap, no acks). The outer message id isn't covered by the seal, so
+replay protection keys on the **ciphertext hash** (`sealed.<sha256>` in the tombstone set), not the id. **v2** addresses mail by the recipient's
 **self-certifying `mesh.` id** and exchanges keys via **mesh identity cards** — `GET /api/mesh/identity`
 (your card: public keys + secret `mailboxToken`) → shown as a QR / pasted → `POST /api/mesh/contacts`
 (re-verified server-side: `meshId===hash(sign)` + `kxSig` binding; stored per-user in the
@@ -249,8 +250,10 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
 - **Node-to-node sync** (docs/11): `sync.{enabled,peers,intervalMs}` config; pull-based gossip of
   **public data only** via `GET /api/sync/digest` + `POST /api/sync/messages` (404 unless enabled).
   DMs/private channels/shadow-banned authors never export. Imports are defensive (public-local
-  channels only, users stripped of authority, edits only when newer, attachments copied
-  best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.
+  channels only, users stripped of authority, edits only when newer **and only of the same message** —
+  same arm/author/timestamp/routing, so a peer can't re-type a private id into the public flow — a
+  message naming an attachment id another local message or pending upload owns is refused, attachments
+  copied best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.
   Admin: `GET /api/admin/sync`, `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's
   join URL is its sync address.
 - **Security headers**: an `onSend` hook sets `X-Content-Type-Options: nosniff` on every response and

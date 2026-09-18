@@ -5,7 +5,7 @@ import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { verifyKxBinding } from "@loam/crypto";
 import { ChannelSchema, type Message, type MessageAttachment, MessageSchema, type SealedMessage, SyncAttachmentResponseSchema, type SyncDigest, SyncDigestSchema, SyncMessagesResponseSchema, type SyncPeer, type SyncStatusReport, type User, UserSchema } from "@loam/schema";
-import { attachmentFileName, attachmentMaxBytes, isAcceptableAttachmentBytes, missingAttachmentBackoffMs, missingAttachmentMaxAgeMs, missingAttachmentMaxRecordsPerPass } from "./media.js";
+import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, isAcceptableAttachmentBytes, isImageAttachmentMime, missingAttachmentBackoffMs, missingAttachmentMaxAgeMs, missingAttachmentMaxRecordsPerPass } from "./media.js";
 import { type PeerTransportPosture, type PeerTransportSession, fetchPeerTransportPosture, handshakeWithPeer, sealedFetch } from "./sync-transport.js";
 import type { MeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
@@ -405,7 +405,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (!response.ok) {
           throw new Error(`Peer answered ${response.status}`);
         }
-        return await readPeerBody(response, attachmentMaxBytes);
+        // Read up to the cap for THIS attachment's type — non-image files may be larger than images.
+        const maxBytes = isImageAttachmentMime(attachment.mimeType) ? attachmentMaxBytes : attachmentFileMaxBytes;
+        return await readPeerBody(response, maxBytes);
       } finally {
         clearTimeout(timeout);
       }
@@ -624,6 +626,49 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
    * land first), never into private/unknown channels (a malicious peer must not inject into a
    * local private channel id), never over a tombstone, and edits only when strictly newer.
    */
+  /** True when `message` names an attachment id already owned by another local message or pending upload. */
+  function claimsForeignAttachment(message: Message): boolean {
+    if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
+      return false;
+    }
+
+    const ids = new Set(message.attachments.map((attachment) => attachment.id));
+
+    if ([...ids].some((id) => rt.attachmentOwners.has(id))) {
+      return true;
+    }
+
+    return rt.data.messages.some(
+      (candidate) =>
+        candidate.id !== message.id &&
+        candidate.type !== "reaction" &&
+        candidate.type !== "sealed" &&
+        !!candidate.attachments?.some((attachment) => ids.has(attachment.id)),
+    );
+  }
+
+  /** True when `incoming` is an edit of `existing` — same arm, author, timestamp and routing — rather
+   *  than a different message reusing its id. */
+  function isSameMessageIdentity(existing: Message, incoming: Message): boolean {
+    if (existing.type !== incoming.type || existing.authorId !== incoming.authorId || existing.createdAt !== incoming.createdAt) {
+      return false;
+    }
+
+    if (existing.type === "channelPost" && incoming.type === "channelPost") {
+      return existing.channelId === incoming.channelId;
+    }
+
+    if (existing.type === "channelReply" && incoming.type === "channelReply") {
+      return existing.channelId === incoming.channelId && existing.parentMessageId === incoming.parentMessageId;
+    }
+
+    if (existing.type === "reaction" && incoming.type === "reaction") {
+      return existing.targetMessageId === incoming.targetMessageId;
+    }
+
+    return false;
+  }
+
   async function importPeerMessages(peerUrl: string, messages: Message[], generation: number): Promise<number> {
     const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
     const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
@@ -724,6 +769,14 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           }
         }
 
+        // An attachment id belongs to exactly one message (uploads are consumed on first use). A peer
+        // message naming an id that a DIFFERENT local message — or a still-pending local upload — already
+        // owns would alias that file: the download gate resolves a file to its owning message, so a public
+        // import could make a DM / private-channel attachment anonymously fetchable. Refuse it outright.
+        if (claimsForeignAttachment(message)) {
+          continue;
+        }
+
         await importPeerAttachments(peerUrl, message, generation);
         // A kill switch during the attachment fetch just wiped the store — stop before we insert
         // this (and any later) message back onto it (docs/15 #2).
@@ -735,6 +788,14 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       const existing = rt.data.messages.find((candidate) => candidate.id === message.id);
 
       if (existing) {
+        // An import may only EDIT the record it names, never turn it into a different one: the checks
+        // above vetted the INCOMING message, so without this a peer that knows a private message's id
+        // could re-offer it as a public arm — reclassifying a DM into the public export (leaking its
+        // body via `Object.assign`-preserved fields, and its attachments via the download gate).
+        if (!isSameMessageIdentity(existing, message)) {
+          continue;
+        }
+
         if ((message.editedAt ?? 0) > (existing.editedAt ?? 0)) {
           const updated = MessageSchema.parse(message);
           rt.store.updateMessage(updated);

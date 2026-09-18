@@ -101,7 +101,13 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
 
       try {
         const bytes = await readFile(join(ctx.attachmentsDir, attachmentFileName(attachment)));
-        return { data: bytes.toString("base64"), mimeType: attachment.mimeType };
+        // A `.bin` (non-image) file name carries no MIME, so report the one recorded on the owning message
+        // — an undefined `mimeType` used to drop out of the JSON and fail the puller's schema check.
+        const entry =
+          owningMessage.type !== "reaction" && owningMessage.type !== "sealed"
+            ? owningMessage.attachments?.find((candidate) => candidate.id === attachment.id)
+            : undefined;
+        return { data: bytes.toString("base64"), mimeType: attachment.mimeType ?? entry?.mimeType };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
           return reply.code(404).send(errorBody("Attachment does not exist"));
