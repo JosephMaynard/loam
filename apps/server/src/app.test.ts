@@ -8348,6 +8348,26 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       expect(await deliver(genuine)).toBe(1);
       const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
       expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toEqual(["must arrive"]);
+
+      // On a RELAY the unauthenticated outer fields are the lever: a copy with a spent hop budget, or with
+      // `meta.streaming` (which the export treats as "never offer"), must not park a dead row that shadows
+      // the genuine mail.
+      const nodeC = await makeApp({ mesh: MESH });
+      const relay = async (message: Record<string, unknown>) =>
+        ((await nodeC.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
+          accepted: number;
+        }).accepted;
+      const offered = async () =>
+        ((await nodeC.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as { messages: { hopLimit: number; meta?: unknown }[] })
+          .messages;
+
+      expect(await relay({ ...genuine, id: "seal_spent", hopLimit: 1 })).toBe(0); // nothing left to carry
+      expect(await relay({ ...genuine, id: "seal_low", hopLimit: 2, meta: { streaming: true } })).toBe(1);
+      expect(await offered()).toMatchObject([{ hopLimit: 1 }]);
+      expect((await offered())[0].meta).toBeUndefined();
+      expect(await relay(genuine)).toBe(1); // the better-provisioned copy raises the held budget…
+      expect(await offered()).toMatchObject([{ hopLimit: (genuine.hopLimit as number) - 1 }]);
+      expect(await relay({ ...genuine, id: "seal_again" })).toBe(0); // …and nothing further is gained by replays
     });
 
     it("relays through a carrier that cannot read the blob (bridge A→C→B)", async () => {

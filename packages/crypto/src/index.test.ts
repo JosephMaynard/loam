@@ -96,6 +96,8 @@ describe("sealed mailbox", () => {
     expect(isCanonicalSealedBlob("AB")).toBe(false); // 1 byte + non-zero unused bits
     expect(isCanonicalSealedBlob("AA")).toBe(true);
     expect(isCanonicalSealedBlob("***")).toBe(false);
+    expect(isCanonicalSealedBlob("")).toBe(false);
+    expect(isCanonicalSealedBlob("AAAAA")).toBe(false); // a lone 6-bit tail encodes no byte
   });
 
   it("returns null for the wrong recipient key", () => {

@@ -275,7 +275,7 @@ export function sealMailbox(input: {
  */
 export function isCanonicalSealedBlob(blob: string): boolean {
   try {
-    return b64urlEncode(b64urlDecode(blob)) === blob;
+    return blob.length > 0 && b64urlEncode(b64urlDecode(blob)) === blob;
   } catch {
     return false;
   }

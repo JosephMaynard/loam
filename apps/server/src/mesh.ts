@@ -207,8 +207,10 @@ export function createMeshLayer(rt: Runtime) {
    * can re-offer identical mail under a fresh id; this key identifies the one authentic message instead.
    * The AAD fields must be in it: they're cleartext a relay can't verify, so keying on the blob alone would
    * let a carrier offer the genuine blob with a FAKE ttl/tag first (it fails to open, gets carried) and
-   * thereby block the genuine copy arriving by another path. A forged variant gets its own key and can
-   * never open, so it costs a relay slot at most (as any junk blob already can). Stored beside the id
+   * thereby block the genuine copy arriving by another path. A variant forging those gets its own key and
+   * can never open, so it costs a relay slot at most (as any junk blob already can); a variant that keeps
+   * them and forges the UNauthenticated `hopLimit`/`meta` shares the key — `acceptSealedFromPeer` handles
+   * that (hop budget is raised by a better copy; extras are dropped on relay). Stored beside the id
    * tombstones under the reserved `sealed.` prefix — peer-supplied ids in that namespace are refused
    * (`isReservedReplayId`) so nobody can pre-plant one. Survives restarts; GC'd by the same horizon. */
   function sealedReplayKey(message: SealedMessage): string {
@@ -291,15 +293,23 @@ export function createMeshLayer(rt: Runtime) {
     if (rt.tombstones.has(replayKey)) {
       return false; // this exact mail was already delivered here — a replay under a new outer id
     }
-    // Already hold it — by id, or the same ciphertext re-offered under another id (which would otherwise
-    // take a second `maxCarried` slot on a relay). Compared by cached hash, never blob-to-blob: a peer
-    // picks the blob length, and thousands of equal-length 90KB string compares per inbound message
-    // would stall the event loop.
-    if (
-      rt.data.messages.some(
-        (candidate) => candidate.id === message.id || (candidate.type === "sealed" && sealedReplayKey(candidate) === replayKey),
-      )
-    ) {
+    // Already hold it — by id, or the same mail re-offered under another id (which would otherwise take a
+    // second `maxCarried` slot on a relay). Compared by cached hash, never blob-to-blob: a peer picks the
+    // blob length, and thousands of equal-length 90KB string compares per inbound message would stall
+    // the event loop.
+    const held = rt.data.messages.find(
+      (candidate) => candidate.id === message.id || (candidate.type === "sealed" && sealedReplayKey(candidate) === replayKey),
+    );
+    if (held) {
+      // `hopLimit` is NOT authenticated, so a carrier can pre-offer genuine mail with a nearly spent hop
+      // budget to park a copy here that goes nowhere. Let a better-provisioned copy of the SAME mail
+      // raise the held budget instead of being shadowed by it (monotonic: never lowered).
+      if (held.type === "sealed" && sealedReplayKey(held) === replayKey && message.hopLimit - 1 > held.hopLimit) {
+        const raised = MessageSchema.parse({ ...held, hopLimit: message.hopLimit - 1 }) as SealedMessage;
+        rt.store.updateMessage(raised);
+        held.hopLimit = raised.hopLimit;
+        return true;
+      }
       return false;
     }
     if (tryDeliverSealed(message)) {
@@ -309,11 +319,28 @@ export function createMeshLayer(rt: Runtime) {
     if (!rt.appConfig.mesh.relay) {
       return false;
     }
+    // Nothing left to carry: a copy stored at hop 0 is never advertised again, it would only hold a slot
+    // (and, before the raise above existed, shadow the real copy).
+    if (message.hopLimit - 1 <= 0) {
+      return false;
+    }
     const carried = rt.data.messages.reduce((count, candidate) => count + (candidate.type === "sealed" ? 1 : 0), 0);
     if (carried >= rt.appConfig.mesh.maxCarried) {
       return false; // at capacity — refuse new mail (soonest-to-expire eviction is a v2 refinement)
     }
-    const relayed = MessageSchema.parse({ ...message, hopLimit: message.hopLimit - 1 });
+    // Rebuild the carried row from the fields that matter rather than spreading the peer's object:
+    // unauthenticated extras ride along otherwise — `meta.streaming`, say, which `isSyncableMessage`
+    // treats as "never export", turning a carried copy into a dead one that blocks the genuine mail.
+    const relayed = MessageSchema.parse({
+      id: message.id,
+      type: "sealed",
+      authorId: MESH_SENTINEL_AUTHOR,
+      createdAt: message.createdAt,
+      toTag: message.toTag,
+      sealed: message.sealed,
+      ttlExpiresAt: message.ttlExpiresAt,
+      hopLimit: message.hopLimit - 1,
+    });
     rt.store.insertMessage(relayed);
     rt.data.messages.push(relayed);
     return true; // opaque — no client broadcast
