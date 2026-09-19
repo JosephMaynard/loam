@@ -254,7 +254,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
 - **Node-to-node sync** (docs/11): `sync.{enabled,peers,intervalMs}` config; pull-based gossip of
   **public data only** via `GET /api/sync/digest` + `POST /api/sync/messages` (404 unless enabled).
   DMs/private channels/shadow-banned authors never export. Imports are defensive (public-local
-  channels only, users stripped of authority, edits only when newer **and only of the same message** —
+  channels only, users stripped of authority, edits only when newer, **only of a message this node
+  imported** (`synced_messages` provenance — a peer can't rewrite a local user's post) **and only of the
+  same message** —
   same arm/author/timestamp/routing, so a peer can't re-type a private id into the public flow — a
   message naming an attachment id another local message or pending upload owns is refused, attachments
   copied best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.

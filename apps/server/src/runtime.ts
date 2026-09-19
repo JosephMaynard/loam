@@ -49,6 +49,8 @@ export type Runtime = {
   visibleUsers(viewer: User): User[];
   channelPostingError(channel: Channel, authorId: string, isReply: boolean): string | undefined;
   isLocallyAuthoritative(userId: string): boolean;
+  /** True when `userId` holds a session on THIS node (i.e. is one of our own users, not a peer's). */
+  hasLocalSession(userId: string): boolean;
   messageAudienceUserIds(message: Message): Set<string> | undefined;
   dmMessages(peerId: string, currentUserId: string): Message[];
 };

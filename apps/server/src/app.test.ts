@@ -6558,6 +6558,22 @@ describe("attachment + sync review hardening", () => {
     expect(app.store.loadMessages().find((message) => message.id === child.id)).toMatchObject({ parentMessageId: parentA.id, body: "child" });
     expect(app.store.loadMessages().some((message) => message.id.startsWith("sealed."))).toBe(false);
 
+    // A peer can't rewrite a message a LOCAL user wrote, even with every identity field right — only
+    // records this node imported are editable by a later import.
+    offered = [
+      { id: parentA.id, type: "channelPost", authorId: sender.userId, channelId: "general", body: "PEER REWROTE THIS", createdAt: parentA.createdAt, editedAt: Date.now() + 4000 },
+    ];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === parentA.id)).toMatchObject({ body: "parent A" });
+
+    // ...while a message that CAME from the peer still takes the peer's edits.
+    const peerPost = { id: "msg.peer-own", type: "channelPost", authorId: "user.peerown", channelId: "general", body: "v1", createdAt: 3 };
+    offered = [peerPost];
+    await runSync();
+    offered = [{ ...peerPost, body: "v2", editedAt: Date.now() + 5000 }];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === peerPost.id)).toMatchObject({ body: "v2" });
+
     offered = [
       { id: "msg.peer-alias", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "alias", createdAt: 1, attachments: [attachment] },
     ];
@@ -6569,6 +6585,17 @@ describe("attachment + sync review hardening", () => {
       await app.server.inject({ method: "POST", url: "/api/sync/messages", payload: { ids: [dm.id] } })
     ).json() as { messages: unknown[] };
     expect(exported.messages).toEqual([]);
+
+    // After a restart pending-upload ownership (in-memory) is gone; an unowned file already on disk must
+    // still never be bound to a public import.
+    const orphan = await uploadAttachment(app, sender.cookie);
+    const reopened = await reopenApp(app.app, app.dataDir);
+    const reopenedAdmin = await newSession(reopened);
+    offered = [
+      { id: "msg.peer-orphan", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "orphan", createdAt: 4, attachments: [orphan] },
+    ];
+    await reopened.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: reopenedAdmin.cookie } });
+    expect(reopened.store.loadMessages().some((message) => message.id === "msg.peer-orphan")).toBe(false);
   });
 
   it.each([
@@ -6612,6 +6639,33 @@ describe("attachment + sync review hardening", () => {
     const copied = readdirSync(join(puller.dataDir, "attachments"));
     expect(copied).toHaveLength(1);
     expect(readFileSync(join(puller.dataDir, "attachments", copied[0])).equals(bytes)).toBe(true);
+  });
+
+  it("still refuses an IMAGE over the 256 KiB image cap from a peer (the wire cap is now the 1 MiB file cap)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const attachment = await uploadAttachment(source, sourceAdmin.cookie);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "big image", attachments: [attachment] },
+    });
+    // A hostile/buggy peer's copy is bigger than any honest upload could be (valid PNG signature, 300 KiB).
+    const oversized = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(300 * 1024)]);
+    writeFileSync(join(source.dataDir, "attachments", `${attachment.id}.png`), oversized);
+    await source.server.listen({ host: "127.0.0.1", port: 0 });
+    const peerUrl = `http://127.0.0.1:${(source.server.server.address() as AddressInfo).port}`;
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: peerUrl, transportKey: source.getTransportPublicKey() }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+
+    const attachmentsDir = join(puller.dataDir, "attachments");
+    expect(existsSync(attachmentsDir) ? readdirSync(attachmentsDir) : []).toEqual([]);
+    expect(puller.store.loadMissingAttachments()).toHaveLength(1); // recorded for retry, never written
   });
 
   it("retries a transiently-failed sync attachment copy independently, without re-importing the message (docs/15 A6)", async () => {

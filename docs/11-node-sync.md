@@ -25,8 +25,13 @@ strictly newer **and only to the same message** — an incoming record that reus
 its type, author, `createdAt` and routing (channel / parent / target), checked before any attachment is
 fetched, so a peer that learns a private message's id can't re-type it into the public flow. A message
 naming an attachment id that another local message (or a pending upload) already owns is refused, and ids
-in the mesh replay-key namespace (`sealed.`) are never imported. (Body rewrites of a *public* message by a
-configured peer remain possible — sync is unsigned; signed sync, docs/29 Track B, is the fix.) An imported message body over **256KB** is skipped (`maxSyncImportBodyBytes`): the stored
+in the mesh replay-key namespace (`sealed.`) are never imported. **Only messages this node imported are
+peer-editable** (`synced_messages` provenance table, mirroring the channel C1 gate): a peer can never
+rewrite a message a local user wrote. A peer can still rewrite messages that *came from peers* — sync is
+unsigned; signed sync (docs/29 Track B) is the real fix. Messages imported before the provenance table
+existed are unmarked, so later peer edits to them are ignored (fail closed). An import is also refused if
+it names an attachment file already on disk that the edited record doesn't reference, and a peer's mesh key
+is never adopted onto a user with a local session. An imported message body over **256KB** is skipped (`maxSyncImportBodyBytes`): the stored
 body schema is deliberately uncapped so long *local* LLM replies round-trip, but a hostile peer must not be
 able to amplify ~8MB bodies onto a syncing node (docs/25 SW2). Message ids are globally unique, so gossip is
 idempotent and loop-safe; content propagates transitively (A←B←C) without coordination.

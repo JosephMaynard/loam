@@ -356,7 +356,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // Trust-on-first-use: adopt a valid key the FIRST time we see one for a known user, but never
         // overwrite an existing key from a later (possibly hostile) sync — a peer can't silently rebind
         // a user we already hold a key for.
-        if (!existing.identityKey && importedKey) {
+        // ...and never onto one of OUR OWN users: a local user with no key yet (mesh off, or not minted)
+        // would otherwise be bound to a peer-chosen key, and `ensureMeshIdentity` would then never publish
+        // their real one.
+        if (!existing.identityKey && importedKey && !rt.hasLocalSession(existing.id)) {
           const next = UserSchema.parse({ ...existing, identityKey: importedKey });
           rt.store.upsertUser(next);
           Object.assign(existing, next);
@@ -621,9 +624,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   // bytes, only the recipient's home node can open it. All of this is gated on `mesh.enabled`; with
   // it off nothing below runs and the public-data flow is byte-identical to today.
 
-  /** True when `message` names an attachment id already owned by another local message or pending upload
-   *  (`existing` = the identity-verified record being edited, the only legitimate co-owner). */
-  function claimsForeignAttachment(message: Message, existing: Message | undefined): boolean {
+  /** True when `message` names an attachment this node already holds for someone else: an id owned by
+   *  another local message or a pending upload, or — because pending-upload ownership is in-memory only
+   *  and lost on restart — ANY file already on disk that the identity-verified record being edited
+   *  (`existing`, the only legitimate co-owner) doesn't reference. Binding a public import to such a file
+   *  would make it anonymously downloadable. (A file left by an import interrupted between write and
+   *  insert is refused too, until the orphan sweep reaps it and the next round re-fetches it.) */
+  async function claimsForeignAttachment(message: Message, existing: Message | undefined): Promise<boolean> {
     if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
       return false;
     }
@@ -636,15 +643,38 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       }
     }
 
-    // `existing` is the one record this import has already PROVEN it is an edit of — never merely a
-    // record that shares its id.
-    return rt.data.messages.some(
+    const ownedElsewhere = rt.data.messages.some(
       (candidate) =>
         candidate !== existing &&
         candidate.type !== "reaction" &&
         candidate.type !== "sealed" &&
         !!candidate.attachments?.some((attachment) => ids.has(attachment.id)),
     );
+
+    if (ownedElsewhere) {
+      return true;
+    }
+
+    const alreadyReferenced = new Set(
+      existing && existing.type !== "reaction" && existing.type !== "sealed"
+        ? (existing.attachments ?? []).map((attachment) => attachment.id)
+        : [],
+    );
+
+    for (const attachment of message.attachments) {
+      if (alreadyReferenced.has(attachment.id)) {
+        continue;
+      }
+
+      try {
+        await stat(join(rt.attachmentsDir, attachmentFileName(attachment)));
+        return true;
+      } catch {
+        // not on disk — free to import
+      }
+    }
+
+    return false;
   }
 
   /** True when `incoming` is an edit of `existing` — same arm, author, timestamp and routing — rather
@@ -735,7 +765,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // attachment fetch, so a refused import can't write bytes or queue retry work under a local id.
       const existing = rt.data.messages.find((candidate) => candidate.id === message.id);
 
-      if (existing && !isSameMessageIdentity(existing, message)) {
+      // ...and only a record this node itself IMPORTED. Sync is unsigned and the export hands a peer every
+      // field the identity check compares, so without provenance any configured peer could rewrite a
+      // message a LOCAL user wrote. (Messages imported before this mark existed are unmarked, so their
+      // later peer edits are ignored — fail closed.)
+      if (existing && (!isSameMessageIdentity(existing, message) || !rt.store.isMessageSynced(existing.id))) {
         continue;
       }
 
@@ -796,8 +830,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // message naming an id that a DIFFERENT local message — or a still-pending local upload — already
         // owns would alias that file: the download gate resolves a file to its owning message, so a public
         // import could make a DM / private-channel attachment anonymously fetchable. Refuse it outright.
-        if (claimsForeignAttachment(message, existing)) {
+        if (await claimsForeignAttachment(message, existing)) {
           continue;
+        }
+
+        // The check above awaited — a kill switch may have landed (docs/15 #2).
+        if (rt.wipeGeneration !== generation) {
+          return imported;
         }
 
         await importPeerAttachments(peerUrl, message, generation);
@@ -806,6 +845,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (rt.wipeGeneration !== generation) {
           return imported;
         }
+      }
+
+      // The attachment work above awaited: if the record was deleted (or appeared) locally meanwhile,
+      // drop this import rather than update a detached object and broadcast a deleted message back.
+      if (rt.data.messages.find((candidate) => candidate.id === message.id) !== existing) {
+        continue;
       }
 
       if (existing) {
@@ -827,7 +872,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         continue;
       }
 
-      rt.store.insertMessage(message);
+      rt.store.transaction(() => {
+        rt.store.insertMessage(message);
+        rt.store.markMessageSynced(message.id);
+      });
       rt.data.messages.push(message);
       rt.broadcast({ type: "messageCreated", message });
       imported += 1;
