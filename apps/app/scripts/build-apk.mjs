@@ -8,6 +8,12 @@
 // Usage:  pnpm --filter app apk                 → writes apps/app/loam-host.apk
 //         pnpm --filter app apk -- --out ~/x.apk → also copies to the given path
 //
+//         pnpm --filter app aab                 → ALSO builds apps/app/loam-host.aab (Google Play)
+//
+// Google Play only accepts an Android App Bundle for new apps. `--aab` adds a `bundleRelease` pass
+// after the APK; upload the .aab to Play with Play App Signing enabled, where this repo's release
+// keystore acts as the UPLOAD key (docs/30). The APK stays the GitHub-Releases / sideload artifact.
+//
 // Signing: the release APK is signed with the throwaway debug key unless you first run
 // `pnpm --filter app keystore` (generates apps/app/keystore.properties, which
 // plugins/with-release-signing.js picks up at prebuild). See docs/04 "Signing the release APK".
@@ -28,6 +34,9 @@ const repoRoot = resolve(appDir, "..", "..");
 const androidDir = join(appDir, "android");
 const gradlewApk = join(androidDir, "app", "build", "outputs", "apk", "release", "app-release.apk");
 const defaultOut = join(appDir, "loam-host.apk");
+const gradlewAab = join(androidDir, "app", "build", "outputs", "bundle", "release", "app-release.aab");
+const aabOut = join(appDir, "loam-host.aab");
+const buildAab = process.argv.slice(2).includes("--aab");
 
 /** Parse `--out <path>` from argv; everything after `--` is ours (pnpm forwards it). */
 function parseOut() {
@@ -150,3 +159,16 @@ copyFileSync(gradlewApk, out);
 const sizeMb = (statSync(out).size / 1024 / 1024).toFixed(0);
 console.log(`\n[32m✓ APK ready (${sizeMb} MB):[0m ${out}`);
 console.log(`Install it on a connected phone/emulator with:\n  adb install -r ${out}`);
+
+if (buildAab) {
+  // 6. The Play upload artifact. Same arm64-only ABI filter as the APK (the bundled native prebuilds
+  //    ship no other ABI, so a wider bundle would install-then-crash on 32-bit devices).
+  run("./gradlew", ["bundleRelease", "-PreactNativeArchitectures=arm64-v8a"], { cwd: androidDir, env });
+
+  if (!existsSync(gradlewAab)) {
+    console.error(`\nBuild finished but no AAB was found at ${gradlewAab}`);
+    process.exit(1);
+  }
+  copyFileSync(gradlewAab, aabOut);
+  console.log(`\n\u001b[32m✓ AAB ready (${(statSync(aabOut).size / 1024 / 1024).toFixed(0)} MB):\u001b[0m ${aabOut}`);
+}

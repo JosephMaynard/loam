@@ -50,6 +50,9 @@ const MESH_PERMISSIONS = [
   "android.permission.BLUETOOTH_ADVERTISE",
   "android.permission.BLUETOOTH_SCAN",
   "android.permission.BLUETOOTH_CONNECT",
+  // The Wi-Fi Aware data path calls ConnectivityManager.requestNetwork(), which throws a
+  // SecurityException without this (normal-level, no runtime prompt).
+  "android.permission.CHANGE_NETWORK_STATE",
 ];
 
 const HOST_SERVICE_NAME = "expo.modules.loamhotspot.LoamHostService";

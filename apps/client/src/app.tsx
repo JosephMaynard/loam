@@ -2071,6 +2071,7 @@ function ConversationView({
 }: ConversationViewProps) {
   const location = useLocation();
   const [membersOpen, setMembersOpen] = useState(false);
+  const [reportUserOpen, setReportUserOpen] = useState(false);
   const timedOut = useIsTimedOut(currentUser);
   const topMessages = useMemo(
     () => (conversation ? topLevelMessages(messages, conversation) : []),
@@ -2138,6 +2139,12 @@ function ConversationView({
                   type="button"
                 >
                   {t("conversation.members")}
+                </button>
+              ) : conversation.kind === "dm" && usersById.get(conversation.id)?.type === "human" ? (
+                // The report-a-USER entry point (the server + dialog already supported it, but nothing
+                // opened it): reachable from the one place a person is the subject — their DM.
+                <button className="ghost-button" onClick={() => setReportUserOpen(true)} type="button">
+                  {t("report.userTitle")}
                 </button>
               ) : undefined
             }
@@ -2212,6 +2219,9 @@ function ConversationView({
           repliesByParent={repliesByParent}
           usersById={usersById}
         />
+      ) : null}
+      {reportUserOpen && conversation.kind === "dm" ? (
+        <ReportDialog targetType="user" targetId={conversation.id} onClose={() => setReportUserOpen(false)} />
       ) : null}
     </>
   );

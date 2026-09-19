@@ -53,6 +53,7 @@
     "bundle:server": "node ./scripts/bundle-server.mjs",
     "fetch:native": "node ./scripts/fetch-native-modules.mjs",
     "apk": "node ./scripts/build-apk.mjs",
+    "aab": "node ./scripts/build-apk.mjs --aab",
     "keystore": "node ./scripts/generate-keystore.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
