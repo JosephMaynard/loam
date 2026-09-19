@@ -356,10 +356,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // Trust-on-first-use: adopt a valid key the FIRST time we see one for a known user, but never
         // overwrite an existing key from a later (possibly hostile) sync — a peer can't silently rebind
         // a user we already hold a key for.
-        // ...and never onto one of OUR OWN users: a local user with no key yet (mesh off, or not minted)
-        // would otherwise be bound to a peer-chosen key, and `ensureMeshIdentity` would then never publish
-        // their real one.
-        if (!existing.identityKey && importedKey && !rt.hasLocalSession(existing.id)) {
+        // ...and only onto a record a sync import CREATED, never one of our own users: a local user with
+        // no key yet (mesh off, or not minted) would otherwise be bound to a peer-chosen key, and
+        // `ensureMeshIdentity` would then never publish their real one. Provenance is durable — a
+        // live-session test isn't (a logged-out or restarted local user has no session).
+        if (!existing.identityKey && importedKey && rt.store.isUserSynced(existing.id)) {
           const next = UserSchema.parse({ ...existing, identityKey: importedKey });
           rt.store.upsertUser(next);
           Object.assign(existing, next);
@@ -377,7 +378,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         pending: undefined,
         identityKey: importedKey,
       });
-      rt.store.upsertUser(sanitized);
+      rt.store.transaction(() => {
+        rt.store.upsertUser(sanitized);
+        rt.store.markUserSynced(sanitized.id);
+      });
       rt.data.users.push(sanitized);
       rt.broadcast({ type: "userUpserted", user: sanitized });
     }
@@ -666,15 +670,27 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         continue;
       }
 
-      try {
-        await stat(join(rt.attachmentsDir, attachmentFileName(attachment)));
-        return true;
-      } catch {
-        // not on disk — free to import
+      // Id-keyed like every other ownership check (the download gate and the orphan sweep resolve a file
+      // by id), so declaring a different MIME class can't dodge it via a different file name.
+      for (const extension of ["png", "jpg", "webp", "bin"]) {
+        try {
+          await stat(join(rt.attachmentsDir, `${attachment.id}.${extension}`));
+          return true;
+        } catch {
+          // not on disk under this name
+        }
       }
     }
 
     return false;
+  }
+
+  /** True when a later import may edit `existing`: it must be a record this node imported (provenance),
+   *  and local moderation is sticky — a moderator removal is an in-place edit (body blanked, files
+   *  deleted, `meta.removedByModerator`), which the origin's next ordinary edit would otherwise win
+   *  newer-wins against, restoring the content and re-downloading the removed attachment. */
+  function isPeerEditable(existing: Message): boolean {
+    return !existing.meta?.removedByModerator && rt.store.isMessageSynced(existing.id);
   }
 
   /** True when `incoming` is an edit of `existing` — same arm, author, timestamp and routing — rather
@@ -769,7 +785,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // field the identity check compares, so without provenance any configured peer could rewrite a
       // message a LOCAL user wrote. (Messages imported before this mark existed are unmarked, so their
       // later peer edits are ignored — fail closed.)
-      if (existing && (!isSameMessageIdentity(existing, message) || !rt.store.isMessageSynced(existing.id))) {
+      if (existing && (!isSameMessageIdentity(existing, message) || !isPeerEditable(existing))) {
         continue;
       }
 
@@ -990,7 +1006,14 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           }
 
           const mine = localById.get(entry.id);
-          return !mine || (entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0));
+
+          if (!mine) {
+            return true;
+          }
+
+          // Don't even ask for an edit the import would refuse (a local-origin or moderator-removed
+          // record) — the peer's newer stamp never goes away, so it would be re-fetched every round.
+          return entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0) && isPeerEditable(mine);
         })
         .map((entry) => entry.id);
 

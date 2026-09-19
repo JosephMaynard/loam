@@ -273,7 +273,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     visibleUsers: (viewer) => visibleUsers(viewer),
     channelPostingError: (channel, authorId, isReply) => channelPostingError(channel, authorId, isReply),
     isLocallyAuthoritative: (userId) => isLocallyAuthoritative(userId),
-    hasLocalSession: (userId) => [...sessions.values()].includes(userId),
     messageAudienceUserIds: (message) => messageAudienceUserIds(message),
     dmMessages: (peerId, currentUserId) => dmMessages(peerId, currentUserId),
   };

@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createMeshIdentity,
   currentEpoch,
   mailboxTag,
   openTransport,
@@ -6485,6 +6486,7 @@ describe("attachment + sync review hardening", () => {
     // A hostile peer that knows a DM's id / attachment id (e.g. a former participant) offers (1) the DM's
     // id re-typed as a public post and (2) a brand-new public post naming the DM's attachment id.
     let offered: Record<string, unknown>[] = [];
+    let offeredUsers: Record<string, unknown>[] = [];
     const peer = createServer((req, res) => {
       res.setHeader("content-type", "application/json");
       if (req.url === "/api/sync/digest") {
@@ -6492,7 +6494,7 @@ describe("attachment + sync review hardening", () => {
         return;
       }
       if (req.url === "/api/sync/messages") {
-        res.end(JSON.stringify({ messages: offered, users: [] }));
+        res.end(JSON.stringify({ messages: offered, users: offeredUsers }));
         return;
       }
       res.statusCode = 404;
@@ -6586,27 +6588,83 @@ describe("attachment + sync review hardening", () => {
     ).json() as { messages: unknown[] };
     expect(exported.messages).toEqual([]);
 
-    // After a restart pending-upload ownership (in-memory) is gone; an unowned file already on disk must
-    // still never be bound to a public import.
-    const orphan = await uploadAttachment(app, sender.cookie);
-    const reopened = await reopenApp(app.app, app.dataDir);
-    const reopenedAdmin = await newSession(reopened);
+    // A moderator removal is sticky: the origin's next (newer) edit must not restore the content.
+    expect(
+      (await app.server.inject({ method: "POST", url: `/api/moderation/messages/${peerPost.id}/remove`, headers: { cookie: admin.cookie } }))
+        .statusCode,
+    ).toBe(200);
+    offered = [{ ...peerPost, body: "back again", editedAt: Date.now() + 60_000 }];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === peerPost.id)).toMatchObject({
+      body: "",
+      meta: { removedByModerator: true },
+    });
+
+    // An imported record can't be re-routed or re-attributed either (the identity check on its own —
+    // provenance passes here).
+    const other = (
+      await app.server.inject({ method: "POST", url: "/api/channels", headers: { cookie: admin.cookie }, payload: { name: "Elsewhere" } })
+    ).json() as { id: string };
+    const peerSecond = { id: "msg.peer-second", type: "channelPost", authorId: "user.peerown", channelId: "general", body: "stay", createdAt: 5 };
+    offered = [peerSecond];
+    await runSync();
     offered = [
-      { id: "msg.peer-orphan", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "orphan", createdAt: 4, attachments: [orphan] },
+      { ...peerSecond, channelId: other.id, body: "moved", editedAt: Date.now() + 6000 },
+      { ...peerSecond, authorId: sender.userId, body: "re-attributed", editedAt: Date.now() + 7000 },
     ];
-    await reopened.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: reopenedAdmin.cookie } });
-    expect(reopened.store.loadMessages().some((message) => message.id === "msg.peer-orphan")).toBe(false);
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === peerSecond.id)).toMatchObject({
+      channelId: "general", authorId: "user.peerown", body: "stay",
+    });
+
+    // A peer's mesh key is never adopted onto one of OUR users — even one with no live session.
+    const peerIdentity = createMeshIdentity();
+    await app.server.inject({ method: "POST", url: "/api/session/end", headers: { cookie: recipient.cookie } });
+    offeredUsers = [
+      {
+        id: recipient.userId, displayName: "x", type: "human", isAdmin: false, createdAt: 1, ephemeral: true,
+        identityKey: { alg: "ed25519", sign: peerIdentity.signPublic, kx: peerIdentity.kxPublic, kxSig: peerIdentity.kxSig },
+      },
+    ];
+    offered = [{ id: "msg.peer-third", type: "channelPost", authorId: recipient.userId, channelId: "general", body: "hi", createdAt: 6 }];
+    await runSync();
+    expect(app.store.loadUsers().find((user) => user.id === recipient.userId)?.identityKey).toBeUndefined();
+    offeredUsers = [];
+
+    // After a restart pending-upload ownership (in-memory) is gone; an unowned file already on disk must
+    // still never be bound to a public import — whatever MIME class the peer declares for its id (the
+    // download gate and the orphan sweep resolve files by ID, so a `.bin` claim would alias the `.png`).
+    const reopened = await reopenApp(app.app, app.dataDir);
+    const unownedId = "att_feedfacefeedface";
+    mkdirSync(join(app.dataDir, "attachments"), { recursive: true });
+    writeFileSync(join(app.dataDir, "attachments", `${unownedId}.png`), "unowned");
+    offered = [
+      { id: "msg.peer-orphan", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "orphan", createdAt: 4, attachments: [{ id: unownedId, mimeType: "text/plain", name: "x.txt" }] },
+      { id: "msg.peer-control", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "control", createdAt: 4 },
+    ];
+    const rerun = await reopened.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+    expect(rerun.statusCode).toBe(200);
+    const afterReopen = reopened.store.loadMessages().map((message) => message.id);
+    expect(afterReopen).toContain("msg.peer-control"); // the round really ran
+    expect(afterReopen).not.toContain("msg.peer-orphan");
   });
 
   it.each([
-    { name: "encrypted (pinned key)", pinned: true },
-    { name: "plaintext", pinned: false },
-  ])("syncs a non-image file larger than the image cap over $name sync", async ({ pinned }) => {
-    // Files may be up to 1 MiB; the sync attachment paths used to cap every fetch at the 256 KiB IMAGE
-    // limit, so a valid larger file imported as a message with a permanently missing attachment.
-    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    // >256 KiB over the sealed JSON route: the response schema capped `data` at the IMAGE limit.
+    { name: "a 300 KiB file over encrypted sync", pinned: true, plaintextSource: false, size: 300 * 1024 },
+    // A SMALL file isolates the other cause: the sealed route omitted `mimeType` for `.bin` files.
+    { name: "a small file over encrypted sync", pinned: false, plaintextSource: false, size: 2048 },
+    // The legacy binary GET used for a plaintext (Developer Mode) peer capped the stream at the image limit.
+    { name: "a 300 KiB file from a plaintext peer", pinned: false, plaintextSource: true, size: 300 * 1024 },
+  ])("syncs a non-image attachment: $name", async ({ pinned, plaintextSource, size }) => {
+    if (plaintextSource) {
+      process.env.LOAM_DEV_MODE = "1"; // read once, at buildApp time
+    }
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } }).finally(() => {
+      delete process.env.LOAM_DEV_MODE;
+    });
     const sourceAdmin = await newSession(source);
-    const bytes = Buffer.alloc(300 * 1024, 65);
+    const bytes = Buffer.alloc(size, 65);
     const attachment = (
       await source.server.inject({
         method: "POST",

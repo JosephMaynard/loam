@@ -115,7 +115,10 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    relay can't verify, so a blob-only key would let a carrier pre-offer the genuine blob under a fake TTL
    and shadow the real copy. Only the canonical base64url spelling of a blob is accepted (the decoder is
    tolerant, so one envelope has many spellings), peer-supplied ids inside the `sealed.` namespace are
-   refused, and a `ttlExpiresAt` beyond the 7-day max (+1 epoch skew) is dropped. This supersedes the
+   refused, and a `ttlExpiresAt` beyond the 7-day max (+1 epoch skew) is dropped. `hopLimit` and `meta` are
+   NOT authenticated: a relay rebuilds the carried row from the needed fields only, doesn't carry a copy
+   with no hops left, and lets a better-provisioned copy of held mail raise the held hop budget — so a
+   carrier can't park a dead copy that shadows the genuine one. This supersedes the
    "dedup by id" wording in §2 below. **Not covered:** an Emergency Reset clears tombstones, so replay
    records don't survive a wipe (tied to the open mesh-key-wipe policy, docs/29 §4).
 7. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
