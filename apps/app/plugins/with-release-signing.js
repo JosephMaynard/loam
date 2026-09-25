@@ -24,6 +24,8 @@ const { isAbsolute, join, resolve } = require("node:path");
 const MARKER = "// loam-host: release signing";
 const APP_DIR = resolve(__dirname, "..");
 const PROPS_PATH = join(APP_DIR, "keystore.properties");
+// Config plugins are evaluated repeatedly (prebuild, `expo config`, Metro) — warn once per process.
+let warnedDebugSigning = false;
 
 /** Parse a `key=value` properties file into a plain object (blank lines and `#` comments ignored). */
 function parseProperties(text) {
@@ -47,8 +49,22 @@ function groovyLiteral(value) {
 }
 
 module.exports = function withReleaseSigning(config) {
-  // No keystore configured → leave the project untouched (release stays debug-signed, as today).
+  // No keystore configured → leave the project untouched (release stays debug-signed) — but say so, and
+  // refuse outright when the caller requires release signing (scripts/build-apk.mjs --aab, CI tag builds).
   if (!existsSync(PROPS_PATH)) {
+    if (process.env.LOAM_REQUIRE_RELEASE_SIGNING === "1") {
+      throw new Error(
+        "with-release-signing: LOAM_REQUIRE_RELEASE_SIGNING=1 but apps/app/keystore.properties is missing — " +
+          "refusing to generate a debug-signed release build. Run `pnpm --filter app keystore`.",
+      );
+    }
+    if (!warnedDebugSigning) {
+      warnedDebugSigning = true;
+      console.warn(
+        "with-release-signing: no apps/app/keystore.properties — release builds will be DEBUG-SIGNED " +
+          "(not distributable). Run `pnpm --filter app keystore` to sign with a real key.",
+      );
+    }
     return config;
   }
 
