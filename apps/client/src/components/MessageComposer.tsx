@@ -82,6 +82,9 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
   const [locationLat, setLocationLat] = useState("");
   const [locationLng, setLocationLng] = useState("");
   const pendingKeyRef = useRef(0);
+  // An upload that resolves after the user moved to another conversation can't land in the new composer:
+  // the caller keys the composer by conversation, so the new one is a separate instance, and Preact ignores a
+  // state update on an unmounted component (ConversationView.test.tsx covers it).
   const composerId = useId();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -235,6 +238,12 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
               <span className="attachment-chip-name" title={entry.error}>
                 {entry.name}
               </span>
+              {/* The reason must be readable on touch devices too, where a `title` tooltip never shows. */}
+              {entry.status === "error" && entry.error ? (
+                <span className="attachment-chip-error" role="alert">
+                  {entry.error}
+                </span>
+              ) : null}
               <button
                 aria-label={t("composer.removeAttachment", { name: entry.name })}
                 disabled={sending}

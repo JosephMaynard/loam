@@ -1,7 +1,7 @@
 // Build a release APK for the LOAM Android host end-to-end, then copy it somewhere obvious.
 //
-// One command instead of the six-step dance in docs/04: builds the workspace, fetches the
-// better-sqlite3 native prebuild, bundles the embedded server, regenerates the native project with
+// One command instead of the six-step dance in docs/04: builds the workspace, places the
+// vendored SQLite native prebuilds (plain + SQLCipher), bundles the embedded server, regenerates the native project with
 // Expo prebuild, and runs `gradlew assembleRelease` (arm64). The finished APK is copied to
 // `apps/app/loam-host.apk` (gitignored) and its path printed, ready for `adb install -r`.
 //
@@ -17,6 +17,10 @@
 // Signing: the release APK is signed with the throwaway debug key unless you first run
 // `pnpm --filter app keystore` (generates apps/app/keystore.properties, which
 // plugins/with-release-signing.js picks up at prebuild). See docs/04 "Signing the release APK".
+// Without a keystore, `--aab` REFUSES to build (Play rejects a debug-signed bundle, and a debug key can
+// never become the upload key), and an APK build prints a loud warning unless you acknowledge it with
+// `--debug-signed` (or LOAM_ALLOW_DEBUG_SIGNING=1) — a debug-signed APK can't update an installed
+// release-signed one, and each machine's debug key differs.
 //
 // Prereqbs (see docs/04): a real JDK (Android Studio's JBR, not a bare JRE) and the Android SDK with
 // platform-tools + NDK r27+. JAVA_HOME / ANDROID_HOME are auto-detected on macOS if unset; otherwise
@@ -37,6 +41,9 @@ const defaultOut = join(appDir, "loam-host.apk");
 const gradlewAab = join(androidDir, "app", "build", "outputs", "bundle", "release", "app-release.aab");
 const aabOut = join(appDir, "loam-host.aab");
 const buildAab = process.argv.slice(2).includes("--aab");
+const debugSignedAcknowledged =
+  process.argv.slice(2).includes("--debug-signed") || process.env.LOAM_ALLOW_DEBUG_SIGNING === "1";
+const keystoreProps = join(appDir, "keystore.properties");
 
 /** Parse `--out <path>` from argv; everything after `--` is ours (pnpm forwards it). */
 function parseOut() {
@@ -106,6 +113,32 @@ if (!env.ANDROID_HOME && !env.ANDROID_SDK_ROOT) {
   process.exit(1);
 }
 
+// Release-signing gate — before any (slow) build step.
+if (!existsSync(keystoreProps)) {
+  if (buildAab) {
+    console.error(
+      "\n\u001b[31m✗ No apps/app/keystore.properties — refusing to build a debug-signed AAB.\u001b[0m\n" +
+        "Google Play needs the bundle signed with your upload key. Run `pnpm --filter app keystore` (or restore\n" +
+        "your existing keystore.properties + release.jks) and try again. See docs/04 / docs/30.",
+    );
+    process.exit(1);
+  }
+  if (debugSignedAcknowledged) {
+    console.warn("Note: building a DEBUG-signed APK (acknowledged via --debug-signed / LOAM_ALLOW_DEBUG_SIGNING).");
+  } else {
+    console.warn(
+      "\n\u001b[33m" +
+        "================================================================================\n" +
+        "  WARNING: no apps/app/keystore.properties — this APK will be DEBUG-SIGNED.\n" +
+        "  It cannot update an installed release build, and every machine's debug key\n" +
+        "  differs. Do NOT distribute it. Run `pnpm --filter app keystore` to sign with a\n" +
+        "  real key, or pass --debug-signed to acknowledge a local test build.\n" +
+        "================================================================================" +
+        "\u001b[0m\n",
+    );
+  }
+}
+
 const out = parseOut();
 const pnpm = { cwd: repoRoot, env };
 
@@ -143,7 +176,9 @@ for (const stale of [join(llamaPkgDir, "android", ".cxx"), join(llamaPkgDir, "an
 //    what makes the build reproducible from a checkout.
 run("npx", ["expo", "prebuild", "--platform", "android", "--no-install", "--clean"], {
   cwd: appDir,
-  env: { ...env, CI: "1" },
+  // LOAM_REQUIRE_RELEASE_SIGNING makes plugins/with-release-signing.js fail prebuild rather than fall back
+  // to debug signing — belt and braces for the keystore check above (e.g. the file vanishing mid-build).
+  env: { ...env, CI: "1", ...(buildAab ? { LOAM_REQUIRE_RELEASE_SIGNING: "1" } : {}) },
 });
 // 5. Assemble the release APK for arm64 (the only ABI the bundled native prebuild ships).
 run("./gradlew", ["assembleRelease", "-PreactNativeArchitectures=arm64-v8a"], {

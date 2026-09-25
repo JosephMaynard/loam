@@ -6,7 +6,8 @@
 > constant-time), `GET`/`PATCH /api/admin/config` (layered defaults ← file ← DB, hot-reload,
 > `configUpdated` broadcast), the messaging feature flags wired to config and **enforced in
 > `createMessage()`**, shared `LoamConfigSchema` in `packages/schema` (with the doc-09
-> `security.profile` field reserved), legacy admin seeds demoted, `/admin` client UI + claim form
+> `security.profile` field reserved), the legacy seed users `user.1234`/`user.5678` removed (first
+> demoted, now deleted at boot with their messages tombstoned), `/admin` client UI + claim form
 > in settings, and 12 route tests via the new `buildApp()` factory. **Part B remaining:** user
 > management, channel create/archive, session revocation, kill-switch section (02).
 
@@ -18,7 +19,8 @@ the kill switch, initiative 2). Non-admins never see it; the server enforces eve
 
 ## Hard prerequisite: admin bootstrap
 
-Today **no real user can be an admin.** `isAdmin` is only true for seed users `user.1234` /
+*(Historical — this section describes the pre-bootstrap state; see the status note above.)* At the
+time, **no real user could be an admin.** `isAdmin` is only true for seed users `user.1234` /
 `user.5678` (set in `loadData()` via `ensureUser(id, id === "user.1234")`), and every browser session
 gets a random `user.<hex>` id from `getSessionUserId()`. So an admin-gated UI is unreachable in
 practice. **Solve this first.** Options:

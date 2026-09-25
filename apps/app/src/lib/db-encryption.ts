@@ -13,6 +13,8 @@
 import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 
+import { addOwnListener, type BridgeSubscription } from './bridge-listener';
+
 export type DbEncryptionMode = 'off' | 'ephemeral' | 'persistent' | 'passphrase';
 
 export const DB_ENCRYPTION_MODES: readonly DbEncryptionMode[] = ['off', 'ephemeral', 'persistent', 'passphrase'];
@@ -152,7 +154,8 @@ export type ResolvedDbKey = {
 /** The subset of the nodejs-mobile bridge channel this module uses (kept loose, matching the other
  * RN↔launcher bridges — on-device-llm.ts, mesh-courier.ts, model-manager-bridge.ts). */
 export interface BridgeChannel {
-  addListener(name: string, handler: (payload: unknown) => void): void;
+  // Returns RN's EventSubscription at runtime (see bridge-listener.ts); `void` covers test doubles.
+  addListener(name: string, handler: (payload: unknown) => void): BridgeSubscription | void;
   removeAllListeners(name: string): void;
   post(name: string, payload: unknown): void;
 }
@@ -698,7 +701,8 @@ export function requestDbStartFresh(
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeAllListeners('loam-db-start-fresh-result');
+      // Only THIS round trip's listener — an overlapping one on the same event must keep its own.
+      removeListener();
       resolve(result);
     };
 
@@ -714,7 +718,7 @@ export function requestDbStartFresh(
       finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
     }, timeoutMs);
 
-    channel.addListener('loam-db-start-fresh-result', onResult);
+    const removeListener = addOwnListener(channel, 'loam-db-start-fresh-result', onResult);
     try {
       channel.post('loam-db-start-fresh', { requestId, intent });
     } catch (err) {
@@ -750,7 +754,8 @@ export function requestDbUnlock(channel: BridgeChannel, timeoutMs = 5000): Promi
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeAllListeners('loam-db-unlock-result');
+      // Only THIS round trip's listener — an overlapping one on the same event must keep its own.
+      removeListener();
       resolve(result);
     };
 
@@ -766,7 +771,7 @@ export function requestDbUnlock(channel: BridgeChannel, timeoutMs = 5000): Promi
       finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
     }, timeoutMs);
 
-    channel.addListener('loam-db-unlock-result', onResult);
+    const removeListener = addOwnListener(channel, 'loam-db-unlock-result', onResult);
     try {
       channel.post('loam-db-unlock', { requestId });
     } catch (err) {
@@ -803,7 +808,8 @@ export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, ti
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeAllListeners('loam-db-set-mode-hint-result');
+      // Only THIS round trip's listener — an overlapping one on the same event must keep its own.
+      removeListener();
       resolve(result);
     };
 
@@ -819,7 +825,7 @@ export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, ti
       finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
     }, timeoutMs);
 
-    channel.addListener('loam-db-set-mode-hint-result', onResult);
+    const removeListener = addOwnListener(channel, 'loam-db-set-mode-hint-result', onResult);
     try {
       channel.post('loam-db-set-mode-hint', { requestId, mode });
     } catch (err) {
@@ -1011,6 +1017,11 @@ async function applyDbModeChangeLocked(
  * CONVERSION is a documented FUTURE enhancement (docs/21) — not built. */
 export const DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE = 'db_encryption_plaintext_unconverted' as const;
 
+/** Boot-error code (pre-release review 2026-09-25): an encrypted mode is selected but the SQLCipher native
+ * driver failed to load, so the launcher LOCKED instead of booting plaintext. Recovery: Retry, or an explicit
+ * switch to `off`. Mirrors `DB_ENCRYPTION_DRIVER_MISSING_CODE` in nodejs-project-template/boot-config.js. */
+export const DB_ENCRYPTION_DRIVER_MISSING_CODE = 'db_encryption_driver_missing' as const;
+
 /**
  * P1-4-RN (Sol round 8): whether SELECTING `next` is a destructive action that must be gated behind an
  * explicit operator confirmation before it is persisted. Any encrypted mode
@@ -1031,7 +1042,7 @@ export function dbModeSelectionIsDestructive(next: DbEncryptionMode): boolean {
  * or `null` for codes with no dedicated recovery. Pure so `index.tsx`'s code→recovery mapping (which
  * decides whether to show the destructive plaintext-unconverted / start-fresh / unlock UI) is
  * harness-testable. */
-export type DbEncryptionRecovery = 'plaintext-unconverted' | 'unreadable' | 'locked';
+export type DbEncryptionRecovery = 'plaintext-unconverted' | 'unreadable' | 'locked' | 'driver-missing';
 export function dbEncryptionRecoveryForCode(code: string | undefined): DbEncryptionRecovery | null {
   switch (code) {
     case DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE:
@@ -1040,6 +1051,8 @@ export function dbEncryptionRecoveryForCode(code: string | undefined): DbEncrypt
       return 'unreadable';
     case 'db_encryption_locked':
       return 'locked';
+    case DB_ENCRYPTION_DRIVER_MISSING_CODE:
+      return 'driver-missing';
     default:
       return null;
   }

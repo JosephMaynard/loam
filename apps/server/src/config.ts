@@ -1,6 +1,6 @@
 // LoamConfig defaults, layered merge, and legacy-profile reconciliation. Extracted from app.ts
 // (2026-09-04 split).
-import { LoamConfigSchema, securityProfilePreset, type LoamConfig, type LoamConfigUpdate } from "@loam/schema";
+import { BotIdSchema, LLM_MODEL_MAX_LENGTH, LoamConfigSchema, securityProfilePreset, type LoamConfig, type LoamConfigUpdate } from "@loam/schema";
 
 import { hashSecret, isHashedSecret } from "./secrets.js";
 
@@ -158,6 +158,97 @@ export function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamCon
   }
 
   return LoamConfigSchema.parse(merged);
+}
+
+/**
+ * Repair values that older builds accepted but the current schema refuses, BEFORE a config layer is
+ * validated — so upgrading a node never turns a once-valid config.json / persisted row into a boot
+ * failure. Each repair is reported so the caller can log it. Operates on raw parsed JSON (mutated in
+ * place and returned); anything it doesn't recognise is left for the schema to judge.
+ *
+ * - `security.transportEncryption: "off"` → `"optional"`: plaintext is no longer an operator posture
+ *   (only Developer Mode reaches it, as a read-time projection).
+ * - `llm.ollama.botId` outside the reserved `llm.` namespace → dropped (the default bot id applies), so a
+ *   bot id can never name a person's account. The dropped id is returned as `droppedBotId`, so the caller
+ *   can report a bot record it orphans (hidden from the roster: `visibleUsers` shows only the configured bot).
+ * - `llm.ollama.botDisplayName` over 80 chars → truncated to the user display-name bound.
+ * - `llm.ollama.model` / `llm.onDevice.model` over `LLM_MODEL_MAX_LENGTH` → truncated to that bound.
+ */
+export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repairs: string[]; droppedBotId?: string } {
+  const repairs: string[] = [];
+  let droppedBotId: string | undefined;
+
+  if (!isRecord(json)) {
+    return { json, repairs };
+  }
+
+  const security = json.security;
+  if (isRecord(security) && security.transportEncryption === "off") {
+    security.transportEncryption = "optional";
+    repairs.push(
+      'security.transportEncryption "off" is not an operator posture (use Developer Mode, LOAM_DEV_MODE, for plaintext debugging); using "optional"',
+    );
+  }
+
+  const ollama = isRecord(json.llm) ? json.llm.ollama : undefined;
+  if (isRecord(ollama)) {
+    if (ollama.botId !== undefined && !BotIdSchema.safeParse(ollama.botId).success) {
+      droppedBotId = typeof ollama.botId === "string" ? ollama.botId : undefined;
+      delete ollama.botId;
+      repairs.push("llm.ollama.botId must be an llm.* id (at most 64 chars); using the default bot id");
+    }
+    if (typeof ollama.botDisplayName === "string" && ollama.botDisplayName.length > 80) {
+      ollama.botDisplayName = ollama.botDisplayName.slice(0, 80);
+      repairs.push("llm.ollama.botDisplayName is longer than 80 characters; truncated");
+    }
+  }
+
+  for (const backend of ["ollama", "onDevice"] as const) {
+    const block = isRecord(json.llm) ? json.llm[backend] : undefined;
+    if (isRecord(block) && typeof block.model === "string" && block.model.length > LLM_MODEL_MAX_LENGTH) {
+      block.model = block.model.slice(0, LLM_MODEL_MAX_LENGTH);
+      repairs.push(`llm.${backend}.model is longer than ${LLM_MODEL_MAX_LENGTH} characters; truncated`);
+    }
+  }
+
+  return { json, repairs, droppedBotId };
+}
+
+/**
+ * {@link sanitizeLegacyConfigJson} for a FULL `LoamConfig` snapshot (the wipe journal) rather than a config
+ * layer: there is no lower layer to supply a dropped `llm.ollama.botId`, so the default bot id fills it in,
+ * which is what the layered load ends up with for a repaired config.json or DB row.
+ */
+export function sanitizeLegacyFullConfigJson(json: unknown): { json: unknown; repairs: string[] } {
+  const ollama = isRecord(json) && isRecord(json.llm) ? json.llm.ollama : undefined;
+  const hadBotId = isRecord(ollama) && ollama.botId !== undefined;
+  const result = sanitizeLegacyConfigJson(json);
+  // Only a bot id the repair DROPPED is filled; a snapshot that never had one stays invalid (corrupt).
+  if (hadBotId && isRecord(ollama) && ollama.botId === undefined) {
+    ollama.botId = defaultLoamConfig().llm.ollama.botId;
+  }
+  return result;
+}
+
+/**
+ * Drop the keys the Android launcher owns from a config update. The launcher's model manager
+ * (`nodejs-project-template/main.js`, `loam-model-set-active`) persists the whole `llm.onDevice` block
+ * into config.json; the DB config layer (written in full by every admin save) sits ABOVE config.json, so
+ * without this a single admin save froze whatever `llm.onDevice` was effective at that moment and every
+ * later activate/deactivate from the launcher was silently overridden on the next boot. The caller
+ * applies this to the DB layer only when config.json actually carries `llm.onDevice` — a desktop/Pi node
+ * whose config.json never mentions it keeps the admin's persisted value. When config.json does carry it,
+ * an admin edit of `llm.onDevice` is written through to config.json instead (routes-admin.ts
+ * `writeThroughLauncherOwnedOnDevice`), so the file stays the one source for the block.
+ */
+export function withoutLauncherOwnedKeys(update: LoamConfigUpdate): LoamConfigUpdate {
+  if (!update.llm?.onDevice) {
+    return update;
+  }
+
+  const { onDevice: _launcherOwned, ...llm } = update.llm;
+  void _launcherOwned;
+  return { ...update, llm };
 }
 
 /**

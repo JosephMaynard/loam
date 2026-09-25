@@ -104,8 +104,8 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 
 | # | Item | Doc | Size |
 |---|------|-----|------|
-| D1 | `app.tsx` still ~3,519 lines (down from ~5,400; much extracted) — remaining extraction is lower-ROI now | 15#21 | M |
-| D2 | Dead `notifyIfHidden` (`app.tsx:342`/`:596`) can never fire — wire it (→P15) or remove | 15#22 | S |
+| D1 | `app.tsx` still ~3,600 lines (down from ~5,400; conversation panes, error banner/boundary, admin panels etc. now in `src/components/`) — remaining extraction is lower-ROI now | 15#21 | M |
+| D2 | ~~Dead `notifyIfHidden` can never fire~~ — **removed** (in-app toast is the signal; OS push for the Android host stays P15) | 15#22 | S |
 | D3 | Native-speaker review of the 14 machine-translated i18n catalogs (structure tested, quality not) | 13 | ongoing |
 
 ## 7. Infra / device-verification
@@ -170,7 +170,6 @@ shared-tag race, desktop Enter-to-send, shadow-ban attachment defense-in-depth).
   (`main.js:462`). Plus assorted nits (executor dead-code, `RECEIVER_EXPORTED` flag, invalid
   `fullBackupContent` value).
 
-**Misc low/nit (client + host):** `notifyIfHidden` is dead (no `requestPermission` call — tie to P15 or
-remove, `app.tsx:342`); `stopHostService` exported but never called (no "stop hosting" affordance); `.tmp-*`
+**Misc low/nit (client + host):** ~~`notifyIfHidden` is dead~~ (removed, D2); `stopHostService` exported but never called (no "stop hosting" affordance); `.tmp-*`
 model-store files can leak on a crash mid-save; an `'aborted'` download shows no UI feedback; Settings join-QR
 lacks a `role="img"`/label. None are defects; all cheap if picked up.

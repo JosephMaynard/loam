@@ -340,6 +340,20 @@ describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
     });
     expect(attempts).toBe(2);
   });
+
+  it("db_encryption_driver_missing neither exits nor overwrites the reported code with boot_failed", async () => {
+    const reports = installFakeBridge();
+    const mod = await import("./embedded-main.js");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    reports.length = 0;
+    exitSpy.mockClear();
+
+    await mod.bootEmbeddedServer(async () => {
+      throw Object.assign(new Error("no SQLCipher driver"), { code: "db_encryption_driver_missing" });
+    });
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(reports.some((report) => report.code === "boot_failed")).toBe(false);
+  });
 });
 
 describe("P2 (Sol round 4): boot-ready is reported directly to RN, independent of main.js's own readiness poll", () => {

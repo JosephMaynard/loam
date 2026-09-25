@@ -93,17 +93,34 @@ export type SocketEvent =
       type: "wipe";
     }
   | {
+      /** Server heartbeat (content-free): proves the socket is alive; drives the client's liveness watchdog. */
+      type: "ping";
+    }
+  | {
       type: "stream";
       event: StreamEvent;
     };
 
 /**
- * Maps a client path to a `RouteState`. Unknown paths fall back to the channels screen.
+ * Maps a client path to a `RouteState`. Unknown paths — and paths whose segments aren't valid
+ * percent-encoding (e.g. `/dm/%E0%A4%A`, which makes `decodeURIComponent` throw a `URIError`) — fall
+ * back to the channels screen rather than crashing the render that parses them.
  *
  * @param path - The location path (e.g. `/channel/general/thread/abc`, `/dm/user.1`, `/admin`)
  * @returns The parsed route state
  */
 export function parseRoute(path: string): RouteState {
+  try {
+    return parseRouteUnsafe(path);
+  } catch (error) {
+    if (error instanceof URIError) {
+      return { screen: "channels" };
+    }
+    throw error;
+  }
+}
+
+function parseRouteUnsafe(path: string): RouteState {
   if (path === "/" || path === "/channels") {
     return { screen: "channels" };
   }
@@ -268,6 +285,10 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
 
   if (candidate.type === "wipe") {
     return { type: "wipe" };
+  }
+
+  if (candidate.type === "ping") {
+    return { type: "ping" };
   }
 
   if (

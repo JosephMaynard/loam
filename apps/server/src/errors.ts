@@ -47,6 +47,20 @@ export class DbEncryptionPlaintextUnconvertedError extends Error {
 }
 
 /**
+ * Thrown by `openInitialStore` when an encrypted mode is configured but the SQLCipher driver
+ * (`better-sqlite3-multiple-ciphers`) won't load. Nothing on disk is wrong, so it must never enter the
+ * unreadable / plaintext-unconverted recovery chain (whose actions delete or set aside data). Same code as
+ * the Android launcher's own driver probe (`boot-config.js`), so the host shows one recovery screen.
+ */
+export class DbEncryptionDriverMissingError extends Error {
+  readonly code = "db_encryption_driver_missing" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEncryptionDriverMissingError";
+  }
+}
+
+/**
  * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
  * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
  * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still
@@ -160,6 +174,18 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Replies are disabled in this channel": "channel_replies_disabled",
   "Only the channel owner can post in this channel": "channel_owner_post_only",
   "Only admins can post in this channel": "channel_admins_post_only",
+  "This message was removed by a moderator": "message_removed",
+  "The assistant is busy; try again shortly": "assistant_busy",
+  // User blocking (docs/30 B3). The first is deliberately generic: it doesn't state the reason (a DM to a
+  // banned / awaiting-approval recipient gets it too), never "you're blocked".
+  "Direct messages to this person aren't available": "dm_unavailable",
+  "You blocked this person. Unblock them to send a message": "dm_blocked_by_you",
+  "This user can't be blocked": "block_not_allowed",
+  // An invite or ownership transfer across a block (either direction). Generic like `dm_unavailable`: it
+  // doesn't state the reason.
+  "This person isn't available for this channel": "channel_member_unavailable",
+  // The generic 5xx body (see the app's error handler) — internal detail is logged, never returned.
+  "Internal server error": "internal_error",
 };
 
 /** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */

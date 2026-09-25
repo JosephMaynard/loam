@@ -56,8 +56,9 @@ development on the same transport-agnostic layer.
 - 📡 **Off-grid by design**: a local hotspot is the whole network; no internet required at any point.
 - 📱 **Nothing to install**: joiners open a link (or scan a QR); the host can run it from a laptop, Pi, or [an Android phone](docs/04-android-host-app.md).
 - 🕶️ **Ephemeral, privacy-preserving identities**: every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
-- 💬 **Real messaging**: public and private (invite-only) channels, threaded replies, direct messages, reactions, image attachments, and message search.
+- 💬 **Real messaging**: public and private (invite-only) channels, threaded replies, direct messages, reactions, image and file attachments, and message search.
 - 🛡️ **Host controls**: optional join approval, plus greeter and moderator roles to vet newcomers and ban or shadow-ban when needed.
+- 🚫 **Report and block**: anyone can report a message or a person to the node's moderators, or block someone. Blocking stops DMs both ways and hides that person's channel messages on your device, and they aren't notified.
 - 🕸️ **Node-to-node sync (optional)**: two LOAM nodes that can reach each other sync their public channels, so separate hotspots converge into one conversation ([docs/11](docs/11-node-sync.md)).
 - 🤖 **Optional local AI**: point it at a laptop's [Ollama](https://ollama.com) model, or run a small downloadable model on the Android host itself (via llama.rn). Either way a bot appears as a DM contact and its replies stream in. Off by default, operator-installed, and entirely local.
 - 🔌 **Rides out connection drops**: the client keeps what it has seen in the browser's local database and reconnects on its own when the hotspot blips. (A home-screen install and the offline app shell need a browser "secure context", which a plain-`http://` hotspot address is not — so joiners get them only from the Android host's own screen or an HTTPS self-host. See [Security](#security).)
@@ -80,8 +81,11 @@ loam                       # boots a node and prints a join QR + LAN URL
 
 Scan the printed QR (or open the URL) from another device on the same network. That's the whole join
 flow. Useful flags: `loam --port 8080`, `loam --data-dir ~/loam-data` (defaults to `$XDG_DATA_HOME/loam`
-or `~/.loam`), and `loam --encrypt <passphrase>` to encrypt the database at rest (pulls an optional
-native SQLCipher driver; skip it and storage stays plain). See [`loam --help`](docs/14-distribution.md).
+or `~/.loam`), and `loam --encrypt` to encrypt the database at rest: it takes the passphrase from
+`$LOAM_DB_KEY` (`LOAM_DB_KEY=… loam --encrypt`) or prompts for it without echoing, and `--encrypt
+ephemeral` uses a RAM-only key. Encryption needs the optional native SQLCipher driver; if it isn't
+installed, `loam --encrypt` stops with an install hint rather than starting unencrypted. Without
+`--encrypt`, storage is plain. See [`loam --help`](docs/14-distribution.md).
 
 ### Develop from source (git clone)
 
@@ -132,8 +136,11 @@ pnpm install
 pnpm --filter app apk        # → apps/app/loam-host.apk (takes a few minutes)
 ```
 
-That runs the whole pipeline (workspace build → native prebuild → bundle the embedded server → Expo
-prebuild → `gradlew assembleRelease`) and writes the finished APK to `apps/app/loam-host.apk`.
+That runs the whole pipeline (workspace build → unpack the vendored native SQLite drivers → bundle the
+embedded server → Expo prebuild → `gradlew assembleRelease`) and writes the finished APK to
+`apps/app/loam-host.apk`. Without a release keystore (`pnpm --filter app keystore`) the APK is signed
+with your machine's debug key and the build says so loudly; add `-- --debug-signed` to acknowledge it.
+A debug-signed APK can't update a release-signed install.
 
 **Copy it to a phone with `adb`:**
 
@@ -273,17 +280,21 @@ an id into an avatar, one draws QR codes, and one implements the (experimental) 
 ### Identities and sessions
 
 There are no accounts. The first time your browser talks to a node, the server mints a random id for
-you (something like `user.1a2b3c4d`) and sets a cookie. That cookie is your identity for as long as you
-keep it. Your display name and avatar are generated from the id and nothing else, so the same id always
-looks the same to everyone, but there is no email, phone number, or password attached to it.
+you (something like `user.1a2b3c4d5e6f7a8b`) and hands your browser a random token that proves it. When
+you joined by scanning the QR, that token only ever travels inside the encrypted channel (see [Transport
+encryption](#transport-encryption-for-hostile-networks)); otherwise it is a session cookie. Either way it
+is your identity for as long as your browser keeps it. Your display name and avatar are generated from
+the id and nothing else, so the same id always looks the same to everyone, but there is no email, phone
+number, or password attached to it.
 
 The names are deterministic and human-friendly: an `adjective.material.creature` triple (for example
 `brave.copper.otter`) hashed from your id, so people can recognise each other across a session without
-anyone signing up. The cookie is the real identity; the id your browser shows before the server answers
+anyone signing up. The server decides who you are; the id your browser shows before the server answers
 is just a placeholder that gets replaced on first load.
 
 Who becomes the admin is a per-node choice the host makes: the first person to join, a one-time setup
-code printed at startup, a shared passphrase, or nobody. Admin powers (moderation, config, the
+code printed at startup, a shared passphrase, or nobody. On the Android host, the host phone's own screen
+is the admin. Admin powers (moderation, config, the
 Emergency Reset) are always checked on the server. The app only hides buttons; it never trusts the
 browser.
 
@@ -386,9 +397,9 @@ phone](#host-it-from-an-android-phone) above and [docs/04](docs/04-android-host-
 
 ### Transport encryption for hostile networks
 
-The traffic between a joiner and the host normally runs as plain HTTP over the LAN, which is fine on a
-trusted network. For untrusted networks LOAM can add an app-layer encryption on top, bootstrapped from
-the join QR so there is nothing to type. Browsers block the usual web crypto on a plain-HTTP LAN
+The traffic between a joiner and the host runs over plain HTTP on the LAN, so anyone else on the same
+Wi-Fi could read it. LOAM therefore adds its own app-layer encryption on top, on by default and
+bootstrapped from the join QR so there is nothing to type. Browsers block the usual web crypto on a plain-HTTP LAN
 address, so LOAM ships its own: an X25519 key handshake and XChaCha20-Poly1305 sealing (the same modern
 primitives used elsewhere, in a small pure library).
 
@@ -410,8 +421,10 @@ plaintext) and `required` (also route every request through one opaque tunnel, s
 asked for is hidden, and plaintext clients are refused). In `required` mode the only thing visible on the
 wire is that "a request happened" plus its rough size and timing. Reading the host public key from the QR
 (rather than trusting whatever the network offers) is what makes this resistant to a machine-in-the-middle
-on the LAN. (A fully-plaintext `off` mode exists only for local debugging via Developer Mode, which
-announces itself with a banner and refuses to run in production.) See [docs/08](docs/08-transport-security.md).
+on the LAN. Once your app has a node's key, a different key is never swapped in silently: you are shown
+both fingerprints and asked. (A fully-plaintext `off` mode exists only for local debugging via Developer
+Mode, which announces itself with a banner and refuses to run in production; it can't be picked in the
+config.) See [docs/08](docs/08-transport-security.md).
 
 ### Connecting separate nodes: sync and mesh
 
@@ -421,8 +434,9 @@ different situations.
 **Node-to-node sync** is for nodes that *can* reach each other, even briefly (same larger network, or
 one within radio range of another). They gossip their **public** data only, pulling each other's public
 channel messages so the two hotspots converge into one conversation. Direct messages, private channels,
-and anything from a blocked author never leave a node. A peer's join URL is also its sync address. Nodes
-can optionally require a shared secret token before they'll sync, so only nodes you trust can pair.
+and anything from a shadow-banned author never leave a node. A peer's join URL is also its sync address. Nodes
+can optionally require a shared secret token before they'll sync, so only nodes you trust can pair; sync
+traffic is encrypted whenever both nodes support it, and the token is never sent in the clear.
 
 ```mermaid
 flowchart LR
@@ -453,9 +467,12 @@ it as a production security guarantee yet. See [docs/16](docs/16-opportunistic-m
 
 The host can wipe a node in one action. It deletes stored messages, avatars, and sessions, tells every
 connected client to purge its local copy and show a neutral disconnected screen, and re-seeds a clean
-node. The node configuration survives, so it comes back ready to use. In encrypted-at-rest mode the
-wipe also rotates the key, so remnants left on flash become unreadable rather than merely deleted. An
-optional pre-shared token can trigger it without logging in. It is called `killSwitch` in the code and
+node. The node configuration survives, so it comes back ready to use. When the database is encrypted,
+the wipe deletes the encrypted files; with an ephemeral key, and on the Android host (which clears its
+stored key), the key is discarded too, so remnants left on flash become unreadable rather than merely
+deleted. A device that was offline during the reset clears its local copy when it next connects to the
+node.
+An optional pre-shared token can trigger it without logging in. It is called `killSwitch` in the code and
 "Emergency Reset" in the app; see [docs/02](docs/02-kill-switch.md).
 
 ### Optional on-device AI
@@ -532,6 +549,9 @@ key in memory, or coercion of a known passphrase can still expose data. Anyone w
 on this should seek a professional security review and not treat LOAM as sufficient on its own. See
 [`SECURITY.md`](SECURITY.md) and the [docs](#documentation) for the full threat model.
 
+The [privacy policy](https://loamnet.com/privacy) covers what the app and the website store; it's also
+linked from the client's Settings and the Android host's menu.
+
 > **A note on intent.** These protections exist to protect *ordinary people*: during emergencies, in
 > communities cut off from connectivity, and in everyday situations where privacy and safety matter. They
 > are deliberately **not** marketed as a way to hide wrongdoing, and LOAM's other design choices (a
@@ -559,12 +579,12 @@ pnpm build      # build every package, then server and client (also type-checks 
 pnpm test       # run the workspace test suite
 ```
 
-CI runs `pnpm build`, then `pnpm test`, then `pnpm --filter app typecheck` on every push and PR to
-`master`. There's no lint script; type-checking happens as part of `pnpm build` for every workspace
+CI checks that every package version agrees (`scripts/check-versions.mjs`), then runs `pnpm build`,
+`pnpm test` and `pnpm --filter app typecheck` on every push and PR to `master`. There's no lint script; type-checking happens as part of `pnpm build` for every workspace
 EXCEPT the Android host app (`apps/app` isn't in the build graph — its dedicated `typecheck` script
 is the separate CI step above). If you're new to the codebase,
-[`CLAUDE.md`](CLAUDE.md) is the fastest way in, and a server or client test harness is a
-high-value first contribution.
+[`CLAUDE.md`](CLAUDE.md) is the fastest way in; moving logic out of the large `apps/client/src/app.tsx`
+into tested components or helpers is a high-value first contribution.
 
 ## License
 

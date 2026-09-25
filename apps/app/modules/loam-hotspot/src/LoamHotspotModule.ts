@@ -11,8 +11,9 @@ declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
   startHotspot(): Promise<HotspotCredentials>;
   /** Closes the hotspot reservation. Safe to call when no hotspot is running. */
   stopHotspot(): void;
-  /** Start a foreground service so the host survives screen-off / backgrounding. Best-effort. */
-  startHostService(): void;
+  /** Start a foreground service so the host survives screen-off / backgrounding. Best-effort; returns
+   * false when the platform refused (e.g. API 31+ while the app is in the background). */
+  startHostService(): boolean;
   /** Stop the foreground host service. */
   stopHostService(): void;
   /** Pin the app (Android screen pinning / lock-task) so it can't be left without the device PIN. */

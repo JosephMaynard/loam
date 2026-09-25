@@ -87,7 +87,11 @@ function notify(status, extra) {
 // too, back when that case silently downgraded to a plaintext boot instead of staying locked; it is no
 // longer emitted by this file at all, but `index.tsx`'s defensive fallback set still recognizes it in
 // case an older bundled build is ever paired with a newer one.)
-const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_open_failed', 'db_encryption_recovered_fresh', 'db_encryption_unavailable'];
+//
+// `db_encryption_driver_missing` (pre-release review 2026-09-25) is likewise a real 'error': the SQLCipher
+// driver failed to load under an encrypted selection, and the launcher now LOCKS instead of booting
+// plaintext (it used to be the `db_encryption_unavailable` notice here, with a silent plaintext boot).
+const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_open_failed', 'db_encryption_recovered_fresh'];
 
 // embedded-main.ts (bundled into loam-server.js below) does the real startup work asynchronously —
 // require('./loam-server.js') returns long before a config-load or server.listen() failure would
@@ -95,7 +99,7 @@ const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_open_failed', 'db_encryption_
 // this hook, installed on `global` BEFORE requiring the bundle (same pattern as
 // global.__loamOnDeviceChat below), so a failure still reaches the host screen as a real error
 // instead of just the generic readiness-poll timeout. Also used directly, below, by this file's own
-// DB-encryption downgrade paths (db_encryption_locked / db_encryption_unavailable) — same single
+// DB-encryption lock paths (db_encryption_locked / db_encryption_driver_missing) — same single
 // choke point decides notice-vs-fatal for both callers.
 global.__loamReportBootError = function (message, code) {
   const isNotice = DB_ENCRYPTION_NOTICE_CODES.indexOf(code) !== -1;
@@ -460,6 +464,21 @@ function refreshMesh() {
   });
 }
 
+// Delay from a radio receipt to the outbound refresh it triggers (coalesced: one pending refresh at a time).
+const MESH_REFRESH_AFTER_RECEIVE_MS = 2_000;
+let meshReceiveRefreshTimer = null;
+
+/** Refresh the outbound cache once, MESH_REFRESH_AFTER_RECEIVE_MS after a blob arrived (whatever became of it). */
+function scheduleMeshRefreshAfterReceive() {
+  if (meshReceiveRefreshTimer) {
+    return;
+  }
+  meshReceiveRefreshTimer = setTimeout(() => {
+    meshReceiveRefreshTimer = null;
+    refreshMesh();
+  }, MESH_REFRESH_AFTER_RECEIVE_MS);
+}
+
 /** Push every outbound blob we haven't already sent to this peer this session. */
 function meshPushToPeer(peerId) {
   if (!meshEnabled || !peerId || !meshOutbound.length) {
@@ -510,12 +529,12 @@ rnBridge.channel.on('loam-mesh-received', (payload) => {
   } catch (err) {
     return; // malformed transfer — drop
   }
-  meshRequest('POST', '/api/mesh/inbound', { messages: [message] }, (err, status, json) => {
-    if (!err && status === 200 && json && json.accepted > 0) {
-      // Accepting mail may change what we now hold to carry — refresh our outbound + have-mail hint.
-      refreshMesh();
-    }
-  });
+  // Taking mail in may change what we now hold to carry — refresh our outbound + have-mail hint. On a fixed
+  // delay from RECEIPT, for every blob alike, and never on the inbound answer (which is outcome-free anyway):
+  // re-advertising only when a blob was accepted told the neighbour that pushed it, on a non-relaying node,
+  // that it had just been delivered here (docs/16 §9).
+  scheduleMeshRefreshAfterReceive();
+  meshRequest('POST', '/api/mesh/inbound', { messages: [message] }, () => {});
 });
 
 rnBridge.channel.on('loam-mesh-error', (payload) => {
@@ -1289,21 +1308,27 @@ function applyBootEnv(values) {
 }
 
 /** Whether the SQLCipher native module actually LOADS (not just resolves) in this build — injected into
- * `computeDbBootEnv` so the encrypted→plaintext downgrade decision stays pure/testable. */
+ * `computeDbBootEnv` so the fail-closed driver-missing lock decision stays pure/testable. Re-probed on every
+ * attempt (a failed native `require` isn't cached), so an unlock Retry really re-tries the load. */
 function probeEncryptedDriver() {
   try {
-    require('better-sqlite3-multiple-ciphers');
+    // `require` alone only loads the JS wrapper — the .node addon is dlopen'd lazily by the first
+    // `new Database()`. Open (and close) a throwaway in-memory DB so a missing / wrong-ABI binary is caught
+    // HERE, as a clean locked state, rather than as a confusing open failure deep in the server's boot.
+    var Database = require('better-sqlite3-multiple-ciphers');
+    var probe = new Database(':memory:');
+    probe.close();
     return true;
   } catch (err) {
-    // Do NOT swallow this silently: a failed load is the reason an operator-selected encrypted mode
-    // silently downgrades to plaintext, and without the error there is no way to tell WHY on-device (a
+    // Do NOT swallow this silently: a failed load is why an operator-selected encrypted mode is LOCKED
+    // (`db_encryption_driver_missing`), and without the error there is no way to tell WHY on-device (a
     // missing .node, a wrong-ABI/arch prebuild, a bad OpenSSL/libc link, a resolution failure...). Log it
     // loudly to logcat so `adb logcat | grep LOAM-DB` surfaces the real cause. (better-sqlite3-multiple-
-    // ciphers is the SELF-BUILT vendored ABI-108 arm64 prebuild — the plain driver is a proven upstream
-    // prebuild, so this one is the untested-on-device path.)
+    // ciphers is the SELF-BUILT vendored ABI-108 arm64 prebuild — the plain driver is digidem's
+    // device-proven prebuild, also vendored, so this one is the untested-on-device path.)
     console.warn(
       'LOAM-DB: SQLCipher driver (better-sqlite3-multiple-ciphers) failed to load; encrypted modes will ' +
-        'downgrade to plaintext. Error: ' +
+        'stay LOCKED (no plaintext fallback). Error: ' +
         (err && err.message ? err.message : String(err)) +
         (err && err.stack ? '\n' + String(err.stack).split('\n').slice(0, 4).join('\n') : ''),
     );

@@ -63,6 +63,15 @@ function frame(value: unknown): string {
 }
 
 describe("parseRoute", () => {
+  it("falls back to the channels screen for malformed percent-encoding instead of throwing (review 2026-09-25)", () => {
+    expect(() => decodeURIComponent("%E0%A4%A")).toThrow(URIError);
+    expect(parseRoute("/dm/%E0%A4%A")).toEqual({ screen: "channels" });
+    expect(parseRoute("/channel/%E0%A4%A")).toEqual({ screen: "channels" });
+    expect(parseRoute("/channel/general/thread/%zz")).toEqual({ screen: "channels" });
+    // Well-formed encodings still decode.
+    expect(parseRoute("/dm/user%2E1")).toEqual({ screen: "channels", conversation: { kind: "dm", id: "user.1" } });
+  });
+
   it("maps the static screens", () => {
     expect(parseRoute("/")).toEqual({ screen: "channels" });
     expect(parseRoute("/channels")).toEqual({ screen: "channels" });
@@ -172,6 +181,10 @@ describe("parseSocketEvent", () => {
       networkConfig,
     });
     expect(parseSocketEvent(frame({ type: "configUpdated", networkConfig: {} }))).toBeUndefined();
+  });
+
+  it("parses the content-free heartbeat", () => {
+    expect(parseSocketEvent(frame({ type: "ping" }))).toEqual({ type: "ping" });
   });
 
   it("parses the wipe event", () => {

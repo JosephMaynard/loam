@@ -1,16 +1,8 @@
-# 08 — Transport security on an off-grid LAN (no HTTPS)
-
-> **⚠️ SUPERSEDED IN PART BY docs/20 (transport auth-binding).** The status block below describes the
-> shipped #70/#75 foundation, but docs/20 fixes a **Critical** flaw in it and corrects three claims here:
-> (1) the tunnel no longer forwards the **cookie** for a `bound` session — identity is the un-sniffable
-> session key, resolved server-side via a trusted internal `x-loam-user` (the plaintext cookie is not a
-> credential for a bound/`required` session); (2) the cookie-free public bootstrap is now
-> **`GET /api/bootstrap`**, and `GET /api/config` is tunnel-only content for a bound session (it no
-> longer "runs before a session exists" on a `required` node); (3) the claim that "**WS frames aren't
-> sequence-numbered / a replayed frame is idempotent**" is **wrong and now fixed** — WS frames carry a
-> per-connection sequence + connection-bound AAD and are preceded by a reflection-safe key-confirmation
-> challenge (docs/20 §7). Read docs/20 for the authoritative auth model; the encryption/handshake/tunnel
-> mechanics below still hold.
+> **Read with docs/20 (transport auth-binding)**, which is authoritative for the auth model: a `bound`
+> session's identity is its un-sniffable session key (resolved server-side via a trusted internal
+> `x-loam-user`, never the cookie), the cookie-free public bootstrap is **`GET /api/bootstrap`**, and
+> `GET /api/config` is tunnel-only content for a bound session. The encryption/handshake/tunnel mechanics
+> below are current and have been corrected in place to match.
 
 > **Status: Layer 1 (QR-bootstrapped session encryption) is BUILT AND SHIPPED end-to-end** — server,
 > crypto, and client are all done (`feat/transport-encryption`). `@loam/crypto` has the X25519
@@ -27,9 +19,11 @@
 > (denial only, never disclosure), and the ways back are a real rescan of the host's current QR or
 > Settings → "erase this device". The same mechanism is what makes an Emergency Reset (which rotates the
 > host key) show a "scan the current QR" screen instead of looping.
-> Gated by `security.transportEncryption` (**`optional` default — secure by default** / `required`; `off`
-> is no longer operator-settable, reachable only via Developer Mode `LOAM_DEV_MODE`, which self-announces a
-> plaintext banner to every client and refuses to run under `NODE_ENV=production`). `optional` is seamless
+> Gated by `security.transportEncryption` (**`optional` default — secure by default** / `required`). `off`
+> is not an operator posture: `PATCH /api/admin/config` rejects it (400), and an `"off"` in `config.json`
+> or a persisted DB row is coerced to `optional` with a boot warning. Plaintext is reachable only via
+> Developer Mode (`LOAM_DEV_MODE`, a read-time projection), which self-announces a plaintext banner to every
+> client and refuses to run under `NODE_ENV=production`. `optional` is seamless
 > — a QR-joiner gets the `#k=` key and encrypts automatically, plaintext clients still work — so the
 > default prevents *accidental* plaintext for normal QR joiners at no UX cost (it does not block a client
 > that deliberately skips the QR; `required` is what refuses plaintext outright). Every named profile encrypts: `open`/`standard` force
@@ -42,21 +36,57 @@
 > rejected while modest reordering/concurrency is tolerated. **Path-hiding tunnel is now built:** in
 > `required` mode the client sends every post-handshake request as an opaque `POST /api/transport/tunnel`
 > whose sealed body is `{ m, p, body }`; the server re-dispatches it internally (`server.inject`, with
-> the caller's cookie + an unforgeable per-boot internal token) and seals the `{ status, contentType,
-> bodyB64 }` response back — so the real method, path/query (a search term, which channel is read), and
+> an unforgeable per-boot internal token plus the caller's identity — `x-loam-user` for a `bound` session,
+> never its cookie; only an anonymous `optional`-mode session forwards its cookie, and under `required` an
+> anonymous session may not tunnel content at all) and seals the `{ s, m, p, status, contentType,
+> bodyB64 }` response back (bound to the request's sequence/method/path) — so the real method, path/query (a search term, which channel is read), and
 > response body are all ciphertext; only `POST /api/transport/tunnel` is on the wire. `optional` mode
 > keeps the lighter per-route body sealing (path visible). **Image encryption is now built too:** in
 > `required` mode the avatar/attachment routes are no longer exempt — a direct `<img src>` GET (which
 > can't carry the session header) is refused (401), forcing the client to fetch images through the tunnel
 > (`encryptedImageUrl` / the `useEncryptedImage` hook) and render them from a cached `blob:` object URL,
-> so image bytes are sealed on the wire like everything else. `optional`/`off` nodes still serve images
-> directly in clear (lighter). So in `required` mode a **post-handshake REST request** reveals only that
+> so image bytes are sealed on the wire like everything else. `optional` nodes (and Developer Mode) still
+> serve images directly in clear (lighter). So in `required` mode a **post-handshake REST request** reveals only that
 > a `POST /api/transport/tunnel` happened, plus coarse ciphertext size/timing — its method, path/query,
-> and body are all sealed. Still observable (unavoidably): the **bootstrap** — `GET /api/config` and
+> and body are all sealed. Still observable (unavoidably): the **bootstrap** — `GET /api/bootstrap` and
 > `POST /api/transport/handshake` run before a session exists — and the **WebSocket upgrade**
-> `GET /ws?enc=<sid>`, which exposes the session id and that a WS connection opened (its frames are then
-> sealed). (WS frames aren't sequence-numbered: a replayed server→client frame is idempotent client-side
-> — every event is upserted by id.)
+> `GET /ws?enc=<sid>`, which exposes the session id and that a WS connection opened. Its frames are then
+> sealed, carry a per-connection sequence + connection-bound AAD, and follow a reflection-safe
+> key-confirmation challenge (docs/20 §7). Every admitted socket also gets a content-free `{"type":"ping"}`
+> heartbeat (sealed + sequenced like any frame) on admission and every 25 s, so a client can detect a dead
+> connection (docs/20).
+>
+> **Client pin rules (pre-release review 2026-09-25).** A `#k=` fragment only ever *establishes* a pin for
+> an origin that has none (or re-confirms the same key). A **different** key never silently replaces the
+> pin — any same-origin navigation can carry a `#k=` (a link posted in a channel, say), so silent
+> replacement would let any member lock others out or, from an on-path position, swap in their own key.
+> It is parked as a pending change, and: (1) if the current pin still handshakes, the node holds that key
+> (a node has exactly one), so the link is dropped without asking; (2) only once the pin is **broken** (the
+> node's handshake reported another key — a restart of an ephemeral-key node, an Emergency Reset) is the
+> change offered, showing both emoji fingerprints; (3) **Accept** works only when the link's key equals the
+> key the node itself reported in that mismatching handshake (on a load that starts with an already-broken
+> pin, a key-only probe handshake learns it; nothing is derived or kept). A link whose key the node doesn't
+> hold is shown as "this link's key doesn't match the node — rescan the QR at the host", with no Accept.
+> An on-path attacker who can forge the handshake *and* plant the link still gets as far as the prompt;
+> the fingerprints are what the user checks against the host's screen. **Android host WebView:** the
+> launcher injects the key it read from its own server over loopback (`window.__loamHostTransportKey`, see
+> docs/04), and the client adopts it directly over any pin, so a node with an ephemeral DB key — which
+> mints a new transport key every boot — doesn't break the host's own pin on every launch. LAN browsers
+> never get that global; for them a restarted ephemeral-key node is a real key change: pin broken → the
+> gate explains the node's key changed (for example after a restart or reset) → rescan the QR. Message
+> markdown strips any fragment with a `k=` parameter from links. The join/invite QR a client shows others
+> carries `#k=` **only** from its own QR-verified session key — never the `networkConfig.transportPublicKey`
+> it learned over the plaintext bootstrap — and is suppressed outright when the advertised key contradicts
+> the client's pin. On a live tunnel session the client **never hands an unsealed reply to the caller**:
+> the only unsealed reply it acts on is a `401` to a `GET`/`HEAD`, which triggers one re-handshake + retry;
+> anything else unsealed (403, 503, 429, …) becomes an `UnsealedTunnelResponseError`, so an on-path forger
+> can't fake content such as a `GET /api/mesh/identity` card.
+>
+> **Server logs.** Tunnel re-dispatches are never request-logged (a `LogController` recognises the
+> per-boot internal token), so the hidden path/query can't land in logs that outlive an Emergency Reset;
+> only the outer `POST /api/transport/tunnel` is logged, which is all the wire shows too. The request
+> serializer drops query strings from every logged URL (search terms, `?enc=` ids), and a 5xx inside the
+> tunnel is logged path-free on the outer request.
 
 
 ## The problem
@@ -162,7 +192,8 @@ is that client (pure `@loam/crypto`, no native deps), mirroring `apps/client/src
   response can be sequence-bound — see the framing note). Header `x-loam-enc: sessionId`; the `x-loam-enc: 1`
   response is unsealed under `"POST ${path}#${s}"`. On a `401` or an undecryptable/unsealed response it
   re-handshakes **once** and retries — always safe because every sync request is a read-only query. (The
-  bodyless-GET plaintext path is a separate function, `fetchPeerText`, used only for `off`-mode peers.)
+  bodyless-GET plaintext path is a separate function, `fetchPeerText`, used only when the plaintext
+  fallback below is allowed.)
 
 **Framing note (important):** every sealed sync request is a **POST** whose inner sealed plaintext is the
 **`{ s, b?, tok? }` envelope** — `s` a per-session monotonic sequence (starts at 1, resets on
@@ -174,7 +205,7 @@ be renumbered/read without breaking the tag. Even a tokenless digest is a POST c
 the **response** can be bound to it: the peer seals its reply under `${method} ${path}#${seq}` (the
 request sequence; sync paths carry no query, so `path === url`), and the puller opens it with the exact
 `seq` it sent, so a captured response can't be **replayed or cross-fed** to another request on the same
-route (the tunnel binds its responses `{s,m,p}` the same way). An `off`-mode peer's plaintext digest stays
+route (the tunnel binds its responses `{s,m,p}` the same way). A plaintext-fallback digest stays
 a GET (nothing to seal). **Encrypted sessions authorize
 ONLY via the sealed `tok`** — the `x-loam-sync-token` header is honoured solely on the plaintext path, so
 a captured token can't authorize an attacker's own encrypted session by being attached as a header.
@@ -182,31 +213,45 @@ a captured token can't authorize an attacker's own encrypted session by being at
 **Tunnel-only gate reconcile:** under `required` mode the peer makes user-facing content *tunnel-only*
 (`/api/transport/tunnel`, identity-bound). Sync is different — it is authenticated by the shared
 `sync.token` (a *node* credential, not a user identity, so there is nothing to bind or carry over
-`x-loam-user`, and the tunnel would admit neither an unbound session nor the token). So the two sync
-routes (`/api/sync/digest`, `/api/sync/messages`) are reachable via a **direct sealed request**
-(`DIRECT_SEALED_SYNC_ROUTES` in `app.ts`): they still **must** be sealed in `required` mode (a plaintext
+`x-loam-user`, and the tunnel would admit neither an unbound session nor the token). So the sync
+routes (`/api/sync/digest`, `/api/sync/messages`, `/api/sync/attachment`) are reachable via a **direct sealed request**
+(`DIRECT_SEALED_SYNC_ROUTES` in `transport-server.ts`): they still **must** be sealed in `required` mode (a plaintext
 hit with no resolved session is refused), so the data is encrypted end-to-end; they are only exempt from
 the tunnel/bound requirement, never from encryption.
 
-`fetchPeerJson` (`apps/server/src/app.ts`, the single choke point for every peer request) decides per
+`fetchPeerJson` (`apps/server/src/sync.ts`, the single choke point for every peer request) decides per
 peer:
 
 1. Reuse a cached decision if fresh (a live session is cached ~11 h — just under the peer's 12 h
    server-side TTL; a "this peer runs plaintext" verdict is cached only ~5 min so a peer that *enables*
-   transport is noticed quickly). The cache is cleared on any config PATCH and by the kill switch.
+   transport is noticed quickly). The cache is cleared on any config PATCH and by the kill switch (which
+   also forgets the per-peer refused-offer and "seen encrypted" memory).
 2. Otherwise learn the peer's posture from its unauthenticated `/api/bootstrap`
    (`networkConfig.transportEncryption` + `transportPublicKey`) — the public, cookie-free bootstrap;
    under the auth-binding change `/api/config` itself became session-gated content, so posture is read
    from `/api/bootstrap` instead.
-3. `off` / no key / posture unreadable → the **unchanged plaintext path** (a genuinely `required` peer
-   whose `/api/bootstrap` we can't read just 401s the plaintext pull, surfacing as a normal sync failure —
-   never a silent wrong result).
+3. `off` / no key / posture unreadable → the **plaintext fallback** (`plaintextFallback`), which is
+   refused outright (the reason lands in the peer's sync status) when **this** node's effective mode is
+   `required`, or when the peer already completed a handshake with this node **this boot** (a sudden
+   plaintext verdict for it is what an attacker blocking `/api/bootstrap` or forging `off` looks like).
+   Otherwise the pull goes in the clear **without** the `sync.token` — the token only rides a plaintext
+   pull when this node itself runs transport `off` (Developer Mode) — so a token-guarded peer 404s it and
+   the round records an ordinary failure. (A genuinely `required` peer whose `/api/bootstrap` we can't
+   read likewise 401s the plaintext pull — never a silent wrong result.)
 4. `optional` / `required` with a key → handshake + route the digest/messages/attachment requests through
    `sealedFetch`, so the **sync data AND the `sync.token`** are sealed on the wire (the token rides inside
    the `{ s, b, tok }` envelope, never a header). **Fail-closed:** a `required` peer (or any peer with a
    pinned key) that can't complete the handshake fails the sync attempt rather than falling back to a
-   plaintext pull that would 401 anyway; an `optional` peer degrades to plaintext (it still serves the
-   clear path). An UNSEALED 2xx over a live session is refused (a downgrade), never imported.
+   plaintext pull that would 401 anyway; an `optional` peer degrades through the same plaintext fallback
+   (with the same refusals). An UNSEALED 2xx over a live session is refused (a downgrade), never imported.
+
+**Residual (optional-mode first contact).** The "seen encrypted this boot" memory is RAM-only and starts
+empty. So on an `optional` (or Developer-Mode) node, for an **unpinned** peer that has not completed a
+handshake with it since boot (or since an Emergency Reset cleared the memory), an on-path attacker who
+blocks or forges that peer's `/api/bootstrap` can push the pull onto the plaintext path. What it gets is a
+plaintext pull of the peer's **public** data — the `sync.token` is withheld, so a token-guarded peer serves
+nothing — and, like any unauthenticated plaintext exchange, the chance to tamper with that public data in
+transit. Pinning the peer's key (`SyncPeer.transportKey`, below) or running `required` closes it.
 
 This closes a real gap: a peer running `transportEncryption: "required"` previously **401'd every
 plaintext sync pull** (its transport hook refuses any `/api/*` content request without a session), so it
@@ -215,15 +260,17 @@ could not be synced *from* at all. It can now.
 **Attachments** are fetched over the channel the peer supports: from an **encrypted** peer as base64
 JSON from `POST /api/sync/attachment` (a string payload `onSend` can seal), **not** the tunnel-only binary
 `/api/attachments/:fileName` (which a peer's sessionless GET would 401, dropping every attachment on a
-required peer). A **plaintext** (`off`-mode) peer keeps using the legacy public binary GET
+required peer). A peer reached over the **plaintext** fallback keeps using the legacy public binary GET
 `/api/attachments/:fileName` — preserving back-compat with older / off-mode peers that predate the
 sync-attachment route (an older *encrypted* peer without it must be upgraded). Only attachments on
 syncable (public) messages are served.
 
 **Token confidentiality (honest scope):** over a **sealed** channel (`optional`/`required` peer) the
-`sync.token` is confidential + authenticated — it never leaves the AEAD. Over the **plaintext** path
-(an `off`-mode peer) it still rides as an `x-loam-sync-token` header, since there is no encrypted channel
-to carry it — but there the whole sync is plaintext anyway, and the token gates public-data-only reads.
+`sync.token` is confidential + authenticated — it never leaves the AEAD. It is **never** sent in
+plaintext, except when this node itself runs transport `off` (Developer Mode), where the operator has
+deliberately put everything on the wire in the clear; then it rides as an `x-loam-sync-token` header. A
+plaintext fallback from an encrypted node goes tokenless. (The serving side still honours the header only
+on a plaintext request — an encrypted session authenticates solely via the sealed `tok`.)
 
 ### MITM disposition between nodes (honest scope)
 

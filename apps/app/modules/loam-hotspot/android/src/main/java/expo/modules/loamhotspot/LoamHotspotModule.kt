@@ -52,16 +52,22 @@ class LoamHotspotModule : Module() {
     }
 
     // Start/stop the foreground service that keeps the host alive while the screen is off (docs/04).
-    // Best-effort: a failure is logged and leaves the app in its normal foreground-only state.
+    // Best-effort: a failure is logged and leaves the app in its normal foreground-only state. Returns
+    // whether the start call went through — API 31+ throws ForegroundServiceStartNotAllowedException when
+    // the app is in the background, so JS re-calls this whenever the app is foregrounded (idempotent: a
+    // repeat start re-posts the same notification and the wake lock is guarded).
     Function("startHostService") {
       val context = appContext.reactContext?.applicationContext
       if (context == null) {
         android.util.Log.w("LoamHotspot", "startHostService failed: no application context")
+        false
       } else {
         try {
           LoamHostService.start(context)
+          true
         } catch (error: Throwable) {
           android.util.Log.w("LoamHotspot", "startHostService failed", error)
+          false
         }
       }
     }

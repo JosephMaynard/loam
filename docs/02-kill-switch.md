@@ -8,10 +8,15 @@
 > deletes `avatars/` and `attachments/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
 > re-seeds defaults — config survives so the switch can fire again. Clients purge IndexedDB,
 > localStorage, service worker + caches, and show a neutral "Disconnected" screen. Admin UI has a
-> Safety panel with type-to-confirm arming. **Now with a cryptographic wipe when encryption at rest
+> Safety panel with type-to-confirm arming. A client that was **offline** during the wipe (so missed the
+> `wipe` event) purges its cache when it reconnects: it records the last server-confirmed identity
+> (`loam.confirmedUserId`) and treats a different `currentUser` on its next boot as a reset. **Now with a cryptographic wipe when encryption at rest
 > is on** (`LOAM_DB_KEY`): instead of a logical `DELETE`, the kill switch closes the store, deletes
 > the DB files (`loam.db`/`-wal`/`-shm`), and — in `ephemeral` mode — rotates to a fresh random key,
-> so any bytes still physically present on flash become unreadable. Reboot in `ephemeral` mode also
+> so any bytes still physically present on flash become unreadable. Every branch also removes the
+> `.loam-recovery-*` snapshots a "start fresh" moves aside (an older DB set + plaintext media) and their
+> anchor — fail-closed (lock-down, 503) in the encrypted branches, best-effort with a loud warning in the
+> plaintext logical wipe. Reboot in `ephemeral` mode also
 > loses the key permanently. Known limitation: Node strings can't be reliably zeroed in RAM, so a
 > device seized *while running* remains the weak case (documented honestly). **Second known
 > limitation (Sol 2026-08-15): uploaded media — avatar and attachment files — live OUTSIDE the

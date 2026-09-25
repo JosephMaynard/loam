@@ -27,12 +27,20 @@ loam [options]
   --port <n>        Port to listen on (default 3000, or $PORT)
   --data-dir <dir>  Where to store the SQLite database and avatars
                     (default $XDG_DATA_HOME/loam or ~/.loam)
-  --encrypt [key]   Encrypt the database at rest with SQLCipher. Pass a value to
-                    use it as a passphrase, or leave it bare for an ephemeral
-                    RAM-only key that is discarded on restart. Needs the optional
-                    native driver, which installs automatically when it can build.
+  --encrypt         Encrypt the database at rest with SQLCipher. The passphrase
+                    comes from $LOAM_DB_KEY if set; otherwise you are prompted
+                    for it (not echoed). For a new database, an empty answer,
+                    or no terminal to prompt on, uses an ephemeral RAM-only key
+                    that is discarded on exit. An existing database needs its
+                    passphrase.
+  --encrypt ephemeral
+                    Use an ephemeral RAM-only key without prompting.
+  --encrypt <pass>  Use <pass> directly. Discouraged: other users can see it in
+                    `ps` and it lands in your shell history.
   -h, --help        Show help
 ```
+
+For a persistent encrypted node, prefer `LOAM_DB_KEY='your passphrase' loam --encrypt`, or run bare `loam --encrypt` and type the passphrase at the prompt. Encryption needs the optional native driver, which installs with `loamnet` when it can build; if it isn't available, `loam` stops before starting. Reinstall `loamnet` (`npm install -g loamnet`) and check the install output for the native build error; installing the driver separately doesn't help, because `loam` loads it from its own package.
 
 The default database driver is Node's built in `node:sqlite`, so a plain node needs no native build step. Encryption at rest (`--encrypt`) is the one feature that pulls in the optional native SQLCipher driver.
 

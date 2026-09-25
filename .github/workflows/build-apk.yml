@@ -3,13 +3,31 @@ name: Build APK
 # Builds the Android host APK and, on a release tag, attaches it to the GitHub Release.
 #
 # Triggers:
-#   - push of a tag matching v*  → build + create/update that Release with the APK asset
-#   - manual (workflow_dispatch) → build + upload the APK as a workflow artifact (no Release)
+#   - push of a tag matching v*  → verify + test + build (release-signed, REQUIRED) → attach the APK to the
+#                                  Release; the Play AAB is built in the same pass and uploaded as a workflow
+#                                  artifact only (docs/30 B1 — it's for the Play Console, not the Release).
+#                                  Tags are vX.Y.Z, or vX.Y.Z-rc.N / vX.Y.Z-beta.N for a pre-release: same
+#                                  checks, keystore and tests, AAB included (RCs are what internal testing
+#                                  gets), but published as a GitHub PRE-release. Anything else fails the
+#                                  version check.
+#   - manual (workflow_dispatch) → build + upload the APK as a workflow artifact (no Release); debug-signed
+#                                  when the keystore secret isn't configured
 #
 # The heavy lifting is scripts/build-apk.mjs (`pnpm --filter app apk`): it runs the workspace build,
 # fetches the SQLite native prebuilds (fetch:native), bundles the embedded server, downloads llama.rn's
-# native libs, runs `expo prebuild --clean`, and assembles the release APK for arm64-v8a. This job only
-# has to provide the toolchain (JDK + Android SDK/NDK/CMake) and, optionally, a signing key.
+# native libs, runs `expo prebuild --clean`, and assembles the release APK for arm64-v8a. The build job
+# only provides the toolchain (JDK + Android SDK/NDK/CMake) and the signing key.
+#
+# Hardening (pre-release review 2026-09-25):
+#   - Every action is pinned to a full commit SHA (the version is in the trailing comment).
+#   - The build job has read-only repo access and checks out without persisting the token; only the small
+#     `release` job gets `contents: write`, and it runs no repo code — it downloads the built artifact and
+#     attaches it.
+#   - The keystore secrets are exposed ONLY to the one step that writes the keystore, never job-wide.
+#   - Tag builds FAIL without the keystore secret (a debug-signed release can't update installs), when the
+#     tag's X.Y.Z doesn't match the manifest versions, or when versionCode isn't above that of every earlier
+#     release tag (pre-releases included — Play never accepts a code twice).
+#     `pnpm test` must pass before anything is built.
 #
 # NOTE: for this to fire on a tag, the workflow file must already exist in the tagged commit — i.e. it
 # must be merged to master before you push a v* tag built from master.
@@ -21,40 +39,64 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # create/update the Release and upload the APK asset
+  contents: read
 
 jobs:
   build-apk:
     name: Build Android host APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      # Referenced in the "Configure release signing" step's `if:` so the build stays debug-signed
-      # (still installable) when the secret isn't set. Secrets are safe to surface as job env.
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          # Full history + tags: the release-version check compares versionCode with the previous tag.
+          fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .node-version
           cache: pnpm
 
+      - name: Check versions
+        # On a tag: the tag's X.Y.Z (before any -rc.N / -beta.N) must equal the manifest version and
+        # versionCode must exceed every earlier release tag's. Otherwise: every manifest agrees.
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            node scripts/check-versions.mjs --release-tag "$RELEASE_TAG"
+          else
+            node scripts/check-versions.mjs
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Android host typecheck
+        run: pnpm --filter app typecheck
+
       - name: Setup JDK 17
-        # Version tags (not SHA-pinned like the reused actions above) — SHA-pin these to match the
-        # repo convention when convenient.
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
       - name: Install NDK + CMake
         # NDK 27.1.12297006 is the version Expo SDK 57 / RN 0.86 prebuild pins (and what a working local
@@ -62,20 +104,28 @@ jobs:
         # modules' externalNativeBuild expects.
         run: sdkmanager "ndk;27.1.12297006" "cmake;3.22.1"
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
       - name: Configure release signing
-        # Only when the keystore secret is present. Materialises release.jks + keystore.properties, which
-        # plugins/with-release-signing.js picks up at prebuild to sign the release build with a STABLE key
-        # (so installs update in place). Absent → strict no-op, build stays debug-signed (still installable,
-        # but each build's signature differs, so updating requires an uninstall first).
-        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
+        # The ONLY step that sees the keystore secrets. Materialises release.jks + keystore.properties, which
+        # plugins/with-release-signing.js picks up at prebuild to sign with a STABLE key (so installs update
+        # in place). No secret: a tag build fails here; a manual build proceeds debug-signed, acknowledged
+        # explicitly (LOAM_ALLOW_DEBUG_SIGNING) so build-apk.mjs doesn't treat it as an accident.
         env:
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            if [ "$IS_TAG" = "true" ]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is not set — refusing to publish a debug-signed release APK."
+              exit 1
+            fi
+            echo "::warning::No keystore secret — this manual build is DEBUG-SIGNED (not for distribution)."
+            echo "LOAM_ALLOW_DEBUG_SIGNING=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          umask 077
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > apps/app/release.jks
           cat > apps/app/keystore.properties <<PROPS
           storeFile=release.jks
@@ -84,19 +134,59 @@ jobs:
           keyPassword=${ANDROID_KEY_PASSWORD}
           PROPS
 
-      - name: Build APK
-        run: pnpm --filter app apk
+      - name: Build APK (and, on a tag, the AAB)
+        # `aab` runs the same pipeline as `apk` (the APK lands at the same path) and then adds a
+        # `bundleRelease` pass; it refuses to build without the release keystore, which a tag build has
+        # already guaranteed above.
+        env:
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          if [ "$IS_TAG" = "true" ]; then
+            pnpm --filter app aab
+          else
+            pnpm --filter app apk
+          fi
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f apps/app/release.jks apps/app/keystore.properties
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: loam-host-apk
           path: apps/app/loam-host.apk
           if-no-files-found: error
 
-      - name: Attach APK to the Release
+      - name: Upload AAB artifact
+        # Play upload artifact (upload-key signed). Deliberately NOT attached to the GitHub Release: the
+        # release job downloads only `loam-host-apk`.
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          files: apps/app/loam-host.apk
+          name: loam-host-aab
+          path: apps/app/loam-host.aab
+          if-no-files-found: error
+
+  release:
+    name: Attach APK to the Release
+    needs: build-apk
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create/update the Release and upload the APK asset — this job only
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: loam-host-apk
+
+      - name: Attach APK to the Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: loam-host.apk
           fail_on_unmatched_files: true
+          # vX.Y.Z-rc.N / -beta.N (check-versions rejects any other suffix) → a GitHub pre-release, so it
+          # never becomes "Latest" or the default download.
+          prerelease: ${{ contains(github.ref_name, '-') }}

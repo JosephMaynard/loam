@@ -14,8 +14,11 @@
 //      (node_modules/<pkg>/build/Release/better_sqlite3.node), after verifying its sha256.
 //
 // Binary sources differ by driver:
-//   - better-sqlite3 (plain): DOWNLOADED from digidem/better-sqlite3-nodejs-mobile (the CoMapeo-proven
-//     upstream release), pinned by sha256.
+//   - better-sqlite3 (plain): digidem/better-sqlite3-nodejs-mobile's (CoMapeo-proven) 12.10.0 binary,
+//     VENDORED in the repo at apps/app/native-prebuilds/better-sqlite3/ and pinned by sha256. It used to
+//     be downloaded, but upstream re-generated that release's assets on 2026-08-17 (a maintainer-run
+//     prebuild workflow, non-reproducible), so the pinned download stopped matching. The vendored file
+//     is the binary from the ORIGINAL release that previous LOAM APKs shipped — see its README.
 //   - better-sqlite3-multiple-ciphers (encrypted): a SELF-BUILT prebuild VENDORED in the repo at
 //     apps/app/native-prebuilds/multiple-ciphers/ (no upstream Android/ABI-108 release exists yet),
 //     built from the reproducible recipe there and pinned by sha256. The encrypted driver now DOES
@@ -39,17 +42,19 @@ import { fileURLToPath } from "node:url";
 const ARCH = "android-arm64"; // matches the arm64-v8a APK we build (see plugins/with-loam-host.js)
 const ABI = "108"; // Node 18 (embedded nodejs-mobile runtime)
 
-// --- PLAIN driver: better-sqlite3, DOWNLOADED from digidem ------------------------------------------
+// --- PLAIN driver: better-sqlite3, digidem's prebuild VENDORED in-repo ---------------------------------
 // Pinned pair: the JS wrapper npm version and the digidem release tag (same number). android-arm64,
 // Node ABI 108. Fallback if this fails to load on-device: 11.10.0 (the version CoMapeo ships).
 const BETTER_SQLITE3_VERSION = "12.10.0";
 const RELEASE_TAG = BETTER_SQLITE3_VERSION;
 const ASSET = `better-sqlite3-${BETTER_SQLITE3_VERSION}-node-${ABI}-${ARCH}.tar.gz`;
+// Upstream provenance (not fetched any more): the original asset at this URL had sha256
+// 00d84fcd41b80bbc910c0531320763f8f1a5c72a5638404ad9484f8805d70e9a; the vendored tarball repackages the
+// .node extracted from it (the .node's own sha256 is a338a11b261c3db217cddf3b7597ce265ae02780bf55c55cbb677c940dc7a9a7).
 const PREBUILD_URL = `https://github.com/digidem/better-sqlite3-nodejs-mobile/releases/download/${RELEASE_TAG}/${ASSET}`;
-// Pinned sha256 of the tarball above — we refuse to install a native binary that doesn't match, so a
-// compromised/replaced release or a MITM can't slip a different .node onto the device. Update this
-// together with BETTER_SQLITE3_VERSION.
-const PREBUILD_SHA256 = "00d84fcd41b80bbc910c0531320763f8f1a5c72a5638404ad9484f8805d70e9a";
+// Pinned sha256 of the VENDORED tarball — we refuse to install a native binary that doesn't match. Keep
+// in lockstep with apps/app/native-prebuilds/better-sqlite3/README.md.
+const PREBUILD_SHA256 = "c454974e7194fb078830e9c7c494477cfd41cd963c125225d995f128749b7241";
 
 // --- ENCRYPTED driver: better-sqlite3-multiple-ciphers, VENDORED in-repo -----------------------------
 // No upstream Android/ABI-108 release exists; the prebuild is self-built (recipe + tarball vendored
@@ -79,6 +84,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const appDir = join(here, "..");
 const projectDir = join(appDir, "nodejs-assets", "nodejs-project");
 const nodeModulesDir = join(projectDir, "node_modules");
+const vendoredPlainTarball = join(appDir, "native-prebuilds", "better-sqlite3", ASSET);
 const vendoredMcTarball = join(
   appDir,
   "native-prebuilds",
@@ -171,7 +177,7 @@ mkdirSync(projectDir, { recursive: true });
 mkdirSync(nodeModulesDir, { recursive: true });
 
 // ====================================================================================================
-// 1. PLAIN better-sqlite3 — wrapper from npm, binary downloaded from digidem (verified by sha256).
+// 1. PLAIN better-sqlite3 — wrapper from npm, binary from the VENDORED digidem prebuild (sha256-verified).
 // ====================================================================================================
 const bsqRoot = materialiseWrapper(
   "better-sqlite3",
@@ -180,18 +186,17 @@ const bsqRoot = materialiseWrapper(
 );
 
 {
-  const downloadDir = mkdtempSync(join(tmpdir(), "loam-bsq-dl-"));
-  try {
-    const tarball = join(downloadDir, ASSET);
-    console.log(`Downloading prebuilt native binary:\n  ${PREBUILD_URL}`);
-    run("curl", ["--fail", "--location", "--silent", "--show-error", "-o", tarball, PREBUILD_URL]);
-    verifySha256(tarball, PREBUILD_SHA256, ASSET);
-    const binary = extractBinary(tarball, bsqRoot, ASSET);
-    console.log(`\n✓ better-sqlite3@${BETTER_SQLITE3_VERSION} (${ARCH}, ABI ${ABI}) ready:`);
-    console.log(`  ${binary.replace(`${appDir}/`, "")}`);
-  } finally {
-    rmSync(downloadDir, { recursive: true, force: true });
+  if (!existsSync(vendoredPlainTarball)) {
+    throw new Error(
+      `Vendored prebuild missing: ${vendoredPlainTarball}\n` +
+        "Expected digidem's better-sqlite3 android-arm64 tarball to be committed under " +
+        `apps/app/native-prebuilds/better-sqlite3/ (see its README; upstream: ${PREBUILD_URL}).`,
+    );
   }
+  verifySha256(vendoredPlainTarball, PREBUILD_SHA256, ASSET);
+  const binary = extractBinary(vendoredPlainTarball, bsqRoot, ASSET);
+  console.log(`\n✓ better-sqlite3@${BETTER_SQLITE3_VERSION} (${ARCH}, ABI ${ABI}) ready:`);
+  console.log(`  ${binary.replace(`${appDir}/`, "")}`);
 }
 
 // ====================================================================================================

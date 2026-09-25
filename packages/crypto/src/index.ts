@@ -58,40 +58,82 @@ const B64URL_LOOKUP = (() => {
   return table;
 })();
 
+// The alphabet as char codes, so the encoder writes ASCII bytes into a pre-sized buffer and decodes them to
+// a string in ONE TextDecoder call (UTF-8 — ASCII is a subset, and it's the one encoding every runtime ships) — no per-character string concatenation (which is quadratic-ish on big
+// payloads: a 4 MiB tunnel body used to block the event loop for tens of milliseconds per request).
+const B64URL_CODES = Uint8Array.from(B64URL_ALPHABET, (char) => char.charCodeAt(0));
+
 /** Encode bytes as unpadded base64url. */
 function b64urlEncode(bytes: Uint8Array): string {
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i];
-    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
-    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
-    out += B64URL_ALPHABET[b0 >> 2];
-    out += B64URL_ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)];
-    if (i + 1 < bytes.length) out += B64URL_ALPHABET[((b1 & 0x0f) << 2) | (b2 >> 6)];
-    if (i + 2 < bytes.length) out += B64URL_ALPHABET[b2 & 0x3f];
+  const length = bytes.length;
+  const out = new Uint8Array(Math.ceil((length * 4) / 3));
+  let o = 0;
+  let i = 0;
+  for (; i + 3 <= length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    out[o++] = B64URL_CODES[n >> 18];
+    out[o++] = B64URL_CODES[(n >> 12) & 0x3f];
+    out[o++] = B64URL_CODES[(n >> 6) & 0x3f];
+    out[o++] = B64URL_CODES[n & 0x3f];
   }
-  return out;
+  const rest = length - i;
+  if (rest === 1) {
+    const b0 = bytes[i];
+    out[o++] = B64URL_CODES[b0 >> 2];
+    out[o++] = B64URL_CODES[(b0 & 0x03) << 4];
+  } else if (rest === 2) {
+    const b0 = bytes[i];
+    const b1 = bytes[i + 1];
+    out[o++] = B64URL_CODES[b0 >> 2];
+    out[o++] = B64URL_CODES[((b0 & 0x03) << 4) | (b1 >> 4)];
+    out[o++] = B64URL_CODES[(b1 & 0x0f) << 2];
+  }
+  return utf8Decode.decode(out.subarray(0, o)); // pure ASCII, so UTF-8 decodes it 1:1
 }
 
-/** Decode unpadded (or padded) base64url. Throws on any invalid character. */
+/** The 6-bit value of one base64url character code; throws on anything outside the alphabet. */
+function b64urlValue(code: number): number {
+  const value = code < 128 ? B64URL_LOOKUP[code] : -1;
+  if (value < 0) throw new Error("invalid base64url");
+  return value;
+}
+
+/**
+ * Decode unpadded (or padded) base64url into a pre-sized buffer. Throws on any invalid character.
+ *
+ * Deliberately TOLERANT, exactly like the original bit-accumulator it replaces: it stops at the first `=`
+ * (ignoring anything after it) and drops the unused low bits of a final partial character. So several
+ * strings decode to the same bytes — which is why {@link isCanonicalSealedBlob} re-encodes and compares
+ * rather than trusting a successful decode.
+ */
 function b64urlDecode(str: string): Uint8Array {
-  const out: number[] = [];
-  let buffer = 0;
-  let bits = 0;
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
-    if (code === 0x3d) break; // '=' padding — tolerate and stop
-    const value = code < 128 ? B64URL_LOOKUP[code] : -1;
-    if (value < 0) throw new Error("invalid base64url");
-    buffer = (buffer << 6) | value;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out.push((buffer >> bits) & 0xff);
-      buffer &= (1 << bits) - 1;
-    }
+  const padAt = str.indexOf("=");
+  const end = padAt < 0 ? str.length : padAt;
+  const out = new Uint8Array(Math.floor((end * 3) / 4));
+  let o = 0;
+  let i = 0;
+  for (; i + 4 <= end; i += 4) {
+    const n =
+      (b64urlValue(str.charCodeAt(i)) << 18) |
+      (b64urlValue(str.charCodeAt(i + 1)) << 12) |
+      (b64urlValue(str.charCodeAt(i + 2)) << 6) |
+      b64urlValue(str.charCodeAt(i + 3));
+    out[o++] = n >> 16;
+    out[o++] = (n >> 8) & 0xff;
+    out[o++] = n & 0xff;
   }
-  return Uint8Array.from(out);
+  const rest = end - i;
+  if (rest === 1) {
+    b64urlValue(str.charCodeAt(i)); // a lone trailing char carries no whole byte, but must still be valid
+  } else if (rest === 2) {
+    const n = (b64urlValue(str.charCodeAt(i)) << 6) | b64urlValue(str.charCodeAt(i + 1));
+    out[o++] = n >> 4;
+  } else if (rest === 3) {
+    const n = (b64urlValue(str.charCodeAt(i)) << 12) | (b64urlValue(str.charCodeAt(i + 1)) << 6) | b64urlValue(str.charCodeAt(i + 2));
+    out[o++] = n >> 10;
+    out[o++] = (n >> 2) & 0xff;
+  }
+  return out;
 }
 
 const B32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"; // RFC 4648 base32, lowercase

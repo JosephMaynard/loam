@@ -87,12 +87,17 @@ const DB_ENCRYPTION_UNREADABLE_CODE = "db_encryption_unreadable";
  *                                          restart, or is still awaiting a durable deletion. Either way the
  *                                          imminent launcher restart / a later reopen drives it forward —
  *                                          exiting would kill the very listeners that finish it.
+ *  - `db_encryption_driver_missing`      — an encrypted mode with a SQLCipher driver that won't load (the
+ *                                          launcher's probe normally catches this first). app.ts already
+ *                                          reported the code; exiting would replace it with `boot_failed`
+ *                                          and hide the "start without encryption" recovery.
  * In every other case boot is presumed unrecoverable without intervention outside this process, so it exits.
  */
 const STAY_ALIVE_BOOT_ERROR_CODES = new Set<string>([
   DB_ENCRYPTION_UNREADABLE_CODE,
   "db_encryption_plaintext_unconverted",
   "db_encryption_wipe_resume",
+  "db_encryption_driver_missing",
 ]);
 
 /** True when `error` carries one of the {@link STAY_ALIVE_BOOT_ERROR_CODES}. Narrow, defensive shape check

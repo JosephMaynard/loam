@@ -803,3 +803,34 @@ p {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Privacy policy and other long-form legal pages. */
+.legal-body {
+  max-width: 72ch;
+}
+.legal-body h1 {
+  margin-bottom: 0.25rem;
+}
+.legal-meta {
+  color: var(--sage);
+  margin-top: 0;
+}
+.legal-body h2 {
+  font-family: var(--serif);
+  margin-top: 2.5rem;
+}
+.legal-body h3 {
+  margin-top: 1.75rem;
+}
+.legal-body p,
+.legal-body li {
+  color: var(--ink-soft);
+  line-height: 1.65;
+}
+.legal-body li + li {
+  margin-top: 0.5rem;
+}
+.legal-body code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}

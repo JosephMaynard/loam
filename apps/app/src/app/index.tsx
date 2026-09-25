@@ -1,7 +1,7 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, BackHandler, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, BackHandler, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
@@ -11,12 +11,13 @@ import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { PRIVACY_POLICY_URL } from '@/constants/links';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { SERVER_PORT } from '@/lib/join-url';
 import {
-  applyDbModeChange,
   clearStoredDbKeys,
+  DB_ENCRYPTION_DRIVER_MISSING_CODE,
   DB_ENCRYPTION_MODE_READ_ERROR,
   DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
   dbEncryptionRecoveryForCode,
@@ -30,9 +31,11 @@ import {
   type DbEncryptionMode,
   type StartFreshIntent,
 } from '@/lib/db-encryption';
+import { confirmStartUnencrypted, retryKeyResolution, switchEncryptionOffAndRetry } from '@/lib/driver-missing-recovery';
+import { ensureHostService } from '@/lib/host-service';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
-import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
+import { startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot IP (below).
@@ -56,6 +59,7 @@ const DB_ENCRYPTION_ERROR_CODES = new Set([
   'db_encryption_unavailable',
   'db_encryption_no_key',
   'db_encryption_locked',
+  DB_ENCRYPTION_DRIVER_MISSING_CODE,
   DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
 ]);
 
@@ -340,6 +344,9 @@ export default function HostScreen() {
   // whether the mode is `passphrase`, to offer a "mistyped it? enter it again" path (review 2026-09-04 —
   // with the passphrase prompted at EVERY start, a typo now lands here rather than auto-unlocking).
   const dbUnreadableForMode = status === 'error' && errorCode === DB_UNREADABLE_CODE;
+  // And the driver-missing lock: its "Start without encryption" confirmation says different things about
+  // the existing database in ephemeral mode (already deleted) than in persistent/passphrase (kept on disk).
+  const dbDriverMissing = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'driver-missing';
 
   // Once the locked (or unreadable) state becomes active, learn which mode is actually configured (purely
   // to decide whether to show the passphrase input, which only makes sense for 'passphrase' mode). A
@@ -347,7 +354,7 @@ export default function HostScreen() {
   // recovery input to show), so a transient read failure just leaves the plain-Retry UI rather than a
   // bogus mode value.
   useEffect(() => {
-    if (!dbLocked && !dbUnreadableForMode) {
+    if (!dbLocked && !dbUnreadableForMode && !dbDriverMissing) {
       return;
     }
     let cancelled = false;
@@ -359,7 +366,7 @@ export default function HostScreen() {
     return () => {
       cancelled = true;
     };
-  }, [dbLocked, dbUnreadableForMode]);
+  }, [dbLocked, dbUnreadableForMode, dbDriverMissing]);
 
   // P1-2(b), Sol round 4: clear the device key material and, ONLY on a VERIFIED success, ack the
   // launcher (`loam-wipe-complete`) so it deletes its durable `.loam-wipe-phase` file. On ANY
@@ -461,9 +468,10 @@ export default function HostScreen() {
         // Deliberately NOT touching `notice`/`nodeNotice` here (AF2/P1-4) — a boot notice describes a
         // degraded DB-encryption posture that's still true once the host is up; clearing it just
         // because the server also became ready is exactly the bug this fix removes.
-        // Keep the host alive when the screen locks (docs/04). Best-effort — a device that refuses
-        // the foreground service just falls back to foreground-only hosting.
-        startHostService();
+        // Keep the host alive when the screen locks (docs/04). Best-effort and idempotent: if the app is
+        // in the background right now (API 31+ refuses a background FGS start — cold start is ~80 s, so
+        // the operator may well have switched away), the AppState effect below retries on return.
+        void ensureHostService();
       } else if (payload?.status === 'notice') {
         // Non-fatal (main.js only ever sends this for DB-encryption boot degradations — see its
         // `DB_ENCRYPTION_NOTICE_CODES`) — never touches `status`/`nodeStatus`, so it can't regress a
@@ -493,6 +501,7 @@ export default function HostScreen() {
           if (
             (current === DB_UNREADABLE_CODE ||
               current === DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE ||
+              current === DB_ENCRYPTION_DRIVER_MISSING_CODE ||
               current === DB_LOCKED_CODE) &&
             (payload.code === undefined || payload.code === 'boot_timeout')
           ) {
@@ -679,9 +688,32 @@ export default function HostScreen() {
     setBootstrapAttempt((attempt) => attempt + 1);
   };
 
-  // Ask the launcher for fresh addresses whenever the Share overlay opens — that's when the hotspot
-  // starts and its AP interface (and address) appears.
+  // Re-assert the foreground host service every time the app comes back to the foreground while hosting
+  // (pre-release review 2026-09-25). The one-shot start on `ready` is refused on API 31+ if the app was in
+  // the background at that moment, which used to leave the host with no FGS and no wake lock — killed as
+  // soon as the screen went off. `ensureHostService` is idempotent.
   useEffect(() => {
+    if (Platform.OS !== 'android' || status !== 'ready') {
+      return;
+    }
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        void ensureHostService();
+      }
+    });
+    return () => subscription.remove();
+  }, [status]);
+
+  // Ask the launcher for fresh addresses whenever the Share overlay opens — that's when the hotspot
+  // starts and its AP interface (and address) appears. Opening the overlay is also the operator's explicit
+  // "start hosting" moment, so (re)start the foreground service then too (idempotent).
+  useEffect(() => {
+    if (shareOpen && status === 'ready') {
+      // No notification prompt here: the overlay is about to ask for the hotspot's location/nearby-Wi-Fi
+      // permissions, and two overlapping permission dialogs can auto-deny one. The overlay re-asserts
+      // (with the prompt) once the hotspot is running.
+      void ensureHostService({ prompt: false });
+    }
     if (shareOpen) {
       try {
         nodejs.channel.post('loam-hostinfo-request');
@@ -689,7 +721,7 @@ export default function HostScreen() {
         // best-effort; the launcher also re-posts on an interval
       }
     }
-  }, [shareOpen]);
+  }, [shareOpen, status]);
 
   // A WebView load failure after the node is ready is usually transient (page fetched mid-cold-start).
   // Surface the error UI; Retry remounts the WebView (a fresh load) as long as the node is still up.
@@ -793,10 +825,11 @@ export default function HostScreen() {
     // P1-b (Sol round 6): re-assert the mode-name hint for the known locked mode so a subsequent transient
     // key-request failure locks rather than downgrading to plaintext. Best-effort; skipped if the mode
     // couldn't be read (a transient read-error leaves `lockedMode` undefined — see the effect above).
-    if (lockedMode) {
-      void setDbModeHint(nodejs.channel, lockedMode);
-    }
-    const result = await requestDbUnlock(nodejs.channel);
+    const result = await retryKeyResolution({
+      lockedMode,
+      writeHint: (m) => setDbModeHint(nodejs.channel, m),
+      requestUnlock: () => requestDbUnlock(nodejs.channel),
+    });
     if (!result.ok) {
       setUnlockBusy(false);
       setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
@@ -815,26 +848,33 @@ export default function HostScreen() {
   const handleRevertToOff = async () => {
     setRevertBusy(true);
     setRevertMessage(undefined);
-    const outcome = await applyDbModeChange('off', {
+    const outcome = await switchEncryptionOffAndRetry({
       readMode: getDbEncryptionMode,
       writeMode: setDbEncryptionMode,
       writeHint: (m) => setDbModeHint(nodejs.channel, m),
+      requestUnlock: () => requestDbUnlock(nodejs.channel),
     });
-    if (!outcome.applied) {
+    if (!outcome.ok) {
       setRevertBusy(false);
-      setRevertMessage(`Couldn't switch encryption off — ${outcome.error ?? 'unknown error'}. You can try again.`);
-      return;
-    }
-    const result = await requestDbUnlock(nodejs.channel);
-    if (!result.ok) {
-      setRevertBusy(false);
-      setRevertMessage(`Couldn't retry — ${result.error ?? 'unknown error'}. You can try again.`);
+      setRevertMessage(
+        outcome.failed === 'mode'
+          ? `Couldn't switch encryption off — ${outcome.error}. You can try again.`
+          : `Couldn't retry — ${outcome.error}. You can try again.`,
+      );
       return;
     }
     // The retry's OUTCOME (ready / a different boot error) arrives via `loam-status` — see onStatus's
     // 'ready'/'error' branches, both of which reset `revertBusy`.
     setRevertMessage('Switching encryption off and restarting…');
   };
+
+  // `db_encryption_driver_missing` recovery (pre-release review 2026-09-25): the SQLCipher module didn't
+  // load, so the launcher refused to start. Switching to Off is a real security downgrade — the database
+  // and everything after it is stored UNENCRYPTED — so it needs an explicit confirmation, never a single tap.
+  // The copy depends on the locked mode (ephemeral: the old database is already gone — see
+  // `startUnencryptedConfirmation`).
+  const handleStartUnencryptedPress = () =>
+    confirmStartUnencrypted(Alert.alert, lockedMode, () => void handleRevertToOff());
 
   // Bridge from the WebView's web content (the LOAM client) back to this native screen. The client's
   // `wipe` WS-event handler (apps/client/src/app.tsx) posts `{"type":"loam-wipe"}` via
@@ -953,6 +993,19 @@ export default function HostScreen() {
                   style={styles.menuItem}>
                   <ThemedText type="smallBold">Share · Host</ThemedText>
                 </Pressable>
+                <View style={styles.menuDivider} />
+                {/* Play's user-data policy wants the privacy policy reachable in-app. It opens in the
+                    system browser; with no internet (the usual hosting case) it just won't load yet. */}
+                <Pressable
+                  onPress={() => {
+                    setMenuOpen(false);
+                    void Linking.openURL(PRIVACY_POLICY_URL).catch(() => undefined);
+                  }}
+                  accessibilityRole="link"
+                  accessibilityLabel="Open the LOAM privacy policy in your browser"
+                  style={styles.menuItem}>
+                  <ThemedText type="smallBold">Privacy policy</ThemedText>
+                </Pressable>
               </ThemedView>
             </View>
           </Pressable>
@@ -1004,8 +1057,16 @@ export default function HostScreen() {
             // here — a LAN joiner never sees it): the client claims admin with it on its first boot under the
             // `hostDevice` bootstrap (review 2026-09-04). `originWhitelist` + `onShouldStartLoadWithRequest`
             // below pin this frame to the loopback origin, so the injected global can't reach another page.
+            // Also hand over the host's transport key (read from the loopback bootstrap above) as
+            // `__loamHostTransportKey`: the client trusts it over a stale pin, since a node with an ephemeral
+            // DB key mints a new transport key every boot and would otherwise break the host's own pin
+            // (rescan gate + "different key" prompt) on every launch (docs/04, docs/08).
             injectedJavaScriptBeforeContentLoaded={
-              hostAdminToken ? `window.__loamHostDeviceToken = ${JSON.stringify(hostAdminToken)}; true;` : undefined
+              (hostAdminToken ? `window.__loamHostDeviceToken = ${JSON.stringify(hostAdminToken)};` : '') +
+              (transportKeyFragment
+                ? `window.__loamHostTransportKey = ${JSON.stringify(decodeURIComponent(transportKeyFragment.slice('#k='.length)))};`
+                : '') +
+              ' true;'
             }
             // The LOAM client relies on the loam_session cookie, localStorage/IndexedDB, and a
             // WebSocket — enable all of them, and allow the cleartext localhost origin.
@@ -1116,6 +1177,7 @@ export default function HostScreen() {
     errorCode !== DB_UNREADABLE_CODE &&
     errorCode !== DB_LOCKED_CODE &&
     errorCode !== DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE &&
+    errorCode !== DB_ENCRYPTION_DRIVER_MISSING_CODE &&
     DB_ENCRYPTION_ERROR_CODES.has(errorCode);
   // FATAL db_encryption_unreadable (P1-1, Sol round 3, AF8/design#1): boot genuinely failed and the
   // embedded runtime stayed alive specifically so this recovery can work — see DB_UNREADABLE_CODE's
@@ -1127,6 +1189,10 @@ export default function HostScreen() {
   // (delete existing data & start encrypted, or switch encryption back off) — never a silent plaintext
   // downgrade under an encrypted selection. Uses the shared code→recovery classifier for the mapping.
   const dbPlaintextUnconverted = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'plaintext-unconverted';
+  // FATAL db_encryption_driver_missing (pre-release review 2026-09-25): an encrypted mode is selected but the
+  // SQLCipher driver failed to load. The launcher stays LOCKED (it used to boot plaintext with a dismissible
+  // notice); the operator either retries or explicitly switches encryption off. (`dbDriverMissing` is
+  // derived above the ready-return, beside `dbLocked`, because the lockedMode effect needs it too.)
 
   return (
     <ThemedView style={styles.center}>
@@ -1308,6 +1374,43 @@ export default function HostScreen() {
           ) : null}
         </ThemedView>
       ) : null}
+      {/* FATAL, NOT dismissible — encrypted storage can't load on this device, and the host refuses to start
+          unencrypted under an encrypted selection. Retry re-probes the driver; "Start without encryption"
+          is the only way to plaintext, behind a confirmation. A subsequent `ready` clears this (onStatus). */}
+      {dbDriverMissing ? (
+        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+          <ThemedText type="smallBold">Encrypted storage is unavailable — the host did not start.</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            {errorMessage ?? 'The encrypted-storage module failed to load on this device.'}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            Nothing was stored unencrypted. Retry, or switch encryption off to run this host WITHOUT
+            encryption.
+          </ThemedText>
+          <ThemedView style={styles.noticeBannerActions}>
+            <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy || revertBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+              </ThemedView>
+            </Pressable>
+            <Pressable onPress={handleStartUnencryptedPress} disabled={unlockBusy || revertBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">{revertBusy ? 'Switching…' : 'Start without encryption'}</ThemedText>
+              </ThemedView>
+            </Pressable>
+          </ThemedView>
+          {unlockMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {unlockMessage}
+            </ThemedText>
+          ) : null}
+          {revertMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {revertMessage}
+            </ThemedText>
+          ) : null}
+        </ThemedView>
+      ) : null}
       {/* P1-2(b): a wipe-key-clear attempt failed and was NOT acked as complete — the launcher's durable
           marker is still pending, so this must never look like a benign notice; it stays until a retry
           succeeds. Shown in both the ready and non-ready views (see the matching block above) since a
@@ -1367,7 +1470,7 @@ export default function HostScreen() {
                 <ThemedText type="link">Retry</ThemedText>
               </ThemedView>
             </Pressable>
-          ) : dbUnreadable || dbLocked || dbPlaintextUnconverted ? null : (
+          ) : dbUnreadable || dbLocked || dbPlaintextUnconverted || dbDriverMissing ? null : (
             // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process) —
             // except for `dbUnreadable` (P1-1, Sol round 3), `dbLocked` (P1-1, Sol round 4), and
             // `dbPlaintextUnconverted` (P1-4-RN, Sol round 8), all of which have their own in-app recovery

@@ -9,12 +9,13 @@ ranked within each group. Each entry names the file and the concrete change.
 
 ## Security — do these before any hostile-environment deployment
 
-1. **Sync import trusts peer-supplied `authorId` (impersonation).** `importPeerMessages`
-   (`apps/server/src/app.ts`) accepts any `authorId`, including a **local** admin/moderator's id, and
-   renders the injected message as authored by that identity. Mitigation now: `sync.token` gates
-   *which* peers may talk. Next: reject an imported message whose `authorId` matches a locally
-   *authoritative* user (admin/moderator/greeter) unless that author record was itself imported;
-   longer-term, per-peer **signed authors** (docs/11).
+1. ~~**Sync import trusts peer-supplied `authorId` (impersonation).**~~ **MITIGATED**: `importPeerMessages`
+   (`apps/server/src/sync.ts`) drops a message whose `authorId` is a locally *authoritative* user
+   (admin/moderator/greeter — `isLocallyAuthoritative`), a `mesh.*` id or this node's bot id; only the
+   author of an accepted message is imported as a user, and only messages this node itself imported are
+   peer-editable (`synced_messages`), so a peer can't rewrite a local user's post. A peer can still post
+   as an ordinary non-authoritative local user id (sync is unsigned); `sync.token` gates *which* peers may
+   talk, and per-peer **signed authors** (docs/29 Track B) are the real fix.
 2. ~~**Kill switch can be partially undone by an in-flight sync round.**~~ **RESOLVED**
    (`feat/mesh-secure-addressing`): a `wipeGeneration` counter is bumped at the top of
    `executeKillSwitch` (before its first await); `syncWithPeer` snapshots it and bails after the digest
@@ -46,13 +47,19 @@ ranked within each group. Each entry names the file and the concrete change.
    Fastify hooks) + seals WS frames, persists a host key (kill-switch-rotated), and enforces
    `required` mode; the client `transport.ts` handshakes off the QR `#k=` key (MITM-resistant),
    migrated all fetches + WS through it (off-mode = pure passthrough), with a fingerprint UX. Gated by
-   `security.transportEncryption` (`off` default), now the axis that distinguishes the profiles
-   (docs/09). **Layer-1 scope:** request/response BODIES + WS frames encrypted; GET paths/query
-   strings + image bytes stay visible metadata (a full tunnel + image encryption are v2). Follow-ups:
+   `security.transportEncryption` — `optional` by default now (`required` is `hardened`'s posture); `off`
+   is no longer operator-settable, only Developer Mode's effective mode (docs/08, docs/09). **Layer-1
+   scope at the time:** request/response BODIES + WS frames encrypted, paths/queries + image bytes
+   visible — since closed in `required` mode by the path-hiding tunnel and tunnelled images (docs/08),
+   and the auth-binding work (docs/20) bound identity to the session key. Original follow-ups:
    thread the `#k=` fragment through the remaining join-QR surfaces (InviteControl / Android
    host-panel / NodeLinkControl); live re-handshake on a runtime mode flip.
-6. **On-device SQLCipher.** The Android DB is unencrypted at rest; needs a multiple-ciphers ABI-108
-   android-arm64 prebuild (docs/01, docs/04).
+6. ~~**On-device SQLCipher.**~~ **SHIPPED**: the multiple-ciphers ABI-108 android-arm64 prebuild is
+   cross-compiled and vendored (sha256-pinned), so `security.dbEncryption` keys the Android DB, and an
+   encrypted mode whose driver won't load now fails closed instead of booting plaintext — on the launcher
+   and in the server itself (`db_encryption_driver_missing`, no recovery chain), and a failed keyed open
+   never creates a plaintext file (docs/01). Remaining: runtime
+   verification on a physical arm64 phone (docs/01, docs/04).
 6a. **Node-to-node sync now rides the transport channel — but inter-node MITM is TOFU by default.**
    **BUILT** (`feat/sync-transport-encryption`, `apps/server/src/sync-transport.ts` + `fetchPeerJson`):
    a pulling node establishes a transport session with each peer and seals its digest/messages/attachment
@@ -60,9 +67,12 @@ ranked within each group. Each entry names the file and the concrete change.
    `required` peer's replay window is satisfied), which also fixes the gap that a `required`-mode peer
    401'd every plaintext pull and so couldn't be synced from. Because auth-binding made user content
    tunnel-only, the sync routes are reached via a **direct sealed request** (`DIRECT_SEALED_SYNC_ROUTES`
-   in `app.ts`) — still sealed, just exempt from the identity tunnel — and peer posture is read from the
+   in `transport-server.ts`) — still sealed, just exempt from the identity tunnel — and peer posture is read from the
    public `/api/bootstrap` (not the now-session-gated `/api/config`). The `sync.token` rides sealed INSIDE
-   the envelope (never a wire header) over an encrypted channel, and attachments cross via
+   the envelope (never a wire header) over an encrypted channel and is withheld from any plaintext
+   fallback (sent in the clear only when this node is itself in Developer Mode); a `required` node
+   refuses plaintext pulls, and a peer that negotiated encryption this boot is never silently downgraded
+   (docs/08, incl. the optional-mode first-contact residual). Attachments cross via
    `POST /api/sync/attachment` (base64 JSON, sealable) rather than the tunnel-only binary route. **Residual:**
    the peer's static key is learned over plain HTTP (not out-of-band like the browser's join QR), so this is
    passive-eavesdropper confidentiality + integrity, **not active-MITM resistance** between nodes unless the
@@ -139,9 +149,10 @@ ranked within each group. Each entry names the file and the concrete change.
 
 ## Architecture / tech debt
 
-21. **`app.tsx` is ~5,400 lines.** Extract presentational components into `src/components/` with
-    tests, highest ROI first: `AvatarImageEditor` (self-contained canvas/pointer logic),
-    `MessageItem`, `MessageComposer`, `ChannelMembersPanel`, `Sidebar`, and the `AdminView` sub-panels.
+21. ~~**`app.tsx` is ~5,400 lines.**~~ **LARGELY RESOLVED**: `AvatarImageEditor`, `MessageItem`,
+    `MessageComposer`, `ChannelMembersPanel`, `Sidebar`, `AdminView` + its panels, and
+    `ConversationView` (with `MessageList`/`ThreadPanel`) now live in `src/components/`, most with a
+    `.test.tsx`; `app.tsx` is ~3.6k lines (state, boot, WebSocket, routing).
 22. **Dead code.** The `SERVER_URL_KEY` custom-server branch is read but never written (unreachable);
     `notifyIfHidden` never fires because `Notification.requestPermission()` is never called. Remove or
     wire each. Extract the duplicated base64-encode loop in `uploadAttachment`/`uploadAvatarImage`

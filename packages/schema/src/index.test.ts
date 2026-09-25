@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ChannelSchema,
   DbEncryptionModeSchema,
+  IdSchema,
   LoamConfigSchema,
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
@@ -10,11 +11,14 @@ import {
   MessageSchema,
   ModerationUpdateRequestSchema,
   NetworkConfigSchema,
+  SearchQuerySchema,
   securityProfilePreset,
   SecurityConfigSchema,
   SERVER_ERROR_CODES,
   StreamEventSchema,
   SyncAttachmentResponseSchema,
+  TransportEncryptionSchema,
+  UserAvatarSchema,
   UserSchema,
 } from "./index.js";
 
@@ -165,7 +169,7 @@ describe("@loam/schema", () => {
         admin: { bootstrap: "firstUser" },
         killSwitch: { enabled: false, requireConfirmation: true },
         retention: {},
-        security: { profile: "standard", transportEncryption: "off", dbEncryption: "off" },
+        security: { profile: "standard", transportEncryption: "optional", dbEncryption: "off" },
         access: { joinPolicy: "open" },
         sync: { enabled: false, peers: [], intervalMs: 30_000 },
         mesh: { enabled: false, relay: false, ttlMs: 259_200_000, hopLimit: 6, maxCarried: 5_000, maxContacts: 1_000 },
@@ -344,14 +348,70 @@ describe("@loam/schema", () => {
   it("accepts every declared dbEncryption mode and rejects unknown ones", () => {
     for (const mode of ["off", "ephemeral", "persistent", "passphrase"] as const) {
       expect(() =>
-        SecurityConfigSchema.parse({ profile: "custom", transportEncryption: "off", dbEncryption: mode }),
+        SecurityConfigSchema.parse({ profile: "custom", transportEncryption: "optional", dbEncryption: mode }),
       ).not.toThrow();
     }
     expect(DbEncryptionModeSchema.safeParse("hardware").success).toBe(false);
     expect(
-      SecurityConfigSchema.safeParse({ profile: "custom", transportEncryption: "off", dbEncryption: "hardware" })
+      SecurityConfigSchema.safeParse({ profile: "custom", transportEncryption: "optional", dbEncryption: "hardware" })
         .success,
     ).toBe(false);
+  });
+
+  it("never accepts a CONFIGURED transportEncryption of 'off' (Developer Mode is the only plaintext path)", () => {
+    expect(SecurityConfigSchema.safeParse({ profile: "custom", transportEncryption: "off", dbEncryption: "off" }).success).toBe(
+      false,
+    );
+    expect(LoamConfigUpdateSchema.safeParse({ security: { transportEncryption: "off" } }).success).toBe(false);
+    expect(LoamConfigUpdateSchema.safeParse({ security: { transportEncryption: "required" } }).success).toBe(true);
+    // The REPORTED posture still carries `off` (Developer Mode's effective value).
+    expect(TransportEncryptionSchema.safeParse("off").success).toBe(true);
+  });
+
+  it("constrains an avatar imageId to the server-minted avt_<16 hex> file-name format (no traversal)", () => {
+    const base = { kind: "image" as const, mimeType: "image/png" as const };
+    expect(UserAvatarSchema.safeParse({ ...base, imageId: "avt_0123456789abcdef" }).success).toBe(true);
+    for (const imageId of ["../../x", "../attachments/att_0123456789abcdef", "avt_0123456789ABCDEF", "avt_0123", "avt_0123456789abcdef/"]) {
+      expect(UserAvatarSchema.safeParse({ ...base, imageId }).success, imageId).toBe(false);
+    }
+  });
+
+  it("bounds ids, bot ids, bot display names and model labels", () => {
+    expect(IdSchema.safeParse("x".repeat(128)).success).toBe(true);
+    expect(IdSchema.safeParse("x".repeat(129)).success).toBe(false);
+
+    const ollama = { botId: "llm.ollama.gemma4", botDisplayName: "Gemma", model: "gemma4" };
+    const update = (patch: Record<string, unknown>) =>
+      LoamConfigUpdateSchema.safeParse({ llm: { ollama: { ...ollama, ...patch } } }).success;
+    expect(update({})).toBe(true);
+    // A bot id must live in the reserved `llm.` namespace — never a person's `user.` id.
+    expect(update({ botId: "user.0123456789abcdef" })).toBe(false);
+    expect(update({ botId: `llm.${"x".repeat(61)}` })).toBe(false);
+    expect(update({ botDisplayName: "x".repeat(80) })).toBe(true);
+    expect(update({ botDisplayName: "x".repeat(81) })).toBe(false);
+    expect(update({ model: "m".repeat(121) })).toBe(false);
+
+    const meta = (model: string) =>
+      MessageSchema.safeParse({
+        id: "llm_1",
+        type: "dm",
+        authorId: "llm.ollama.gemma4",
+        recipientUserId: "user.1",
+        body: "",
+        createdAt: 1,
+        meta: { source: "llm", model },
+      }).success;
+    expect(meta("m".repeat(120))).toBe(true);
+    expect(meta("m".repeat(121))).toBe(false);
+  });
+
+  it("accepts a moderator timeout as a duration (timeoutMs) and single-string search params", () => {
+    expect(ModerationUpdateRequestSchema.safeParse({ timeoutMs: 3_600_000 }).success).toBe(true);
+    expect(ModerationUpdateRequestSchema.safeParse({ timeoutMs: 0 }).success).toBe(false);
+    expect(ModerationUpdateRequestSchema.safeParse({ timeoutMs: 1.5 }).success).toBe(false);
+    expect(SearchQuerySchema.safeParse({ q: "hello", limit: "5" }).success).toBe(true);
+    expect(SearchQuerySchema.safeParse({ q: ["a", "b"] }).success).toBe(false);
+    expect(SearchQuerySchema.safeParse({ limit: ["1", "2"] }).success).toBe(false);
   });
 
   it("keeps dbEncryption out of the security-profile forcing bundle (an independent axis)", () => {

@@ -17,7 +17,7 @@
 | `MeshTransport` abstraction (perms, discover, send/receive, events) | `apps/app/src/mesh/mesh-transport.ts` | TS typechecks |
 | RN ↔ launcher courier bridge | `apps/app/src/mesh/mesh-courier.ts` | TS typechecks |
 | Launcher courier brain (poll outbound, push/pull, feed relay) | `apps/app/nodejs-project-template/main.js` | Not runtime-tested (needs device) |
-| Loopback bridge endpoints | `apps/server/src/app.ts` (`GET /api/mesh/outbound`, `POST /api/mesh/inbound`) | **Yes — desktop tests** |
+| Launcher bridge endpoints | `apps/server/src/routes-sync-mesh.ts` (`GET /api/mesh/outbound`, `POST /api/mesh/inbound`) | **Yes — desktop tests** (`mesh-bridge.test.ts`) |
 | Permissions + optional features | `apps/app/plugins/with-loam-host.js` | Applied at prebuild (not device-verified) |
 
 **Nothing here touches `@loam/crypto` or public-data sync.** The transport carries opaque bytes; every
@@ -57,13 +57,15 @@ crypto/relay rule stays server-side in the existing sealed relay (docs/16 §2–
 only happens when an operator has turned **`mesh.enabled`** on — via `PATCH /api/admin/config` (or by
 editing `config.json` before boot), and, in a build that ships it, the admin UI **Mesh panel** is a
 convenience wrapper over the same PATCH. With mesh off the endpoint `404`s and the courier stays idle (one cheap loopback
-GET per 30 s). The endpoints are **loopback-only** (`request.ip` must be `127.0.0.1`/`::1`; `trustProxy`
-is off, so this is unspoofable) — a joiner on the hotspot LAN cannot drain or inject the sealed queue;
-that path stays the token-guarded `/api/sync/*`. On Android, loopback is reachable by every installed
-app (and `adb forward`), so the launcher additionally sends its per-boot host token
-(`x-loam-host-token`, minted in `main.js` and handed to the server as `LOAM_HOST_TOKEN`) and the
-server requires it whenever one is configured — a co-located app can neither read the queue's routing
-metadata nor inject blobs (review 2026-09-04).
+GET per 30 s). The endpoints need **both** a loopback socket (`request.ip` must be `127.0.0.1`/`::1`;
+`trustProxy` is off, so this is unspoofable) **and** the launcher's per-boot host token
+(`x-loam-host-token`, minted in `main.js` and handed to the server as `LOAM_HOST_TOKEN`) — on **every**
+host. Loopback alone isn't enough: on Android every installed app (and `adb forward`) can reach it, and
+behind a same-host reverse proxy or the Vite dev proxy every LAN client arrives as loopback. So a
+joiner on the hotspot LAN or a co-located app can neither read the queue's routing metadata nor inject
+blobs; peer-to-peer mail stays on the token-guarded `/api/sync/*`. A host with no host token (a
+desktop/Pi node) has **no bridge** — both routes `404`. Their per-route rate limits also count tunnel
+re-dispatches (`allowList: () => false`).
 
 ## Device requirements
 

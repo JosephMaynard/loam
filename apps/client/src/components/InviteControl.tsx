@@ -27,10 +27,20 @@ function reactNativeBridge(): ReactNativeBridge | undefined {
  *   the caller's `joinQrUrl(joinUrl, transportPublicKey)` (docs/08), which appends a `#k=` fragment so
  *   the QR carries the host's transport public key out-of-band while the displayed text stays plain.
  *   Defaults to `joinUrl` when omitted.
+ * @param qrSuppressed - Withhold the QR and explain why: the node's advertised key contradicts the key
+ *   this client joined with, so any key the QR could carry is suspect (pre-release review 2026-09-25).
  */
-export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: string }) {
+export function InviteControl({
+  joinUrl,
+  qrSuppressed = false,
+  qrUrl,
+}: {
+  joinUrl?: string;
+  qrSuppressed?: boolean;
+  qrUrl?: string;
+}) {
   const [open, setOpen] = useState(false);
-  const qrSvg = useMemo(() => safeQrSvg(qrUrl ?? joinUrl, "#16271f"), [joinUrl, qrUrl]);
+  const qrSvg = useMemo(() => (qrSuppressed ? "" : safeQrSvg(qrUrl ?? joinUrl, "#16271f")), [joinUrl, qrSuppressed, qrUrl]);
   const hasNativeBridge = typeof window !== "undefined" && !!reactNativeBridge();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -107,7 +117,13 @@ export function InviteControl({ joinUrl, qrUrl }: { joinUrl?: string; qrUrl?: st
             </div>
             {/* The QR is a visual shortcut for the URL below it; hide it from assistive tech so screen
                 readers announce the actual join URL rather than raw SVG. */}
-            <div aria-hidden="true" className="invite-modal-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+            {qrSuppressed ? (
+              <p className="form-error" role="alert">
+                {t("invite.qrKeyMismatch")}
+              </p>
+            ) : (
+              <div aria-hidden="true" className="invite-modal-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+            )}
             <p className="invite-modal-url">{joinUrl}</p>
             {hasNativeBridge ? (
               <div className="invite-modal-wifi">

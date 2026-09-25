@@ -857,17 +857,61 @@ a {
   line-height: 1.55;
 }
 
+/* App-level error notice. Pinned to the TOP of the viewport (inside the safe area), centred, so it can
+   never sit over the composer / send button at the bottom on any layout — and dismissible. */
 .connection-error {
   position: fixed;
-  inset-inline-end: 16px;
-  bottom: 16px;
-  max-width: min(420px, calc(100vw - 32px));
-  margin: 0;
+  z-index: 60;
+  top: max(12px, env(safe-area-inset-top));
+  inset-inline: 16px;
+  width: fit-content;
+  max-width: min(520px, calc(100vw - 32px));
+  margin-inline: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   border-radius: 8px;
   background: var(--c-danger-2);
   color: var(--c-danger-bg-2);
-  padding: 12px 14px;
+  padding-block: 10px;
+  padding-inline: 14px 10px;
   box-shadow: 0 14px 34px rgba(23, 35, 29, 0.18);
+}
+
+.connection-error p {
+  margin: 0;
+  padding-block: 7px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.connection-error .close-button {
+  flex: none;
+  background: rgba(255, 255, 255, 0.14);
+  color: inherit;
+}
+
+/* A conversation the server says doesn't exist for this user (404): shown in place of list + composer. */
+.conversation-not-found {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.conversation-not-found h2 {
+  margin: 0;
+}
+
+.crash-actions {
+  justify-content: center;
+}
+
+/* Pin-change confirmation: fingerprints are emoji strings; keep them wrapping on narrow screens. */
+.pin-change .transport-fingerprint {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .settings-grid {
@@ -1052,10 +1096,6 @@ a {
   font-size: 0.85rem;
   line-height: 1.35;
   text-align: center;
-}
-
-.dev-mode-banner strong {
-  text-decoration: underline;
 }
 
 .wiped-screen {
@@ -1513,6 +1553,61 @@ a {
   font-size: 0.9rem;
 }
 
+/* User blocking (docs/30 B3): a blocked author's collapsed message, the DM banner, the Settings list. */
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--c-ink-green);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.blocked-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surf-2);
+  color: var(--c-text-2);
+  font-size: 0.9rem;
+}
+
+.blocked-users-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.blocked-users-list li {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.blocked-users-list .avatar {
+  width: 36px;
+  height: 36px;
+}
+
+.blocked-users-name {
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.privacy-policy-link {
+  margin-top: 4px;
+  font-size: 0.85rem;
+}
+
 .composer-disabled {
   padding: 12px 14px;
   color: var(--c-text-2);
@@ -1911,6 +2006,14 @@ a {
   white-space: nowrap;
 }
 
+/* Why an attachment failed (e.g. too large) — visible, since a `title` tooltip never shows on touch. */
+.attachment-chip-error {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .attachment-chip button {
   background: none;
   padding: 0 2px;
@@ -2045,6 +2148,14 @@ a {
 .search-result-button:focus-visible {
   outline: 3px solid rgba(47, 95, 76, 0.18);
   border-color: var(--c-border-3);
+}
+
+/* A hit from a blocked user: the collapsed placeholder, framed like a result but not a link. */
+.search-result-blocked {
+  border: 1px dashed var(--c-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--c-text-muted);
 }
 
 .search-result-meta {

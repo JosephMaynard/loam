@@ -6,6 +6,38 @@ export const ATTACHMENT_MAX_DIMENSION = 1280;
 export const ATTACHMENT_MAX_BYTES = 256 * 1024;
 /** Most images a message may carry (mirrors the schema cap). */
 export const ATTACHMENT_MAX_COUNT = 4;
+/** The server's cap for a non-image file attachment (mirrors `attachmentFileMaxBytes` in the server's
+ * media.ts) — sent as-is, so the picked file itself must fit. */
+export const ATTACHMENT_FILE_MAX_BYTES = 1024 * 1024;
+/** Largest source image the on-device downscaler will even try to decode. The upload is re-encoded under
+ * {@link ATTACHMENT_MAX_BYTES} anyway; this only stops a huge pick from stalling the tab while it decodes. */
+export const ATTACHMENT_IMAGE_SOURCE_MAX_BYTES = 50 * 1024 * 1024;
+
+/**
+ * The size limit a picked file breaks, or `undefined` when it may be read and uploaded. Checked BEFORE
+ * reading the file (pre-release review 2026-09-25: a 100 MB pick used to be read whole and base64'd a byte
+ * at a time, hanging the tab, only for the server to refuse it).
+ */
+export function exceededAttachmentLimit(file: Pick<File, "size" | "type">): number | undefined {
+  const limit = file.type.startsWith("image/") ? ATTACHMENT_IMAGE_SOURCE_MAX_BYTES : ATTACHMENT_FILE_MAX_BYTES;
+  return file.size > limit ? limit : undefined;
+}
+
+/** A byte limit as short human text (`256 KB`, `1 MB`) for an error message. */
+export function formatByteLimit(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${Math.round(bytes / (1024 * 1024))} MB` : `${Math.round(bytes / 1024)} KB`;
+}
+
+/** Base64-encode bytes in fixed-size chunks — `String.fromCharCode` per byte (the old loop) is quadratic
+ * string building; a chunked `apply` is linear and stays under the engine's argument-count limit. */
+export function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  const parts: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, Array.from(bytes.subarray(offset, offset + CHUNK))));
+  }
+  return btoa(parts.join(""));
+}
 
 /**
  * Scale a width/height pair to fit within `max` on its longest edge, preserving aspect ratio and

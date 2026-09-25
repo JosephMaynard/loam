@@ -33,7 +33,7 @@ LOAM is unusually well-positioned because the opportunistic-mesh work (`docs/16`
 | **Crypto primitives** | ✅ Ed25519 signing, X25519 sealed-sender (XChaCha20-Poly1305), `@noble/*` pure-JS (works in the insecure-context PWA + embedded Node-18) | `packages/crypto` |
 | **Relay / firehose / federation** | 🟡 pull-based **node-to-node sync**: digest → diff → fetch, tombstones, optional shared `sync.token` — but it gossips **node-owned public data**, trusting the peer node | `GET /api/sync/digest`, `POST /api/sync/messages`, `docs/11` |
 | **Lexicons** — open, namespaced schemas | 🟡 `@loam/schema` (Zod) — a real client↔server contract, but **fixed and closed**, not extensible | `packages/schema` |
-| **PDS / signed user repo** | ❌ **nothing** — messages are stored per-node in SQLite, keyed by a node-local `user.<8hex>` minted from the session cookie | `getSessionUserId`, `LoamStore` |
+| **PDS / signed user repo** | ❌ **nothing** — messages are stored per-node in SQLite, keyed by a node-local `user.<16hex>` minted with the session (cookie or bound transport session) | `getSessionUserId`, `LoamStore` |
 | **Portable account** | ❌ identity is anonymous, ephemeral, and **node-scoped** — it does not survive moving to another node | `getSessionUserId` |
 
 **Read: ~30–40% of the conceptual stack exists, and it's the hard cryptographic part.** The gaps are the

@@ -47,17 +47,28 @@ export function makeBotUser(config: OllamaConfig): User {
 }
 
 /**
- * Create a new user identifier for an anonymous session.
+ * Create a new user identifier for an anonymous session: `user.<16 hex>` (64 random bits). The old
+ * 8-hex (32-bit) form made a birthday collision plausible on a busy long-lived node, and a colliding
+ * mint silently inherited the existing user's record (ensureUser returns what it finds). Ids minted
+ * earlier keep working — nothing parses the suffix.
  *
- * @returns A string of the form `user.<8hex>` where the suffix is the first 8 hexadecimal characters of a UUID with dashes removed.
+ * @param isTaken - Optional predicate; when given, minting retries until it returns false, so a new
+ *   identity can never alias an existing user or session (callers pass their user/session lookups)
+ * @returns A fresh `user.<16hex>` id
  */
-export function makeSessionUserId(): string {
-  return `user.${randomUUID().replaceAll("-", "").slice(0, 8)}`;
+export function makeSessionUserId(isTaken?: (id: string) => boolean): string {
+  for (;;) {
+    const id = `user.${randomBytes(8).toString("hex")}`;
+
+    if (!isTaken?.(id)) {
+      return id;
+    }
+  }
 }
 
 /** A fresh session-cookie bearer token (256 random bits, base64url). */
 export function makeSessionToken(): string {
-  return randomUUID();
+  return randomBytes(32).toString("base64url");
 }
 
 /** A fresh 256-bit secure identity token (docs/20) — high-entropy, so a fast hash (not scrypt) is the

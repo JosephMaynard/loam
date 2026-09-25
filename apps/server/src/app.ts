@@ -30,8 +30,8 @@ import {
 } from "@loam/schema";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-import { importLegacyJsonData } from "./db.js";
-import { createLlmLayer } from "./llm.js";
+import { importLegacyJsonData, type StoredRowReport } from "./db.js";
+import { createLlmLayer, INTERRUPTED_ASSISTANT_BODY } from "./llm.js";
 import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
 import { createStoreLifecycle } from "./store-lifecycle.js";
@@ -44,7 +44,7 @@ import { registerMessageRoutes } from "./routes-messages.js";
 import { registerSessionRoutes } from "./routes-session.js";
 import { registerSyncMeshRoutes } from "./routes-sync-mesh.js";
 import { registerUserRoutes } from "./routes-users.js";
-import { createTransportServer, registerTransportHooks, registerTransportRoutes } from "./transport-server.js";
+import { createTransportServer, loamLogController, loamLoggerOptions, registerTransportHooks, registerTransportRoutes } from "./transport-server.js";
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
 
@@ -52,7 +52,7 @@ import type { AppData, AppOptions, LoamApp } from "./types.js";
 
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
-import { defaultLoamConfig, mergeConfig, reconcileLegacyProfile } from "./config.js";
+import { defaultLoamConfig, mergeConfig, reconcileLegacyProfile, sanitizeLegacyConfigJson, withoutLauncherOwnedKeys } from "./config.js";
 
 import { makeUser, makeSessionUserId, makeSessionToken, makeAdminSetupCode, encodeCookieValue, readCookie } from "./identity.js";
 import { attachmentFileName, parseAttachmentFileName, avatarImageExtension, parseAvatarImageId } from "./media.js";
@@ -84,7 +84,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // on the LAN — and it REFUSES to engage in a production build (`NODE_ENV=production`), so a plaintext
   // node can never ship by accident. This is the ONLY path to plaintext now that `off` is not an
   // operator-settable posture (the default is `optional`; the admin UI omits `off`).
-  const devModeRequested = process.env.LOAM_DEV_MODE === "1" || process.env.LOAM_DEV_MODE === "true";
+  // `options.devMode` lets an embedder (in practice: the test suite) request it without mutating the
+  // process env; it is subject to exactly the same production-build refusal as the env var.
+  const devModeRequested =
+    options.devMode ?? (process.env.LOAM_DEV_MODE === "1" || process.env.LOAM_DEV_MODE === "true");
   const isProductionBuild = process.env.NODE_ENV === "production";
   const devMode = devModeRequested && !isProductionBuild;
 
@@ -99,7 +102,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   const server = Fastify({
     // Developer Mode turns on verbose (`debug`) logging unless the caller passed an explicit logger.
-    logger: options.logger ?? (devMode ? { level: "debug" } : true),
+    // Logged request URLs drop their query string, and tunnel re-dispatches aren't request-logged at all
+    // (their URL is the path the tunnel hides) — see `loamLoggerOptions` / `loamLogController`.
+    logger: options.logger === false ? false : loamLoggerOptions(devMode ? "debug" : "info", options.logStream),
+    logController: loamLogController(),
     // The global body ceiling stays at Fastify's 1 MiB default. Only the two routes that genuinely
     // carry large envelopes — `POST /api/attachments` and `POST /api/transport/tunnel` — raise it
     // per-route (`LARGE_BODY_LIMIT`); a blanket 4 MiB would hand every endpoint (including the
@@ -112,6 +118,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // ceiling bounded while the real, decoded limits stay enforced semantically (avatar 128 KiB,
   // image 256 KiB, file 1 MiB).
   const LARGE_BODY_LIMIT = 4 * 1024 * 1024;
+  // Generic 5xx body: an unexpected throw (a Zod parse, a TypeError, a store failure) must never echo its
+  // internal message or a validation dump to the client. The detail is logged; the client gets a stable,
+  // localizable `internal_error`. 4xx errors (rate limits, body parsing, typed errors like
+  // IdentityLimitError) keep Fastify's default handling — rethrowing hands them to it unchanged.
+  server.setErrorHandler((error, request, reply) => {
+    const statusCode =
+      typeof (error as { statusCode?: unknown }).statusCode === "number"
+        ? (error as { statusCode: number }).statusCode
+        : 500;
+
+    if (statusCode < 500) {
+      throw error;
+    }
+
+    request.log.error(error);
+    return reply.code(statusCode).send(errorBody("Internal server error"));
+  });
+
   if (devModeRequested && isProductionBuild) {
     server.log.error(
       "LOAM_DEV_MODE is set but IGNORED: refusing to disable transport encryption in a production build (NODE_ENV=production).",
@@ -250,6 +274,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     get store() {
       return store;
     },
+    get quarantine() {
+      return store.quarantine();
+    },
     get wipeGeneration() {
       return wipeGeneration;
     },
@@ -258,6 +285,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     },
     log: server.log,
     options,
+    effectiveTransportEncryption: () => effectiveTransportEncryption(),
     attachmentsDir,
     attachmentOwners,
     tombstones,
@@ -377,6 +405,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     set store(value) {
       store = value;
     },
+    get quarantine() {
+      return store.quarantine();
+    },
     currentJoinHost,
     effectiveTransportEncryption,
     effectiveAdminBootstrap,
@@ -385,6 +416,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     loadAppConfig,
     anyAdminExists,
     consumeIdentityBudget,
+    mintSessionUserId,
     getSessionUserId,
     getSessionUserIdFromRequest,
     ensureUser,
@@ -392,11 +424,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     currentNetworkConfig,
     redactedConfig,
     applyUserUpdate,
+    clientAvatarUpdateError,
     canModerate,
     canGreet,
     isLocallyAuthoritative,
     participationError,
     timeoutError,
+    dmBlockError,
     applyUserModeration,
     invalidateUserSessions,
     revokeIdentityToken,
@@ -460,16 +494,38 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * `off` default and serve plaintext while the operator believes it's hardened. Fail closed instead — the
    * caller only invokes this when a config source actually exists (an absent file is a normal fresh boot).
    */
-  function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate {
-    let json: unknown;
+  // Bot ids a legacy-config repair dropped this boot (see sanitizeLegacyConfigJson): `loadData` reports any
+  // bot record one of them orphans.
+  const legacyBotIds = new Set<string>();
+
+  function parseConfigUpdate(
+    raw: string,
+    source: string,
+    onRepaired?: (repairedJson: unknown) => void,
+  ): LoamConfigUpdate {
+    let parsedJson: unknown;
     try {
-      json = JSON.parse(raw);
+      parsedJson = JSON.parse(raw);
     } catch {
       throw new Error(`Invalid configuration in ${source}: not valid JSON. Fix or remove it; refusing to start from defaults.`);
     }
 
+    // Values an older build accepted but the schema now refuses (a configured `off` transport, an
+    // out-of-namespace bot id, an over-long bot name) are repaired with a warning rather than aborting
+    // the upgrade boot — see sanitizeLegacyConfigJson.
+    const { json, repairs, droppedBotId } = sanitizeLegacyConfigJson(parsedJson);
+    for (const repair of repairs) {
+      server.log.warn(`${source}: ${repair}`);
+    }
+    if (droppedBotId !== undefined) {
+      legacyBotIds.add(droppedBotId);
+    }
+
     const parsed = LoamConfigUpdateSchema.safeParse(json);
     if (parsed.success) {
+      if (repairs.length > 0) {
+        onRepaired?.(json);
+      }
       return parsed.data;
     }
 
@@ -485,12 +541,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   async function loadAppConfig(): Promise<void> {
     let config = defaultLoamConfig();
+    // Whether config.json carries the launcher-owned `llm.onDevice` block (see withoutLauncherOwnedKeys).
+    let fileOwnsOnDevice = false;
 
     try {
       const raw = await readFile(configPath, "utf8");
       // A present-but-invalid config.json throws here (fail closed); an ABSENT file is ENOENT → a normal
       // fresh boot from defaults, handled by the catch below.
       const fileUpdate = parseConfigUpdate(raw, configPath);
+      fileOwnsOnDevice = fileUpdate.llm?.onDevice !== undefined;
 
       // Same reconciliation as the persisted path: a hand-authored config.json that pins a preset
       // profile *and* sets an explicit kill switch / approval / TTL keeps those explicit settings
@@ -515,7 +574,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // through `parseConfigUpdate` (JSON.parse("") throws → abort), not be silently skipped to defaults. An
     // absent key returns `undefined` → a normal fresh boot.
     if (stored !== undefined) {
-      const storedUpdate = parseConfigUpdate(stored, "the persisted config table");
+      // A row an older build wrote can need repairs (sanitizeLegacyConfigJson). Write the repaired row back
+      // once, so the warning isn't repeated on every boot until the next admin save rewrites it.
+      const parsedStored = parseConfigUpdate(stored, "the persisted config table", (repairedJson) => {
+        store.setConfigValue("config", JSON.stringify(repairedJson));
+      });
+      // config.json is authoritative for the launcher-owned `llm.onDevice` block when it carries one: the
+      // DB row holds a full snapshot from the last admin save, which must not freeze the launcher's later
+      // model activate/deactivate (rows written before this fix contain it too — it is simply ignored).
+      const storedUpdate = fileOwnsOnDevice ? withoutLauncherOwnedKeys(parsedStored) : parsedStored;
 
       // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
       // preserve an explicitly-armed kill switch / approval / TTL by demoting the profile to custom.
@@ -580,7 +647,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw new IdentityLimitError();
     }
 
-    const userId = makeSessionUserId();
+    const userId = mintSessionUserId();
     const token = makeSessionToken();
     sessions.set(token, userId);
     store.putSession(token, userId);
@@ -597,6 +664,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${secure ? "; Secure" : ""}`;
     reply.header("set-cookie", cookie);
     return userId;
+  }
+
+  /**
+   * Mint a fresh anonymous user id that no existing user, cookie session, or secure identity token already
+   * names. `ensureUser` returns whatever record it finds for an id, so an aliasing mint would silently hand
+   * the newcomer someone else's identity (admin flag included); 64 random bits make that astronomically
+   * unlikely, and this check makes it impossible.
+   */
+  function mintSessionUserId(): string {
+    return makeSessionUserId(
+      (id) =>
+        data.users.some((user) => user.id === id) ||
+        store.quarantine().users.has(id) ||
+        [...sessions.values()].includes(id) ||
+        [...identityTokens.values()].includes(id),
+    );
   }
 
   /** Like `getSessionUserId`, but never mints: undefined when the request carries no valid identity. */
@@ -722,6 +805,39 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Why a client-supplied avatar in a profile edit (`PATCH /api/users/me`, the admin
+   * `PATCH /api/users/:userId`) must be refused for `user`, or undefined when it may be applied. Image
+   * avatars are minted ONLY by the upload route (`PUT /api/users/me/avatar-image`), which names the file
+   * itself: a profile edit that names an image file (`kind: "image"`, an `imageId`, a `mimeType`, or an
+   * `uploadedAt`) is accepted only when it is the user's CURRENT image avatar sent back unchanged. Otherwise
+   * a client could point its avatar at another user's file (or, before the id was constrained, at any path)
+   * and the next upload — which removes the replaced file — would delete it.
+   */
+  function clientAvatarUpdateError(user: User, avatar: UserUpdateRequest["avatar"]): string | undefined {
+    if (!avatar) {
+      return undefined;
+    }
+
+    const namesImage =
+      avatar.kind === "image" ||
+      avatar.imageId !== undefined ||
+      avatar.mimeType !== undefined ||
+      avatar.uploadedAt !== undefined;
+
+    if (!namesImage) {
+      return undefined;
+    }
+
+    const current = user.avatar;
+    const unchangedCurrentImage =
+      current?.kind === "image" &&
+      avatar.kind === "image" &&
+      avatar.imageId === current.imageId &&
+      avatar.mimeType === current.mimeType;
+    return unchangedCurrentImage ? undefined : "Invalid user update request";
+  }
+
+  /**
    * Whether a user may moderate others (ban / shadow-ban / unban non-admins): admins always can,
    * as can anyone granted the `moderator` role — unless they are themselves banned or pending
    * (a banned moderator's lingering session must not keep its powers).
@@ -779,6 +895,37 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return "You are timed out by a moderator and cannot post right now";
     }
     return undefined;
+  }
+
+  /**
+   * Whether a user block stops `senderId` writing into a DM with `recipientId` (docs/30 B3): a new DM, a
+   * reaction on one, or an edit of an old one. A sender who did the blocking gets an honest "you blocked
+   * them"; a sender who IS blocked gets the generic `dm_unavailable`, which doesn't state the reason (a DM
+   * to a banned or not-yet-approved recipient gets it too, but those are hidden from the roster, so it
+   * doesn't disguise the block — docs/12 §5). Reads the DAL directly (one indexed lookup): block lists keep
+   * no in-memory mirror that a wipe would have to reset.
+   */
+  function dmBlockError(senderId: string, recipientId: string): string | undefined {
+    if (senderId === recipientId) {
+      return undefined;
+    }
+    if (store.isUserBlocked(senderId, recipientId)) {
+      return "You blocked this person. Unblock them to send a message";
+    }
+    if (store.isUserBlocked(recipientId, senderId)) {
+      return "Direct messages to this person aren't available";
+    }
+    return undefined;
+  }
+
+  /** The other participant of the DM `message` belongs to (a DM, or a reaction on one), else undefined. */
+  function dmCounterpart(message: Message, actorId: string): string | undefined {
+    const root =
+      message.type === "reaction" ? data.messages.find((candidate) => candidate.id === message.targetMessageId) : message;
+    if (root?.type !== "dm") {
+      return undefined;
+    }
+    return root.authorId === actorId ? root.recipientUserId : root.authorId;
   }
 
   /**
@@ -899,6 +1046,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       updatedAt: Date.now(),
     });
     store.upsertChannel(next);
+    // Un-archiving or reopening posts/replies can make a peer's refused offers acceptable: refetch them.
+    if (next.archived !== channel.archived || next.allowPosting !== channel.allowPosting || next.allowReplies !== channel.allowReplies) {
+      sync.forgetRefusedOffers();
+    }
     // Turning join requests OFF clears any pending queue (they can no longer be fulfilled via the flow).
     if (update.allowJoinRequests === false) {
       store.removeJoinRequestsForChannel(channel.id);
@@ -972,7 +1123,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   /** The roster as `viewer` may see it: sanitized per-user, and with mesh sender artifacts hidden
    * except from the recipients they actually mailed. */
   function visibleUsers(viewer: User): User[] {
-    const base = llmEnabled() ? data.users : data.users.filter((user) => user.type !== "bot");
+    // Only the CONFIGURED assistant is a contact: a bot record whose id the config no longer names (a
+    // replaced or legacy-repaired botId) would otherwise linger on the roster as a dead DM contact.
+    const base = data.users.filter(
+      (user) => user.type !== "bot" || (llmEnabled() && user.id === appConfig.llm.ollama.botId),
+    );
     return base
       .filter((user) => !user.banned && !user.pending)
       .filter((user) => !isMeshSentinelUser(user.id) || meshSenderVisibleTo(user.id, viewer.id))
@@ -1007,14 +1162,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // id would inherit the old channel's ghosts — a peer's undelivered copies, stale references —
     // and would itself be refused by peers still holding the tombstone. Suffixed ids below are
     // random enough that a tombstone collision is not a practical concern.
-    if (slug && !ensureChannel(slug) && !tombstones.has(slug)) {
+    // A quarantined id (a stored channel row that no longer validates, still on disk with its messages) is
+    // taken too: a new channel under it would inherit that row's retained messages.
+    const taken = (id: string) => !!ensureChannel(id) || store.quarantine().channels.has(id);
+
+    if (slug && !taken(slug) && !tombstones.has(slug)) {
       return slug;
     }
 
     let candidate: string;
     do {
       candidate = `${slug || "channel"}-${randomBytes(3).toString("hex")}`;
-    } while (ensureChannel(candidate));
+    } while (taken(candidate));
 
     return candidate;
   }
@@ -1161,6 +1320,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         if (target.type === "channelReply" && !appConfig.features.enableReplies) {
           return { code: 403, error: "Replies are disabled on this LOAM node" };
+        }
+
+        // A block also freezes edits of pre-block DMs: an edit re-broadcasts new text to the other side.
+        const counterpart = dmCounterpart(target, actor.id);
+        const blockError = counterpart ? dmBlockError(actor.id, counterpart) : undefined;
+
+        if (blockError) {
+          return { code: 403, error: blockError };
         }
       }
     }
@@ -1389,6 +1556,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (parent.channelId !== input.channelId) {
         return { error: "Parent message belongs to a different channel" };
       }
+
+      // A moderator-removed post is a tombstone, not a live thread: no new replies under it.
+      if (parent.meta?.removedByModerator) {
+        return { error: "This message was removed by a moderator", forbidden: true };
+      }
     }
 
     if (input.type === "reaction") {
@@ -1444,6 +1616,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
         return { deletedMessageId: deleted?.id, deletedMessage: deleted };
       }
+
+      // No NEW reactions on a moderator-removed message (toggling an existing one off, above, stays
+      // allowed — that only removes the reactor's own content).
+      if (target.meta?.removedByModerator) {
+        return { error: "This message was removed by a moderator", forbidden: true };
+      }
+
+      // Nor on a DM across a block, either way (removing your own reaction, above, stays allowed).
+      const counterpart = dmCounterpart(target, authorId);
+      const blockError = counterpart ? dmBlockError(authorId, counterpart) : undefined;
+
+      if (blockError) {
+        return { error: blockError, forbidden: true };
+      }
     }
 
     if (input.type === "dm") {
@@ -1451,6 +1637,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (!recipient) {
         return { error: "Recipient user does not exist" };
+      }
+
+      // Someone who can't read DMs (banned, or still awaiting approval) can't receive one. The same generic
+      // answer a sender the recipient has BLOCKED gets (dmBlockError): it doesn't state the reason.
+      if (recipient.banned || recipient.pending) {
+        return { error: "Direct messages to this person aren't available", forbidden: true };
+      }
+
+      const blockError = dmBlockError(authorId, recipient.id);
+
+      if (blockError) {
+        return { error: blockError, forbidden: true };
       }
     }
 
@@ -1515,14 +1713,41 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       server.log.info("Imported legacy .loam JSON data into SQLite (originals renamed to *.json.bak)");
     }
 
-    data = {
-      users: store.loadUsers(),
-      channels: store.loadChannels(),
-      messages: store.loadMessages(),
+    // A row an older release wrote that no longer validates (e.g. an id past `ID_MAX_LENGTH`) is not fatal:
+    // an upgraded node must still boot. The store repairs what it provably can (in memory) and QUARANTINES the
+    // rest — not loaded, left on disk, and its id refused to every write (see `LoamStore.quarantine`).
+    const storedRowReports: Record<string, StoredRowReport> = {};
+    const noteStoredRows = (table: string) => (report: StoredRowReport) => {
+      storedRowReports[table] = report;
     };
+    data = {
+      users: store.loadUsers(noteStoredRows("users")),
+      channels: store.loadChannels(noteStoredRows("channels")),
+      messages: store.loadMessages(noteStoredRows("messages")),
+    };
+    // Open reports are read from the DB on demand (never mirrored); scanned here only to count the invalid ones.
+    store.loadOpenReports(noteStoredRows("reports"));
+    if (Object.keys(storedRowReports).length) {
+      server.log.warn(
+        { storedRows: storedRowReports },
+        "Some stored rows no longer validate: the safely repairable ones were repaired in memory; the rest are " +
+          "quarantined (not loaded, their ids refused to sync, seeding and new channels) and remain on disk " +
+          "untouched, except that retention (retention.messageTtlMs) still deletes quarantined messages once " +
+          "they expire. An Emergency Reset removes them with everything else.",
+      );
+    }
+    finalizeInterruptedStreams();
     tombstones.clear();
 
     for (const id of store.loadTombstones()) {
+      tombstones.add(id);
+    }
+
+    // A quarantined message id is, for this boot, an id this node refuses to (re)create — exactly the refusal
+    // a tombstone gives, so the sync pull never asks a peer for it, its import skips it, and a sealed offer
+    // under it is inadmissible. In memory only (never persisted as a tombstone); rebuilt from the rows still
+    // on disk at every load. (Quarantined channel and user ids are refused by their own checks.)
+    for (const id of store.quarantine().messages) {
       tombstones.add(id);
     }
 
@@ -1542,13 +1767,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     sessions.clear();
 
+    // A session or identity token naming a quarantined user isn't honoured (its row stays on disk): the caller
+    // gets a fresh identity instead of `ensureUser` recreating that user id over the quarantined row.
+    const quarantinedUsers = store.quarantine().users;
     for (const session of store.loadSessions()) {
-      sessions.set(session.token, session.userId);
+      if (!quarantinedUsers.has(session.userId)) {
+        sessions.set(session.token, session.userId);
+      }
     }
 
     identityTokens.clear();
     for (const record of store.loadIdentityTokens()) {
-      identityTokens.set(record.tokenHash, record.userId);
+      if (!quarantinedUsers.has(record.userId)) {
+        identityTokens.set(record.tokenHash, record.userId);
+      }
     }
 
     if (!data.channels.length) {
@@ -1556,7 +1788,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // (delete is permanent; its tombstone survives restarts). A kill-switch wipe clears the
       // tombstones along with everything else, so a post-reset node still seeds fresh defaults.
       data.channels = defaultChannels
-        .filter((channel) => !tombstones.has(channel.id))
+        .filter((channel) => !tombstones.has(channel.id) && !store.quarantine().channels.has(channel.id))
         .map((channel) => ({ ...channel }));
       store.transaction(() => {
         for (const channel of data.channels) {
@@ -1614,6 +1846,55 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     ensureBotUser();
     ensureAllMeshIdentities();
+
+    // A bot record left behind by a legacy bot-id repair is no longer the assistant: `visibleUsers` hides
+    // it (only the configured bot is listed). It stays in the database with its DM history; say so once.
+    for (const id of legacyBotIds) {
+      if (id !== appConfig.llm.ollama.botId && data.users.some((user) => user.id === id && user.type === "bot")) {
+        server.log.warn(`The assistant's old bot id "${id}" was replaced; its bot record is hidden from the roster`);
+      }
+    }
+    legacyBotIds.clear();
+  }
+
+  /**
+   * Repair assistant replies a previous process left mid-stream. The LLM writer persists its placeholder
+   * with `meta.streaming: true` and only clears it when the reply finishes — so a crash or restart
+   * mid-stream stranded a record that the retention reaper spares forever and that DELETE refuses (409)
+   * even for an admin. At load no writer can still be running, so every streaming record is finalized:
+   * streaming cleared (persisted), keeping any partial text or a neutral "interrupted" body.
+   */
+  function finalizeInterruptedStreams(): void {
+    const repaired = data.messages.flatMap((message) => {
+      if (!message.meta?.streaming || !("body" in message)) {
+        return [];
+      }
+
+      const next = MessageSchema.parse({
+        ...message,
+        body: message.body.trim() ? message.body : INTERRUPTED_ASSISTANT_BODY,
+        meta: { ...message.meta, streaming: false },
+      });
+      return [{ live: message, next }];
+    });
+
+    if (!repaired.length) {
+      return;
+    }
+
+    // Persist first, then mirror in memory (the house mutator order). Nothing is connected at load, so
+    // there is no one to broadcast to — clients pick the repaired records up on their next fetch.
+    store.transaction(() => {
+      for (const { next } of repaired) {
+        store.updateMessage(next);
+      }
+    });
+
+    for (const { live, next } of repaired) {
+      Object.assign(live, next);
+    }
+
+    server.log.warn(`Finalized ${repaired.length} assistant repl${repaired.length === 1 ? "y" : "ies"} interrupted mid-stream`);
   }
 
   /**
@@ -1711,6 +1992,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // now" — a 0 would make `createdAt < now - 0` true for every message in a non-TTL channel.
       return channelTtl ?? (globalTtl || undefined);
     };
+    reapExpiredQuarantinedMessages(now, (channelId) =>
+      (channelId ? channelsById.get(channelId)?.messageTtlMs : undefined) ?? (globalTtl || undefined),
+    );
+
     const expired = data.messages.filter((message) => {
       if (message.meta?.streaming) {
         return false;
@@ -1741,10 +2026,74 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Retention for QUARANTINED message rows (docs/01): they are never loaded, so the in-memory sweep above can't
+   * see them, yet a legacy row can hold a private body. A row goes once it is older than the TTL of its channel
+   * (a loaded channel's override, else the node default — the only TTL readable for a quarantined channel),
+   * taking the quarantined rows under it (replies, reactions) with it like the normal cascade. Deleted and
+   * tombstoned exactly like a normal expiry (the id was already refused in memory); the delete releases the
+   * id from the quarantine. Nothing is broadcast: no client was ever served these rows by this build.
+   */
+  function reapExpiredQuarantinedMessages(now: number, ttlForChannel: (channelId: string | null) => number | undefined): void {
+    if (!store.quarantine().messages.size) {
+      return;
+    }
+    const rows = store.loadQuarantinedMessageRows();
+    const doomed = new Set(
+      rows
+        .filter((row) => {
+          const ttl = ttlForChannel(row.channelId);
+          return ttl !== undefined && row.createdAt < now - ttl;
+        })
+        .map((row) => row.id),
+    );
+    let grew = doomed.size > 0;
+    while (grew) {
+      grew = false;
+      for (const row of rows) {
+        if (!doomed.has(row.id) && row.parentId !== null && doomed.has(row.parentId)) {
+          doomed.add(row.id);
+          grew = true;
+        }
+      }
+    }
+    if (!doomed.size) {
+      return;
+    }
+    store.transaction(() => {
+      for (const id of doomed) {
+        store.deleteMessage(id);
+        store.addTombstone(id);
+      }
+    });
+    for (const id of doomed) {
+      tombstones.add(id);
+    }
+    server.log.info(`Retention reaper deleted ${doomed.size} expired quarantined message row(s)`);
+  }
+
+  /** Whether any live message references attachment `id` (read at call time — never a snapshot). */
+  function attachmentReferenced(id: string): boolean {
+    return data.messages.some(
+      (message) =>
+        message.type !== "reaction" &&
+        message.type !== "sealed" &&
+        !!message.attachments?.some((attachment) => attachment.id === id),
+    );
+  }
+
+  /**
    * Delete attachment files no message references and no fresh pending upload claims: uploads
    * whose send was abandoned (past the grace period) and files orphaned by a restart (the pending
-   * map is RAM-only, so at boot every unreferenced file is an orphan). Runs at boot and on the
+   * map is RAM-only, so after a restart unreferenced files are orphans). Runs at boot and on the
    * reaper timer.
+   *
+   * The loop awaits the filesystem per file, so the message set can change under it: every decision is
+   * re-made against the LIVE `data.messages` + `attachmentOwners` immediately before each `rm` (no await in
+   * between), never against a snapshot taken at the start — a message created mid-sweep consumes its
+   * pending upload (dropping the owner entry), and a snapshot would have deleted its file. And a file with
+   * NO owner entry is only an orphan once it is older than the grace window (like the avatar sweep): sync
+   * writes a peer's attachment to disk BEFORE inserting the message that references it, and those files
+   * never have an owner entry. Files are swept in name order so a pass is deterministic.
    */
   async function reapOrphanedAttachments(): Promise<void> {
     let files: string[];
@@ -1755,35 +2104,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return; // No attachments directory yet — nothing uploaded.
     }
 
-    const referenced = new Set<string>();
-
-    for (const message of data.messages) {
-      if (message.type !== "reaction" && message.type !== "sealed") {
-        for (const attachment of message.attachments ?? []) {
-          referenced.add(attachment.id);
-        }
-      }
-    }
-
-    const now = Date.now();
-
-    for (const fileName of files) {
+    for (const fileName of files.sort()) {
       const parsed = parseAttachmentFileName(fileName);
 
-      if (!parsed || referenced.has(parsed.id)) {
+      if (!parsed || attachmentReferenced(parsed.id)) {
         continue;
       }
 
+      const path = join(attachmentsDir, fileName);
+      const info = await stat(path).catch(() => undefined);
+
+      if (!info) {
+        continue;
+      }
+
+      // Re-decide against live state now that the stat await is over — nothing awaits between here and rm.
+      const now = Date.now();
       const pending = attachmentOwners.get(parsed.id);
 
-      if (pending && now - pending.uploadedAt < attachmentPendingGraceMs) {
+      if (attachmentReferenced(parsed.id)) {
+        continue;
+      }
+
+      if (pending ? now - pending.uploadedAt < attachmentPendingGraceMs : now - info.mtimeMs < attachmentPendingGraceMs) {
         continue;
       }
 
       attachmentOwners.delete(parsed.id);
-      await rm(join(attachmentsDir, fileName), { force: true }).catch((error: unknown) =>
-        server.log.warn(error),
-      );
+      await rm(path, { force: true }).catch((error: unknown) => server.log.warn(error));
     }
   }
 

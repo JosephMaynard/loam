@@ -205,10 +205,20 @@ export type AppOptions = {
    * `effectiveAdminBootstrap` — so admin is claimable ONLY by presenting this token, never by being the
    * first LAN session; and (2) is REQUIRED (header `x-loam-host-token`) on the loopback mesh bridge
    * routes, since on Android loopback is reachable by every installed app, not just the launcher.
-   * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged.
+   * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged — and
+   * without it the mesh bridge does not exist at all (review 2026-09-25).
    */
   hostToken?: string;
+  /**
+   * Request Developer Mode (plaintext transport + verbose logs) directly instead of via `LOAM_DEV_MODE`.
+   * Still REFUSED when `NODE_ENV=production`, exactly like the env var, and still self-announcing
+   * (`networkConfig.devMode`). Neither the CLI nor the Android host passes it; it exists so tests can
+   * exercise the plaintext path now that `off` is not a configurable posture.
+   */
+  devMode?: boolean;
   logger?: boolean;
+  /** Where server logs go (default stdout). Tests pass a capturing sink to assert what is (not) logged. */
+  logStream?: { write(line: string): void };
 };
 
 export type LoamApp = {

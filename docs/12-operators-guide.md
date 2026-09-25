@@ -16,7 +16,7 @@ Any device that can run the server and offer a network the others can reach work
 
 | Host | Command | Good for |
 |---|---|---|
-| **Laptop / desktop** | `pnpm build && pnpm --filter @loam/server start` | Quick setup where a laptop is already on the LAN or hotspot. |
+| **Laptop / desktop** | `npx loamnet` (the published CLI, see `cli/README.md`), or from a checkout `pnpm build && pnpm --filter @loam/server start` | Quick setup where a laptop is already on the LAN or hotspot. |
 | **Raspberry Pi** (or any always-on Linux box) | same as above | A fixed-site node that stays up; pairs well with node-to-node sync. |
 | **Android phone** | `pnpm --filter app apk` → install → **Share · Host** | Truly off-grid: the phone runs the embedded server *and* raises its own WiFi hotspot. |
 
@@ -32,7 +32,9 @@ phone, launch **LOAM**, and tap **Share · Host**. The app brings up a local-onl
 server on the phone, and shows the join QR. See [docs/04](04-android-host-app.md) for the full build and
 join flow. Note: on-device database encryption now **ships** on Android (SQLCipher via a vendored arm64
 prebuild, keyed per the `security.dbEncryption` mode) — pending final on-device runtime verification
-(docs/01, docs/04); only older builds stored the DB unencrypted.
+(docs/01, docs/04). It **fails closed**: if an encrypted mode's SQLCipher driver won't load, the host
+locks with a "driver missing" screen (**Retry**, or a confirmed **Start without encryption** that
+switches the mode to Off) rather than quietly storing data in plaintext.
 
 **Environment variables** (laptop/Pi; the Android host sets its own):
 
@@ -42,7 +44,7 @@ prebuild, keyed per the `security.dbEncryption` mode) — pending final on-devic
 | `HOST` / `LOAM_JOIN_HOST` | Bind address / the host used in the printed join URL. |
 | `LOAM_DATA_DIR` | Where the `.loam/` data dir (DB + avatars) lives. |
 | `LOAM_CONFIG_FILE` | Path to a JSON config file to seed defaults (otherwise `.loam/config.json`). |
-| `LOAM_DB_KEY` | **Encryption at rest.** Unset = plain SQLite. A passphrase = SQLCipher (AES-256), same passphrase needed on every start. `ephemeral` = a random in-memory key that never touches disk. See §7. |
+| `LOAM_DB_KEY` | **Encryption at rest.** Unset = plain SQLite. A passphrase = SQLCipher (AES-256), same passphrase needed on every start. `ephemeral` = a random in-memory key that never touches disk. See §7. (The `loam` CLI's `--encrypt` reads this variable, or prompts for the passphrase without echoing it.) |
 
 ## 2. First run — becoming admin
 
@@ -83,16 +85,22 @@ It's shown to everyone in the client sidebar and on the join screen — call it 
 A named profile is *authoritative* — it forces its bundled axes and locks those individual controls
 until you switch back to **Custom** (docs/09):
 
-| Profile | Who can join | Retention | Kill switch |
-|---|---|---|---|
-| **Open** | anyone, immediately | kept forever | off |
-| **Standard** | anyone with the link | kept forever | off |
-| **Hardened** | approval required | messages expire after **1 hour** | **armed** |
-| **Custom** *(default)* | set each axis yourself | set yourself | set yourself |
+| Profile | Who can join | Retention | Kill switch | Transport encryption |
+|---|---|---|---|---|
+| **Open** | anyone, immediately | kept forever | off | optional |
+| **Standard** | anyone with the link | kept forever | off | optional |
+| **Hardened** | approval required | messages expire after **1 hour** | **armed** | **required** |
+| **Custom** *(default)* | set each axis yourself | set yourself | set yourself | set yourself (optional by default) |
 
-Open and Standard apply the **same enforced settings today** — the axes that would separate them
-(transport encryption, invite tokens) aren't built yet, so they differ only in intent. `custom` is the
-default so a fresh node never has its raw settings silently overridden.
+Open and Standard apply the **same enforced settings today** — the axis that would separate them
+(invite tokens) isn't built yet, so they differ only in intent. `custom` is the default so a fresh node
+never has its raw settings silently overridden.
+
+**Transport encryption** has two settings. **Optional** (the default) encrypts every device that joins
+by scanning the QR code, but still accepts a device that typed the URL by hand, unencrypted. **Required**
+refuses unencrypted devices and hides which pages they request, too. There is no "off" setting: an
+`"off"` in a config file is read as optional (with a warning), and the only unencrypted mode is the
+developer-only `LOAM_DEV_MODE`, which shows every client a red "unencrypted" banner (docs/08).
 
 **The individual axes** (editable under Custom, or forced by a profile):
 
@@ -113,7 +121,9 @@ default so a fresh node never has its raw settings silently overridden.
 **The join QR is the whole invite.** Greeters and admins get an **Invite someone** control in the
 sidebar that expands the node's join URL as a QR plus the URL text; the same URL appears under
 **Settings → Join this LOAM node**. Anyone already on the LAN/hotspot scans it (or types the URL) and
-the PWA opens — no install, no account. WiFi credentials themselves are shared out-of-band (or by the
+the PWA opens — no install, no account. The QR a member shows carries the host's encryption key only
+when their own connection came from a verified QR scan; if the key they were given doesn't match, the
+invite QR is hidden with a warning instead of passing on a possibly-substituted key. WiFi credentials themselves are shared out-of-band (or by the
 Android hotspot); the QR only carries the URL.
 
 **Join policy** decides what happens next:
@@ -136,6 +146,8 @@ reverse it — with per-person controls:
 |---|---|---|
 | **Ban / Unban** | admin, moderator | Locks the person out entirely and tears down their sessions. |
 | **Shadow-ban** | admin, moderator | They can still post, but their new messages are broadcast only back to themselves. Quietly defuses a spammer. |
+| **Timeout** | admin, moderator | Mutes them for a chosen duration (at most **7 days**). The expiry is computed on the node's clock, so a moderator's phone with a wrong clock can't set a years-long or already-expired timeout. |
+| **Remove a message** | admin, moderator | An honest tombstone: the body and attachments are deleted and readers see "removed by a moderator" (with an optional reason). A removed message can't be edited by its author, replied to, or newly reacted to, and a sync peer's later edit can't restore it. |
 | **Moderator / Greeter role** | admin only | Grant moderation powers or greeter (approve-joins) powers. |
 | **Make admin** | admin only | Promote a member to a full admin. |
 | **Delete a message** | admin (any message); author (their own, if no one else has replied) | Removes it from the node and every client; a tombstone stops sync re-importing it. |
@@ -147,6 +159,29 @@ state are stripped from any profile that arrives over sync — a peer's moderato
 not a dial — removing an admin is done by re-bootstrapping the node (or firing the kill switch and
 starting fresh), *not* by one admin stripping another. This avoids mutual-demotion wars where two
 admins race to remove each other. Promote carefully.
+
+**Members can block each other.** Anyone can block another person from the **Block** button in their DM
+header, and unblock them from the DM or from **Settings → Blocked people**. This is personal, not
+moderation:
+
+- A block list is private to the member who made it. No admin view or API shows it, it isn't broadcast or
+  synced to other nodes, and Emergency Reset clears it with everything else.
+- It stops DMs **both ways** (new messages, reactions and edits of older ones; typing indicators too). On
+  the blocker's device, the blocked person's posts and replies in channels collapse to "Message from a
+  blocked user" (with Show) and their reactions, typing and notifications disappear. The node still
+  delivers channel content to everyone; the hiding happens on the blocker's device.
+- The blocked person isn't notified. A DM to someone who blocked them gets a generic "Direct messages to
+  this person aren't available" that doesn't say why, and neither can invite the other into a private
+  channel or hand them one ("This person isn't available for this channel").
+- It doesn't replace reports. Harassment you should know about still needs **Report this user**, and only
+  moderators can ban, time out or remove messages.
+
+Known limits: the blocked person can still work it out (the recipient is plainly active but their DMs
+fail; a banned or not-yet-approved member gets the same DM answer, but those are hidden from the member
+list, so it doesn't disguise the block); a mesh sender can't be blocked (mesh mail arrives outside the
+normal message path); and because the client keeps the list in
+memory only, a device that reloads while it can't reach the node shows cached posts from blocked people
+until it reconnects.
 
 ## 6. Linking nodes into a mesh
 
@@ -180,7 +215,10 @@ other converge in both directions.
 Enabling sync exposes this node's public content to anyone who can reach it while it's on — an explicit
 operator choice. Peers can be authenticated with an optional shared `sync.token` (the `x-loam-sync-token`
 header, sealed inside the transport envelope on encrypted links; a missing/wrong token 404s exactly like
-sync being off) — hardened deployments should set one, pair it with approval joins, or leave sync off.
+sync being off). The token is **never sent over an unencrypted link** (except in Developer Mode): if a peer
+can only be reached in plaintext, the pull goes ahead without it — public data only — and a peer that
+needs the token simply refuses; a `required` node refuses plaintext pulls outright. Hardened deployments
+should set a token, pair it with approval joins, or leave sync off.
 Depth and limits are in [docs/11](11-node-sync.md).
 
 ## 7. Emergency posture
@@ -188,12 +226,16 @@ Depth and limits are in [docs/11](11-node-sync.md).
 For the protest / surveillance threat model, layer these — and be honest that they raise the bar rather
 than guarantee safety (a host seized while powered on, with the key in RAM, is still the weak case).
 
-**Encryption at rest** (`LOAM_DB_KEY`, laptop/Pi only for now):
+**Encryption at rest** (`LOAM_DB_KEY` or `loam --encrypt` on a laptop/Pi; the **Database encryption**
+setting on the Android host, which adds a Keystore-held `persistent` mode):
 
 - **unset** — plain SQLite on disk.
 - **a passphrase** — SQLCipher (AES-256); the same passphrase is required on every start.
 - **`ephemeral`** — a random key generated in memory, **never written to disk**. Data is readable only
   while the process runs; a reboot loses the key forever.
+
+An encrypted setting never falls back to plaintext: if the SQLCipher driver is missing, the CLI stops
+before starting and the Android host locks (see §1).
 
 **Kill switch** (**Admin → Kill switch**, or armed automatically by the Hardened profile). Firing it:
 
@@ -202,9 +244,13 @@ than guarantee safety (a host seized while powered on, with the key in RAM, is s
    them to a neutral "Disconnected" screen,
 3. re-seeds defaults so the node is usable again. **Node config survives**, so the switch can fire again.
 
-With encryption on, the wipe is *cryptographic*: it closes the store, deletes the DB files, and (in
-`ephemeral` mode) rotates to a fresh key, so bytes still physically on flash become unreadable. Without
-encryption it's a logical `DELETE` — recoverable pages may remain on flash (docs/02).
+With encryption on, the wipe is *cryptographic*: it closes the store, deletes the DB files, and rotates
+to a fresh key (`ephemeral` mode in-process; on the Android host, for `persistent`/`passphrase`, the
+launcher clears the Keystore-held device secret the key is derived from, so even the same passphrase yields
+a new key), so bytes still physically on flash become unreadable. A
+laptop/Pi using a fixed `LOAM_DB_KEY` passphrase can't rotate it in-process: the files are deleted but the
+fresh database is keyed with the same passphrase. Without encryption it's a logical `DELETE` —
+recoverable pages may remain on flash (docs/02).
 
 **Panic token.** Set a token (≥16 chars) in the kill-switch panel to enable an unauthenticated
 `POST /api/panic` — fire the wipe from a bookmark or second device without logging into the admin UI
@@ -213,7 +259,9 @@ entirely unless a token is configured. Require typed confirmation (default on) f
 for the one-tap raid case.
 
 **What survives a wipe, and what peers keep.** A kill switch wipes *your* node and *its* connected
-clients — not other people's phones that have since disconnected, and **not peer nodes**. If you enabled
+clients. A phone that was disconnected at the time keeps its cached copy until it next reaches this node:
+it then gets a different identity than the one it last had confirmed, and purges its cache before
+showing anything. A phone that never reconnects keeps its copy. It does **not** reach peer nodes. If you enabled
 sync, a peer keeps every public message it already pulled. That is the point of a mesh, and worth knowing
 before you both enable sync *and* rely on the kill switch.
 

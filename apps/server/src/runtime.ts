@@ -4,9 +4,9 @@
 // reload is observed immediately, plus the hoisted helper functions the subsystems call back into.
 import type { FastifyBaseLogger } from "fastify";
 
-import type { Channel, LoamConfig, Message, MessageCreateRequest, StreamEvent, User } from "@loam/schema";
+import type { Channel, LoamConfig, Message, MessageCreateRequest, StreamEvent, TransportEncryption, User } from "@loam/schema";
 
-import type { LoamStore } from "./db.js";
+import type { LoamStore, StoreQuarantine } from "./db.js";
 import type { AppData, AppOptions, ClientEvent } from "./types.js";
 
 /** What `createMessage` returns: the stored message, a deleted one (a reaction toggle-off), or an error. */
@@ -25,16 +25,22 @@ export type Runtime = {
   readonly data: AppData;
   /** The open store (live — reopened by an encrypted kill switch). */
   readonly store: LoamStore;
+  /** Ids of stored rows that no longer validate and couldn't be repaired (live: `store.quarantine()`); no
+   *  path may create or overwrite them — the store's writes refuse them too. */
+  readonly quarantine: StoreQuarantine;
   /** Bumped by every kill-switch wipe; a long-running pass abandons itself when it changes. */
   readonly wipeGeneration: number;
   /** True for the duration of a kill-switch wipe. */
   readonly wipeInProgress: boolean;
   log: FastifyBaseLogger;
   options: AppOptions;
+  /** The transport-encryption mode actually in force (Developer Mode projects `off`). */
+  effectiveTransportEncryption(): TransportEncryption;
   attachmentsDir: string;
   /** Uploads not yet consumed by a message, keyed by attachment id (uploader-bound). */
   attachmentOwners: Map<string, { userId: string; uploadedAt: number }>;
-  /** Message ids deliberately deleted on this node — never re-imported. */
+  /** Message ids deliberately deleted on this node — never re-imported. For the current boot it also holds
+   *  the quarantined message ids (in memory only), so every tombstone refusal covers them. */
   tombstones: Set<string>;
   /** Channel ids imported from a sync peer (C1 provenance). */
   syncedChannelIds: Set<string>;

@@ -29,6 +29,18 @@ const WS_UNCONFIRMED_PER_IP_CAP = 8;
  * at a Pi/phone host concurrently. 16 KiB leaves generous headroom for the proof envelope.
  */
 export const WS_MAX_INBOUND_FRAME_BYTES = 16 * 1024;
+/**
+ * Heartbeat period for every admitted socket (pre-release review 2026-09-25). A LOAM client never sends
+ * after its key confirmation, so a connection whose peer silently vanished (phone left the hotspot, AP
+ * dropped the flow) never errors on its side: it would show "live" forever and miss every event. The
+ * server sends a content-free `{ type: "ping" }` on admission and then every interval; the client's
+ * watchdog (`apps/client/src/lib/ws-liveness.ts`, kept in step with this value) reconnects after ~2
+ * missed beats. ~25s keeps it modest on battery/bandwidth and under typical NAT/AP idle timeouts. The
+ * frame goes through `wsSend`, so an encrypted socket gets it sealed + sequenced like any event; it
+ * carries no data (nothing about presence or other users).
+ */
+export const WS_HEARTBEAT_INTERVAL_MS = 25_000;
+const WS_HEARTBEAT_FRAME = JSON.stringify({ type: "ping" });
 
 /** Build the live-event layer over the app context: socket set, audience filtering, sealed frames, presence, `/ws`. */
 export function createRealtime(ctx: AppContext) {
@@ -162,6 +174,27 @@ export function createRealtime(ctx: AppContext) {
       return;
     }
     session.socket.send(payload);
+  }
+
+  /** Start the heartbeat for an ADMITTED socket (plaintext on connect, encrypted only once key-confirmed):
+   * one beat immediately — so the client knows this node speaks heartbeats and arms its watchdog — then
+   * one every `WS_HEARTBEAT_INTERVAL_MS`. Returns the stop function the socket's close handler must call. */
+  function startHeartbeat(session: SocketSession): () => void {
+    const beat = (): void => {
+      if (session.socket.readyState !== session.socket.OPEN) {
+        return;
+      }
+      try {
+        wsSend(session, WS_HEARTBEAT_FRAME);
+      } catch {
+        // A socket failing mid-send is closing; its close handler stops this heartbeat.
+      }
+    };
+    beat();
+    const interval = setInterval(beat, WS_HEARTBEAT_INTERVAL_MS);
+    // Never keep the process alive for a heartbeat (tests, shutdown); guarded for WS mocks.
+    (interval as { unref?: () => void }).unref?.();
+    return () => clearInterval(interval);
   }
 
   /** Send an event to every connected socket whose user may receive it (see `socketCanReceiveEvent`). */
@@ -317,7 +350,9 @@ export function createRealtime(ctx: AppContext) {
         const socketSession: SocketSession = { socket: connection, userId };
         sockets.add(socketSession);
         broadcastPresence();
+        const stopHeartbeat = startHeartbeat(socketSession);
         connection.on("close", () => {
+          stopHeartbeat();
           sockets.delete(socketSession);
           broadcastPresence();
         });
@@ -368,6 +403,8 @@ export function createRealtime(ctx: AppContext) {
       // Closes the socket when its transport session reaches `expiresAt`, so a confirmed socket can't keep
       // receiving frames past the session key's lifetime (docs/20 §7). Set on confirm, cleared on close.
       let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+      // The heartbeat starts only once the socket is key-confirmed (nothing is sent before), stopped on close.
+      let stopHeartbeat: (() => void) | undefined;
       // Register the mid-challenge socket so ban/logout/kill-switch can reach and close it — otherwise it
       // exists only as closures and could complete its proof AFTER being revoked and slip into the feed.
       const pending = { userId, close: () => connection.close() };
@@ -430,6 +467,7 @@ export function createRealtime(ctx: AppContext) {
         expiryTimer = setTimeout(() => connection.close(), Math.max(0, transportSession.expiresAt - Date.now()));
         (expiryTimer as { unref?: () => void }).unref?.();
         broadcastPresence();
+        stopHeartbeat = startHeartbeat(socketSession);
       });
 
       connection.on("close", () => {
@@ -437,6 +475,7 @@ export function createRealtime(ctx: AppContext) {
         if (expiryTimer) {
           clearTimeout(expiryTimer);
         }
+        stopHeartbeat?.();
         releaseUnconfirmed();
         pendingSockets.delete(pending);
         sockets.delete(socketSession);

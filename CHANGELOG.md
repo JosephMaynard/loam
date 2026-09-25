@@ -4,64 +4,205 @@ All notable changes to LOAM are recorded here. LOAM is a local-first, off-grid m
 `README.md` and `MISSION.md`). Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 the project is pre-1.0, so the surface can still change. Dates are UTC.
 
-## [Unreleased]
+## [0.5.0] - Unreleased
 
-- **Review fixes (2026-09-04 full-codebase review).** Client: a QR-joined client can no longer fall back
-  to plaintext on an `optional` node when its handshake fails (the decision now comes from the transport
-  layer's QR-pinned effective mode, not the unauthenticated advertisement); a node whose transport key
-  changed (Emergency Reset, stale poster) marks the pinned key broken and shows a "scan the current join
-  QR" gate instead of looping on a doomed resume — the pin is kept (never replaced by an advertised key)
-  and only a fresh scan clears it, and a pinned client refuses plaintext fetches/sockets outright; a transparent re-handshake closes the socket sealed under the old
-  key; a wipe also forgets the cached host key, revokes decrypted image `blob:` URLs and clears the
-  rendered-markdown cache; a live transport-mode flip re-runs session setup. Server: WebSocket inbound
-  frames capped at 16 KiB (was the 100 MiB library default, buffered even on pre-auth sockets); a
-  non-member's PATCH on a private channel answers 404 like every sibling route; sync import honours a
-  locally-authoritative channel's posting policy and the node's channel/reply/reaction flags; typing
-  signals respect the posting policy; sealed mesh mail is dropped (and tombstoned) when DMs are off; avatar
-  files no user references are reaped at boot. Android host: **`hostDevice` admin bootstrap** — the
-  launcher mints a per-boot host token and the host's own WebView claims admin with it, so no LAN session
-  can take `firstUser` in the boot window; the loopback mesh bridge requires the same token;
-  **passphrase mode asks for the passphrase at every start and never stores it** (a legacy stored copy is
-  retired only once the server confirms the database opened under it — never on a discarded attempt; the
-  unreadable-DB recovery screen offers "enter it again" for a typo, and "start fresh" re-asks for the
-  passphrase so a fresh database is never keyed by a mistyped one; the host's own admin claim is honoured
-  ahead of the per-IP attempt limiter and retried on later passes; after a node wipe the host screen
-  rejoins under the new key and re-claims admin without an app restart); a
-  system-stopped hotspot (tethering, Wi-Fi toggle) is reflected in the share screen and restarts on reopen;
-  ephemeral mode removes avatars/attachments with the database; the native SQLite wrappers' transitive
-  deps are pinned. `docs/21` gains host-claim and system-stopped-hotspot checks.
-- **Server split.** `apps/server/src/app.ts` (9.4k lines) is now a ~2k-line composition root + domain
-  core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain
-  routes are sibling modules over one `AppContext` (CLAUDE.md "Server architecture"). No behaviour change.
-- README and the site no longer claim an installable offline PWA on the plain-http hotspot path (a
-  hotspot address is not a browser secure context); the copy now says what joiners actually get.
-- **Pre-tester hardening** (from an external full-codebase review, 2026-08-15, plus a three-agent
-  adversarial pass over the fixes): one shared content-mutation policy — removed private-channel
-  members, timed-out users, archived channels, and post-hoc posting-policy lockdowns can no longer
-  be bypassed via edit, delete, or **reaction** paths; archive is now uniformly **read-only but
-  available** (readable, searchable, listed with a badge; composer/actions disabled; roster growth
-  — invite/transfer/join-request-approval — frozen); channels gain a first-class **permanent
-  delete** (cascade incl. reactions + attachment files, sync tombstone, join-request cleanup,
-  slug never reused, survives restarts — and a non-admin owner cannot delete a channel holding
-  other people's messages); moderator timeouts also cover channel creation, metadata edits, and
-  roster growth (invite/transfer/approval — shrinking access stays available) and profile edits
-  (join *requests* deliberately stay open — they publish nothing and grant nothing unapproved);
-  switching DMs or replies off blocks edits of pre-shutdown messages (deletion stays, as cleanup); the `npx loamnet` join QR carries the `#k=` transport key (and the QR
-  encoder auto-degrades EC level so keyed URLs actually render — this also silently broke the
-  browser invite QR); the 1 MB attachment limit is actually reachable (per-route body ceilings on
-  the upload + tunnel paths only); semantic rate limits apply inside the encrypted tunnel across
-  uploads, mesh, sync, and search (image *reads* got higher caps so `required`-mode clients don't
-  starve); avatar uploads and mesh sends respect moderator timeouts; SECURITY.md corrected.
-- **Upgrade notes:** channels archived under the old semantics were *hidden*; after this release
-  they reappear for their audience as read-only (archive was never an access control — direct
-  reads always worked — but it *was* a visibility control; use **Delete** for gone-for-good).
-  Archiving also no longer purges members' local caches — **Delete is the purge lever** now. PR #122 review follow-ups: an Emergency Reset on a fixed-key node without the launcher hook now
-  re-persists the FULL config (sync token included) into the fresh encrypted DB row, matching the ephemeral
-  branch (the plaintext `config.json` copy stays sanitized); the Android passphrase entry is tried before a
-  legacy stored passphrase so a pre-change install can change it (the legacy value is retired only on the
-  server's confirmed-open ack); a key scanned this session always wins over a stale stored pin; a failed
-  sealed resume also closes the socket sealed under the old key; the Android wipe handler re-gates the
-  WebView before re-bootstrapping; per-route rate limits are inline literals so CodeQL can see them.
+The pre-release review release: fixes from two full-codebase reviews (2026-09-04, 2026-09-25) and an
+external one (2026-08-15), the server split, per-user blocking, and Play Store groundwork.
+
+### Security
+- **Key pinning is fail-closed.** A QR-joined client can no longer fall back to plaintext on an
+  `optional` node when its handshake fails, and refuses plaintext fetches/sockets outright. A node whose
+  key changed (Emergency Reset, stale poster) shows a "scan the current join QR" gate instead of looping.
+  A join link carrying a *different* key never quietly replaces the pin: while the pinned key still
+  works the link is ignored, and once the node's key has really changed the client asks (showing both
+  fingerprints) and accepts only the key the node itself reports. The Android host's own screen is handed
+  the node's key by the launcher, so a node with an ephemeral database key (a new transport key every boot)
+  no longer shows the host a rescan screen on every launch. On a pinned session the client refuses an unsealed tunnel reply (an on-path attacker
+  could otherwise forge one, e.g. a mesh contact card). The invite QR a client shows carries the node key
+  only from its own QR-verified session, and join-key fragments are stripped from links in messages.
+- **Plaintext transport can't be configured any more.** `security.transportEncryption: "off"` is refused
+  by the admin API; an `off` left in `config.json` or the database is read as `optional`, with a warning.
+  Developer Mode (`LOAM_DEV_MODE`, never in production) is the only plaintext path.
+- **Encrypted databases fail closed.** If the SQLCipher driver won't load, an encrypted Android node now
+  stops on a lock screen (Retry, or a confirmed "Start without encryption") instead of silently running on
+  plaintext SQLite; the `loam` CLI checks the driver before it starts, and the server locks with the same
+  error when a keyed open fails for lack of the driver. After every keyed open the server refuses a
+  database file that is still plaintext, and a keyed open that fails on a new node no longer leaves a
+  plaintext file behind.
+- **CLI passphrases stay out of `ps` and shell history.** Bare `loam --encrypt` takes `$LOAM_DB_KEY` or
+  prompts without echo; `--encrypt <passphrase>` still works but warns.
+- **Android host.** The host phone's own screen claims admin with a per-boot token (`hostDevice`), so no
+  LAN device can take the first-user admin grant while the node boots. Passphrase mode asks for the
+  passphrase at every start and never stores it. Android 12+ device-to-device transfer no longer copies
+  the database, media or config to a new phone. The loopback mesh bridge requires the launcher's token on
+  every host (a desktop/Pi node has no bridge).
+- **Logs don't undo the tunnel.** Requests re-dispatched inside the encrypted tunnel are no longer
+  request-logged (that printed the hidden path and query), and query strings are stripped from every
+  logged URL. Fastify's own "reply was already sent" warnings, which printed the raw URL, now omit it. Unexpected server errors return a generic body; details go to the log only.
+- **Server hardening.** Uploaded avatar ids are validated (a crafted id could reach outside the avatar
+  directory); the assistant bot id must be an `llm.*` id and can't be pointed at a person's account;
+  record ids are capped at 128 characters; session ids are longer (64-bit, minted collision-free) and
+  session tokens 256-bit; admin-claim and panic attempt limits also count requests made through the
+  tunnel; inbound WebSocket frames are capped at 16 KiB.
+- **Upgrade quarantine.** A stored row from 0.4 that fails the tighter bounds and can't be safely repaired
+  is quarantined at boot: not loaded, left on disk untouched, and its id refused everywhere. A sync peer, a
+  new channel, the default channels or a new session can't take that id, and a peer can't re-supply the
+  message or user. Messages under a quarantined channel, and replies and reactions under a quarantined
+  message, are quarantined too. Previously the row was only skipped: a private channel with one over-long
+  member id disappeared, and a peer's public channel with the same name was then written over it, exposing
+  its retained messages. A boot warning gives the counts; Emergency Reset removes the rows, and retention
+  (`retention.messageTtlMs` or a channel TTL) deletes quarantined messages once they expire. An open report
+  0.4 wrote about a peer message with an over-long id is skipped the same way; it used to make every boot of
+  an upgraded node fail.
+- **Node-to-node sync.** A peer can no longer edit a post a local user wrote, re-type a private message
+  into a public channel, bind a local or pending attachment to its own message, undo a moderator's
+  removal, or add new replies or reactions under a post a moderator removed here. Only the authors of
+  accepted messages are imported, and mesh ids, the whole `llm.*` assistant namespace and non-human
+  (bot/system) author records are refused. A peer that answers every batch with junk can no longer make
+  a round issue thousands of requests: splitting a bad batch has a per-round request and byte budget,
+  after which the peer fails the round, and too-large answers shrink later batches. An import is checked
+  again right before it lands, after its attachments download, so a moderator removal, delete, archive or
+  parent removal made meanwhile wins, and the files a discarded import wrote are deleted; the
+  missing-attachment retry no longer fetches a file back for a message that no longer lists it. Only
+  records the puller asked for, on the list it asked for them on, are imported. The
+  sync token is never sent on a plaintext pull, a `required` node refuses plaintext pulls, and a peer that
+  negotiated encryption is never silently downgraded.
+- **Mesh.** Replay protection keys on the sealed content (ciphertext, routing tag and expiry), only the
+  canonical encoding is accepted, and a forged hop budget or metadata can no longer shadow genuine mail.
+  A node now fetches every eligible sealed offer rather than only its own mail, so the serving peer can't
+  learn which node a recipient uses (docs/16 states the remaining leak). Every sealed offer a node has
+  fetched or received is remembered durably, whatever became of it, for longer than any tombstone it can
+  leave (the 30-day tombstone horizon plus the 7-day TTL maximum and two days' slack), and skipped on
+  every digest list, so a restart, a config save, switching relaying on, re-listing the ids as public
+  messages or re-advertising them with a later TTL no longer makes it re-fetch only the blobs it dropped
+  (which told the serving peer which ones it had delivered). Sealed offers must carry a `seal_` id and
+  public records may not, so the two lists never share an id. Each source may fill at most 50 000 of the
+  record's 200 000 entries; past that the node stops pulling new sealed offers from that source, and blobs
+  arriving over the radio bridge obey the same bounds. The record also keeps each mail's replay key, so the
+  same mail re-offered under new ids isn't carried either. A sync round imports the sealed mail it fetched
+  only after its last request, so request timing can't show which batches held local mail, and the radio
+  bridge's answer and the courier's re-advertising no longer depend on whether a blob was delivered. A node with relaying off and no local mesh identity pulls
+  no sealed mail, and `mesh.maxSealedPullPerRound` (default 80) caps sealed pulls per round for metered
+  links. Mesh identities are only minted for local users, and rows an older build minted for synced users
+  are deleted at boot; a database upgraded from 0.4.0 first has its peer-imported users identified and
+  marked, and the `mesh.*` records it imported from peers removed.
+- **Emergency Reset.** An upload landing mid-reset can no longer restore the pre-reset user or leave a
+  file behind; start-fresh recovery snapshots are swept too; an assistant reply streaming across a reset
+  is abandoned; a device that was offline during the reset clears its local copy when it next connects.
+  On a fixed-key node without the Android launcher, the full config is re-persisted after the reset.
+- **One content-mutation policy** (from the external review): removed private-channel members, timed-out
+  users, archived channels and posting-policy lockdowns can no longer be bypassed through edit, delete or
+  reaction paths; moderator timeouts also cover channel creation, metadata edits, roster growth, profile
+  edits, avatar uploads and mesh sends; rate limits apply inside the encrypted tunnel. `SECURITY.md`
+  corrected.
+
+### Fixed
+- **Dead connections are noticed.** The server sends a heartbeat on every WebSocket; a client that stops
+  hearing it reconnects, and re-checks when the device comes back online or the page becomes visible. A
+  check that runs late because the page was frozen waits briefly for queued frames instead of dropping a
+  healthy connection.
+- When a node resets this browser's identity, other open tabs of LOAM drop the old identity's messages and
+  reload too. Tunnelled images still on screen after a wipe or identity change load again instead of
+  showing broken.
+- **Android keeps hosting with the screen off**: the foreground service is re-asserted whenever the app
+  returns to the foreground (a start from the background can be refused), and the notification permission
+  is requested so the "LOAM is hosting" notice shows on Android 13+. A system-stopped hotspot (tethering,
+  Wi-Fi toggle) is reflected on the share screen and restarts on reopen.
+- Drafts, pending attachments, report dialogs and scroll position no longer follow you into the next
+  conversation, and a report dialog stays bound to the user it was opened for.
+- A message deleted or edited while its conversation was loading is no longer resurrected or reverted;
+  unread markers use the server's timestamps rather than the device clock.
+- Moderator timeouts are a duration applied on the node's clock (capped at 7 days), so a moderator's
+  device clock can't set a years-long or already-expired timeout.
+- A message removed by a moderator can't be edited by its author or take new replies or reactions.
+- Assistant: a reply interrupted by a crash is finalized on restart, a moderator removal stops a reply
+  mid-stream, replies are limited to one per user and two at a time per node, and an admin save no
+  longer freezes the Android host's model switching. Stopping an on-device reply keeps its slot until the
+  phone's model finishes, so a new request can't start a second generation beside it. An admin's own on-device model change is saved to
+  `config.json` when that file holds the on-device settings (the Android host, or any node after an
+  Emergency Reset), so a restart no longer undoes it.
+- Claiming admin on a node that requires join approval now leaves the claimer approved.
+- The orphaned-attachment sweep can no longer delete a file an in-flight upload is about to use.
+- Non-image files sync between nodes over encrypted sync, up to the 1 MiB file limit.
+- The legacy demo users (`user.1234`/`user.5678`) and their messages are removed from older databases.
+- Android: overlapping encryption/model requests to the embedded server no longer time each other out.
+- Android build: the plain SQLite driver is now vendored in the repo, after an upstream re-upload broke
+  the pinned download.
+- Large encrypted requests (up to 4 MiB) no longer block the server for tens of milliseconds while being
+  decoded.
+- Earlier review fixes: a transparent re-handshake closes the socket sealed under the old key; a wipe also
+  forgets the cached node key, image URLs and rendered-message cache; a non-member editing a private
+  channel gets the same 404 as elsewhere; sync honours a channel's posting policy and the node's flags;
+  typing signals respect posting policy; sealed mail is dropped when DMs are off; unreferenced avatars are
+  cleaned up at boot; the `npx loamnet` join QR carries the node key; the 1 MB attachment limit is
+  actually reachable.
+- Search rejects a malformed query with a 400; a malformed link no longer crashes routing.
+- Sync: offers refused under an old policy are fetched again right after an admin config save or a change
+  to a channel's archived, posting or replies setting, instead of up to an hour later.
+- `loam --encrypt`: an empty passphrase for an existing database is refused (it used to pick an ephemeral
+  key that can never open it), a pasted passphrase and confirmation are no longer cut at the first line,
+  and the missing-driver message says to reinstall `loamnet` rather than install the driver globally,
+  where `loam` never looks.
+- Android: the "Start without encryption" confirmation no longer tells an ephemeral-mode host that its old
+  database stays on disk; it was already deleted.
+- The Play listing no longer hides from landscape-only devices such as Chromebooks: the portrait screen is
+  declared optional.
+- An Emergency Reset journal whose saved config predates this release (`off` transport, an old bot id) is
+  repaired like `config.json` instead of locking the node as corrupt, and a repaired stored config is
+  written back once, so its warning doesn't repeat every boot.
+- An assistant bot id replaced by the upgrade repair (or changed by an admin) no longer leaves the old bot
+  on the member list as a dead contact; only the configured assistant is listed.
+- A node upgraded from 0.4 boots even when its database or `config.json` holds values past the new
+  bounds: a private channel's roster entry over 128 characters is dropped (it can't be a local user), an
+  assistant model label over 120 characters is truncated, and any other stored user, channel or message
+  that no longer validates is quarantined (see Security).
+
+### Added
+- **Blocking.** Block someone from their DM header; unblock there or in Settings. Blocking stops DMs, DM
+  reactions and typing both ways, stops either of you inviting the other into a private channel or handing
+  them one, and hides the person's channel posts, replies and reactions on your device, search results
+  included. They aren't told: a DM to someone who blocked them gets a generic "not available" answer that
+  doesn't say why. The list is private to you, never synced, and cleared by Emergency Reset; the device keeps
+  a copy so blocked people stay hidden when it starts offline.
+- **Privacy policy** at [loamnet.com/privacy](https://loamnet.com/privacy), linked from the site footer,
+  the client's Settings and the Android host menu.
+- **Report this user** from a DM's header.
+- Channel **Delete** (permanent, with its messages, reactions and files; sync never re-imports it).
+- A download confirmation for on-device models, stating the size and warning about mobile or metered
+  data.
+- A dismissible error notice at the top of the screen, a "conversation not available" state, and a
+  recoverable crash screen.
+- `pnpm --filter app aab` builds an Android App Bundle for Google Play, and tag builds in CI produce it as
+  the `loam-host-aab` workflow artifact (not attached to the Release); a themed (monochrome) app icon.
+- Every one of the 14 non-English locales now covers every string, with a test that keeps it that way
+  (machine-translated, pending native review).
+- CI checks that all package versions agree; tag builds also check the tag and that `versionCode` is above
+  every earlier release tag's. `vX.Y.Z-rc.N` and `vX.Y.Z-beta.N` tags build like releases (keystore, tests,
+  the AAB) and are published as GitHub pre-releases. A stale generated Android project now fails the build
+  instead of shipping old settings.
+
+### Changed
+- **Archived channels are read-only but visible** (readable, searchable, listed with a badge; composing,
+  actions and roster growth frozen). See the upgrade notes.
+- Release signing: `pnpm --filter app aab` refuses to build without a release keystore, and a
+  debug-signed APK build warns unless acknowledged with `--debug-signed`. CI actions are pinned to commit
+  SHAs (Dependabot bumps them weekly), and the job that publishes releases is separate from the build.
+- **DMs to banned or not-yet-approved members are refused** (`dm_unavailable`). They used to be accepted.
+  It's the same generic answer a blocked sender gets.
+- Android: Wi-Fi, location and Bluetooth are declared optional hardware (so Play doesn't filter out
+  tablets and Chromebooks); unused template permissions are blocked; incoming `loam://` links only ever
+  open the host screen.
+- The server's 9.4k-line `app.ts` is split into a ~2k-line core and sibling modules (no behaviour change).
+- README and the site no longer claim an installable offline app on the plain-`http` hotspot path.
+- Dependencies: Vitest 5, Fastify 5.12, Zod 4.6, Vite 8.3, DOMPurify 3.4.15, and other minor updates.
+
+### Upgrade notes
+- Channels archived under the old semantics were *hidden*; they now reappear for their audience as
+  read-only (archive was never an access control, but it was a visibility control). Use **Delete** for
+  gone-for-good. Archiving no longer purges members' local caches; Delete does.
+- A `config.json` with `"transportEncryption": "off"` now boots as `optional`; set `LOAM_DEV_MODE=1` (not
+  in production) if you need plaintext for debugging.
+- Existing session ids keep working; new ones are `user.` + 16 hex characters.
 
 ## [0.4.0] - 2026-08-08
 

@@ -11,8 +11,14 @@ import { LoamConfigSchema, type LoamConfig } from "@loam/schema";
 import type { FastifyBaseLogger } from "fastify";
 
 import { reportBootNotice, reportDbKeyMigrated } from "./boot-bridge.js";
-import { openStore, type LoamStore } from "./db.js";
-import { DbEncryptionPlaintextUnconvertedError, DbEncryptionUnreadableError, WipeResumeInProgressError } from "./errors.js";
+import { sanitizeLegacyFullConfigJson } from "./config.js";
+import { hasPlaintextSqliteHeader, openStore, probeEncryptedDriver, type LoamStore } from "./db.js";
+import {
+  DbEncryptionDriverMissingError,
+  DbEncryptionPlaintextUnconvertedError,
+  DbEncryptionUnreadableError,
+  WipeResumeInProgressError,
+} from "./errors.js";
 import type { AppOptions } from "./types.js";
 
 /** The live at-rest key state. `dbKey` is the active SQLCipher key (rotated by an ephemeral-mode kill
@@ -174,33 +180,52 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    */
   function deleteAndVerifyAllWipeArtifacts(): DeletionResult {
     const db = deleteAndVerifyDbArtifacts();
-    const survivors = [...db.survivors];
-    const errors = [...db.errors];
-    // The media dirs, PLUS any preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol
-    // round-11): those hold an old, still-readable (under the prior key) DB set + avatars + attachments moved
-    // aside by a `preserve` start-fresh, so an emergency wipe must remove them too. A `readdir` failure here
-    // is surfaced as an error (fail closed) — "can't enumerate" is not "nothing to remove".
-    const dirsToRemove = [avatarsDir, attachmentsDir];
-    try {
-      for (const entry of readdirSync(dataDir)) {
-        if (entry.startsWith(".loam-recovery-")) {
-          dirsToRemove.push(join(dataDir, entry));
-        }
-      }
-    } catch (error) {
-      errors.push(`readdir ${dataDir} (recovery snapshots): ${error instanceof Error ? error.message : String(error)}`);
-    }
-    for (const dir of dirsToRemove) {
+    // The media dirs PLUS every preserve-recovery snapshot + anchor (see deleteAndVerifyRecoverySnapshots).
+    const media = deleteAndVerifyPaths([avatarsDir, attachmentsDir], true);
+    const survivors = [...db.survivors, ...media.survivors];
+    const errors = [...db.errors, ...media.errors];
+    return { ok: survivors.length === 0 && errors.length === 0, survivors, errors };
+  }
+
+  /**
+   * Delete + PROVE gone every preserve-recovery artifact: the `.loam-recovery-<suffix>/` snapshot directories
+   * (Sol round-11 — an old, still-readable-under-the-prior-key DB set + avatars + attachments moved aside by a
+   * `preserve` start-fresh) and the `.loam-recovery-state` anchor. EVERY emergency-wipe branch must remove
+   * them — the ephemeral and plaintext branches too, not only the fixed-key ones (review 2026-09-25 #7).
+   */
+  function deleteAndVerifyRecoverySnapshots(): DeletionResult {
+    return deleteAndVerifyPaths([], true);
+  }
+
+  /** Remove `paths` (recursively) — plus, with `withRecoverySnapshots`, every `.loam-recovery-*` entry in the
+   *  data dir — and prove each absent. A `readdir` failure is surfaced as an error (fail closed): "can't
+   *  enumerate" is not "nothing to remove". */
+  function deleteAndVerifyPaths(paths: string[], withRecoverySnapshots: boolean): DeletionResult {
+    const survivors: string[] = [];
+    const errors: string[] = [];
+    const toRemove = [...paths];
+    if (withRecoverySnapshots) {
       try {
-        rmSync(dir, { recursive: true, force: true });
+        for (const entry of readdirSync(dataDir)) {
+          if (entry.startsWith(".loam-recovery-")) {
+            toRemove.push(join(dataDir, entry));
+          }
+        }
+      } catch (error) {
+        errors.push(`readdir ${dataDir} (recovery snapshots): ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const path of toRemove) {
+      try {
+        rmSync(path, { recursive: true, force: true });
       } catch {
         // Fall through to the proven-absence check.
       }
-      const status = provenAbsence(dir);
+      const status = provenAbsence(path);
       if (status === "present") {
-        survivors.push(dir);
+        survivors.push(path);
       } else if (status === "unknown") {
-        errors.push(dir);
+        errors.push(path);
       }
     }
     return { ok: survivors.length === 0 && errors.length === 0, survivors, errors };
@@ -563,7 +588,14 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     let config: LoamConfig | undefined;
     let configInvalid = false;
     if (obj.config !== undefined) {
-      const validated = LoamConfigSchema.safeParse(obj.config);
+      // A snapshot committed by an OLDER build may hold values that build accepted but the schema now refuses
+      // (a configured `off` transport, an out-of-namespace bot id): repair them exactly as a config.json /
+      // persisted row is repaired at load, rather than locking the node as if the journal were corrupt.
+      const { json: repaired, repairs } = sanitizeLegacyFullConfigJson(obj.config);
+      for (const repair of repairs) {
+        log.warn(`wipe journal config snapshot: ${repair}`);
+      }
+      const validated = LoamConfigSchema.safeParse(repaired);
       if (validated.success) {
         config = validated.data;
       } else {
@@ -680,6 +712,43 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     resumePreserveRecovery();
 
     const keyWasResolved = state.dbKey !== undefined;
+
+    /**
+     * Stop a failed KEYED open from entering the migration / plaintext-probe / start-fresh recovery chain
+     * when that chain can't apply. Throws; returns only when recovery should proceed as before.
+     *  - The SQLCipher driver doesn't load: nothing on disk is wrong, so no recovery action (start fresh,
+     *    delete and re-encrypt) may be offered. Report `db_encryption_driver_missing`, the same fatal code
+     *    the Android launcher uses when its own probe fails, and lock.
+     *  - There was no database before this boot: there is nothing to migrate or recover. Remove whatever
+     *    the failed open itself created (a codec that never engaged writes a PLAINTEXT file, which a later
+     *    boot would otherwise misreport as an unconverted plaintext database) and rethrow the open error.
+     */
+    function failFatallyIfKeyedOpenCannotRecover(openError: unknown, dbExistedBeforeOpen: boolean): void {
+      const removeStrayNewDb = () => {
+        if (!dbExistedBeforeOpen) {
+          for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
+            rmSync(path, { force: true });
+          }
+        }
+      };
+
+      const driverError = probeEncryptedDriver();
+      if (driverError) {
+        removeStrayNewDb();
+        const message =
+          "An encrypted database mode is configured but the SQLCipher driver (better-sqlite3-multiple-ciphers) " +
+          `could not be loaded: ${driverError.message}. Refusing to start (no plaintext fallback).`;
+        log.error(message);
+        reportBootNotice(message, "db_encryption_driver_missing");
+        throw new DbEncryptionDriverMissingError(message);
+      }
+
+      if (!dbExistedBeforeOpen) {
+        removeStrayNewDb();
+        log.error(openError, "Could not create a new encrypted database");
+        throw openError;
+      }
+    }
 
     /**
      * Execute a confirmed start-fresh honoring the operator's INTENT (P1-2, Sol round-9) — the SINGLE place
@@ -907,6 +976,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       }
     }
 
+    // Whether a database file was on disk BEFORE the keyed open below: that open creates the file when it is
+    // missing, so after a failure its mere presence proves nothing about pre-existing data.
+    const dbExistedBeforeOpen = existsSync(dbPath);
     try {
       const opened = openLoamStore();
       if (keyWasResolved && (options.dbEncryptionMigrateFromKey !== undefined || options.dbEncryptionMode === "passphrase")) {
@@ -921,7 +993,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         reportDbKeyMigrated(options.dbKeyRequestId);
       }
       return opened;
-    } catch {
+    } catch (openError) {
+      if (keyWasResolved) {
+        failFatallyIfKeyedOpenCannotRecover(openError, dbExistedBeforeOpen);
+      }
       // Fall through — try the legacy-key migration below, then the plaintext fallback (case 2), or
       // recovery (case 3).
     }
@@ -1034,12 +1109,15 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       // genuine plaintext SQLite DB under an encrypted mode — the persisted mode/hint say encrypted. The old
       // code SILENTLY served that plaintext file (`state.encryptionEnabled=false`, `db_encryption_open_failed`),
       // a confidentiality downgrade the operator was never told about. Instead LOCK: do NOT serve plaintext.
+      // Probe only a file that carries the plaintext SQLite header: opening anything else without a key
+      // would either fail (ciphertext) or, for a missing path, CREATE a fresh plaintext database.
       let plainStore: LoamStore | undefined;
-      try {
-        plainStore = openStore(dbPath, { driver: options.dbDriver });
-      } catch {
-        // Not plaintext either (genuine ciphertext with the wrong key) — fall through to the marker-gated
-        // recovery below, exactly as before.
+      if (hasPlaintextSqliteHeader(dbPath)) {
+        try {
+          plainStore = openStore(dbPath, { driver: options.dbDriver });
+        } catch {
+          // Unopenable despite the header — fall through to the marker-gated recovery below.
+        }
       }
 
       if (plainStore) {
@@ -1287,6 +1365,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     openLoamStore,
     dbArtifactPaths,
     deleteAndVerifyDbArtifacts,
+    deleteAndVerifyRecoverySnapshots,
     deleteAndVerifyAllWipeArtifactsDurable,
     durableWriteFileSync,
     sanitizeConfigForRestart,

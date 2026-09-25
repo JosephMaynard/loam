@@ -1,8 +1,9 @@
 import { ReportReasonSchema, type ReportReason, type ReportTargetType } from "@loam/schema";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { requestJson } from "../lib/api";
+import { trapFocus } from "../lib/focus-trap";
 
 interface ReportDialogProps {
   targetType: ReportTargetType;
@@ -23,9 +24,16 @@ export function ReportDialog({ targetType, targetId, onClose }: ReportDialogProp
   const [sent, setSent] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Move focus into the dialog on open (accessibility), so keyboard/screen-reader users land in it.
-  useEffect(() => {
+  // Move focus into the dialog on open (accessibility), so keyboard/screen-reader users land in it — and
+  // give it back to whatever opened the dialog (the report button) when it closes, however it closes.
+  useLayoutEffect(() => {
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialogRef.current?.focus();
+    return () => {
+      if (trigger?.isConnected) {
+        trigger.focus();
+      }
+    };
   }, []);
 
   async function submit(): Promise<void> {
@@ -63,7 +71,9 @@ export function ReportDialog({ targetType, targetId, onClose }: ReportDialogProp
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             onClose();
+            return;
           }
+          trapFocus(dialogRef.current, event);
         }}
         ref={dialogRef}
         role="dialog"

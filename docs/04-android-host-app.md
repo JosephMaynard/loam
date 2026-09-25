@@ -6,7 +6,7 @@
 > On-device proof: `Server listening on 0.0.0.0:3000`, `GET /api/config` → 200 (session minted),
 > `POST /api/messages` → 201 with read-back, and the client rendered live (channels, DMs, avatars,
 > "live" WS badge). DB uses plain **better-sqlite3** (unencrypted) via the digidem ABI-108
-> android-arm64 prebuild. Then on `feat/android-hotspot-join`: a **`LocalOnlyHotspot` native module**
+> android-arm64 prebuild (now vendored in-repo; SQLCipher encryption at rest ships too — see below). Then on `feat/android-hotspot-join`: a **`LocalOnlyHotspot` native module**
 > (`apps/app/modules/loam-hotspot`, Kotlin via the Expo Modules API) plus a **"Share · Host" host bar**
 > above the WebView that opens a modal rendering the two-step QR join flow (`HostShareOverlay` →
 > `HostPanel`). Emulator-verified (arm64 API-35): LOAM still loads, the bar's button opens the modal,
@@ -19,8 +19,8 @@
 > a 20s JS start-timeout, and an error message in Step 1 while Step 2's QR stays — but wasn't the path
 > this emulator took. The full two-phone join (a second device scans Step 1, connects, scans Step 2) is
 > the **physical-device** test. See
-> **[Runnable build](#runnable-build)** below for exact commands. **Follow-ups:** encryption at rest
-> on-device; 32-bit `armeabi-v7a`; raising `@loam/qr` capacity for long creds.
+> **[Runnable build](#runnable-build)** below for exact commands. **Follow-ups:** on-device verification of
+> encryption at rest (it ships, see docs/01); 32-bit `armeabi-v7a`; raising `@loam/qr` capacity for long creds.
 >
 > Earlier status (kept for context): `apps/app/scripts/bundle-server.mjs` esbuild-bundles the real
 > server (`apps/server/src/embedded.ts`, a TLA-free, env-driven CJS entry) →
@@ -46,16 +46,31 @@ JDK/SDK on macOS) and copies the result to `apps/app/loam-host.apk`. The manual 
 ```bash
 pnpm install                                   # nodejs-mobile's postinstall is (correctly) blocked by pnpm
 pnpm -r build                                  # builds packages + server + web client (client dist is bundled)
-pnpm --filter app fetch:native                 # downloads + places the better-sqlite3 android-arm64 prebuild
+pnpm --filter app fetch:native                 # places BOTH SQLite android-arm64 prebuilds (vendored, sha256-checked)
 pnpm --filter app bundle:server                # esbuild → nodejs-assets/nodejs-project/{loam-server.js,client,main.js,...}
 cd apps/app
 export ANDROID_HOME=$HOME/Library/Android/sdk
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
-CI=1 npx expo prebuild --platform android --no-install     # generates android/ (gitignored)
+CI=1 npx expo prebuild --platform android --no-install --clean   # generates android/ (gitignored)
 cd android
 ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
-# → app/build/outputs/apk/release/app-release.apk (~91 MB; signed with the debug keystore, installable)
+# → app/build/outputs/apk/release/app-release.apk (signed with the debug keystore unless you set up signing below)
 ```
+
+Order matters: `fetch:native` must run before `bundle:server`, which **fails** if either SQLite prebuild
+(plain or SQLCipher) is missing from the embedded project — an APK without the SQLCipher driver would
+lock every encrypted node. `LOAM_ALLOW_MISSING_NATIVE=1` skips that check for a desktop-only smoke bundle
+(never for an APK). `pnpm --filter app apk` also materialises llama.rn's prebuilt native libs, which a
+plain `pnpm install` may skip.
+
+**Stale-prebuild guard.** `android/` is generated and gitignored, so a direct `./gradlew` on an old one
+would ship its old manifest. The config plugin stamps `android/loam-prebuild.sha256` (a hash of `app.json`
++ `plugins/*.js`) at prebuild and adds a Gradle check that fails `preBuild` when they no longer match.
+A unit test parses the Groovy hashing back out and checks it against the JS; set
+`LOAM_GRADLE_GUARD_TEST=1` (with `gradle` on PATH or `LOAM_GRADLE=<path>`) to also run the guard under a
+real Gradle against a JS-written stamp (~15–30 s, so not in CI).
+Regenerate with `CI=1 npx expo prebuild --platform android --clean` (the `apk` script always does);
+`-PloamSkipPrebuildCheck` bypasses it for local native debugging only.
 
 Install on a device/emulator: `adb install -r app/build/outputs/apk/release/app-release.apk`, then
 launch it. First cold start takes ~1 minute (asset copy + first `require`); the screen shows
@@ -73,8 +88,16 @@ pnpm --filter app apk          # now signs the release APK with that key
 ```
 
 `plugins/with-release-signing.js` injects the release `signingConfig` at prebuild **only when
-`apps/app/keystore.properties` exists** — with no keystore it's a no-op, so the debug-signed build
-above keeps working unchanged. `release.jks` and `keystore.properties` are gitignored; **back them
+`apps/app/keystore.properties` exists** — with no keystore it's a no-op (and warns once), so the
+debug-signed build above keeps working. The build script is stricter: `pnpm --filter app aab` **refuses**
+to build without a keystore (Play rejects a debug-signed bundle, and it sets
+`LOAM_REQUIRE_RELEASE_SIGNING=1` so the plugin fails prebuild too), and `pnpm --filter app apk` prints a
+loud debug-signing banner unless acknowledged with `--debug-signed` or `LOAM_ALLOW_DEBUG_SIGNING=1`.
+A debug-signed APK can't update a release-signed install, and each machine's debug key differs. The
+tag-triggered `build-apk.yml` job fails outright without the keystore secret; it runs `aab`, attaches the
+APK to the GitHub Release and uploads the bundle as the `loam-host-aab` workflow artifact. Tags are
+`vX.Y.Z`, or `vX.Y.Z-rc.N` / `vX.Y.Z-beta.N` for a pre-release (same gates and AAB, published as a GitHub
+pre-release); `versionCode` must beat every earlier release tag's, pre-releases included. `release.jks` and `keystore.properties` are gitignored; **back them
 up** (losing the key means users must uninstall before they can update). For Play Store distribution,
 enable Play App Signing and treat this key as the upload key. See `keystore.properties.example` for
 the file format if you'd rather supply your own key than generate one.
@@ -91,8 +114,14 @@ The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi
 - **Don't turn on the phone's own WiFi hotspot / tethering.** Android allows a device to run *either*
   its personal hotspot *or* a LocalOnlyHotspot, not both — enabling the system hotspot tears LOAM's
   down. The host may stay **connected to a WiFi network** (station mode) while hosting; that's fine.
-- **Keep the LOAM app in the foreground.** Backgrounding can suspend the hotspot and the embedded
-  server. (Screen-on + app-open is the reliable state.)
+- **Keep the LOAM app in the foreground.** A `connectedDevice` foreground service (`LoamHostService`:
+  a "LOAM is hosting" notification + a partial wake lock) keeps the host running with the screen off, but
+  API 31+ refuses to *start* one from the background, and the ~80 s cold start makes that likely. So the
+  app re-asserts it (`ensureHostService`, idempotent) on `ready`, whenever the app returns to the
+  foreground, when the Share overlay opens and when the hotspot comes up. `POST_NOTIFICATIONS` is asked
+  once, while the app is in the foreground and before the first start; denying it only hides the
+  notification (the overlay says so) and never blocks hosting. Screen-on + app-open is still the most
+  reliable state; the FGS path is not yet device-verified.
 - **The Step-2 address.** LocalOnlyHotspot puts the host at `192.168.49.1` on **stock** Android, but
   this isn't guaranteed. The launcher (`main.js`) reports the host's real IPv4 addresses over the
   `loam-hostinfo` channel and the host screen builds the Step-2 QR from the `192.168.49.x` one when
@@ -107,22 +136,28 @@ into the embedded project's `node_modules` (the DAL, `apps/server/src/db.ts`, la
 one it needs, so both ship):
 
 - **Plain `better-sqlite3`** (`@12.10.0`, the on-device default): the matching ABI-108 (Node 18)
-  android-arm64 binary is **downloaded** from `digidem/better-sqlite3-nodejs-mobile` (tag `12.10.0`,
-  asset `better-sqlite3-12.10.0-node-108-android-arm64.tar.gz`) and placed at
-  `node_modules/better-sqlite3/build/Release/`. If it ever fails to load, fall back to `11.10.0` (the
-  version CoMapeo ships) by changing **both** the npm wrapper version and the digidem release tag
-  together (and update `PREBUILD_SHA256`).
+  android-arm64 binary from `digidem/better-sqlite3-nodejs-mobile` (release `12.10.0`) is **VENDORED**
+  at `apps/app/native-prebuilds/better-sqlite3/` and placed at `node_modules/better-sqlite3/build/Release/`.
+  It used to be downloaded, but upstream re-generated that release's assets on 2026-08-17
+  (non-reproducible build), so the pinned download stopped matching; the vendored file is the
+  **original** binary earlier APKs shipped (see that directory's README). To move versions (e.g. back
+  to `11.10.0`, the one CoMapeo ships), download and device-test the new asset, then replace the
+  tarball and change the npm wrapper version and `PREBUILD_SHA256` together.
 - **Encrypted `better-sqlite3-multiple-ciphers`** (`@12.11.1`, SQLCipher; used when
   `security.dbEncryption` is on and a key is handed across the bridge — docs/01): its android-arm64
   ABI-108 binary has no upstream release, so it's a **self-built prebuild VENDORED in the repo** at
   `apps/app/native-prebuilds/multiple-ciphers/` (tarball + reproducible build recipe + README, all
   committed). `fetch:native` extracts it into `node_modules/better-sqlite3-multiple-ciphers/build/Release/`.
   So the encrypted driver **now ships on-device** and `security.dbEncryption` modes take effect on a
-  real device build (subject to on-device `PRAGMA key` runtime verification — docs/01).
+  real device build (subject to on-device `PRAGMA key` runtime verification — docs/01). If it still
+  won't load, the host screen locks (`db_encryption_driver_missing`: **Retry**, or a confirmed **Start
+  without encryption**). The confirmation depends on the mode: in `ephemeral` the launcher has already
+  deleted the old database, so it says so; in `persistent`/`passphrase` the encrypted file stays on disk
+  and can be preserved (the actions live in `src/lib/driver-missing-recovery.ts`, with tests).
 
 The `.node` binaries themselves are **not committed** in `nodejs-assets/` (gitignored build output) —
 re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` sha256-verifies **each**
-tarball (downloaded and vendored alike) before installing it. Each JS-wrapper npm version and its
+vendored tarball before installing it. Each JS-wrapper npm version and its
 `.node` source version must stay in lockstep (change both together).
 
 ### What's committed vs generated
@@ -130,18 +165,39 @@ tarball (downloaded and vendored alike) before installing it. Each JS-wrapper np
   (`LOAM_DB_DRIVER`), `apps/app/scripts/{bundle-server.mjs,fetch-native-modules.mjs}`,
   `apps/app/nodejs-project-template/{main.js,package.json}` (the CJS launcher template),
   `apps/app/plugins/with-loam-host.js` (config plugin: cleartext localhost + arm64-only ABIs +
-  hotspot/WiFi permissions), `apps/app/nodejs-assets/BUILD_NATIVE_MODULES.txt` (`0`),
+  hotspot/WiFi/FGS permissions + `data_extraction_rules.xml` + optional `uses-feature` + the
+  stale-prebuild fingerprint), `apps/app/plugins/with-release-signing.js`, `apps/app/nodejs-assets/BUILD_NATIVE_MODULES.txt` (`0`),
   `apps/app/app.json` (package `com.loamnet.host`, `loam://` scheme, plugin), `apps/app/src/app/index.tsx` (host WebView
-  screen + "Share · Host" button + overlay), `apps/app/src/components/{host-panel,host-share-overlay,
+  screen + "Share · Host" button + overlay), `apps/app/src/app/+native-intent.tsx` (incoming-URL policy), `apps/app/src/components/{host-panel,host-share-overlay,
   qr-code}.tsx`, `apps/app/src/hooks/use-hotspot.ts`, **`apps/app/modules/loam-hotspot/`** (the local
   Expo module: `expo-module.config.json`, `index.ts`, `src/*.ts`, `android/build.gradle` +
-  `LoamHotspotModule.kt`), `package.json` deps, **`apps/app/native-prebuilds/multiple-ciphers/`** (the
+  `LoamHotspotModule.kt`, `LoamHostService.kt`), `package.json` deps, **`apps/app/native-prebuilds/multiple-ciphers/`** (the
   self-built encrypted-driver prebuild tarball + `build-mc-android-arm64.sh` + `CMakeLists.mc.txt` +
-  `README.md` — vendored because no upstream Android/ABI-108 release exists; sha256-pinned in
-  `fetch-native-modules.mjs`).
+  `README.md` — vendored because no upstream Android/ABI-108 release exists) and
+  **`apps/app/native-prebuilds/better-sqlite3/`** (the plain driver's original upstream binary,
+  repackaged + README), both sha256-pinned in `fetch-native-modules.mjs`.
 - **Generated at build time (gitignored):** `apps/app/android/` (prebuild — local modules are
   autolinked into it, not committed), `apps/app/nodejs-assets/nodejs-project/` (bundle output + web
-  client + **both** SQLite native prebuilds, plain + encrypted), the APK.
+  client + **both** SQLite native prebuilds, plain + encrypted), `android/loam-prebuild.sha256`, the
+  APK/AAB.
+
+### Manifest hardening (config plugin)
+- **No backup or device transfer.** `allowBackup=false` + `fullBackupContent=false` cover API < 31, and
+  `res/xml/data_extraction_rules.xml` excludes every domain from both `<cloud-backup>` and
+  `<device-transfer>`. At targetSdk 31+ `allowBackup=false` alone does **not** stop Android 12+
+  device-to-device transfer, which would otherwise copy `loam.db`, avatars, attachments and
+  `config.json` to a new phone.
+- **Optional hardware.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE and the portrait
+  screen (implied by `orientation: "portrait"`) are declared `uses-feature required="false"`, so Play
+  doesn't hide the listing from devices without them (Chromebooks included); the app degrades (no
+  hotspot, no mesh, letterboxed on a landscape-only screen).
+- **Unused template permissions blocked** (`SYSTEM_ALERT_WINDOW`, `READ/WRITE_EXTERNAL_STORAGE`, via
+  `android.blockedPermissions`), and `CHANGE_NETWORK_STATE` declared for the Wi-Fi Aware data path.
+- **Deep links ignored.** `app.json` keeps the `loam://` scheme (Expo Router resolves its root URL
+  through it and throws in a release build without one), which also exports a `loam://` VIEW intent
+  filter. `src/app/+native-intent.tsx` rewrites every incoming URL to the host screen on launch and
+  ignores it afterwards.
+- **Themed icon.** `android.adaptiveIcon.monochromeImage` (a white wordmark on transparent).
 
 ## Goal
 
@@ -329,6 +385,18 @@ support it); avoid Android-only Easy Connect for v1.
   network-security-config, since there's no TLS on a local hotspot).
 - The client already supports a configurable server origin (`loam.serverUrl` in localStorage) and uses
   `credentials: "include"` — but same-origin (WebView → localhost) is simplest; prefer that.
+- **After an Emergency Reset** the node rotates its transport key. The host screen re-fetches
+  `/api/bootstrap` for the new `#k=` and remounts the WebView when the client reports the `wipe` event
+  (which also clears its old pin). The WebView is also handed the node's key directly: alongside the
+  per-boot host token (`window.__loamHostDeviceToken`), `injectedJavaScriptBeforeContentLoaded` sets
+  `window.__loamHostTransportKey` to the key from the loopback `/api/bootstrap`, and the client adopts it
+  over any stale or broken pin without asking. That covers a WebView that **missed** the wipe event, and
+  a node with an ephemeral DB key, which mints a new transport key on **every boot** — without it the host's
+  own screen would hit the rescan gate and a "different key" prompt on each launch. The injection only
+  happens in the host's own WebView, pinned to the loopback origin (`originWhitelist` +
+  `onShouldStartLoadWithRequest`), so a LAN browser never gets it; LAN joiners of an ephemeral-key node
+  rescan the QR after each host restart (docs/08). The client also purges its cached data when its
+  server-confirmed identity changes, so a missed wipe doesn't leave old messages on screen.
 
 ## Monorepo question — settled
 

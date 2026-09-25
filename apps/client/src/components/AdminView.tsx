@@ -20,11 +20,10 @@ import { fetchJson, REQUEST_TIMEOUT_MS } from "../lib/api";
 import { encryptedFetch } from "../lib/transport";
 import { AddSyncPeerControl } from "./AddSyncPeerControl";
 import { AdminChannelsPanel } from "./AdminChannelsPanel";
-import { BackArrowIcon } from "./BackArrowIcon";
 import { GettingStartedPanel } from "./GettingStartedPanel";
 import { LlmPanel } from "./LlmPanel";
 import { MeshPanel } from "./MeshPanel";
-import { NavLink } from "./NavLink";
+import { MobileBackLink } from "./MobileBackLink";
 import { NodeLinkControl } from "./NodeLinkControl";
 import { SyncStatusPanel } from "./SyncStatusPanel";
 
@@ -303,9 +302,7 @@ export function AdminView({
     return (
       <section className="settings-view">
         <header className="conversation-header">
-          <NavLink active={false} className="mobile-back" href="/channels">
-            <BackArrowIcon />
-          </NavLink>
+          <MobileBackLink />
           <div>
             <p className="eyebrow">{t("admin.eyebrow")}</p>
             <h1>{t("people.notAuthorizedTitle")}</h1>
@@ -319,9 +316,7 @@ export function AdminView({
   return (
     <section className="settings-view">
       <header className="conversation-header">
-        <NavLink active={false} className="mobile-back" href="/channels">
-          <BackArrowIcon />
-        </NavLink>
+        <MobileBackLink />
         <div>
           <p className="eyebrow">{t("admin.eyebrow")}</p>
           <h1>{t("admin.title")}</h1>

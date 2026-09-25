@@ -8,12 +8,12 @@ owner/Fable to pick from. "Threat-fit" flags the protest/privacy use case specif
 |---------|----------------|--------|-----------|-------|
 | **Ephemeral / disappearing messages + retention policy** | Proactive privacy; complements the reactive kill switch | S–M | ★★★ | Per-channel/global TTL, a reaper deletes old rows. Trivial on SQLite. |
 | **End-to-end encryption (DMs / private channels)** | Server currently sees **all plaintext**; the strongest protection for the protest model | L | ★★★ | Big strategic call — see below. Tension with LLM/RAG/search/broadcast filtering. |
-| **Attachments (images/files)** | Real coordination needs photos/maps, not just text | M | ★★ | **Landed (images)**: on-device downscale → `POST /api/attachments` (avatar-style signature checks, 256KB cap), ≤4 per message, image-only messages allowed. Non-image files remain future work. |
+| **Attachments (images/files)** | Real coordination needs photos/maps, not just text | M | ★★ | **Landed (images)**: on-device downscale → `POST /api/attachments` (avatar-style signature checks, 256KB cap), ≤4 per message, attachment-only messages allowed. **Non-image files landed too** (allowlisted types, 1 MiB, served as downloads). |
 | **LoRa / multi-node store-and-forward sync** | The stated transport goal; extends range beyond one hotspot | L | ★★ | **Sync protocol landed** ([11](11-node-sync.md)): pull-based gossip over HTTP with tombstones. The LoRa transport itself (framing, bandwidth budgeting) remains its own initiative. |
 | **Moderation tools** | Needed for team/website mode (delete any message, remove/ban user, lock/pin) | M | — | **Landed**: moderator/greeter roles, ban + shadow-ban, join-approval queue, admin message deletion, and the People & moderation client area. Lock/pin channels remain future ideas. |
 | **Message search** | Basic usability as history grows | S–M | — | **Landed**: `GET /api/search` (case-insensitive substring, strictly audience-scoped — private channels and DMs respected) + a `/search` client view. Semantic search still falls out of the RAG embeddings ([06](06-llm.md)). |
-| **i18n + RTL (actually implement it)** | README **promises** multilingual + RTL support that **isn't in the code** (verified: no `dir`/`lang`/i18n anywhere) | M | ★ | **RTL landed**: `dir="auto"` on message bodies, composers, and search inputs, so bidi text renders correctly. A translation layer for UI chrome remains future work. |
-| **Presence / typing indicators** | Liveness in active conversations | S | — | Over WS; make it privacy-toggleable (some deployments won't want it). |
+| **i18n + RTL (actually implement it)** | README **promises** multilingual + RTL support that **isn't in the code** (verified: no `dir`/`lang`/i18n anywhere) | M | ★ | **RTL landed**: `dir="auto"` on message bodies, composers, and search inputs, so bidi text renders correctly. **UI translation landed** too: 15 admin-selected locales ([13](13-i18n.md)). |
+| **Presence / typing indicators** | Liveness in active conversations | S | — | **Landed**: online dots behind the `enablePresence` flag (disable for high-risk deployments) and ephemeral typing pings. |
 | **Web push / PWA notifications** | Re-engagement on the local network | M | — | Limited value fully offline; useful for same-network alerts (e.g. new announcement). |
 | **Backup / export / import** | Team/website continuity | S–M | ✗ (anti-fit) | Great for team mode, **dangerous for protest mode** — must be config-gated and off by default. |
 | **Identity/key verification (safety numbers, QR)** | Trust in authenticated/E2EE mode | M | ★★ | Fits LOAM's QR idiom; only meaningful once accounts or E2EE exist. |
@@ -23,8 +23,10 @@ owner/Fable to pick from. "Threat-fit" flags the protest/privacy use case specif
 ## Deeper notes on the big ones
 
 ### End-to-end encryption (strategic decision)
-Today every message body is **plaintext in the DB and visible to the server** (verified: no crypto in the
-codebase). The [01 at-rest encryption](01-sqlite-migration.md) + [02 kill switch](02-kill-switch.md) work
+Every message body is **visible to the server** as plaintext. Transport encryption
+([08](08-transport-security.md)) protects it on the wire and at-rest encryption on disk, and sealed
+mesh mail ([16](16-opportunistic-mesh.md)) is end-to-end only against *carrier nodes* — the recipient's
+host still sees it. The [01 at-rest encryption](01-sqlite-migration.md) + [02 kill switch](02-kill-switch.md) work
 protects data *on the host*, but the server still *processes* plaintext. True E2EE (client-side
 encryption, server relays ciphertext) is the strongest answer for the oppressive-regime model — but it
 **conflicts with server-side features**: LLM/RAG, search, and the DM/reaction audience filtering in
