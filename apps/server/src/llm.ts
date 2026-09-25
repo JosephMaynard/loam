@@ -302,6 +302,11 @@ export function createLlmLayer(rt: Runtime) {
       wake?.();
       wake = undefined;
     };
+    // Resolves once the host reports the end (or an error), or the timeout below gives up on it.
+    let settle: () => void = () => undefined;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
 
     // Bound the request like the Ollama path: if the host hook goes silent (a wedged model, a dropped
     // rn-bridge round-trip) the generator would otherwise hang forever. After 5 minutes, fail it.
@@ -312,6 +317,7 @@ export function createLlmLayer(rt: Runtime) {
           finished = true;
           signal();
         }
+        settle();
       },
       5 * 60 * 1000,
     );
@@ -326,11 +332,13 @@ export function createLlmLayer(rt: Runtime) {
       onEnd: () => {
         finished = true;
         signal();
+        settle();
       },
       onError: (message) => {
         failure = new Error(message || "The on-device model failed.");
         finished = true;
         signal();
+        settle();
       },
     });
 
@@ -351,6 +359,13 @@ export function createLlmLayer(rt: Runtime) {
         });
       }
     } finally {
+      // The consumer stopped early (a moderator removed the reply, or an Emergency Reset): the launcher
+      // bridge has no cancel, so the phone's model keeps generating until its own end/error. Don't return
+      // until then (bounded by the timeout above): the caller holds the assistant's in-flight slot across
+      // this, so an abort can't let a second generation start on the phone beside the first.
+      if (!finished) {
+        await settled;
+      }
       clearTimeout(timeout);
     }
   }

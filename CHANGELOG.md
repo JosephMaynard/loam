@@ -77,7 +77,8 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
 - A message removed by a moderator can't be edited by its author or take new replies or reactions.
 - Assistant: a reply interrupted by a crash is finalized on restart, a moderator removal stops a reply
   mid-stream, replies are limited to one per user and two at a time per node, and an admin save no
-  longer freezes the Android host's model switching. An admin's own on-device model change is saved to
+  longer freezes the Android host's model switching. Stopping an on-device reply keeps its slot until the
+  phone's model finishes, so a new request can't start a second generation beside it. An admin's own on-device model change is saved to
   `config.json` when that file holds the on-device settings (the Android host, or any node after an
   Emergency Reset), so a restart no longer undoes it.
 - Claiming admin on a node that requires join approval now leaves the claimer approved.

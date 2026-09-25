@@ -427,7 +427,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   non-bot user (PATCH 400; at boot an out-of-namespace id is dropped for the default with a warning, and
   one naming a person skips the bot). Only the configured bot is on the roster (`visibleUsers`): a bot
   record under an old or repaired id stays in the DB but is hidden (logged once when a repair orphans one); `botDisplayName` ≤80, `model` ≤120. At most one reply in flight per user and 2 node-wide (`429 assistant_busy`); a moderator
-  removal/delete aborts the stream, and a placeholder left streaming by a crash is finalized at boot.
+  removal/delete aborts the stream (an on-device reply keeps its in-flight slot until the phone's model
+  reports its end/error or the 5-minute timeout, since the launcher bridge has no cancel), and a placeholder left streaming by a crash is finalized at boot.
 
 **Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
 `enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`.

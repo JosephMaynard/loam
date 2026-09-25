@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Channel, Message, User } from "@loam/schema";
 
 import { buildApp, type LoamApp } from "./app.js";
-import type { AppOptions } from "./types.js";
+import type { AppOptions, OnDeviceChatHook } from "./types.js";
 
 /**
  * Second-round findings from the 2026-09-25 pre-release review. Each security test was mutation-checked:
@@ -239,5 +239,70 @@ describe("a legacy bot id the config repair drops doesn't leave a dead assistant
     // The record itself is kept (its DM history still points at it) — only hidden.
     expect(app.store.loadUsers().some((user) => user.id === "ollama.gemma")).toBe(true);
     expect(logs.join("")).toContain('old bot id \\"ollama.gemma\\"');
+  });
+});
+
+describe("a moderator abort of an on-device reply holds the assistant slot until the phone model stops", () => {
+  type Callbacks = Parameters<OnDeviceChatHook>[1];
+
+  afterEach(() => {
+    delete (globalThis as { __loamOnDeviceChat?: OnDeviceChatHook }).__loamOnDeviceChat;
+  });
+
+  /** Poll `check` until it holds (or a few seconds pass). */
+  async function waitUntil(check: () => boolean): Promise<boolean> {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && !check()) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return check();
+  }
+
+  it("refuses a second generation while the aborted one is still running, and frees the slot on its end", async () => {
+    // A fake launcher hook: each request's callbacks are driven by the test (the real bridge has no cancel).
+    const requests: Callbacks[] = [];
+    (globalThis as { __loamOnDeviceChat?: OnDeviceChatHook }).__loamOnDeviceChat = (_messages, callbacks) => {
+      requests.push(callbacks);
+    };
+    const botId = "llm.ollama.gemma4";
+    const app = await boot(tempDataDir({ llm: { onDevice: { enabled: true, model: "phone" } } }));
+    const admin = await newSession(app);
+    const user = await newSession(app);
+    const dm = () =>
+      app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: user.cookie },
+        payload: { type: "dm", recipientUserId: botId, body: "hi" },
+      });
+
+    expect((await dm()).statusCode).toBe(201);
+    expect(await waitUntil(() => requests.length === 1)).toBe(true);
+    requests[0]?.onDelta("partial");
+    const reply = () => app.store.loadMessages().find((message) => message.authorId === botId);
+    expect(await waitUntil(() => reply() !== undefined)).toBe(true);
+
+    const removed = await app.server.inject({
+      method: "POST",
+      url: `/api/moderation/messages/${reply()?.id}/remove`,
+      headers: { cookie: admin.cookie },
+      payload: {},
+    });
+    expect(removed.statusCode).toBe(200);
+    // The writer notices the removal on the next delta and stops listening — but the phone keeps going.
+    requests[0]?.onDelta(" more");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const busy = await dm();
+    expect(busy.statusCode).toBe(429);
+    expect(codeOf(busy)).toBe("assistant_busy");
+    expect(requests).toHaveLength(1);
+
+    // The phone model finishes: the slot is free again.
+    requests[0]?.onEnd();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((await dm()).statusCode).toBe(201);
+    expect(await waitUntil(() => requests.length === 2)).toBe(true);
+    requests[1]?.onEnd();
   });
 });
