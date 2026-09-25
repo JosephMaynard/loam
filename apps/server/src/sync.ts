@@ -956,6 +956,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     if (mesh.isReservedReplayId(message.id)) {
       return "refuse";
     }
+    // …or inside the sealed-offer namespace, which public records never use (see `isSealedOfferId`).
+    if (mesh.isSealedOfferId(message.id)) {
+      return "refuse";
+    }
 
     // Skip an over-cap imported body (docs/25 SW2) — a hostile peer amplification guard. Only the
     // body-bearing public arms have a `body`; reactions are unaffected.
@@ -1370,6 +1374,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (
           rt.tombstones.has(entry.id) ||
           mesh.isReservedReplayId(entry.id) ||
+          mesh.isSealedOfferId(entry.id) ||
           mesh.isSealedOfferSeen(entry.id, now) ||
           isRefusedOffer(peer.url, publicOfferKey(entry.id, entry.editedAt), now)
         ) {

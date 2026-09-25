@@ -72,7 +72,8 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   leave (the 30-day tombstone horizon plus the 7-day TTL maximum and two days' slack), and skipped on
   every digest list, so a restart, a config save, switching relaying on, re-listing the ids as public
   messages or re-advertising them with a later TTL no longer makes it re-fetch only the blobs it dropped
-  (which told the serving peer which ones it had delivered). Each source may fill at most 50 000 of the
+  (which told the serving peer which ones it had delivered). Sealed offers must carry a `seal_` id and
+  public records may not, so the two lists never share an id. Each source may fill at most 50 000 of the
   record's 200 000 entries; past that the node stops pulling new sealed offers from that source. A node with relaying off and no local mesh identity pulls
   no sealed mail, and `mesh.maxSealedPullPerRound` (default 80) caps sealed pulls per round for metered
   links. Mesh identities are only minted for local users, and rows an older build minted for synced users

@@ -391,6 +391,8 @@ export function createMeshLayer(rt: Runtime) {
   }
 
   const SEALED_REPLAY_PREFIX = "sealed.";
+  /** Outer-id prefix of every sealed message (`newMessageId("seal")`); see {@link isSealedOfferId}. */
+  const SEALED_OFFER_ID_PREFIX = "seal_";
   // Hash once per held message object (a sealed row is immutable while carried).
   const replayKeyCache = new WeakMap<SealedMessage, string>();
 
@@ -421,6 +423,17 @@ export function createMeshLayer(rt: Runtime) {
   /** True for an id inside the namespace reserved for replay keys — never valid on a peer-supplied record. */
   function isReservedReplayId(id: string): boolean {
     return id.startsWith(SEALED_REPLAY_PREFIX);
+  }
+
+  /**
+   * True for an id in the sealed-offer namespace. Every LOAM build (v0.4.0 included) mints a sealed message's
+   * outer id as `seal_<hex>`, and nothing else uses that prefix, so the two lists a digest carries never share
+   * an id: a sealed offer must be named `seal_…`, and a public record may not be. That keeps a peer from
+   * re-listing sealed ids as public messages to learn which ones were delivered here, and from naming a sealed
+   * offer after a public message it has seen so the seen-offer record keeps the real message out.
+   */
+  function isSealedOfferId(id: string): boolean {
+    return id.startsWith(SEALED_OFFER_ID_PREFIX);
   }
 
   /** Try to open a sealed blob for one of our local users and deliver it. Returns true when it was
@@ -464,8 +477,8 @@ export function createMeshLayer(rt: Runtime) {
    * them (review 2026-09-25 #1). One predicate for both, so they can't drift apart again.
    */
   function sealedOfferAdmissible(offer: Pick<SealedMessage, "id" | "ttlExpiresAt" | "hopLimit">, now: number): boolean {
-    // A peer may not name a record inside the replay-key namespace.
-    if (isReservedReplayId(offer.id) || rt.tombstones.has(offer.id)) {
+    // A peer may not name a record inside the replay-key namespace, and a sealed offer must carry a sealed id.
+    if (!isSealedOfferId(offer.id) || isReservedReplayId(offer.id) || rt.tombstones.has(offer.id)) {
       return false;
     }
     if (offer.ttlExpiresAt <= now || offer.hopLimit <= 0) {
@@ -727,6 +740,7 @@ export function createMeshLayer(rt: Runtime) {
     sealedHeldCount,
     acceptSealedFromPeer,
     isReservedReplayId,
+    isSealedOfferId,
     addMeshContact,
     meshIdentityCard,
     sendSealed,

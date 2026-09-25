@@ -337,7 +337,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   tags, so a serving peer can't learn where a recipient lives; every sealed id it fetched or took in over
   the radio bridge goes in the durable `sealed_offers_seen` table (keyed by id, kept tombstone horizon + 7-day
   TTL max + 2 days from intake, so it outlives any tombstone) and is skipped on **both** digest lists (with
-  tombstoned and `sealed.` ids), whatever its outcome (only the kill switch clears it; ≤200 000 ids,
+  tombstoned and `sealed.` ids; sealed offers must be `seal_…` ids and public records may not, so the lists
+  never share an id), whatever its outcome (only the kill switch clears it; ≤200 000 ids,
   ≤50 000 per source, then no new sealed pulls from that source). With
   relay off and no local mesh identity it pulls no sealed mail. `sync.token` never rides a plaintext pull
   (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that

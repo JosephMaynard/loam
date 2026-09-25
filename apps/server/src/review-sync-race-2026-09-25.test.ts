@@ -293,6 +293,64 @@ describe("sealed-offer history can't be bypassed to find delivered mail (#2)", (
   });
 });
 
+describe("sealed and public records live in separate id namespaces", () => {
+  const peerUser = { id: "user.peer", type: "human", isAdmin: false, ephemeral: true, createdAt: 1, displayName: "Peer" };
+
+  it("never requests a sealed offer without a seal_ id, nor a public record with one", async () => {
+    const expiry = Date.now() + 60_000;
+    const oddSealed = { ...sealedRecord("seal_placeholder", expiry), id: "msg_0123456789abcdef" };
+    const sealedNamedPublic = { id: "seal_0123456789abcdef", type: "channelPost", authorId: "user.peer", channelId: "general", createdAt: 1000, body: "public under a sealed id" };
+    const peer = await fakePeer((path, body) => {
+      if (path === "/api/sync/digest") {
+        return {
+          channels: [],
+          messages: [{ id: sealedNamedPublic.id }],
+          sealed: [{ id: oddSealed.id, toTag: oddSealed.toTag, ttlExpiresAt: oddSealed.ttlExpiresAt, hopLimit: oddSealed.hopLimit }],
+        };
+      }
+      if (path === "/api/sync/messages") {
+        const ids = new Set((body as { ids: string[] }).ids);
+        return { messages: [oddSealed, sealedNamedPublic].filter((record) => ids.has(record.id)), users: [peerUser] };
+      }
+      return undefined;
+    });
+    const { app } = await makeApp({ sync: { enabled: true, peers: [{ url: peer.url }], intervalMs: 3_600_000 }, mesh: MESH_NO_RELAY });
+    const cookie = await newSession(app);
+    await syncRound(app, cookie);
+    expect(requestedIds(peer)).toEqual([]);
+    const stored = app.store.loadMessages();
+    expect(stored.some((message) => message.id === oddSealed.id || message.id === sealedNamedPublic.id)).toBe(false);
+  });
+
+  it("a sealed offer named after a public message can't keep the real message out", async () => {
+    const post = { id: "msg_fedcba9876543210", type: "channelPost", authorId: "user.peer", channelId: "general", createdAt: 1000, body: "the real public post" };
+    const squatter = { ...sealedRecord("seal_placeholder", Date.now() + 60_000), id: post.id };
+    const state = { phase: "squat" as "squat" | "public" };
+    const peer = await fakePeer((path, body) => {
+      if (path === "/api/sync/digest") {
+        return state.phase === "squat"
+          ? { channels: [], messages: [], sealed: [{ id: squatter.id, toTag: squatter.toTag, ttlExpiresAt: squatter.ttlExpiresAt, hopLimit: squatter.hopLimit }] }
+          : { channels: [], messages: [{ id: post.id }] };
+      }
+      if (path === "/api/sync/messages") {
+        const ids = new Set((body as { ids: string[] }).ids);
+        const pool = state.phase === "squat" ? [squatter] : [post];
+        return { messages: pool.filter((record) => ids.has(record.id)), users: [peerUser] };
+      }
+      return undefined;
+    });
+    const { app } = await makeApp({ sync: { enabled: true, peers: [{ url: peer.url }], intervalMs: 3_600_000 }, mesh: MESH_NO_RELAY });
+    const cookie = await newSession(app);
+    await syncRound(app, cookie);
+    expect(requestedIds(peer)).toEqual([]);
+
+    state.phase = "public";
+    await syncRound(app, cookie);
+    expect(requestedIds(peer)).toEqual([post.id]);
+    expect(app.store.loadMessages().some((message) => message.id === post.id && message.type === "channelPost")).toBe(true);
+  });
+});
+
 describe("the seen-offer record's bounds", () => {
   it("keeps a live mark's first stamp, re-arms only a lapsed one, and counts per source", () => {
     const store = openStore(":memory:");

@@ -172,10 +172,11 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
      same ids with a later TTL after the first one passed fetched only the dropped ones, while the
      delivered ids were still tombstoned. A repeat mark never extends a live row.
    The record is not a tombstone (it never refuses an import on its own), it survives restarts and config
-   changes, and only an Emergency Reset clears it. **Cost:** a peer that sees a public message's id before
-   this node does can offer it as sealed mail first and keep the genuine public message out for the
-   record's ~39 days (it could already pre-block an id for the tombstone horizon by getting it carried
-   until it expires). Consequences: a node that switches relaying on, or frees space under `maxCarried`,
+   changes, and only an Emergency Reset clears it. *Separate namespaces.* Every build (v0.4.0 included)
+   names a sealed message `seal_<hex>` and nothing else uses that prefix, so a sealed offer must carry a
+   `seal_` id and a public record may not. A peer therefore can't list sealed ids among public messages at
+   all, and can't name a sealed offer after a public message it has seen to keep the real one out.
+   Consequences: a node that switches relaying on, or frees space under `maxCarried`,
    doesn't go back for blobs it dropped earlier (other carriers still can). **Bounds:** the record holds
    at most 200 000 ids, and each source (a sync peer URL, or the radio bridge) at most 50 000 of them.
    When a source reaches its quota the node pulls no new sealed offers from that source, and when the
