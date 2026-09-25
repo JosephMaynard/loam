@@ -14,6 +14,7 @@ import {
   resetSecureStoreMock,
   secureStoreMock,
 } from "@/test-utils/mocks";
+import { makeRnLikeChannel } from "@/test-utils/rn-channel";
 
 vi.mock("expo-secure-store", () => secureStoreMock);
 vi.mock("expo-crypto", () => cryptoMock);
@@ -31,6 +32,7 @@ const {
   mayBootPlaintextOnLockedError,
   registerDbEncryption,
   requestDbStartFresh,
+  requestDbUnlock,
   resolveDbKey,
   setDbEncryptionMode,
   setDbModeHint,
@@ -635,6 +637,56 @@ describe("setDbModeHint (P1-b, Sol round 6)", () => {
     channel.emit("loam-db-set-mode-hint-result", { requestId: "not-mine", ok: true });
     // Still pending → falls through to the timeout as ok:false.
     await expect(promise).resolves.toEqual({ ok: false, error: expect.any(String) });
+  });
+});
+
+describe("overlapping bridge round trips (pre-release review 2026-09-25)", () => {
+  // Each round trip used to clean up with removeAllListeners(resultEvent): the first to finish removed the
+  // second's listener too, so the second always timed out. Now each removes only its own subscription.
+  it("two overlapping requestDbUnlock calls both receive their own result", async () => {
+    const channel = makeRnLikeChannel();
+    const first = requestDbUnlock(channel, 200);
+    const second = requestDbUnlock(channel, 200);
+    const [a, b] = channel.posted.map((p) => (p.payload as { requestId: string }).requestId);
+    expect(channel.listenerCount("loam-db-unlock-result")).toBe(2);
+
+    channel.emit("loam-db-unlock-result", { requestId: a, ok: true });
+    await expect(first).resolves.toEqual({ ok: true });
+    // The finished round trip removed ONLY its own listener.
+    expect(channel.listenerCount("loam-db-unlock-result")).toBe(1);
+
+    channel.emit("loam-db-unlock-result", { requestId: b, ok: false, error: "still locked" });
+    await expect(second).resolves.toEqual({ ok: false, error: "still locked" });
+    expect(channel.listenerCount("loam-db-unlock-result")).toBe(0);
+  });
+
+  it("overlapping setDbModeHint / requestDbStartFresh calls don't cancel each other either", async () => {
+    const channel = makeRnLikeChannel();
+    const hintA = setDbModeHint(channel, "off", 200);
+    const hintB = setDbModeHint(channel, "persistent", 200);
+    const freshA = requestDbStartFresh(channel, "preserve", 200);
+    const freshB = requestDbStartFresh(channel, "delete", 200);
+    const ids = channel.posted.map((p) => (p.payload as { requestId: string }).requestId);
+
+    channel.emit("loam-db-set-mode-hint-result", { requestId: ids[0], ok: true });
+    channel.emit("loam-db-start-fresh-result", { requestId: ids[2], ok: true });
+    await expect(hintA).resolves.toEqual({ ok: true });
+    await expect(freshA).resolves.toEqual({ ok: true });
+
+    channel.emit("loam-db-set-mode-hint-result", { requestId: ids[1], ok: true });
+    channel.emit("loam-db-start-fresh-result", { requestId: ids[3], ok: true });
+    await expect(hintB).resolves.toEqual({ ok: true });
+    await expect(freshB).resolves.toEqual({ ok: true });
+  });
+
+  it("a timed-out round trip does not tear down a concurrent one's listener", async () => {
+    const channel = makeRnLikeChannel();
+    const short = requestDbUnlock(channel, 5);
+    const long = requestDbUnlock(channel, 500);
+    const longId = (channel.posted[1]!.payload as { requestId: string }).requestId;
+    await expect(short).resolves.toMatchObject({ ok: false });
+    channel.emit("loam-db-unlock-result", { requestId: longId, ok: true });
+    await expect(long).resolves.toEqual({ ok: true });
   });
 });
 
