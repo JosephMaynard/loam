@@ -20,6 +20,22 @@ function isSafeLink(href: string): boolean {
 }
 
 /**
+ * Strip a join-QR host-key fragment (`#k=…`) from a message link (pre-release review 2026-09-25). A `#k=`
+ * is only meaningful when it arrives out-of-band from a physically scanned QR; a link carrying one in a
+ * message would otherwise let any member hand others a key to pin — for this node's origin that's a
+ * remote lockout (or, with an on-path position, a key substitution). The link still works; it just no
+ * longer carries a key. Any fragment with a `k=` parameter is dropped, whatever the origin.
+ */
+function withoutHostKeyFragment(href: string): string {
+  const hashAt = href.indexOf("#");
+  if (hashAt === -1) {
+    return href;
+  }
+  const fragment = href.slice(hashAt + 1);
+  return /(^|&)k=/i.test(fragment) ? href.slice(0, hashAt) : href;
+}
+
+/**
  * Images only ever need to load from a normal http(s) URL. Unlike links,
  * there is no legitimate `mailto:`/`data:` use case here, so — belt and
  * braces alongside DOMPurify's own scheme filtering — restrict `<img src>`
@@ -46,6 +62,11 @@ export function renderMarkdown(markdown: string): string {
     if (!isSafeLink(href)) {
       link.removeAttribute("href");
       continue;
+    }
+
+    const neutralised = withoutHostKeyFragment(href);
+    if (neutralised !== href) {
+      link.setAttribute("href", neutralised);
     }
 
     link.setAttribute("rel", "noreferrer");
