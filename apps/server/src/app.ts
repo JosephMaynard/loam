@@ -44,7 +44,7 @@ import { registerMessageRoutes } from "./routes-messages.js";
 import { registerSessionRoutes } from "./routes-session.js";
 import { registerSyncMeshRoutes } from "./routes-sync-mesh.js";
 import { registerUserRoutes } from "./routes-users.js";
-import { createTransportServer, registerTransportHooks, registerTransportRoutes } from "./transport-server.js";
+import { createTransportServer, loamLoggerOptions, registerTransportHooks, registerTransportRoutes, skipInternalRequestLogging } from "./transport-server.js";
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
 
@@ -102,7 +102,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   const server = Fastify({
     // Developer Mode turns on verbose (`debug`) logging unless the caller passed an explicit logger.
-    logger: options.logger ?? (devMode ? { level: "debug" } : true),
+    // Logged request URLs drop their query string, and tunnel re-dispatches aren't request-logged at all
+    // (their URL is the path the tunnel hides) — see `loamLoggerOptions` / `skipInternalRequestLogging`.
+    logger: options.logger === false ? false : loamLoggerOptions(devMode ? "debug" : "info", options.logStream),
+    disableRequestLogging: skipInternalRequestLogging,
     // The global body ceiling stays at Fastify's 1 MiB default. Only the two routes that genuinely
     // carry large envelopes — `POST /api/attachments` and `POST /api/transport/tunnel` — raise it
     // per-route (`LARGE_BODY_LIMIT`); a blanket 4 MiB would hand every endpoint (including the

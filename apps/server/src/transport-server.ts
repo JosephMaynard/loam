@@ -34,6 +34,54 @@ export interface TransportSession {
   resumeResult?: { s?: number; m: string; p: string; currentUser: unknown; token: string };
 }
 
+// Every live app's per-boot internal tunnel token (normally one per process; tests build many). The request
+// LOGGER needs to recognise a tunnel re-dispatch before the app context exists — Fastify's logger options are
+// fixed at construction — so the check is keyed on the token itself. A forged header can only ever suppress
+// the forger's OWN request log line; it grants nothing (authorization still uses `isInternalTunnelRequest`).
+const liveInternalTunnelTokens = new Set<string>();
+
+/** Whether a request is an internal tunnel re-dispatch, for logging purposes (see above). */
+function isInternalDispatchForLogging(request: { headers?: Record<string, unknown> }): boolean {
+  const header = request.headers?.["x-loam-internal"];
+  return typeof header === "string" && liveInternalTunnelTokens.has(header);
+}
+
+/**
+ * Fastify's `disableRequestLogging` predicate: never log a tunnel re-dispatch (review 2026-09-25 #10). Its
+ * URL is the real path + query the tunnel exists to hide (`/api/search?q=…`), and server logs outlive an
+ * Emergency Reset. The OUTER `POST /api/transport/tunnel` is still logged, which is all the wire shows too.
+ */
+export function skipInternalRequestLogging(request: { headers?: Record<string, unknown> }): boolean {
+  return isInternalDispatchForLogging(request);
+}
+
+/**
+ * The logged form of a request: Fastify's default `req` serializer minus the query string (search terms,
+ * `?enc=` WebSocket session ids…) — and, for an internal tunnel re-dispatch (should one ever be logged, e.g.
+ * a 5xx error line), no path at all.
+ */
+export function loggedRequest(request: {
+  method?: string;
+  url?: string;
+  host?: string;
+  ip?: string;
+  headers?: Record<string, unknown>;
+  socket?: { remotePort?: number };
+}): Record<string, unknown> {
+  return {
+    method: request.method,
+    url: isInternalDispatchForLogging(request) ? "[tunnelled]" : (request.url ?? "").split("?", 1)[0],
+    host: request.host,
+    remoteAddress: request.ip,
+    remotePort: request.socket?.remotePort,
+  };
+}
+
+/** The server's pino options: the level, the query-stripping `req` serializer, and an optional sink. */
+export function loamLoggerOptions(level: string, stream?: { write(line: string): void }) {
+  return { level, serializers: { req: loggedRequest }, ...(stream ? { stream } : {}) };
+}
+
 /** Build the transport session layer over the app context: identity, sessions, replay windows, request-auth helpers. */
 export function createTransportServer(ctx: AppContext) {
   const transportSessions = new Map<string, TransportSession>();
@@ -80,6 +128,10 @@ export function createTransportServer(ctx: AppContext) {
   // in constant time — an external request can't forge it, so the transport-enforcement bypass it
   // unlocks for internal requests is safe. Never leaves the process; regenerated every boot.
   const internalTunnelToken = randomBytes(32).toString("base64url");
+  liveInternalTunnelTokens.add(internalTunnelToken);
+  ctx.server.addHook("onClose", async () => {
+    liveInternalTunnelTokens.delete(internalTunnelToken);
+  });
 
   /** Whether a request is an internal tunnel re-dispatch (carries the valid per-boot internal token).
    * Such requests skip transport enforcement (they run plaintext inside the process) and the global
@@ -845,6 +897,12 @@ export function registerTransportRoutes(ctx: AppContext): void {
     // (identity bootstrap through the tunnel) — the browser must see Set-Cookie to store it. A bound
     // session's inner request mints no cookie (identity came via `x-loam-user`), so there's nothing to
     // forward there.
+    // The inner request is never request-logged (it would print the hidden path — `skipInternalRequestLogging`),
+    // which also silences its 5xx error line; keep a path-free trace of the failure on the outer request.
+    if (injected.statusCode >= 500) {
+      request.log.error({ method, status: injected.statusCode }, "A tunnelled request failed");
+    }
+
     const setCookie = injected.headers["set-cookie"];
     if (setCookie !== undefined) {
       reply.header("set-cookie", setCookie);
