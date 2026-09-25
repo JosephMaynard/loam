@@ -165,7 +165,7 @@ export const tr: Translation = {
     "Herkes hemen katılır ve paylaşır. Mesajlar saklanır ve acil sıfırlama kapalıdır — azami erişim, afet yardımı tarzı kullanım için.",
   "admin.profileStandardTitle": "Standart",
   "admin.profileStandardSummary":
-    "Katılma bağlantısı olan herkes katılır; mesajlar saklanır ve acil sıfırlama kapalıdır. (Aktarım şifrelemesi gelene dek Açık ile aynı ayarlar uygulanır.)",
+    "Katılma bağlantısı olan herkes katılır; mesajlar saklanır ve acil sıfırlama kapalıdır. (Şimdilik Açık ile aynı ayarları uygular.)",
   "admin.profileHardenedTitle": "Sıkılaştırılmış",
   "admin.profileHardenedSummary":
     "Yeni katılanlar onaylanmalı, mesajlar 1 saat sonra sona erer ve acil sıfırlama etkindir. Gizliliğe duyarlı ortamlar için.",

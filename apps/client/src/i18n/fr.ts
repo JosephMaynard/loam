@@ -165,7 +165,7 @@ export const fr: Translation = {
     "Tout le monde rejoint et publie immédiatement. Les messages sont conservés et la Réinitialisation d’urgence est désactivée — accès maximal, pour un usage type secours d’urgence.",
   "admin.profileStandardTitle": "Standard",
   "admin.profileStandardSummary":
-    "Quiconque a le lien participe ; les messages sont conservés et la Réinitialisation d’urgence est désactivée. (Mêmes réglages appliqués qu’Ouvert jusqu’à l’arrivée du chiffrement de transport.)",
+    "Quiconque a le lien participe ; les messages sont conservés et la Réinitialisation d’urgence est désactivée. (Applique pour l’instant les mêmes réglages qu’Ouvert.)",
   "admin.profileHardenedTitle": "Renforcé",
   "admin.profileHardenedSummary":
     "Les nouveaux arrivants doivent être approuvés, les messages expirent après 1 heure et la Réinitialisation d’urgence est activée. Pour les contextes sensibles à la confidentialité.",

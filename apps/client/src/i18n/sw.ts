@@ -165,7 +165,7 @@ export const sw: Translation = {
     "Yeyote hujiunga na kuchapisha mara moja. Ujumbe huhifadhiwa na Uwekaji upya wa dharura umezimwa — ufikiaji wa juu, kwa matumizi ya aina ya msaada wa maafa.",
   "admin.profileStandardTitle": "Kawaida",
   "admin.profileStandardSummary":
-    "Yeyote mwenye kiungo cha kujiunga hushiriki; ujumbe huhifadhiwa na Uwekaji upya wa dharura umezimwa. (Mipangilio ile ile kama Wazi hadi usimbaji wa usafirishaji ufike.)",
+    "Yeyote mwenye kiungo cha kujiunga hushiriki; ujumbe huhifadhiwa na Uwekaji upya wa dharura umezimwa. (Kwa sasa hutumia mipangilio ile ile kama Wazi.)",
   "admin.profileHardenedTitle": "Imara",
   "admin.profileHardenedSummary":
     "Wanaojiunga wapya lazima waidhinishwe, ujumbe huisha baada ya saa 1, na Uwekaji upya wa dharura umewashwa. Kwa mazingira nyeti kwa faragha.",

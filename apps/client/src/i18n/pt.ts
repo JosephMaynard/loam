@@ -165,7 +165,7 @@ export const pt: Translation = {
     "Qualquer um entra e publica imediatamente. As mensagens são mantidas e a Redefinição de emergência está desligada — acesso máximo, para uso tipo ajuda humanitária.",
   "admin.profileStandardTitle": "Padrão",
   "admin.profileStandardSummary":
-    "Qualquer um com o link participa; as mensagens são mantidas e a Redefinição de emergência está desligada. (Mesmas configurações aplicadas que Aberto até chegar a criptografia de transporte.)",
+    "Qualquer um com o link participa; as mensagens são mantidas e a Redefinição de emergência está desligada. (Por enquanto aplica as mesmas configurações que Aberto.)",
   "admin.profileHardenedTitle": "Reforçado",
   "admin.profileHardenedSummary":
     "Novos ingressantes precisam ser aprovados, as mensagens expiram após 1 hora e a Redefinição de emergência está ativada. Para contextos sensíveis à privacidade.",

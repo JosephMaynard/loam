@@ -207,7 +207,7 @@ export const en = {
     "Anyone joins and posts immediately. Messages are kept and Emergency Reset is off — maximum access, for disaster-relief style use.",
   "admin.profileStandardTitle": "Standard",
   "admin.profileStandardSummary":
-    "Anyone with the join link participates; messages are kept and Emergency Reset is off. (Same enforced settings as Open until transport encryption lands.)",
+    "Anyone with the join link participates; messages are kept and Emergency Reset is off. (Currently enforces the same settings as Open.)",
   "admin.profileHardenedTitle": "Hardened",
   "admin.profileHardenedSummary":
     "New joiners must be approved, messages expire after 1 hour, and Emergency Reset is enabled. For privacy-sensitive settings.",

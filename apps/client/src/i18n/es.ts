@@ -165,7 +165,7 @@ export const es: Translation = {
     "Cualquiera se une y publica de inmediato. Los mensajes se conservan y el Restablecimiento de emergencia está desactivado — máximo acceso, para uso tipo ayuda humanitaria.",
   "admin.profileStandardTitle": "Estándar",
   "admin.profileStandardSummary":
-    "Cualquiera con el enlace de acceso participa; los mensajes se conservan y el Restablecimiento de emergencia está desactivado. (Mismos ajustes aplicados que Abierto hasta que llegue el cifrado de transporte).",
+    "Cualquiera con el enlace de acceso participa; los mensajes se conservan y el Restablecimiento de emergencia está desactivado. (Por ahora aplica los mismos ajustes que Abierto).",
   "admin.profileHardenedTitle": "Reforzado",
   "admin.profileHardenedSummary":
     "Los nuevos integrantes deben ser aprobados, los mensajes caducan tras 1 hora y el Restablecimiento de emergencia está activado. Para entornos sensibles a la privacidad.",

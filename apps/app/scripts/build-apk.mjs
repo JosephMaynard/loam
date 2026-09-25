@@ -1,7 +1,7 @@
 // Build a release APK for the LOAM Android host end-to-end, then copy it somewhere obvious.
 //
-// One command instead of the six-step dance in docs/04: builds the workspace, fetches the
-// better-sqlite3 native prebuild, bundles the embedded server, regenerates the native project with
+// One command instead of the six-step dance in docs/04: builds the workspace, places the
+// vendored SQLite native prebuilds (plain + SQLCipher), bundles the embedded server, regenerates the native project with
 // Expo prebuild, and runs `gradlew assembleRelease` (arm64). The finished APK is copied to
 // `apps/app/loam-host.apk` (gitignored) and its path printed, ready for `adb install -r`.
 //

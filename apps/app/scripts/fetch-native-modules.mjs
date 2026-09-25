@@ -42,7 +42,7 @@ import { fileURLToPath } from "node:url";
 const ARCH = "android-arm64"; // matches the arm64-v8a APK we build (see plugins/with-loam-host.js)
 const ABI = "108"; // Node 18 (embedded nodejs-mobile runtime)
 
-// --- PLAIN driver: better-sqlite3, DOWNLOADED from digidem ------------------------------------------
+// --- PLAIN driver: better-sqlite3, digidem's prebuild VENDORED in-repo ---------------------------------
 // Pinned pair: the JS wrapper npm version and the digidem release tag (same number). android-arm64,
 // Node ABI 108. Fallback if this fails to load on-device: 11.10.0 (the version CoMapeo ships).
 const BETTER_SQLITE3_VERSION = "12.10.0";
