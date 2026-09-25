@@ -6,12 +6,15 @@ import type { Conversation } from "./protocol";
 import {
   compareCreatedAt,
   conversationMessages,
+  countUnreadByConversation,
   groupReactionsByTarget,
   groupRepliesByParent,
   isConversationMessage,
   isJumboEmoji,
+  LiveChangeJournal,
   mergeMessagesInOrder,
   messageConversationKey,
+  newestMessageTimestamp,
   reactionSummary,
   reconcileConversationSnapshot,
   repliesFor,
@@ -437,5 +440,81 @@ describe("reconcileConversationSnapshot", () => {
     expect(result.messages.map((message) => message.id)).toEqual(["d", "a", "raced"]);
     expect(result.messages[1]).toMatchObject({ body: "edited" });
     expect(result.prunedIds).toEqual([]);
+  });
+});
+
+describe("reconcileConversationSnapshot vs live events during the fetch (review 2026-09-25)", () => {
+  it("doesn't resurrect a message a live messageDeleted removed while the fetch was in flight", () => {
+    const journal = new LiveChangeJournal();
+    const mark = journal.mark(); // fetch starts; the snapshot below still contains "gone"
+    // ...the live delete arrives and removes it locally...
+    journal.recordDeleted("gone");
+    const previous = [post("a", 100)];
+    const result = reconcileConversationSnapshot(
+      previous,
+      CHANNEL,
+      [post("a", 100), post("gone", 200)],
+      new Set(["a", "gone"]),
+      ME,
+      journal.since(mark),
+    );
+    expect(result.messages.map((message) => message.id)).toEqual(["a"]);
+    expect(result.applied.map((message) => message.id)).toEqual(["a"]); // nothing to re-persist for "gone"
+  });
+
+  it("keeps a live edit over the older snapshot copy, but takes a strictly newer snapshot edit", () => {
+    const journal = new LiveChangeJournal();
+    const mark = journal.mark();
+    const liveEdited = { ...post("a", 100, "live edit"), editedAt: 500 } as Message;
+    journal.recordUpdated("a");
+    const stale = reconcileConversationSnapshot(
+      [liveEdited],
+      CHANNEL,
+      [post("a", 100, "original")],
+      new Set(["a"]),
+      ME,
+      journal.since(mark),
+    );
+    expect(stale.messages[0]).toMatchObject({ body: "live edit" });
+    expect(stale.applied).toEqual([]);
+
+    const newer = { ...post("a", 100, "even newer"), editedAt: 900 } as Message;
+    const fresh = reconcileConversationSnapshot([liveEdited], CHANNEL, [newer], new Set(["a"]), ME, journal.since(mark));
+    expect(fresh.messages[0]).toMatchObject({ body: "even newer" });
+  });
+
+  it("only counts changes AFTER the mark, and forgets entries past their retention", () => {
+    let now = 1_000;
+    const journal = new LiveChangeJournal(60_000, () => now);
+    journal.recordDeleted("before");
+    const mark = journal.mark();
+    journal.recordDeleted("after");
+    journal.recordUpdated("edited");
+    expect([...journal.since(mark).deletedIds]).toEqual(["after"]);
+    expect([...journal.since(mark).updatedIds]).toEqual(["edited"]);
+
+    now += 120_000;
+    journal.recordDeleted("later");
+    expect([...journal.since(0).deletedIds]).toEqual(["later"]);
+    expect([...journal.since(0).updatedIds]).toEqual([]);
+  });
+});
+
+describe("read markers use server timestamps (review 2026-09-25)", () => {
+  it("newestMessageTimestamp is the newest post/DM createdAt, ignoring reactions", () => {
+    expect(newestMessageTimestamp([])).toBeUndefined();
+    expect(newestMessageTimestamp([post("a", 100), post("b", 300), reaction("r", 900, "a", "👍", ME)])).toBe(300);
+  });
+
+  it("a message newer than the marker is unread even when the client clock runs ahead of the server", () => {
+    const peerPost = { ...post("new", 1_000), authorId: "user.peer" } as Message;
+    // Old behaviour: the marker was the CLIENT's Date.now() (here, a clock 1h fast) — the new post vanished.
+    const clientClockMarker = { [`channel:${CHANNEL.id}`]: 1_000 + 3_600_000 };
+    expect(countUnreadByConversation([peerPost], clientClockMarker, ME).get(`channel:${CHANNEL.id}`)).toBeUndefined();
+    // New behaviour: the marker is the newest createdAt seen on screen (server time) — the post counts.
+    const serverMarker = { [`channel:${CHANNEL.id}`]: newestMessageTimestamp([post("seen", 900)])! };
+    expect(countUnreadByConversation([peerPost], serverMarker, ME).get(`channel:${CHANNEL.id}`)).toBe(1);
+    // Own messages and reactions never count.
+    expect(countUnreadByConversation([post("mine", 2_000)], serverMarker, "user.1").size).toBe(0);
   });
 });

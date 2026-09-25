@@ -2,6 +2,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  clearAllRecords,
   deleteRecord,
   destroyDatabase,
   getAllRecords,
@@ -139,5 +140,20 @@ describe("local-store", () => {
       // Our store latched itself in the versionchange handler → it won't rehydrate the DB the sibling erased.
       expect(await getAllRecords<Channel>("channels")).toEqual([]);
     });
+  });
+
+  it("clearAllRecords empties every store but leaves the database usable (identity change, review 2026-09-25)", async () => {
+    await putRecords<Channel>("channels", [{ id: "general", name: "General" }]);
+    await putRecord("messages", { id: "m1" });
+    await putRecord("users", { id: "user.old" });
+    await putRecord("sync", { id: "conversationReads" });
+
+    await clearAllRecords();
+
+    for (const store of ["channels", "messages", "users", "sync"] as const) {
+      expect(await getAllRecords(store)).toEqual([]);
+    }
+    await putRecord<Channel>("channels", { id: "fresh", name: "Fresh" });
+    expect(await getAllRecords<Channel>("channels")).toEqual([{ id: "fresh", name: "Fresh" }]);
   });
 });
