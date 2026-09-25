@@ -751,6 +751,17 @@ export const ReportResolveRequestSchema = z.object({
 export type ReportResolveRequest = z.infer<typeof ReportResolveRequestSchema>;
 
 /**
+ * The signed-in user's own block list (docs/30 B3) — `GET/PUT/DELETE /api/users/me/blocks[/:userId]` all
+ * answer with it. Private to its owner: it never rides `userUpserted`, the roster, or sync. Blocking stops
+ * DMs (and DM reactions) in both directions server-side; the client hides the blocked user's channel posts,
+ * replies and reactions locally (the server still delivers channel content — hiding is the viewer's choice).
+ */
+export const UserBlockListSchema = z.object({
+  blockedUserIds: z.array(IdSchema),
+});
+export type UserBlockList = z.infer<typeof UserBlockListSchema>;
+
+/**
  * `GET /api/search` querystring. Each field must be a single string — a repeated key (`?q=a&q=b`) parses
  * to an array and is a 400, not a crash. Unknown keys are ignored.
  */
@@ -1252,6 +1263,9 @@ export const SERVER_ERROR_CODES = [
   "message_removed",
   "assistant_busy",
   "internal_error",
+  "dm_unavailable",
+  "dm_blocked_by_you",
+  "block_not_allowed",
 ] as const;
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 

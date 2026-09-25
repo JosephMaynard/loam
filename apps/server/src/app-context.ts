@@ -103,6 +103,7 @@ export type AppContext = {
   isLocallyAuthoritative(userId: string): boolean;
   participationError(user: User): string | undefined;
   timeoutError(user: User): string | undefined;
+  dmBlockError(senderId: string, recipientId: string): string | undefined;
   applyUserModeration(
   user: User,
   changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending" | "timeoutUntil">>,

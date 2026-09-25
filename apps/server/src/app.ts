@@ -424,6 +424,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     isLocallyAuthoritative,
     participationError,
     timeoutError,
+    dmBlockError,
     applyUserModeration,
     invalidateUserSessions,
     revokeIdentityToken,
@@ -883,6 +884,36 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
+   * Whether a user block stops `senderId` writing into a DM with `recipientId` (docs/30 B3): a new DM, a
+   * reaction on one, or an edit of an old one. A sender who did the blocking gets an honest "you blocked
+   * them"; a sender who IS blocked gets the generic `dm_unavailable` answer that a DM to a banned or
+   * not-yet-approved recipient also gets, so the refusal never says "you were blocked". Reads the DAL
+   * directly (one indexed lookup): block lists keep no in-memory mirror that a wipe would have to reset.
+   */
+  function dmBlockError(senderId: string, recipientId: string): string | undefined {
+    if (senderId === recipientId) {
+      return undefined;
+    }
+    if (store.isUserBlocked(senderId, recipientId)) {
+      return "You blocked this person. Unblock them to send a message";
+    }
+    if (store.isUserBlocked(recipientId, senderId)) {
+      return "Direct messages to this person aren't available";
+    }
+    return undefined;
+  }
+
+  /** The other participant of the DM `message` belongs to (a DM, or a reaction on one), else undefined. */
+  function dmCounterpart(message: Message, actorId: string): string | undefined {
+    const root =
+      message.type === "reaction" ? data.messages.find((candidate) => candidate.id === message.targetMessageId) : message;
+    if (root?.type !== "dm") {
+      return undefined;
+    }
+    return root.authorId === actorId ? root.recipientUserId : root.authorId;
+  }
+
+  /**
    * Apply moderation / role state to a user (roles, banned, shadowBanned, pending), re-validating
    * the whole record against the schema, persisting, then broadcasting `userUpserted`. Mirrors
    * `applyUserUpdate`: persist first, then mutate the live object and broadcast, so a failed write
@@ -1267,6 +1298,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         if (target.type === "channelReply" && !appConfig.features.enableReplies) {
           return { code: 403, error: "Replies are disabled on this LOAM node" };
         }
+
+        // A block also freezes edits of pre-block DMs: an edit re-broadcasts new text to the other side.
+        const counterpart = dmCounterpart(target, actor.id);
+        const blockError = counterpart ? dmBlockError(actor.id, counterpart) : undefined;
+
+        if (blockError) {
+          return { code: 403, error: blockError };
+        }
       }
     }
 
@@ -1560,6 +1599,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (target.meta?.removedByModerator) {
         return { error: "This message was removed by a moderator", forbidden: true };
       }
+
+      // Nor on a DM across a block, either way (removing your own reaction, above, stays allowed).
+      const counterpart = dmCounterpart(target, authorId);
+      const blockError = counterpart ? dmBlockError(authorId, counterpart) : undefined;
+
+      if (blockError) {
+        return { error: blockError, forbidden: true };
+      }
     }
 
     if (input.type === "dm") {
@@ -1567,6 +1614,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (!recipient) {
         return { error: "Recipient user does not exist" };
+      }
+
+      // Someone who can't read DMs (banned, or still awaiting approval) can't receive one. It is the same
+      // generic answer a sender the recipient has BLOCKED gets (dmBlockError), so neither reads as "blocked".
+      if (recipient.banned || recipient.pending) {
+        return { error: "Direct messages to this person aren't available", forbidden: true };
+      }
+
+      const blockError = dmBlockError(authorId, recipient.id);
+
+      if (blockError) {
+        return { error: blockError, forbidden: true };
       }
     }
 

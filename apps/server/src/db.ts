@@ -265,6 +265,17 @@ export interface LoamStore {
   loadJoinRequests(channelId: string): string[];
   removeJoinRequest(channelId: string, userId: string): void;
   removeJoinRequestsForChannel(channelId: string): void;
+  /**
+   * Per-user block lists (Play UGC policy — docs/30 B3). A row means `blockerId` has blocked `blockedId`:
+   * the server refuses DMs (and DM reactions) between the two, and the blocker's client hides the blocked
+   * user's channel content. Private to the blocker — never broadcast, never exported by sync. Idempotent
+   * add/remove; rows for a user go when that user is deleted (`deleteUser`); wiped by the kill switch.
+   */
+  addUserBlock(blockerId: string, blockedId: string): void;
+  removeUserBlock(blockerId: string, blockedId: string): void;
+  /** The ids `blockerId` has blocked, oldest block first. */
+  loadUserBlocks(blockerId: string): string[];
+  isUserBlocked(blockerId: string, blockedId: string): boolean;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -583,6 +594,13 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       created_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (channel_id, user_id)
     );
+    CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_id TEXT NOT NULL,
+      blocked_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (blocker_id, blocked_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks (blocked_id);
   `);
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
@@ -683,6 +701,15 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     "DELETE FROM channel_join_requests WHERE channel_id = ? AND user_id = ?",
   );
   const removeJoinRequestsForChannelStmt = db.prepare("DELETE FROM channel_join_requests WHERE channel_id = ?");
+  const addUserBlockStmt = db.prepare(
+    "INSERT INTO user_blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?) ON CONFLICT(blocker_id, blocked_id) DO NOTHING",
+  );
+  const removeUserBlockStmt = db.prepare("DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?");
+  const loadUserBlocksStmt = db.prepare(
+    "SELECT blocked_id FROM user_blocks WHERE blocker_id = ? ORDER BY created_at ASC, rowid ASC",
+  );
+  const isUserBlockedStmt = db.prepare("SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?");
+  const deleteUserBlocksForUserStmt = db.prepare("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?");
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -739,6 +766,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     deleteUser(userId) {
       deleteUserStmt.run(userId);
+      deleteUserBlocksForUserStmt.run(userId, userId);
     },
     upsertChannel(channel) {
       upsertChannelStmt.run(channel.id, JSON.stringify(channel));
@@ -896,6 +924,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     removeJoinRequestsForChannel(channelId) {
       removeJoinRequestsForChannelStmt.run(channelId);
     },
+    addUserBlock(blockerId, blockedId) {
+      addUserBlockStmt.run(blockerId, blockedId, Date.now());
+    },
+    removeUserBlock(blockerId, blockedId) {
+      removeUserBlockStmt.run(blockerId, blockedId);
+    },
+    loadUserBlocks(blockerId) {
+      return loadUserBlocksStmt.all(blockerId).map((row) => (row as { blocked_id: string }).blocked_id);
+    },
+    isUserBlocked(blockerId, blockedId) {
+      return isUserBlockedStmt.get(blockerId, blockedId) !== undefined;
+    },
     wipeAll() {
       store.transaction(() => {
         db.exec("DELETE FROM messages");
@@ -912,6 +952,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM synced_messages");
         db.exec("DELETE FROM synced_users");
         db.exec("DELETE FROM channel_join_requests");
+        db.exec("DELETE FROM user_blocks");
       });
     },
     checkpoint() {
