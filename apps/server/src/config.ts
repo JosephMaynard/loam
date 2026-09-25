@@ -203,6 +203,22 @@ export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repair
 }
 
 /**
+ * {@link sanitizeLegacyConfigJson} for a FULL `LoamConfig` snapshot (the wipe journal) rather than a config
+ * layer: there is no lower layer to supply a dropped `llm.ollama.botId`, so the default bot id fills it in,
+ * which is what the layered load ends up with for a repaired config.json or DB row.
+ */
+export function sanitizeLegacyFullConfigJson(json: unknown): { json: unknown; repairs: string[] } {
+  const ollama = isRecord(json) && isRecord(json.llm) ? json.llm.ollama : undefined;
+  const hadBotId = isRecord(ollama) && ollama.botId !== undefined;
+  const result = sanitizeLegacyConfigJson(json);
+  // Only a bot id the repair DROPPED is filled; a snapshot that never had one stays invalid (corrupt).
+  if (hadBotId && isRecord(ollama) && ollama.botId === undefined) {
+    ollama.botId = defaultLoamConfig().llm.ollama.botId;
+  }
+  return result;
+}
+
+/**
  * Drop the keys the Android launcher owns from a config update. The launcher's model manager
  * (`nodejs-project-template/main.js`, `loam-model-set-active`) persists the whole `llm.onDevice` block
  * into config.json; the DB config layer (written in full by every admin save) sits ABOVE config.json, so

@@ -487,7 +487,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * `off` default and serve plaintext while the operator believes it's hardened. Fail closed instead — the
    * caller only invokes this when a config source actually exists (an absent file is a normal fresh boot).
    */
-  function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate {
+  function parseConfigUpdate(
+    raw: string,
+    source: string,
+    onRepaired?: (repairedJson: unknown) => void,
+  ): LoamConfigUpdate {
     let parsedJson: unknown;
     try {
       parsedJson = JSON.parse(raw);
@@ -505,6 +509,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     const parsed = LoamConfigUpdateSchema.safeParse(json);
     if (parsed.success) {
+      if (repairs.length > 0) {
+        onRepaired?.(json);
+      }
       return parsed.data;
     }
 
@@ -553,7 +560,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // through `parseConfigUpdate` (JSON.parse("") throws → abort), not be silently skipped to defaults. An
     // absent key returns `undefined` → a normal fresh boot.
     if (stored !== undefined) {
-      const parsedStored = parseConfigUpdate(stored, "the persisted config table");
+      // A row an older build wrote can need repairs (sanitizeLegacyConfigJson). Write the repaired row back
+      // once, so the warning isn't repeated on every boot until the next admin save rewrites it.
+      const parsedStored = parseConfigUpdate(stored, "the persisted config table", (repairedJson) => {
+        store.setConfigValue("config", JSON.stringify(repairedJson));
+      });
       // config.json is authoritative for the launcher-owned `llm.onDevice` block when it carries one: the
       // DB row holds a full snapshot from the last admin save, which must not freeze the launcher's later
       // model activate/deactivate (rows written before this fix contain it too — it is simply ignored).

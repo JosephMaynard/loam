@@ -8,7 +8,7 @@ import { type TransportIdentity, createTransportIdentity, openTransport, sealTra
 import { TransportHandshakeRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { IdentityLimitError, errorBody } from "./errors.js";
-import { hashIdentityToken, makeIdentityToken, makeSessionUserId } from "./identity.js";
+import { hashIdentityToken, makeIdentityToken } from "./identity.js";
 import { type FastifyRequest, LogController } from "fastify";
 
 // Live transport sessions: sessionId → derived key + expiry + anti-replay window. In-memory only;
@@ -767,7 +767,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
       if (!ctx.consumeIdentityBudget(request.ip)) {
         throw new IdentityLimitError();
       }
-      userId = makeSessionUserId();
+      userId = ctx.mintSessionUserId();
       token = makeIdentityToken();
       tokenHash = hashIdentityToken(token);
       ctx.identityTokens.set(tokenHash, userId);

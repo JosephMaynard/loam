@@ -11,8 +11,14 @@ import { LoamConfigSchema, type LoamConfig } from "@loam/schema";
 import type { FastifyBaseLogger } from "fastify";
 
 import { reportBootNotice, reportDbKeyMigrated } from "./boot-bridge.js";
-import { openStore, type LoamStore } from "./db.js";
-import { DbEncryptionPlaintextUnconvertedError, DbEncryptionUnreadableError, WipeResumeInProgressError } from "./errors.js";
+import { sanitizeLegacyFullConfigJson } from "./config.js";
+import { hasPlaintextSqliteHeader, openStore, probeEncryptedDriver, type LoamStore } from "./db.js";
+import {
+  DbEncryptionDriverMissingError,
+  DbEncryptionPlaintextUnconvertedError,
+  DbEncryptionUnreadableError,
+  WipeResumeInProgressError,
+} from "./errors.js";
 import type { AppOptions } from "./types.js";
 
 /** The live at-rest key state. `dbKey` is the active SQLCipher key (rotated by an ephemeral-mode kill
@@ -582,7 +588,14 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     let config: LoamConfig | undefined;
     let configInvalid = false;
     if (obj.config !== undefined) {
-      const validated = LoamConfigSchema.safeParse(obj.config);
+      // A snapshot committed by an OLDER build may hold values that build accepted but the schema now refuses
+      // (a configured `off` transport, an out-of-namespace bot id): repair them exactly as a config.json /
+      // persisted row is repaired at load, rather than locking the node as if the journal were corrupt.
+      const { json: repaired, repairs } = sanitizeLegacyFullConfigJson(obj.config);
+      for (const repair of repairs) {
+        log.warn(`wipe journal config snapshot: ${repair}`);
+      }
+      const validated = LoamConfigSchema.safeParse(repaired);
       if (validated.success) {
         config = validated.data;
       } else {
@@ -699,6 +712,43 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     resumePreserveRecovery();
 
     const keyWasResolved = state.dbKey !== undefined;
+
+    /**
+     * Stop a failed KEYED open from entering the migration / plaintext-probe / start-fresh recovery chain
+     * when that chain can't apply. Throws; returns only when recovery should proceed as before.
+     *  - The SQLCipher driver doesn't load: nothing on disk is wrong, so no recovery action (start fresh,
+     *    delete and re-encrypt) may be offered. Report `db_encryption_driver_missing`, the same fatal code
+     *    the Android launcher uses when its own probe fails, and lock.
+     *  - There was no database before this boot: there is nothing to migrate or recover. Remove whatever
+     *    the failed open itself created (a codec that never engaged writes a PLAINTEXT file, which a later
+     *    boot would otherwise misreport as an unconverted plaintext database) and rethrow the open error.
+     */
+    function failFatallyIfKeyedOpenCannotRecover(openError: unknown, dbExistedBeforeOpen: boolean): void {
+      const removeStrayNewDb = () => {
+        if (!dbExistedBeforeOpen) {
+          for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
+            rmSync(path, { force: true });
+          }
+        }
+      };
+
+      const driverError = probeEncryptedDriver();
+      if (driverError) {
+        removeStrayNewDb();
+        const message =
+          "An encrypted database mode is configured but the SQLCipher driver (better-sqlite3-multiple-ciphers) " +
+          `could not be loaded: ${driverError.message}. Refusing to start (no plaintext fallback).`;
+        log.error(message);
+        reportBootNotice(message, "db_encryption_driver_missing");
+        throw new DbEncryptionDriverMissingError(message);
+      }
+
+      if (!dbExistedBeforeOpen) {
+        removeStrayNewDb();
+        log.error(openError, "Could not create a new encrypted database");
+        throw openError;
+      }
+    }
 
     /**
      * Execute a confirmed start-fresh honoring the operator's INTENT (P1-2, Sol round-9) — the SINGLE place
@@ -926,6 +976,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       }
     }
 
+    // Whether a database file was on disk BEFORE the keyed open below: that open creates the file when it is
+    // missing, so after a failure its mere presence proves nothing about pre-existing data.
+    const dbExistedBeforeOpen = existsSync(dbPath);
     try {
       const opened = openLoamStore();
       if (keyWasResolved && (options.dbEncryptionMigrateFromKey !== undefined || options.dbEncryptionMode === "passphrase")) {
@@ -940,7 +993,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         reportDbKeyMigrated(options.dbKeyRequestId);
       }
       return opened;
-    } catch {
+    } catch (openError) {
+      if (keyWasResolved) {
+        failFatallyIfKeyedOpenCannotRecover(openError, dbExistedBeforeOpen);
+      }
       // Fall through — try the legacy-key migration below, then the plaintext fallback (case 2), or
       // recovery (case 3).
     }
@@ -1053,12 +1109,15 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       // genuine plaintext SQLite DB under an encrypted mode — the persisted mode/hint say encrypted. The old
       // code SILENTLY served that plaintext file (`state.encryptionEnabled=false`, `db_encryption_open_failed`),
       // a confidentiality downgrade the operator was never told about. Instead LOCK: do NOT serve plaintext.
+      // Probe only a file that carries the plaintext SQLite header: opening anything else without a key
+      // would either fail (ciphertext) or, for a missing path, CREATE a fresh plaintext database.
       let plainStore: LoamStore | undefined;
-      try {
-        plainStore = openStore(dbPath, { driver: options.dbDriver });
-      } catch {
-        // Not plaintext either (genuine ciphertext with the wrong key) — fall through to the marker-gated
-        // recovery below, exactly as before.
+      if (hasPlaintextSqliteHeader(dbPath)) {
+        try {
+          plainStore = openStore(dbPath, { driver: options.dbDriver });
+        } catch {
+          // Unopenable despite the header — fall through to the marker-gated recovery below.
+        }
       }
 
       if (plainStore) {

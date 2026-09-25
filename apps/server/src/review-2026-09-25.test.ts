@@ -499,8 +499,8 @@ describe("peer users: only accepted authors, no reserved ids, no mesh keys minte
     await app.close();
     const reopened = await buildApp({ dataDir, logger: false });
     cleanups.push(() => reopened.close());
-    const row = reopened.store.loadMeshIdentities().find((entry) => entry.userId === peerAuthor.id);
-    expect(row === undefined || !row.data.includes(forged.signSecret)).toBe(true);
+    // The row is DELETED, not overwritten with a placeholder.
+    expect(reopened.store.loadMeshIdentities().some((entry) => entry.userId === peerAuthor.id)).toBe(false);
     expect(reopened.store.loadUsers().find((user) => user.id === peerAuthor.id)?.identityKey).toBeUndefined();
   });
 });

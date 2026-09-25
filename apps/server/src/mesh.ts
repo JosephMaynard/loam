@@ -62,7 +62,7 @@ export function createMeshLayer(rt: Runtime) {
   /**
    * Load every persisted per-user mesh identity into the in-memory map — only for local users. A row minted
    * for a peer-imported user or a mesh sender by an older build is a useless secret for someone else's
-   * identity: it is dropped (row overwritten, so the secret key no longer sits in the DB) and, if that
+   * identity: its row is deleted (so the secret key no longer sits in the DB) and, if that
    * user's record still publishes the key we minted, the forged `identityKey` is stripped so it stops being
    * re-exported (a later genuine key from the user's home node may then be adopted by the sync TOFU rule).
    */
@@ -74,14 +74,18 @@ export function createMeshLayer(rt: Runtime) {
       } catch {
         continue; // Skip a corrupt row rather than crash boot.
       }
-      if (!identity || typeof identity !== "object" || typeof identity.mailboxToken !== "string") {
-        continue; // a revoked (see below) or malformed row
+      if (identity === null) {
+        // A `null` placeholder an earlier build wrote in place of a purged row (below) — remove it.
+        rt.store.deleteMeshIdentity(userId);
+        continue;
+      }
+      if (typeof identity !== "object" || typeof identity.mailboxToken !== "string") {
+        continue; // a malformed row
       }
       const user = rt.data.users.find((candidate) => candidate.id === userId);
       // (A BANNED local user keeps theirs — a ban is reversible; they just can't mint a new one meanwhile.)
       if (user && !isLocalMeshUser({ ...user, banned: false })) {
-        // No DAL delete for this table: overwrite the row so the foreign secret is gone from the store.
-        rt.store.upsertMeshIdentity(userId, "null");
+        rt.store.deleteMeshIdentity(userId);
         if (user.identityKey?.sign === identity.signPublic) {
           const next = UserSchema.parse({ ...user, identityKey: undefined });
           rt.store.upsertUser(next);

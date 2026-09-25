@@ -47,6 +47,20 @@ export class DbEncryptionPlaintextUnconvertedError extends Error {
 }
 
 /**
+ * Thrown by `openInitialStore` when an encrypted mode is configured but the SQLCipher driver
+ * (`better-sqlite3-multiple-ciphers`) won't load. Nothing on disk is wrong, so it must never enter the
+ * unreadable / plaintext-unconverted recovery chain (whose actions delete or set aside data). Same code as
+ * the Android launcher's own driver probe (`boot-config.js`), so the host shows one recovery screen.
+ */
+export class DbEncryptionDriverMissingError extends Error {
+  readonly code = "db_encryption_driver_missing" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEncryptionDriverMissingError";
+  }
+}
+
+/**
  * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
  * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
  * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still

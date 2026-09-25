@@ -185,6 +185,8 @@ export interface LoamStore {
    * private material; wiped with everything else by the kill switch.
    */
   upsertMeshIdentity(userId: string, data: string): void;
+  /** Delete a user's mesh keypair record (secret keys included). A no-op when there is none. */
+  deleteMeshIdentity(userId: string): void;
   loadMeshIdentities(): { userId: string; data: string }[];
   /**
    * Store (or replace) one entry in a local user's mesh address book (docs/16): the owner's user id,
@@ -403,6 +405,45 @@ export function assertNotPlaintextSqliteFile(path: string): void {
 }
 
 /**
+ * Whether the file at `path` exists and starts with the plaintext SQLite header. False for a missing,
+ * unreadable, or shorter-than-header file, and for SQLCipher ciphertext (random from byte 0).
+ */
+export function hasPlaintextSqliteHeader(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return false;
+  }
+  try {
+    const header = Buffer.alloc(PLAINTEXT_SQLITE_HEADER.length);
+    return readSync(fd, header, 0, header.length, 0) === header.length && header.equals(PLAINTEXT_SQLITE_HEADER);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Load the SQLCipher driver and open (then close) a throwaway in-memory database, the same check the
+ * Android launcher runs before an encrypted boot. `require` alone only loads the JS wrapper; the native
+ * addon is dlopen'd by the first `new Database()`, so a missing or wrong-ABI binary only shows up there.
+ *
+ * @returns undefined when the driver works, otherwise the load/open error
+ */
+export function probeEncryptedDriver(): Error | undefined {
+  try {
+    const requireNative = createRequire(import.meta.url);
+    const Database = requireNative("better-sqlite3-multiple-ciphers") as new (dbPath: string) => EncryptedDatabase;
+    new Database(":memory:").close();
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+/**
  * Backfill the `tombstones.created_at` column onto a database created before horizon-based GC
  * existed. `CREATE TABLE IF NOT EXISTS` is a no-op on an already-existing table, so a plain
  * `ALTER TABLE` here is the only way an older `.loam/loam.db` picks up the column. Existing rows
@@ -586,6 +627,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   const upsertMeshIdentityStmt = db.prepare(
     "INSERT INTO mesh_identities (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
   );
+  const deleteMeshIdentityStmt = db.prepare("DELETE FROM mesh_identities WHERE user_id = ?");
   const loadMeshIdentitiesStmt = db.prepare("SELECT user_id, data FROM mesh_identities");
   const upsertMeshContactStmt = db.prepare(
     `INSERT INTO mesh_contacts (owner_user_id, mesh_id, data) VALUES (?, ?, ?)
@@ -743,6 +785,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     upsertMeshIdentity(userId, data) {
       upsertMeshIdentityStmt.run(userId, data);
+    },
+    deleteMeshIdentity(userId) {
+      deleteMeshIdentityStmt.run(userId);
     },
     loadMeshIdentities() {
       return loadMeshIdentitiesStmt.all().map((row) => ({ userId: row.user_id as string, data: row.data as string }));
