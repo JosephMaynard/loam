@@ -174,33 +174,52 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    */
   function deleteAndVerifyAllWipeArtifacts(): DeletionResult {
     const db = deleteAndVerifyDbArtifacts();
-    const survivors = [...db.survivors];
-    const errors = [...db.errors];
-    // The media dirs, PLUS any preserve-recovery snapshot directories (`.loam-recovery-<suffix>/`, Sol
-    // round-11): those hold an old, still-readable (under the prior key) DB set + avatars + attachments moved
-    // aside by a `preserve` start-fresh, so an emergency wipe must remove them too. A `readdir` failure here
-    // is surfaced as an error (fail closed) — "can't enumerate" is not "nothing to remove".
-    const dirsToRemove = [avatarsDir, attachmentsDir];
-    try {
-      for (const entry of readdirSync(dataDir)) {
-        if (entry.startsWith(".loam-recovery-")) {
-          dirsToRemove.push(join(dataDir, entry));
-        }
-      }
-    } catch (error) {
-      errors.push(`readdir ${dataDir} (recovery snapshots): ${error instanceof Error ? error.message : String(error)}`);
-    }
-    for (const dir of dirsToRemove) {
+    // The media dirs PLUS every preserve-recovery snapshot + anchor (see deleteAndVerifyRecoverySnapshots).
+    const media = deleteAndVerifyPaths([avatarsDir, attachmentsDir], true);
+    const survivors = [...db.survivors, ...media.survivors];
+    const errors = [...db.errors, ...media.errors];
+    return { ok: survivors.length === 0 && errors.length === 0, survivors, errors };
+  }
+
+  /**
+   * Delete + PROVE gone every preserve-recovery artifact: the `.loam-recovery-<suffix>/` snapshot directories
+   * (Sol round-11 — an old, still-readable-under-the-prior-key DB set + avatars + attachments moved aside by a
+   * `preserve` start-fresh) and the `.loam-recovery-state` anchor. EVERY emergency-wipe branch must remove
+   * them — the ephemeral and plaintext branches too, not only the fixed-key ones (review 2026-09-25 #7).
+   */
+  function deleteAndVerifyRecoverySnapshots(): DeletionResult {
+    return deleteAndVerifyPaths([], true);
+  }
+
+  /** Remove `paths` (recursively) — plus, with `withRecoverySnapshots`, every `.loam-recovery-*` entry in the
+   *  data dir — and prove each absent. A `readdir` failure is surfaced as an error (fail closed): "can't
+   *  enumerate" is not "nothing to remove". */
+  function deleteAndVerifyPaths(paths: string[], withRecoverySnapshots: boolean): DeletionResult {
+    const survivors: string[] = [];
+    const errors: string[] = [];
+    const toRemove = [...paths];
+    if (withRecoverySnapshots) {
       try {
-        rmSync(dir, { recursive: true, force: true });
+        for (const entry of readdirSync(dataDir)) {
+          if (entry.startsWith(".loam-recovery-")) {
+            toRemove.push(join(dataDir, entry));
+          }
+        }
+      } catch (error) {
+        errors.push(`readdir ${dataDir} (recovery snapshots): ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const path of toRemove) {
+      try {
+        rmSync(path, { recursive: true, force: true });
       } catch {
         // Fall through to the proven-absence check.
       }
-      const status = provenAbsence(dir);
+      const status = provenAbsence(path);
       if (status === "present") {
-        survivors.push(dir);
+        survivors.push(path);
       } else if (status === "unknown") {
-        errors.push(dir);
+        errors.push(path);
       }
     }
     return { ok: survivors.length === 0 && errors.length === 0, survivors, errors };
@@ -1287,6 +1306,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     openLoamStore,
     dbArtifactPaths,
     deleteAndVerifyDbArtifacts,
+    deleteAndVerifyRecoverySnapshots,
     deleteAndVerifyAllWipeArtifactsDurable,
     durableWriteFileSync,
     sanitizeConfigForRestart,

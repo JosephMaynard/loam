@@ -301,6 +301,16 @@ export function createKillSwitch(ctx: AppContext) {
             "down (503); restart it to retry the wipe.",
         );
       }
+      // A preserve-recovery snapshot (`.loam-recovery-*`) holds an older DB set + plaintext media moved aside
+      // by a start-fresh — outside the live DB, so the delete above never touches it. Same fail-closed rule.
+      const snapshots = ctx.lifecycle.deleteAndVerifyRecoverySnapshots();
+      if (!snapshots.ok) {
+        const remaining = [...snapshots.survivors, ...snapshots.errors].join(", ");
+        return lockDownAndReportIncomplete(
+          `KILL SWITCH NOTICE: could not delete and VERIFY every recovery snapshot gone (${remaining}) — refusing ` +
+            "to reopen while recoverable data may remain. The node is locked down (503); restart it to retry the wipe.",
+        );
+      }
       if (ctx.lifecycle.ephemeralDbKey) {
         // Drop the old key by overwriting the reference; a fresh random key encrypts the new DB.
         // (Node strings can't be reliably zeroed in RAM — documented as a known limitation.)
@@ -336,6 +346,17 @@ export function createKillSwitch(ctx: AppContext) {
               "recoverable ciphertext from a prior encrypted era may remain on disk; remove it manually.",
           );
         }
+      }
+      // Preserve-recovery snapshots (`.loam-recovery-*`: an older DB set + plaintext media moved aside by a
+      // start-fresh) and their anchor must go too — best-effort like the rest of this logical wipe, but loud.
+      const snapshots = ctx.lifecycle.deleteAndVerifyRecoverySnapshots();
+      if (!snapshots.ok) {
+        ctx.server.log.warn(
+          `KILL SWITCH NOTICE: a recovery snapshot could not be deleted during the logical wipe (${[
+            ...snapshots.survivors,
+            ...snapshots.errors,
+          ].join(", ")}) — remove it manually.`,
+        );
       }
     }
 
