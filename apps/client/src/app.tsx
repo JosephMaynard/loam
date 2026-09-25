@@ -3627,7 +3627,8 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
                         onClick={() =>
                           void act(
                             report,
-                            () => moderateUser(report.targetId, { timeoutUntil: Date.now() + TIMEOUT_DURATION_MS }),
+                            // A duration, not an absolute time: the server derives the expiry from its own clock.
+                            () => moderateUser(report.targetId, { timeoutMs: TIMEOUT_DURATION_MS }),
                             "user_timed_out",
                           )
                         }
@@ -3785,7 +3786,12 @@ function ModerationUserRow({
     );
   }
 
-  function setModeration(update: { banned?: boolean; shadowBanned?: boolean; timeoutUntil?: number | null }): void {
+  function setModeration(update: {
+    banned?: boolean;
+    shadowBanned?: boolean;
+    timeoutMs?: number;
+    timeoutUntil?: null;
+  }): void {
     void run(() => requestUser("PATCH", `/api/moderation/users/${encodeURIComponent(user.id)}`, update));
   }
 
@@ -3852,7 +3858,7 @@ function ModerationUserRow({
             ) : (
               <button
                 disabled={busy}
-                onClick={() => setModeration({ timeoutUntil: Date.now() + TIMEOUT_DURATION_MS })}
+                onClick={() => setModeration({ timeoutMs: TIMEOUT_DURATION_MS })}
                 type="button"
               >
                 {t("moderation.timeout")}

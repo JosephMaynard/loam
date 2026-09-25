@@ -1,6 +1,13 @@
 import { z } from "zod";
 
-export const IdSchema = z.string().min(1);
+/**
+ * Every record id on the wire (users, channels, messages, attachments, reports…). Bounded so a client or a
+ * sync peer can't persist and broadcast megabyte ids. 128 comfortably covers every id format LOAM mints:
+ * `user.<hex>`, `llm.…` bot ids (≤64), `mesh.<26 base32>`, `sealed.<sha256>`, channel slugs (≤47),
+ * `msg_`/`att_`/`avt_`/`rpt_` + 16 hex.
+ */
+export const ID_MAX_LENGTH = 128;
+export const IdSchema = z.string().min(1).max(ID_MAX_LENGTH);
 export type Id = z.infer<typeof IdSchema>;
 
 export const TimestampSchema = z.number().int().nonnegative();
@@ -37,11 +44,18 @@ export type AttachmentFileMimeType = z.infer<typeof AttachmentFileMimeTypeSchema
 export const AttachmentMimeTypeSchema = z.union([AvatarImageMimeTypeSchema, AttachmentFileMimeTypeSchema]);
 export type AttachmentMimeType = z.infer<typeof AttachmentMimeTypeSchema>;
 
+/**
+ * An uploaded avatar image id — exactly the `avt_<16 hex>` the server mints on upload (`newAvatarImageId`).
+ * The id becomes a FILE NAME on the host (`avatars/<imageId>.<ext>`), so anything looser (e.g. `../x`) is a
+ * path-traversal vector the moment the server removes a replaced avatar file.
+ */
+export const AvatarImageIdSchema = z.string().regex(/^avt_[a-f0-9]{16}$/, "must be an avatar image id");
+
 export const UserAvatarSchema = z.object({
   kind: z.enum(["generated", "image"]).optional(),
   seed: z.string().min(1).max(128).optional(),
   mode: AvatarModeSchema.optional(),
-  imageId: IdSchema.optional(),
+  imageId: AvatarImageIdSchema.optional(),
   mimeType: AvatarImageMimeTypeSchema.optional(),
   uploadedAt: TimestampSchema.optional(),
   // Short palette/feature keys — bounded so a PATCH to /api/users/me can't persist and broadcast
@@ -135,12 +149,23 @@ export const LocaleSchema = z.enum([
 export type Locale = z.infer<typeof LocaleSchema>;
 
 /**
- * App-layer transport encryption mode (docs/08): `off` (plain HTTP, the pre-existing behaviour),
- * `optional` (encrypt when the client did the QR handshake, but still serve unencrypted requests),
- * or `required` (reject unencrypted requests to content endpoints — bootstrap endpoints stay open).
+ * App-layer transport encryption mode (docs/08) as ENFORCED/REPORTED: `off` (plain HTTP), `optional`
+ * (encrypt when the client did the QR handshake, but still serve unencrypted requests), or `required`
+ * (reject unencrypted requests to content endpoints — bootstrap endpoints stay open). `off` only ever
+ * appears as the *effective* posture under Developer Mode; operators cannot configure it (see
+ * `OperatorTransportEncryptionSchema`).
  */
 export const TransportEncryptionSchema = z.enum(["off", "optional", "required"]);
 export type TransportEncryption = z.infer<typeof TransportEncryptionSchema>;
+
+/**
+ * The transport-encryption postures an operator may CONFIGURE (config.json, the persisted config,
+ * `PATCH /api/admin/config`): `optional` or `required`. Plaintext (`off`) is deliberately not settable —
+ * the only path to it is Developer Mode (`LOAM_DEV_MODE`, dev builds only, self-announcing), a read-time
+ * projection that never lands in the stored config.
+ */
+export const OperatorTransportEncryptionSchema = z.enum(["optional", "required"]);
+export type OperatorTransportEncryption = z.infer<typeof OperatorTransportEncryptionSchema>;
 
 /**
  * At-rest DB-encryption key strategy (SQLCipher via `openStore(path, { encryptionKey })`, see
@@ -183,7 +208,7 @@ export type SecurityProfilePreset = {
   /** Whether the admin/panic kill switch is armed. */
   killSwitchEnabled: boolean;
   /** App-layer transport encryption posture (docs/08). */
-  transportEncryption: TransportEncryption;
+  transportEncryption: OperatorTransportEncryption;
 };
 
 /**
@@ -383,12 +408,28 @@ export const IdentityConfigSchema = z.object({
 });
 export type IdentityConfig = z.infer<typeof IdentityConfigSchema>;
 
+/** Longest model label a config or a message's `meta.model` may carry. */
+export const LLM_MODEL_MAX_LENGTH = 120;
+
+/**
+ * The assistant bot's user id. It must live in the reserved `llm.` namespace — session users are always
+ * `user.<hex>` and mesh senders `mesh.<hash>` — so pointing `botId` at an existing person can't turn them
+ * into a bot (the server also refuses any id held by a non-bot user). Bounded like other ids.
+ */
+export const BotIdSchema = z
+  .string()
+  .min(5)
+  .max(64)
+  .regex(/^llm\.[A-Za-z0-9._-]+$/, "must be an llm.* bot id");
+
 export const OllamaConfigSchema = z.object({
   enabled: z.boolean(),
   baseUrl: z.url({ protocol: /^https?$/ }),
-  model: z.string().min(1),
-  botId: IdSchema,
-  botDisplayName: z.string().min(1),
+  model: z.string().min(1).max(LLM_MODEL_MAX_LENGTH),
+  botId: BotIdSchema,
+  // Same bound as `UserSchema.displayName`: the bot is a user record, so a longer name would persist in
+  // config and then fail the bot user's own validation (a 500 now, a failed boot later).
+  botDisplayName: z.string().min(1).max(80),
   systemPrompt: z.string().min(1).optional(),
 });
 export type OllamaConfig = z.infer<typeof OllamaConfigSchema>;
@@ -443,8 +484,9 @@ export type KillSwitchConfig = z.infer<typeof KillSwitchConfigSchema>;
 export const SecurityConfigSchema = z.object({
   profile: SecurityProfileSchema,
   /** App-layer transport encryption posture (docs/08). A named profile forces this; `custom` uses it
-   * as configured. Default `off` keeps existing plain-HTTP deployments unchanged. */
-  transportEncryption: TransportEncryptionSchema,
+   * as configured. Default `optional` (secure by default); `off` is not configurable — it exists only
+   * as Developer Mode's read-time projection. */
+  transportEncryption: OperatorTransportEncryptionSchema,
   /**
    * At-rest DB-encryption key strategy (see `DbEncryptionModeSchema`). Unlike `transportEncryption`,
    * this axis is **not** forced by a named security profile (it's absent from `SecurityProfilePreset`
@@ -613,21 +655,34 @@ export const RolesUpdateRequestSchema = z.object({
 });
 export type RolesUpdateRequest = z.infer<typeof RolesUpdateRequestSchema>;
 
+/** The longest moderator timeout the server applies (7 days); longer requests are clamped to it. */
+export const MODERATION_TIMEOUT_MAX_MS = 7 * 24 * 3_600_000;
+
 /** Admin/moderator request to set a user's moderation state (omitted fields are left unchanged). */
 export const ModerationUpdateRequestSchema = z
   .object({
     banned: z.boolean().optional(),
     shadowBanned: z.boolean().optional(),
     /**
-     * A moderator timeout: a future timestamp temporarily bars posting; `null` clears an active timeout.
-     * Omitted = leave the timeout unchanged.
+     * A moderator timeout as a DURATION from now (ms). The server computes the expiry from its own clock
+     * (so a moderator's skewed device clock can't mint a years-long or already-expired timeout) and clamps
+     * it to `MODERATION_TIMEOUT_MAX_MS`. Preferred over `timeoutUntil`; wins when both are sent.
+     */
+    timeoutMs: z.number().int().positive().optional(),
+    /**
+     * Legacy absolute form: a future timestamp temporarily bars posting; `null` clears an active timeout.
+     * Still accepted for older clients, but the server clamps it to `MODERATION_TIMEOUT_MAX_MS` from its
+     * own clock. Omitted = leave the timeout unchanged.
      */
     timeoutUntil: TimestampSchema.nullable().optional(),
   })
   .refine(
     (value) =>
-      value.banned !== undefined || value.shadowBanned !== undefined || value.timeoutUntil !== undefined,
-    { message: "Provide at least one of banned, shadowBanned, or timeoutUntil" },
+      value.banned !== undefined ||
+      value.shadowBanned !== undefined ||
+      value.timeoutMs !== undefined ||
+      value.timeoutUntil !== undefined,
+    { message: "Provide at least one of banned, shadowBanned, timeoutMs, or timeoutUntil" },
   );
 export type ModerationUpdateRequest = z.infer<typeof ModerationUpdateRequestSchema>;
 
@@ -695,6 +750,16 @@ export const ReportResolveRequestSchema = z.object({
 });
 export type ReportResolveRequest = z.infer<typeof ReportResolveRequestSchema>;
 
+/**
+ * `GET /api/search` querystring. Each field must be a single string — a repeated key (`?q=a&q=b`) parses
+ * to an array and is a 400, not a crash. Unknown keys are ignored.
+ */
+export const SearchQuerySchema = z.object({
+  q: z.string().max(500).optional(),
+  limit: z.string().max(10).optional(),
+});
+export type SearchQuery = z.infer<typeof SearchQuerySchema>;
+
 /** Moderator removal of a message (the honest-tombstone action): an optional sanitized public reason. */
 export const MessageRemoveRequestSchema = z.object({
   reason: z.string().max(280).optional(),
@@ -760,7 +825,7 @@ export type MessageSource = z.infer<typeof MessageSourceSchema>;
 
 export const MessageMetaSchema = z.object({
   source: MessageSourceSchema.optional(),
-  model: z.string().min(1).optional(),
+  model: z.string().min(1).max(LLM_MODEL_MAX_LENGTH).optional(),
   markdown: z.boolean().optional(),
   streaming: z.boolean().optional(),
   /**
@@ -1184,6 +1249,9 @@ export const SERVER_ERROR_CODES = [
   "channel_replies_disabled",
   "channel_owner_post_only",
   "channel_admins_post_only",
+  "message_removed",
+  "assistant_busy",
+  "internal_error",
 ] as const;
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 

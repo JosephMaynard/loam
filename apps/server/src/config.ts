@@ -1,6 +1,6 @@
 // LoamConfig defaults, layered merge, and legacy-profile reconciliation. Extracted from app.ts
 // (2026-09-04 split).
-import { LoamConfigSchema, securityProfilePreset, type LoamConfig, type LoamConfigUpdate } from "@loam/schema";
+import { BotIdSchema, LoamConfigSchema, securityProfilePreset, type LoamConfig, type LoamConfigUpdate } from "@loam/schema";
 
 import { hashSecret, isHashedSecret } from "./secrets.js";
 
@@ -158,6 +158,67 @@ export function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamCon
   }
 
   return LoamConfigSchema.parse(merged);
+}
+
+/**
+ * Repair values that older builds accepted but the current schema refuses, BEFORE a config layer is
+ * validated — so upgrading a node never turns a once-valid config.json / persisted row into a boot
+ * failure. Each repair is reported so the caller can log it. Operates on raw parsed JSON (mutated in
+ * place and returned); anything it doesn't recognise is left for the schema to judge.
+ *
+ * - `security.transportEncryption: "off"` → `"optional"`: plaintext is no longer an operator posture
+ *   (only Developer Mode reaches it, as a read-time projection).
+ * - `llm.ollama.botId` outside the reserved `llm.` namespace → dropped (the default bot id applies), so a
+ *   bot id can never name a person's account.
+ * - `llm.ollama.botDisplayName` over 80 chars → truncated to the user display-name bound.
+ */
+export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repairs: string[] } {
+  const repairs: string[] = [];
+
+  if (!isRecord(json)) {
+    return { json, repairs };
+  }
+
+  const security = json.security;
+  if (isRecord(security) && security.transportEncryption === "off") {
+    security.transportEncryption = "optional";
+    repairs.push(
+      'security.transportEncryption "off" is not an operator posture (use Developer Mode, LOAM_DEV_MODE, for plaintext debugging); using "optional"',
+    );
+  }
+
+  const ollama = isRecord(json.llm) ? json.llm.ollama : undefined;
+  if (isRecord(ollama)) {
+    if (ollama.botId !== undefined && !BotIdSchema.safeParse(ollama.botId).success) {
+      delete ollama.botId;
+      repairs.push("llm.ollama.botId must be an llm.* id (at most 64 chars); using the default bot id");
+    }
+    if (typeof ollama.botDisplayName === "string" && ollama.botDisplayName.length > 80) {
+      ollama.botDisplayName = ollama.botDisplayName.slice(0, 80);
+      repairs.push("llm.ollama.botDisplayName is longer than 80 characters; truncated");
+    }
+  }
+
+  return { json, repairs };
+}
+
+/**
+ * Drop the keys the Android launcher owns from a config update. The launcher's model manager
+ * (`nodejs-project-template/main.js`, `loam-model-set-active`) persists the whole `llm.onDevice` block
+ * into config.json; the DB config layer (written in full by every admin save) sits ABOVE config.json, so
+ * without this a single admin save froze whatever `llm.onDevice` was effective at that moment and every
+ * later activate/deactivate from the launcher was silently overridden on the next boot. The caller
+ * applies this to the DB layer only when config.json actually carries `llm.onDevice` — a desktop/Pi node
+ * whose config.json never mentions it keeps the admin's persisted value.
+ */
+export function withoutLauncherOwnedKeys(update: LoamConfigUpdate): LoamConfigUpdate {
+  if (!update.llm?.onDevice) {
+    return update;
+  }
+
+  const { onDevice: _launcherOwned, ...llm } = update.llm;
+  void _launcherOwned;
+  return { ...update, llm };
 }
 
 /**

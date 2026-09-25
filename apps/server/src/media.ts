@@ -13,6 +13,15 @@ export function newAvatarImageId(): string {
   return `avt_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
+/**
+ * Whether a value is exactly a server-minted avatar image id (`avt_<16 hex>`). Avatar ids become file
+ * names under `avatars/`, so every path that touches the filesystem with one (notably removing a
+ * replaced avatar) checks this first — defence in depth behind `AvatarImageIdSchema`.
+ */
+export function isAvatarImageId(value: string): boolean {
+  return /^avt_[a-f0-9]{16}$/.test(value);
+}
+
 /** Mint an attachment id (`att_<16 hex>`). */
 export function newAttachmentId(): string {
   return `att_${randomUUID().replaceAll("-", "").slice(0, 16)}`;

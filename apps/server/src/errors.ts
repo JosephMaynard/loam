@@ -160,6 +160,10 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Replies are disabled in this channel": "channel_replies_disabled",
   "Only the channel owner can post in this channel": "channel_owner_post_only",
   "Only admins can post in this channel": "channel_admins_post_only",
+  "This message was removed by a moderator": "message_removed",
+  "The assistant is busy; try again shortly": "assistant_busy",
+  // The generic 5xx body (see the app's error handler) — internal detail is logged, never returned.
+  "Internal server error": "internal_error",
 };
 
 /** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */

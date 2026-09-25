@@ -1,6 +1,6 @@
 // The optional LLM assistant: the bot user, Ollama / on-device streaming, and the DM-driven assistant
 // reply. Extracted verbatim from app.ts (2026-09-04 split) behind the shared `Runtime` view.
-import { type Message, MessageSchema, type User, UserSchema } from "@loam/schema";
+import { type LoamConfig, type Message, MessageSchema, type User, UserSchema } from "@loam/schema";
 import { isRecord } from "./config.js";
 import { MAX_LLM_CONTEXT_MESSAGES } from "./defaults.js";
 import { makeBotUser } from "./identity.js";
@@ -8,8 +8,21 @@ import { newMessageId } from "./ids.js";
 import type { OnDeviceChatHook } from "./types.js";
 import type { Runtime } from "./runtime.js";
 
+/**
+ * How many assistant replies may stream at once across the whole node. Each one holds an Ollama request
+ * (or the host's on-device model) for up to 5 minutes; without a bound, a handful of users — or one user
+ * firing DMs — could queue unbounded generations on a Pi/phone host. Per user the limit is one.
+ */
+export const MAX_CONCURRENT_ASSISTANT_REPLIES = 2;
+
+/** The body an assistant reply is left with when it was cut off (crash/restart mid-stream) before any text. */
+export const INTERRUPTED_ASSISTANT_BODY = "(No response — the assistant was interrupted.)";
+
 /** Build the LLM layer over the runtime view: bot user, backend selection, and the streaming assistant reply. */
 export function createLlmLayer(rt: Runtime) {
+  /** Users with an assistant reply currently streaming (at most one each; the set size is the global count). */
+  const repliesInFlight = new Set<string>();
+
   /** Whether any LLM backend is active — the laptop Ollama connection or the on-device model. The
    * bot DM contact, streaming, and all LLM routes are gated on this, so it stays off unless the
    * operator explicitly enables a backend (both default off). */
@@ -40,35 +53,99 @@ export function createLlmLayer(rt: Runtime) {
       return undefined;
     }
 
-    const existing = rt.data.users.find((user) => user.id === rt.appConfig.llm.ollama.botId);
+    // Non-fatal by design: this runs at boot (loadData) and after every config save, and a bad bot config
+    // must never take the node down — it just means no assistant contact until the config is fixed.
+    const configError = botConfigError(rt.appConfig);
 
-    if (existing) {
-      const parsedExisting = UserSchema.parse(existing);
-      const next = UserSchema.parse({
-        ...parsedExisting,
-        displayName: rt.appConfig.llm.ollama.botDisplayName,
-        type: "bot" as const,
-        isAdmin: false,
-        avatar: parsedExisting.avatar ?? {
-          seed: rt.appConfig.llm.ollama.botId,
-          mode: "pattern" as const,
-        },
-      });
-
-      if (JSON.stringify(parsedExisting) !== JSON.stringify(next)) {
-        rt.store.upsertUser(next);
-        Object.assign(existing, next);
-        rt.broadcast({ type: "userUpserted", user: existing });
-      }
-
-      return existing;
+    if (configError) {
+      rt.log.warn(`LLM assistant disabled: ${configError}`);
+      return undefined;
     }
 
-    const user = makeBotUser(rt.appConfig.llm.ollama);
-    rt.store.upsertUser(user);
-    rt.data.users.push(user);
-    rt.broadcast({ type: "userUpserted", user });
-    return user;
+    try {
+      const existing = rt.data.users.find((user) => user.id === rt.appConfig.llm.ollama.botId);
+
+      if (existing) {
+        const parsedExisting = UserSchema.parse(existing);
+        const next = UserSchema.parse({
+          ...parsedExisting,
+          displayName: rt.appConfig.llm.ollama.botDisplayName,
+          type: "bot" as const,
+          isAdmin: false,
+          avatar: parsedExisting.avatar ?? {
+            seed: rt.appConfig.llm.ollama.botId,
+            mode: "pattern" as const,
+          },
+        });
+
+        if (JSON.stringify(parsedExisting) !== JSON.stringify(next)) {
+          rt.store.upsertUser(next);
+          Object.assign(existing, next);
+          rt.broadcast({ type: "userUpserted", user: existing });
+        }
+
+        return existing;
+      }
+
+      const user = makeBotUser(rt.appConfig.llm.ollama);
+      rt.store.upsertUser(user);
+      rt.data.users.push(user);
+      rt.broadcast({ type: "userUpserted", user });
+      return user;
+    } catch (error) {
+      rt.log.error(error, "LLM assistant disabled: could not create the bot user");
+      return undefined;
+    }
+  }
+
+  /**
+   * Why `config`'s assistant bot can't be applied, or undefined when it can. `botId` must not name any
+   * existing NON-bot user: `ensureBotUser` rewrites whatever record holds the id into a bot with
+   * `isAdmin: false`, so pointing it at a person would hijack their account (and demote an admin past the
+   * deliberate no-demote rule). The bot record itself must also validate (e.g. its display name bound).
+   * `PATCH /api/admin/config` refuses such a config before persisting it; at boot `ensureBotUser` skips
+   * the bot instead of failing.
+   */
+  function botConfigError(config: LoamConfig): string | undefined {
+    const { botId } = config.llm.ollama;
+    const holder = rt.data.users.find((user) => user.id === botId);
+
+    if (holder && holder.type !== "bot") {
+      return `llm.ollama.botId "${botId}" belongs to an existing ${holder.type} user`;
+    }
+
+    try {
+      makeBotUser(config.llm.ollama);
+    } catch {
+      return "the configured bot identity is not a valid user record";
+    }
+
+    return undefined;
+  }
+
+  /** The assistant bot user, when an LLM backend is on and the configured id really is a bot. */
+  function activeBotUser(): User | undefined {
+    if (!llmEnabled()) {
+      return undefined;
+    }
+
+    const bot = rt.data.users.find((user) => user.id === rt.appConfig.llm.ollama.botId);
+    return bot?.type === "bot" ? bot : undefined;
+  }
+
+  /**
+   * Whether a DM from `authorId` to `recipientUserId` would start an assistant reply that the concurrency
+   * bound (`MAX_CONCURRENT_ASSISTANT_REPLIES`, one per user) can't take right now. `POST /api/messages`
+   * checks this BEFORE creating the DM and answers 429, so a refused request leaves no unanswered message.
+   */
+  function assistantBusyFor(recipientUserId: string, authorId: string): boolean {
+    const bot = activeBotUser();
+
+    if (!bot || recipientUserId !== bot.id || authorId === bot.id) {
+      return false;
+    }
+
+    return repliesInFlight.has(authorId) || repliesInFlight.size >= MAX_CONCURRENT_ASSISTANT_REPLIES;
   }
 
   /**
@@ -294,16 +371,35 @@ export function createLlmLayer(rt: Runtime) {
    * @param userMessage - The incoming DM message that may trigger the bot response
    */
   async function createAssistantResponse(userMessage: Message): Promise<void> {
-    if (!llmEnabled() || userMessage.type !== "dm") {
+    if (userMessage.type !== "dm") {
       return;
     }
 
-    const bot = rt.data.users.find((user) => user.id === rt.appConfig.llm.ollama.botId);
+    // Only a genuine bot record answers (a botId that names a person is refused/skipped — botConfigError).
+    const bot = activeBotUser();
 
     if (!bot || userMessage.recipientUserId !== bot.id || userMessage.authorId === bot.id) {
       return;
     }
 
+    // Defence in depth behind the route's 429: never exceed the concurrency bound, whatever the caller.
+    if (assistantBusyFor(userMessage.recipientUserId, userMessage.authorId)) {
+      return;
+    }
+
+    const requesterId = userMessage.authorId;
+    // Reserved synchronously (before the first await), so two back-to-back requests can't both pass.
+    repliesInFlight.add(requesterId);
+
+    try {
+      await streamAssistantReply(bot, userMessage);
+    } finally {
+      repliesInFlight.delete(requesterId);
+    }
+  }
+
+  /** Stream one assistant reply to `userMessage` into a new bot DM (see createAssistantResponse). */
+  async function streamAssistantReply(bot: User, userMessage: Message & { type: "dm" }): Promise<void> {
     const assistantMessage = MessageSchema.parse({
       id: newMessageId("llm"),
       type: "dm",
@@ -326,12 +422,25 @@ export function createLlmLayer(rt: Runtime) {
     // An Emergency Reset mid-stream destroys this conversation; abandon the reply rather than keep
     // writing a pre-wipe message (today a no-op UPDATE, but never worth depending on).
     const generation = rt.wipeGeneration;
+    const wiped = () => rt.wipeGeneration !== generation;
+    // A moderator may remove the reply mid-stream (the honest tombstone blanks it and clears `streaming`),
+    // or it may be deleted outright. Either way the writer must stop: writing the next delta or the final
+    // body would silently restore removed content. Checked before EVERY write.
+    const withdrawn = () =>
+      assistantMessage.meta?.removedByModerator === true || !rt.data.messages.includes(assistantMessage);
+    /** Stop streaming: tell the participants' clients the stream is over (unless the node was wiped). */
+    const abandon = () => {
+      if (!wiped()) {
+        rt.broadcastStreamEvent(audience, { type: "end", messageId: assistantMessage.id });
+      }
+    };
     let body = "";
     rt.broadcastStreamEvent(audience, { type: "start", messageId: assistantMessage.id });
 
     try {
       for await (const delta of streamChat(llmMessagesForUser(bot.id, userMessage.authorId))) {
-        if (rt.wipeGeneration !== generation) {
+        if (wiped() || withdrawn()) {
+          abandon();
           return;
         }
 
@@ -346,14 +455,16 @@ export function createLlmLayer(rt: Runtime) {
         rt.broadcastStreamEvent(audience, { type: "delta", messageId: assistantMessage.id, text: delta });
       }
 
-      if (rt.wipeGeneration !== generation) {
+      if (wiped() || withdrawn()) {
+        abandon();
         return;
       }
 
       rt.updateMessage(assistantMessage, body.trim() || "(No response.)", false);
       rt.broadcastStreamEvent(audience, { type: "end", messageId: assistantMessage.id });
     } catch (error) {
-      if (rt.wipeGeneration !== generation) {
+      if (wiped() || withdrawn()) {
+        abandon();
         return;
       }
 
@@ -368,6 +479,8 @@ export function createLlmLayer(rt: Runtime) {
     llmEnabled,
     activeLlmModel,
     ensureBotUser,
+    botConfigError,
+    assistantBusyFor,
     createAssistantResponse,
   };
 }

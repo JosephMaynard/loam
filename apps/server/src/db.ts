@@ -316,6 +316,30 @@ function messageColumns(message: Message): [string, string, string | null, strin
 }
 
 /**
+ * Parse a stored user row. Rows written before avatar image ids were constrained to `avt_<16 hex>` may
+ * carry an avatar naming some other path (the pre-fix `PATCH /api/users/me` hole); rather than let one
+ * such row fail the whole boot, the unusable avatar is dropped (the user falls back to a generated one).
+ * Any other invalid row still throws, as before.
+ */
+function parseStoredUser(raw: unknown): User {
+  const parsed = UserSchema.safeParse(raw);
+
+  if (parsed.success) {
+    return parsed.data;
+  }
+
+  const record = raw as { avatar?: { imageId?: unknown } } | null;
+
+  if (record && typeof record === "object" && record.avatar && typeof record.avatar === "object" && "imageId" in record.avatar) {
+    const { avatar: _unusable, ...rest } = record as Record<string, unknown>;
+    void _unusable;
+    return UserSchema.parse(rest);
+  }
+
+  throw parsed.error;
+}
+
+/**
  * Open (creating if necessary) the SQLite-backed LOAM store.
  *
  * @param path - Filesystem path for the database, or `":memory:"` for an in-memory store
@@ -588,7 +612,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       return db
         .prepare("SELECT data FROM users ORDER BY rowid")
         .all()
-        .map((row) => UserSchema.parse(JSON.parse(row.data as string)));
+        .map((row) => parseStoredUser(JSON.parse(row.data as string)));
     },
     loadChannels() {
       return db

@@ -208,6 +208,13 @@ export type AppOptions = {
    * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged.
    */
   hostToken?: string;
+  /**
+   * Request Developer Mode (plaintext transport + verbose logs) directly instead of via `LOAM_DEV_MODE`.
+   * Still REFUSED when `NODE_ENV=production`, exactly like the env var, and still self-announcing
+   * (`networkConfig.devMode`). Neither the CLI nor the Android host passes it; it exists so tests can
+   * exercise the plaintext path now that `off` is not a configurable posture.
+   */
+  devMode?: boolean;
   logger?: boolean;
 };
 

@@ -34,6 +34,7 @@ import {
 
 import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.js";
 import { openStore } from "./db.js";
+import { makeSessionToken, makeSessionUserId } from "./identity.js";
 
 // RF4: a single-shot fault-injection seam for `node:fs`'s `renameSync`, used ONLY by the "marker-
 // confirmed recovery failure" test below to make `openInitialStore`'s rename-aside step throw
@@ -186,7 +187,11 @@ vi.mock("node:fs", async (importOriginal) => {
 // window. `rmGate.promise` defaults to `undefined` (pass straight through to the real implementation),
 // so every other test — which never sets it — is unaffected; every other `node:fs/promises` export is
 // untouched (`...actual`).
-const rmGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
+const rmGate = vi.hoisted(() => ({
+  promise: undefined as Promise<void> | undefined,
+  // Optional: called when a gated `rm` arrives (lets a test know a sweep is parked mid-loop).
+  entered: undefined as (() => void) | undefined,
+}));
 // A gate for `node:fs/promises`'s `mkdir` of ONE exact directory, used by the upload-vs-Emergency-Reset
 // tests to suspend an upload between its session check and its file write so a wipe can land in the gap.
 // `entered` fires when the gated call arrives. Inert by default (`path` undefined); reset in `afterEach`.
@@ -206,6 +211,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     rm: async (...args: Parameters<typeof actual.rm>) => {
       if (rmGate.promise) {
+        rmGate.entered?.();
         await rmGate.promise;
       }
       return actual.rm(...args);
@@ -231,6 +237,7 @@ afterEach(async () => {
   // Belt-and-suspenders: a test that armed the P1-2(a) `rm()` gate but failed before releasing it must
   // never leave a later, unrelated test's own `rm()` calls hanging on a promise nobody will resolve.
   rmGate.promise = undefined;
+  rmGate.entered = undefined;
   mkdirGate.path = undefined;
   mkdirGate.promise = undefined;
   mkdirGate.entered = undefined;
@@ -6434,10 +6441,13 @@ describe("attachment + sync review hardening", () => {
     // Fresh pending upload: inside the grace period — must survive.
     const pending = await uploadAttachment(app, session.cookie);
 
-    // Restart-orphan: a file on disk with no pending entry and no referencing message.
+    // Restart-orphan: a file on disk with no pending entry and no referencing message, older than the
+    // grace window (a fresh owner-less file may be a sync import about to be referenced — see below).
     mkdirSync(attachmentsDir, { recursive: true });
     const strayPath = join(attachmentsDir, "att_00000000000000ff.png");
     writeFileSync(strayPath, Buffer.from(tinyPng, "base64"));
+    const old = new Date(Date.now() - 60 * 60_000);
+    utimesSync(strayPath, old, old);
 
     await app.reapOrphanedAttachments();
 
@@ -7235,7 +7245,7 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
     const app = await makeApp({
       access: { joinPolicy: "approval" },
       // Enable the LLM so the bot user exists, to exercise the type !== "human" guard below.
-      llm: { ollama: { enabled: true, baseUrl: "http://localhost:11434", model: "m", botId: "bot.test", botDisplayName: "Bot" } },
+      llm: { ollama: { enabled: true, baseUrl: "http://localhost:11434", model: "m", botId: "llm.bot.test", botDisplayName: "Bot" } },
     });
     const admin = await newSession(app);
     const member = await newSession(app);
@@ -7250,7 +7260,7 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
     // A bot can never be promoted to admin (only people can be admins).
     const bot = await app.server.inject({
       method: "POST",
-      url: "/api/admin/users/bot.test/promote",
+      url: "/api/admin/users/llm.bot.test/promote",
       headers: { cookie: admin.cookie },
     });
     expect(bot.statusCode).toBe(400);
@@ -8636,7 +8646,9 @@ describe("secure by default + Developer Mode", () => {
 
 describe("transport encryption foundation (docs/08)", () => {
   it("404s the handshake and advertises no host key when transport encryption is off", async () => {
-    const app = await makeApp({ security: { transportEncryption: "off" } }); // 'off' is now opt-in (dev/tests only)
+    // `off` is not a configurable posture any more; Developer Mode (here via the test-only option) is the
+    // only way to run plaintext.
+    const app = await makeApp(undefined, { devMode: true });
     const hello = transportClientHello();
     const res = await app.server.inject({
       method: "POST",
@@ -11313,5 +11325,669 @@ describe("review fixes 2026-09-04 (server) — round 2", () => {
     ).toBe(201);
     expect((await sync()).statusCode).toBe(200);
     expect(puller.store.loadMessages().some((message) => message.type === "reaction")).toBe(false);
+  });
+});
+
+describe("pre-release review 2026-09-25", () => {
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const webp = Buffer.from("RIFF\0\0\0\0WEBP").toString("base64");
+  const BOT_ID = "llm.ollama.gemma4";
+
+  async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await check()) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  }
+
+  async function uploadAvatar(app: LoamApp, cookie: string): Promise<string> {
+    const res = await app.server.inject({
+      method: "PUT",
+      url: "/api/users/me/avatar-image",
+      headers: { cookie },
+      payload: { mimeType: "image/webp", data: webp },
+    });
+    expect(res.statusCode).toBe(200);
+    return (res.json() as { avatar: { imageId: string } }).avatar.imageId;
+  }
+
+  async function uploadPng(app: LoamApp, cookie: string): Promise<{ id: string; mimeType: string }> {
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie },
+      payload: { mimeType: "image/png", data: tinyPng },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json() as { id: string; mimeType: string };
+  }
+
+  async function post(app: LoamApp, cookie: string, payload: Record<string, unknown>): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/messages", headers: { cookie }, payload });
+  }
+
+  // ---- 1. avatar imageId path traversal ------------------------------------------------------------
+
+  describe("avatar image ids", () => {
+    const avatarConfig = { identity: { allowUserAvatarEdit: true, allowUserAvatarUpload: true } };
+
+    it("refuses a profile edit that points the avatar at ANOTHER user's image file (which survives)", async () => {
+      const { app, dataDir } = await makeApp(avatarConfig);
+      const alice = await newSession(app);
+      const bob = await newSession(app);
+      const bobImageId = await uploadAvatar(app, bob.cookie);
+      const bobFile = join(dataDir, "avatars", `${bobImageId}.webp`);
+
+      const hijack = await app.server.inject({
+        method: "PATCH",
+        url: "/api/users/me",
+        headers: { cookie: alice.cookie },
+        payload: { avatar: { kind: "image", imageId: bobImageId, mimeType: "image/webp" } },
+      });
+      expect(hijack.statusCode).toBe(400);
+      expect(hijack.json()).toMatchObject({ code: "invalid_user_update" });
+
+      // Alice's next upload replaces HER avatar — it must never remove Bob's file.
+      await uploadAvatar(app, alice.cookie);
+      expect(existsSync(bobFile)).toBe(true);
+    });
+
+    it("refuses a traversal imageId, so the next upload can't delete a message attachment", async () => {
+      const { app, dataDir } = await makeApp(avatarConfig);
+      const alice = await newSession(app);
+      const attachment = await uploadPng(app, alice.cookie);
+      const attachmentFile = join(dataDir, "attachments", `${attachment.id}.png`);
+      expect(existsSync(attachmentFile)).toBe(true);
+
+      const traversal = await app.server.inject({
+        method: "PATCH",
+        url: "/api/users/me",
+        headers: { cookie: alice.cookie },
+        payload: { avatar: { kind: "image", imageId: `../attachments/${attachment.id}`, mimeType: "image/png" } },
+      });
+      expect(traversal.statusCode).toBe(400);
+
+      await uploadAvatar(app, alice.cookie);
+      expect(existsSync(attachmentFile)).toBe(true);
+    });
+
+    it("applies the same rule to the admin user edit, but accepts an unchanged current image avatar", async () => {
+      const { app, dataDir } = await makeApp(avatarConfig);
+      const admin = await newSession(app);
+      const member = await newSession(app);
+      const adminImageId = await uploadAvatar(app, admin.cookie);
+      const memberImageId = await uploadAvatar(app, member.cookie);
+
+      const aimed = await app.server.inject({
+        method: "PATCH",
+        url: `/api/users/${member.userId}`,
+        headers: { cookie: admin.cookie },
+        payload: { avatar: { kind: "image", imageId: adminImageId, mimeType: "image/webp" } },
+      });
+      expect(aimed.statusCode).toBe(400);
+
+      // Sending the member's own current image avatar back unchanged is a harmless no-op edit.
+      const unchanged = await app.server.inject({
+        method: "PATCH",
+        url: "/api/users/me",
+        headers: { cookie: member.cookie },
+        payload: { avatar: { kind: "image", imageId: memberImageId, mimeType: "image/webp" } },
+      });
+      expect(unchanged.statusCode).toBe(200);
+      expect(existsSync(join(dataDir, "avatars", `${adminImageId}.webp`))).toBe(true);
+    });
+
+    it("boots past a legacy user row whose stored avatar names a non-avatar path (the avatar is dropped)", async () => {
+      const { app, dataDir } = await makeApp();
+      const user = await newSession(app);
+      // Write the row the pre-fix hole could have stored, bypassing today's schema.
+      const raw = {
+        id: user.userId,
+        displayName: "Legacy",
+        type: "human",
+        isAdmin: false,
+        createdAt: 1,
+        ephemeral: false,
+        avatar: { kind: "image", imageId: "../../x", mimeType: "image/png" },
+      };
+      await app.close();
+      const { DatabaseSync } = await import("node:sqlite");
+      const sqlite = new DatabaseSync(join(dataDir, "loam.db"));
+      sqlite.prepare("UPDATE users SET data = ? WHERE id = ?").run(JSON.stringify(raw), user.userId);
+      sqlite.close();
+
+      const reopened = await buildApp({ dataDir, logger: false });
+      cleanups.push(() => reopened.close());
+      const loaded = reopened.store.loadUsers().find((candidate) => candidate.id === user.userId);
+      expect(loaded?.displayName).toBe("Legacy");
+      expect(loaded?.avatar).toBeUndefined();
+    });
+  });
+
+  // ---- 2. admin claim under the approval join policy -----------------------------------------------
+
+  describe("admin claim under access.joinPolicy approval", () => {
+    async function expectActiveAdmin(app: LoamApp, cookie: string): Promise<void> {
+      const config = (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie } })).json() as {
+        currentUser: { isAdmin: boolean; pending?: boolean };
+      };
+      expect(config.currentUser.isAdmin).toBe(true);
+      expect(config.currentUser.pending).not.toBe(true);
+      // Not locked out: the participation-gated roster and the approval queue both answer.
+      expect((await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie } })).statusCode).toBe(200);
+      expect((await app.server.inject({ method: "GET", url: "/api/access/pending", headers: { cookie } })).statusCode).toBe(200);
+    }
+
+    it("setupCode: the claimer becomes an ACTIVE admin (pending cleared, persisted)", async () => {
+      const { app, dataDir } = await makeApp({ admin: { bootstrap: "setupCode" }, access: { joinPolicy: "approval" } });
+      const session = await newSession(app);
+      const code = app.getAdminSetupCode();
+      expect(code).toBeDefined();
+      expect((await claim(app, session.cookie, code as string)).statusCode).toBe(200);
+      await expectActiveAdmin(app, session.cookie);
+
+      const reopened = await reopenApp(app, dataDir);
+      const stored = reopened.store.loadUsers().find((user) => user.id === session.userId);
+      expect(stored?.isAdmin).toBe(true);
+      expect(stored?.pending).not.toBe(true);
+    });
+
+    it("passphrase: the claimer becomes an ACTIVE admin", async () => {
+      const app = await makeApp({
+        admin: { bootstrap: "passphrase", passphrase: "correct horse battery" },
+        access: { joinPolicy: "approval" },
+      });
+      const session = await newSession(app);
+      expect((await claim(app, session.cookie, "correct horse battery")).statusCode).toBe(200);
+      await expectActiveAdmin(app, session.cookie);
+    });
+
+    it("hostDevice: the host's claim becomes an ACTIVE admin", async () => {
+      const hostToken = "h".repeat(43);
+      const app = await makeApp({ access: { joinPolicy: "approval" } }, { hostToken });
+      const session = await newSession(app);
+      expect(session.isAdmin).toBe(false);
+      expect((await claim(app, session.cookie, hostToken)).statusCode).toBe(200);
+      await expectActiveAdmin(app, session.cookie);
+    });
+  });
+
+  // ---- 3. transportEncryption "off" is not operator-settable --------------------------------------
+
+  describe("transportEncryption off is Developer-Mode-only", () => {
+    it("refuses PATCH security.transportEncryption 'off' (400, nothing persisted)", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const res = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { security: { profile: "custom", transportEncryption: "off" } },
+      });
+      expect(res.statusCode).toBe(400);
+      const cfg = (await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).json() as {
+        networkConfig: { transportEncryption: string };
+      };
+      expect(cfg.networkConfig.transportEncryption).toBe("optional");
+    });
+
+    it("coerces a config.json 'off' to 'optional' (and still boots)", async () => {
+      const app = await makeApp({ security: { profile: "custom", transportEncryption: "off" } });
+      const cfg = (await app.server.inject({ method: "GET", url: "/api/config" })).json() as {
+        networkConfig: { transportEncryption: string; transportPublicKey?: string; devMode: boolean };
+      };
+      expect(cfg.networkConfig.transportEncryption).toBe("optional");
+      expect(cfg.networkConfig.transportPublicKey).toBeDefined();
+      expect(cfg.networkConfig.devMode).toBe(false);
+    });
+
+    it("coerces a persisted (DB) 'off' to 'optional' at load", async () => {
+      const { app, dataDir } = await makeApp();
+      app.store.setConfigValue("config", JSON.stringify({ security: { profile: "custom", transportEncryption: "off" } }));
+      const reopened = await reopenApp(app, dataDir);
+      const cfg = (await reopened.server.inject({ method: "GET", url: "/api/config" })).json() as {
+        networkConfig: { transportEncryption: string };
+      };
+      expect(cfg.networkConfig.transportEncryption).toBe("optional");
+    });
+  });
+
+  // ---- 4. llm.ollama bot identity -------------------------------------------------------------------
+
+  describe("assistant bot identity", () => {
+    async function seedHumanAdmin(id: string): Promise<{ app: LoamApp; dataDir: string; adminCookie: string }> {
+      const made = await makeApp();
+      const admin = await newSession(made.app);
+      made.app.store.upsertUser({ id, displayName: "Victim", type: "human", isAdmin: true, createdAt: 1, ephemeral: false });
+      const app = await reopenApp(made.app, made.dataDir);
+      return { app, dataDir: made.dataDir, adminCookie: admin.cookie };
+    }
+
+    it("refuses a botId that names an existing person (no hijack / demotion of an admin)", async () => {
+      const { app, adminCookie } = await seedHumanAdmin("llm.victim");
+      const res = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: adminCookie },
+        payload: { llm: { ollama: { enabled: true, botId: "llm.victim" } } },
+      });
+      expect(res.statusCode).toBe(400);
+      const victim = app.store.loadUsers().find((user) => user.id === "llm.victim");
+      expect(victim).toMatchObject({ type: "human", isAdmin: true });
+      const cfg = (await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: adminCookie } })).json() as {
+        llm: { ollama: { botId: string; enabled: boolean } };
+      };
+      expect(cfg.llm.ollama).toMatchObject({ botId: BOT_ID, enabled: false });
+    });
+
+    it("refuses a person's user.* id as botId at the schema", async () => {
+      const app = await makeApp();
+      const admin = await newSession(app);
+      const res = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { llm: { ollama: { enabled: true, botId: admin.userId } } },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(app.store.loadUsers().find((user) => user.id === admin.userId)).toMatchObject({ type: "human", isAdmin: true });
+    });
+
+    it("boots (skipping the bot) when config.json points botId at an existing person", async () => {
+      const { app, dataDir } = await seedHumanAdmin("llm.victim");
+      await app.close();
+      writeFileSync(join(dataDir, "config.json"), JSON.stringify({ llm: { ollama: { enabled: true, botId: "llm.victim" } } }));
+      const reopened = await buildApp({ dataDir, logger: false });
+      cleanups.push(() => reopened.close());
+      expect(reopened.store.loadUsers().find((user) => user.id === "llm.victim")).toMatchObject({ type: "human", isAdmin: true });
+    });
+
+    it("rejects an over-long botDisplayName with a 400 (not a 500) and the node still reboots", async () => {
+      const { app, dataDir } = await makeApp();
+      const admin = await newSession(app);
+      const res = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { llm: { ollama: { enabled: true, botDisplayName: "x".repeat(81) } } },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.body).not.toContain("too_big");
+      const reopened = await reopenApp(app, dataDir);
+      expect((await reopened.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+    });
+  });
+
+  // ---- 5. moderator-removed messages stay removed ---------------------------------------------------
+
+  it("a moderator-removed message can't be edited back, replied to, or newly reacted to", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const author = await newSession(app);
+    const created = await post(app, author.cookie, { type: "channelPost", channelId: "general", body: "abuse" });
+    expect(created.statusCode).toBe(201);
+    const messageId = (created.json() as { message: { id: string } }).message.id;
+    // A reaction placed BEFORE removal can still be toggled off afterwards.
+    expect((await post(app, author.cookie, { type: "reaction", targetMessageId: messageId, reaction: "👍" })).statusCode).toBe(201);
+
+    const removed = await app.server.inject({
+      method: "POST",
+      url: `/api/moderation/messages/${messageId}/remove`,
+      headers: { cookie: admin.cookie },
+      payload: {},
+    });
+    expect(removed.statusCode).toBe(200);
+
+    const edit = await app.server.inject({
+      method: "PATCH",
+      url: `/api/messages/${messageId}`,
+      headers: { cookie: author.cookie },
+      payload: { body: "abuse again" },
+    });
+    expect(edit.statusCode).toBe(403);
+    expect(edit.json()).toMatchObject({ code: "message_removed" });
+    const stored = app.store.loadMessages().find((message) => message.id === messageId) as { body: string } | undefined;
+    expect(stored?.body).toBe("");
+
+    const reply = await post(app, author.cookie, { type: "channelReply", channelId: "general", parentMessageId: messageId, body: "hi" });
+    expect(reply.statusCode).toBe(403);
+    expect(reply.json()).toMatchObject({ code: "message_removed" });
+
+    const react = await post(app, admin.cookie, { type: "reaction", targetMessageId: messageId, reaction: "🔥" });
+    expect(react.statusCode).toBe(403);
+    expect(react.json()).toMatchObject({ code: "message_removed" });
+
+    const unreact = await post(app, author.cookie, { type: "reaction", targetMessageId: messageId, reaction: "👍" });
+    expect(unreact.statusCode).toBe(200);
+  });
+
+  // ---- 6. interrupted / moderated LLM streams -------------------------------------------------------
+
+  it("finalizes an assistant reply left streaming by a crash at the next boot (reapable, deletable)", async () => {
+    const { app, dataDir } = await makeApp();
+    const admin = await newSession(app);
+    const user = await newSession(app);
+    app.store.insertMessage({
+      id: "llm_0123456789abcdef",
+      type: "dm",
+      authorId: BOT_ID,
+      recipientUserId: user.userId,
+      body: "",
+      createdAt: Date.now(),
+      meta: { source: "llm", model: "gemma4", markdown: true, streaming: true },
+    });
+
+    const reopened = await reopenApp(app, dataDir);
+    const repaired = reopened.store.loadMessages().find((message) => message.id === "llm_0123456789abcdef") as
+      | { body: string; meta?: { streaming?: boolean } }
+      | undefined;
+    expect(repaired?.meta?.streaming).toBe(false);
+    expect(repaired?.body).toContain("interrupted");
+
+    const deleted = await reopened.server.inject({
+      method: "DELETE",
+      url: "/api/messages/llm_0123456789abcdef",
+      headers: { cookie: admin.cookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+  });
+
+  it("a moderator can remove an assistant reply mid-stream; the writer never restores its body", async () => {
+    const ollama = startMockOllama(["alpha", " beta", " gamma", " delta", " epsilon"], { delayMs: 80 });
+    cleanups.push(ollama.close);
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const admin = await newSession(app);
+    const user = await newSession(app);
+    expect((await post(app, user.cookie, { type: "dm", recipientUserId: BOT_ID, body: "hi" })).statusCode).toBe(201);
+
+    const reply = () =>
+      app.store.loadMessages().find((message) => message.authorId === BOT_ID) as
+        | { id: string; body: string; meta?: { streaming?: boolean; removedByModerator?: boolean } }
+        | undefined;
+    const liveBody = async () => {
+      const dms = (await app.server.inject({ method: "GET", url: `/api/dms/${BOT_ID}`, headers: { cookie: user.cookie } })).json() as {
+        authorId: string;
+        body: string;
+      }[];
+      return dms.find((message) => message.authorId === BOT_ID)?.body ?? "";
+    };
+    expect(await waitUntil(async () => (await liveBody()).length > 0)).toBe(true);
+
+    const removed = await app.server.inject({
+      method: "POST",
+      url: `/api/moderation/messages/${reply()?.id}/remove`,
+      headers: { cookie: admin.cookie },
+      payload: { reason: "test" },
+    });
+    expect(removed.statusCode).toBe(200);
+
+    // Let the mock finish streaming everything it had queued.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(reply()).toMatchObject({ body: "", meta: { removedByModerator: true, streaming: false } });
+    expect(await liveBody()).toBe("");
+  });
+
+  // ---- 7. orphan-attachment sweep --------------------------------------------------------------------
+
+  describe("orphan attachment sweep", () => {
+    it("keeps a fresh owner-less file (e.g. a sync import not yet referenced) until the grace passes", async () => {
+      const { app, dataDir } = await makeApp();
+      const attachmentsDir = join(dataDir, "attachments");
+      mkdirSync(attachmentsDir, { recursive: true });
+      const fresh = join(attachmentsDir, "att_00000000000000aa.png");
+      writeFileSync(fresh, Buffer.from(tinyPng, "base64"));
+
+      await app.reapOrphanedAttachments();
+      expect(existsSync(fresh)).toBe(true);
+
+      const old = new Date(Date.now() - 60 * 60_000);
+      utimesSync(fresh, old, old);
+      await app.reapOrphanedAttachments();
+      expect(existsSync(fresh)).toBe(false);
+    });
+
+    it("never deletes an upload consumed by a message created while the sweep is mid-loop", async () => {
+      const { app, dataDir } = await makeApp();
+      const user = await newSession(app);
+      const attachmentsDir = join(dataDir, "attachments");
+      const upload = await uploadPng(app, user.cookie);
+      const uploadPath = join(attachmentsDir, `${upload.id}.png`);
+      // Sorted first, so the sweep parks in its rm BEFORE it reaches the upload.
+      const stray = join(attachmentsDir, "att_0000000000000000.png");
+      writeFileSync(stray, Buffer.from(tinyPng, "base64"));
+      const old = new Date(Date.now() - 60 * 60_000);
+      utimesSync(stray, old, old);
+      utimesSync(uploadPath, old, old);
+
+      let release: () => void = () => undefined;
+      rmGate.promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const parked = new Promise<void>((resolve) => {
+        rmGate.entered = resolve;
+      });
+      const sweep = app.reapOrphanedAttachments();
+      await parked;
+
+      // While the sweep awaits the stray's rm, the upload is consumed by a new message.
+      const created = await post(app, user.cookie, { type: "channelPost", channelId: "general", body: "", attachments: [upload] });
+      expect(created.statusCode).toBe(201);
+
+      rmGate.promise = undefined;
+      release();
+      await sweep;
+
+      expect(existsSync(stray)).toBe(false);
+      expect(existsSync(uploadPath)).toBe(true);
+    });
+  });
+
+  // ---- 8. bounded assistant concurrency ------------------------------------------------------------
+
+  it("bounds assistant replies: one in flight per user and two node-wide (429 assistant_busy)", async () => {
+    const ollama = startMockOllama(["one", " two", " three", " four"], { delayMs: 120 });
+    cleanups.push(ollama.close);
+    const app = await makeApp({ llm: { ollama: { enabled: true, baseUrl: await ollama.url } } });
+    const u1 = await newSession(app);
+    const u2 = await newSession(app);
+    const u3 = await newSession(app);
+    const dm = (cookie: string) => post(app, cookie, { type: "dm", recipientUserId: BOT_ID, body: "hi" });
+
+    expect((await dm(u1.cookie)).statusCode).toBe(201);
+    const again = await dm(u1.cookie);
+    expect(again.statusCode).toBe(429);
+    expect(again.json()).toMatchObject({ code: "assistant_busy" });
+    expect((await dm(u2.cookie)).statusCode).toBe(201);
+    const third = await dm(u3.cookie);
+    expect(third.statusCode).toBe(429);
+    // A refused request created nothing.
+    expect(app.store.loadMessages().filter((message) => message.authorId === u3.userId)).toHaveLength(0);
+
+    const finished = () =>
+      app.store
+        .loadMessages()
+        .filter((message) => message.authorId === BOT_ID)
+        .every((message) => message.meta?.streaming === false);
+    expect(await waitUntil(finished)).toBe(true);
+    expect((await dm(u1.cookie)).statusCode).toBe(201);
+    expect(await waitUntil(finished)).toBe(true);
+  });
+
+  // ---- 9. session identity minting -------------------------------------------------------------------
+
+  it("mints 64-bit user ids that never alias an existing one, and 256-bit session tokens", async () => {
+    const app = await makeApp();
+    const session = await newSession(app);
+    expect(session.userId).toMatch(/^user\.[0-9a-f]{16}$/);
+    expect(decodeURIComponent(session.cookie.slice("loam_session=".length))).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(makeSessionToken()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    // The minter retries until the id is free.
+    const seen: string[] = [];
+    const id = makeSessionUserId((candidate) => {
+      seen.push(candidate);
+      return seen.length < 4;
+    });
+    expect(seen).toHaveLength(4);
+    expect(id).toBe(seen[3]);
+  });
+
+  // ---- 10. malformed search params + generic 5xx bodies -------------------------------------------
+
+  it("answers a repeated search param with a 400, and any 5xx with a generic body (detail only logged)", async () => {
+    const app = await makeApp();
+    app.server.get("/api/test-boom", async () => {
+      throw new Error("secret internal detail");
+    });
+    app.server.get("/api/test-teapot", async () => {
+      throw Object.assign(new Error("short and stout"), { statusCode: 418 });
+    });
+    const user = await newSession(app);
+
+    const dup = await app.server.inject({ method: "GET", url: "/api/search?q=a&q=b", headers: { cookie: user.cookie } });
+    expect(dup.statusCode).toBe(400);
+    expect(dup.json()).toMatchObject({ code: "invalid_request" });
+    expect(dup.body).not.toContain("trim");
+
+    const boom = await app.server.inject({ method: "GET", url: "/api/test-boom" });
+    expect(boom.statusCode).toBe(500);
+    expect(boom.json()).toEqual({ error: "Internal server error", code: "internal_error" });
+    expect(boom.body).not.toContain("secret");
+
+    // A 4xx keeps Fastify's default handling (its message is part of the contract there).
+    const teapot = await app.server.inject({ method: "GET", url: "/api/test-teapot" });
+    expect(teapot.statusCode).toBe(418);
+    expect(teapot.body).toContain("short and stout");
+  });
+
+  // ---- 11. bounded ids ------------------------------------------------------------------------------
+
+  it("rejects an over-long id at the request boundary (schema 400, not a lookup miss)", async () => {
+    const app = await makeApp();
+    const user = await newSession(app);
+    const res = await post(app, user.cookie, { type: "reaction", targetMessageId: "m".repeat(129), reaction: "👍" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: "invalid_message_request" });
+  });
+
+  // ---- 12. moderator timeouts use the server clock --------------------------------------------------
+
+  it("computes a timeout from the server clock (timeoutMs) and clamps both forms to 7 days", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const member = await newSession(app);
+    const WEEK = 7 * 24 * 3_600_000;
+    const moderate = (payload: Record<string, unknown>) =>
+      app.server.inject({
+        method: "PATCH",
+        url: `/api/moderation/users/${member.userId}`,
+        headers: { cookie: admin.cookie },
+        payload,
+      });
+    const timeoutUntil = () => app.store.loadUsers().find((user) => user.id === member.userId)?.timeoutUntil ?? 0;
+
+    let before = Date.now();
+    expect((await moderate({ timeoutMs: 3_600_000 })).statusCode).toBe(200);
+    expect(timeoutUntil()).toBeGreaterThanOrEqual(before + 3_600_000);
+    expect(timeoutUntil()).toBeLessThanOrEqual(Date.now() + 3_600_000);
+
+    expect((await moderate({ timeoutMs: 10 * 365 * 24 * 3_600_000 })).statusCode).toBe(200);
+    expect(timeoutUntil()).toBeLessThanOrEqual(Date.now() + WEEK);
+
+    // A skewed moderator clock sending an absolute far-future time (legacy field) is clamped too.
+    before = Date.now();
+    expect((await moderate({ timeoutUntil: before + 50 * 365 * 24 * 3_600_000 })).statusCode).toBe(200);
+    expect(timeoutUntil()).toBeLessThanOrEqual(Date.now() + WEEK);
+    expect(timeoutUntil()).toBeGreaterThanOrEqual(before + WEEK - 1_000);
+
+    expect((await moderate({ timeoutUntil: null })).statusCode).toBe(200);
+    expect(timeoutUntil()).toBe(0);
+  });
+
+  // ---- 13. claim/panic caps count tunnelled requests -----------------------------------------------
+
+  it("counts tunnelled requests against the admin-claim route cap (10/min)", async () => {
+    const app = await makeApp({ admin: { bootstrap: "setupCode" } });
+    const session = await openTransport08(app);
+    expect((await resumeIdentity(app, session, 1)).status).toBe(200);
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      // An invalid body is a 400 BEFORE the semantic claim limiter, so only the route cap can 429 here.
+      const inner = await tunnelInner(app, session, 2 + i, { m: "POST", p: "/api/admin/claim", body: {} });
+      expect(inner.outerStatus).toBe(200);
+      statuses.push(inner.status);
+    }
+    expect(statuses.slice(0, 10).every((status) => status === 400)).toBe(true);
+    expect(statuses[10]).toBe(429);
+  });
+
+  it("counts tunnelled requests against the panic route cap: the 11th call can't fire the wipe", async () => {
+    const panicToken = "p".repeat(24);
+    const app = await makeApp({ killSwitch: { enabled: true, requireConfirmation: true, panicToken } });
+    const admin = await newSession(app);
+    const created = await post(app, admin.cookie, { type: "channelPost", channelId: "general", body: "keep me" });
+    expect(created.statusCode).toBe(201);
+    const session = await openTransport08(app);
+    expect((await resumeIdentity(app, session, 1)).status).toBe(200);
+
+    for (let i = 0; i < 10; i += 1) {
+      // Schema-invalid bodies 404 before the semantic panic limiter; only the route cap counts them.
+      const inner = await tunnelInner(app, session, 2 + i, { m: "POST", p: "/api/panic", body: {} });
+      expect(inner.status).toBe(404);
+    }
+    const fired = await tunnelInner(app, session, 12, { m: "POST", p: "/api/panic", body: { token: panicToken } });
+    expect(fired.status).toBe(404);
+    expect(app.store.loadMessages().some((message) => message.type === "channelPost" && message.body === "keep me")).toBe(true);
+  });
+
+  // ---- 14. launcher-owned llm.onDevice ----------------------------------------------------------------
+
+  describe("launcher-owned llm.onDevice", () => {
+    it("an admin save no longer freezes the launcher's later model activate/deactivate", async () => {
+      const onDevice = { enabled: true, model: "gemma-test", modelPath: "/data/model.gguf" };
+      const { app, dataDir } = await makeApp({ llm: { onDevice } });
+      const admin = await newSession(app);
+      // Any admin save persists the full effective config (llm.onDevice included) into the DB layer.
+      const saved = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { features: { enableReactions: false } },
+      });
+      expect(saved.statusCode).toBe(200);
+
+      // The launcher's model manager then deactivates the model in config.json (main.js).
+      writeFileSync(join(dataDir, "config.json"), JSON.stringify({ llm: { onDevice: { ...onDevice, enabled: false } } }));
+      const reopened = await reopenApp(app, dataDir);
+      const cfg = (await reopened.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: admin.cookie } })).json() as {
+        llm: { onDevice: { enabled: boolean } };
+        features: { enableReactions: boolean };
+      };
+      expect(cfg.llm.onDevice.enabled).toBe(false);
+      // ...while the admin's own edit still survives the restart.
+      expect(cfg.features.enableReactions).toBe(false);
+    });
+
+    it("keeps an admin's llm.onDevice edit where config.json never mentions it (desktop/Pi)", async () => {
+      const { app, dataDir } = await makeApp();
+      const admin = await newSession(app);
+      const saved = await app.server.inject({
+        method: "PATCH",
+        url: "/api/admin/config",
+        headers: { cookie: admin.cookie },
+        payload: { llm: { onDevice: { enabled: true, model: "gemma-admin" } } },
+      });
+      expect(saved.statusCode).toBe(200);
+      const reopened = await reopenApp(app, dataDir);
+      const cfg = (await reopened.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: admin.cookie } })).json() as {
+        llm: { onDevice: { enabled: boolean; model?: string } };
+      };
+      expect(cfg.llm.onDevice).toMatchObject({ enabled: true, model: "gemma-admin" });
+    });
   });
 });

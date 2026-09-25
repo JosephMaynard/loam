@@ -83,6 +83,7 @@ export type AppContext = {
   loadAppConfig(): Promise<void>;
   anyAdminExists(): boolean;
   consumeIdentityBudget(ip: string): boolean;
+  mintSessionUserId(): string;
   getSessionUserId(request: FastifyRequest, reply: FastifyReply): string;
   getSessionUserIdFromRequest(request: FastifyRequest): string | undefined;
   ensureUser(id: string, isAdmin?: boolean, pending?: boolean): User;
@@ -96,6 +97,7 @@ export type AppContext = {
   wsTransportSession(url: string): TransportSession | undefined;
   requiresTransportSession(request: FastifyRequest): boolean;
   applyUserUpdate(user: User, update: UserUpdateRequest): User;
+  clientAvatarUpdateError(user: User, avatar: UserUpdateRequest["avatar"]): string | undefined;
   canModerate(user: User): boolean;
   canGreet(user: User): boolean;
   isLocallyAuthoritative(userId: string): boolean;

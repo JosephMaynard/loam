@@ -1,6 +1,6 @@
 // Admin: claim, config read/patch, kill switch, and the unauthenticated panic token. Extracted verbatim
 // from app.ts (2026-09-04 split) over the shared AppContext.
-import { AdminClaimRequestSchema, KillSwitchRequestSchema, type LoamConfig, LoamConfigUpdateSchema, PanicRequestSchema } from "@loam/schema";
+import { AdminClaimRequestSchema, KillSwitchRequestSchema, type LoamConfig, LoamConfigUpdateSchema, PanicRequestSchema, UserSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { mergeConfig } from "./config.js";
 import { errorBody } from "./errors.js";
@@ -11,7 +11,10 @@ import { timingSafeEqualStrings, verifySecret } from "./secrets.js";
 export function registerAdminRoutes(ctx: AppContext): void {
   ctx.server.post(
     "/api/admin/claim",
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    // `allowList: () => false` so internal tunnel re-dispatches count too: route configs otherwise inherit
+    // the global limiter's tunnel exemption, which would lift this cap for any client using the tunnel
+    // (the same reason `semanticRateLimit` exists — see transport-server.ts).
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
     const body = AdminClaimRequestSchema.safeParse(request.body);
 
@@ -38,9 +41,14 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody("Admin claiming is not enabled on this LOAM node"));
     }
 
+    // Persist first, then mirror onto the live record and broadcast (the house mutator order), and clear
+    // `pending`: under `access.joinPolicy: "approval"` the claimer's session was created pending, and an
+    // admin still marked pending is locked out of every participation-gated route — including the
+    // approval queue — so a fresh approval-policy node would have no one able to let anyone in.
     const promote = () => {
-      currentUser.isAdmin = true;
-      ctx.store.upsertUser(currentUser);
+      const next = UserSchema.parse({ ...currentUser, isAdmin: true, pending: false });
+      ctx.store.upsertUser(next);
+      Object.assign(currentUser, next);
       ctx.broadcast({ type: "userUpserted", user: currentUser });
       return currentUser;
     };
@@ -127,6 +135,8 @@ export function registerAdminRoutes(ctx: AppContext): void {
         rateLimit: {
           max: 10,
           timeWindow: "1 minute",
+          // Count internal tunnel re-dispatches too (see the claim route above).
+          allowList: () => false,
           // Answer 404 (not the default 429) when the route limit trips, so a rate-limited prober
           // sees the same "not found" as every other failure path here — no 429 to reveal the route.
           errorResponseBuilder: () => {
@@ -195,6 +205,13 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // succeed (and clearing the passphrase while the mode is active would lock admins out).
     if (next.admin.bootstrap === "passphrase" && !next.admin.passphrase) {
       return reply.code(400).send(errorBody("The passphrase bootstrap strategy requires a passphrase"));
+    }
+
+    // Validate the assistant bot BEFORE persisting: a botId naming an existing person would otherwise turn
+    // them into a bot (demoting an admin past the no-demote rule), and a bot record that fails validation
+    // would 500 here and then fail the next boot.
+    if (ctx.llm.botConfigError(next)) {
+      return reply.code(400).send(errorBody("Invalid config values"));
     }
 
     const switchedToSetupCode = next.admin.bootstrap === "setupCode" && ctx.appConfig.admin.bootstrap !== "setupCode";

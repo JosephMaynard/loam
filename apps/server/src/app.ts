@@ -31,7 +31,7 @@ import {
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
 import { importLegacyJsonData } from "./db.js";
-import { createLlmLayer } from "./llm.js";
+import { createLlmLayer, INTERRUPTED_ASSISTANT_BODY } from "./llm.js";
 import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
 import { createStoreLifecycle } from "./store-lifecycle.js";
@@ -52,7 +52,7 @@ import type { AppData, AppOptions, LoamApp } from "./types.js";
 
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
-import { defaultLoamConfig, mergeConfig, reconcileLegacyProfile } from "./config.js";
+import { defaultLoamConfig, mergeConfig, reconcileLegacyProfile, sanitizeLegacyConfigJson, withoutLauncherOwnedKeys } from "./config.js";
 
 import { makeUser, makeSessionUserId, makeSessionToken, makeAdminSetupCode, encodeCookieValue, readCookie } from "./identity.js";
 import { attachmentFileName, parseAttachmentFileName, avatarImageExtension, parseAvatarImageId } from "./media.js";
@@ -84,7 +84,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // on the LAN — and it REFUSES to engage in a production build (`NODE_ENV=production`), so a plaintext
   // node can never ship by accident. This is the ONLY path to plaintext now that `off` is not an
   // operator-settable posture (the default is `optional`; the admin UI omits `off`).
-  const devModeRequested = process.env.LOAM_DEV_MODE === "1" || process.env.LOAM_DEV_MODE === "true";
+  // `options.devMode` lets an embedder (in practice: the test suite) request it without mutating the
+  // process env; it is subject to exactly the same production-build refusal as the env var.
+  const devModeRequested =
+    options.devMode ?? (process.env.LOAM_DEV_MODE === "1" || process.env.LOAM_DEV_MODE === "true");
   const isProductionBuild = process.env.NODE_ENV === "production";
   const devMode = devModeRequested && !isProductionBuild;
 
@@ -112,6 +115,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // ceiling bounded while the real, decoded limits stay enforced semantically (avatar 128 KiB,
   // image 256 KiB, file 1 MiB).
   const LARGE_BODY_LIMIT = 4 * 1024 * 1024;
+  // Generic 5xx body: an unexpected throw (a Zod parse, a TypeError, a store failure) must never echo its
+  // internal message or a validation dump to the client. The detail is logged; the client gets a stable,
+  // localizable `internal_error`. 4xx errors (rate limits, body parsing, typed errors like
+  // IdentityLimitError) keep Fastify's default handling — rethrowing hands them to it unchanged.
+  server.setErrorHandler((error, request, reply) => {
+    const statusCode =
+      typeof (error as { statusCode?: unknown }).statusCode === "number"
+        ? (error as { statusCode: number }).statusCode
+        : 500;
+
+    if (statusCode < 500) {
+      throw error;
+    }
+
+    request.log.error(error);
+    return reply.code(statusCode).send(errorBody("Internal server error"));
+  });
+
   if (devModeRequested && isProductionBuild) {
     server.log.error(
       "LOAM_DEV_MODE is set but IGNORED: refusing to disable transport encryption in a production build (NODE_ENV=production).",
@@ -385,6 +406,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     loadAppConfig,
     anyAdminExists,
     consumeIdentityBudget,
+    mintSessionUserId,
     getSessionUserId,
     getSessionUserIdFromRequest,
     ensureUser,
@@ -392,6 +414,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     currentNetworkConfig,
     redactedConfig,
     applyUserUpdate,
+    clientAvatarUpdateError,
     canModerate,
     canGreet,
     isLocallyAuthoritative,
@@ -461,11 +484,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * caller only invokes this when a config source actually exists (an absent file is a normal fresh boot).
    */
   function parseConfigUpdate(raw: string, source: string): LoamConfigUpdate {
-    let json: unknown;
+    let parsedJson: unknown;
     try {
-      json = JSON.parse(raw);
+      parsedJson = JSON.parse(raw);
     } catch {
       throw new Error(`Invalid configuration in ${source}: not valid JSON. Fix or remove it; refusing to start from defaults.`);
+    }
+
+    // Values an older build accepted but the schema now refuses (a configured `off` transport, an
+    // out-of-namespace bot id, an over-long bot name) are repaired with a warning rather than aborting
+    // the upgrade boot — see sanitizeLegacyConfigJson.
+    const { json, repairs } = sanitizeLegacyConfigJson(parsedJson);
+    for (const repair of repairs) {
+      server.log.warn(`${source}: ${repair}`);
     }
 
     const parsed = LoamConfigUpdateSchema.safeParse(json);
@@ -485,12 +516,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    */
   async function loadAppConfig(): Promise<void> {
     let config = defaultLoamConfig();
+    // Whether config.json carries the launcher-owned `llm.onDevice` block (see withoutLauncherOwnedKeys).
+    let fileOwnsOnDevice = false;
 
     try {
       const raw = await readFile(configPath, "utf8");
       // A present-but-invalid config.json throws here (fail closed); an ABSENT file is ENOENT → a normal
       // fresh boot from defaults, handled by the catch below.
       const fileUpdate = parseConfigUpdate(raw, configPath);
+      fileOwnsOnDevice = fileUpdate.llm?.onDevice !== undefined;
 
       // Same reconciliation as the persisted path: a hand-authored config.json that pins a preset
       // profile *and* sets an explicit kill switch / approval / TTL keeps those explicit settings
@@ -515,7 +549,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // through `parseConfigUpdate` (JSON.parse("") throws → abort), not be silently skipped to defaults. An
     // absent key returns `undefined` → a normal fresh boot.
     if (stored !== undefined) {
-      const storedUpdate = parseConfigUpdate(stored, "the persisted config table");
+      const parsedStored = parseConfigUpdate(stored, "the persisted config table");
+      // config.json is authoritative for the launcher-owned `llm.onDevice` block when it carries one: the
+      // DB row holds a full snapshot from the last admin save, which must not freeze the launcher's later
+      // model activate/deactivate (rows written before this fix contain it too — it is simply ignored).
+      const storedUpdate = fileOwnsOnDevice ? withoutLauncherOwnedKeys(parsedStored) : parsedStored;
 
       // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
       // preserve an explicitly-armed kill switch / approval / TTL by demoting the profile to custom.
@@ -580,7 +618,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       throw new IdentityLimitError();
     }
 
-    const userId = makeSessionUserId();
+    const userId = mintSessionUserId();
     const token = makeSessionToken();
     sessions.set(token, userId);
     store.putSession(token, userId);
@@ -597,6 +635,21 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     )}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionCookieMaxAge}${secure ? "; Secure" : ""}`;
     reply.header("set-cookie", cookie);
     return userId;
+  }
+
+  /**
+   * Mint a fresh anonymous user id that no existing user, cookie session, or secure identity token already
+   * names. `ensureUser` returns whatever record it finds for an id, so an aliasing mint would silently hand
+   * the newcomer someone else's identity (admin flag included); 64 random bits make that astronomically
+   * unlikely, and this check makes it impossible.
+   */
+  function mintSessionUserId(): string {
+    return makeSessionUserId(
+      (id) =>
+        data.users.some((user) => user.id === id) ||
+        [...sessions.values()].includes(id) ||
+        [...identityTokens.values()].includes(id),
+    );
   }
 
   /** Like `getSessionUserId`, but never mints: undefined when the request carries no valid identity. */
@@ -719,6 +772,39 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     Object.assign(user, next);
     broadcast({ type: "userUpserted", user });
     return user;
+  }
+
+  /**
+   * Why a client-supplied avatar in a profile edit (`PATCH /api/users/me`, the admin
+   * `PATCH /api/users/:userId`) must be refused for `user`, or undefined when it may be applied. Image
+   * avatars are minted ONLY by the upload route (`PUT /api/users/me/avatar-image`), which names the file
+   * itself: a profile edit that names an image file (`kind: "image"`, an `imageId`, a `mimeType`, or an
+   * `uploadedAt`) is accepted only when it is the user's CURRENT image avatar sent back unchanged. Otherwise
+   * a client could point its avatar at another user's file (or, before the id was constrained, at any path)
+   * and the next upload — which removes the replaced file — would delete it.
+   */
+  function clientAvatarUpdateError(user: User, avatar: UserUpdateRequest["avatar"]): string | undefined {
+    if (!avatar) {
+      return undefined;
+    }
+
+    const namesImage =
+      avatar.kind === "image" ||
+      avatar.imageId !== undefined ||
+      avatar.mimeType !== undefined ||
+      avatar.uploadedAt !== undefined;
+
+    if (!namesImage) {
+      return undefined;
+    }
+
+    const current = user.avatar;
+    const unchangedCurrentImage =
+      current?.kind === "image" &&
+      avatar.kind === "image" &&
+      avatar.imageId === current.imageId &&
+      avatar.mimeType === current.mimeType;
+    return unchangedCurrentImage ? undefined : "Invalid user update request";
   }
 
   /**
@@ -1389,6 +1475,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       if (parent.channelId !== input.channelId) {
         return { error: "Parent message belongs to a different channel" };
       }
+
+      // A moderator-removed post is a tombstone, not a live thread: no new replies under it.
+      if (parent.meta?.removedByModerator) {
+        return { error: "This message was removed by a moderator", forbidden: true };
+      }
     }
 
     if (input.type === "reaction") {
@@ -1443,6 +1534,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         }
 
         return { deletedMessageId: deleted?.id, deletedMessage: deleted };
+      }
+
+      // No NEW reactions on a moderator-removed message (toggling an existing one off, above, stays
+      // allowed — that only removes the reactor's own content).
+      if (target.meta?.removedByModerator) {
+        return { error: "This message was removed by a moderator", forbidden: true };
       }
     }
 
@@ -1520,6 +1617,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       channels: store.loadChannels(),
       messages: store.loadMessages(),
     };
+    finalizeInterruptedStreams();
     tombstones.clear();
 
     for (const id of store.loadTombstones()) {
@@ -1614,6 +1712,46 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     ensureBotUser();
     ensureAllMeshIdentities();
+  }
+
+  /**
+   * Repair assistant replies a previous process left mid-stream. The LLM writer persists its placeholder
+   * with `meta.streaming: true` and only clears it when the reply finishes — so a crash or restart
+   * mid-stream stranded a record that the retention reaper spares forever and that DELETE refuses (409)
+   * even for an admin. At load no writer can still be running, so every streaming record is finalized:
+   * streaming cleared (persisted), keeping any partial text or a neutral "interrupted" body.
+   */
+  function finalizeInterruptedStreams(): void {
+    const repaired = data.messages.flatMap((message) => {
+      if (!message.meta?.streaming || !("body" in message)) {
+        return [];
+      }
+
+      const next = MessageSchema.parse({
+        ...message,
+        body: message.body.trim() ? message.body : INTERRUPTED_ASSISTANT_BODY,
+        meta: { ...message.meta, streaming: false },
+      });
+      return [{ live: message, next }];
+    });
+
+    if (!repaired.length) {
+      return;
+    }
+
+    // Persist first, then mirror in memory (the house mutator order). Nothing is connected at load, so
+    // there is no one to broadcast to — clients pick the repaired records up on their next fetch.
+    store.transaction(() => {
+      for (const { next } of repaired) {
+        store.updateMessage(next);
+      }
+    });
+
+    for (const { live, next } of repaired) {
+      Object.assign(live, next);
+    }
+
+    server.log.warn(`Finalized ${repaired.length} assistant repl${repaired.length === 1 ? "y" : "ies"} interrupted mid-stream`);
   }
 
   /**
@@ -1740,11 +1878,29 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     server.log.info(`Retention reaper deleted ${doomed.size} expired message(s)`);
   }
 
+  /** Whether any live message references attachment `id` (read at call time — never a snapshot). */
+  function attachmentReferenced(id: string): boolean {
+    return data.messages.some(
+      (message) =>
+        message.type !== "reaction" &&
+        message.type !== "sealed" &&
+        !!message.attachments?.some((attachment) => attachment.id === id),
+    );
+  }
+
   /**
    * Delete attachment files no message references and no fresh pending upload claims: uploads
    * whose send was abandoned (past the grace period) and files orphaned by a restart (the pending
-   * map is RAM-only, so at boot every unreferenced file is an orphan). Runs at boot and on the
+   * map is RAM-only, so after a restart unreferenced files are orphans). Runs at boot and on the
    * reaper timer.
+   *
+   * The loop awaits the filesystem per file, so the message set can change under it: every decision is
+   * re-made against the LIVE `data.messages` + `attachmentOwners` immediately before each `rm` (no await in
+   * between), never against a snapshot taken at the start — a message created mid-sweep consumes its
+   * pending upload (dropping the owner entry), and a snapshot would have deleted its file. And a file with
+   * NO owner entry is only an orphan once it is older than the grace window (like the avatar sweep): sync
+   * writes a peer's attachment to disk BEFORE inserting the message that references it, and those files
+   * never have an owner entry. Files are swept in name order so a pass is deterministic.
    */
   async function reapOrphanedAttachments(): Promise<void> {
     let files: string[];
@@ -1755,35 +1911,34 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return; // No attachments directory yet — nothing uploaded.
     }
 
-    const referenced = new Set<string>();
-
-    for (const message of data.messages) {
-      if (message.type !== "reaction" && message.type !== "sealed") {
-        for (const attachment of message.attachments ?? []) {
-          referenced.add(attachment.id);
-        }
-      }
-    }
-
-    const now = Date.now();
-
-    for (const fileName of files) {
+    for (const fileName of files.sort()) {
       const parsed = parseAttachmentFileName(fileName);
 
-      if (!parsed || referenced.has(parsed.id)) {
+      if (!parsed || attachmentReferenced(parsed.id)) {
         continue;
       }
 
+      const path = join(attachmentsDir, fileName);
+      const info = await stat(path).catch(() => undefined);
+
+      if (!info) {
+        continue;
+      }
+
+      // Re-decide against live state now that the stat await is over — nothing awaits between here and rm.
+      const now = Date.now();
       const pending = attachmentOwners.get(parsed.id);
 
-      if (pending && now - pending.uploadedAt < attachmentPendingGraceMs) {
+      if (attachmentReferenced(parsed.id)) {
+        continue;
+      }
+
+      if (pending ? now - pending.uploadedAt < attachmentPendingGraceMs : now - info.mtimeMs < attachmentPendingGraceMs) {
         continue;
       }
 
       attachmentOwners.delete(parsed.id);
-      await rm(join(attachmentsDir, fileName), { force: true }).catch((error: unknown) =>
-        server.log.warn(error),
-      );
+      await rm(path, { force: true }).catch((error: unknown) => server.log.warn(error));
     }
   }
 
