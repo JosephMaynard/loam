@@ -25,7 +25,9 @@ malicious peer can't inject into a private channel id), **only the author of a m
 actually accepted is imported** (never every user a peer's payload lists — a peer could otherwise push
 tens of thousands of records per batch), imported user profiles are stripped of `isAdmin`/roles/moderation
 state (a peer's admin is a stranger here), **reserved ids are refused** both as user records and as message
-authors (any `mesh.*` id — a mesh sender's display record — and this node's configured bot id), and edits
+authors (any `mesh.*` id — a mesh sender's display record — and the whole `llm.*` assistant namespace, not
+just this node's configured bot id); an author whose record in the payload isn't `human` (a peer's bot or
+system account) is refused along with its message, and edits
 apply only when
 strictly newer **and only to the same message** — an incoming record that reuses an existing id must match
 its type, author, `createdAt` and routing (channel / parent / target), checked before any attachment is
@@ -47,25 +49,33 @@ able to amplify ~8MB bodies onto a syncing node (docs/25 SW2). Message ids are g
 idempotent and loop-safe; content propagates transitively (A←B←C) without coordination.
 
 **Batching.** Public ids go out in batches of **200** and sealed mesh ids (docs/16, ≤ 90 KB each) in
-batches of **40**, within per-round budgets of **4 000** public / **80** sealed ids (the rest waits for the
-next round; sealed offers are taken soonest-expiry first). Responses are capped at 8 MiB of plaintext JSON
-(the sealed-response cap allows for the 4/3 base64 envelope overhead). A batch whose *content* is unusable
-— over the cap, not JSON, failing the schema — is split in half and retried down to the single offending
-id, which is then remembered as refused; a network-level failure (peer unreachable, 4xx/5xx) ends the
-round's fetching without discarding what earlier batches imported.
+batches of **40**, within per-round budgets of **4 000** public / **80** sealed ids (`mesh.maxSealedPullPerRound`,
+0–500, set in `config.json` or `PATCH /api/admin/config`; the admin UI doesn't show it yet). The rest waits
+for the next round; sealed offers are taken soonest-expiry first. Responses are capped at 8 MiB of plaintext
+JSON (the sealed-response cap allows for the 4/3 base64 envelope overhead). A batch whose *content* is
+unusable — over the cap, not JSON, failing the schema — is split in half and retried down to the single
+offending id, which is then remembered as refused. Splitting is budgeted per round: at most
+`2 × batches + 16` extra requests and 32 MiB (4 × the cap) of unusable response bytes; past either the peer
+counts as failed for the round (`lastError`) and is retried next round. (A peer answering every batch with
+junk used to cost 2n − 1 requests per n-id batch, about 8 000 a round.) One bad record in a full batch costs
+about 16 extra requests, well inside the budget. A too-large answer also halves that peer's later batch size
+for that kind (floor 10 public / 5 sealed), which doubles back after a clean round. A network-level failure
+(peer unreachable, 4xx/5xx) ends the round's fetching without discarding what earlier batches imported.
 
-**Refused offers.** After each batch the puller remembers, per peer, every offer it fetched and didn't end
-up holding (a reply to a deleted post, a post into an archived channel, an over-cap body, a sealed blob
-that is neither ours nor carriable…), keyed by id + version, so it isn't re-downloaded every round. The
-memory is RAM-only, bounded (**20 000** entries per peer, oldest evicted), and expires (**1 h**; a sealed
-blob this node can't carry by policy — relay off, no hop left — is remembered until its own TTL, and the
-key embeds the relay setting so switching relaying on voids those verdicts at once). A reply/reaction whose
+**Refused offers.** After each batch the puller remembers, per peer, every public offer it fetched and
+didn't end up holding (a reply to a deleted post, a post into an archived channel, an over-cap body…),
+keyed by id + version, so it isn't re-downloaded every round. The memory is RAM-only, bounded (**20 000**
+entries per peer, oldest evicted), and expires (**1 h**). Sealed offers are handled differently: every
+sealed id this node fetched or received, whatever became of it, goes into a durable node-wide record
+(`sealed_offers_seen`) until the offer's own TTL and is never fetched again (docs/16 §9). A reply/reaction whose
 parent/target is still on offer this round is deferred, not remembered. Refused replies are cached, not
 tombstoned: a tombstone is node-wide and durable, and the id is peer-chosen. The kill switch clears it; a
-restart re-fetches each refused offer once. A change to the local policy that decided a refusal also clears
-it (`forgetRefusedOffers()`, which keeps the transport sessions and downgrade history): every admin config
-save (`PATCH /api/admin/config`), and a channel edit that changes `archived`, `allowPosting` or
-`allowReplies`. The next round then fetches those offers again instead of waiting out the hour.
+restart re-fetches each refused public offer once. A change to the local policy that decided a refusal also
+clears it (`forgetRefusedOffers()`, which keeps the transport sessions and downgrade history): every admin
+config save (`PATCH /api/admin/config`), and a channel edit that changes `archived`, `allowPosting` or
+`allowReplies`. The next round then fetches those offers again instead of waiting out the hour. None of
+these touch the sealed record: only the kill switch (`wipeAll`, or the encrypted wipe's file delete) clears
+it.
 
 **Tombstones**: every local deletion (author/admin delete, reaction toggle-off, retention reaper)
 records the id in a `tombstones` table, so a peer that still holds the message can never hand it

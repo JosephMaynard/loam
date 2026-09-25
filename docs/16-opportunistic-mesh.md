@@ -64,7 +64,14 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
   on the user record + synced), and the E2E guarantee is against **carrier nodes**, not a user's home
   host. Identities are minted **only for local users** — never for a sync-imported user or a `mesh.*`
   sender record; a row an older build minted for a synced user is deleted at boot (with any `null`
-  placeholder an earlier fix wrote) and the forged `identityKey` stripped from that user. `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
+  placeholder an earlier fix wrote) and the forged `identityKey` stripped from that user. A database from
+  v0.4.0 or earlier has no `synced_users` table, so on its first boot a one-time backfill marks as synced
+  every human with no session, no identity token, no authority/moderation state and no local-only footprint
+  (DMs, private-channel content, mesh contacts, blocks, reports, channel ownership or membership), then
+  deletes `mesh.*` user records no local DM references and resets the rest to the generated default. The
+  safety of the rule rests on the first two conditions: a user with neither can't be signed in as, so a
+  local user wrongly marked loses only a mesh identity nobody can use. It runs once per database (a
+  config-table flag). `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
   DM.
 - **Phase 2 — bounded relay (server)**: carriers import sealed blobs opaquely and deliver-if-ours,
   else relay onward (hop-decremented, per-carrier cap), else drop; the reaper expires + tombstones by
@@ -137,17 +144,29 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    (`sealedOfferAdmissible`: not tombstoned, not in the `sealed.` namespace, unexpired, hop left, TTL
    within the 7-day max + one epoch) — soonest-expiry first, at most 80 per round in 40-id batches,
    **regardless of tag**; the import then delivers what's ours, carries what it can, and drops the rest.
-   The cost: a non-relaying node downloads each blob its peer offers once, as a relay would. Offers it
-   fetched and couldn't keep are remembered per peer in RAM (docs/11 *Refused offers*) so they aren't
-   re-downloaded (a cache, not tombstones: a tombstone is node-wide and durable, and the id is
-   peer-chosen, so a hostile peer could use refusals to pre-block genuine records).
+   The cost: a non-relaying node downloads each blob its peer offers once, as a relay would, and at most
+   `mesh.maxSealedPullPerRound` (default 80) per round. A node with relaying off and no local mesh identity
+   pulls no sealed mail at all: it has nothing to deliver or carry, and the decision ignores tags.
+   **"Once" holds for every outcome alike.** Every sealed id the node fetches over sync or takes in over
+   the radio bridge goes into a durable, node-wide record (`sealed_offers_seen`, until the offer's own
+   `ttlExpiresAt`), whether it was delivered, carried or dropped, and is never fetched again. Before this,
+   delivered ids were skipped for good via their tombstone while dropped ones sat in a per-peer RAM cache
+   that a restart, any admin config save or a relay toggle cleared; the next round re-fetched exactly the
+   foreign blobs, and a peer diffing the two fetch sets learned which ones had been delivered. The record
+   is not a tombstone (it expires with the offer and never refuses an import — a peer-chosen id can't
+   pre-block genuine mail through it), it survives restarts and config changes, and only an Emergency
+   Reset clears it. Consequences: a node that switches relaying on, or frees space under `maxCarried`,
+   doesn't go back for blobs it dropped earlier (other carriers still can); and the record is capped at
+   200 000 ids — at the cap the node pulls no new sealed offers until entries expire, rather than evicting
+   marks, which would re-open the difference.
    The recipient's tag set spans `now − MESH_TTL_MAX_MS` … `now + 1 epoch` (not `now − ` this node's own
    `mesh.ttlMs`: the lifetime is the *sender's* choice), memoised per epoch. **What still leaks:** on a
    **relaying** node a pulled blob that is delivered locally is tombstoned and never appears in its digest,
    while a carried one reappears there hop-decremented. So a peer that both serves blobs to this node and
    pulls this node's digest can infer that a blob it served with `hopLimit ≥ 2` (one that would otherwise
    have been carried) was delivered here when it never shows up — ambiguous only when the node was at
-   `maxCarried` or already held that mail. A **relay-off** node never advertises pulled mail at all (its
+   `maxCarried` or already held that mail. (A blob refused at capacity is never fetched again either, so
+   regaining room adds no refetch pattern; only this digest signal remains.) A **relay-off** node never advertises pulled mail at all (its
    digest holds only mail its own users sealed), so what it pulls never shows in its digest; hop-1 blobs
    are never carried by anyone, so their absence says nothing either. Closing it needs cover traffic or
    deliberately carrying (re-advertising) delivered mail — v2.

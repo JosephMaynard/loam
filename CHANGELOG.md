@@ -35,7 +35,7 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   every host (a desktop/Pi node has no bridge).
 - **Logs don't undo the tunnel.** Requests re-dispatched inside the encrypted tunnel are no longer
   request-logged (that printed the hidden path and query), and query strings are stripped from every
-  logged URL. Unexpected server errors return a generic body; details go to the log only.
+  logged URL. Fastify's own "reply was already sent" warnings, which printed the raw URL, now omit it. Unexpected server errors return a generic body; details go to the log only.
 - **Server hardening.** Uploaded avatar ids are validated (a crafted id could reach outside the avatar
   directory); the assistant bot id must be an `llm.*` id and can't be pointed at a person's account;
   record ids are capped at 128 characters; session ids are longer (64-bit, minted collision-free) and
@@ -43,14 +43,24 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   tunnel; inbound WebSocket frames are capped at 16 KiB.
 - **Node-to-node sync.** A peer can no longer edit a post a local user wrote, re-type a private message
   into a public channel, bind a local or pending attachment to its own message, undo a moderator's
-  removal, or add new replies or reactions under a post a moderator removed here. Only the authors of accepted messages are imported, and mesh or assistant ids are refused. The
+  removal, or add new replies or reactions under a post a moderator removed here. Only the authors of
+  accepted messages are imported, and mesh ids, the whole `llm.*` assistant namespace and non-human
+  (bot/system) author records are refused. A peer that answers every batch with junk can no longer make
+  a round issue thousands of requests: splitting a bad batch has a per-round request and byte budget,
+  after which the peer fails the round, and too-large answers shrink later batches. The
   sync token is never sent on a plaintext pull, a `required` node refuses plaintext pulls, and a peer that
   negotiated encryption is never silently downgraded.
 - **Mesh.** Replay protection keys on the sealed content (ciphertext, routing tag and expiry), only the
   canonical encoding is accepted, and a forged hop budget or metadata can no longer shadow genuine mail.
   A node now fetches every eligible sealed offer rather than only its own mail, so the serving peer can't
-  learn which node a recipient uses (docs/16 states the remaining leak). Mesh identities are only minted
-  for local users, and rows an older build minted for synced users are deleted at boot.
+  learn which node a recipient uses (docs/16 states the remaining leak). Every sealed offer a node has
+  fetched or received is remembered durably until it expires, whatever became of it, so a restart, a
+  config save or switching relaying on no longer makes it re-fetch only the blobs it dropped (which told
+  the serving peer which ones it had delivered). A node with relaying off and no local mesh identity pulls
+  no sealed mail, and `mesh.maxSealedPullPerRound` (default 80) caps sealed pulls per round for metered
+  links. Mesh identities are only minted for local users, and rows an older build minted for synced users
+  are deleted at boot; a database upgraded from 0.4.0 first has its peer-imported users identified and
+  marked, and the `mesh.*` records it imported from peers removed.
 - **Emergency Reset.** An upload landing mid-reset can no longer restore the pre-reset user or leave a
   file behind; start-fresh recovery snapshots are swept too; an assistant reply streaming across a reset
   is abandoned; a device that was offline during the reset clears its local copy when it next connects.

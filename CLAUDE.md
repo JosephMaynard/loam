@@ -26,7 +26,8 @@ law-enforcement avoidance as the purpose.
 (A→C→B) delivery. **Phases 0–2 + v2 secure addressing are BUILT & TESTED** (see the doc's
 "Implementation status"): `packages/crypto` (`@loam/crypto`) is the Ed25519/X25519 sealed-sender
 primitive; the server has a `sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL
-table; minted only for local users — a row an older build minted for a synced user is deleted at boot and
+table; minted only for local users — a v0.4 database gets a one-time `synced_users` backfill (unreachable,
+footprint-free humans) — a row an older build minted for a synced user is deleted at boot and
 its forged `identityKey` stripped), and bounded relay (TTL/hop/cap, no acks). The outer message id isn't covered by the seal, so
 replay protection keys on a **hash of ciphertext + toTag + TTL** (`sealed.<sha256>`, stored beside the
 id tombstones on delivery) as well as the id; relays dedupe carried mail by the same key, only the
@@ -249,7 +250,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   limiters on top.
 - **Logging**: tunnel re-dispatches are never request-logged (`loamLogController`, keyed on the
   internal token — the inner URL is the path the tunnel hides), the `req` serializer strips query
-  strings from every logged URL, and a 5xx inside the tunnel is logged path-free on the outer request.
+  strings from every logged URL, a pino `logMethod` hook (`redactLogText`) drops the URL from Fastify's own
+  double-send warnings and query strings from any other message text, and a 5xx inside the tunnel is logged
+  path-free on the outer request.
   Unhandled errors return a generic 5xx body (`internal_error`); the detail goes to the log only.
   `AppOptions.logStream` lets tests capture output.
 - **Ephemeral messages** (off by default; `retention.messageTtlMs`): a 30s reaper (+ boot sweep)
@@ -311,16 +314,22 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   same arm/author/timestamp/routing, so a peer can't re-type a private id into the public flow — a
   message naming an attachment id another local message or pending upload owns is refused, attachments
   copied best-effort). Only the **author of an accepted message** is imported as a user (never every user
-  in the payload), and `mesh.*` ids and the configured bot id are refused as users and as authors. Local
+  in the payload), and `mesh.*`/`llm.*` ids and non-human author records are refused as users and as
+  authors. Local
   deletes write **tombstones** (DB table) so peers can't re-import them. Pulls are bounded: 200-id public
   / 40-id sealed batches under an 8 MiB response cap (the sealed cap allows for the 4/3 envelope), at
-  most 4 000 public / 80 sealed ids per round, and a batch that is too large or fails the schema is
-  bisected down to the offending id. Offers fetched and refused are remembered per peer in RAM (id +
-  version, 1 h TTL, ≤20 000 per peer) so they aren't re-downloaded every round; the kill switch, every admin
-  config save and a channel `archived`/`allowPosting`/`allowReplies` change forget them
+  most 4 000 public / `mesh.maxSealedPullPerRound` (default 80) sealed ids per round, and a batch that is
+  too large or fails the schema is bisected down to the offending id — within a per-round budget of
+  `2 × batches + 16` extra requests and 32 MiB of unusable bytes, past which the peer fails the round; a
+  too-large answer shrinks that peer's batches. Public offers fetched and refused are remembered per peer in
+  RAM (id + version, 1 h TTL, ≤20 000 per peer) so they aren't re-downloaded every round; the kill switch,
+  every admin config save and a channel `archived`/`allowPosting`/`allowReplies` change forget them
   (`sync.forgetRefusedOffers()`), so the next round refetches.
   The sealed puller fetches every admissible sealed offer (soonest expiry first), never just its own
-  tags, so a serving peer can't learn where a recipient lives. `sync.token` never rides a plaintext pull
+  tags, so a serving peer can't learn where a recipient lives; every sealed id it fetched or took in over
+  the radio bridge goes in the durable `sealed_offers_seen` table until the offer's TTL and is never fetched
+  again, whatever its outcome (only the kill switch clears it; ≤200 000 ids, then no new sealed pulls). With
+  relay off and no local mesh identity it pulls no sealed mail. `sync.token` never rides a plaintext pull
   (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that
   negotiated encryption this boot is never silently downgraded. Admin: `GET /api/admin/sync`,
   `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's join URL is its sync address.
