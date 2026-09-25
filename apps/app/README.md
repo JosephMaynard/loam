@@ -1,57 +1,32 @@
-# Welcome to your Expo app 👋
+# LOAM Android host (`apps/app`)
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app),
-living in the LOAM pnpm workspace as `apps/app` (the future Android host — see `docs/04-android-host-app.md`).
+The Expo (SDK 57 / React Native 0.86) app that turns an Android phone into a LOAM host: it runs the real
+LOAM server in an embedded Node 18 (`@comapeo/nodejs-mobile-react-native`), starts a local-only Wi-Fi
+hotspot, shows the two-step join QR codes, and loads the LOAM web client in a WebView. The full design,
+build and verification notes are in [`docs/04-android-host-app.md`](../../docs/04-android-host-app.md).
 
-## Get started
+## Build an APK
 
-1. Install dependencies (from the repo root — this is a pnpm workspace)
-
-   ```bash
-   pnpm install
-   ```
-
-2. Start the app (from `apps/app`)
-
-   ```bash
-   pnpm start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **src/app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+From the repo root, after `pnpm install`:
 
 ```bash
-pnpm run reset-project
+pnpm --filter app keystore   # once: creates release.jks + keystore.properties (gitignored — back them up)
+pnpm --filter app apk        # → apps/app/loam-host.apk
+adb install -r apps/app/loam-host.apk
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **src/app** directory where you can start developing.
+`apk` runs the workspace build, `fetch:native` (places the two vendored, sha256-pinned SQLite prebuilds),
+`bundle:server`, llama.rn's native libs, `expo prebuild --clean` and `gradlew assembleRelease` (arm64-v8a).
+Without a keystore it warns that the APK is debug-signed (acknowledge with `--debug-signed`), and
+`pnpm --filter app aab` (the Google Play bundle, docs/30) refuses to build. Needs a real JDK and the
+Android SDK + NDK r27+; see docs/04 for prerequisites and the manual steps.
 
-### Other setup steps
+## Develop
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- `pnpm --filter app test` — the vitest suite (`src/**/*.test.ts`). Never put a test file under `src/app/`:
+  Expo Router bundles everything in that directory into the release APK.
+- `pnpm --filter app typecheck` — run by CI.
+- The generated `android/` project is gitignored. If you edit `app.json` or `plugins/*.js`, re-run prebuild
+  (the `apk` script does): Gradle refuses a stale `android/` (stale-prebuild guard, docs/04).
+- Before writing Expo code, read the versioned docs at https://docs.expo.dev/versions/v57.0.0/ (see
+  `AGENTS.md`).

@@ -46,9 +46,11 @@ it on and tunes it (relay/TTL/hop/caps) from the **admin UI Mesh panel** (`PATCH
 `apps/app/modules/loam-mesh-transport` Expo module (Kotlin BLE advertise/scan + a fixed LOAM GATT
 service, Wi-Fi Aware publish/subscribe + data-path socket, BLE-only chunked fallback = TODO), a TS
 `MeshTransport` + `mesh-courier` RN↔launcher bridge (`apps/app/src/mesh/`), the launcher courier brain
-(`nodejs-project-template/main.js`), and two **loopback-only** server endpoints (on Android additionally
-gated by the launcher's per-boot `x-loam-host-token`, since loopback is reachable by every installed app there) (`GET /api/mesh/outbound`,
-`POST /api/mesh/inbound`) that shuttle sealed blobs between the radio and the existing relay — a radio-fed
+(`nodejs-project-template/main.js`), and two **launcher-only** server endpoints (`GET /api/mesh/outbound`,
+`POST /api/mesh/inbound`; loopback **and** the launcher's per-boot `x-loam-host-token` on every host —
+loopback alone is reachable by every installed app on Android and by every LAN client behind a same-host
+proxy — so a desktop/Pi node, which has no host token, has no bridge and 404s) that shuttle sealed blobs
+between the radio and the existing relay — a radio-fed
 mirror of `/api/sync/*` reusing `acceptSealedFromPeer` (desktop-tested; the Kotlin compiles in APK builds but has NOT been run
 against radios — no CI hardware). **Still not built:** the Wi-Fi Aware handshake/port-exchange finish +
 BLE fallback + Phase 4 background/battery duty-cycling (all real-device work), an in-band contact-request
@@ -63,8 +65,8 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 | Path | Role |
 |------|------|
 | `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. `src/app.ts` is the composition root (`buildApp()`, testable via `inject`) plus the domain core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain routes are sibling modules over one `AppContext` (see "Server architecture"). `src/server.ts` is the thin entry point (env, listen, SIGINT). |
-| `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2k lines, all components). Libs in `src/lib/`. |
-| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored) and the host UI (`HostPanel`, `QRCode`). Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
+| `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~3.6k lines: `LoamApp` state, boot, WebSocket, routing). Views in `src/components/`, libs in `src/lib/`. |
+| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored; run `fetch:native` first — it fails without both SQLite prebuilds unless `LOAM_ALLOW_MISSING_NATIVE=1`) and the host UI (`HostPanel`, `QRCode`). Both android-arm64 SQLite prebuilds (plain `better-sqlite3` and `multiple-ciphers`) are **vendored** under `native-prebuilds/`, sha256-pinned — nothing is downloaded from upstream releases. Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
 | `packages/avatar` | Deterministic SVG avatar from an id. Three modes: `face` (SVG template), `initial`, `pattern`. OKLCH colour derivation with WCAG contrast fixups. Has a standalone `demo/`. |
@@ -82,21 +84,24 @@ pnpm test             # pnpm -r --if-present test: runs vitest in the 5 packages
 
 There is **no lint script**. Type-checking happens as part of `build` (`tsc`), except `apps/app`,
 which has a dedicated `typecheck` script (`pnpm --filter app typecheck`). A `.stylelintrc.json`
-exists but is not wired to any script. CI (`.github/workflows/ci.yml`) runs `pnpm build`, `pnpm
-test`, then the apps/app typecheck on push/PR to `master`.
+exists but is not wired to any script. CI (`.github/workflows/ci.yml`) runs `node
+scripts/check-versions.mjs` (every workspace `package.json`, `cli/package.json` and `app.json`
+`expo.version` must agree), `pnpm build`, `pnpm test`, then the apps/app typecheck on push/PR to
+`master`. `build-apk.yml` (tag builds) pins every action to a commit SHA, runs `check-versions
+--release-tag vX.Y.Z` (tag == version, `versionCode` > the previous release tag's), build + test +
+typecheck, then signs; a separate least-privilege release job attaches the APK.
 
 **Tests**: `packages/*` (schema, display-name, avatar, qr, crypto), `apps/server` (`src/db.test.ts` for the
 DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
 matrix, config API, flag enforcement, kill switch, retention, private channels, search, WebSocket
-privacy filtering via a real listener — plus `src/embedded.test.ts`), and `apps/client` (Vitest + jsdom:
-`src/lib/markdown.test.ts` sanitizer/XSS, `src/lib/local-store.test.ts` IndexedDB round-trips +
-kill-switch purge via `fake-indexeddb`, `src/lib/protocol.test.ts` route + WS-event + message-response
-parsers). Client tests use a standalone `vitest.config.ts` (jsdom + `@preact/preset-vite`, so `*.test.tsx`
-mount real components into jsdom); `*.test.ts`/`*.test.tsx` are excluded from the `tsc -b` build. The
-pure route/protocol parsers live in `src/lib/protocol.ts` (extracted from `app.tsx`); rendered
-components extracted to `src/components/` (`Avatar`, `UnreadBadge`, `InviteControl`, `SearchResult`) have `.test.tsx`
-suites. `apps/app` has its own vitest suite (`src/**/*.test.ts`, included in `pnpm test`); also
-validate it with `pnpm --filter app typecheck` (CI runs this as its own step).
+privacy filtering via a real listener — plus focused suites: `realtime`, `llm`, `mesh-bridge`,
+`sync-transport`, `tombstone`, `net`, `embedded`), and `apps/client` (Vitest + jsdom: `src/lib/*.test.ts`
+— markdown sanitizer/XSS, IndexedDB round-trips + kill-switch purge via `fake-indexeddb`, route/WS-event
+parsers, transport, WS liveness — and a `.test.tsx` suite beside most components in `src/components/`).
+Client tests use a standalone `vitest.config.ts` (jsdom + `@preact/preset-vite`, so `*.test.tsx` mount
+real components into jsdom); `*.test.ts`/`*.test.tsx` are excluded from the `tsc -b` build. `apps/app`
+has its own vitest suite (`src/**/*.test.ts`, included in `pnpm test`); also validate it with `pnpm
+--filter app typecheck` (CI runs this as its own step).
 
 ## How dev mode wires together (important)
 
@@ -116,8 +121,10 @@ pnpm build && pnpm --filter @loam/server start   # node dist/server.js, defaults
 ```
 
 Env vars the server/dev script read: `PORT`, `CLIENT_PORT`, `HOST`, `LOAM_JOIN_HOST`,
-`LOAM_DATA_DIR`, `LOAM_CONFIG_FILE`, `LOAM_API_PORT` (client), `NODE_ENV` (`production` adds
-`Secure` to the session cookie).
+`LOAM_DATA_DIR`, `LOAM_CONFIG_FILE`, `LOAM_CLIENT_DIST`, `LOAM_VERSION`, `LOAM_DB_KEY` /
+`LOAM_DB_ENCRYPTION_MODE` (at-rest encryption), `LOAM_DEV_MODE` (see Developer Mode), `LOAM_API_PORT`
+(client), `NODE_ENV` (`production` refuses Developer Mode; the cookie's `Secure` flag follows the real
+request protocol, not `NODE_ENV`).
 
 ## Data model & the schema contract
 
@@ -130,12 +137,16 @@ Env vars the server/dev script read: `PORT`, `CLIENT_PORT`, `HOST`, `LOAM_JOIN_H
   (the invite-only roster; the owner is always an implicit member). `ChannelCreateRequest` accepts
   `visibility`; `ChannelMemberAddRequest` is the invite payload.
 - **User**: `{ id, displayName, avatar?, type: human|bot|system, isAdmin, createdAt, ephemeral }`.
-  `avatar` is either generated (`seed`+`mode`) or an uploaded `image` (`imageId`+`mimeType`).
+  `avatar` is either generated (`seed`+`mode`) or an uploaded `image` (`imageId`+`mimeType`; `imageId`
+  must be exactly `avt_<16hex>`).
+- **Ids**: every record id on the wire goes through `IdSchema` (max `ID_MAX_LENGTH` = 128), so a client or
+  sync peer can't persist megabyte ids.
 - **StreamEvent**: `start | delta | end | error` — the LLM streaming protocol over the WebSocket.
   Deltas carry only the new text (sent just to the DM participants); the final complete message is
   persisted and broadcast once via `messageUpdated`, so non-streaming clients still converge.
-- **NetworkConfig**: feature flags sent to the client from `/api/config` (and re-broadcast live via
-  the `configUpdated` WS event when an admin edits config).
+- **NetworkConfig**: feature flags sent to the client from `/api/config` and the public, cookie-free
+  `/api/bootstrap` (everything `/api/config` returns except `currentUser`; mints no identity), and
+  re-broadcast live via the `configUpdated` WS event when an admin edits config.
 - **LoamConfig / LoamConfigUpdate**: the full node configuration (identity, features, llm, admin
   bootstrap, security profile) and its PATCH shape — shared by the server config loader, the
   `/api/admin/config` endpoints, and the client admin UI.
@@ -178,15 +189,24 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   **better-sqlite3-multiple-ciphers** (SQLCipher, **encrypted at rest**) when a key is passed —
   lazy-`require`d, so only encrypted deployments load the native module (it's in
   `pnpm-workspace.yaml` `onlyBuiltDependencies`). Set via `buildApp({ dbEncryptionKey })` ←
-  `LOAM_DB_KEY`; encrypted stores need a file path, not `:memory:`. On first
+  `LOAM_DB_KEY`; encrypted stores need a file path, not `:memory:`. After every keyed open the store
+  checkpoints and `assertNotPlaintextSqliteFile` refuses a file that starts with the plaintext SQLite
+  header (a codec-less driver build silently ignores `PRAGMA key`). **Fail closed**: an encrypted mode
+  whose SQLCipher driver won't load never falls back to plaintext — the Android launcher locks with
+  `db_encryption_driver_missing` (Retry, or a confirmed "Start without encryption"), and the `loamnet`
+  CLI probes the driver before prompting or booting. On first
   boot with legacy data, `importLegacyJsonData()` migrates the old `*.json` files into the DB and
   renames them `*.json.bak`. `config.json` and the `avatars/` dir remain plain files. There is no
   `markDirty`/flush interval any more — call the matching `store.*` method after mutating in-memory
   state, then `broadcast(...)`. `.loam/` is gitignored.
-- **Sessions/identity**: `getSessionUserId` reads the `loam_session` cookie; if absent it mints a new
-  `user.<8hex>` id + token and `Set-Cookie`s it (HttpOnly, SameSite=Lax). The **server session cookie
-  is the real identity**; the client's locally generated id is a pre-hydration placeholder that gets
-  replaced by `config.currentUser` on first load.
+- **Sessions/identity**: two modes (docs/20). **Anonymous** (plaintext or `optional` without a pinned
+  key): `getSessionUserId` reads the `loam_session` cookie; if absent it mints a `user.<16hex>` id (64
+  random bits, retried until it collides with no user or session — `mintSessionUserId`) + a 256-bit
+  base64url token and `Set-Cookie`s it (HttpOnly, SameSite=Lax). **Bound** (a QR-pinned client): a
+  sealed `POST /api/session/resume` with a separate identity token promotes the transport session; its
+  identity is the session key, never a cookie, and content is reachable only through the tunnel. The
+  client's locally generated id is a pre-hydration placeholder replaced by the server-confirmed
+  `currentUser`.
 - **Admin**: comes only from the config-selected **bootstrap strategy** (`admin.bootstrap`):
   `firstUser` (default — the first session on a fresh node becomes admin), `setupCode` (a one-time
   code logged at startup, exchanged via `POST /api/admin/claim`, rate-limited + constant-time
@@ -195,17 +215,30 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   forces this strategy as a read-time projection over the persisted one; only a claim presenting that
   token becomes admin, and only the host's own WebView receives it, injected as
   `window.__loamHostDeviceToken`, so no LAN session can take `firstUser` during the boot window), or
-  `none`. Seed users `user.1234`/`user.5678` still exist but are
-  **never admins** (legacy admin seeds are demoted at boot). Admin-only endpoints check
-  `currentUser.isAdmin`; client gating is cosmetic.
+  `none`. A successful claim persists `{isAdmin, pending:false}`, so on an approval-policy node the
+  claimer is an active admin. The legacy demo users `user.1234`/`user.5678` are **deleted at boot** (their
+  messages tombstoned via the normal delete path, sessions/identity tokens purged); a fresh node never
+  creates them. Admin-only endpoints check `currentUser.isAdmin`; client gating is cosmetic.
 - **Config**: layered defaults ← `config.json` ← DB-persisted admin edits (`config` table), all
   validated against the shared `LoamConfigSchema`. `PATCH /api/admin/config` merges, persists,
   hot-reloads, and broadcasts `configUpdated`. Feature flags are **enforced server-side** in
   `createMessage()`. Secrets (`admin.passphrase`, `killSwitch.panicToken`) are stored
   **scrypt-hashed** (`scrypt:<salt>:<hash>`) — plaintext from a config file or PATCH is hashed at
   merge time and verified with `verifySecret()`; never store or compare them in the clear.
-- **Rate limiting**: `@fastify/rate-limit` runs globally (300/min/IP) with a tighter per-route cap
-  on avatar uploads; claim/panic add their own semantic attempt limiters on top.
+  `security.transportEncryption: "off"` is refused by PATCH (400); an `"off"` in `config.json` or a
+  persisted DB row is coerced to `"optional"` with a warning (`sanitizeLegacyConfigJson`, which also
+  repairs a legacy bot id / over-long bot name, so an upgrade never fails boot). The launcher-owned
+  `llm.onDevice` block is the exception to "DB wins": when `config.json` carries it, it is
+  authoritative (the launcher's model activate/deactivate writes there), so an admin save can't freeze it.
+- **Rate limiting**: `@fastify/rate-limit` runs globally (300/min/IP) with per-route caps on uploads,
+  sync, mesh, search, claim and panic; those per-route configs set `allowList: () => false` so tunnel
+  re-dispatches (exempt from the global limiter) still count. Claim/panic add their own semantic attempt
+  limiters on top.
+- **Logging**: tunnel re-dispatches are never request-logged (`loamLogController`, keyed on the
+  internal token — the inner URL is the path the tunnel hides), the `req` serializer strips query
+  strings from every logged URL, and a 5xx inside the tunnel is logged path-free on the outer request.
+  Unhandled errors return a generic 5xx body (`internal_error`); the detail goes to the log only.
+  `AppOptions.logStream` lets tests capture output.
 - **Ephemeral messages** (off by default; `retention.messageTtlMs`): a 30s reaper (+ boot sweep)
   deletes expired messages and broadcasts `messageDeleted`; streaming LLM messages are spared until
   complete.
@@ -215,8 +248,11 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   wipe depends on encryption: **encrypted** (`LOAM_DB_KEY` set) → close store, delete DB files, and
   (ephemeral mode) rotate to a fresh key — a cryptographic wipe that makes flash remnants
   unreadable; the store is reopened so `app.store` is a **getter**, not a snapshot. **Unencrypted** →
-  `store.wipeAll()` (logical DELETE, **not** secure erasure on flash — docs/02). Optional
-  unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`.
+  `store.wipeAll()` (logical DELETE, **not** secure erasure on flash — docs/02). Every branch also sweeps
+  `.loam-recovery-*` snapshots (a start-fresh's moved-aside DB + media): fail-closed in the encrypted
+  branches, best-effort (warns on a survivor) in the plaintext one. A client that was offline during the
+  wipe purges its cache on reconnect, because its server-confirmed identity changed (`lib/identity.ts`).
+  Optional unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`.
 - **Broadcast filtering**: `broadcast()` sends to all sockets but `socketCanReceiveEvent` restricts DM
   and DM-reaction events to their participants and **everything about a private channel (the channel
   upsert, its messages, and reactions on them) to its members** (`messageAudienceUserIds` resolves the
@@ -240,7 +276,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   attachment-only messages are valid) — images (256KB, served inline) or allowlisted non-image files
   (1 MiB, stored as `.bin`, served octet-stream + `Content-Disposition: attachment`). `POST /api/attachments` mirrors the avatar pipeline (base64, magic-byte vs
   MIME, 256KB images / 1 MiB other files, rate-limited); ids are uploader-bound and consumed on first use; files served
-  from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch.
+  from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch. The
+  orphan sweep re-checks live messages/owners right before each delete and gives owner-less files an
+  mtime grace window, so it can't race an in-flight upload.
   Clients downscale to ≤1280px webp on-device first (`apps/client/src/lib/attachments.ts`).
   `enableAttachments` flag, default on.
 - **Network identity & presence**: `node.name` (default "LOAM local") is the operator-set network
@@ -259,9 +297,18 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   moderator-removed message (local moderation is sticky), **and only of the same message** —
   same arm/author/timestamp/routing, so a peer can't re-type a private id into the public flow — a
   message naming an attachment id another local message or pending upload owns is refused, attachments
-  copied best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.
-  Admin: `GET /api/admin/sync`, `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's
-  join URL is its sync address.
+  copied best-effort). Only the **author of an accepted message** is imported as a user (never every user
+  in the payload), and `mesh.*` ids and the configured bot id are refused as users and as authors. Local
+  deletes write **tombstones** (DB table) so peers can't re-import them. Pulls are bounded: 200-id public
+  / 40-id sealed batches under an 8 MiB response cap (the sealed cap allows for the 4/3 envelope), at
+  most 4 000 public / 80 sealed ids per round, and a batch that is too large or fails the schema is
+  bisected down to the offending id. Offers fetched and refused are remembered per peer in RAM (id +
+  version, 1 h TTL, ≤20 000 per peer, cleared by the kill switch) so they aren't re-downloaded every round.
+  The sealed puller fetches every admissible sealed offer (soonest expiry first), never just its own
+  tags, so a serving peer can't learn where a recipient lives. `sync.token` never rides a plaintext pull
+  (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that
+  negotiated encryption this boot is never silently downgraded. Admin: `GET /api/admin/sync`,
+  `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's join URL is its sync address.
 - **Security headers**: an `onSend` hook sets `X-Content-Type-Options: nosniff` on every response and
   a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
   (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session
@@ -272,14 +319,24 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   insecure-context PWA, so it's `@loam/crypto`: X25519 handshake + XChaCha20-Poly1305). Host static
   key in the join QR `#k=` fragment (MITM-resistant); `POST /api/transport/handshake` derives a
   session; global `onRequest`/`preValidation`/`onSend` hooks transparently decrypt request bodies +
-  encrypt responses (aad `METHOD url`), and WS frames are sealed (aad `"ws"`) for `/ws?enc=<sid>`. The
-  client routes all fetches/WS through `apps/client/src/lib/transport.ts`; `off` is a pure passthrough.
-  Bodies + WS frames are encrypted. **Anti-replay:** each sealed REST request carries a per-session
+  encrypt responses (aad `METHOD url`). WS frames on `/ws?enc=<sid>` (after a key-confirmation challenge)
+  are sealed under a connection-bound aad (`loam.ws.frame.v1 <connectionId>`) inside a `{ q, f }`
+  envelope with a monotonic per-connection sequence, so a frame can't be replayed onto another
+  connection. The client routes all fetches/WS through `apps/client/src/lib/transport.ts`; `off` is a
+  pure passthrough. **Anti-replay:** each sealed REST request carries a per-session
   monotonic sequence inside its `{ s, b }` envelope; the server enforces a DTLS-style sliding window
-  (`TRANSPORT_REPLAY_WINDOW`), 409 on replay/out-of-window. **Path-hiding tunnel (`required` mode):** the
-  client tunnels every request through an opaque `POST /api/transport/tunnel` (sealed `{ m, p, body }`),
-  re-dispatched server-side via `server.inject` (caller's cookie + an unforgeable per-boot internal
-  token, rate-limit-exempt) and the response sealed back — so paths/queries are hidden too. `optional`
+  (`TRANSPORT_REPLAY_WINDOW`), 409 on replay/out-of-window. **Path-hiding tunnel (`required` mode, and
+  every bound session):** the client tunnels every request through an opaque `POST /api/transport/tunnel`
+  (sealed `{ m, p, body }`), re-dispatched server-side via `server.inject` with an unforgeable per-boot
+  internal token (global-limiter-exempt) plus the caller's identity — `x-loam-user` for a bound session
+  (never a cookie; an external `x-loam-user` is stripped), the cookie for an anonymous session on an
+  `optional` node (under `required` an anonymous session gets 401) — and the
+  response sealed back, so paths/queries are hidden too. On a live pinned session the client refuses an
+  unsealed tunnel reply (except a GET/HEAD 401, which triggers one re-handshake). **Key pinning:** a `#k=`
+  fragment only establishes a pin; a different key is parked as a pending change the user must accept
+  (`PinChangePrompt`, both fingerprints shown), never silently swapped. Markdown strips `#k=` fragments
+  from message links, and a client's invite QR carries `#k=` only from its own QR-verified session
+  (hidden on an advertised-key mismatch). `optional`
   mode keeps per-route body sealing (paths visible). **Image encryption** (required mode): avatar/
   attachment routes are no longer exempt, so a direct `<img>` GET is 401'd — the client fetches images
   through the tunnel (`encryptedImageUrl`/`useEncryptedImage` → cached `blob:` URL); optional/off serve
@@ -298,8 +355,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   **read-time projection** (`effectiveTransportEncryption()` = `devMode ? "off" : configured`), NOT a
   mutation of `appConfig` — so the persisted config always keeps operator intent and a dev-mode PATCH/kill-
   switch can never bake plaintext into a later non-dev run of the same data dir. **Activation condition:**
-  `LOAM_DEV_MODE` is `1` or `true`, **and** `NODE_ENV !== "production"` — it logs an error and stays
-  encrypted otherwise. The **Android host can never
+  `LOAM_DEV_MODE` is `1` or `true` (or the test-only `AppOptions.devMode`), **and** `NODE_ENV !==
+  "production"` — it logs an error and stays encrypted otherwise. The **Android host can never
   run it**: its bundle entry (`embedded-main.ts`) defaults `NODE_ENV` to `"production"`, so a shipped APK
   refuses dev mode regardless of env. On a desktop/Pi, plaintext requires an operator to *both* set
   `LOAM_DEV_MODE=1` *and* not set `NODE_ENV=production` — a deliberate act, not an accident (you can't set an
@@ -308,27 +365,39 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   in `app.tsx`) + a console warning. This reconciles "keep an encryption-off path for debugging" with "secure
   by default, no silent plaintext."
 - **REST endpoints**: `GET /api/health` (liveness, mints no identity — the Android launcher probes
-  this so it can't consume the `firstUser` admin grant), `GET /api/config`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
+  this so it can't consume the `firstUser` admin grant), `GET /api/bootstrap` (public, cookie-free),
+  `GET /api/config`, `POST /api/session/resume|logout|end`, `GET/PATCH /api/users`, `PATCH /api/users/me`,
   `PUT /api/users/me/avatar-image`, `PATCH /api/users/:userId` (admin), `GET /api/avatars/:fileName`,
   `GET/POST /api/channels`, `PATCH /api/channels/:channelId` (owner or admin),
   `GET/POST /api/channels/:channelId/members`,
   `DELETE /api/channels/:channelId/members/:userId`, `GET /api/messages/:channelId`,
   `GET /api/dms/:userId`, `POST /api/messages`, `PATCH/DELETE /api/messages/:messageId`,
-  `GET /api/search`, `GET /api/moderation/users` + `PATCH /api/moderation/users/:userId`
-  (admin/moderator ban + shadow-ban), `GET /api/access/pending` +
+  `GET /api/search` (400 on a malformed querystring), `GET /api/moderation/users` +
+  `PATCH /api/moderation/users/:userId` (admin/moderator ban + shadow-ban + timeout: `timeoutMs` is a
+  duration, applied and clamped to 7 days on the server clock; the legacy absolute `timeoutUntil` is
+  clamped too), `GET /api/access/pending` +
   `POST /api/access/users/:userId/approve|deny` (admin/greeter join approval),
   `PATCH /api/admin/users/:userId/roles` + `POST /api/admin/users/:userId/promote` (admin),
   `POST /api/attachments` + `GET /api/attachments/:fileName`, `POST /api/admin/claim`,
   `GET/PATCH /api/admin/config` (admin),
   `GET /api/admin/channels` (admin), `POST /api/admin/kill-switch`
   (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless
-  configured). WebSocket at `GET /ws` (requires the session cookie to already be set — the client
-  opens it only after `/api/config` resolves).
+  configured). WebSocket at `GET /ws` (an anonymous socket needs the session cookie already set; a bound
+  one proves its session key via the challenge — the client opens it only after boot resolves). Every
+  admitted socket gets a content-free `{"type":"ping"}` immediately and every 25 s
+  (`WS_HEARTBEAT_INTERVAL_MS`) via `wsSend` — sealed + sequenced when encrypted, never before key
+  confirmation.
+- **Moderator-removed messages** can't be edited by their author (403 `message_removed`) and take no new
+  replies or reactions.
 - **Avatar uploads**: base64 JSON body, ≤128KB, magic-byte signature checked against declared MIME,
-  written to `.loam/avatars/`. Original files never leave the browser (cropped client-side to 256×256).
+  written to `.loam/avatars/` under an `avt_<16hex>` id. Profile/admin edits may not name any image file
+  but the user's current one. Original files never leave the browser (cropped client-side to 256×256).
 - **LLM (optional)**: when `llm.ollama.enabled`, a bot user appears as a DM contact. DMing it streams
   a reply from Ollama's `/api/chat` into a new assistant message, updated incrementally. All gated on
-  config; absent config = no bot, no LLM routes.
+  config; absent config = no bot, no LLM routes. `botId` must be an `llm.*` id (≤64) and may not name a
+  non-bot user (PATCH 400; at boot an out-of-namespace id is dropped for the default with a warning, and
+  one naming a person skips the bot); `botDisplayName` ≤80, `model` ≤120. At most one reply in flight per user and 2 node-wide (`429 assistant_busy`); a moderator
+  removal/delete aborts the stream, and a placeholder left streaming by a crash is finalized at boot.
 
 **Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
 `enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`.
@@ -342,25 +411,41 @@ individually configurable. A boot-time `reconcileLegacyProfile()` demotes an old
 `custom` if its stored axes diverge, so the profile becoming authoritative never silently disarms a
 kill switch. See `docs/09-security-profiles.md`.
 
-## Client architecture (`apps/client/src/app.tsx`)
+## Client architecture (`apps/client/src/`)
 
 - Preact + `preact-iso` for routing (hash-free paths: `/channels`, `/channel/:id`,
   `/channel/:id/thread/:tid`, `/dm/:id`, `/settings`, `/admin`, `/people`, `/search`). `parseRoute`
   maps path → `RouteState`. The admin area (`AdminView`) and the claim form in settings appear per
   `currentUser.isAdmin` / `networkConfig.allowAdminClaim` — cosmetic only; the server enforces.
 - State is plain `useState` in `LoamApp` (no store lib). Flow: hydrate from **IndexedDB**
-  (`src/lib/local-store.ts`, db `loam-poc`) → fetch `/api/config`, `/api/channels`, `/api/users` →
-  open WebSocket → apply live `messageCreated/Updated/Deleted` and `userUpserted` events. Reconnect
-  uses exponential backoff (cap 30s).
+  (`src/lib/local-store.ts`, db `loam-poc`) → `/api/bootstrap` (then a sealed resume for a bound client,
+  or the cookie `/api/config` for an anonymous one), `/api/channels`, `/api/users` → open WebSocket →
+  apply live `messageCreated/Updated/Deleted` and `userUpserted` events. Reconnect uses exponential
+  backoff (cap 30s). A per-socket liveness watchdog (`lib/ws-liveness.ts`, armed by the first server
+  ping) declares a socket dead after ~60 s without a beat and reconnects; `online`/`visibilitychange`
+  re-check it and skip the backoff.
+- **Identity & roster reconcile**: `lib/identity.ts` stores the server-confirmed user id
+  (`loam.confirmedUserId`); when it changes (e.g. an Emergency Reset the client missed) the local cache is
+  purged. `lib/roster.ts` `reconcileRoster` drops users the full `/api/users` list no longer returns.
+- **Conversations**: `components/ConversationView.tsx` (header, `MessageList`, `ThreadPanel`) is keyed by
+  conversation (`kind:id`; the thread panel by parent id), so drafts, pending attachments, report dialogs
+  and scroll state never follow the user into another conversation. A `LiveChangeJournal`
+  (`lib/messages.ts`) stops a history snapshot from resurrecting a message deleted, or undoing an edit
+  applied, while the fetch was in flight. Read markers are the newest **server** `createdAt` on screen,
+  not the client clock.
+- **Errors**: `lib/api.ts` throws a typed `ApiError { status, code }` (branch on the code, never the
+  message text); `ErrorBanner` is a top-of-viewport `role=alert` notice with a dismiss button (transient
+  action errors auto-dismiss after 8 s); a top-level `ErrorBoundary` shows a recoverable screen.
+  `MobileBackLink` / `PinChangePrompt` (see transport) live in `src/components/` too.
 - All server payloads are re-validated client-side with the same Zod schemas (`parseSocketEvent`,
   `parseMessageResponse`).
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
-  `DOMPurify`, and hardens links (safe protocols only, `rel=noreferrer target=_blank`). Any new
-  rendered-HTML path must go through this — never inject raw message HTML.
+  `DOMPurify`, hardens links (safe protocols only, `rel=noreferrer target=_blank`) and strips `#k=`
+  fragments. Any new rendered-HTML path must go through this — never inject raw message HTML.
 - **PWA**: `public/service-worker.js` (cache `loam-poc-v2`) caches the app shell — **network-first for
   navigations** (so a deploy isn't masked by a stale `index.html`), cache-first for immutable hashed
   assets; never touches `/api` or `/ws`. Registered only in PROD (`main.tsx`).
-- **Avatar upload editor**: `AvatarImageEditor` in `app.tsx` — canvas crop/zoom/rotate with pointer
+- **Avatar upload editor**: `components/AvatarImageEditor.tsx` — canvas crop/zoom/rotate with pointer
   gestures, re-encodes to webp/png under 128KB before upload.
 
 ## Conventions
@@ -377,15 +462,14 @@ kill switch. See `docs/09-security-profiles.md`.
 
 ## Good first areas / known gaps
 
-- `apps/client` has a Vitest+jsdom harness now (lib parsers + rendered-component tests for `Avatar`,
-  `UnreadBadge`, `InviteControl`, `SearchResult` under `src/components/`). Most of `app.tsx` is still
-  one big module, so extracting more presentational components into `src/components/` to test them is
-  high value.
+- `apps/client` has a Vitest+jsdom harness (lib tests + a rendered `.test.tsx` beside most of
+  `src/components/`). `app.tsx` still holds `LoamApp`'s boot/socket/state logic (~3.6k lines), so
+  extracting more of it into tested `src/lib/` helpers or components is high value.
 - **Private channels are implemented** (membership, full server-side enforcement, member management
   UI, targeted `channelRemoved`) — see the server-architecture notes above. **Ownership transfer**
   landed too: `POST /api/channels/:id/transfer` (owner/admin only; the new owner is added to a private
   roster if absent, the old owner stays a member) with a "Make owner" control in the Members panel.
-  Remaining refinement idea: a join-request flow (today it is invite-only).
+  Private-channel join requests (owner/admin approval) shipped in 0.4.0.
 - Message search is server-side substring (`LIKE`-equivalent over the in-memory mirror); semantic
   search would fall out of the RAG embeddings (docs/06) if that lands.
 - `security.profile` is wired (see the feature-flag note). Transport encryption is enforced, so now
@@ -394,19 +478,27 @@ kill switch. See `docs/09-security-profiles.md`.
   be the axis to split them, still unbuilt). Plaintext (`off`) is no longer any profile's posture.
 - On-device SQLCipher (encrypted Android DB) now SHIPS: the multiple-ciphers ABI-108 android-arm64
   prebuild is cross-compiled + vendored (`apps/app/native-prebuilds/multiple-ciphers/`, sha256-pinned
-  tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the
-  plain driver, so `security.dbEncryption` modes key the DB on-device. On-device runtime verification
-  (actual `PRAGMA key`/rekey/wipe on a physical arm64 phone) is the remaining device-test item (docs/01, docs/04).
+  tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the plain
+  driver — also vendored (`native-prebuilds/better-sqlite3/`: the original digidem 12.10.0 binary, since
+  upstream re-uploaded non-reproducible assets on 2026-08-17 and the pinned download stopped matching) —
+  so `security.dbEncryption` modes key the DB on-device, failing closed if the driver won't load.
+  On-device runtime verification (actual `PRAGMA key`/rekey/wipe on a physical arm64 phone) is the
+  remaining device-test item (docs/01, docs/04).
 - LoRa / alternate transports: the node-to-node sync protocol (docs/11) is the transport-agnostic
   layer a LoRa link would carry; the LoRa framing/bandwidth work itself is unbuilt. **Sync peer
   authentication is now built**: an optional shared `sync.token` (stored in the clear — it's a bearer
   secret the node must present) is required via the `x-loam-sync-token` header on `/api/sync/*` when
-  set, and attached when pulling; a missing/wrong token 404s identically to sync being off. Unset =
-  open (the pre-token behaviour). Transport encryption (docs/08) is still the remaining hostile-env
-  gap.
+  set, and sent when pulling — inside the sealed envelope, never on a plaintext pull (except from a
+  Developer Mode node); a missing/wrong token 404s identically to sync being off. Unset = open (the
+  pre-token behaviour). Sync pulls ride the same transport encryption as clients (docs/08, docs/11).
 - **Anonymous-user creation is bounded**: `getSessionUserId` mints a new identity only within a per-IP
   budget (`maxNewIdentitiesPerWindow`, default 60 / 10 min; `AppOptions`), throwing a `429` past it —
   a client that keeps its session cookie never touches it, and on a LAN each device has its own IP.
-- **Release APK signing**: `pnpm --filter app keystore` generates a real signing key;
+- **Release signing**: `pnpm --filter app keystore` generates a real signing key;
   `plugins/with-release-signing.js` injects the release `signingConfig` at prebuild **only when
-  `keystore.properties` exists** (no-op otherwise, so the default debug-signed build is unaffected).
+  `keystore.properties` exists**. Without it, `pnpm --filter app aab` refuses to build (sets
+  `LOAM_REQUIRE_RELEASE_SIGNING`, so prebuild fails too) and `apk` prints a loud debug-signing banner
+  unless acknowledged with `--debug-signed` / `LOAM_ALLOW_DEBUG_SIGNING=1`.
+- **Stale-prebuild guard** (`apps/app`): prebuild stamps `android/loam-prebuild.sha256` with a hash of
+  `app.json` + `plugins/*.js`, and `app/build.gradle` fails `preBuild` on a mismatch — re-run prebuild
+  (`pnpm --filter app apk` does; `-PloamSkipPrebuildCheck` bypasses it for local native debugging only).

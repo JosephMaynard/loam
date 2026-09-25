@@ -19,10 +19,10 @@ the **known limitations honestly**, and lists the concrete things worth attackin
 | Concern | File | Notes |
 |---|---|---|
 | Primitives (X25519 handshake, XChaCha20-Poly1305 AEAD, HKDF, fingerprint) | `packages/crypto/src/index.ts` | `transportClientHello`/`transportServerAccept`/`transportClientDerive`, `sealTransport`/`openTransport`. Do **not** hand-audit the AEAD/curve — that's `@noble/*`; audit our *use* of it (nonces, aad, key handling). |
-| Host keypair + handshake endpoint | `apps/server/src/app.ts` | `ensureTransportIdentity` (persisted, kill-switch-rotated, validated on load), `POST /api/transport/handshake` (unauth bootstrap, rate-limited, session cap + eviction). |
-| Request/response sealing hooks | `apps/server/src/app.ts` | `onRequest` (resolve session, fail-closed), `preValidation` (decrypt + replay check), `onSend` (seal string responses). |
-| Anti-replay window | `apps/server/src/app.ts` | `acceptTransportSeq` + `TransportSession.{maxSeq,seen}`, `TRANSPORT_REPLAY_WINDOW`. |
-| Path-hiding tunnel | `apps/server/src/app.ts` | `POST /api/transport/tunnel`, `internalTunnelToken` + `isInternalTunnelRequest`, `TUNNELLABLE_METHODS`. |
+| Host keypair + handshake endpoint | `apps/server/src/transport-server.ts` | `ensureTransportIdentity` (persisted, kill-switch-rotated, validated on load), `POST /api/transport/handshake` (unauth bootstrap, rate-limited, session cap + eviction). |
+| Request/response sealing hooks | `apps/server/src/transport-server.ts` | `onRequest` (resolve session, fail-closed), `preValidation` (decrypt + replay check), `onSend` (seal string responses). |
+| Anti-replay window | `apps/server/src/transport-server.ts` | `acceptTransportSeq` + `TransportSession.{maxSeq,seen}`, `TRANSPORT_REPLAY_WINDOW`. |
+| Path-hiding tunnel | `apps/server/src/transport-server.ts` | `POST /api/transport/tunnel`, `internalTunnelToken` + `isInternalTunnelRequest`, `TUNNELLABLE_METHODS`. |
 | Client (all of it) | `apps/client/src/lib/transport.ts` | `ensureSession`, `attemptFetch`/`tunnelFetch`, `encryptedImageUrl`, seq counter, re-handshake retry. |
 | Image encryption | `apps/client/src/lib/use-encrypted-image.ts`, `components/Avatar.tsx`, `components/AttachmentImage.tsx` | plus the dropped image-route exemption in `requiresTransportSession`. |
 | Tests | `apps/server/src/app.test.ts` ("transport …" describes), `apps/client/src/lib/transport.test.ts`, `packages/crypto/src/index.test.ts` | |
@@ -36,8 +36,10 @@ the **known limitations honestly**, and lists the concrete things worth attackin
    A swapped QR poster is surfaced by the emoji fingerprint (`transportFingerprint`).
 3. **No silent downgrade.** `required` mode with no QR key **gates the app** (`TransportNeedsQrError`)
    rather than falling back to plaintext. A presented-but-unknown session id is 401'd (not served
-   plaintext). A **QR key present forces encryption even if the (unauthenticated) `/api/config` mode
-   says `off`** — defeating a MITM config-downgrade (regression-tested).
+   plaintext). A **QR key present forces encryption even if the (unauthenticated) bootstrap mode —
+   now `GET /api/bootstrap` — says `off`** — defeating a MITM config-downgrade (regression-tested). On a
+   live tunnel session an unsealed reply is never handed to the caller (only a `GET`/`HEAD` 401 triggers
+   one re-handshake), and a `#k=` link never silently replaces an existing pin (docs/08).
 4. **Anti-replay** (v2): every sealed REST request carries a per-session monotonic sequence inside the
    authenticated envelope; a captured ciphertext replayed within the 12h session is 409'd. Sliding
    window tolerates real reordering.

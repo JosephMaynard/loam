@@ -22,9 +22,10 @@ drive `isAdmin` (and solve the admin-bootstrap problem from [03](03-admin-ui.md)
 ## Current identity model (what auth slots into)
 
 In `apps/server/src/app.ts` (inside `buildApp()`): `getSessionUserId()` reads/sets the `loam_session`
-cookie and maps it to a random `user.<hex>` via the `sessions` Map (persisted in SQLite);
-`ensureUser()` lazily creates the `User`. No passwords, no verification, cookie is the only
-credential. Auth replaces *how a request resolves to a user* in `authenticated` mode, leaving the
+cookie and maps it to a random `user.<16hex>` via the `sessions` Map (persisted in SQLite);
+`ensureUser()` lazily creates the `User`. No passwords, no verification: the cookie is the only
+credential for an anonymous session, and a `bound` session is identified by its transport session key
+instead (docs/20). Auth replaces *how a request resolves to a user* in `authenticated` mode, leaving the
 anonymous path untouched.
 
 ## Option A — Better Auth (recommended first)

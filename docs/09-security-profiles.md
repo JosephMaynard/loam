@@ -3,7 +3,7 @@
 > **Status (2026-07): partially implemented.** The profile is now **authoritative over the axes LOAM
 > enforces today**. `security.profile` (`open`/`standard`/`hardened`/`custom`) is a single source of
 > truth (`SECURITY_PROFILE_PRESETS` + `securityProfilePreset()` in `@loam/schema`); the server forces
-> the bundled axes onto the effective config in `mergeConfig()` (`apps/server/src/app.ts`), and the
+> the bundled axes onto the effective config in `mergeConfig()` (`apps/server/src/config.ts`), and the
 > admin UI has a profile selector that locks the managed axes unless `custom`. **Bundled today:**
 > `access.joinPolicy`, `retention.messageTtlMs`, `killSwitch.enabled`, and now
 > **`security.transportEncryption`** (docs/08). **Not built yet** (so still *not* bundled): E2EE (07),
@@ -11,8 +11,11 @@
 > identity mode (05). **Secure by default:** transport encryption is enforced and **every named profile
 > now encrypts** — `open` and `standard` both force `optional` (they differ only in intent for now; an
 > invite-token axis would split them), and `hardened` forces `required` (plus approval join, 1-hour TTL,
-> armed kill switch). Plaintext (`off`) is not any profile's posture; it's reachable only via Developer
-> Mode (`LOAM_DEV_MODE=1`, non-production builds only — it refuses when `NODE_ENV=production`, and the Android host is always production — self-announcing). The default is `custom` so a fresh node's raw axes are never silently
+> armed kill switch). Plaintext (`off`) is not any profile's posture and not an operator setting at all:
+> `security.transportEncryption` accepts only `optional` / `required` (`PATCH /api/admin/config` 400s an
+> `"off"`; one found in `config.json` or a persisted DB row is coerced to `optional` with a warning). It's
+> reachable only via Developer Mode (`LOAM_DEV_MODE=1`, a read-time projection; non-production builds only
+> — it refuses when `NODE_ENV=production`, and the Android host is always production — self-announcing). The default is `custom` so a fresh node's raw axes are never silently
 > overridden, and `reconcileLegacyProfile()` demotes a legacy persisted preset to `custom` if its
 > stored axes diverge (so this change can't disarm a previously-armed kill switch). The rest of this
 > doc is the original briefing — the full vision the presets grow into as those axes land.
@@ -37,7 +40,7 @@ what keeps "make it all optional" from becoming "too complex."
 | Axis | Values | Doc |
 |------|--------|-----|
 | Admission | `open` (anyone connects) / `token` (QR invite required) | 08 |
-| Transport encryption (Layer 1) | `off` / `optional` / `required` (QR-bootstrapped session encryption — the shipped `security.transportEncryption` values) | 08 |
+| Transport encryption (Layer 1) | `optional` / `required` (QR-bootstrapped session encryption — the shipped `security.transportEncryption` values; plaintext `off` exists only as Developer Mode's effective mode) | 08 |
 | Host-key delivery (when encryption on) | `qr` (authenticated) / `tofu` (trust-on-first-use, weaker) | 08 |
 | E2EE (Layer 2) | `off` / `dmsAndPrivate` | 07 |
 | At-rest encryption | `off` / `on` | 01 |
@@ -106,7 +109,7 @@ branches on security settings:
                                     // shipped default (a fresh node never has an axis silently forced)
   // present only to override a profile, or when profile === "custom":
   "admission": "token",            // "open" | "token"
-  "transportEncryption": "optional", // "off" | "optional" | "required" (shipped, docs/08)
+  "transportEncryption": "optional", // "optional" | "required" (shipped, docs/08; "off" = Developer Mode only)
   "transportKeyDelivery": "qr",    // "qr" | "tofu"
   "e2ee": "off",                   // "off" | "dmsAndPrivate"
   "atRestEncryption": "on",

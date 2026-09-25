@@ -102,11 +102,14 @@
           <li>
             The host can run an <strong>Emergency Reset</strong>, which deletes every message, user, image
             and file on the network and clears the copies on devices connected at the time. A device that was
-            offline clears its copy the next time it reconnects.
+            offline clears its copy the next time it reconnects to that network.
           </li>
           <li>
-            The host can turn on encryption of the stored database. With encryption on, a reset destroys the
-            key, so the deleted data cannot be recovered from the device's storage.
+            The host can turn on encryption of the stored database. With encryption on, a reset also replaces
+            the key on the Android host app, and on a computer using a temporary key, so the deleted data
+            cannot be recovered from the device's storage. A computer that uses a fixed passphrase deletes the
+            database files but keeps the same passphrase. Uploaded images and files are stored outside the
+            encrypted database, and a reset deletes them.
           </li>
           <li>
             Uninstalling the Android host app deletes everything it stored.
@@ -121,9 +124,10 @@
         </p>
         <ul>
           <li>
-            <strong>Sync with other LOAM networks:</strong> public channel messages, their attachments, and
-            their authors' display names and avatar settings are copied to the networks the host links
-            to. Direct messages and private channels are never synced.
+            <strong>Sync with other LOAM networks:</strong> public channels (their names and descriptions),
+            the messages, replies and reactions posted in them, their attachments, and their authors' user
+            ids, display names and avatar settings are copied to the networks the host links to. Direct messages
+            and private channels are never synced.
           </li>
           <li>
             <strong>Remote assistant:</strong> if the host connects the assistant to a model running on
@@ -137,7 +141,8 @@
         </ul>
         <p>
           When the host downloads an on-device assistant model, the host phone fetches the file from Hugging
-          Face. That request is between the host phone and Hugging Face and contains no LOAM user data.
+          Face, or from a web address the host enters. That request is between the host phone and that site
+          and contains no LOAM user data.
         </p>
 
         <h3>Android permissions</h3>
@@ -148,6 +153,10 @@
           </li>
           <li>
             <strong>Notifications:</strong> used to show that the phone is hosting a network.
+          </li>
+          <li>
+            <strong>Foreground service and wake lock:</strong> keep the network running while the screen is
+            off.
           </li>
           <li>
             <strong>Bluetooth and Wi-Fi Aware</strong> (mesh, experimental): used to find nearby LOAM

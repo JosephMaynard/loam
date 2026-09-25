@@ -25,8 +25,9 @@ adb install -r apps/app/loam-host.apk
 
 ## 1. On-device LLM (llama.rn)
 
-- [ ] **Download + activate + chat.** Download the default model (Gemma 3 1B), activate it, DM the bot. Reply
-  text streams in token by token.
+- [ ] **Download + activate + chat.** Start downloading the default model (Gemma 3 1B): a confirmation
+  states its size and warns about mobile/metered data before anything downloads (a custom URL says its size
+  is unknown). Confirm, activate it, DM the bot. Reply text streams in token by token.
 - [ ] **Switch models while idle.** Activate a second model. The old context is released and the new one
   loads; the next DM uses the new model. Watch `adb shell dumpsys meminfo <pkg>` across the switch: resident
   memory must not stack (no two multi-GB contexts at once).
@@ -44,6 +45,10 @@ adb install -r apps/app/loam-host.apk
 
 ## 2. SQLCipher at rest (`security.dbEncryption`)
 
+- [ ] **The SQLCipher driver loads.** Select any encrypted mode and restart. The host boots (no
+  `db_encryption_driver_missing` lock screen) and `adb logcat | grep LOAM-DB` shows no driver-load failure.
+  This is the first on-device load of the self-built `better-sqlite3-multiple-ciphers` prebuild under the
+  embedded Node 18.
 - [ ] **Persistent mode.** Set `persistent`, restart. Pull `.loam/loam.db` off the device and confirm it is
   NOT readable as plaintext SQLite (the header is encrypted).
 - [ ] **Passphrase mode.** Select it, restart, and confirm the host **refuses to start** until the
@@ -68,7 +73,22 @@ adb install -r apps/app/loam-host.apk
   (`adb shell am force-stop <pkg>`), then relaunch. The two-phase wipe resumes and completes: a fresh DB, the
   config (kill switch / panic token / profile / retention) survives, and there is no perpetual re-wipe loop.
 
-## 3. Recovery paths
+## 3. Host service and manifest
+
+- [ ] **Foreground service survives a background cold start.** Launch the app and switch away before the
+  host finishes starting (~80 s cold). Return to the app: the "LOAM is hosting" notification appears (the
+  service is re-asserted on returning to the foreground). Turn the screen off for several minutes; a joined
+  second device keeps sending and receiving.
+- [ ] **Notification permission (API 33+).** On a fresh install the `POST_NOTIFICATIONS` prompt appears
+  once, while the app is in the foreground and never on top of the hotspot permission dialogs. Deny it:
+  hosting still works, and the share screen notes that notifications are off.
+- [ ] **Deep links are ignored.** `adb shell am start -a android.intent.action.VIEW -d 'loam://anything'`
+  opens (or keeps) the host screen and navigates nowhere else.
+- [ ] **Themed icon.** With themed icons on (Android 13+), the launcher shows the monochrome LOAM mark.
+- [ ] **No device-to-device transfer** (optional, needs a second phone). Run the Android setup-time
+  "copy data from old phone" flow: LOAM arrives with no database, avatars, attachments or config.
+
+## 4. Recovery paths
 
 - [ ] **Locked / unreadable DB.** Put the store into a state it cannot open under the current mode (e.g. wrong
   mode after a manual change). The app shows the locked / recovery screen rather than crashing, and the
@@ -76,5 +96,5 @@ adb install -r apps/app/loam-host.apk
 
 ## Reporting
 
-Note the device model, Android version, and build SHA (`951f7a6` or later) with each result. A failure on any
+Note the device model, Android version, and build SHA with each result. A failure on any
 item is a native-runtime finding worth escalating; a clean pass closes the branch's remaining work.
