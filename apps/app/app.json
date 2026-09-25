@@ -15,7 +15,8 @@
       "versionCode": 6,
       "adaptiveIcon": {
         "backgroundColor": "#d14900",
-        "foregroundImage": "./assets/images/loam-icon.png"
+        "foregroundImage": "./assets/images/loam-icon.png",
+        "monochromeImage": "./assets/images/loam-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
       "blockedPermissions": [
