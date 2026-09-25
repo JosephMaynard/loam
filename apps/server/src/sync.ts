@@ -144,9 +144,98 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     return Buffer.concat(chunks);
   }
 
-  // Generous digest/messages ceiling: a full 500-message batch of maximum-size bodies fits well
-  // inside this; anything larger is not a LOAM peer talking in good faith.
+  // Digest/messages ceiling on the PLAINTEXT JSON. A batch that would exceed it (200 long CJK posts, dozens
+  // of 90KB sealed blobs) is split and re-requested (see `syncWithPeer`), so the cap bounds memory without
+  // ever wedging a round.
   const maxPeerJsonBytes = 8 * 1024 * 1024;
+  // The same ceiling measured on the wire for a SEALED response (review 2026-09-25 #2): `{"enc":"<base64url of
+  // nonce ‖ ciphertext ‖ tag>"}` inflates the plaintext by 4/3 plus a few bytes, so capping the raw body at
+  // `maxPeerJsonBytes` silently shrank the real budget to ~6 MB on every encrypted peer.
+  const maxSealedPeerJsonBytes = Math.ceil((maxPeerJsonBytes * 4) / 3) + 64 * 1024;
+
+  // Ids per `/api/sync/messages` request. Sealed blobs (≤ 90KB each) get their own, smaller batches so one
+  // request stays a few MB; public messages keep the historical 200.
+  const PUBLIC_BATCH_IDS = 200;
+  const SEALED_BATCH_IDS = 40;
+  // Per-round fetch budgets. Bounded so a peer advertising a huge backlog can't make one round unbounded;
+  // what doesn't fit is picked up next round. The sealed budget is spent in a tag-INDEPENDENT order (soonest
+  // expiry first), so what we fetch never depends on which mail is ours (#4).
+  const MAX_PUBLIC_IDS_PER_ROUND = 4_000;
+  const MAX_SEALED_IDS_PER_ROUND = 80;
+
+  // Per-peer memory of offers this node fetched and REFUSED (review 2026-09-25 #6), keyed by id + version, so
+  // a refused NEW message (a reply to a deleted post, a post into an archived channel, an over-cap body, a
+  // blob that's neither ours nor carriable…) isn't re-downloaded every round forever — the digest keeps
+  // advertising it and "not held locally" alone would always want it. Entries expire (a refusal can stop
+  // applying — a channel un-archived, relaying switched on), the map is bounded, and it is RAM-only (a
+  // restart re-fetches each refused offer once). Cleared by the kill switch.
+  const REFUSED_TTL_MS = 3_600_000;
+  const REFUSED_MAX_PER_PEER = 20_000;
+  const refusedOffers = new Map<string, Map<string, number>>();
+
+  /** True while `peerUrl`'s offer `key` is remembered as refused (expired entries are dropped lazily). */
+  function isRefusedOffer(peerUrl: string, key: string, now: number): boolean {
+    const book = refusedOffers.get(peerUrl);
+    const expiresAt = book?.get(key);
+    if (expiresAt === undefined) {
+      return false;
+    }
+    if (expiresAt <= now) {
+      book?.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  /** Remember that `peerUrl`'s offer `key` was refused until `expiresAt` (oldest entry evicted at the cap). */
+  function rememberRefusedOffer(peerUrl: string, key: string, expiresAt: number): void {
+    let book = refusedOffers.get(peerUrl);
+    if (!book) {
+      book = new Map();
+      refusedOffers.set(peerUrl, book);
+    }
+    book.delete(key); // re-insert at the back so eviction order follows recency
+    while (book.size >= REFUSED_MAX_PER_PEER) {
+      const oldest = book.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      book.delete(oldest);
+    }
+    book.set(key, expiresAt);
+  }
+
+  /** The refused-offer key of a public message at a given edit version. */
+  function publicOfferKey(id: string, editedAt: number | undefined): string {
+    return `p\u0000${id}\u0000${editedAt ?? 0}`;
+  }
+
+  /** The refused-offer key of a sealed offer. Includes the relay setting, so switching relaying on makes
+   *  every earlier "not ours, not carriable" verdict moot at once instead of waiting out its expiry. */
+  function sealedOfferKey(id: string): string {
+    return `s\u0000${id}\u0000${rt.appConfig.mesh.relay ? 1 : 0}`;
+  }
+
+  // Peers that completed a transport handshake this boot. A later plaintext fallback for one of them is a
+  // downgrade (an attacker blocking `/api/bootstrap` or forging `off`), refused rather than silently taken
+  // (review 2026-09-25 #13). RAM-only; cleared by the kill switch.
+  const peersSeenEncrypted = new Set<string>();
+
+  /** Drop every piece of per-peer memory (transport sessions, refusals, downgrade history) — kill switch. */
+  function forgetPeerState(): void {
+    peerTransportSessions.clear();
+    refusedOffers.clear();
+    peersSeenEncrypted.clear();
+  }
+
+  /** Errors that mean "this BATCH's content is unusable" (too big, not JSON, fails the schema) rather than
+   *  "the peer is unreachable" — the batch is split to isolate the offender instead of failing the round. */
+  function isPeerContentError(error: unknown): boolean {
+    return (
+      error instanceof SyntaxError ||
+      (error instanceof Error && (error.message === "Peer response too large" || error.message === "Peer sent an invalid payload"))
+    );
+  }
 
   // Per-message body cap for SYNC IMPORT only (docs/25 SW2). The stored `MessageBodySchema` is deliberately
   // uncapped (a local LLM reply can be long, and locally-authored content must round-trip), but a hostile
@@ -155,10 +244,17 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   // an over-cap imported body is skipped, not fatal. Reactions/sealed carry no `body`.
   const maxSyncImportBodyBytes = 256 * 1024;
 
-  /** The shared sync-token header (if configured), presented so a token-guarded peer will serve us and
-   * harmless when the peer runs open. Under transport encryption this rides INSIDE the sealed session. */
+  /** The shared sync-token header for a PLAINTEXT pull — only ever sent when this node itself runs transport
+   * `off` (Developer Mode), where the operator has deliberately put everything on the wire in the clear.
+   * Otherwise a plaintext pull goes WITHOUT the token (review 2026-09-25 #13): an unreadable/blocked
+   * `/api/bootstrap` or a forged `off` advertisement must not be able to make this node read its
+   * node-membership bearer secret onto the wire. (On an encrypted session the token rides INSIDE the sealed
+   * envelope instead — see `sealedFetchPeerText`.) A token-guarded peer then 404s the tokenless pull, which
+   * the round records as an ordinary failure. */
   function peerSyncHeaders(): Record<string, string> {
-    return rt.appConfig.sync.token ? { "x-loam-sync-token": rt.appConfig.sync.token } : {};
+    return rt.appConfig.sync.token && rt.effectiveTransportEncryption() === "off"
+      ? { "x-loam-sync-token": rt.appConfig.sync.token }
+      : {};
   }
 
   /** Handshake a fresh transport session against a peer (honouring any operator-pinned key) and cache
@@ -167,7 +263,23 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     const pinnedKey = rt.appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
     const session = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
     peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
+    peersSeenEncrypted.add(peerUrl);
     return session;
+  }
+
+  /** Fall back to talking to `peerUrl` in the clear — unless that would be a downgrade this node refuses
+   * (review 2026-09-25 #13): never when this node REQUIRES transport encryption (its whole posture is "no
+   * plaintext"), and never for a peer that already negotiated encryption with us this boot (a sudden
+   * plaintext verdict for it is what an attacker blocking `/api/bootstrap` or forging `off` looks like).
+   * The throw lands in the peer's sync status as `lastError`. */
+  function plaintextFallback(peerUrl: string, reason: string): "plaintext" {
+    if (rt.effectiveTransportEncryption() === "required") {
+      throw new Error(`Refusing a plaintext sync (${reason}): this node requires transport encryption`);
+    }
+    if (peersSeenEncrypted.has(peerUrl)) {
+      throw new Error(`Refusing a plaintext sync (${reason}): this peer negotiated encryption earlier`);
+    }
+    return cachePlaintext(peerUrl);
   }
 
   /** Re-handshake and fold the fresh session INTO the caller's existing `session` object (then re-cache
@@ -208,13 +320,15 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
    * closed** (the error propagates, so the sync round records it, rather than a silent plaintext pull).
    * Unpinned: a peer advertising `required` also fails closed on a handshake failure; an `optional`
    * peer degrades to plaintext (it still serves the clear path); and a peer we can't read a posture from
-   * at all (older peer, or `/api/bootstrap` unreachable/non-2xx) falls back to plaintext exactly as before
-   * transport encryption existed — if it truly required transport the plaintext pull just 401s and the
-   * round records a normal failure, never a silent wrong result.
+   * at all (older peer, or `/api/bootstrap` unreachable/non-2xx) falls back to plaintext — if it truly
+   * required transport the plaintext pull just 401s and the round records a normal failure. Every plaintext
+   * fallback goes through {@link plaintextFallback}: refused outright when THIS node is `required` or the
+   * peer already negotiated encryption this boot, and never carrying the sync token (`peerSyncHeaders`).
    */
   async function resolvePeerTransport(peerUrl: string): Promise<PeerTransportSession | "plaintext"> {
     const cached = peerTransportSessions.get(peerUrl);
-    if (cached && cached.expiresAt > Date.now()) {
+    // (A cached plaintext verdict is re-judged if this node has since been switched to `required`.)
+    if (cached && cached.expiresAt > Date.now() && !(cached.transport === "plaintext" && rt.effectiveTransportEncryption() === "required")) {
       return cached.transport;
     }
     peerTransportSessions.delete(peerUrl);
@@ -231,12 +345,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       posture = await fetchPeerTransportPosture(peerUrl);
     } catch {
       // Couldn't learn the posture (older peer without the field, or an unreachable/erroring
-      // `/api/bootstrap`) → preserve the legacy plaintext path.
-      return cachePlaintext(peerUrl);
+      // `/api/bootstrap`) → the legacy plaintext path, if this node allows one (never with the token).
+      return plaintextFallback(peerUrl, "the peer's transport posture is unreadable");
     }
 
     if (posture.mode === "off" || !posture.publicKey) {
-      return cachePlaintext(peerUrl);
+      return plaintextFallback(peerUrl, "the peer advertises no transport encryption");
     }
 
     try {
@@ -245,16 +359,17 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       if (posture.mode === "required") {
         throw error;
       }
-      return cachePlaintext(peerUrl);
+      return plaintextFallback(peerUrl, "the transport handshake failed");
     }
   }
 
   /**
    * GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. Transparently
    * routes through the peer's transport session when it advertises encryption (docs/08) — so the sync
-   * digest/messages request+response DATA travels sealed (the `x-loam-sync-token` bearer header does NOT
-   * — it rides plaintext, gating public-data-only reads; see docs/08) — and stays a plain HTTP request
-   * against a peer running transport `off`.
+   * digest/messages request AND response travel sealed, the `sync.token` included (it rides inside the
+   * sealed `{ s, b, tok }` envelope, never as a wire header) — and stays a plain HTTP request against a
+   * peer running transport `off` (where the token is withheld unless this node is in Developer Mode too;
+   * see `peerSyncHeaders`).
    */
   async function fetchPeerJson<T>(
     peerUrl: string,
@@ -316,7 +431,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // node-membership bearer credential is never readable on the wire and the request proves key
       // possession. A present token also makes a bodyless digest a sealed POST.
       syncToken: rt.appConfig.sync.token,
-      maxBytes: maxPeerJsonBytes,
+      maxBytes: maxSealedPeerJsonBytes,
       reHandshake: async () => {
         try {
           // Fold the fresh session into THIS request's `session` object (and re-cache it) so the cache and
@@ -335,56 +450,67 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     return response.text;
   }
 
+  /** Ids a peer may never name — as a user record OR a message author (review 2026-09-25 #3/#8): a `mesh.*`
+   *  id is a self-certifying mesh sender's display record (pre-naming one would let a peer choose what a
+   *  real sender's mail later renders as), and the configured bot id is this node's own assistant. */
+  function isReservedPeerIdentity(id: string): boolean {
+    return id.startsWith("mesh.") || id === rt.appConfig.llm.ollama.botId;
+  }
+
   /**
-   * Import a peer's user profiles for message authors we don't know yet. Authority and moderation
-   * state are stripped — a peer's admin or moderator is a stranger here, and a peer must never be
-   * able to ban/shadow-ban someone on this node.
+   * Import the author record of a message this node has just ACCEPTED (review 2026-09-25 #3): only the
+   * authors of accepted messages, never every user in a peer's payload — a peer could otherwise push tens of
+   * thousands of arbitrary user records per batch. Authority and moderation state are stripped — a peer's
+   * admin or moderator is a stranger here, and a peer must never be able to ban/shadow-ban someone on this
+   * node. Reserved ids (`isReservedPeerIdentity`) are refused.
    */
-  function importPeerUsers(users: User[]): void {
-    for (const user of users) {
-      // Accept a published mesh key only if its kx is cryptographically bound to its sign (kxSig);
-      // otherwise strip it — the user is still imported as a display contact, just not sealable-to via
-      // this record. (v1 ids aren't key-derived, so this proves kx↔sign but NOT key↔identity — the
-      // TOFU below and docs/16's limitation cover the residual active-substitution risk.)
-      const importedKey =
-        user.identityKey && verifyKxBinding(user.identityKey.sign, user.identityKey.kx, user.identityKey.kxSig)
-          ? user.identityKey
-          : undefined;
-
-      const existing = rt.data.users.find((candidate) => candidate.id === user.id);
-      if (existing) {
-        // Trust-on-first-use: adopt a valid key the FIRST time we see one for a known user, but never
-        // overwrite an existing key from a later (possibly hostile) sync — a peer can't silently rebind
-        // a user we already hold a key for.
-        // ...and only onto a record a sync import CREATED, never one of our own users: a local user with
-        // no key yet (mesh off, or not minted) would otherwise be bound to a peer-chosen key, and
-        // `ensureMeshIdentity` would then never publish their real one. Provenance is durable — a
-        // live-session test isn't (a logged-out or restarted local user has no session).
-        if (!existing.identityKey && importedKey && rt.store.isUserSynced(existing.id)) {
-          const next = UserSchema.parse({ ...existing, identityKey: importedKey });
-          rt.store.upsertUser(next);
-          Object.assign(existing, next);
-          rt.broadcast({ type: "userUpserted", user: existing });
-        }
-        continue;
-      }
-
-      const sanitized = UserSchema.parse({
-        ...user,
-        isAdmin: false,
-        roles: undefined,
-        banned: undefined,
-        shadowBanned: undefined,
-        pending: undefined,
-        identityKey: importedKey,
-      });
-      rt.store.transaction(() => {
-        rt.store.upsertUser(sanitized);
-        rt.store.markUserSynced(sanitized.id);
-      });
-      rt.data.users.push(sanitized);
-      rt.broadcast({ type: "userUpserted", user: sanitized });
+  function importPeerAuthor(authorId: string, usersById: Map<string, User>): void {
+    const user = usersById.get(authorId);
+    if (!user || isReservedPeerIdentity(user.id)) {
+      return;
     }
+    // Accept a published mesh key only if its kx is cryptographically bound to its sign (kxSig);
+    // otherwise strip it — the user is still imported as a display contact, just not sealable-to via
+    // this record. (v1 ids aren't key-derived, so this proves kx↔sign but NOT key↔identity — the
+    // TOFU below and docs/16's limitation cover the residual active-substitution risk.)
+    const importedKey =
+      user.identityKey && verifyKxBinding(user.identityKey.sign, user.identityKey.kx, user.identityKey.kxSig)
+        ? user.identityKey
+        : undefined;
+
+    const existing = rt.data.users.find((candidate) => candidate.id === user.id);
+    if (existing) {
+      // Trust-on-first-use: adopt a valid key the FIRST time we see one for a known user, but never
+      // overwrite an existing key from a later (possibly hostile) sync — a peer can't silently rebind
+      // a user we already hold a key for.
+      // ...and only onto a record a sync import CREATED, never one of our own users: a local user with
+      // no key yet (mesh off, or not minted) would otherwise be bound to a peer-chosen key, and
+      // `ensureMeshIdentity` would then never publish their real one. Provenance is durable — a
+      // live-session test isn't (a logged-out or restarted local user has no session).
+      if (!existing.identityKey && importedKey && rt.store.isUserSynced(existing.id)) {
+        const next = UserSchema.parse({ ...existing, identityKey: importedKey });
+        rt.store.upsertUser(next);
+        Object.assign(existing, next);
+        rt.broadcast({ type: "userUpserted", user: existing });
+      }
+      return;
+    }
+
+    const sanitized = UserSchema.parse({
+      ...user,
+      isAdmin: false,
+      roles: undefined,
+      banned: undefined,
+      shadowBanned: undefined,
+      pending: undefined,
+      identityKey: importedKey,
+    });
+    rt.store.transaction(() => {
+      rt.store.upsertUser(sanitized);
+      rt.store.markUserSynced(sanitized.id);
+    });
+    rt.data.users.push(sanitized);
+    rt.broadcast({ type: "userUpserted", user: sanitized });
   }
 
   /**
@@ -443,6 +569,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       try {
         const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment);
 
+        // The fetch awaited: a kill switch meanwhile wiped the store, so a work item recorded now would land
+        // a pre-wipe message id in the fresh post-wipe DB (review 2026-09-25 #9).
+        if (rt.wipeGeneration !== generation) {
+          return;
+        }
+
         if (!isAcceptableAttachmentBytes(bytes, attachment.mimeType)) {
           // Fetched something, but it isn't usable — record it as missing too (docs/15 A6) rather
           // than silently dropping it: a peer mid-write or serving a truncated/corrupt copy today can
@@ -451,12 +583,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           continue;
         }
 
-        // A kill switch during the fetch just deleted the attachments dir — don't recreate it and
-        // write an orphaned file the wipe was meant to destroy (docs/15 #2).
-        if (rt.wipeGeneration !== generation) {
-          return;
-        }
-
+        // (The generation check above also covers this: a kill switch during the fetch deleted the attachments
+        // dir, so nothing may recreate it and write an orphaned file the wipe was meant to destroy — docs/15 #2.)
         await mkdir(rt.attachmentsDir, { recursive: true });
         await writeFile(filePath, bytes);
 
@@ -472,6 +600,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // image would stay absent forever (docs/15 A6). `retryMissingAttachments` is the independent pass
         // that re-fetches just this file from this peer, without re-importing the message. The
         // required-mode 401 that dropped EVERY attachment is the case this path originally fixed.
+        // ...unless a kill switch landed while the fetch was in flight: then the store is the fresh post-wipe
+        // one and this pre-wipe work item must not reach it (review 2026-09-25 #9).
+        if (rt.wipeGeneration !== generation) {
+          return;
+        }
         rt.store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
       }
     }
@@ -719,11 +852,24 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
    * Import a batch of peer messages: posts before replies before reactions (so parents/targets
    * land first), never into private/unknown channels (a malicious peer must not inject into a
    * local private channel id), never over a tombstone, and edits only when strictly newer — and only of
-   * the same message (see {@link isSameMessageIdentity}).
+   * the same message (see {@link isSameMessageIdentity}). The author record of each ACCEPTED message is
+   * imported from `users` just before it lands (never the rest of the payload's users).
+   *
+   * Returns the number imported plus the ids refused only because their reply parent / reaction target
+   * hasn't arrived YET but is still on offer this round (`pendingIds`) — the caller must not remember those
+   * as refused; everything else this batch asked for and didn't end up holding is a real refusal.
    */
-  async function importPeerMessages(peerUrl: string, messages: Message[], generation: number): Promise<number> {
+  async function importPeerMessages(
+    peerUrl: string,
+    messages: Message[],
+    users: User[],
+    generation: number,
+    pendingIds: ReadonlySet<string>,
+  ): Promise<{ imported: number; deferred: Set<string> }> {
     const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
     const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
+    const usersById = new Map(users.map((user) => [user.id, user]));
+    const deferred = new Set<string>();
     let imported = 0;
 
     for (const message of sorted) {
@@ -763,6 +909,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         continue;
       }
 
+      // A public message may not claim a reserved author (a `mesh.*` sender record or this node's bot) —
+      // it would render as that identity here (review 2026-09-25 #8).
+      if (isReservedPeerIdentity(message.authorId)) {
+        continue;
+      }
+
       // Node-wide feature flags govern what content may EXIST on this node, not just what local users may
       // create (review 2026-09-04): a node that has switched channel posting, replies, or reactions off
       // must not acquire that content from a peer either — `createMessage` refuses the same three.
@@ -792,8 +944,15 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       if (message.type === "reaction") {
         const target = rt.data.messages.find((candidate) => candidate.id === message.targetMessageId);
 
-        // The reaction's target must exist locally and be public-audience (no DM/private targets).
-        if (!target || rt.messageAudienceUserIds(message) !== undefined) {
+        // The reaction's target must exist locally and be public-audience (no DM/private targets). A target
+        // still on offer this round may simply not have landed yet — retry next round, don't remember it.
+        if (!target) {
+          if (pendingIds.has(message.targetMessageId) && !rt.tombstones.has(message.targetMessageId)) {
+            deferred.add(message.id);
+          }
+          continue;
+        }
+        if (rt.messageAudienceUserIds(message) !== undefined) {
           continue;
         }
 
@@ -833,11 +992,20 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
         // A reply needs a valid local parent in the same channel (posts sort first, so a parent
         // in the same batch already landed). A parent we tombstoned or never had stays deleted —
-        // and takes its replies with it, matching the local cascade semantics.
+        // and takes its replies with it, matching the local cascade semantics. (The refused reply is
+        // remembered per peer by the caller rather than tombstoned: a tombstone is node-wide and durable,
+        // and a peer choosing the reply's id could use one to pre-block a genuine id arriving elsewhere.)
+        // A parent still on offer this round may just be in a later batch — retry next round instead.
         if (message.type === "channelReply") {
           const parent = rt.data.messages.find((candidate) => candidate.id === message.parentMessageId);
 
-          if (!parent || parent.type !== "channelPost" || parent.channelId !== message.channelId) {
+          if (!parent) {
+            if (pendingIds.has(message.parentMessageId) && !rt.tombstones.has(message.parentMessageId)) {
+              deferred.add(message.id);
+            }
+            continue;
+          }
+          if (parent.type !== "channelPost" || parent.channelId !== message.channelId) {
             continue;
           }
         }
@@ -852,14 +1020,14 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
         // The check above awaited — a kill switch may have landed (docs/15 #2).
         if (rt.wipeGeneration !== generation) {
-          return imported;
+          return { imported, deferred };
         }
 
         await importPeerAttachments(peerUrl, message, generation);
         // A kill switch during the attachment fetch just wiped the store — stop before we insert
         // this (and any later) message back onto it (docs/15 #2).
         if (rt.wipeGeneration !== generation) {
-          return imported;
+          return { imported, deferred };
         }
       }
 
@@ -871,6 +1039,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
       if (existing) {
         if ((message.editedAt ?? 0) > (existing.editedAt ?? 0)) {
+          importPeerAuthor(message.authorId, usersById);
           const updated = MessageSchema.parse(message);
           rt.store.updateMessage(updated);
           // Mirror the row exactly: drop optional fields the edit removed (e.g. `attachments`) before
@@ -888,6 +1057,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         continue;
       }
 
+      importPeerAuthor(message.authorId, usersById);
       rt.store.transaction(() => {
         rt.store.insertMessage(message);
         rt.store.markMessageSynced(message.id);
@@ -901,7 +1071,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       rt.data.messages.sort((a, b) => a.createdAt - b.createdAt);
     }
 
-    return imported;
+    return { imported, deferred };
   }
 
   /** One pull round against one peer: digest → diff (skipping tombstones) → fetch → import. */
@@ -998,69 +1168,158 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         rt.broadcast({ type: "channelUpserted", channel: existing });
       }
 
+      const now = Date.now();
       const localById = new Map(rt.data.messages.map((message) => [message.id, message]));
-      const wanted = digest.messages
-        .filter((entry) => {
-          if (rt.tombstones.has(entry.id)) {
-            return false;
-          }
+      // What each requested id was asked for, so a batch can tell afterwards which offers it REFUSED.
+      const offers = new Map<string, { kind: "public"; editedAt?: number } | { kind: "sealed"; ttlExpiresAt: number; hopLimit: number }>();
 
-          const mine = localById.get(entry.id);
-
-          if (!mine) {
-            return true;
-          }
-
-          // Don't even ask for an edit the import would refuse (a local-origin or moderator-removed
-          // record) — the peer's newer stamp never goes away, so it would be re-fetched every round.
-          return entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0) && isPeerEditable(mine);
-        })
-        .map((entry) => entry.id);
-
-      // Sealed mailbox mail on offer: pull a blob only if it's addressed to a local identity (a tag
-      // match) or this node relays and has room — never mail that's neither ours nor carriable.
-      if (rt.appConfig.mesh.enabled && digest.sealed?.length) {
-        const now = Date.now();
-        const localTags = new Set<string>();
-        for (const identity of mesh.meshIdentities.values()) {
-          for (const tag of mesh.localTagsForWindow(identity, now)) {
-            localTags.add(tag);
-          }
+      const publicWanted: string[] = [];
+      for (const entry of digest.messages) {
+        if (publicWanted.length >= MAX_PUBLIC_IDS_PER_ROUND) {
+          break;
         }
-        const carried = rt.data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
-        const canRelay = rt.appConfig.mesh.relay && carried < rt.appConfig.mesh.maxCarried;
-        for (const entry of digest.sealed) {
-          if (rt.tombstones.has(entry.id) || localById.has(entry.id) || entry.ttlExpiresAt <= now || entry.hopLimit <= 0) {
+        if (rt.tombstones.has(entry.id) || isRefusedOffer(peer.url, publicOfferKey(entry.id, entry.editedAt), now)) {
+          continue;
+        }
+
+        const mine = localById.get(entry.id);
+
+        // Don't even ask for an edit the import would refuse (a local-origin or moderator-removed
+        // record) — the peer's newer stamp never goes away, so it would be re-fetched every round.
+        if (mine && !(entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0) && isPeerEditable(mine))) {
+          continue;
+        }
+        publicWanted.push(entry.id);
+        offers.set(entry.id, { kind: "public", editedAt: entry.editedAt });
+      }
+
+      // Sealed mailbox mail on offer. Which blobs we pull must NOT depend on which of them are addressed to
+      // a local identity (review 2026-09-25 #4): pulling only "ours" whenever this node isn't relaying (relay
+      // off — the default — or at `maxCarried`, or a hop-1 blob) told the serving peer exactly which node the
+      // recipient of a tag lives on, while docs/16 promises carriers learn the path, never the endpoints. So
+      // pull every offer acceptance could take at all (`sealedOfferAdmissible` — the same outer-field checks
+      // `acceptSealedFromPeer` applies, #1), soonest-expiring first, within a per-round budget; the import
+      // delivers what's ours, carries what it can, and drops the rest, which `settleBatch` then remembers so
+      // it is never re-downloaded (#1/#6). The cost is that a non-relaying node downloads each blob its peer
+      // carries once, like a relay would.
+      const sealedWanted: string[] = [];
+      if (rt.appConfig.mesh.enabled && digest.sealed?.length) {
+        const candidates = digest.sealed
+          .filter(
+            (entry) =>
+              !localById.has(entry.id) &&
+              !offers.has(entry.id) &&
+              mesh.sealedOfferAdmissible(entry, now) &&
+              !isRefusedOffer(peer.url, sealedOfferKey(entry.id), now),
+          )
+          .sort((a, b) => a.ttlExpiresAt - b.ttlExpiresAt)
+          .slice(0, MAX_SEALED_IDS_PER_ROUND);
+        for (const entry of candidates) {
+          sealedWanted.push(entry.id);
+          offers.set(entry.id, { kind: "sealed", ttlExpiresAt: entry.ttlExpiresAt, hopLimit: entry.hopLimit });
+        }
+      }
+
+      const pendingIds: ReadonlySet<string> = new Set(offers.keys());
+
+      /** After a batch: remember, per peer, every offer it asked for and didn't end up holding (unless it was
+       *  only deferred for a parent/target still on offer), so the next round doesn't fetch it again. */
+      const settleBatch = (ids: string[], deferred: ReadonlySet<string>) => {
+        const settledAt = Date.now();
+        const held = new Map(rt.data.messages.map((message) => [message.id, message]));
+        for (const id of ids) {
+          const offer = offers.get(id);
+          if (!offer || deferred.has(id) || rt.tombstones.has(id)) {
             continue;
           }
-          if (localTags.has(entry.toTag) || canRelay) {
-            wanted.push(entry.id);
+          const mine = held.get(id);
+          if (offer.kind === "public") {
+            if (!mine || (mine.editedAt ?? 0) < (offer.editedAt ?? 0)) {
+              rememberRefusedOffer(peer.url, publicOfferKey(id, offer.editedAt), settledAt + REFUSED_TTL_MS);
+            }
+          } else if (!mine) {
+            // Not ours and not carried. If this node can't carry it by POLICY (relay off / no hop left), that
+            // stays true for the blob's whole life (the key embeds the relay setting); otherwise it was a
+            // transient refusal (capacity, a duplicate) — retry after the ordinary expiry.
+            const until = mesh.sealedOfferCarriable(offer) ? settledAt + REFUSED_TTL_MS : offer.ttlExpiresAt;
+            rememberRefusedOffer(peer.url, sealedOfferKey(id), until);
           }
         }
+      };
+
+      /** Fetch + import one batch. A batch whose CONTENT is unusable (over the size cap, not JSON, fails the
+       *  schema) is split in half and retried, down to single ids, so one oversized or malformed message
+       *  can't sink the rest (#2) — and a single unusable id is remembered as refused. Any other failure
+       *  (peer unreachable, 4xx/5xx) ends the round's fetching: it is returned, not thrown, so what earlier
+       *  batches imported stands. */
+      const pullBatch = async (ids: string[]): Promise<{ imported: number; error?: string } | "wiped"> => {
+        let payload: { messages: Message[]; users: User[] };
+        try {
+          payload = await fetchPeerJson(peer.url, "/api/sync/messages", SyncMessagesResponseSchema, { ids });
+        } catch (error) {
+          if (rt.wipeGeneration !== generation) {
+            return "wiped";
+          }
+          if (!isPeerContentError(error)) {
+            return { imported: 0, error: error instanceof Error ? error.message : "Sync failed" };
+          }
+          if (ids.length === 1) {
+            rt.log.warn(`Sync: peer ${peer.url} served an unusable record for one message; skipping it`);
+            settleBatch(ids, new Set());
+            return { imported: 0 };
+          }
+          const half = Math.ceil(ids.length / 2);
+          let total = 0;
+          for (const part of [ids.slice(0, half), ids.slice(half)]) {
+            const result = await pullBatch(part);
+            if (result === "wiped" || result.error) {
+              return result === "wiped" ? result : { imported: total + result.imported, error: result.error };
+            }
+            total += result.imported;
+          }
+          return { imported: total };
+        }
+        if (rt.wipeGeneration !== generation) {
+          return "wiped";
+        }
+        const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds);
+        if (rt.wipeGeneration !== generation) {
+          return "wiped";
+        }
+        settleBatch(ids, result.deferred);
+        return { imported: result.imported };
+      };
+
+      const batches: string[][] = [];
+      for (let start = 0; start < publicWanted.length; start += PUBLIC_BATCH_IDS) {
+        batches.push(publicWanted.slice(start, start + PUBLIC_BATCH_IDS));
+      }
+      for (let start = 0; start < sealedWanted.length; start += SEALED_BATCH_IDS) {
+        batches.push(sealedWanted.slice(start, start + SEALED_BATCH_IDS));
       }
 
       let imported = 0;
-
-      for (let start = 0; start < wanted.length; start += 200) {
-        const payload = await fetchPeerJson(
-          peer.url,
-          "/api/sync/messages",
-          SyncMessagesResponseSchema,
-          { ids: wanted.slice(start, start + 200) },
-        );
-        if (rt.wipeGeneration !== generation) {
+      let failure: string | undefined;
+      for (const ids of batches) {
+        const result = await pullBatch(ids);
+        if (result === "wiped") {
           return;
         }
-        importPeerUsers(payload.users);
-        imported += await importPeerMessages(peer.url, payload.messages, generation);
-        if (rt.wipeGeneration !== generation) {
-          return;
+        imported += result.imported;
+        if (result.error) {
+          failure = result.error;
+          break;
         }
       }
 
-      status.lastSuccessAt = Date.now();
-      status.lastError = undefined;
       status.imported += imported;
+      if (failure) {
+        status.lastError = failure;
+        rt.log.warn(`Sync with peer ${peer.url} stopped part-way: ${failure}`);
+      } else {
+        status.lastSuccessAt = Date.now();
+        status.lastError = undefined;
+      }
 
       if (imported) {
         rt.log.info(`Synced ${imported} message(s) from peer ${peer.url}`);
@@ -1111,7 +1370,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     peerTransportSessions,
     isSyncableMessage,
     buildSyncDigest,
-    importPeerUsers,
+    forgetPeerState,
     retryMissingAttachments,
     syncWithPeer,
     runSyncLoop,

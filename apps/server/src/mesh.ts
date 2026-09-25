@@ -48,14 +48,49 @@ export function createMeshLayer(rt: Runtime) {
   // Local users' mesh keypairs (userId → identity), mirrored from the store. Secret keys stay here.
   const meshIdentities = new Map<string, MeshIdentity>();
 
-  /** Load every persisted per-user mesh identity into the in-memory map. */
+  /**
+   * Whether `user` is a LOCAL person who may hold a mesh identity on this node: a non-banned human that
+   * this node did not import from a sync peer, and not a mesh-sender display record (`mesh.*`). Minting
+   * for anyone else (review 2026-09-25 #3) gave every peer-imported user a secret keypair HERE, overwrote
+   * the key they published at home (then re-exported that forgery), and let a peer that pushes thousands
+   * of users grow `mesh_identities` — and the per-message decrypt loop — without bound.
+   */
+  function isLocalMeshUser(user: { id: string; type: string; banned?: boolean }): boolean {
+    return user.type === "human" && !user.banned && !user.id.startsWith("mesh.") && !rt.store.isUserSynced(user.id);
+  }
+
+  /**
+   * Load every persisted per-user mesh identity into the in-memory map — only for local users. A row minted
+   * for a peer-imported user or a mesh sender by an older build is a useless secret for someone else's
+   * identity: it is dropped (row overwritten, so the secret key no longer sits in the DB) and, if that
+   * user's record still publishes the key we minted, the forged `identityKey` is stripped so it stops being
+   * re-exported (a later genuine key from the user's home node may then be adopted by the sync TOFU rule).
+   */
   function loadMeshIdentities(): void {
     for (const { userId, data: json } of rt.store.loadMeshIdentities()) {
+      let identity: MeshIdentity;
       try {
-        meshIdentities.set(userId, JSON.parse(json) as MeshIdentity);
+        identity = JSON.parse(json) as MeshIdentity;
       } catch {
-        // Skip a corrupt row rather than crash boot.
+        continue; // Skip a corrupt row rather than crash boot.
       }
+      if (!identity || typeof identity !== "object" || typeof identity.mailboxToken !== "string") {
+        continue; // a revoked (see below) or malformed row
+      }
+      const user = rt.data.users.find((candidate) => candidate.id === userId);
+      // (A BANNED local user keeps theirs — a ban is reversible; they just can't mint a new one meanwhile.)
+      if (user && !isLocalMeshUser({ ...user, banned: false })) {
+        // No DAL delete for this table: overwrite the row so the foreign secret is gone from the store.
+        rt.store.upsertMeshIdentity(userId, "null");
+        if (user.identityKey?.sign === identity.signPublic) {
+          const next = UserSchema.parse({ ...user, identityKey: undefined });
+          rt.store.upsertUser(next);
+          Object.assign(user, next);
+          delete (user as { identityKey?: unknown }).identityKey;
+        }
+        continue;
+      }
+      meshIdentities.set(userId, identity);
     }
   }
 
@@ -104,7 +139,7 @@ export function createMeshLayer(rt: Runtime) {
     }
 
     const user = rt.data.users.find((candidate) => candidate.id === userId);
-    if (!user || user.type !== "human" || user.banned) {
+    if (!user || !isLocalMeshUser(user)) {
       return undefined;
     }
 
@@ -130,13 +165,13 @@ export function createMeshLayer(rt: Runtime) {
     return identity;
   }
 
-  /** Publish mesh identities for every eligible local user (boot + whenever mesh is enabled). */
+  /** Publish mesh identities for every eligible LOCAL user (boot + whenever mesh is enabled). */
   function ensureAllMeshIdentities(): void {
     if (!rt.appConfig.mesh.enabled) {
       return;
     }
     for (const user of rt.data.users) {
-      if (user.type === "human" && !user.banned) {
+      if (isLocalMeshUser(user)) {
         ensureMeshIdentity(user.id);
       }
     }
@@ -149,18 +184,34 @@ export function createMeshLayer(rt: Runtime) {
     return `${toTag}|${ttlExpiresAt}`;
   }
 
-  /** Routing tags a local identity answers to across the live TTL window (+ one epoch clock-skew).
-   * Derived from the identity's SECRET mailbox token, so only the recipient and the senders it handed
-   * a card to can compute them — a passive carrier holding the sealed blob cannot correlate it to a
-   * recipient (metadata-unlinkability; docs/16 §2). A sender computes the same tag from the contact's
-   * `mailboxToken`, which it obtained out-of-band with the rest of the card. */
+  // Per-identity memo of `localTagsForWindow` for the current epoch (the set only changes on rollover).
+  const localTagCache = new Map<string, { epoch: number; tags: Set<string> }>();
+
+  /** Routing tags a local identity answers to across the longest possible live window (+ one epoch
+   * clock-skew). Derived from the identity's SECRET mailbox token, so only the recipient and the senders
+   * it handed a card to can compute them — a passive carrier holding the sealed blob cannot correlate it
+   * to a recipient (metadata-unlinkability; docs/16 §2). A sender computes the same tag from the
+   * contact's `mailboxToken`, which it obtained out-of-band with the rest of the card.
+   *
+   * The window starts at now − MESH_TTL_MAX_MS, NOT now − this node's own `mesh.ttlMs` (review 2026-09-25
+   * #5): the lifetime is the SENDER's choice (anything up to the schema max), so a recipient configured
+   * with a shorter TTL must still recognise mail a default-TTL sender sealed days ago. */
   function localTagsForWindow(identity: MeshIdentity, now: number): Set<string> {
+    const nowEpoch = currentEpoch(now, MESH_EPOCH_WINDOW_MS);
+    const cached = localTagCache.get(identity.mailboxToken);
+    if (cached && cached.epoch === nowEpoch) {
+      return cached.tags;
+    }
     const tags = new Set<string>();
-    const start = currentEpoch(now - rt.appConfig.mesh.ttlMs, MESH_EPOCH_WINDOW_MS);
+    const start = currentEpoch(now - MESH_TTL_MAX_MS, MESH_EPOCH_WINDOW_MS);
     const end = currentEpoch(now + MESH_EPOCH_WINDOW_MS, MESH_EPOCH_WINDOW_MS);
     for (let epoch = start; epoch <= end; epoch += 1) {
       tags.add(mailboxTag(identity.mailboxToken, epoch));
     }
+    if (localTagCache.size > 10_000) {
+      localTagCache.clear(); // bounded; identities are local users only, so this never churns in practice
+    }
+    localTagCache.set(identity.mailboxToken, { epoch: nowEpoch, tags });
     return tags;
   }
 
@@ -266,22 +317,42 @@ export function createMeshLayer(rt: Runtime) {
     return false;
   }
 
+  /**
+   * Every check {@link acceptSealedFromPeer} makes on a sealed offer's OUTER fields alone — the fields a sync
+   * digest advertises — so a puller can skip exactly the offers acceptance would refuse without downloading
+   * them (review 2026-09-25 #1). One predicate for both, so they can't drift apart again.
+   */
+  function sealedOfferAdmissible(offer: Pick<SealedMessage, "id" | "ttlExpiresAt" | "hopLimit">, now: number): boolean {
+    // A peer may not name a record inside the replay-key namespace.
+    if (isReservedReplayId(offer.id) || rt.tombstones.has(offer.id)) {
+      return false;
+    }
+    if (offer.ttlExpiresAt <= now || offer.hopLimit <= 0) {
+      return false;
+    }
+    // No honest sender can ask for more than the schema's max lifetime (+ one epoch of clock skew).
+    // Refusing it keeps every replay record below well inside the tombstone GC horizon.
+    return offer.ttlExpiresAt <= now + MESH_TTL_MAX_MS + MESH_EPOCH_WINDOW_MS;
+  }
+
+  /** Whether this node would CARRY an admissible offer that isn't for a local user: relaying is on and a hop
+   * is left after the decrement (a copy stored at hop 0 is never advertised again). Capacity is separate. */
+  function sealedOfferCarriable(offer: Pick<SealedMessage, "hopLimit">): boolean {
+    return rt.appConfig.mesh.relay && offer.hopLimit - 1 > 0;
+  }
+
+  /** How many sealed blobs this node currently holds (carried or self-originated) — the `maxCarried` count. */
+  function sealedHeldCount(): number {
+    return rt.data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
+  }
+
   /** Handle a sealed message pulled from a peer: deliver locally, else relay onward (hop-decremented,
    * bounded), else drop. Never broadcast to clients. Returns true when accepted (delivered or carried). */
   function acceptSealedFromPeer(message: SealedMessage): boolean {
     if (!rt.appConfig.mesh.enabled) {
       return false;
     }
-    const now = Date.now();
-    if (isReservedReplayId(message.id)) {
-      return false; // a peer may not name a record inside the replay-key namespace
-    }
-    if (message.ttlExpiresAt <= now || message.hopLimit <= 0 || rt.tombstones.has(message.id)) {
-      return false;
-    }
-    // No honest sender can ask for more than the schema's max lifetime (+ one epoch of clock skew).
-    // Refusing it keeps every replay record below well inside the tombstone GC horizon.
-    if (message.ttlExpiresAt > now + MESH_TTL_MAX_MS + MESH_EPOCH_WINDOW_MS) {
+    if (!sealedOfferAdmissible(message, Date.now())) {
       return false;
     }
     // `sealMailbox` only ever emits the canonical spelling; any other string that decodes to the same
@@ -315,17 +386,13 @@ export function createMeshLayer(rt: Runtime) {
     if (tryDeliverSealed(message)) {
       return true;
     }
-    // Not for a local user → carry it onward, if this node relays and has room.
-    if (!rt.appConfig.mesh.relay) {
+    // Not for a local user → carry it onward, if this node relays and a hop is left (a copy stored at hop 0
+    // is never advertised again — it would only hold a slot, and before the raise above, shadow the real
+    // copy) and there is room.
+    if (!sealedOfferCarriable(message)) {
       return false;
     }
-    // Nothing left to carry: a copy stored at hop 0 is never advertised again, it would only hold a slot
-    // (and, before the raise above existed, shadow the real copy).
-    if (message.hopLimit - 1 <= 0) {
-      return false;
-    }
-    const carried = rt.data.messages.reduce((count, candidate) => count + (candidate.type === "sealed" ? 1 : 0), 0);
-    if (carried >= rt.appConfig.mesh.maxCarried) {
+    if (sealedHeldCount() >= rt.appConfig.mesh.maxCarried) {
       return false; // at capacity — refuse new mail (soonest-to-expire eviction is a v2 refinement)
     }
     // Rebuild the carried row from the fields that matter rather than spreading the peer's object:
@@ -395,8 +462,7 @@ export function createMeshLayer(rt: Runtime) {
   function sendSealed(sender: MeshIdentity, contact: MeshIdentityCard, body: string): string | undefined {
     // Bound self-originated mail by the same per-node storage cap as relayed mail, so a local
     // participant can't fill the store with undeliverable sealed blobs (they persist until TTL).
-    const carried = rt.data.messages.reduce((count, message) => count + (message.type === "sealed" ? 1 : 0), 0);
-    if (carried >= rt.appConfig.mesh.maxCarried) {
+    if (sealedHeldCount() >= rt.appConfig.mesh.maxCarried) {
       return "This node's sealed-mail queue is full; try again later.";
     }
     const now = Date.now();
@@ -437,6 +503,9 @@ export function createMeshLayer(rt: Runtime) {
     ensureMeshIdentity,
     ensureAllMeshIdentities,
     localTagsForWindow,
+    sealedOfferAdmissible,
+    sealedOfferCarriable,
+    sealedHeldCount,
     acceptSealedFromPeer,
     isReservedReplayId,
     addMeshContact,

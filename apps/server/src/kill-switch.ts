@@ -70,7 +70,7 @@ export function createKillSwitch(ctx: AppContext) {
       ctx.claimAttempts.clear();
       ctx.panicAttempts.clear();
       ctx.transportSessions.clear();
-      ctx.sync.peerTransportSessions.clear();
+      ctx.sync.forgetPeerState();
       ctx.broadcast({ type: "wipe" });
       for (const { socket } of ctx.sockets) {
         socket.close();
@@ -123,7 +123,7 @@ export function createKillSwitch(ctx: AppContext) {
         ctx.claimAttempts.clear();
         ctx.panicAttempts.clear();
         ctx.transportSessions.clear();
-        ctx.sync.peerTransportSessions.clear();
+        ctx.sync.forgetPeerState();
 
         // Notify still-connected clients to purge their local caches BEFORE closing their sockets —
         // closing first would leave the broadcast with no one left to reach.
@@ -389,8 +389,9 @@ export function createKillSwitch(ctx: AppContext) {
     // captured session key survives the wipe (docs/08). loadData reloaded whatever was persisted
     // (the old key on an unencrypted wipe), so rotate explicitly to guarantee a fresh one on both paths.
     ctx.rotateTransportIdentity();
-    // Drop cached puller-side sessions to peers too — RAM hygiene during an emergency wipe (docs/08).
-    ctx.sync.peerTransportSessions.clear();
+    // Drop cached puller-side sessions to peers, and the per-peer refusal/downgrade memory (it names message
+    // ids) — RAM hygiene during an emergency wipe (docs/08).
+    ctx.sync.forgetPeerState();
 
     if (ctx.effectiveAdminBootstrap() === "setupCode") {
       ctx.adminSetupCode = makeAdminSetupCode();
