@@ -217,8 +217,11 @@ function withArmOnlyReactNativeArchitectures(config) {
 
 // Hardware the declared permissions IMPLY as required (CHANGE_WIFI_STATE → wifi, ACCESS_FINE_LOCATION →
 // location + location.gps, BLUETOOTH_* → bluetooth), plus the mesh radios. All optional: without Wi-Fi the
-// hotspot just can't start (the LAN join path remains), without BLE/Aware there is no mesh.
+// hotspot just can't start (the LAN join path remains), without BLE/Aware there is no mesh. Also the
+// portrait screen that app.json `orientation: "portrait"` implies — landscape-only devices (Chromebooks,
+// some TVs/tablets) would otherwise be filtered from Play; the app still runs there, letterboxed.
 const OPTIONAL_FEATURES = [
+  "android.hardware.screen.portrait",
   "android.hardware.bluetooth",
   "android.hardware.bluetooth_le",
   "android.hardware.wifi",
@@ -307,18 +310,27 @@ function withMeshManifest(config) {
 // The generated android/ is gitignored and only refreshed by `expo prebuild`. Running `./gradlew` on an
 // old one silently ships its old manifest (e.g. template permissions a later app.json blocks, or a missing
 // permission a plugin now adds). The fingerprint covers exactly what shapes the generated native project
-// from this repo: app.json and every config plugin. The Groovy check below recomputes it the same way.
+// from this repo: app.json and every config plugin. The Groovy check below recomputes it the same way, from
+// the same constants; src/__tests__/with-loam-host.test.ts parses the Groovy's algorithm back out and
+// checks it against this function, and (opt-in, LOAM_GRADLE_GUARD_TEST=1) runs it under a real Gradle.
 const FINGERPRINT_FILE = "loam-prebuild.sha256";
+const FINGERPRINT_MANIFEST = "app.json";
+const FINGERPRINT_PLUGIN_DIR = "plugins";
+const FINGERPRINT_PLUGIN_EXT = ".js";
 const STALE_GUARD_MARKER = "// loam-host: stale-prebuild guard";
 
 /** sha256 over app.json then plugins/*.js (sorted by name); each file contributes its name, then bytes. */
 function prebuildFingerprint(appDir) {
   const hash = createHash("sha256");
-  const pluginDir = join(appDir, "plugins");
+  const pluginDir = join(appDir, FINGERPRINT_PLUGIN_DIR);
+  // Default sort = UTF-16 code-unit order, the same as Groovy's `sort { it.name }` (String.compareTo).
   const plugins = readdirSync(pluginDir)
-    .filter((name) => name.endsWith(".js"))
+    .filter((name) => name.endsWith(FINGERPRINT_PLUGIN_EXT))
     .sort();
-  const files = [["app.json", join(appDir, "app.json")], ...plugins.map((name) => [name, join(pluginDir, name)])];
+  const files = [
+    [FINGERPRINT_MANIFEST, join(appDir, FINGERPRINT_MANIFEST)],
+    ...plugins.map((name) => [name, join(pluginDir, name)]),
+  ];
   for (const [name, file] of files) {
     hash.update(Buffer.from(name, "utf8"));
     hash.update(readFileSync(file));
@@ -335,8 +347,8 @@ ${STALE_GUARD_MARKER}
 def loamPrebuildFingerprint = {
     def appDir = new File(rootDir, "..")
     def md = java.security.MessageDigest.getInstance("SHA-256")
-    def files = [new File(appDir, "app.json")]
-    files += (new File(appDir, "plugins").listFiles().findAll { it.name.endsWith(".js") }.sort { it.name })
+    def files = [new File(appDir, "${FINGERPRINT_MANIFEST}")]
+    files += (new File(appDir, "${FINGERPRINT_PLUGIN_DIR}").listFiles().findAll { it.name.endsWith("${FINGERPRINT_PLUGIN_EXT}") }.sort { it.name })
     files.each { f ->
         md.update(f.name.getBytes("UTF-8"))
         md.update(f.bytes)
@@ -404,6 +416,7 @@ module.exports = function withLoamHost(config) {
 // Pure helpers, exported for the unit tests in src/__tests__/with-loam-host.test.ts.
 module.exports._internal = {
   BACKUP_DOMAINS,
+  FINGERPRINT_FILE,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
   addOptionalFeatures,
