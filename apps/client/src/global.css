@@ -1552,6 +1552,61 @@ a {
   font-size: 0.9rem;
 }
 
+/* User blocking (docs/30 B3): a blocked author's collapsed message, the DM banner, the Settings list. */
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--c-ink-green);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.blocked-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surf-2);
+  color: var(--c-text-2);
+  font-size: 0.9rem;
+}
+
+.blocked-users-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.blocked-users-list li {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.blocked-users-list .avatar {
+  width: 36px;
+  height: 36px;
+}
+
+.blocked-users-name {
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.privacy-policy-link {
+  margin-top: 4px;
+  font-size: 0.85rem;
+}
+
 .composer-disabled {
   padding: 12px 14px;
   color: var(--c-text-2);

@@ -99,12 +99,12 @@ export async function requestChannel(method: "POST" | "PATCH", path: string, bod
 }
 
 /**
- * POST/PATCH/DELETE a JSON endpoint through the transport wrapper and return the parsed body (unvalidated
+ * POST/PUT/PATCH/DELETE a JSON endpoint through the transport wrapper and return the parsed body (unvalidated
  * — the caller narrows). Throws a localized error on a non-2xx. For endpoints whose response shape the
  * caller doesn't need to schema-validate (reports, moderation actions, resolves).
  */
 export async function requestJson<T>(
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {

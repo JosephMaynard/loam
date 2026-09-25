@@ -4,6 +4,7 @@ import { useLocation } from "preact-iso";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
+import { withoutBlockedReactions } from "../lib/blocks";
 import { dayKey, dayLabel } from "../lib/dates";
 import {
   groupReactionsByTarget,
@@ -23,6 +24,8 @@ import { ReportDialog } from "./ReportDialog";
 
 /** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
 const EMPTY_MESSAGES: Message[] = [];
+/** Shared empty block list (the default when the caller passes none). */
+const NO_BLOCKS: ReadonlySet<string> = new Set();
 
 /** Stable per-conversation identity (`channel:<id>` / `dm:<peerId>`) — a thread is part of its channel. */
 export function conversationIdentity(conversation: Conversation): string {
@@ -32,6 +35,8 @@ export function conversationIdentity(conversation: Conversation): string {
 export interface ConversationViewProps {
   allowAttachments: boolean;
   allowLocationSharing: boolean;
+  /** Who the current user has blocked (docs/30 B3): their channel content is collapsed, their DM is read-only. */
+  blockedUserIds?: ReadonlySet<string>;
   channels: Channel[];
   conversation?: Conversation;
   currentUser: User;
@@ -44,6 +49,8 @@ export interface ConversationViewProps {
   onLeftChannel: (channelId: string) => void;
   onReact: (messageId: string, reaction: string) => Promise<void>;
   onSend: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
+  /** Block (`true`) or unblock (`false`) a user. Omitted → no block controls. */
+  onSetBlocked?: (userId: string, blocked: boolean) => Promise<void>;
   onThreadReply: (
     parentMessageId: string,
     body: string,
@@ -96,6 +103,7 @@ function backRouteForThread(conversation: Conversation): string {
 function ConversationPane({
   allowAttachments,
   allowLocationSharing,
+  blockedUserIds = NO_BLOCKS,
   channels,
   conversation,
   currentUser,
@@ -109,6 +117,7 @@ function ConversationPane({
   onLeftChannel,
   onReact,
   onSend,
+  onSetBlocked,
   onThreadReply,
   onUploadAttachment,
   users,
@@ -124,7 +133,13 @@ function ConversationPane({
   // replies/reactions in O(1) instead of rescanning the whole conversation per message (was O(n^2)
   // for a conversation with n messages).
   const repliesByParent = useMemo(() => groupRepliesByParent(messages), [messages]);
-  const reactionsByTarget = useMemo(() => groupReactionsByTarget(messages), [messages]);
+  // In a channel, a blocked person's reactions simply don't count (their posts and replies collapse to a
+  // placeholder instead — see MessageItem). A DM you blocked someone in stays as it was.
+  const hiddenAuthors = conversation.kind === "channel" ? blockedUserIds : NO_BLOCKS;
+  const reactionsByTarget = useMemo(
+    () => groupReactionsByTarget(withoutBlockedReactions(messages, hiddenAuthors)),
+    [hiddenAuthors, messages],
+  );
   const threadParent =
     conversation.kind === "channel" && conversation.threadId
       ? topMessages.find((message) => message.id === conversation.threadId)
@@ -133,17 +148,29 @@ function ConversationPane({
   const activeChannel =
     conversation.kind === "channel" ? channels.find((channel) => channel.id === conversation.id) : undefined;
   const isPrivateChannel = activeChannel?.visibility === "private";
+  const dmPeer = conversation.kind === "dm" ? usersById.get(conversation.id) : undefined;
+  // Only people can be blocked — not the assistant bot, and not a mesh sender (the server refuses both).
+  const canBlockPeer = !!onSetBlocked && dmPeer?.type === "human" && !conversation.id.startsWith("mesh.");
+  const dmBlocked = conversation.kind === "dm" && blockedUserIds.has(conversation.id);
   // Archived channels are readable but read-only: the composer (and the thread panel's) disable
-  // with an explanation instead of letting a send fail server-side.
+  // with an explanation instead of letting a send fail server-side. So does a DM with someone you blocked.
   const composerDisabledReason = activeChannel?.archived
     ? t("composer.archived")
-    : timedOut
-      ? t("composer.timedOut")
-      : undefined;
+    : dmBlocked
+      ? t("block.composerDisabled")
+      : timedOut
+        ? t("composer.timedOut")
+        : undefined;
   const title =
     conversation.kind === "channel"
       ? `${isPrivateChannel ? "🔒" : "#"} ${activeChannel?.name ?? conversation.id}`
-      : usersById.get(conversation.id)?.displayName ?? conversation.id;
+      : dmPeer?.displayName ?? conversation.id;
+
+  function confirmBlock(): void {
+    if (onSetBlocked && window.confirm(t("block.confirm", { name: title }))) {
+      void onSetBlocked(conversation.id, true);
+    }
+  }
 
   if (notFound) {
     return (
@@ -178,12 +205,20 @@ function ConversationPane({
                 >
                   {t("conversation.members")}
                 </button>
-              ) : conversation.kind === "dm" && usersById.get(conversation.id)?.type === "human" ? (
+              ) : conversation.kind === "dm" && dmPeer?.type === "human" ? (
                 // The report-a-USER entry point (the server + dialog already supported it, but nothing
-                // opened it): reachable from the one place a person is the subject — their DM.
-                <button className="ghost-button" onClick={() => setReportUserId(conversation.id)} type="button">
-                  {t("report.userTitle")}
-                </button>
+                // opened it): reachable from the one place a person is the subject — their DM. Block sits
+                // beside it (Play UGC policy, docs/30 B3); once blocked, the banner below offers Unblock.
+                <>
+                  <button className="ghost-button" onClick={() => setReportUserId(conversation.id)} type="button">
+                    {t("report.userTitle")}
+                  </button>
+                  {canBlockPeer && !dmBlocked ? (
+                    <button className="ghost-button" onClick={confirmBlock} type="button">
+                      {t("block.block")}
+                    </button>
+                  ) : null}
+                </>
               ) : undefined
             }
           />
@@ -196,8 +231,19 @@ function ConversationPane({
               users={users}
             />
           ) : null}
+          {dmBlocked ? (
+            <div className="blocked-banner" role="status">
+              <span>{t("block.dmBanner")}</span>
+              {onSetBlocked ? (
+                <button className="ghost-button" onClick={() => void onSetBlocked(conversation.id, false)} type="button">
+                  {t("block.unblock")}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <MessageList
+          blockedUserIds={hiddenAuthors}
           conversation={conversation}
           currentUser={currentUser}
           onDelete={onDelete}
@@ -243,6 +289,7 @@ function ConversationPane({
         // from one thread into another.
         <ThreadPanel
           allowLocationSharing={allowLocationSharing}
+          blockedUserIds={hiddenAuthors}
           currentUser={currentUser}
           key={threadParent.id}
           onClose={() => location.route(backRouteForThread(conversation))}
@@ -293,6 +340,8 @@ function ConversationHeader({
 }
 
 interface MessageListProps {
+  /** Authors whose posts collapse to a "blocked user" placeholder. */
+  blockedUserIds: ReadonlySet<string>;
   conversation: Conversation;
   currentUser: User;
   onDelete: (messageId: string) => void;
@@ -312,6 +361,7 @@ interface MessageListProps {
  * bookkeeping and an open report dialog start fresh in every conversation.
  */
 function MessageList({
+  blockedUserIds,
   conversation,
   currentUser,
   onDelete,
@@ -364,6 +414,7 @@ function MessageList({
                 ) : null}
                 <MessageItem
                   currentUser={currentUser}
+                  hiddenAsBlocked={blockedUserIds.has(message.authorId)}
                   message={message}
                   onDelete={onDelete}
                   onEdit={onEdit}
@@ -396,6 +447,8 @@ function MessageList({
 interface ThreadPanelProps {
   /** When true, the reply composer offers the "share location" toggle (docs/10; off by default). */
   allowLocationSharing?: boolean;
+  /** Authors whose posts collapse to a "blocked user" placeholder. */
+  blockedUserIds?: ReadonlySet<string>;
   currentUser: User;
   onClose: () => void;
   onDelete: (messageId: string) => void;
@@ -430,6 +483,7 @@ interface ThreadPanelProps {
  */
 function ThreadPanel({
   allowLocationSharing,
+  blockedUserIds = NO_BLOCKS,
   composerDisabledReason,
   currentUser,
   onClose,
@@ -465,6 +519,7 @@ function ThreadPanel({
       <div className="thread-scroll">
         <MessageItem
           currentUser={currentUser}
+          hiddenAsBlocked={blockedUserIds.has(parent.authorId)}
           message={parent}
           onDelete={onDelete}
           onEdit={onEdit}
@@ -480,6 +535,7 @@ function ThreadPanel({
         {replies.map((reply) => (
           <MessageItem
             currentUser={currentUser}
+            hiddenAsBlocked={blockedUserIds.has(reply.authorId)}
             key={reply.id}
             message={reply}
             onDelete={onDelete}

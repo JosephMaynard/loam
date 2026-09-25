@@ -674,6 +674,23 @@ export const en = {
     "The join QR is hidden: the key this node advertises doesn't match the key you joined with.",
   "invite.qrNoKeyNote":
     "This QR doesn't include the node's security key, because your own connection wasn't verified by scanning a join QR.",
+  // User blocking (docs/30 B3) and the in-app privacy policy link (docs/30 B2).
+  "block.block": "Block",
+  "block.unblock": "Unblock",
+  "block.confirm": "Block {name}? They won't be able to send you direct messages, and their messages in channels will be hidden from you. LOAM won't notify them.",
+  "block.dmBanner": "You blocked this user.",
+  "block.composerDisabled": "You blocked this user. Unblock them to send a message.",
+  "block.hiddenMessage": "Message from a blocked user",
+  "block.show": "Show",
+  "block.error": "Couldn't update your block list.",
+  "settings.privacyEyebrow": "Privacy",
+  "settings.blockedTitle": "Blocked people",
+  "settings.blockedNote": "People you block can't send you direct messages, and their channel messages are hidden from you. LOAM doesn't notify them.",
+  "settings.blockedEmpty": "You haven't blocked anyone.",
+  "settings.privacyPolicy": "Privacy policy",
+  "error.dm_unavailable": "Direct messages to this person aren't available",
+  "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
+  "error.block_not_allowed": "This user can't be blocked",
 };
 
 /**

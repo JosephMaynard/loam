@@ -27,6 +27,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact
 import { AdminView } from "./components/AdminView";
 import { Avatar } from "./components/Avatar";
 import { AvatarImageEditor } from "./components/AvatarImageEditor";
+import { BlockedUsersPanel } from "./components/BlockedUsersPanel";
 import { ConversationView } from "./components/ConversationView";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -37,6 +38,7 @@ import { SearchResult } from "./components/SearchResult";
 import { Sidebar } from "./components/Sidebar";
 import { ApiError, fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
+import { fetchBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { forgetConfirmedIdentity, recordConfirmedIdentity } from "./lib/identity";
 import {
@@ -151,6 +153,8 @@ type ToastItem = {
   route: string;
 };
 const AVATAR_MODES = ["face", "initial", "pattern"] as const;
+/** LOAM's public privacy policy, linked from Settings (docs/30 B2). */
+const PRIVACY_POLICY_URL = "https://loamnet.com/privacy";
 
 /**
  * Generates a random client user identifier.
@@ -516,6 +520,11 @@ function LoamApp() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   // Who is connected right now (server presence events; empty when the node disables presence).
   const [onlineUserIds, setOnlineUserIds] = useState<ReadonlySet<string>>(new Set());
+  // Who this user has blocked (docs/30 B3). Server-owned; held in memory only (never IndexedDB), so a wipe
+  // or an identity change just resets it. Drives the client-side hiding of their channel content.
+  const [blockedUserIds, setBlockedUserIds] = useState<ReadonlySet<string>>(() => new Set());
+  const blockedUserIdsRef = useRef(blockedUserIds);
+  blockedUserIdsRef.current = blockedUserIds;
   // Ephemeral typing signals (P14): conversationKey → (userId → last-seen ms). Pruned on a timer.
   const [typing, setTyping] = useState<Record<string, Record<string, number>>>({});
 
@@ -639,7 +648,8 @@ function LoamApp() {
     (message: Message) => {
       const meId = currentUserIdRef.current;
 
-      if (message.authorId === meId) {
+      // Nothing from a blocked person raises a toast (their channel content is hidden; DMs are refused).
+      if (message.authorId === meId || blockedUserIdsRef.current.has(message.authorId)) {
         return;
       }
 
@@ -944,6 +954,7 @@ function LoamApp() {
     setMessages([]);
     setChannels([]);
     setUsers([]);
+    setBlockedUserIds(new Set());
     setConfig(undefined);
     // Drop the secure identity token (docs/20) BEFORE removing SERVER_URL_KEY — the token is namespaced
     // by the configured origin, so clearing it must happen while that origin is still resolvable. (The
@@ -1013,6 +1024,7 @@ function LoamApp() {
     setLastReadByConversation({});
     setTyping({});
     setOnlineUserIds(new Set());
+    setBlockedUserIds(new Set());
     setNotFoundConversation(undefined);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
     clearImageObjectUrls();
@@ -1439,9 +1451,11 @@ function LoamApp() {
         }
 
         const preFetchUserIds = new Set(usersRef.current.map((user) => user.id));
-        const [nextChannels, nextUsers] = await Promise.all([
+        const [nextChannels, nextUsers, nextBlocks] = await Promise.all([
           fetchJson<Channel[]>("/api/channels"),
           fetchJson<User[]>("/api/users"),
+          // Best effort: a failed block-list read keeps the list already in memory rather than failing boot.
+          fetchBlockList().catch(() => undefined),
         ]);
 
         if (!active) {
@@ -1449,6 +1463,9 @@ function LoamApp() {
         }
 
         setChannels(nextChannels);
+        if (nextBlocks) {
+          setBlockedUserIds(nextBlocks);
+        }
         // `/api/users` is the full roster: users it no longer returns are dropped, not just kept around.
         replaceRoster([nextConfig.currentUser, ...nextUsers], preFetchUserIds);
         void putRecords("channels", nextChannels);
@@ -1890,7 +1907,9 @@ function LoamApp() {
   // The other users currently typing in the active conversation (fresh, excluding myself), as display names.
   const activeTypers = activeConversation
     ? Object.entries(typing[conversationKey(activeConversation)] ?? {})
-        .filter(([userId, at]) => userId !== currentUser.id && Date.now() - at < TYPING_TTL_MS)
+        .filter(
+          ([userId, at]) => userId !== currentUser.id && !blockedUserIds.has(userId) && Date.now() - at < TYPING_TTL_MS,
+        )
         .map(([userId]) => usersById.get(userId)?.displayName ?? generateDisplayName(userId))
     : [];
 
@@ -1915,9 +1934,22 @@ function LoamApp() {
 
   // Count unread (non-own) messages per conversation: any post/reply/DM newer than the conversation's
   // read marker. Reactions never count (they have no conversation key).
+  // A blocked person's posts are hidden, so they don't count either.
   const unreadByConversation = useMemo(
-    () => countUnreadByConversation(messages, lastReadByConversation, currentUser.id),
-    [currentUser.id, lastReadByConversation, messages],
+    () => countUnreadByConversation(withoutBlockedAuthors(messages, blockedUserIds), lastReadByConversation, currentUser.id),
+    [blockedUserIds, currentUser.id, lastReadByConversation, messages],
+  );
+
+  /** Block or unblock someone; the server answers with the whole updated list, which replaces ours. */
+  const setBlocked = useCallback(
+    async (userId: string, blocked: boolean): Promise<void> => {
+      try {
+        setBlockedUserIds(await setUserBlocked(userId, blocked));
+      } catch (blockError) {
+        setError(blockError instanceof Error ? blockError.message : t("block.error"));
+      }
+    },
+    [setError],
   );
 
   // The active conversation is always "read": its marker is the newest SERVER timestamp on screen, so its
@@ -2077,8 +2109,11 @@ function LoamApp() {
         <MeshView />
       ) : routeState.screen === "settings" ? (
         <SettingsView
+          blockedUserIds={blockedUserIds}
           config={config}
           currentUser={currentUser}
+          onSetBlocked={setBlocked}
+          usersById={usersById}
           onClaimAdmin={claimAdmin}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
@@ -2088,6 +2123,7 @@ function LoamApp() {
         <ConversationView
           allowAttachments={!!config?.networkConfig.enableAttachments}
           allowLocationSharing={!!config?.networkConfig.enableLocationSharing}
+          blockedUserIds={blockedUserIds}
           channels={channels}
           conversation={activeConversation}
           currentUser={currentUser}
@@ -2103,6 +2139,7 @@ function LoamApp() {
           onDelete={deleteMessage}
           onEdit={editMessage}
           onLeftChannel={removeChannel}
+          onSetBlocked={setBlocked}
           onReact={(messageId, reaction) =>
             sendMessage({
               type: "reaction",
@@ -2701,19 +2738,25 @@ function MeshView() {
  * @param onUploadAvatarImage - Called with the cropped avatar `Blob` when the user uploads an image avatar.
  */
 function SettingsView({
+  blockedUserIds,
   config,
   currentUser,
   onClaimAdmin,
+  onSetBlocked,
   onUpdateCurrentUser,
   onUploadAvatarImage,
   onWipeDevice,
+  usersById,
 }: {
+  blockedUserIds: ReadonlySet<string>;
   config?: Config;
   currentUser: User;
   onClaimAdmin: (secret: string) => Promise<void>;
+  onSetBlocked: (userId: string, blocked: boolean) => Promise<void>;
   onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
   onUploadAvatarImage: (blob: Blob) => Promise<void>;
   onWipeDevice: () => Promise<void>;
+  usersById: Map<string, User>;
 }) {
   const [displayName, setDisplayName] = useState(currentUser.displayName);
   const [avatarKind, setAvatarKind] = useState(currentUser.avatar?.kind === "image" ? "image" : "generated");
@@ -2822,6 +2865,13 @@ function SettingsView({
           {/* Product name + version — the node's build, not this browser's cache. Deliberately no
               translatable label word so it stays i18n-neutral. */}
           <p className="node-version">LOAM v{config?.version ?? "…"}</p>
+          {/* Play's user-data policy wants the privacy policy linked in-app. It's on the public web, so on
+              an offline LAN it simply won't load (and the Android host opens it in the system browser). */}
+          <p className="privacy-policy-link">
+            <a href={PRIVACY_POLICY_URL} rel="noreferrer" target="_blank">
+              {t("settings.privacyPolicy")}
+            </a>
+          </p>
           {/* Transport encryption (docs/08): only shown once a session is actually live — `fingerprint()`
               returns undefined off-mode or before the handshake completes. A QR-verified session (the
               host key came from a scanned join QR, out-of-band) is MITM-resistant; a session keyed only
@@ -2916,6 +2966,7 @@ function SettingsView({
             {profileError ? <p className="form-error">{profileError}</p> : null}
           </form>
         ) : null}
+        <BlockedUsersPanel blockedUserIds={blockedUserIds} onSetBlocked={onSetBlocked} usersById={usersById} />
         <AdminAccessPanel
           allowAdminClaim={config?.networkConfig.allowAdminClaim ?? false}
           currentUser={currentUser}
