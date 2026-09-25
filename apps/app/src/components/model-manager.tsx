@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AppState, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Alert, AppState, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
@@ -15,6 +15,7 @@ import {
   STORAGE_HEADROOM_BYTES,
   type DeviceCapabilities,
 } from '@/lib/device-capabilities';
+import { modelDownloadDisclosure } from '@/lib/model-download-disclosure';
 import {
   deactivateAction,
   deleteAction,
@@ -681,6 +682,27 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * from inside the transaction via the delete BARRIER `actionDeps.confirmActiveModelReleased` (Finding 1)
    * — path-aware, and it CONFIRMS native disposal before the unlink — so there is no post-`ok` release here.
    */
+  /** Show the size + Wi-Fi/metered-data disclosure (docs/30 H4) and start the download only on an explicit
+   * confirm. `sizeBytes` undefined = unknown up front (a custom URL). */
+  const confirmThenDownload = (name: string, sizeBytes: number | undefined, start: () => void) => {
+    const text = modelDownloadDisclosure(name, sizeBytes === undefined ? undefined : formatBytes(sizeBytes));
+    Alert.alert(text.title, text.message, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: text.confirmLabel, onPress: start },
+    ]);
+  };
+
+  /** The "Add & download" button: validate the URL first (so a bad one errors without a prompt), then
+   * confirm, then run the real download (which re-validates — `prepareCustomModelDownload` is pure). */
+  const handleAddCustomUrlPress = () => {
+    const prepared = prepareCustomModelDownload(customUrl);
+    if (!prepared.ok) {
+      setStatusMessage(prepared.error);
+      return;
+    }
+    confirmThenDownload(prepared.displayName, undefined, handleAddCustomUrl);
+  };
+
   const handleDelete = (model: DownloadedModel) => runOperation(model.id, () => deleteAction(actionDeps, model));
 
   /**
@@ -762,6 +784,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
               <ThemedText type="smallBold" style={styles.sectionTitle}>
                 Catalog
               </ThemedText>
+              <ThemedText type="small" themeColor="textSecondary">
+                Models are large downloads ({formatBytes(Math.min(...MODEL_CATALOG.map((e) => e.sizeBytes)))}–
+                {formatBytes(Math.max(...MODEL_CATALOG.map((e) => e.sizeBytes)))}). Use Wi-Fi — on mobile data
+                they can use much of your allowance.
+              </ThemedText>
               {!sweepReady ? (
                 <ThemedText type="small" themeColor="textSecondary">
                   Preparing model storage…
@@ -778,7 +805,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                   progress={progress[entry.id]}
                   downloadDisabled={!sweepReady || actionsBlocked || downloadInFlight}
                   opInFlight={actionsBlocked}
-                  onDownload={() => void handleDownloadCatalogEntry(entry)}
+                  onDownload={() =>
+                    confirmThenDownload(entry.displayName, entry.sizeBytes, () => void handleDownloadCatalogEntry(entry))
+                  }
                   onDelete={(model) => void handleDelete(model)}
                   onSetActive={(model) => void handleSetActive(model)}
                 />
@@ -802,7 +831,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                 style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
               />
               <Pressable
-                onPress={() => handleAddCustomUrl()}
+                onPress={() => handleAddCustomUrlPress()}
                 disabled={!customUrl.trim() || !sweepReady || actionsBlocked || downloadInFlight}
                 accessibilityRole="button"
                 style={[
