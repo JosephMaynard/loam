@@ -292,8 +292,8 @@ export function createTransportServer(ctx: AppContext) {
    * the `@loam/crypto` mesh layer (the wire below them adds nothing). Under `required` mode a direct
    * `/api/` hit with no resolved transport session would otherwise 401 (`requiresTransportSession`), which
    * would silently wedge the courier the moment an operator turns transport encryption up. They are exempt
-   * from the transport-session requirement ONLY when the request actually arrives over loopback (the
-   * handlers additionally refuse any non-loopback caller), so the exemption can never widen LAN exposure.
+   * from the transport-session requirement ONLY for an authorized bridge caller (loopback AND the launcher's
+   * per-boot host token — `meshBridgeCallerAuthorized`), so the exemption can never widen LAN exposure.
    */
   const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound"]);
 
@@ -332,16 +332,16 @@ export function createTransportServer(ctx: AppContext) {
   }
 
   /**
-   * Who may drive the mesh transport bridge: a loopback caller — and, when the launcher configured a
-   * per-boot `hostToken`, ONLY a loopback caller that also presents it (review 2026-09-04). On Android
-   * "loopback" is not process-private: every installed app (and `adb forward`) can reach 127.0.0.1, so the
-   * IP check alone let a co-located app read the sealed outbound queue's routing metadata and inject blobs.
+   * Who may drive the mesh transport bridge: ONLY a loopback caller presenting the launcher's per-boot
+   * `hostToken`. The Android launcher's courier (`nodejs-project-template/main.js`) is the bridge's one real
+   * caller and always sends it as `x-loam-host-token`. Loopback alone is never enough: on Android every
+   * installed app (and `adb forward`) reaches 127.0.0.1 (review 2026-09-04), and on a desktop/Pi a
+   * same-host reverse proxy or the Vite dev proxy makes EVERY LAN client arrive from loopback (review
+   * 2026-09-25 #12). So a host with no `hostToken` (desktop/Pi — there is no radio courier there) has no
+   * bridge at all: the routes 404 exactly as if mesh were off.
    */
   function meshBridgeCallerAuthorized(request: FastifyRequest): boolean {
-    if (!requestFromLoopback(request)) {
-      return false;
-    }
-    return ctx.options.hostToken ? ctx.presentsHostToken(request) : true;
+    return requestFromLoopback(request) && !!ctx.options.hostToken && ctx.presentsHostToken(request);
   }
 
   /** Whether a sync request presents the configured `sync.token` (sealed in the envelope on an encrypted session, header on plaintext). */
@@ -412,8 +412,10 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
   // ---- Transport encryption (docs/08): transparently decrypt requests / encrypt responses ----------
   // With a live transport session (from POST /api/transport/handshake), the client sends request
   // bodies as { enc: <sealed> } and gets responses back the same way, so plain HTTP carries only
-  // ciphertext for message/DM/config CONTENT. GET request paths + query strings and image bytes remain
-  // visible (metadata); that's the documented Layer-1 scope. All inert when the mode is `off`.
+  // ciphertext for message/DM/config CONTENT. In `optional` mode a direct request's path + query stay
+  // visible on the wire (and images are served in clear); in `required` mode — or for any `bound`
+  // session — content goes through the path-hiding tunnel (`/api/transport/tunnel`), images included,
+  // so only "a tunnel request happened" + ciphertext size/timing remain. All inert when the mode is `off`.
   ctx.server.addHook("onRequest", async (request, reply) => {
     // RF1: once a persistent/passphrase kill switch has handed off to the launcher for a restart, this
     // process must not serve anything from its (deliberately) stale in-memory mirrors while it waits to
@@ -468,11 +470,11 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
       if (activeSession && ctx.DIRECT_SEALED_SYNC_ROUTES.has(request.routeOptions?.url ?? "")) {
         return;
       }
-      // The in-process mesh bridge (docs/17) is loopback-only and carries blobs already sealed at the
-      // mesh crypto layer, so it isn't the LAN-content this gate protects — let the launcher's courier
-      // keep polling it when the operator turns transport encryption up. Gated on a real loopback peer
-      // (the handlers re-check too), so a LAN joiner still can't reach it unsealed.
-      if (ctx.MESH_LOOPBACK_BRIDGE_ROUTES.has(request.routeOptions?.url ?? "") && ctx.requestFromLoopback(request)) {
+      // The in-process mesh bridge (docs/17) is loopback + host-token only and carries blobs already sealed
+      // at the mesh crypto layer, so it isn't the LAN-content this gate protects — let the launcher's courier
+      // keep polling it when the operator turns transport encryption up. Gated on the SAME check the handlers
+      // apply (loopback AND the launcher's per-boot token), so nobody else reaches it unsealed.
+      if (ctx.MESH_LOOPBACK_BRIDGE_ROUTES.has(request.routeOptions?.url ?? "") && ctx.meshBridgeCallerAuthorized(request)) {
         return;
       }
       return reply.code(401).send(errorBody("This node requires an encrypted session. Scan the join QR to connect."));

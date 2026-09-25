@@ -328,12 +328,15 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
   // radio-fed mirror of the `/api/sync/*` sealed path: `outbound` is the same set the sync digest
   // offers (full records, so the courier ships bytes without a second round trip); `inbound` runs each
   // blob through the same defensive `mesh.acceptSealedFromPeer` used by sync imports. Both 404 (identical to
-  // absent) unless `mesh.enabled`, and both refuse non-loopback callers so only this device's launcher
-  // can reach them. Public-data sync is completely untouched.
+  // absent) unless `mesh.enabled`, and both refuse any caller that isn't loopback AND presenting the
+  // launcher's per-boot host token (`meshBridgeCallerAuthorized`) — so a host with no launcher (desktop/Pi)
+  // has no bridge at all. Public-data sync is completely untouched.
 
   ctx.server.get(
     "/api/mesh/outbound",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    // `allowList: () => false` so an internal tunnel re-dispatch can't inherit the global limiter's tunnel
+    // exemption on these routes (same rule as `semanticRateLimit`).
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       if (!ctx.appConfig.mesh.enabled || !ctx.meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
@@ -350,7 +353,7 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
 
   ctx.server.post(
     "/api/mesh/inbound",
-    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    { config: { rateLimit: { max: 240, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       if (!ctx.appConfig.mesh.enabled || !ctx.meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
