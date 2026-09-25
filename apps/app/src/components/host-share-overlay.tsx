@@ -8,6 +8,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ensureHotspot, useHotspot, type HotspotState } from '@/hooks/use-hotspot';
+import { ensureHostService, hostingNotificationDenied } from '@/lib/host-service';
 import { hostJoinDisplay } from '@/lib/join-url';
 
 /** Project the hotspot lifecycle onto the presentational HostPanel state (docs/04 two-step flow). */
@@ -71,6 +72,14 @@ export function HostShareOverlay({
     }
   }, [visible]);
 
+  // Once the hotspot is up, make sure the foreground host service is too (idempotent) — joiners are now
+  // depending on this phone staying reachable with the screen off.
+  useEffect(() => {
+    if (hotspot.phase === 'running') {
+      void ensureHostService();
+    }
+  }, [hotspot.phase]);
+
   // When the hotspot is up, joiners are on it — target the gateway, and drop the host's other
   // (unreachable-from-the-hotspot) LAN addresses from the "also at" list so we don't send a joiner to
   // an address on the wrong network. Off the hotspot (shared-WiFi / Pi / laptop), the real addresses
@@ -118,6 +127,13 @@ export function HostShareOverlay({
                 </ThemedView>
                 <Switch value={kiosk} onValueChange={onKioskChange} />
               </ThemedView>
+
+              {hostingNotificationDenied() ? (
+                <ThemedText type="small" themeColor="textSecondary">
+                  Notifications are off for LOAM, so Android hides the “LOAM is hosting” notice. Hosting
+                  still works; allow notifications in the system settings to see it.
+                </ThemedText>
+              ) : null}
 
               <ThemedText type="small" themeColor="textSecondary" style={styles.version}>
                 LOAM v{version}

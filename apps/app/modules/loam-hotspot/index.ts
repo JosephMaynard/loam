@@ -57,13 +57,16 @@ export function stopHotspot(): void {
 
 /**
  * Start a foreground service so the host keeps serving while the screen is off / the app is
- * backgrounded (docs/04). A no-op when unsupported; never throws.
+ * backgrounded (docs/04). Idempotent. Returns whether the start went through (false when unsupported or
+ * refused — API 31+ refuses from the background); never throws. Prefer `ensureHostService`
+ * (src/lib/host-service.ts), which also handles the notification permission and foreground timing.
  */
-export function startHostService(): void {
+export function startHostService(): boolean {
   try {
-    LoamHotspotModule?.startHostService();
+    return LoamHotspotModule?.startHostService() === true;
   } catch {
     // Best effort — the host still works while foregrounded even if the service can't start.
+    return false;
   }
 }
 

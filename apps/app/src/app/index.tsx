@@ -1,7 +1,7 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, BackHandler, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, BackHandler, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
@@ -31,9 +31,10 @@ import {
   type DbEncryptionMode,
   type StartFreshIntent,
 } from '@/lib/db-encryption';
+import { ensureHostService } from '@/lib/host-service';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
-import { startHostService, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
+import { startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot IP (below).
@@ -463,9 +464,10 @@ export default function HostScreen() {
         // Deliberately NOT touching `notice`/`nodeNotice` here (AF2/P1-4) — a boot notice describes a
         // degraded DB-encryption posture that's still true once the host is up; clearing it just
         // because the server also became ready is exactly the bug this fix removes.
-        // Keep the host alive when the screen locks (docs/04). Best-effort — a device that refuses
-        // the foreground service just falls back to foreground-only hosting.
-        startHostService();
+        // Keep the host alive when the screen locks (docs/04). Best-effort and idempotent: if the app is
+        // in the background right now (API 31+ refuses a background FGS start — cold start is ~80 s, so
+        // the operator may well have switched away), the AppState effect below retries on return.
+        void ensureHostService();
       } else if (payload?.status === 'notice') {
         // Non-fatal (main.js only ever sends this for DB-encryption boot degradations — see its
         // `DB_ENCRYPTION_NOTICE_CODES`) — never touches `status`/`nodeStatus`, so it can't regress a
@@ -682,9 +684,32 @@ export default function HostScreen() {
     setBootstrapAttempt((attempt) => attempt + 1);
   };
 
-  // Ask the launcher for fresh addresses whenever the Share overlay opens — that's when the hotspot
-  // starts and its AP interface (and address) appears.
+  // Re-assert the foreground host service every time the app comes back to the foreground while hosting
+  // (pre-release review 2026-09-25). The one-shot start on `ready` is refused on API 31+ if the app was in
+  // the background at that moment, which used to leave the host with no FGS and no wake lock — killed as
+  // soon as the screen went off. `ensureHostService` is idempotent.
   useEffect(() => {
+    if (Platform.OS !== 'android' || status !== 'ready') {
+      return;
+    }
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        void ensureHostService();
+      }
+    });
+    return () => subscription.remove();
+  }, [status]);
+
+  // Ask the launcher for fresh addresses whenever the Share overlay opens — that's when the hotspot
+  // starts and its AP interface (and address) appears. Opening the overlay is also the operator's explicit
+  // "start hosting" moment, so (re)start the foreground service then too (idempotent).
+  useEffect(() => {
+    if (shareOpen && status === 'ready') {
+      // No notification prompt here: the overlay is about to ask for the hotspot's location/nearby-Wi-Fi
+      // permissions, and two overlapping permission dialogs can auto-deny one. The overlay re-asserts
+      // (with the prompt) once the hotspot is running.
+      void ensureHostService({ prompt: false });
+    }
     if (shareOpen) {
       try {
         nodejs.channel.post('loam-hostinfo-request');
@@ -692,7 +717,7 @@ export default function HostScreen() {
         // best-effort; the launcher also re-posts on an interval
       }
     }
-  }, [shareOpen]);
+  }, [shareOpen, status]);
 
   // A WebView load failure after the node is ready is usually transient (page fetched mid-cold-start).
   // Surface the error UI; Retry remounts the WebView (a fresh load) as long as the node is still up.
