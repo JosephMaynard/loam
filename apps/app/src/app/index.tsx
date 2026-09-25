@@ -11,6 +11,7 @@ import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { PRIVACY_POLICY_URL } from '@/constants/links';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { SERVER_PORT } from '@/lib/join-url';
@@ -996,6 +997,19 @@ export default function HostScreen() {
                   accessibilityLabel="Share or host this LOAM node"
                   style={styles.menuItem}>
                   <ThemedText type="smallBold">Share · Host</ThemedText>
+                </Pressable>
+                <View style={styles.menuDivider} />
+                {/* Play's user-data policy wants the privacy policy reachable in-app. It opens in the
+                    system browser; with no internet (the usual hosting case) it just won't load yet. */}
+                <Pressable
+                  onPress={() => {
+                    setMenuOpen(false);
+                    void Linking.openURL(PRIVACY_POLICY_URL).catch(() => undefined);
+                  }}
+                  accessibilityRole="link"
+                  accessibilityLabel="Open the LOAM privacy policy in your browser"
+                  style={styles.menuItem}>
+                  <ThemedText type="smallBold">Privacy policy</ThemedText>
                 </Pressable>
               </ThemedView>
             </View>
