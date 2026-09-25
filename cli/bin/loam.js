@@ -226,10 +226,11 @@ function encryptedDriverLoads() {
 function printDriverMissingHint() {
   console.error(
     "\nEncryption requested but the native SQLCipher driver (better-sqlite3-multiple-ciphers) is unavailable.\n" +
-      `It is loaded from the loamnet package itself (resolved from ${dirname(bundlePath)}); it's an optional\n` +
-      "dependency, so it is missing when its native build failed during install. Reinstall loamnet and check\n" +
-      "the install output for the build error (it needs a C/C++ toolchain and Python when no prebuilt binary\n" +
-      "fits your platform):  npm install -g loamnet\n" +
+      "It is loaded from the loamnet package itself, resolved from:\n" +
+      `  ${dirname(bundlePath)}\n` +
+      "It's loamnet's optional dependency, so it is missing when its native build failed during install.\n" +
+      "Reinstall loamnet and check the install output for the build error (it needs a C/C++ toolchain and\n" +
+      "Python when no prebuilt binary fits your platform):  npm install -g loamnet\n" +
       "Or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
   );
 }
