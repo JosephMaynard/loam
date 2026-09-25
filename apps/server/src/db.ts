@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import {
   ChannelSchema,
+  IdSchema,
   LLM_MODEL_MAX_LENGTH,
   MessageSchema,
   ReportSchema,
@@ -14,6 +15,37 @@ import {
   type Report,
   type User,
 } from "@loam/schema";
+
+/**
+ * Ids of stored rows that no longer validate and could not be safely repaired (see `LoamStore.loadUsers`).
+ * They stay on disk untouched and are not loaded; while quarantined, no path may create or overwrite a
+ * row under one of these ids — a peer's public channel, a seeded default or a fresh local channel taking a
+ * quarantined private channel's id would otherwise inherit (and expose) its retained messages.
+ */
+export type StoreQuarantine = {
+  readonly users: ReadonlySet<string>;
+  readonly channels: ReadonlySet<string>;
+  readonly messages: ReadonlySet<string>;
+};
+
+/** What one table load did with rows that no longer validate as stored. */
+export type StoredRowReport = {
+  /** Rows loaded after a safe in-memory repair (the row on disk is unchanged). */
+  repaired: number;
+  /** Rows not loaded (quarantined), including `dependent` ones. */
+  quarantined: number;
+  /** Of `quarantined`: valid messages held back because their channel, parent or target is quarantined. */
+  dependent: number;
+};
+
+/** Thrown by a store write that would create or overwrite a quarantined row (see `StoreQuarantine`). */
+export class QuarantinedRowError extends Error {
+  constructor(table: keyof StoreQuarantine, id: string) {
+    // A legacy id can be arbitrarily long (that is often why it's quarantined): name only its prefix.
+    super(`Refusing to write ${table} row "${id.slice(0, 64)}": a stored row with that id is quarantined`);
+    this.name = "QuarantinedRowError";
+  }
+}
 
 export type SessionRecord = {
   token: string;
@@ -147,12 +179,22 @@ function openConnection(path: string, options: OpenStoreOptions): SqliteConnecti
 export interface LoamStore {
   /**
    * Load every stored row of a table. A row that no longer validates (e.g. one written by an older
-   * release before an id/length bound existed) is skipped rather than failing the whole boot: it stays
-   * on disk untouched, is not loaded, and is counted through `onSkipped` so the caller can log it.
+   * release before an id/length bound existed) doesn't fail the boot. When a provably safe repair exists
+   * (see `parseStoredChannel`/`parseStoredUser`/`parseStoredMessage`) the repaired record is loaded and
+   * the row on disk is left as it was. Otherwise the row is QUARANTINED: not loaded, left on disk
+   * untouched, and its id held in {@link quarantine} so nothing can claim that id (see
+   * {@link QuarantinedRowError}). `loadMessages` also quarantines every message under a quarantined
+   * channel, and every reply/reaction under a quarantined message. Non-zero counts go to `onReport`.
    */
-  loadUsers(onSkipped?: (count: number) => void): User[];
-  loadChannels(onSkipped?: (count: number) => void): Channel[];
-  loadMessages(onSkipped?: (count: number) => void): Message[];
+  loadUsers(onReport?: (report: StoredRowReport) => void): User[];
+  loadChannels(onReport?: (report: StoredRowReport) => void): Channel[];
+  loadMessages(onReport?: (report: StoredRowReport) => void): Message[];
+  /**
+   * The ids of the quarantined user, channel and message rows, as of the last load of each table (live
+   * sets, rebuilt by every load; emptied by `wipeAll`). Writes that would create or overwrite one of these
+   * rows (`upsertUser`, `upsertChannel`, `insertMessage`, `updateMessage`) throw `QuarantinedRowError`.
+   */
+  quarantine(): StoreQuarantine;
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
   /** Delete a single user row by id. Used for the legacy demo-user cleanup (`user.1234`/`user.5678`);
@@ -345,17 +387,20 @@ function messageColumns(message: Message): [string, string, string | null, strin
   ];
 }
 
+/** A stored row as the loader parsed it: the record, and whether it needed an in-memory repair. */
+type ParsedRow<T> = { value: T; repaired: boolean };
+
 /**
  * Parse a stored user row. Rows written before avatar image ids were constrained to `avt_<16 hex>` may
  * carry an avatar naming some other path (the pre-fix `PATCH /api/users/me` hole); rather than drop the
  * whole user, the unusable avatar is dropped (the user falls back to a generated one). Any other invalid
- * row yields `undefined` (the loader skips it).
+ * row yields `undefined` (the loader quarantines it).
  */
-function parseStoredUser(raw: unknown): User | undefined {
+function parseStoredUser(raw: unknown): ParsedRow<User> | undefined {
   const parsed = UserSchema.safeParse(raw);
 
   if (parsed.success) {
-    return parsed.data;
+    return { value: parsed.data, repaired: false };
   }
 
   const record = raw as { avatar?: { imageId?: unknown } } | null;
@@ -364,59 +409,51 @@ function parseStoredUser(raw: unknown): User | undefined {
     const { avatar: _unusable, ...rest } = record as Record<string, unknown>;
     void _unusable;
     const repaired = UserSchema.safeParse(rest);
-    return repaired.success ? repaired.data : undefined;
+    return repaired.success ? { value: repaired.data, repaired: true } : undefined;
   }
 
   return undefined;
 }
 
 /**
- * Parse every stored row with `parse`, keeping the ones that validate. A row that is unparseable JSON
- * or fails its schema (written by an older release before a bound such as `ID_MAX_LENGTH` existed) is
- * skipped, not thrown: one legacy row must not stop an upgraded node from booting. The row stays on disk;
- * the skipped count goes to `onSkipped` (only when non-zero) so the caller can log it.
+ * Parse a stored channel row. A roster written before `ID_MAX_LENGTH` existed can name a member id past
+ * it; no such id can be a local user (session ids are `user.<hex>`, far shorter), so the entry came from
+ * outside and names no one who can sign in here. Dropping it only narrows the roster, and the channel keeps
+ * its visibility and every other field, so a private channel stays private. Any other invalid row (an
+ * over-long channel id or owner id, unparseable JSON…) yields `undefined` (the loader quarantines it).
  */
-function parseStoredRows<T>(
-  rows: readonly SqliteRow[],
-  parse: (raw: unknown) => T | undefined,
-  onSkipped?: (count: number) => void,
-): T[] {
-  const loaded: T[] = [];
-  let skipped = 0;
+function parseStoredChannel(raw: unknown): ParsedRow<Channel> | undefined {
+  const parsed = ChannelSchema.safeParse(raw);
 
-  for (const row of rows) {
-    let value: T | undefined;
+  if (parsed.success) {
+    return { value: parsed.data, repaired: false };
+  }
 
-    try {
-      value = parse(JSON.parse(row.data as string));
-    } catch {
-      value = undefined;
-    }
+  const record = raw as { memberUserIds?: unknown } | null;
 
-    if (value === undefined) {
-      skipped += 1;
-    } else {
-      loaded.push(value);
+  if (record && typeof record === "object" && Array.isArray(record.memberUserIds)) {
+    const members = record.memberUserIds as unknown[];
+    const kept = members.filter((id) => IdSchema.safeParse(id).success);
+
+    if (kept.length !== members.length) {
+      const repaired = ChannelSchema.safeParse({ ...record, memberUserIds: kept });
+      return repaired.success ? { value: repaired.data, repaired: true } : undefined;
     }
   }
 
-  if (skipped > 0) {
-    onSkipped?.(skipped);
-  }
-
-  return loaded;
+  return undefined;
 }
 
 /**
  * Parse a stored message row. An assistant message written before `meta.model` was bounded can carry a
  * longer (cosmetic) model label; that label is truncated rather than the whole message dropped. Any other
- * invalid row yields `undefined` (the loader skips it).
+ * invalid row yields `undefined` (the loader quarantines it).
  */
-function parseStoredMessage(raw: unknown): Message | undefined {
+function parseStoredMessage(raw: unknown): ParsedRow<Message> | undefined {
   const parsed = MessageSchema.safeParse(raw);
 
   if (parsed.success) {
-    return parsed.data;
+    return { value: parsed.data, repaired: false };
   }
 
   const record = raw as { meta?: { model?: unknown } } | null;
@@ -426,19 +463,58 @@ function parseStoredMessage(raw: unknown): Message | undefined {
 
     if (typeof model === "string" && model.length > LLM_MODEL_MAX_LENGTH) {
       const repaired = MessageSchema.safeParse({ ...record, meta: { ...record.meta, model: model.slice(0, LLM_MODEL_MAX_LENGTH) } });
-      return repaired.success ? repaired.data : undefined;
+      return repaired.success ? { value: repaired.data, repaired: true } : undefined;
     }
   }
 
   return undefined;
 }
 
-/** `safeParse` adapter for `parseStoredRows`: the parsed value, or undefined when invalid. */
-function safeParseWith<T>(schema: { safeParse(raw: unknown): { success: true; data: T } | { success: false } }) {
-  return (raw: unknown): T | undefined => {
-    const parsed = schema.safeParse(raw);
-    return parsed.success ? parsed.data : undefined;
-  };
+/**
+ * Parse every stored row (`SELECT id, data …`) with `parse`. A row that is unparseable JSON or still fails
+ * its schema after `parse`'s safe repairs (written by an older release before a bound such as
+ * `ID_MAX_LENGTH` existed) doesn't throw — one legacy row must not stop an upgraded node from booting — but
+ * is QUARANTINED: left on disk, not loaded, and its id (from the `id` column, readable even when the JSON
+ * isn't) added to `quarantine`, which is rebuilt from scratch here. A row whose id column isn't a string is
+ * skipped on its own.
+ */
+function scanStoredRows<T>(
+  rows: readonly SqliteRow[],
+  parse: (raw: unknown) => ParsedRow<T> | undefined,
+  quarantine: Set<string>,
+): { loaded: T[]; report: StoredRowReport } {
+  const loaded: T[] = [];
+  const report: StoredRowReport = { repaired: 0, quarantined: 0, dependent: 0 };
+  quarantine.clear();
+
+  for (const row of rows) {
+    let parsed: ParsedRow<T> | undefined;
+
+    try {
+      parsed = parse(JSON.parse(row.data as string));
+    } catch {
+      parsed = undefined;
+    }
+
+    if (parsed === undefined) {
+      report.quarantined += 1;
+      if (typeof row.id === "string") {
+        quarantine.add(row.id);
+      }
+    } else {
+      report.repaired += parsed.repaired ? 1 : 0;
+      loaded.push(parsed.value);
+    }
+  }
+
+  return { loaded, report };
+}
+
+/** Hand a load's report to the caller when anything was repaired or quarantined. */
+function reportStoredRows(report: StoredRowReport, onReport?: (report: StoredRowReport) => void): void {
+  if (report.repaired > 0 || report.quarantined > 0) {
+    onReport?.(report);
+  }
 }
 
 /**
@@ -829,23 +905,94 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
           + (SELECT COUNT(*) FROM sessions) AS total`,
   );
 
+  // Ids of stored rows the loaders quarantined (see `LoamStore.quarantine`). Rebuilt by each table's load,
+  // emptied by `wipeAll`; a reopened store (the encrypted kill switch) starts empty.
+  const quarantinedUsers = new Set<string>();
+  const quarantinedChannels = new Set<string>();
+  const quarantinedMessages = new Set<string>();
+  const quarantine: StoreQuarantine = {
+    users: quarantinedUsers,
+    channels: quarantinedChannels,
+    messages: quarantinedMessages,
+  };
+
+  /** Fail closed: no write may create or overwrite a quarantined row, whichever path it comes from. */
+  function refuseQuarantined(table: keyof StoreQuarantine, id: string): void {
+    if (quarantine[table].has(id)) {
+      throw new QuarantinedRowError(table, id);
+    }
+  }
+
+  /** Load the channel table, rebuilding the channel quarantine. */
+  function scanChannels() {
+    return scanStoredRows(
+      db.prepare("SELECT id, data FROM channels ORDER BY rowid").all(),
+      parseStoredChannel,
+      quarantinedChannels,
+    );
+  }
+
+  /** Whether a (valid) message hangs off a quarantined record: its channel, reply parent or reaction target.
+   *  Loading it would expose it under whatever later claims that channel's audience, or orphan it. */
+  function dependsOnQuarantined(message: Message): boolean {
+    return (
+      ("channelId" in message && quarantinedChannels.has(message.channelId)) ||
+      (message.type === "channelReply" && quarantinedMessages.has(message.parentMessageId)) ||
+      (message.type === "reaction" && quarantinedMessages.has(message.targetMessageId))
+    );
+  }
+
   const store: LoamStore = {
-    loadUsers(onSkipped) {
-      return parseStoredRows(db.prepare("SELECT data FROM users ORDER BY rowid").all(), parseStoredUser, onSkipped);
-    },
-    loadChannels(onSkipped) {
-      return parseStoredRows(
-        db.prepare("SELECT data FROM channels ORDER BY rowid").all(),
-        safeParseWith<Channel>(ChannelSchema),
-        onSkipped,
+    loadUsers(onReport) {
+      const { loaded, report } = scanStoredRows(
+        db.prepare("SELECT id, data FROM users ORDER BY rowid").all(),
+        parseStoredUser,
+        quarantinedUsers,
       );
+      reportStoredRows(report, onReport);
+      return loaded;
     },
-    loadMessages(onSkipped) {
-      return parseStoredRows(
-        db.prepare("SELECT data FROM messages ORDER BY created_at, rowid").all(),
+    loadChannels(onReport) {
+      const { loaded, report } = scanChannels();
+      reportStoredRows(report, onReport);
+      return loaded;
+    },
+    loadMessages(onReport) {
+      // Re-scan the channels first (cheap — there are few) so the cascade below never depends on the
+      // caller having loaded them, then hold back every message under a quarantined channel and — to a
+      // fixed point — every reply/reaction under a quarantined message.
+      scanChannels();
+      const { loaded, report } = scanStoredRows(
+        db.prepare("SELECT id, data FROM messages ORDER BY created_at, rowid").all(),
         parseStoredMessage,
-        onSkipped,
+        quarantinedMessages,
       );
+      let kept = loaded;
+      let changed = true;
+
+      while (changed) {
+        changed = false;
+        const next: Message[] = [];
+
+        for (const message of kept) {
+          if (dependsOnQuarantined(message)) {
+            quarantinedMessages.add(message.id);
+            report.quarantined += 1;
+            report.dependent += 1;
+            changed = true;
+          } else {
+            next.push(message);
+          }
+        }
+
+        kept = next;
+      }
+
+      reportStoredRows(report, onReport);
+      return kept;
+    },
+    quarantine() {
+      return quarantine;
     },
     loadSessions() {
       return db
@@ -873,6 +1020,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       deleteIdentityTokensForUserStmt.run(userId);
     },
     upsertUser(user) {
+      refuseQuarantined("users", user.id);
       upsertUserStmt.run(user.id, JSON.stringify(user));
     },
     deleteUser(userId) {
@@ -880,15 +1028,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       deleteUserBlocksForUserStmt.run(userId, userId);
     },
     upsertChannel(channel) {
+      refuseQuarantined("channels", channel.id);
       upsertChannelStmt.run(channel.id, JSON.stringify(channel));
     },
     deleteChannel(channelId) {
       deleteChannelStmt.run(channelId);
     },
     insertMessage(message) {
+      refuseQuarantined("messages", message.id);
       insertMessageStmt.run(message.id, ...messageColumns(message), JSON.stringify(message));
     },
     updateMessage(message) {
+      refuseQuarantined("messages", message.id);
       updateMessageStmt.run(...messageColumns(message), JSON.stringify(message), message.id);
     },
     deleteMessage(messageId) {
@@ -1078,6 +1229,10 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM user_blocks");
         db.exec("DELETE FROM sealed_offers_seen");
       });
+      // Quarantined rows are ordinary rows: the DELETEs above removed them, so nothing is held any more.
+      quarantinedUsers.clear();
+      quarantinedChannels.clear();
+      quarantinedMessages.clear();
     },
     checkpoint() {
       if (!pragma) {

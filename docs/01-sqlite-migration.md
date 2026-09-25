@@ -116,6 +116,29 @@ kill switch a key-discard.
 5. **Retire**: `dirty`, `dataRev`, `saveInProgress`, `saveAllData`, the `setInterval`, `readJsonArray`,
    `writeJson`, `dataPath`. The `SIGINT` handler just closes the DB.
 
+## Rows that no longer validate (upgrade quarantine)
+
+Schema bounds tighten between releases (0.5.0 caps every id at `ID_MAX_LENGTH` = 128), so a row an older
+release wrote can fail today's schema. Loading never throws on such a row. `loadUsers`/`loadChannels`/
+`loadMessages` first try a repair that can't widen access: they drop an unusable avatar image id, drop
+private-roster entries that aren't valid ids (none of them can be a local `user.<hex>` session), and
+truncate an over-long `meta.model`. The repaired record is loaded; the row on disk is only rewritten when
+the record next changes. Anything else is **quarantined**. It isn't loaded and stays on disk untouched. Its
+id (read from the `id` column, which works even when the JSON doesn't parse) goes into
+`store.quarantine()`, exposed as `ctx.quarantine`/`rt.quarantine` and rebuilt at every load. `loadMessages`
+also quarantines messages under a quarantined channel and, down the chain, replies and reactions under a
+quarantined message.
+
+No path may take a quarantined id. The DAL's `upsertUser`/`upsertChannel`/`insertMessage`/`updateMessage`
+throw `QuarantinedRowError`. Above that, the app refuses each path cleanly: default-channel seeding and
+channel-slug allocation treat the id as taken; sync channel and author imports skip it; quarantined
+message ids join the in-memory tombstone set for the boot, so a pull never requests them. A session or
+identity token for a quarantined user isn't honoured (the caller gets a new identity), and a new id is
+never minted into one. Reading or posting into a quarantined channel gets the same 404 as an unknown
+channel. One boot warning reports the repaired and quarantined counts per table. Quarantined rows aren't
+touched by retention either; an operator can inspect or export them with any SQLite tool, and
+`wipeAll()` (Emergency Reset) deletes them like any other row.
+
 ## Testing (landed with Phase A)
 
 The first `apps/server` suite exists: `src/db.test.ts` covers the DAL against `:memory:`/temp-file DBs

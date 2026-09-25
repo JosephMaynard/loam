@@ -44,6 +44,13 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   record ids are capped at 128 characters; session ids are longer (64-bit, minted collision-free) and
   session tokens 256-bit; admin-claim and panic attempt limits also count requests made through the
   tunnel; inbound WebSocket frames are capped at 16 KiB.
+- **Upgrade quarantine.** A stored row from 0.4 that fails the tighter bounds and can't be safely repaired
+  is quarantined at boot: not loaded, left on disk untouched, and its id refused everywhere. A sync peer, a
+  new channel, the default channels or a new session can't take that id, and a peer can't re-supply the
+  message or user. Messages under a quarantined channel, and replies and reactions under a quarantined
+  message, are quarantined too. Previously the row was only skipped: a private channel with one over-long
+  member id disappeared, and a peer's public channel with the same name was then written over it, exposing
+  its retained messages. A boot warning gives the counts; Emergency Reset removes the rows.
 - **Node-to-node sync.** A peer can no longer edit a post a local user wrote, re-type a private message
   into a public channel, bind a local or pending attachment to its own message, undo a moderator's
   removal, or add new replies or reactions under a post a moderator removed here. Only the authors of
@@ -131,8 +138,9 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
 - An assistant bot id replaced by the upgrade repair (or changed by an admin) no longer leaves the old bot
   on the member list as a dead contact; only the configured assistant is listed.
 - A node upgraded from 0.4 boots even when its database or `config.json` holds values past the new
-  bounds: a stored user, channel or message with an id over 128 characters is skipped (logged, left on
-  disk), and an assistant model label over 120 characters is truncated.
+  bounds: a private channel's roster entry over 128 characters is dropped (it can't be a local user), an
+  assistant model label over 120 characters is truncated, and any other stored user, channel or message
+  that no longer validates is quarantined (see Security).
 
 ### Added
 - **Blocking.** Block someone from their DM header; unblock there or in Settings. Blocking stops DMs, DM

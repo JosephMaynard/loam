@@ -519,7 +519,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
    */
   function importPeerAuthor(authorId: string, usersById: Map<string, User>): void {
     const user = usersById.get(authorId);
-    if (!user || isReservedPeerIdentity(user.id) || user.type !== "human") {
+    // A quarantined id's stored row stays on disk untouched — a peer's record never replaces it.
+    if (!user || isReservedPeerIdentity(user.id) || user.type !== "human" || rt.quarantine.users.has(user.id)) {
       return;
     }
     // Accept a published mesh key only if its kx is cryptographically bound to its sign (kxSig);
@@ -1160,7 +1161,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (!existing) {
           // A locally deleted channel is tombstoned by its id — a peer that still lists it must
           // never resurrect it here (delete is permanent; archive is the recoverable state).
-          if (rt.tombstones.has(channel.id) || mesh.isReservedReplayId(channel.id)) {
+          // …nor claim a quarantined id: that stored row (possibly a private channel) is still on disk
+          // with its messages, which a same-id public import would expose.
+          if (rt.tombstones.has(channel.id) || rt.quarantine.channels.has(channel.id) || mesh.isReservedReplayId(channel.id)) {
             continue;
           }
 

@@ -207,8 +207,13 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   so a failed keyed open never leaves a plaintext file behind. On first
   boot with legacy data, `importLegacyJsonData()` migrates the old `*.json` files into the DB and
   renames them `*.json.bak`. A stored user/channel/message row that no longer validates (e.g. an id an
-  older release wrote past `ID_MAX_LENGTH`) is skipped at load with a counted warning and left on disk,
-  not fatal; an over-long `meta.model` is truncated instead. `config.json` and the `avatars/` dir remain plain files. There is no
+  older release wrote past `ID_MAX_LENGTH`) is never fatal: a safe in-memory repair is applied when one
+  exists (unusable avatar id dropped, invalid private-roster entries dropped, over-long `meta.model`
+  truncated); otherwise the row is **quarantined**: not loaded, left on disk, its id in
+  `store.quarantine()` (`ctx`/`rt.quarantine`), with messages under a quarantined channel/message
+  quarantined too. No path may claim a quarantined id: the DAL writes throw `QuarantinedRowError`;
+  seeding, channel-slug allocation, sync channel/author import and session minting skip it; quarantined
+  message ids join the in-memory tombstone set. One boot warning gives the counts (docs/01). `config.json` and the `avatars/` dir remain plain files. There is no
   `markDirty`/flush interval any more — call the matching `store.*` method after mutating in-memory
   state, then `broadcast(...)`. `.loam/` is gitignored.
 - **Sessions/identity**: two modes (docs/20). **Anonymous** (plaintext or `optional` without a pinned

@@ -30,7 +30,7 @@ import {
 } from "@loam/schema";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-import { importLegacyJsonData } from "./db.js";
+import { importLegacyJsonData, type StoredRowReport } from "./db.js";
 import { createLlmLayer, INTERRUPTED_ASSISTANT_BODY } from "./llm.js";
 import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
@@ -274,6 +274,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     get store() {
       return store;
     },
+    get quarantine() {
+      return store.quarantine();
+    },
     get wipeGeneration() {
       return wipeGeneration;
     },
@@ -401,6 +404,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     },
     set store(value) {
       store = value;
+    },
+    get quarantine() {
+      return store.quarantine();
     },
     currentJoinHost,
     effectiveTransportEncryption,
@@ -670,6 +676,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return makeSessionUserId(
       (id) =>
         data.users.some((user) => user.id === id) ||
+        store.quarantine().users.has(id) ||
         [...sessions.values()].includes(id) ||
         [...identityTokens.values()].includes(id),
     );
@@ -1155,14 +1162,18 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // id would inherit the old channel's ghosts — a peer's undelivered copies, stale references —
     // and would itself be refused by peers still holding the tombstone. Suffixed ids below are
     // random enough that a tombstone collision is not a practical concern.
-    if (slug && !ensureChannel(slug) && !tombstones.has(slug)) {
+    // A quarantined id (a stored channel row that no longer validates, still on disk with its messages) is
+    // taken too: a new channel under it would inherit that row's retained messages.
+    const taken = (id: string) => !!ensureChannel(id) || store.quarantine().channels.has(id);
+
+    if (slug && !taken(slug) && !tombstones.has(slug)) {
       return slug;
     }
 
     let candidate: string;
     do {
       candidate = `${slug || "channel"}-${randomBytes(3).toString("hex")}`;
-    } while (ensureChannel(candidate));
+    } while (taken(candidate));
 
     return candidate;
   }
@@ -1702,19 +1713,38 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       server.log.info("Imported legacy .loam JSON data into SQLite (originals renamed to *.json.bak)");
     }
 
-    // A row an older release wrote that no longer validates (e.g. an id past `ID_MAX_LENGTH`) is skipped,
-    // not fatal: an upgraded node must still boot. The row stays on disk; the count is logged.
-    const logSkipped = (table: string) => (count: number) =>
-      server.log.warn({ table, count }, `Skipped ${count} stored ${table} row(s) that no longer validate`);
-    data = {
-      users: store.loadUsers(logSkipped("users")),
-      channels: store.loadChannels(logSkipped("channels")),
-      messages: store.loadMessages(logSkipped("messages")),
+    // A row an older release wrote that no longer validates (e.g. an id past `ID_MAX_LENGTH`) is not fatal:
+    // an upgraded node must still boot. The store repairs what it provably can (in memory) and QUARANTINES the
+    // rest — not loaded, left on disk, and its id refused to every write (see `LoamStore.quarantine`).
+    const storedRowReports: Record<string, StoredRowReport> = {};
+    const noteStoredRows = (table: string) => (report: StoredRowReport) => {
+      storedRowReports[table] = report;
     };
+    data = {
+      users: store.loadUsers(noteStoredRows("users")),
+      channels: store.loadChannels(noteStoredRows("channels")),
+      messages: store.loadMessages(noteStoredRows("messages")),
+    };
+    if (Object.keys(storedRowReports).length) {
+      server.log.warn(
+        { storedRows: storedRowReports },
+        "Some stored rows no longer validate: the safely repairable ones were repaired in memory; the rest are " +
+          "quarantined (not loaded, their ids refused to sync, seeding and new channels) and remain on disk " +
+          "untouched. An Emergency Reset removes them with everything else.",
+      );
+    }
     finalizeInterruptedStreams();
     tombstones.clear();
 
     for (const id of store.loadTombstones()) {
+      tombstones.add(id);
+    }
+
+    // A quarantined message id is, for this boot, an id this node refuses to (re)create — exactly the refusal
+    // a tombstone gives, so the sync pull never asks a peer for it, its import skips it, and a sealed offer
+    // under it is inadmissible. In memory only (never persisted as a tombstone); rebuilt from the rows still
+    // on disk at every load. (Quarantined channel and user ids are refused by their own checks.)
+    for (const id of store.quarantine().messages) {
       tombstones.add(id);
     }
 
@@ -1734,13 +1764,20 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     sessions.clear();
 
+    // A session or identity token naming a quarantined user isn't honoured (its row stays on disk): the caller
+    // gets a fresh identity instead of `ensureUser` recreating that user id over the quarantined row.
+    const quarantinedUsers = store.quarantine().users;
     for (const session of store.loadSessions()) {
-      sessions.set(session.token, session.userId);
+      if (!quarantinedUsers.has(session.userId)) {
+        sessions.set(session.token, session.userId);
+      }
     }
 
     identityTokens.clear();
     for (const record of store.loadIdentityTokens()) {
-      identityTokens.set(record.tokenHash, record.userId);
+      if (!quarantinedUsers.has(record.userId)) {
+        identityTokens.set(record.tokenHash, record.userId);
+      }
     }
 
     if (!data.channels.length) {
@@ -1748,7 +1785,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // (delete is permanent; its tombstone survives restarts). A kill-switch wipe clears the
       // tombstones along with everything else, so a post-reset node still seeds fresh defaults.
       data.channels = defaultChannels
-        .filter((channel) => !tombstones.has(channel.id))
+        .filter((channel) => !tombstones.has(channel.id) && !store.quarantine().channels.has(channel.id))
         .map((channel) => ({ ...channel }));
       store.transaction(() => {
         for (const channel of data.channels) {

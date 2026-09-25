@@ -69,7 +69,7 @@ function rawRowCount(dataDir: string, table: string, id: string): number {
 }
 
 describe("rows an older release wrote past today's bounds don't stop an upgraded node from booting", () => {
-  it("skips an over-long-id row (left on disk), truncates an over-long meta.model and config model", async () => {
+  it("quarantines an over-long-id row (left on disk), truncates an over-long meta.model and config model", async () => {
     const dataDir = tempDataDir();
     const first = await boot(dataDir);
     const admin = await newSession(first);
@@ -98,6 +98,10 @@ describe("rows an older release wrote past today's bounds don't stop an upgraded
     expect(app.store.loadChannels().some((channel) => channel.id === longId)).toBe(false);
     expect(app.store.loadMessages().some((message) => message.id === longId)).toBe(false);
     expect(app.store.loadUsers().some((user) => user.id.length > 128)).toBe(false);
+    // Not loaded, and held: nothing may claim these ids while the rows are on disk (upgrade-quarantine.test.ts).
+    expect(app.store.quarantine().channels.has(longId)).toBe(true);
+    expect(app.store.quarantine().messages.has(longId)).toBe(true);
+    expect(app.store.quarantine().users.has(`user.${"b".repeat(200)}`)).toBe(true);
 
     // The over-long model label is repaired, not the whole message dropped.
     const history = (
@@ -111,7 +115,7 @@ describe("rows an older release wrote past today's bounds don't stop an upgraded
     ).json() as { llm: { ollama: { model: string } } };
     expect(config.llm.ollama.model).toBe(longModel.slice(0, 120));
 
-    // Skipped rows are left on disk, not deleted.
+    // Quarantined rows are left on disk, not deleted.
     await app.close();
     expect(rawRowCount(dataDir, "channels", longId)).toBe(1);
     expect(rawRowCount(dataDir, "messages", longId)).toBe(1);
