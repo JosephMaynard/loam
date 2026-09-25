@@ -1000,6 +1000,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       updatedAt: Date.now(),
     });
     store.upsertChannel(next);
+    // Un-archiving or reopening posts/replies can make a peer's refused offers acceptable: refetch them.
+    if (next.archived !== channel.archived || next.allowPosting !== channel.allowPosting || next.allowReplies !== channel.allowReplies) {
+      sync.forgetRefusedOffers();
+    }
     // Turning join requests OFF clears any pending queue (they can no longer be fulfilled via the flow).
     if (update.allowJoinRequests === false) {
       store.removeJoinRequestsForChannel(channel.id);

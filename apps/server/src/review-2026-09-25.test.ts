@@ -448,6 +448,61 @@ describe("refused new messages are remembered per peer, not refetched every roun
   });
 });
 
+describe("a local policy change forgets remembered refusals (follow-up to #6)", () => {
+  const parent = peerPost("msg.parent");
+  const reply = {
+    id: "msg.reply",
+    type: "channelReply",
+    authorId: peerAuthor.id,
+    channelId: "general",
+    parentMessageId: "msg.parent",
+    body: "a reply",
+    createdAt: 2_000,
+  };
+
+  it("re-enabling replies in the admin config refetches a refused reply at the next round", async () => {
+    const peer = await servingPeer([parent, reply]);
+    const { app, admin } = await puller(peer.url, { features: { enableReplies: false } });
+    await syncRound(app, admin.cookie);
+    await syncRound(app, admin.cookie);
+    expect(requestedIds(peer).filter((id) => id === "msg.reply")).toHaveLength(1);
+    expect(app.store.loadMessages().some((message) => message.id === "msg.reply")).toBe(false);
+
+    const patch = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { features: { enableReplies: true } },
+    });
+    expect(patch.statusCode).toBe(200);
+    await syncRound(app, admin.cookie);
+    expect(requestedIds(peer).filter((id) => id === "msg.reply")).toHaveLength(2);
+    expect(app.store.loadMessages().some((message) => message.id === "msg.reply")).toBe(true);
+  });
+
+  it("un-archiving a channel refetches a post refused while it was archived", async () => {
+    const peer = await servingPeer([parent]);
+    const { app, admin } = await puller(peer.url);
+    const setArchived = async (archived: boolean) =>
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/channels/general",
+          headers: { cookie: admin.cookie },
+          payload: { archived },
+        })
+      ).statusCode;
+    expect(await setArchived(true)).toBe(200);
+    await syncRound(app, admin.cookie);
+    await syncRound(app, admin.cookie);
+    expect(requestedIds(peer).filter((id) => id === "msg.parent")).toHaveLength(1);
+
+    expect(await setArchived(false)).toBe(200);
+    await syncRound(app, admin.cookie);
+    expect(app.store.loadMessages().some((message) => message.id === "msg.parent")).toBe(true);
+  });
+});
+
 describe("peer users: only accepted authors, no reserved ids, no mesh keys minted for them (#3 #8)", () => {
   it("imports just the author of an accepted message and refuses mesh.* / bot-id records and authors", async () => {
     const peerKey = createMeshIdentity();

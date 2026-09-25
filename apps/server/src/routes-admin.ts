@@ -242,6 +242,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // the sync token may have just changed, so an entry established under the old config could be stale
     // or pinned to a now-wrong key. They re-handshake lazily on the next sync tick.
     ctx.sync.peerTransportSessions.clear();
+    // Offers refused under the old config (replies or public channels off, a smaller body cap, relaying off…)
+    // may be acceptable now: fetch them again at the next round rather than after the refusal expires.
+    ctx.sync.forgetRefusedOffers();
     // Switching INTO setupCode bootstrap at runtime must mint a code — otherwise the claim flow is
     // enabled but no code was ever generated, so `allowAdminClaim` stays false and no one can claim
     // (docs/15 #8). Only on the transition (not every PATCH while already in setupCode), so a code

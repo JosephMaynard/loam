@@ -168,7 +168,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   // blob that's neither ours nor carriable…) isn't re-downloaded every round forever — the digest keeps
   // advertising it and "not held locally" alone would always want it. Entries expire (a refusal can stop
   // applying — a channel un-archived, relaying switched on), the map is bounded, and it is RAM-only (a
-  // restart re-fetches each refused offer once). Cleared by the kill switch.
+  // restart re-fetches each refused offer once). Cleared by the kill switch, an admin config save, and a
+  // channel policy change (forgetRefusedOffers).
   const REFUSED_TTL_MS = 3_600_000;
   const REFUSED_MAX_PER_PEER = 20_000;
   const refusedOffers = new Map<string, Map<string, number>>();
@@ -220,6 +221,16 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   // downgrade (an attacker blocking `/api/bootstrap` or forging `off`), refused rather than silently taken
   // (review 2026-09-25 #13). RAM-only; cleared by the kill switch.
   const peersSeenEncrypted = new Set<string>();
+
+  /**
+   * Forget every remembered refusal, keeping the rest of the per-peer state (transport sessions, downgrade
+   * history). Called when a local policy that decides refusals changes (an admin config save, a channel
+   * un-archived or reopened for posts/replies), so those offers are fetched again at the next round instead of
+   * waiting out REFUSED_TTL_MS.
+   */
+  function forgetRefusedOffers(): void {
+    refusedOffers.clear();
+  }
 
   /** Drop every piece of per-peer memory (transport sessions, refusals, downgrade history) — kill switch. */
   function forgetPeerState(): void {
@@ -1371,6 +1382,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     isSyncableMessage,
     buildSyncDigest,
     forgetPeerState,
+    forgetRefusedOffers,
     retryMissingAttachments,
     syncWithPeer,
     runSyncLoop,
