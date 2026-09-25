@@ -215,3 +215,29 @@ describe("an admin edit of llm.onDevice survives a restart when config.json owns
     expect((await onDevice(second, admin.cookie)).enabled).toBe(true);
   });
 });
+
+describe("a legacy bot id the config repair drops doesn't leave a dead assistant on the roster", () => {
+  it("hides the old bot record, lists the configured bot, and logs the orphaned id", async () => {
+    const ollama = { enabled: true, baseUrl: "http://127.0.0.1:9", model: "m", botDisplayName: "Gemma" };
+    const dataDir = tempDataDir({ llm: { ollama: { ...ollama, botId: "llm.ollama.gemma4" } } });
+    const first = await boot(dataDir);
+    const admin = await newSession(first);
+    // What a 0.4 node configured with `botId: "ollama.gemma"` left behind: a bot record under that id.
+    const bot = first.store.loadUsers().find((user) => user.id === "llm.ollama.gemma4") as User;
+    first.store.upsertUser({ ...bot, id: "ollama.gemma" });
+    await first.close();
+
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ llm: { ollama: { ...ollama, botId: "ollama.gemma" } } }));
+    const logs: string[] = [];
+    const app = await boot(dataDir, { logger: true, logStream: { write: (line) => void logs.push(line) } });
+
+    const roster = (
+      await app.server.inject({ method: "GET", url: "/api/users", headers: { cookie: admin.cookie } })
+    ).json() as User[];
+    const bots = roster.filter((user) => user.type === "bot").map((user) => user.id);
+    expect(bots).toEqual(["llm.ollama.gemma4"]);
+    // The record itself is kept (its DM history still points at it) — only hidden.
+    expect(app.store.loadUsers().some((user) => user.id === "ollama.gemma")).toBe(true);
+    expect(logs.join("")).toContain('old bot id \\"ollama.gemma\\"');
+  });
+});

@@ -169,12 +169,14 @@ export function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamCon
  * - `security.transportEncryption: "off"` → `"optional"`: plaintext is no longer an operator posture
  *   (only Developer Mode reaches it, as a read-time projection).
  * - `llm.ollama.botId` outside the reserved `llm.` namespace → dropped (the default bot id applies), so a
- *   bot id can never name a person's account.
+ *   bot id can never name a person's account. The dropped id is returned as `droppedBotId`, so the caller
+ *   can report a bot record it orphans (hidden from the roster: `visibleUsers` shows only the configured bot).
  * - `llm.ollama.botDisplayName` over 80 chars → truncated to the user display-name bound.
  * - `llm.ollama.model` / `llm.onDevice.model` over `LLM_MODEL_MAX_LENGTH` → truncated to that bound.
  */
-export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repairs: string[] } {
+export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repairs: string[]; droppedBotId?: string } {
   const repairs: string[] = [];
+  let droppedBotId: string | undefined;
 
   if (!isRecord(json)) {
     return { json, repairs };
@@ -191,6 +193,7 @@ export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repair
   const ollama = isRecord(json.llm) ? json.llm.ollama : undefined;
   if (isRecord(ollama)) {
     if (ollama.botId !== undefined && !BotIdSchema.safeParse(ollama.botId).success) {
+      droppedBotId = typeof ollama.botId === "string" ? ollama.botId : undefined;
       delete ollama.botId;
       repairs.push("llm.ollama.botId must be an llm.* id (at most 64 chars); using the default bot id");
     }
@@ -208,7 +211,7 @@ export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repair
     }
   }
 
-  return { json, repairs };
+  return { json, repairs, droppedBotId };
 }
 
 /**

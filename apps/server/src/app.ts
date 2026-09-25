@@ -488,6 +488,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * `off` default and serve plaintext while the operator believes it's hardened. Fail closed instead — the
    * caller only invokes this when a config source actually exists (an absent file is a normal fresh boot).
    */
+  // Bot ids a legacy-config repair dropped this boot (see sanitizeLegacyConfigJson): `loadData` reports any
+  // bot record one of them orphans.
+  const legacyBotIds = new Set<string>();
+
   function parseConfigUpdate(
     raw: string,
     source: string,
@@ -503,9 +507,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // Values an older build accepted but the schema now refuses (a configured `off` transport, an
     // out-of-namespace bot id, an over-long bot name) are repaired with a warning rather than aborting
     // the upgrade boot — see sanitizeLegacyConfigJson.
-    const { json, repairs } = sanitizeLegacyConfigJson(parsedJson);
+    const { json, repairs, droppedBotId } = sanitizeLegacyConfigJson(parsedJson);
     for (const repair of repairs) {
       server.log.warn(`${source}: ${repair}`);
+    }
+    if (droppedBotId !== undefined) {
+      legacyBotIds.add(droppedBotId);
     }
 
     const parsed = LoamConfigUpdateSchema.safeParse(json);
@@ -1109,7 +1116,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   /** The roster as `viewer` may see it: sanitized per-user, and with mesh sender artifacts hidden
    * except from the recipients they actually mailed. */
   function visibleUsers(viewer: User): User[] {
-    const base = llmEnabled() ? data.users : data.users.filter((user) => user.type !== "bot");
+    // Only the CONFIGURED assistant is a contact: a bot record whose id the config no longer names (a
+    // replaced or legacy-repaired botId) would otherwise linger on the roster as a dead DM contact.
+    const base = data.users.filter(
+      (user) => user.type !== "bot" || (llmEnabled() && user.id === appConfig.llm.ollama.botId),
+    );
     return base
       .filter((user) => !user.banned && !user.pending)
       .filter((user) => !isMeshSentinelUser(user.id) || meshSenderVisibleTo(user.id, viewer.id))
@@ -1795,6 +1806,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     ensureBotUser();
     ensureAllMeshIdentities();
+
+    // A bot record left behind by a legacy bot-id repair is no longer the assistant: `visibleUsers` hides
+    // it (only the configured bot is listed). It stays in the database with its DM history; say so once.
+    for (const id of legacyBotIds) {
+      if (id !== appConfig.llm.ollama.botId && data.users.some((user) => user.id === id && user.type === "bot")) {
+        server.log.warn(`The assistant's old bot id "${id}" was replaced; its bot record is hidden from the roster`);
+      }
+    }
+    legacyBotIds.clear();
   }
 
   /**

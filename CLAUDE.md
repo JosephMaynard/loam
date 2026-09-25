@@ -425,7 +425,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   a reply from Ollama's `/api/chat` into a new assistant message, updated incrementally. All gated on
   config; absent config = no bot, no LLM routes. `botId` must be an `llm.*` id (≤64) and may not name a
   non-bot user (PATCH 400; at boot an out-of-namespace id is dropped for the default with a warning, and
-  one naming a person skips the bot); `botDisplayName` ≤80, `model` ≤120. At most one reply in flight per user and 2 node-wide (`429 assistant_busy`); a moderator
+  one naming a person skips the bot). Only the configured bot is on the roster (`visibleUsers`): a bot
+  record under an old or repaired id stays in the DB but is hidden (logged once when a repair orphans one); `botDisplayName` ≤80, `model` ≤120. At most one reply in flight per user and 2 node-wide (`429 assistant_busy`); a moderator
   removal/delete aborts the stream, and a placeholder left streaming by a crash is finalized at boot.
 
 **Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
