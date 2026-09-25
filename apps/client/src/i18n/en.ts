@@ -644,6 +644,36 @@ export const en = {
   "typing.one": "{name} is typing…",
   "typing.two": "{a} and {b} are typing…",
   "typing.many": "Several people are typing…",
+
+  // Accessible name for the icon-only mobile back buttons, and a generic dismiss control (error banner).
+  "common.back": "Back",
+  "common.dismiss": "Dismiss",
+  // Developer Mode banner: shown on every screen while the node runs with transport encryption off.
+  "devMode.banner":
+    "⚠️ Developer Mode — messages are sent unencrypted and can be read by anyone on this network. Do not use for anything private.",
+  // A picked attachment exceeds the node's upload limit ({limit} is e.g. "1 MB").
+  "composer.fileTooLarge": "{name} is too large to send (limit {limit}).",
+  // A channel/DM the server says doesn't exist for this user (unknown, removed, or not a member).
+  "conversation.notFoundTitle": "Conversation not available",
+  "conversation.notFoundBody": "This channel doesn't exist, was removed, or you're not a member of it.",
+  // Top-level error screen (a rendering crash).
+  "app.crashTitle": "Something went wrong",
+  "app.crashBody": "LOAM hit an unexpected error while showing this screen.",
+  "app.crashHome": "Go to channels",
+  "app.crashReload": "Reload",
+  // A join link carrying a security key different from the one this browser already trusts for the node.
+  "transport.pinChangeTitle": "This link carries a different security key",
+  "transport.pinChangeBody":
+    "You joined this node with a different key. Only use the new key if you just scanned the node's current join QR code in person — otherwise someone may be impersonating it.",
+  "transport.pinChangeCurrent": "Key you joined with: {fingerprint}",
+  "transport.pinChangeNew": "Key in this link: {fingerprint}",
+  "transport.pinChangeAccept": "Use the new key",
+  "transport.pinChangeReject": "Keep my current key",
+  // Invite / join QR shown to others.
+  "invite.qrKeyMismatch":
+    "The join QR is hidden: the key this node advertises doesn't match the key you joined with.",
+  "invite.qrNoKeyNote":
+    "This QR doesn't include the node's security key, because your own connection wasn't verified by scanning a join QR.",
 };
 
 /**
