@@ -86,8 +86,8 @@ device checks below, and size headroom before a production track.
   **Release candidates:** tag `vX.Y.Z-rc.N` (or `-beta.N`) with the manifests still at `X.Y.Z`. It gets the
   same keystore/test gates and the AAB for internal testing, and is published as a GitHub **pre-release**.
   Play never takes a `versionCode` twice, so each RC needs its own and the final `vX.Y.Z` a higher one.
-  **For 0.5.0:** v0.4.0 shipped `versionCode` 6, so the first 0.5.0 tag needs **≥ 7** (currently 6 — bump
-  it), and the final v0.5.0 needs more than the last RC's.
+  **For 0.5.0:** v0.4.0 shipped `versionCode` 6, so the first 0.5.0 tag needs **≥ 7** (bumped to 7 on this
+  branch), and if an RC is tagged first, the final v0.5.0 needs more than that RC's.
 - **Release workflow hardened.** Every action in `build-apk.yml`/`ci.yml` is pinned to a commit SHA,
   checkouts don't persist the token, the build job is read-only, and a separate release job (`contents:
   write`, runs no repo code) attaches the APK. Keystore secrets reach only the signing step; a tag build

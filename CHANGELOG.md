@@ -4,10 +4,10 @@ All notable changes to LOAM are recorded here. LOAM is a local-first, off-grid m
 `README.md` and `MISSION.md`). Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 the project is pre-1.0, so the surface can still change. Dates are UTC.
 
-## [Unreleased]
+## [0.5.0] - Unreleased
 
 The pre-release review release: fixes from two full-codebase reviews (2026-09-04, 2026-09-25) and an
-external one (2026-08-15), the server split, and Play Store groundwork. Will ship as 0.5.0.
+external one (2026-08-15), the server split, per-user blocking, and Play Store groundwork.
 
 ### Security
 - **Key pinning is fail-closed.** A QR-joined client can no longer fall back to plaintext on an
