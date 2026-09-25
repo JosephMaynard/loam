@@ -4,7 +4,7 @@
 // reload is observed immediately, plus the hoisted helper functions the subsystems call back into.
 import type { FastifyBaseLogger } from "fastify";
 
-import type { Channel, LoamConfig, Message, MessageCreateRequest, StreamEvent, User } from "@loam/schema";
+import type { Channel, LoamConfig, Message, MessageCreateRequest, StreamEvent, TransportEncryption, User } from "@loam/schema";
 
 import type { LoamStore } from "./db.js";
 import type { AppData, AppOptions, ClientEvent } from "./types.js";
@@ -32,7 +32,7 @@ export type Runtime = {
   log: FastifyBaseLogger;
   options: AppOptions;
   /** The transport-encryption mode actually in force (Developer Mode projects `off`). */
-  effectiveTransportEncryption(): LoamConfig["security"]["transportEncryption"];
+  effectiveTransportEncryption(): TransportEncryption;
   attachmentsDir: string;
   /** Uploads not yet consumed by a message, keyed by attachment id (uploader-bound). */
   attachmentOwners: Map<string, { userId: string; uploadedAt: number }>;
