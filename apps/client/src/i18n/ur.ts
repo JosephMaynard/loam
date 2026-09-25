@@ -617,5 +617,6 @@ export const ur: Translation = {
   "settings.privacyPolicy": "رازداری کی پالیسی",
   "error.dm_unavailable": "اس شخص کو براہِ راست پیغامات دستیاب نہیں ہیں",
   "error.dm_blocked_by_you": "آپ نے اس شخص کو بلاک کیا ہے۔ پیغام بھیجنے کے لیے انہیں اَن بلاک کریں",
+  "error.channel_member_unavailable": "یہ شخص اس چینل کے لیے دستیاب نہیں ہے",
   "error.block_not_allowed": "اس صارف کو بلاک نہیں کیا جا سکتا",
 };

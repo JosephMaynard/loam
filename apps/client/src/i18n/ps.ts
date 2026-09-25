@@ -617,5 +617,6 @@ export const ps: Translation = {
   "settings.privacyPolicy": "د محرمیت تګلاره",
   "error.dm_unavailable": "دې کس ته مستقیم پیغامونه شتون نه لري",
   "error.dm_blocked_by_you": "تاسو دا کس بند کړی دی. د پیغام لېږلو لپاره یې بندیز لرې کړئ",
+  "error.channel_member_unavailable": "دا کس د دې چینل لپاره شتون نه لري",
   "error.block_not_allowed": "دا کاروونکی نه شي بندېدای",
 };

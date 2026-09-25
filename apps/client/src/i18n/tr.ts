@@ -617,5 +617,6 @@ export const tr: Translation = {
   "settings.privacyPolicy": "Gizlilik politikası",
   "error.dm_unavailable": "Bu kişiye doğrudan mesaj gönderilemiyor",
   "error.dm_blocked_by_you": "Bu kişiyi engellediniz. Mesaj göndermek için engeli kaldırın",
+  "error.channel_member_unavailable": "Bu kişi bu kanal için uygun değil",
   "error.block_not_allowed": "Bu kullanıcı engellenemez",
 };

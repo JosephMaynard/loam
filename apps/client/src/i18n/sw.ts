@@ -617,5 +617,6 @@ export const sw: Translation = {
   "settings.privacyPolicy": "Sera ya faragha",
   "error.dm_unavailable": "Ujumbe wa moja kwa moja kwa mtu huyu haupatikani",
   "error.dm_blocked_by_you": "Umemzuia mtu huyu. Ondoa kizuizi ili kumtumia ujumbe",
+  "error.channel_member_unavailable": "Mtu huyu hapatikani kwa kituo hiki",
   "error.block_not_allowed": "Mtumiaji huyu hawezi kuzuiwa",
 };

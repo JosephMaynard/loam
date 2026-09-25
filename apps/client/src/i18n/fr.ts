@@ -617,5 +617,6 @@ export const fr: Translation = {
   "settings.privacyPolicy": "Politique de confidentialité",
   "error.dm_unavailable": "Les messages directs à cette personne ne sont pas disponibles",
   "error.dm_blocked_by_you": "Vous avez bloqué cette personne. Débloquez-la pour lui envoyer un message",
+  "error.channel_member_unavailable": "Cette personne n’est pas disponible pour ce canal",
   "error.block_not_allowed": "Cet utilisateur ne peut pas être bloqué",
 };

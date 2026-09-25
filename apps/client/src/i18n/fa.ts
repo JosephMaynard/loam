@@ -617,5 +617,6 @@ export const fa: Translation = {
   "settings.privacyPolicy": "سیاست حریم خصوصی",
   "error.dm_unavailable": "پیام مستقیم به این فرد در دسترس نیست",
   "error.dm_blocked_by_you": "شما این فرد را مسدود کرده‌اید. برای فرستادن پیام، مسدودی را بردارید",
+  "error.channel_member_unavailable": "این فرد برای این کانال در دسترس نیست",
   "error.block_not_allowed": "این کاربر را نمی‌توان مسدود کرد",
 };

@@ -170,14 +170,16 @@ moderation:
   the blocker's device, the blocked person's posts and replies in channels collapse to "Message from a
   blocked user" (with Show) and their reactions, typing and notifications disappear. The node still
   delivers channel content to everyone; the hiding happens on the blocker's device.
-- The blocked person isn't notified. A DM to someone who blocked them gets the same "Direct messages to
-  this person aren't available" as a DM to a banned or not-yet-approved member.
+- The blocked person isn't notified. A DM to someone who blocked them gets a generic "Direct messages to
+  this person aren't available" that doesn't say why, and neither can invite the other into a private
+  channel or hand them one ("This person isn't available for this channel").
 - It doesn't replace reports. Harassment you should know about still needs **Report this user**, and only
   moderators can ban, time out or remove messages.
 
 Known limits: the blocked person can still work it out (the recipient is plainly active but their DMs
-fail); a mesh sender can't be blocked (mesh mail arrives outside the normal message path); blocks don't
-stop someone inviting the blocker into a private channel; and because the client keeps the list in
+fail; a banned or not-yet-approved member gets the same DM answer, but those are hidden from the member
+list, so it doesn't disguise the block); a mesh sender can't be blocked (mesh mail arrives outside the
+normal message path); and because the client keeps the list in
 memory only, a device that reloads while it can't reach the node shows cached posts from blocked people
 until it reconnects.
 

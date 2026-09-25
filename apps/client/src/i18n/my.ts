@@ -617,5 +617,6 @@ export const my: Translation = {
   "settings.privacyPolicy": "ကိုယ်ရေးလုံခြုံမှု မူဝါဒ",
   "error.dm_unavailable": "ဤသူထံ တိုက်ရိုက်စာ ပို့၍ မရနိုင်ပါ",
   "error.dm_blocked_by_you": "သင်သည် ဤသူကို ပိတ်ဆို့ထားသည်။ မက်ဆေ့ချ်ပို့ရန် ပိတ်ဆို့မှုကို ဖြုတ်ပါ",
+  "error.channel_member_unavailable": "ဤသူသည် ဤ channel အတွက် မရနိုင်ပါ",
   "error.block_not_allowed": "ဤအသုံးပြုသူကို ပိတ်ဆို့၍ မရပါ",
 };

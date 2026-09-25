@@ -115,9 +115,10 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
 
 ### Added
 - **Blocking.** Block someone from their DM header; unblock there or in Settings. Blocking stops DMs, DM
-  reactions and typing both ways and hides the person's channel posts, replies and reactions on your
-  device. They aren't told: a DM to someone who blocked them gets the same "not available" answer as one to
-  a banned member. The list is private to you, never synced, and cleared by Emergency Reset.
+  reactions and typing both ways, stops either of you inviting the other into a private channel or handing
+  them one, and hides the person's channel posts, replies and reactions on your device. They aren't told:
+  a DM to someone who blocked them gets a generic "not available" answer that doesn't say why. The list is
+  private to you, never synced, and cleared by Emergency Reset.
 - **Privacy policy** at [loamnet.com/privacy](https://loamnet.com/privacy), linked from the site footer,
   the client's Settings and the Android host menu.
 - **Report this user** from a DM's header.
@@ -142,7 +143,7 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   debug-signed APK build warns unless acknowledged with `--debug-signed`. CI actions are pinned to commit
   SHAs (Dependabot bumps them weekly), and the job that publishes releases is separate from the build.
 - **DMs to banned or not-yet-approved members are refused** (`dm_unavailable`). They used to be accepted.
-  It's the same answer a blocked sender gets, so it doesn't reveal a block.
+  It's the same generic answer a blocked sender gets.
 - Android: Wi-Fi, location and Bluetooth are declared optional hardware (so Play doesn't filter out
   tablets and Chromebooks); unused template permissions are blocked; incoming `loam://` links only ever
   open the host screen.

@@ -886,9 +886,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   /**
    * Whether a user block stops `senderId` writing into a DM with `recipientId` (docs/30 B3): a new DM, a
    * reaction on one, or an edit of an old one. A sender who did the blocking gets an honest "you blocked
-   * them"; a sender who IS blocked gets the generic `dm_unavailable` answer that a DM to a banned or
-   * not-yet-approved recipient also gets, so the refusal never says "you were blocked". Reads the DAL
-   * directly (one indexed lookup): block lists keep no in-memory mirror that a wipe would have to reset.
+   * them"; a sender who IS blocked gets the generic `dm_unavailable`, which doesn't state the reason (a DM
+   * to a banned or not-yet-approved recipient gets it too, but those are hidden from the roster, so it
+   * doesn't disguise the block — docs/12 §5). Reads the DAL directly (one indexed lookup): block lists keep
+   * no in-memory mirror that a wipe would have to reset.
    */
   function dmBlockError(senderId: string, recipientId: string): string | undefined {
     if (senderId === recipientId) {
@@ -1616,8 +1617,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return { error: "Recipient user does not exist" };
       }
 
-      // Someone who can't read DMs (banned, or still awaiting approval) can't receive one. It is the same
-      // generic answer a sender the recipient has BLOCKED gets (dmBlockError), so neither reads as "blocked".
+      // Someone who can't read DMs (banned, or still awaiting approval) can't receive one. The same generic
+      // answer a sender the recipient has BLOCKED gets (dmBlockError): it doesn't state the reason.
       if (recipient.banned || recipient.pending) {
         return { error: "Direct messages to this person aren't available", forbidden: true };
       }

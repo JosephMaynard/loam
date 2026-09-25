@@ -5,6 +5,15 @@ import { ChannelCreateRequestSchema, ChannelMemberAddRequestSchema, ChannelSchem
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 
+/**
+ * Whether a block stands between `actorId` and `targetId`, in either direction. An owner/admin can't pull
+ * someone who blocked them (or whom they blocked) into a private channel roster or hand them a channel:
+ * both put the two in a shared space the block was meant to end.
+ */
+function blockedEitherWay(ctx: AppContext, actorId: string, targetId: string): boolean {
+  return actorId !== targetId && (ctx.store.isUserBlocked(actorId, targetId) || ctx.store.isUserBlocked(targetId, actorId));
+}
+
 /** Register the channel routes: listing, history, members, join requests, transfer, create/update/delete, admin view. */
 export function registerChannelRoutes(ctx: AppContext): void {
   ctx.server.get("/api/channels", async (request, reply) => {
@@ -130,6 +139,11 @@ export function registerChannelRoutes(ctx: AppContext): void {
 
     if (members.has(target.id)) {
       return channel;
+    }
+
+    // Generic answer (both directions), so the blocked party isn't told about the block.
+    if (blockedEitherWay(ctx, currentUser.id, target.id)) {
+      return reply.code(403).send(errorBody("This person isn't available for this channel"));
     }
 
     return ctx.applyChannelMembers(channel, [...members, target.id]);
@@ -376,6 +390,11 @@ export function registerChannelRoutes(ctx: AppContext): void {
 
     if (channel.ownerUserId === target.id) {
       return channel;
+    }
+
+    // Generic answer (both directions), so the blocked party isn't told about the block.
+    if (blockedEitherWay(ctx, currentUser.id, target.id)) {
+      return reply.code(403).send(errorBody("This person isn't available for this channel"));
     }
 
     // For a private channel, materialise the full roster (channelMemberIds folds in the *current*

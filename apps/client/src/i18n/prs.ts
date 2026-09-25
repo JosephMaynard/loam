@@ -618,5 +618,6 @@ export const prs: Translation = {
   "settings.privacyPolicy": "پالیسی حریم خصوصی",
   "error.dm_unavailable": "پیام مستقیم به این شخص در دسترس نیست",
   "error.dm_blocked_by_you": "شما این شخص را مسدود کرده‌اید. برای فرستادن پیام، مسدودیت را رفع کنید",
+  "error.channel_member_unavailable": "این شخص برای این چینل در دسترس نیست",
   "error.block_not_allowed": "این کاربر را نمی‌توان مسدود کرد",
 };

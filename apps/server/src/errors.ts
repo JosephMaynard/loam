@@ -176,11 +176,14 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Only admins can post in this channel": "channel_admins_post_only",
   "This message was removed by a moderator": "message_removed",
   "The assistant is busy; try again shortly": "assistant_busy",
-  // User blocking (docs/30 B3). The first is deliberately generic: a blocked sender sees the same answer
-  // as a DM to anyone who can't currently receive one (banned / awaiting approval), never "you're blocked".
+  // User blocking (docs/30 B3). The first is deliberately generic: it doesn't state the reason (a DM to a
+  // banned / awaiting-approval recipient gets it too), never "you're blocked".
   "Direct messages to this person aren't available": "dm_unavailable",
   "You blocked this person. Unblock them to send a message": "dm_blocked_by_you",
   "This user can't be blocked": "block_not_allowed",
+  // An invite or ownership transfer across a block (either direction). Generic like `dm_unavailable`: it
+  // doesn't state the reason.
+  "This person isn't available for this channel": "channel_member_unavailable",
   // The generic 5xx body (see the app's error handler) — internal detail is logged, never returned.
   "Internal server error": "internal_error",
 };

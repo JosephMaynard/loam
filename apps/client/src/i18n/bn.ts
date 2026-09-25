@@ -617,5 +617,6 @@ export const bn: Translation = {
   "settings.privacyPolicy": "গোপনীয়তা নীতি",
   "error.dm_unavailable": "এই ব্যক্তিকে সরাসরি বার্তা পাঠানো যাচ্ছে না",
   "error.dm_blocked_by_you": "আপনি এই ব্যক্তিকে ব্লক করেছেন। বার্তা পাঠাতে তাঁকে আনব্লক করুন",
+  "error.channel_member_unavailable": "এই ব্যক্তি এই চ্যানেলের জন্য উপলব্ধ নন",
   "error.block_not_allowed": "এই ব্যবহারকারীকে ব্লক করা যায় না",
 };

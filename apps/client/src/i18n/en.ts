@@ -690,6 +690,7 @@ export const en = {
   "settings.privacyPolicy": "Privacy policy",
   "error.dm_unavailable": "Direct messages to this person aren't available",
   "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
+  "error.channel_member_unavailable": "This person isn't available for this channel",
   "error.block_not_allowed": "This user can't be blocked",
 };
 

@@ -1266,6 +1266,7 @@ export const SERVER_ERROR_CODES = [
   "dm_unavailable",
   "dm_blocked_by_you",
   "block_not_allowed",
+  "channel_member_unavailable",
 ] as const;
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 

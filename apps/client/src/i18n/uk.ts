@@ -627,5 +627,6 @@ export const uk: Translation = {
   "settings.privacyPolicy": "Політика конфіденційності",
   "error.dm_unavailable": "Прямі повідомлення цій людині недоступні",
   "error.dm_blocked_by_you": "Ви заблокували цю людину. Розблокуйте її, щоб надіслати повідомлення",
+  "error.channel_member_unavailable": "Ця людина недоступна для цього каналу",
   "error.block_not_allowed": "Цього користувача не можна заблокувати",
 };

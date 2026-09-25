@@ -627,5 +627,6 @@ export const ru: Translation = {
   "settings.privacyPolicy": "Политика конфиденциальности",
   "error.dm_unavailable": "Личные сообщения этому человеку недоступны",
   "error.dm_blocked_by_you": "Вы заблокировали этого человека. Разблокируйте его, чтобы отправить сообщение",
+  "error.channel_member_unavailable": "Этот человек недоступен для этого канала",
   "error.block_not_allowed": "Этого пользователя нельзя заблокировать",
 };

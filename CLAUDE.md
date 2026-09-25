@@ -410,10 +410,12 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   visible human can be blocked (self, bot, system and `mesh.` ids → 400 `block_not_allowed`; unknown,
   banned, pending → 404). `dmBlockError()` refuses new DMs, DM reactions and edits of old DMs in **both
   directions** (removing your own reaction and deleting stay allowed); `/api/typing` drops DM typing
-  silently. The blocker gets `dm_blocked_by_you`; the blocked sender gets the generic `dm_unavailable`,
-  which a DM to a **banned or pending** recipient now also returns (those used to be accepted). Channel
-  content is still delivered — the blocker's client hides it. Mesh mail bypasses `createMessage`, so mesh
-  senders can't be blocked, and channel invites don't consult blocks.
+  silently. The blocker gets `dm_blocked_by_you`; the blocked sender gets the generic `dm_unavailable`
+  (it doesn't state the reason, but it doesn't disguise a block either: a DM to a **banned or pending**
+  recipient also returns it — those used to be accepted — yet those users are hidden from the roster).
+  A private-channel invite or ownership transfer across a block (either direction) gets the generic 403
+  `channel_member_unavailable`. Channel content is still delivered — the blocker's client hides it. Mesh
+  mail bypasses `createMessage`, so mesh senders can't be blocked.
 - **Moderator-removed messages** can't be edited by their author (403 `message_removed`) and take no new
   replies or reactions.
 - **Avatar uploads**: base64 JSON body, ≤128KB, magic-byte signature checked against declared MIME,

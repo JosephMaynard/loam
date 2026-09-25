@@ -631,5 +631,6 @@ export const ar: Translation = {
   "settings.privacyPolicy": "سياسة الخصوصية",
   "error.dm_unavailable": "الرسائل المباشرة إلى هذا الشخص غير متاحة",
   "error.dm_blocked_by_you": "لقد حظرت هذا الشخص. ألغِ حظره لترسل إليه رسالة",
+  "error.channel_member_unavailable": "هذا الشخص غير متاح لهذه القناة",
   "error.block_not_allowed": "لا يمكن حظر هذا المستخدم",
 };

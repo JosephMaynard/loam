@@ -9,9 +9,9 @@ import { openStore } from "./db.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Per-user blocking (docs/30 B3 — Play's user-generated-content policy). The DM-refusal tests were
- * mutation-checked: with the `dmBlockError` checks in `createMessage` / `messageMutationError` reverted,
- * they fail.
+ * Per-user blocking (docs/30 B3 — Play's user-generated-content policy). The DM, invite and transfer
+ * refusal tests were mutation-checked: with the `dmBlockError` checks in `createMessage` /
+ * `messageMutationError`, or the `blockedEitherWay` checks in routes-channels.ts, reverted, they fail.
  */
 
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
@@ -162,7 +162,7 @@ describe("user blocking (docs/30 B3)", () => {
     expect(codeOf(response)).toBe("user_not_found");
   });
 
-  it("refuses a DM from the blocked user with a generic code that doesn't reveal the block", async () => {
+  it("refuses a DM from the blocked user with a generic code that doesn't state the reason", async () => {
     const app = await makeApp();
     const admin = await newSession(app);
     const alice = await newSession(app);
@@ -177,7 +177,8 @@ describe("user blocking (docs/30 B3)", () => {
     expect(codeOf(refused)).toBe("dm_unavailable");
     expect(JSON.stringify(refused.json())).not.toMatch(/block/i);
 
-    // Exactly what a DM to someone who can't receive one (a banned user) answers — indistinguishable.
+    // The code is generic, not block-specific: a DM to a banned user gets it too. (That doesn't make the
+    // two indistinguishable — banned users are hidden from the roster — it only means no reason is stated.)
     await app.server.inject({
       method: "PATCH",
       url: `/api/moderation/users/${banned.userId}`,
@@ -185,8 +186,8 @@ describe("user blocking (docs/30 B3)", () => {
       payload: { banned: true },
     });
     const toBanned = await sendDm(app, bob.cookie, banned.userId, "hello?");
-    expect(toBanned.statusCode).toBe(refused.statusCode);
-    expect(toBanned.json()).toEqual(refused.json());
+    expect(toBanned.statusCode).toBe(403);
+    expect(codeOf(toBanned)).toBe("dm_unavailable");
 
     // Nothing was stored for Alice to receive.
     const thread = (
@@ -388,28 +389,106 @@ describe("user blocking (docs/30 B3)", () => {
     expect(app.store.isUserBlocked(alice.userId, bob.userId)).toBe(false);
   });
 
-  it("is never exported by node sync", async () => {
+  it("refuses a private-channel invite or ownership transfer across a block, generically, both ways", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    const carol = await newSession(app);
+    await block(app, alice.cookie, bob.userId);
+
+    /** A new private channel owned by `owner`. */
+    const create = async (owner: { cookie: string }, name: string): Promise<string> => {
+      const response = await app.server.inject({
+        method: "POST",
+        url: "/api/channels",
+        headers: { cookie: owner.cookie },
+        payload: { name, visibility: "private" },
+      });
+      expect(response.statusCode).toBe(201);
+      return (response.json() as { id: string }).id;
+    };
+    const invite = (actor: { cookie: string }, channelId: string, userId: string) =>
+      app.server.inject({
+        method: "POST",
+        url: `/api/channels/${channelId}/members`,
+        headers: { cookie: actor.cookie },
+        payload: { userId },
+      });
+    const transfer = (actor: { cookie: string }, channelId: string, userId: string) =>
+      app.server.inject({
+        method: "POST",
+        url: `/api/channels/${channelId}/transfer`,
+        headers: { cookie: actor.cookie },
+        payload: { userId },
+      });
+    const members = async (actor: { cookie: string }, channelId: string): Promise<string[]> =>
+      (
+        (await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/members`, headers: { cookie: actor.cookie } })).json() as {
+          id: string;
+        }[]
+      ).map((user) => user.id);
+
+    // The blocked party (Bob) can neither invite the blocker nor hand her his channel…
+    const bobs = await create(bob, "Bobs Room");
+    for (const refused of [await invite(bob, bobs, alice.userId), await transfer(bob, bobs, alice.userId)]) {
+      expect(refused.statusCode).toBe(403);
+      expect(codeOf(refused)).toBe("channel_member_unavailable");
+      expect(JSON.stringify(refused.json())).not.toMatch(/block/i);
+    }
+    expect(await members(bob, bobs)).not.toContain(alice.userId);
+
+    // …and the blocker gets the same answer the other way round.
+    const alices = await create(alice, "Alices Room");
+    const reverse = await invite(alice, alices, bob.userId);
+    expect(reverse.statusCode).toBe(403);
+    expect(codeOf(reverse)).toBe("channel_member_unavailable");
+    expect(codeOf(await transfer(alice, alices, bob.userId))).toBe("channel_member_unavailable");
+
+    // Third parties are unaffected, and unblocking restores both.
+    expect((await invite(bob, bobs, carol.userId)).statusCode).toBe(200);
+    await unblock(app, alice.cookie, bob.userId);
+    expect((await invite(bob, bobs, alice.userId)).statusCode).toBe(200);
+    expect((await transfer(bob, bobs, alice.userId)).statusCode).toBe(200);
+  });
+
+  it("changes nothing in the node-sync export", async () => {
     const app = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
     await newSession(app);
     const alice = await newSession(app);
     const bob = await newSession(app);
-    await app.server.inject({
-      method: "POST",
-      url: "/api/messages",
-      headers: { cookie: bob.cookie },
-      payload: { type: "channelPost", channelId: "general", body: "public words" },
-    });
-    await block(app, alice.cookie, bob.userId);
+    for (const author of [alice, bob]) {
+      const posted = await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: author.cookie },
+        payload: { type: "channelPost", channelId: "general", body: `public words from ${author.userId}` },
+      });
+      expect(posted.statusCode).toBe(201);
+    }
 
-    const digest = await app.server.inject({ method: "GET", url: "/api/sync/digest" });
-    expect(digest.statusCode).toBe(200);
-    expect(digest.body).not.toMatch(/block/i);
-    const ids = (digest.json() as { messages: { id: string }[] }).messages.map((message) => message.id);
-    expect(ids.length).toBeGreaterThan(0);
-    const exported = await app.server.inject({ method: "POST", url: "/api/sync/messages", payload: { ids } });
-    expect(exported.statusCode).toBe(200);
-    expect(exported.body).toContain("public words");
-    expect(exported.body).not.toMatch(/block/i);
+    /** The whole export a peer can pull: the digest, then every message it offers with their authors. */
+    const exportSnapshot = async (): Promise<{ digest: string; messages: string }> => {
+      const digest = await app.server.inject({ method: "GET", url: "/api/sync/digest" });
+      expect(digest.statusCode).toBe(200);
+      const ids = (digest.json() as { messages: { id: string }[] }).messages.map((message) => message.id);
+      const exported = await app.server.inject({ method: "POST", url: "/api/sync/messages", payload: { ids } });
+      expect(exported.statusCode).toBe(200);
+      return { digest: digest.body, messages: exported.body };
+    };
+
+    const before = await exportSnapshot();
+    // Both authors are exported as users, so a block field on a user record would show up here.
+    const exportedUsers = (JSON.parse(before.messages) as { users: { id: string }[] }).users.map((user) => user.id);
+    expect(exportedUsers).toEqual(expect.arrayContaining([alice.userId, bob.userId]));
+
+    await block(app, alice.cookie, bob.userId);
+    await block(app, bob.cookie, alice.userId);
+    const after = await exportSnapshot();
+
+    // Byte-for-byte the same export: a block adds no field to any user, message or digest entry.
+    expect(after).toEqual(before);
+    expect(`${after.digest}${after.messages}`).not.toMatch(/block/i);
   });
 });
 
