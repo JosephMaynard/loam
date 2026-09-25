@@ -71,6 +71,7 @@ export function createKillSwitch(ctx: AppContext) {
       ctx.panicAttempts.clear();
       ctx.transportSessions.clear();
       ctx.sync.forgetPeerState();
+      ctx.mesh.forget();
       ctx.broadcast({ type: "wipe" });
       for (const { socket } of ctx.sockets) {
         socket.close();
@@ -124,6 +125,7 @@ export function createKillSwitch(ctx: AppContext) {
         ctx.panicAttempts.clear();
         ctx.transportSessions.clear();
         ctx.sync.forgetPeerState();
+        ctx.mesh.forget();
 
         // Notify still-connected clients to purge their local caches BEFORE closing their sockets —
         // closing first would leave the broadcast with no one left to reach.

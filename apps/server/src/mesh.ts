@@ -23,6 +23,9 @@ export function createMeshLayer(rt: Runtime) {
    * regardless of `mesh.enabled` so turning mesh off doesn't strand already-expired sealed rows. */
   function reapExpiredSealed(): void {
     const now = Date.now();
+    // Seen-offer marks past their offer's own TTL: such an offer is inadmissible anyway (expired), so
+    // forgetting it can't make the puller fetch it again.
+    rt.store.pruneSealedOffersSeen(now);
     const expired = rt.data.messages.filter(
       (message): message is SealedMessage => message.type === "sealed" && message.ttlExpiresAt <= now,
     );
@@ -59,6 +62,136 @@ export function createMeshLayer(rt: Runtime) {
     return user.type === "human" && !user.banned && !user.id.startsWith("mesh.") && !rt.store.isUserSynced(user.id);
   }
 
+  // Config-table key marking the one-time legacy provenance backfill below as done.
+  const LEGACY_SYNCED_USERS_BACKFILL_KEY = "migration.syncedUsersBackfill.v1";
+
+  /**
+   * One-time repair of a database written before sync provenance existed (v0.4.0 and earlier; review
+   * 2026-09-25 follow-up). That build imported EVERY user a peer's payload listed, recorded none of them in
+   * `synced_users`, and minted a mesh keypair for every human — peer-imported users and `mesh.*` sender
+   * records included — publishing it as their `identityKey`. Without provenance, `isLocalMeshUser` can't
+   * tell those users from local ones, so the boot purge in {@link loadMeshIdentities} kept the forged keys.
+   *
+   * A user is marked synced only when ALL of these hold (no single signal is trusted on its own):
+   *  - a plain human record (not `mesh.*`/`llm.*`, not already marked);
+   *  - NO session row and NO transport identity token — nobody can act as this user on this node any more.
+   *    This is the condition the rule's safety rests on: a false positive (a local user wrongly marked)
+   *    costs a mesh identity nobody can use, since nobody can sign in as that user. A reachable local user
+   *    always has one of the two (a cookie session or a bound identity token);
+   *  - no authority or moderation state (admin, roles, pending, banned, shadow-banned, timed out) — imports
+   *    always stripped these, so their presence means the record is local;
+   *  - no local-only footprint: owns no mesh contacts, blocks, open reports or channel; isn't on a private
+   *    roster or join queue; authored or received no DM and wrote nothing in a private channel (none of
+   *    that ever syncs).
+   * The old build's public posts carry no provenance (`synced_messages` didn't exist), so authorship of
+   * public content can't count either way; the reachability test above is what keeps local users safe.
+   *
+   * `mesh.*` user records are sender display records: one no local DM references was imported from a peer
+   * (or is an orphan) and is deleted; one that does is reset to the generated default, dropping any
+   * peer-chosen name, avatar or key. The mesh identity rows of every marked user are then purged by the
+   * normal loop in {@link loadMeshIdentities}. Guarded by a config-table flag so it runs once per database.
+   */
+  function backfillLegacySyncedUsers(): void {
+    if (rt.store.getConfigValue(LEGACY_SYNCED_USERS_BACKFILL_KEY) !== undefined) {
+      return;
+    }
+
+    const localFootprint = new Set<string>();
+    for (const { userId } of rt.store.loadSessions()) {
+      localFootprint.add(userId);
+    }
+    for (const { userId } of rt.store.loadIdentityTokens()) {
+      localFootprint.add(userId);
+    }
+    for (const { ownerUserId } of rt.store.loadMeshContacts()) {
+      localFootprint.add(ownerUserId);
+    }
+    for (const report of rt.store.loadOpenReports()) {
+      localFootprint.add(report.reporterUserId);
+    }
+    for (const channel of rt.data.channels) {
+      if (channel.ownerUserId) {
+        localFootprint.add(channel.ownerUserId);
+      }
+      for (const memberId of channel.memberUserIds ?? []) {
+        localFootprint.add(memberId);
+      }
+      for (const requesterId of rt.store.loadJoinRequests(channel.id)) {
+        localFootprint.add(requesterId);
+      }
+    }
+    const dmParticipants = new Set<string>();
+    for (const message of rt.data.messages) {
+      if (message.type === "sealed") {
+        continue; // authored by the opaque sentinel
+      }
+      if (message.type === "dm") {
+        dmParticipants.add(message.authorId);
+        dmParticipants.add(message.recipientUserId);
+      }
+      // A restricted audience means a DM, a private-channel message, or a reaction on one — never synced.
+      if (rt.messageAudienceUserIds(message) !== undefined) {
+        localFootprint.add(message.authorId);
+      }
+    }
+    for (const id of dmParticipants) {
+      localFootprint.add(id);
+    }
+
+    rt.store.transaction(() => {
+      for (const user of rt.data.users) {
+        if (
+          user.type !== "human" ||
+          user.id.startsWith("mesh.") ||
+          user.id.startsWith("llm.") ||
+          rt.store.isUserSynced(user.id) ||
+          localFootprint.has(user.id) ||
+          user.isAdmin ||
+          user.roles?.length ||
+          user.pending ||
+          user.banned ||
+          user.shadowBanned ||
+          user.timeoutUntil !== undefined ||
+          rt.store.loadUserBlocks(user.id).length
+        ) {
+          continue;
+        }
+        rt.store.markUserSynced(user.id);
+      }
+
+      for (const user of rt.data.users.filter((candidate) => candidate.id.startsWith("mesh."))) {
+        if (!dmParticipants.has(user.id)) {
+          rt.store.deleteMeshIdentity(user.id);
+          rt.store.deleteUser(user.id);
+          continue;
+        }
+        const reset = UserSchema.parse({ ...makeUser(user.id), createdAt: user.createdAt });
+        if (JSON.stringify(reset) !== JSON.stringify(user)) {
+          rt.store.upsertUser(reset);
+        }
+      }
+
+      rt.store.setConfigValue(LEGACY_SYNCED_USERS_BACKFILL_KEY, String(Date.now()));
+    });
+
+    // Mirror the committed changes in memory.
+    const resets = new Map(
+      rt.data.users
+        .filter((user) => user.id.startsWith("mesh.") && dmParticipants.has(user.id))
+        .map((user) => [user.id, UserSchema.parse({ ...makeUser(user.id), createdAt: user.createdAt })]),
+    );
+    rt.data.users = rt.data.users.filter((user) => !user.id.startsWith("mesh.") || dmParticipants.has(user.id));
+    for (const user of rt.data.users) {
+      const reset = resets.get(user.id);
+      if (reset) {
+        for (const key of Object.keys(user)) {
+          delete (user as Record<string, unknown>)[key];
+        }
+        Object.assign(user, reset);
+      }
+    }
+  }
+
   /**
    * Load every persisted per-user mesh identity into the in-memory map — only for local users. A row minted
    * for a peer-imported user or a mesh sender by an older build is a useless secret for someone else's
@@ -67,6 +200,9 @@ export function createMeshLayer(rt: Runtime) {
    * re-exported (a later genuine key from the user's home node may then be adopted by the sync TOFU rule).
    */
   function loadMeshIdentities(): void {
+    meshIdentities.clear();
+    localTagCache.clear(); // keyed by secret mailbox tokens — never outlive the identities they came from
+    backfillLegacySyncedUsers();
     for (const { userId, data: json } of rt.store.loadMeshIdentities()) {
       let identity: MeshIdentity;
       try {
@@ -339,6 +475,38 @@ export function createMeshLayer(rt: Runtime) {
     return offer.ttlExpiresAt <= now + MESH_TTL_MAX_MS + MESH_EPOCH_WINDOW_MS;
   }
 
+  // Hard cap on the durable seen-offer record. At the cap the puller stops fetching NEW sealed offers (until
+  // entries expire) rather than evicting: an evicted mark would let a dropped offer be fetched again while
+  // a delivered one stays tombstoned — the very difference the record exists to hide.
+  const SEALED_SEEN_MAX = 200_000;
+
+  /**
+   * Remember that this node has fetched or received sealed offer `id` — delivered, carried or dropped alike
+   * — until the offer's own expiry (docs/16 §9). The puller never fetches a remembered id again, so a restart,
+   * a config save or a relay toggle changes nothing about WHICH offers it re-downloads: a peer diffing fetch
+   * sets across those events can't tell the recipient's node from a node that dropped the blob.
+   */
+  function rememberSealedOffer(id: string, ttlExpiresAt: number): void {
+    rt.store.markSealedOfferSeen(id, ttlExpiresAt);
+  }
+
+  /** True when sealed offer `id` was already fetched or received here and hasn't expired. */
+  function isSealedOfferSeen(id: string, now: number): boolean {
+    return rt.store.isSealedOfferSeen(id, now);
+  }
+
+  /** True when the seen-offer record is full (see SEALED_SEEN_MAX): pull no new sealed offers this round. */
+  function sealedSeenAtCapacity(): boolean {
+    return rt.store.countSealedOffersSeen() >= SEALED_SEEN_MAX;
+  }
+
+  /** Drop every in-memory secret-derived cache: identities, contacts and the tag memo (Emergency Reset lockdown). */
+  function forget(): void {
+    meshIdentities.clear();
+    meshContacts.clear();
+    localTagCache.clear();
+  }
+
   /** Whether this node would CARRY an admissible offer that isn't for a local user: relaying is on and a hop
    * is left after the decrement (a copy stored at hop 0 is never advertised again). Capacity is separate. */
   function sealedOfferCarriable(offer: Pick<SealedMessage, "hopLimit">): boolean {
@@ -359,6 +527,9 @@ export function createMeshLayer(rt: Runtime) {
     if (!sealedOfferAdmissible(message, Date.now())) {
       return false;
     }
+    // Every admissible offer this node takes in is remembered, whatever happens to it below — so a later
+    // sync offer of the same id is skipped the same way whether it was delivered, carried or dropped.
+    rememberSealedOffer(message.id, message.ttlExpiresAt);
     // `sealMailbox` only ever emits the canonical spelling; any other string that decodes to the same
     // envelope is a carrier's attempt to slip one message past the string-keyed replay checks below.
     if (!isCanonicalSealedBlob(message.sealed)) {
@@ -509,6 +680,10 @@ export function createMeshLayer(rt: Runtime) {
     localTagsForWindow,
     sealedOfferAdmissible,
     sealedOfferCarriable,
+    rememberSealedOffer,
+    isSealedOfferSeen,
+    sealedSeenAtCapacity,
+    forget,
     sealedHeldCount,
     acceptSealedFromPeer,
     isReservedReplayId,

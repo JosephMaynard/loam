@@ -518,6 +518,9 @@ export const MeshConfigSchema = z.object({
   /** Cap on a single local user's mesh address book, so an authenticated client can't grow the
    * `mesh_contacts` store without bound (mirrors `maxCarried` for sealed blobs). */
   maxContacts: z.number().int().min(0).max(100_000),
+  /** Most sealed offers one sync round fetches from one peer (absent = 80; 0 = pull no sealed mail over
+   *  sync). Lower it on a metered link: a node pulls every eligible offer, not just its own (docs/16). */
+  maxSealedPullPerRound: z.number().int().min(0).max(500).optional(),
 });
 export type MeshConfig = z.infer<typeof MeshConfigSchema>;
 

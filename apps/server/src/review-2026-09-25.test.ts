@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingHttpHeaders, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 
 import {
@@ -45,6 +46,17 @@ async function makeApp(config?: unknown, opts?: Partial<AppOptions>): Promise<{ 
     rmSync(dataDir, { recursive: true, force: true });
   });
   return { app, dataDir };
+}
+
+/** Poll until `condition` holds (or fail after ~5 s). */
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("waitFor timed out");
 }
 
 /** A fresh cookie session (the first one on a firstUser node is the admin). */
@@ -155,6 +167,24 @@ describe("request logs never reveal tunnelled paths or query strings (#10)", () 
     expect(text).toContain("/api/transport/tunnel");
     expect(text).not.toContain("TUNNELLED_SECRET_TERM");
     expect(text).not.toContain("/api/search");
+  });
+
+  it("Fastify's own double-send warning doesn't name the (tunnelled) path or its query", async () => {
+    const { app, logs } = await makeLoggedApp();
+    // Tunnelled: the path itself is secret. Direct: the path is on the wire anyway, the query isn't logged.
+    for (const path of ["/api/test/double-send-PATH_SECRET", "/api/test/double-send"]) {
+      app.server.get(path, (_request, reply) => {
+        void reply.send({ first: true });
+        void reply.send({ second: true });
+      });
+    }
+    const tunnel = await boundTunnel(app);
+    expect((await tunnel("GET", "/api/test/double-send-PATH_SECRET?q=TUNNEL_QUERY_SECRET")).status).toBe(200);
+    expect((await app.server.inject({ method: "GET", url: "/api/test/double-send?q=DIRECT_QUERY_SECRET" })).statusCode).toBe(200);
+    const text = logs.join("");
+    expect(text).toContain("Reply was already sent");
+    expect(text).not.toContain("PATH_SECRET");
+    expect(text).not.toContain("QUERY_SECRET");
   });
 
   it("strips the query string from every logged request URL", async () => {
@@ -307,7 +337,7 @@ describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL (#1
       }
       return undefined;
     });
-    const { app, admin } = await puller(peer.url, { mesh: MESH_NO_RELAY });
+    const { app, dataDir, admin } = await puller(peer.url, { mesh: MESH_NO_RELAY });
     const card = MeshIdentityCardSchema.parse(
       (await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie: admin.cookie } })).json(),
     );
@@ -331,6 +361,64 @@ describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL (#1
     await syncRound(app, admin.cookie);
     await syncRound(app, admin.cookie);
     expect(requestedIds(peer).filter((id) => id === "seal_foreign")).toHaveLength(1);
+
+    // Nothing that used to clear the RAM refusal cache may make the node go back for the dropped blob while
+    // the delivered one stays skipped — a peer diffing the fetch sets would learn which one was delivered.
+    const fetchCounts = () => ["seal_mine", "seal_foreign"].map((id) => requestedIds(peer).filter((asked) => asked === id).length);
+    const patch = async (target: LoamApp, payload: unknown) =>
+      (await target.server.inject({ method: "PATCH", url: "/api/admin/config", headers: { cookie: admin.cookie }, payload })).statusCode;
+
+    expect(await patch(app, { node: { name: "Renamed node" } })).toBe(200); // a no-op for sync
+    await syncRound(app, admin.cookie);
+    expect(fetchCounts()).toEqual([1, 1]);
+
+    expect(await patch(app, { mesh: { relay: true } })).toBe(200); // relay toggled on
+    await syncRound(app, admin.cookie);
+    expect(fetchCounts()).toEqual([1, 1]);
+
+    await app.close(); // restart
+    const reopened = await buildApp({ dataDir, logger: false });
+    cleanups.push(() => reopened.close());
+    await syncRound(reopened, admin.cookie);
+    expect(fetchCounts()).toEqual([1, 1]);
+    expect(reopened.store.countSealedOffersSeen()).toBe(2);
+  });
+
+  it("Emergency Reset clears the durable seen-offer record", async () => {
+    const foreign = sealedRecord("seal_foreign");
+    const peer = await servingPeer([foreign]);
+    const { app, admin } = await puller(peer.url, { mesh: MESH_NO_RELAY, killSwitch: { enabled: true, requireConfirmation: false } });
+    await syncRound(app, admin.cookie);
+    expect(app.store.countSealedOffersSeen()).toBe(1);
+    const wipe = await app.server.inject({ method: "POST", url: "/api/admin/kill-switch", headers: { cookie: admin.cookie }, payload: {} });
+    expect(wipe.statusCode).toBe(200);
+    expect(app.store.countSealedOffersSeen()).toBe(0);
+  });
+
+  it("pulls no sealed mail at all while relaying is off and no local user has a mesh identity", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const foreign = sealedRecord("seal_foreign");
+      const peer = await servingPeer([foreign]);
+      const { app } = await makeApp({ sync: { enabled: true, peers: [{ url: peer.url }], intervalMs: 5_000 }, mesh: MESH_NO_RELAY });
+      vi.advanceTimersByTime(5_000); // the sync ticker, with no user (so no identity) on the node yet
+      await waitFor(() => peer.requests.some((request) => request.path === "/api/sync/digest"));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(requestedIds(peer)).toEqual([]);
+
+      const admin = await newSession(app); // a local user → a mesh identity → mail may be ours now
+      await syncRound(app, admin.cookie);
+      expect(requestedIds(peer)).toEqual(["seal_foreign"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("honours mesh.maxSealedPullPerRound", async () => {
+    const peer = await servingPeer([sealedRecord("seal_a"), sealedRecord("seal_b"), sealedRecord("seal_c")]);
+    const { app, admin } = await puller(peer.url, { mesh: { ...MESH_RELAY, maxSealedPullPerRound: 1 } });
+    await syncRound(app, admin.cookie);
+    expect(requestedIds(peer)).toHaveLength(1);
   });
 
   it("recognises mail whose sender chose a longer TTL than this node's own mesh.ttlMs", async () => {
@@ -402,6 +490,39 @@ describe("byte-budgeted sync batches (#2)", () => {
     const before = requestedIds(peer).length;
     await syncRound(app, admin.cookie);
     expect(requestedIds(peer).length).toBe(before);
+  });
+});
+
+describe("bisection is bounded against a peer that serves junk", () => {
+  /** A peer advertising `count` public ids and answering every messages request with `junk`. */
+  function junkPeer(count: number, junk: () => unknown) {
+    const ids = Array.from({ length: count }, (_, index) => `msg.junk${index}`);
+    return fakePeer((path) => {
+      if (path === "/api/sync/digest") {
+        return { channels: [], messages: ids.map((id) => ({ id })) };
+      }
+      return path === "/api/sync/messages" ? junk() : undefined;
+    });
+  }
+
+  it("a peer failing the schema on every batch costs at most ~3 requests per batch, and the round fails", async () => {
+    const peer = await junkPeer(1_000, () => ({ messages: [{ id: "x", type: "channelPost" }], users: [] }));
+    const { app, admin } = await puller(peer.url);
+    const status = await syncRound(app, admin.cookie);
+    const batches = 5; // 1 000 ids / 200
+    const requests = peer.requests.filter((request) => request.path === "/api/sync/messages").length;
+    expect(requests).toBeLessThanOrEqual(batches + 2 * batches + 16);
+    expect(status.lastError).toMatch(/unusable batches/);
+  });
+
+  it("a peer answering every batch over the size cap stops within the wasted-byte budget", async () => {
+    const huge = JSON.stringify({ messages: [], users: [], pad: "x".repeat(9 * 1024 * 1024) });
+    const peer = await junkPeer(1_000, () => huge);
+    const { app, admin } = await puller(peer.url);
+    const status = await syncRound(app, admin.cookie);
+    const requests = peer.requests.filter((request) => request.path === "/api/sync/messages").length;
+    expect(requests).toBeLessThanOrEqual(5); // 4 × 8 MiB wasted, then the round gives up on the peer
+    expect(status.lastError).toMatch(/unusable batches/);
   });
 });
 
@@ -539,6 +660,95 @@ describe("peer users: only accepted authors, no reserved ids, no mesh keys minte
     cleanups.push(() => reopened.close());
     expect(reopened.store.loadMeshIdentities().some((row) => row.userId === author.id)).toBe(false);
     expect(reopened.store.loadUsers().find((user) => user.id === author.id)?.identityKey?.sign).toBe(peerKey.signPublic);
+  });
+
+  it("refuses the whole llm.* namespace and non-human author records", async () => {
+    const otherBot = { ...peerAuthor, id: "llm.someone.else", displayName: "Peer assistant", type: "bot" };
+    const disguisedBot = { ...peerAuthor, id: "user.robot", displayName: "Totally human", type: "bot" };
+    const system = { ...peerAuthor, id: "user.sys", displayName: "System", type: "system" };
+    const records = [
+      peerPost("msg.fine"),
+      peerPost("msg.by-llm", "not our assistant", otherBot.id),
+      peerPost("msg.by-bot", "a peer's bot", disguisedBot.id),
+      peerPost("msg.by-system", "a peer's system voice", system.id),
+    ];
+    const peer = await servingPeer(records, [peerAuthor, otherBot, disguisedBot, system]);
+    const { app, admin } = await puller(peer.url);
+    await syncRound(app, admin.cookie);
+    const users = new Set(app.store.loadUsers().map((user) => user.id));
+    const stored = new Set(app.store.loadMessages().map((message) => message.id));
+    expect(stored.has("msg.fine")).toBe(true);
+    for (const id of [otherBot.id, disguisedBot.id, system.id]) {
+      expect(users.has(id)).toBe(false);
+    }
+    for (const id of ["msg.by-llm", "msg.by-bot", "msg.by-system"]) {
+      expect(stored.has(id)).toBe(false);
+    }
+  });
+
+  it("an upgrade from v0.4 marks peer-imported users synced, purges their minted keys and imported mesh.* records", async () => {
+    const peer = await servingPeer([peerPost("msg.fine")]);
+    const { app, dataDir, admin } = await puller(peer.url, { mesh: MESH_NO_RELAY });
+    await syncRound(app, admin.cookie);
+    // A second local user who DMed the admin and then ended their session: unreachable, but a DM author
+    // (never synced), so they must keep their identity.
+    const dmAuthor = await newSession(app);
+    const dm = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: dmAuthor.cookie },
+      payload: { type: "dm", recipientUserId: admin.userId, body: "hi admin" },
+    });
+    expect(dm.statusCode).toBeLessThan(300);
+    await app.server.inject({ method: "POST", url: "/api/session/end", headers: { cookie: dmAuthor.cookie } });
+    const localKeys = new Map(app.store.loadMeshIdentities().map((row) => [row.userId, row.data]));
+    expect(localKeys.has(admin.userId) && localKeys.has(dmAuthor.userId)).toBe(true);
+    await app.close();
+
+    // Reshape the database into what v0.4.0 left: no provenance tables, every user the peer listed imported,
+    // a peer's mesh.* record imported, and a keypair minted + published for every human among them.
+    const db = new DatabaseSync(join(dataDir, "loam.db"));
+    db.exec("DROP TABLE synced_users; DROP TABLE synced_messages; DROP TABLE sealed_offers_seen");
+    db.prepare("DELETE FROM config WHERE key LIKE 'migration.%'").run();
+    const importedMesh = "mesh.aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const mailingMesh = "mesh.bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const bystander = { ...peerAuthor, id: "user.bystander", displayName: "Never posted" };
+    for (const user of [bystander, { ...peerAuthor, id: importedMesh, displayName: "Pre-named sender" }, { ...peerAuthor, id: mailingMesh, displayName: "Pre-named mailer" }]) {
+      db.prepare("INSERT INTO users (id, data) VALUES (?, ?)").run(user.id, JSON.stringify(user));
+    }
+    const minted = new Map<string, string>();
+    for (const userId of [peerAuthor.id, bystander.id, importedMesh, mailingMesh]) {
+      const identity = createMeshIdentity();
+      minted.set(userId, identity.signPublic);
+      db.prepare("INSERT INTO mesh_identities (user_id, data) VALUES (?, ?)").run(userId, JSON.stringify(identity));
+      const row = db.prepare("SELECT data FROM users WHERE id = ?").get(userId) as { data: string };
+      const user = { ...JSON.parse(row.data), identityKey: { alg: "ed25519", sign: identity.signPublic, kx: identity.kxPublic, kxSig: identity.kxSig } };
+      db.prepare("UPDATE users SET data = ? WHERE id = ?").run(JSON.stringify(user), userId);
+    }
+    // mailingMesh genuinely mailed the admin: its DM is here, so its record stays (reset to the default name).
+    const meshDm = { id: "msg.meshdm", type: "dm", authorId: mailingMesh, recipientUserId: admin.userId, body: "sealed hello", createdAt: 5_000, meta: { source: "system" } };
+    db.prepare(
+      "INSERT INTO messages (id, type, author_id, channel_id, recipient_user_id, target_message_id, created_at, data) VALUES (?, 'dm', ?, NULL, ?, NULL, ?, ?)",
+    ).run(meshDm.id, mailingMesh, admin.userId, meshDm.createdAt, JSON.stringify(meshDm));
+    db.close();
+
+    const reopened = await buildApp({ dataDir, logger: false });
+    cleanups.push(() => reopened.close());
+    const rows = new Map(reopened.store.loadMeshIdentities().map((row) => [row.userId, row.data]));
+    const users = new Map(reopened.store.loadUsers().map((user) => [user.id, user]));
+    for (const id of [peerAuthor.id, bystander.id]) {
+      expect(rows.has(id)).toBe(false);
+      expect(users.get(id)?.identityKey).toBeUndefined();
+      expect(reopened.store.isUserSynced(id)).toBe(true);
+    }
+    expect(rows.has(importedMesh) || rows.has(mailingMesh)).toBe(false);
+    expect(users.has(importedMesh)).toBe(false);
+    expect(users.get(mailingMesh)?.displayName).not.toBe("Pre-named mailer");
+    expect(users.get(mailingMesh)?.identityKey).toBeUndefined();
+    // Local users keep the very keypair they had.
+    expect(rows.get(admin.userId)).toBe(localKeys.get(admin.userId));
+    expect(rows.get(dmAuthor.userId)).toBe(localKeys.get(dmAuthor.userId));
+    expect(reopened.store.isUserSynced(admin.userId) || reopened.store.isUserSynced(dmAuthor.userId)).toBe(false);
   });
 
   it("boot drops a mesh identity an older build minted for a synced user, and strips the forged key", async () => {

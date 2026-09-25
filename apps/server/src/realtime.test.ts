@@ -152,8 +152,12 @@ describe("WebSocket heartbeat", () => {
 
     // Never plaintext on the wire, and sequenced like every other frame.
     expect(raw.some((text) => text.includes("ping"))).toBe(false);
+    // Strictly increasing: a repeated sequence number is exactly what a replayed frame would look like.
     const seqs = payloads.map((entry) => entry.q);
-    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(seqs.length).toBeGreaterThanOrEqual(2);
+    for (let index = 1; index < seqs.length; index += 1) {
+      expect(seqs[index]).toBeGreaterThan(seqs[index - 1]!);
+    }
   });
 
   it("stops beating once the socket closes", async () => {

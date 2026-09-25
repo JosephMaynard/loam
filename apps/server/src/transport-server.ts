@@ -77,9 +77,49 @@ export function loggedRequest(request: {
   };
 }
 
-/** The server's pino options: the level, the query-stripping `req` serializer, and an optional sink. */
+/**
+ * Scrub request URLs from a free-text log message. A few of Fastify's own lines interpolate the raw URL into
+ * the message, bypassing both the `req` serializer and the LogController (review 2026-09-25 follow-up): the
+ * double-send warnings name it — for a request re-dispatched inside the tunnel, that's the hidden inner path
+ * — so their URL is dropped outright; any other URL-shaped token keeps its path but loses its query string.
+ */
+export function redactLogText(text: string): string {
+  return text
+    .replace(/(did you forget to "return reply" in (?:the )?")[^"]*(")/g, "$1[redacted]$2")
+    .replace(/(\/[^\s"'?]*)\?[^\s"')]*/g, "$1");
+}
+
+/** {@link redactLogText} applied to one pino log-call argument: a message string, or an `{ err }` object. */
+function redactLogArg(arg: unknown): unknown {
+  if (typeof arg === "string") {
+    return redactLogText(arg);
+  }
+  if (arg && typeof arg === "object" && (arg as { err?: unknown }).err instanceof Error) {
+    const err = (arg as { err: Error & Record<string, unknown> }).err;
+    const message = redactLogText(err.message);
+    if (message === err.message) {
+      return arg;
+    }
+    const clean = Object.assign(new Error(message), { name: err.name, code: err.code, statusCode: err.statusCode });
+    clean.stack = err.stack === undefined ? undefined : redactLogText(err.stack);
+    return { ...(arg as object), err: clean };
+  }
+  return arg;
+}
+
+/** The server's pino options: the level, the query-stripping `req` serializer, the message redaction hook,
+ *  and an optional sink. */
 export function loamLoggerOptions(level: string, stream?: { write(line: string): void }) {
-  return { level, serializers: { req: loggedRequest }, ...(stream ? { stream } : {}) };
+  return {
+    level,
+    serializers: { req: loggedRequest },
+    hooks: {
+      logMethod(this: unknown, inputArgs: unknown[], method: (...args: unknown[]) => void) {
+        method.apply(this, inputArgs.map(redactLogArg));
+      },
+    },
+    ...(stream ? { stream } : {}),
+  };
 }
 
 /** Build the transport session layer over the app context: identity, sessions, replay windows, request-auth helpers. */

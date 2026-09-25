@@ -154,22 +154,34 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   const maxSealedPeerJsonBytes = Math.ceil((maxPeerJsonBytes * 4) / 3) + 64 * 1024;
 
   // Ids per `/api/sync/messages` request. Sealed blobs (≤ 90KB each) get their own, smaller batches so one
-  // request stays a few MB; public messages keep the historical 200.
+  // request stays a few MB; public messages keep the historical 200. A peer whose batch comes back over the
+  // size cap gets smaller batches from then on (`peerBatchSizes`), doubling back after a clean round.
   const PUBLIC_BATCH_IDS = 200;
   const SEALED_BATCH_IDS = 40;
+  const MIN_PUBLIC_BATCH_IDS = 10;
+  const MIN_SEALED_BATCH_IDS = 5;
+  const peerBatchSizes = new Map<string, { public: number; sealed: number }>();
   // Per-round fetch budgets. Bounded so a peer advertising a huge backlog can't make one round unbounded;
-  // what doesn't fit is picked up next round. The sealed budget is spent in a tag-INDEPENDENT order (soonest
-  // expiry first), so what we fetch never depends on which mail is ours (#4).
+  // what doesn't fit is picked up next round. The sealed budget (`mesh.maxSealedPullPerRound`) is spent in a
+  // tag-INDEPENDENT order (soonest expiry first), so what we fetch never depends on which mail is ours (#4).
   const MAX_PUBLIC_IDS_PER_ROUND = 4_000;
-  const MAX_SEALED_IDS_PER_ROUND = 80;
+  const DEFAULT_SEALED_IDS_PER_ROUND = 80;
+  // Bisection limits (review 2026-09-25 follow-up): a peer answering EVERY batch with junk used to cost
+  // 2n − 1 requests per n-id batch (~8 000 a round), each reading up to the 8 MiB cap. A round may spend at
+  // most `2 × batches + SPLIT_SLACK` extra requests and `MAX_WASTED_BYTES_PER_ROUND` bytes on unusable
+  // responses; past either, the peer is treated as failing for this round (`lastError`). One bad record in a
+  // full batch costs ~2·log2(200) ≈ 16 extra requests, so honest peers stay far inside both limits.
+  const SPLIT_SLACK = 16;
+  const MAX_WASTED_BYTES_PER_ROUND = 4 * maxPeerJsonBytes;
 
-  // Per-peer memory of offers this node fetched and REFUSED (review 2026-09-25 #6), keyed by id + version, so
-  // a refused NEW message (a reply to a deleted post, a post into an archived channel, an over-cap body, a
-  // blob that's neither ours nor carriable…) isn't re-downloaded every round forever — the digest keeps
-  // advertising it and "not held locally" alone would always want it. Entries expire (a refusal can stop
-  // applying — a channel un-archived, relaying switched on), the map is bounded, and it is RAM-only (a
-  // restart re-fetches each refused offer once). Cleared by the kill switch, an admin config save, and a
-  // channel policy change (forgetRefusedOffers).
+  // Per-peer memory of PUBLIC offers this node fetched and REFUSED (review 2026-09-25 #6), keyed by id +
+  // version, so a refused NEW message (a reply to a deleted post, a post into an archived channel, an over-cap
+  // body…) isn't re-downloaded every round forever — the digest keeps advertising it and "not held locally"
+  // alone would always want it. Entries expire (a refusal can stop applying — a channel un-archived), the map
+  // is bounded, and it is RAM-only (a restart re-fetches each refused offer once). Cleared by the kill switch,
+  // an admin config save, and a channel policy change (forgetRefusedOffers). Sealed offers are NOT kept here:
+  // they go in the durable, node-wide seen-offer record (`mesh.rememberSealedOffer`), which none of those
+  // events clears — see the sealed pull below.
   const REFUSED_TTL_MS = 3_600_000;
   const REFUSED_MAX_PER_PEER = 20_000;
   const refusedOffers = new Map<string, Map<string, number>>();
@@ -211,22 +223,17 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     return `p\u0000${id}\u0000${editedAt ?? 0}`;
   }
 
-  /** The refused-offer key of a sealed offer. Includes the relay setting, so switching relaying on makes
-   *  every earlier "not ours, not carriable" verdict moot at once instead of waiting out its expiry. */
-  function sealedOfferKey(id: string): string {
-    return `s\u0000${id}\u0000${rt.appConfig.mesh.relay ? 1 : 0}`;
-  }
-
   // Peers that completed a transport handshake this boot. A later plaintext fallback for one of them is a
   // downgrade (an attacker blocking `/api/bootstrap` or forging `off`), refused rather than silently taken
   // (review 2026-09-25 #13). RAM-only; cleared by the kill switch.
   const peersSeenEncrypted = new Set<string>();
 
   /**
-   * Forget every remembered refusal, keeping the rest of the per-peer state (transport sessions, downgrade
-   * history). Called when a local policy that decides refusals changes (an admin config save, a channel
-   * un-archived or reopened for posts/replies), so those offers are fetched again at the next round instead of
-   * waiting out REFUSED_TTL_MS.
+   * Forget every remembered PUBLIC refusal, keeping the rest of the per-peer state (transport sessions,
+   * downgrade history). Called when a local policy that decides refusals changes (an admin config save, a
+   * channel un-archived or reopened for posts/replies), so those offers are fetched again at the next round
+   * instead of waiting out REFUSED_TTL_MS. Never touches the sealed seen-offer record: re-fetching the sealed
+   * offers this node dropped, but not the ones it delivered, would tell the serving peer which were which.
    */
   function forgetRefusedOffers(): void {
     refusedOffers.clear();
@@ -237,6 +244,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     peerTransportSessions.clear();
     refusedOffers.clear();
     peersSeenEncrypted.clear();
+    peerBatchSizes.clear();
   }
 
   /** Errors that mean "this BATCH's content is unusable" (too big, not JSON, fails the schema) rather than
@@ -387,15 +395,36 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     path: string,
     schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
     body?: unknown,
+    meter?: { wastedBytes: number },
   ): Promise<T> {
     const transport = await resolvePeerTransport(peerUrl);
-    const raw =
-      transport === "plaintext"
-        ? await fetchPeerText(peerUrl, path, body)
-        : await sealedFetchPeerText(transport, peerUrl, path, body);
+    let raw: string;
+    try {
+      raw =
+        transport === "plaintext"
+          ? await fetchPeerText(peerUrl, path, body)
+          : await sealedFetchPeerText(transport, peerUrl, path, body);
+    } catch (error) {
+      // An over-cap body was read up to the cap before it was abandoned — bytes spent for nothing.
+      if (meter && error instanceof Error && error.message === "Peer response too large") {
+        meter.wastedBytes += maxPeerJsonBytes;
+      }
+      throw error;
+    }
 
-    const parsed = schema.safeParse(JSON.parse(raw));
+    let parsed: { success: true; data: T } | { success: false };
+    try {
+      parsed = schema.safeParse(JSON.parse(raw));
+    } catch (error) {
+      if (meter) {
+        meter.wastedBytes += Buffer.byteLength(raw, "utf8");
+      }
+      throw error;
+    }
     if (!parsed.success) {
+      if (meter) {
+        meter.wastedBytes += Buffer.byteLength(raw, "utf8");
+      }
       throw new Error("Peer sent an invalid payload");
     }
     return parsed.data;
@@ -463,9 +492,22 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
   /** Ids a peer may never name — as a user record OR a message author (review 2026-09-25 #3/#8): a `mesh.*`
    *  id is a self-certifying mesh sender's display record (pre-naming one would let a peer choose what a
-   *  real sender's mail later renders as), and the configured bot id is this node's own assistant. */
+   *  real sender's mail later renders as), and the whole `llm.*` namespace is reserved for assistant bots —
+   *  not just the configured bot id, since a later config change could point `botId` at a record a peer
+   *  planted, which `ensureBotUser` would then adopt as this node's assistant. */
   function isReservedPeerIdentity(id: string): boolean {
-    return id.startsWith("mesh.") || id === rt.appConfig.llm.ollama.botId;
+    return id.startsWith("mesh.") || id.startsWith("llm.") || id === rt.appConfig.llm.ollama.botId;
+  }
+
+  /** Whether a peer message's author may be imported here: not a reserved id, and — when the payload carries
+   *  the author's record — a human one. A peer's bot or system account is its own; imported as-is it would
+   *  render here as a bot/system voice, and forcing it to "human" would misrepresent it instead. */
+  function isAcceptablePeerAuthor(authorId: string, usersById: ReadonlyMap<string, User>): boolean {
+    if (isReservedPeerIdentity(authorId)) {
+      return false;
+    }
+    const record = usersById.get(authorId);
+    return !record || record.type === "human";
   }
 
   /**
@@ -477,7 +519,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
    */
   function importPeerAuthor(authorId: string, usersById: Map<string, User>): void {
     const user = usersById.get(authorId);
-    if (!user || isReservedPeerIdentity(user.id)) {
+    if (!user || isReservedPeerIdentity(user.id) || user.type !== "human") {
       return;
     }
     // Accept a published mesh key only if its kx is cryptographically bound to its sign (kxSig);
@@ -920,9 +962,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         continue;
       }
 
-      // A public message may not claim a reserved author (a `mesh.*` sender record or this node's bot) —
-      // it would render as that identity here (review 2026-09-25 #8).
-      if (isReservedPeerIdentity(message.authorId)) {
+      // A public message may not claim a reserved author (a `mesh.*` sender record or an `llm.*` bot) or a
+      // non-human one — it would render as that identity here (review 2026-09-25 #8).
+      if (!isAcceptablePeerAuthor(message.authorId, usersById)) {
         continue;
       }
 
@@ -1218,63 +1260,93 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // recipient of a tag lives on, while docs/16 promises carriers learn the path, never the endpoints. So
       // pull every offer acceptance could take at all (`sealedOfferAdmissible` — the same outer-field checks
       // `acceptSealedFromPeer` applies, #1), soonest-expiring first, within a per-round budget; the import
-      // delivers what's ours, carries what it can, and drops the rest, which `settleBatch` then remembers so
-      // it is never re-downloaded (#1/#6). The cost is that a non-relaying node downloads each blob its peer
-      // carries once, like a relay would.
+      // delivers what's ours, carries what it can, and drops the rest. The cost is that a non-relaying node
+      // downloads each blob its peer carries once, like a relay would.
+      //
+      // "Once" must hold for every outcome alike (review 2026-09-25 follow-up). Every sealed id this node has
+      // fetched or received is in the durable, node-wide seen-offer record until the offer's own TTL, and is
+      // never fetched again — delivered, carried or dropped. (Delivered ids used to be skipped for good via
+      // their tombstone while dropped ones sat in a RAM cache that a restart, any admin config save or a relay
+      // toggle cleared; the next round then re-fetched exactly the foreign blobs, and a peer diffing the two
+      // fetch sets learned which blobs were delivered here.) A node that later starts relaying therefore
+      // doesn't go back for blobs it dropped earlier; other carriers still can.
+      //
+      // Skipped entirely when there is nothing to do with a blob: relaying is off and no local user holds a
+      // mesh identity (nothing to deliver, nothing to carry). That decision doesn't look at tags either.
       const sealedWanted: string[] = [];
-      if (rt.appConfig.mesh.enabled && digest.sealed?.length) {
-        const candidates = digest.sealed
-          .filter(
-            (entry) =>
-              !localById.has(entry.id) &&
-              !offers.has(entry.id) &&
-              mesh.sealedOfferAdmissible(entry, now) &&
-              !isRefusedOffer(peer.url, sealedOfferKey(entry.id), now),
-          )
-          .sort((a, b) => a.ttlExpiresAt - b.ttlExpiresAt)
-          .slice(0, MAX_SEALED_IDS_PER_ROUND);
-        for (const entry of candidates) {
-          sealedWanted.push(entry.id);
-          offers.set(entry.id, { kind: "sealed", ttlExpiresAt: entry.ttlExpiresAt, hopLimit: entry.hopLimit });
+      const sealedBudget = rt.appConfig.mesh.maxSealedPullPerRound ?? DEFAULT_SEALED_IDS_PER_ROUND;
+      if (
+        rt.appConfig.mesh.enabled &&
+        digest.sealed?.length &&
+        sealedBudget > 0 &&
+        (rt.appConfig.mesh.relay || mesh.meshIdentities.size > 0)
+      ) {
+        if (mesh.sealedSeenAtCapacity()) {
+          rt.log.warn("Sync: the sealed seen-offer record is full; pulling no new sealed mail until entries expire");
+        } else {
+          const candidates = digest.sealed
+            .filter(
+              (entry) =>
+                !localById.has(entry.id) &&
+                !offers.has(entry.id) &&
+                mesh.sealedOfferAdmissible(entry, now) &&
+                !mesh.isSealedOfferSeen(entry.id, now),
+            )
+            .sort((a, b) => a.ttlExpiresAt - b.ttlExpiresAt)
+            .slice(0, sealedBudget);
+          for (const entry of candidates) {
+            sealedWanted.push(entry.id);
+            offers.set(entry.id, { kind: "sealed", ttlExpiresAt: entry.ttlExpiresAt, hopLimit: entry.hopLimit });
+          }
         }
       }
 
       const pendingIds: ReadonlySet<string> = new Set(offers.keys());
 
-      /** After a batch: remember, per peer, every offer it asked for and didn't end up holding (unless it was
-       *  only deferred for a parent/target still on offer), so the next round doesn't fetch it again. */
+      /** After a batch: remember, per peer, every PUBLIC offer it asked for and didn't end up holding (unless it
+       *  was only deferred for a parent/target still on offer), so the next round doesn't fetch it again — and
+       *  record every SEALED offer it asked for as seen, whatever its outcome (see the sealed pull above). */
       const settleBatch = (ids: string[], deferred: ReadonlySet<string>) => {
         const settledAt = Date.now();
         const held = new Map(rt.data.messages.map((message) => [message.id, message]));
         for (const id of ids) {
           const offer = offers.get(id);
-          if (!offer || deferred.has(id) || rt.tombstones.has(id)) {
+          if (!offer) {
+            continue;
+          }
+          if (offer.kind === "sealed") {
+            mesh.rememberSealedOffer(id, offer.ttlExpiresAt);
+            continue;
+          }
+          if (deferred.has(id) || rt.tombstones.has(id)) {
             continue;
           }
           const mine = held.get(id);
-          if (offer.kind === "public") {
-            if (!mine || (mine.editedAt ?? 0) < (offer.editedAt ?? 0)) {
-              rememberRefusedOffer(peer.url, publicOfferKey(id, offer.editedAt), settledAt + REFUSED_TTL_MS);
-            }
-          } else if (!mine) {
-            // Not ours and not carried. If this node can't carry it by POLICY (relay off / no hop left), that
-            // stays true for the blob's whole life (the key embeds the relay setting); otherwise it was a
-            // transient refusal (capacity, a duplicate) — retry after the ordinary expiry.
-            const until = mesh.sealedOfferCarriable(offer) ? settledAt + REFUSED_TTL_MS : offer.ttlExpiresAt;
-            rememberRefusedOffer(peer.url, sealedOfferKey(id), until);
+          if (!mine || (mine.editedAt ?? 0) < (offer.editedAt ?? 0)) {
+            rememberRefusedOffer(peer.url, publicOfferKey(id, offer.editedAt), settledAt + REFUSED_TTL_MS);
           }
         }
       };
 
+      // Bisection accounting for this round (see SPLIT_SLACK / MAX_WASTED_BYTES_PER_ROUND).
+      const sizes = peerBatchSizes.get(peer.url) ?? { public: PUBLIC_BATCH_IDS, sealed: SEALED_BATCH_IDS };
+      peerBatchSizes.set(peer.url, sizes);
+      let splitsLeft =
+        2 * (Math.ceil(publicWanted.length / sizes.public) + Math.ceil(sealedWanted.length / sizes.sealed)) + SPLIT_SLACK;
+      const meter = { wastedBytes: 0 };
+      let sawTooLarge = false;
+
       /** Fetch + import one batch. A batch whose CONTENT is unusable (over the size cap, not JSON, fails the
        *  schema) is split in half and retried, down to single ids, so one oversized or malformed message
-       *  can't sink the rest (#2) — and a single unusable id is remembered as refused. Any other failure
-       *  (peer unreachable, 4xx/5xx) ends the round's fetching: it is returned, not thrown, so what earlier
+       *  can't sink the rest (#2) — and a single unusable id is remembered as refused. A too-large answer
+       *  also shrinks this peer's later batches of that kind. Splitting stops, and the peer counts as failing
+       *  for the round, once the round's split or wasted-byte budget is spent. Any other failure (peer
+       *  unreachable, 4xx/5xx) ends the round's fetching too: it is returned, not thrown, so what earlier
        *  batches imported stands. */
-      const pullBatch = async (ids: string[]): Promise<{ imported: number; error?: string } | "wiped"> => {
+      const pullBatch = async (ids: string[], kind: "public" | "sealed"): Promise<{ imported: number; error?: string } | "wiped"> => {
         let payload: { messages: Message[]; users: User[] };
         try {
-          payload = await fetchPeerJson(peer.url, "/api/sync/messages", SyncMessagesResponseSchema, { ids });
+          payload = await fetchPeerJson(peer.url, "/api/sync/messages", SyncMessagesResponseSchema, { ids }, meter);
         } catch (error) {
           if (rt.wipeGeneration !== generation) {
             return "wiped";
@@ -1282,15 +1354,27 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           if (!isPeerContentError(error)) {
             return { imported: 0, error: error instanceof Error ? error.message : "Sync failed" };
           }
+          if (error instanceof Error && error.message === "Peer response too large") {
+            sawTooLarge = true;
+            const floor = kind === "public" ? MIN_PUBLIC_BATCH_IDS : MIN_SEALED_BATCH_IDS;
+            sizes[kind] = Math.max(floor, Math.min(sizes[kind], Math.ceil(ids.length / 2)));
+          }
+          if (meter.wastedBytes > MAX_WASTED_BYTES_PER_ROUND) {
+            return { imported: 0, error: "Peer kept serving unusable batches (byte budget spent); retrying next round" };
+          }
           if (ids.length === 1) {
             rt.log.warn(`Sync: peer ${peer.url} served an unusable record for one message; skipping it`);
             settleBatch(ids, new Set());
             return { imported: 0 };
           }
+          if (splitsLeft < 2) {
+            return { imported: 0, error: "Peer kept serving unusable batches (split budget spent); retrying next round" };
+          }
+          splitsLeft -= 2;
           const half = Math.ceil(ids.length / 2);
           let total = 0;
           for (const part of [ids.slice(0, half), ids.slice(half)]) {
-            const result = await pullBatch(part);
+            const result = await pullBatch(part, kind);
             if (result === "wiped" || result.error) {
               return result === "wiped" ? result : { imported: total + result.imported, error: result.error };
             }
@@ -1309,26 +1393,32 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         return { imported: result.imported };
       };
 
-      const batches: string[][] = [];
-      for (let start = 0; start < publicWanted.length; start += PUBLIC_BATCH_IDS) {
-        batches.push(publicWanted.slice(start, start + PUBLIC_BATCH_IDS));
-      }
-      for (let start = 0; start < sealedWanted.length; start += SEALED_BATCH_IDS) {
-        batches.push(sealedWanted.slice(start, start + SEALED_BATCH_IDS));
-      }
-
       let imported = 0;
       let failure: string | undefined;
-      for (const ids of batches) {
-        const result = await pullBatch(ids);
-        if (result === "wiped") {
-          return;
+      pulling: for (const [kind, wanted] of [
+        ["public", publicWanted],
+        ["sealed", sealedWanted],
+      ] as const) {
+        // Batches are cut as we go, so a size shrunk by a too-large answer applies to the rest of the round.
+        for (let start = 0; start < wanted.length; ) {
+          const ids = wanted.slice(start, start + sizes[kind]);
+          start += ids.length;
+          const result = await pullBatch(ids, kind);
+          if (result === "wiped") {
+            return;
+          }
+          imported += result.imported;
+          if (result.error) {
+            failure = result.error;
+            break pulling;
+          }
         }
-        imported += result.imported;
-        if (result.error) {
-          failure = result.error;
-          break;
-        }
+      }
+
+      // A round without a too-large answer lets a shrunk batch size grow back toward the default.
+      if (!sawTooLarge && !failure) {
+        sizes.public = Math.min(PUBLIC_BATCH_IDS, sizes.public * 2);
+        sizes.sealed = Math.min(SEALED_BATCH_IDS, sizes.sealed * 2);
       }
 
       status.imported += imported;
