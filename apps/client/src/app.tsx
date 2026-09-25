@@ -10,7 +10,6 @@ import {
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
-  type MessageLocation,
   type MeshContact,
   type MeshIdentityCard,
   type NetworkConfig,
@@ -23,37 +22,36 @@ import {
 } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import { LocationProvider, useLocation } from "preact-iso";
-import type { ComponentChildren } from "preact";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 
 import { AdminView } from "./components/AdminView";
 import { Avatar } from "./components/Avatar";
 import { AvatarImageEditor } from "./components/AvatarImageEditor";
-import { BackArrowIcon } from "./components/BackArrowIcon";
-import { ChannelMembersPanel } from "./components/ChannelMembersPanel";
-import { MessageComposer } from "./components/MessageComposer";
-import { ReportDialog } from "./components/ReportDialog";
-import { MessageItem } from "./components/MessageItem";
+import { ConversationView } from "./components/ConversationView";
+import { ErrorBanner } from "./components/ErrorBanner";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { MobileBackLink } from "./components/MobileBackLink";
 import { NavLink } from "./components/NavLink";
+import { PinChangePrompt } from "./components/PinChangePrompt";
 import { SearchResult } from "./components/SearchResult";
 import { Sidebar } from "./components/Sidebar";
-import { fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
-import { prepareImageAttachment } from "./lib/attachments";
+import { ApiError, fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
+import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
-import { dayKey, dayLabel } from "./lib/dates";
+import { forgetConfirmedIdentity, recordConfirmedIdentity } from "./lib/identity";
 import {
   compareCreatedAt,
   conversationMessages,
-  groupReactionsByTarget,
-  groupRepliesByParent,
+  countUnreadByConversation,
+  LiveChangeJournal,
   mergeMessagesInOrder,
   messageConversationKey,
-  reactionSummary,
+  newestMessageTimestamp,
   reconcileConversationSnapshot,
-  repliesFor,
-  topLevelMessages,
+  type LiveChanges,
 } from "./lib/messages";
 import {
+  clearAllRecords,
   deleteRecord,
   destroyDatabase,
   getAllRecords,
@@ -61,6 +59,9 @@ import {
   putRecord,
   putRecords,
 } from "./lib/local-store";
+import { reconcileRoster, sortUsers } from "./lib/roster";
+import { useIsTimedOut } from "./lib/timeout";
+import { createLivenessWatchdog, type LivenessWatchdog } from "./lib/ws-liveness";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import {
   announceWipe,
@@ -71,6 +72,7 @@ import {
 } from "./lib/wipe";
 import { bodyFor, displayTime } from "./lib/message-format";
 import {
+  acceptPendingHostKey,
   apiUrl,
   clearCachedHostPublicKey,
   clearImageObjectUrls,
@@ -79,12 +81,15 @@ import {
   ensureSession,
   fingerprint,
   getHostKeyMismatch,
+  getPendingHostKeyChange,
   handleWsFrame,
+  inviteQrHostKey,
   isSessionQrVerified,
   isTunnelActive,
   joinQrUrl,
   mayFallBackToPlaintext,
   reestablishSession,
+  rejectPendingHostKey,
   resumeIdentity,
   SERVER_URL_KEY,
   setMintSuppressed,
@@ -319,9 +324,6 @@ async function loadConfig(): Promise<Config> {
   return fetchConfigJson();
 }
 
-/** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
-const EMPTY_MESSAGES: Message[] = [];
-
 /**
  * Builds the route path for a conversation (channel or direct message).
  *
@@ -336,12 +338,6 @@ function routeForConversation(conversation: Conversation): string {
   }
 
   return `/dm/${encodeURIComponent(conversation.id)}`;
-}
-
-function backRouteForThread(conversation: Conversation): string {
-  return conversation.kind === "channel"
-    ? `/channel/${encodeURIComponent(conversation.id)}`
-    : routeForConversation(conversation);
 }
 
 /**
@@ -417,10 +413,13 @@ async function requestUser(method: "POST" | "PATCH", path: string, body?: unknow
 }
 
 export function App() {
+  // The boundary sits outside the router so its "go to channels" recovery remounts it on the reset path.
   return (
-    <LocationProvider>
-      <LoamApp />
-    </LocationProvider>
+    <ErrorBoundary>
+      <LocationProvider>
+        <LoamApp />
+      </LocationProvider>
+    </ErrorBoundary>
   );
 }
 
@@ -460,7 +459,23 @@ function LoamApp() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [config, setConfig] = useState<Config>();
   const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
-  const [error, setError] = useState<string>();
+  // The app-level error notice. `persistent` marks a connectivity failure (kept until the next boot pass
+  // succeeds or the user dismisses it); everything else is a one-off action error that dismisses itself.
+  // `id` distinguishes repeats of the same text so the banner's auto-dismiss timer restarts.
+  const [error, setErrorState] = useState<{ text: string; persistent: boolean; id: number }>();
+  const errorIdRef = useRef(0);
+  const setError = useCallback((text: string | undefined, persistent = false) => {
+    errorIdRef.current += 1;
+    setErrorState(text === undefined ? undefined : { text, persistent, id: errorIdRef.current });
+  }, []);
+  const dismissError = useCallback(() => setErrorState(undefined), []);
+  // The conversation (`conversationKey`) whose history the server answered with a 404 — it doesn't exist
+  // for this user (unknown, removed, or not a member): shown as "not available", not as an error.
+  const [notFoundConversation, setNotFoundConversation] = useState<string>();
+  // A `#k=` link proposed a host key different from the pinned one (see `PinChangePrompt`).
+  const [pinChange, setPinChange] = useState<{ current: string; next: string }>();
+  // Deletes/edits applied by live events, so a history snapshot fetched before them can't undo them.
+  const liveChangesRef = useRef(new LiveChangeJournal());
   // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). Read
   // it before the transport layer consumes the fragment. When a wipe tombstone is outstanding, a rejoin is
   // the only thing that lifts the boot gate.
@@ -544,6 +559,8 @@ function LoamApp() {
   channelsRef.current = channels;
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const usersRef = useRef(users);
+  usersRef.current = users;
   const usersByIdRef = useRef<Map<string, User>>(new Map());
   const lastReadRef = useRef(lastReadByConversation);
 
@@ -577,11 +594,30 @@ function LoamApp() {
         next.set(user.id, user);
       }
 
-      return Array.from(next.values()).sort((left, right) =>
-        left.displayName.localeCompare(right.displayName),
-      );
+      return sortUsers(next.values());
     });
     void putRecords("users", incomingUsers);
+  }, []);
+
+  /**
+   * Apply the server's full roster (`GET /api/users`): upsert it AND drop cached users it no longer
+   * returns (see `reconcileRoster`), in memory and in IndexedDB.
+   */
+  const replaceRoster = useCallback((serverUsers: User[], preFetchIds: ReadonlySet<string>) => {
+    setUsers((previous) => reconcileRoster(previous, serverUsers, preFetchIds).users);
+    void putRecords("users", serverUsers);
+    // The same rule for the on-disk copy: a record held before the request (hydration loaded every cached
+    // user into memory) that the full list no longer contains goes.
+    const keep = new Set(serverUsers.map((user) => user.id));
+    void getAllRecords<User>("users")
+      .then((cached) => {
+        for (const user of cached) {
+          if (!keep.has(user.id) && preFetchIds.has(user.id)) {
+            void deleteRecord("users", user.id);
+          }
+        }
+      })
+      .catch(() => undefined);
   }, []);
 
   // A `userUpserted` for the signed-in user (approval clearing `pending`, a new role, or a self-ban)
@@ -721,30 +757,33 @@ function LoamApp() {
    * bodies — in memory and IndexedDB forever.
    */
   const reconcileConversationMessages = useCallback(
-    (conversation: Conversation, serverMessages: Message[], preFetchIds: Set<string>) => {
+    (conversation: Conversation, serverMessages: Message[], preFetchIds: Set<string>, liveChanges: LiveChanges) => {
       const meId = currentUserIdRef.current;
 
       setMessages((previous) => {
-        const { messages: next, prunedIds } = reconcileConversationSnapshot(
+        const { messages: next, prunedIds, applied } = reconcileConversationSnapshot(
           previous,
           conversation,
           serverMessages,
           preFetchIds,
           meId,
+          liveChanges,
         );
 
         for (const id of prunedIds) {
           void deleteRecord("messages", id);
         }
 
+        // Persist only what the snapshot actually contributed — never a copy a live delete/edit superseded.
+        void putRecords("messages", applied);
         return next;
       });
-      void putRecords("messages", serverMessages);
     },
     [],
   );
 
   const removeMessage = useCallback((messageId: string) => {
+    liveChangesRef.current.recordDeleted(messageId);
     setMessages((previous) => previous.filter((message) => message.id !== messageId));
     void deleteRecord("messages", messageId);
   }, []);
@@ -813,6 +852,7 @@ function LoamApp() {
         // edit shows even if this browser's socket is momentarily closed.
         const updated = MessageSchema.safeParse(payload);
         if (updated.success) {
+          liveChangesRef.current.recordUpdated(updated.data.id);
           upsertMessages([updated.data]);
         }
         return true;
@@ -917,6 +957,7 @@ function LoamApp() {
     localStorage.removeItem(CURRENT_USER_KEY);
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
+    forgetConfirmedIdentity();
     // In-memory residue: decrypted avatar/attachment `blob:` URLs and rendered message HTML would
     // otherwise outlive the wipe in the still-open tab (review 2026-09-04).
     clearImageObjectUrls();
@@ -959,6 +1000,26 @@ function LoamApp() {
     }
   }, []);
 
+  /**
+   * Drop every piece of cached content — memory and IndexedDB — while staying signed in (unlike
+   * `purgeLocalData`, which is a wipe). Used when the node confirms a different identity than the one this
+   * browser last had: the cache belonged to that previous identity (see the boot effect).
+   */
+  const purgeCachedContent = useCallback(async () => {
+    setMessages([]);
+    setChannels([]);
+    setUsers([]);
+    lastReadRef.current = {};
+    setLastReadByConversation({});
+    setTyping({});
+    setOnlineUserIds(new Set());
+    setNotFoundConversation(undefined);
+    localStorage.removeItem(LAST_CONVERSATION_KEY);
+    clearImageObjectUrls();
+    clearMarkdownCache();
+    await clearAllRecords().catch(() => undefined);
+  }, []);
+
   // Tear THIS tab down if another tab initiates a device wipe (docs/20 round-4 Medium / round-5 Medium): the
   // initiating tab announces over a BroadcastChannel AND raises the durable tombstone (a `storage` event) —
   // `listenForRemoteWipe` covers both. We run a local-only purge (no re-announce, no server revocation).
@@ -984,6 +1045,7 @@ function LoamApp() {
 
     // Append in memory only — per-delta IndexedDB writes would be wasteful, and the closing
     // messageUpdated stores the complete message.
+    liveChangesRef.current.recordUpdated(event.messageId);
     setMessages((previous) =>
       previous.map((message) =>
         message.id === event.messageId && "body" in message
@@ -1098,13 +1160,13 @@ function LoamApp() {
    * attachment. Returns the descriptor to include in the message create request.
    */
   const uploadAttachment = useCallback(async (file: File): Promise<MessageAttachment> => {
-    const toBase64 = (bytes: Uint8Array): string => {
-      let binary = "";
-      for (const byte of bytes) {
-        binary += String.fromCharCode(byte);
-      }
-      return btoa(binary);
-    };
+    const toBase64 = bytesToBase64;
+    // Refuse an over-limit pick BEFORE reading it: reading a 100 MB file whole (and base64-ing it) hangs
+    // the tab, only for the server to refuse it anyway.
+    const limit = exceededAttachmentLimit(file);
+    if (limit !== undefined) {
+      throw new Error(t("composer.fileTooLarge", { name: file.name, limit: formatByteLimit(limit) }));
+    }
 
     // Images are downscaled + re-encoded (existing path). Any other file uploads as-is with its name; the
     // server enforces the type allowlist + size cap and serves non-images as a forced download (never inline).
@@ -1154,19 +1216,13 @@ function LoamApp() {
     async (blob: Blob) => {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      const buffer = await blob.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      let binary = "";
-
-      for (const byte of bytes) {
-        binary += String.fromCharCode(byte);
-      }
+      const data = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
 
       try {
         const response = await encryptedFetch(
           "PUT",
           "/api/users/me/avatar-image",
-          { mimeType: blob.type || "image/png", data: btoa(binary) },
+          { mimeType: blob.type || "image/png", data },
           { signal: controller.signal },
         );
 
@@ -1315,6 +1371,7 @@ function LoamApp() {
         }
 
         setNeedsQr(false);
+        setPinChange(getPendingHostKeyChange());
         syncFailuresRef.current = 0;
         setError(undefined);
         // A VERIFIED rejoin (docs/20 round-5 H2): `loadConfig` succeeded, so the QR-pinned handshake/resume
@@ -1325,6 +1382,16 @@ function LoamApp() {
           bootRejoinAttempt.current = false;
           clearWipeTombstone();
           void fetch(apiUrl("/api/session/end"), { method: "POST", credentials: "include" }).catch(() => undefined);
+        }
+        // The node handed back a DIFFERENT identity than the one this browser last confirmed — its session was
+        // reset (an Emergency Reset whose `wipe` event this backgrounded device missed, an expired cookie, a
+        // revoked token). Everything cached belongs to the previous identity: purge it before carrying on as
+        // the new one, rather than merging a stranger's DMs and private channels into this session.
+        if (recordConfirmedIdentity(nextConfig.currentUser.id)) {
+          await purgeCachedContent();
+          if (!active) {
+            return;
+          }
         }
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
@@ -1371,6 +1438,7 @@ function LoamApp() {
           return;
         }
 
+        const preFetchUserIds = new Set(usersRef.current.map((user) => user.id));
         const [nextChannels, nextUsers] = await Promise.all([
           fetchJson<Channel[]>("/api/channels"),
           fetchJson<User[]>("/api/users"),
@@ -1381,7 +1449,8 @@ function LoamApp() {
         }
 
         setChannels(nextChannels);
-        upsertUsers([nextConfig.currentUser, ...nextUsers]);
+        // `/api/users` is the full roster: users it no longer returns are dropped, not just kept around.
+        replaceRoster([nextConfig.currentUser, ...nextUsers], preFetchUserIds);
         void putRecords("channels", nextChannels);
 
         // Drop cached channels the server no longer returns (deleted, or access revoked while this
@@ -1401,16 +1470,18 @@ function LoamApp() {
           return;
         }
 
+        setPinChange(getPendingHostKeyChange());
+
         if (nextError instanceof TransportNeedsQrError) {
           // `required` mode with no host key available (no QR scanned, none cached) — or a cached QR key
           // the node no longer holds (it rotated, e.g. an Emergency Reset): there is no safe way to talk
           // to this node — gate the whole app instead of falling back to plaintext. Not an error to
-          // retry: the user must scan the (current) join QR.
+          // retry: the user must scan the (current) join QR (and, if it differs from the pin, confirm it).
           setNeedsQr(nextError.reason);
           return;
         }
 
-        setError(nextError instanceof Error ? nextError.message : t("app.serverUnreachable"));
+        setError(nextError instanceof Error ? nextError.message : t("app.serverUnreachable"), true);
         setConnection("offline");
         // Retry with backoff — a one-shot boot fetch would strand the app offline forever when the
         // server is momentarily unreachable (previously a manual reload was the only way out).
@@ -1427,7 +1498,19 @@ function LoamApp() {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [claimAdmin, currentUser.id, currentUser.banned, currentUser.pending, removeChannel, syncTick, upsertUsers, wiped]);
+  }, [
+    claimAdmin,
+    currentUser.id,
+    currentUser.banned,
+    currentUser.pending,
+    purgeCachedContent,
+    removeChannel,
+    replaceRoster,
+    setError,
+    syncTick,
+    upsertUsers,
+    wiped,
+  ]);
 
   useEffect(() => {
     if (!activeConversation) {
@@ -1455,11 +1538,15 @@ function LoamApp() {
     // What we held when the request started — reconciliation may only prune these (a message
     // sent or received while the fetch was in flight is not a deletion).
     const preFetchIds = new Set(messagesRef.current.map((message) => message.id));
+    // Live deletes/edits after this point postdate the snapshot this request returns (see `LiveChangeJournal`).
+    const liveMark = liveChangesRef.current.mark();
+    const key = conversationKey(conversation);
 
     fetchJson<Message[]>(path)
       .then((nextMessages) => {
         if (active) {
-          reconcileConversationMessages(conversation, nextMessages, preFetchIds);
+          setNotFoundConversation((previous) => (previous === key ? undefined : previous));
+          reconcileConversationMessages(conversation, nextMessages, preFetchIds, liveChangesRef.current.since(liveMark));
         }
       })
       .catch((nextError: unknown) => {
@@ -1467,9 +1554,11 @@ function LoamApp() {
           return;
         }
 
-        // A 404 means the channel does not exist for this user (unknown id, or a private channel
-        // they are not a member of) — an empty conversation, not a connectivity problem.
-        if (nextError instanceof Error && nextError.message.endsWith("404")) {
+        // A 404 means the conversation does not exist for this user (unknown id, removed, or a private
+        // channel they are not a member of) — a "not available" state, not a connectivity problem. Keyed on
+        // the typed status: the error's text is localized, server-supplied prose and can't be matched.
+        if (nextError instanceof ApiError && nextError.status === 404) {
+          setNotFoundConversation(key);
           return;
         }
 
@@ -1479,7 +1568,7 @@ function LoamApp() {
     return () => {
       active = false;
     };
-  }, [activeConversation?.id, activeConversation?.kind, config, currentUser.id, reconcileConversationMessages, syncTick]);
+  }, [activeConversation?.id, activeConversation?.kind, config, currentUser.id, reconcileConversationMessages, setError, syncTick]);
 
   useEffect(() => {
     if (!config?.currentUser.id) {
@@ -1495,6 +1584,57 @@ function LoamApp() {
     let reconnectTimer: number | undefined;
     let socket: WebSocket | undefined;
     let socketAttempt = 0;
+    // Liveness of the CURRENT socket (see `ws-liveness.ts`): the server heartbeats every admitted socket,
+    // and a socket that goes quiet for ~2 beats is dead even though the browser never fired `close`.
+    let watchdog: LivenessWatchdog | undefined;
+
+    /** Drop a socket that stopped hearing from the server and reconnect. Its handlers are detached first:
+     * on a half-dead TCP connection `close()` can take a long time to fire `onclose` (if it ever does). */
+    function abandonSocket(dead: WebSocket): void {
+      if (disposed || dead !== socket) {
+        return;
+      }
+      watchdog?.stop();
+      watchdog = undefined;
+      dead.onopen = null;
+      dead.onclose = null;
+      dead.onerror = null;
+      dead.onmessage = null;
+      socket = undefined;
+      try {
+        dead.close();
+      } catch {
+        // Already closing.
+      }
+      setConnection("offline");
+      scheduleReconnect();
+    }
+
+    /** The page became visible again, or the device came back online: a socket that was waiting out a
+     * reconnect backoff retries now; a seemingly open one is re-checked for a missed heartbeat. */
+    function checkConnection(): void {
+      if (disposed) {
+        return;
+      }
+      if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        if (reconnectTimer !== undefined) {
+          window.clearTimeout(reconnectTimer);
+          reconnectTimer = undefined;
+          reconnectAttempts = 0;
+          void connectWebSocket();
+        }
+        return;
+      }
+      watchdog?.check();
+    }
+
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === "visible") {
+        checkConnection();
+      }
+    };
+    window.addEventListener("online", checkConnection);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     // A transparent REST re-handshake replaced the module session (review 2026-09-04): a socket confirmed
     // under the previous key would decrypt every later frame against the wrong key and go silently deaf
@@ -1562,6 +1702,9 @@ function LoamApp() {
         return;
       }
       socket = nextSocket;
+      watchdog?.stop();
+      watchdog = createLivenessWatchdog(() => abandonSocket(nextSocket));
+      const socketWatchdog = watchdog;
       setConnection("connecting");
 
       nextSocket.onopen = () => {
@@ -1580,6 +1723,7 @@ function LoamApp() {
         setConnection("live");
       };
       nextSocket.onclose = () => {
+        socketWatchdog.stop();
         if (disposed || attempt !== socketAttempt) {
           return;
         }
@@ -1603,6 +1747,7 @@ function LoamApp() {
         const frame = handleWsFrame(event.data);
 
         if (frame.proof !== undefined) {
+          socketWatchdog.frame(false);
           // The server's reflection-safe key-confirmation challenge (docs/20 §7) — answer it. Until the
           // proof is sent the server withholds all events; nothing else to do with this frame.
           nextSocket.send(frame.proof);
@@ -1620,7 +1765,17 @@ function LoamApp() {
           return;
         }
 
+        // Any authentic frame proves the socket is alive; the server's `ping` also arms the watchdog.
+        socketWatchdog.frame(payload.type === "ping");
+
+        if (payload.type === "ping") {
+          return;
+        }
+
         if (payload.type === "messageCreated" || payload.type === "messageUpdated") {
+          if (payload.type === "messageUpdated") {
+            liveChangesRef.current.recordUpdated(payload.message.id);
+          }
           upsertMessages([payload.message]);
 
           if (payload.type === "messageCreated") {
@@ -1703,6 +1858,9 @@ function LoamApp() {
     return () => {
       disposed = true;
       unsubscribeSessionReplaced();
+      window.removeEventListener("online", checkConnection);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      watchdog?.stop();
 
       if (reconnectTimer !== undefined) {
         window.clearTimeout(reconnectTimer);
@@ -1756,47 +1914,56 @@ function LoamApp() {
   );
 
   // Count unread (non-own) messages per conversation: any post/reply/DM newer than the conversation's
-  // last-read timestamp. Reactions never count (they have no conversation key).
-  const unreadByConversation = useMemo(() => {
-    const counts = new Map<string, number>();
+  // read marker. Reactions never count (they have no conversation key).
+  const unreadByConversation = useMemo(
+    () => countUnreadByConversation(messages, lastReadByConversation, currentUser.id),
+    [currentUser.id, lastReadByConversation, messages],
+  );
 
-    for (const message of messages) {
-      if (message.authorId === currentUser.id) {
-        continue;
-      }
-
-      const key = messageConversationKey(message, currentUser.id);
-
-      if (!key) {
-        continue;
-      }
-
-      if (message.createdAt > (lastReadByConversation[key] ?? 0)) {
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-      }
-    }
-
-    return counts;
-  }, [currentUser.id, lastReadByConversation, messages]);
-
-  // The active conversation is always "read": mark it on open and whenever fresh traffic arrives
-  // while it is on screen, so its own new messages never light up an unread badge.
+  // The active conversation is always "read": its marker is the newest SERVER timestamp on screen, so its
+  // own new messages never light up an unread badge. (It used to be this device's `Date.now()`, which a
+  // clock running ahead of the host's turned into "everything is read" for messages that came later.)
+  const activeKey = activeConversation ? conversationKey(activeConversation) : undefined;
+  const newestSeen = useMemo(() => newestMessageTimestamp(selectedMessages), [selectedMessages]);
   useEffect(() => {
-    if (!activeConversation) {
+    if (!activeKey || newestSeen === undefined || lastReadRef.current[activeKey] === newestSeen) {
       return;
     }
 
-    const key = conversationKey(activeConversation);
-    updateLastRead((previous) => ({ ...previous, [key]: Date.now() }));
-  }, [activeConversation?.id, activeConversation?.kind, messages.length, updateLastRead]);
+    updateLastRead((previous) => ({ ...previous, [activeKey]: newestSeen }));
+  }, [activeKey, newestSeen, updateLastRead]);
+
+  const onAcceptPinChange = (): void => {
+    acceptPendingHostKey();
+    setPinChange(undefined);
+    setNeedsQr(false);
+    setSyncTick((tick) => tick + 1);
+  };
+  const onRejectPinChange = (): void => {
+    rejectPendingHostKey();
+    setPinChange(undefined);
+  };
 
   if (needsQr) {
     return (
       <main className="wiped-screen">
         <div>
           <p className="brand-title">LOAM</p>
-          <h1>{t("gate.needsQrTitle")}</h1>
-          <p>{t(needsQr === "changed" ? "gate.needsQrKeyChanged" : "gate.needsQrBody")}</p>
+          {pinChange ? (
+            // A freshly opened join link carries a key other than the pinned one (e.g. the node's key was
+            // rotated and this is its new QR): only an explicit confirmation replaces the pin.
+            <PinChangePrompt
+              current={pinChange.current}
+              next={pinChange.next}
+              onAccept={onAcceptPinChange}
+              onReject={onRejectPinChange}
+            />
+          ) : (
+            <>
+              <h1>{t("gate.needsQrTitle")}</h1>
+              <p>{t(needsQr === "changed" ? "gate.needsQrKeyChanged" : "gate.needsQrBody")}</p>
+            </>
+          )}
         </div>
       </main>
     );
@@ -1874,8 +2041,7 @@ function LoamApp() {
     <>
     {config?.networkConfig.devMode ? (
       <div className="dev-mode-banner" role="alert">
-        ⚠️ Developer Mode — messages are sent <strong>unencrypted</strong> and can be read by anyone on this
-        network. Do not use for anything private.
+        {t("devMode.banner")}
       </div>
     ) : null}
     <main className={shellClassName}>
@@ -1886,12 +2052,12 @@ function LoamApp() {
         channels={channels}
         connection={connection}
         currentUser={currentUser}
+        inviteQr={config ? inviteQrHostKey() : undefined}
         joinUrl={config?.joinUrl}
         nodeName={config?.networkConfig.nodeName}
         onCreateChannel={createChannel}
         onlineUserIds={onlineUserIds}
         showMesh={!!config?.networkConfig.enableMesh}
-        transportPublicKey={config?.networkConfig.transportPublicKey}
         unreadByConversation={unreadByConversation}
         users={users}
       />
@@ -1925,6 +2091,7 @@ function LoamApp() {
           channels={channels}
           conversation={activeConversation}
           currentUser={currentUser}
+          notFound={!!activeKey && notFoundConversation === activeKey}
           onTyping={() => {
             if (activeConversation) {
               sendTyping(activeConversation);
@@ -1985,8 +2152,20 @@ function LoamApp() {
           usersById={usersById}
         />
       )}
-      {error ? <p className="connection-error">{error}</p> : null}
     </main>
+    {error ? (
+      <ErrorBanner key={error.id} message={error.text} onDismiss={dismissError} transient={!error.persistent} />
+    ) : null}
+    {pinChange ? (
+      <div className="invite-modal-backdrop">
+        <PinChangePrompt
+          current={pinChange.current}
+          next={pinChange.next}
+          onAccept={onAcceptPinChange}
+          onReject={onRejectPinChange}
+        />
+      </div>
+    ) : null}
     <ToastStack onDismiss={dismissToast} toasts={toasts} />
     </>
   );
@@ -2020,473 +2199,6 @@ function ToastStack({ onDismiss, toasts }: { onDismiss: (id: string) => void; to
         </button>
       ))}
     </div>
-  );
-}
-
-interface ConversationViewProps {
-  allowAttachments: boolean;
-  allowLocationSharing: boolean;
-  channels: Channel[];
-  conversation?: Conversation;
-  currentUser: User;
-  messages: Message[];
-  onChannelUpsert: (channels: Channel[]) => void;
-  onDelete: (messageId: string) => void;
-  onEdit: (messageId: string, body: string) => Promise<boolean>;
-  onLeftChannel: (channelId: string) => void;
-  onReact: (messageId: string, reaction: string) => Promise<void>;
-  onSend: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
-  onThreadReply: (
-    parentMessageId: string,
-    body: string,
-    attachments?: MessageAttachment[],
-    location?: MessageLocation,
-  ) => Promise<void>;
-  onTyping: () => void;
-  onUploadAttachment: (file: File) => Promise<MessageAttachment>;
-  typers: string[];
-  users: User[];
-  usersById: Map<string, User>;
-}
-
-function ConversationView({
-  allowAttachments,
-  allowLocationSharing,
-  channels,
-  conversation,
-  currentUser,
-  onTyping,
-  typers,
-  messages,
-  onChannelUpsert,
-  onDelete,
-  onEdit,
-  onLeftChannel,
-  onReact,
-  onSend,
-  onThreadReply,
-  onUploadAttachment,
-  users,
-  usersById,
-}: ConversationViewProps) {
-  const location = useLocation();
-  const [membersOpen, setMembersOpen] = useState(false);
-  // The user the report dialog was opened for — bound to that id, so the dialog can't follow a route
-  // change onto a different DM and report the wrong person.
-  const [reportUserId, setReportUserId] = useState<string>();
-  const timedOut = useIsTimedOut(currentUser);
-  const topMessages = useMemo(
-    () => (conversation ? topLevelMessages(messages, conversation) : []),
-    [conversation, messages],
-  );
-  // Grouped once per `messages` change so the render loop below can look up each message's
-  // replies/reactions in O(1) instead of rescanning the whole conversation per message (was O(n^2)
-  // for a conversation with n messages).
-  const repliesByParent = useMemo(() => groupRepliesByParent(messages), [messages]);
-  const reactionsByTarget = useMemo(() => groupReactionsByTarget(messages), [messages]);
-
-  // Never carry the members panel or a report dialog from one conversation into another.
-  useEffect(() => {
-    setMembersOpen(false);
-    setReportUserId(undefined);
-  }, [conversation?.kind, conversation?.id]);
-  const threadParent =
-    conversation?.kind === "channel" && conversation.threadId
-      ? topMessages.find((message) => message.id === conversation.threadId)
-      : undefined;
-
-  if (!conversation) {
-    return (
-      <section className="conversation empty-state">
-        <div>
-          <p className="eyebrow">{t("conversation.emptyEyebrow")}</p>
-          <h1>{t("conversation.emptyTitle")}</h1>
-          <p>{t("conversation.emptyBody")}</p>
-        </div>
-      </section>
-    );
-  }
-
-  const activeChannel =
-    conversation.kind === "channel"
-      ? channels.find((channel) => channel.id === conversation.id)
-      : undefined;
-  const isPrivateChannel = activeChannel?.visibility === "private";
-  // Archived channels are readable but read-only: the composer (and the thread panel's) disable
-  // with an explanation instead of letting a send fail server-side.
-  const composerDisabledReason = activeChannel?.archived
-    ? t("composer.archived")
-    : timedOut
-      ? t("composer.timedOut")
-      : undefined;
-  const title =
-    conversation.kind === "channel"
-      ? `${isPrivateChannel ? "🔒" : "#"} ${activeChannel?.name ?? conversation.id}`
-      : usersById.get(conversation.id)?.displayName ?? conversation.id;
-
-  return (
-    <>
-      <section className="conversation">
-        {/* One wrapper = one grid row: .conversation is a strict header/list/composer 3-row grid. */}
-        <div className="conversation-top">
-          <ConversationHeader
-            conversation={conversation}
-            description={activeChannel?.description}
-            title={title}
-            trailing={
-              isPrivateChannel ? (
-                <button
-                  aria-expanded={membersOpen}
-                  className="ghost-button"
-                  onClick={() => setMembersOpen((previous) => !previous)}
-                  type="button"
-                >
-                  {t("conversation.members")}
-                </button>
-              ) : conversation.kind === "dm" && usersById.get(conversation.id)?.type === "human" ? (
-                // The report-a-USER entry point (the server + dialog already supported it, but nothing
-                // opened it): reachable from the one place a person is the subject — their DM.
-                <button className="ghost-button" onClick={() => setReportUserId(conversation.id)} type="button">
-                  {t("report.userTitle")}
-                </button>
-              ) : undefined
-            }
-          />
-          {isPrivateChannel && membersOpen && activeChannel ? (
-            <ChannelMembersPanel
-              channel={activeChannel}
-              currentUser={currentUser}
-              onChannelUpsert={onChannelUpsert}
-              onLeftChannel={onLeftChannel}
-              users={users}
-            />
-          ) : null}
-        </div>
-        <MessageList
-          conversation={conversation}
-          currentUser={currentUser}
-          onDelete={onDelete}
-          onEdit={onEdit}
-          onOpenThread={(messageId) => {
-            if (conversation.kind === "channel") {
-              location.route(`/channel/${encodeURIComponent(conversation.id)}/thread/${encodeURIComponent(messageId)}`);
-            }
-          }}
-          onReact={onReact}
-          readOnly={!!activeChannel?.archived}
-          reactionsByTarget={reactionsByTarget}
-          repliesByParent={repliesByParent}
-          topMessages={topMessages}
-          usersById={usersById}
-        />
-        {typers.length ? (
-          <p className="typing-indicator" aria-live="polite">
-            {typers.length === 1
-              ? t("typing.one", { name: typers[0]! })
-              : typers.length === 2
-                ? t("typing.two", { a: typers[0]!, b: typers[1]! })
-                : t("typing.many")}
-          </p>
-        ) : null}
-        <MessageComposer
-          allowLocationSharing={allowLocationSharing}
-          disabledReason={composerDisabledReason}
-          label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
-          onSend={onSend}
-          onTyping={onTyping}
-          onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
-          placeholder={
-            conversation.kind === "channel"
-              ? t("conversation.composerPlaceholderChannel")
-              : t("conversation.composerPlaceholderDm")
-          }
-        />
-      </section>
-
-      {threadParent ? (
-        <ThreadPanel
-          allowLocationSharing={allowLocationSharing}
-          currentUser={currentUser}
-          onClose={() => location.route(backRouteForThread(conversation))}
-          onDelete={onDelete}
-          onEdit={onEdit}
-          onReact={onReact}
-          composerDisabledReason={activeChannel?.archived ? t("composer.archived") : undefined}
-          readOnly={!!activeChannel?.archived}
-          onReply={(body, attachments, messageLocation) =>
-            onThreadReply(threadParent.id, body, attachments, messageLocation)
-          }
-          onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
-          parent={threadParent}
-          reactionsByTarget={reactionsByTarget}
-          repliesByParent={repliesByParent}
-          usersById={usersById}
-        />
-      ) : null}
-      {conversation.kind === "dm" && reportUserId === conversation.id ? (
-        <ReportDialog targetType="user" targetId={reportUserId} onClose={() => setReportUserId(undefined)} />
-      ) : null}
-    </>
-  );
-}
-
-function ConversationHeader({
-  conversation,
-  description,
-  title,
-  trailing,
-}: {
-  conversation: Conversation;
-  description?: string;
-  title: string;
-  trailing?: ComponentChildren;
-}) {
-  return (
-    <header className="conversation-header">
-      <NavLink active={false} className="mobile-back" href="/channels">
-        <BackArrowIcon />
-      </NavLink>
-      <div className="conversation-heading">
-        <p className="eyebrow">{conversation.kind === "channel" ? t("conversation.kindChannel") : t("conversation.kindDm")}</p>
-        <h1>{title}</h1>
-        {description ? <p className="conversation-description">{description}</p> : null}
-      </div>
-      {trailing ? <div className="conversation-header-actions">{trailing}</div> : null}
-    </header>
-  );
-}
-
-interface MessageListProps {
-  conversation: Conversation;
-  currentUser: User;
-  onDelete: (messageId: string) => void;
-  onEdit: (messageId: string, body: string) => Promise<boolean>;
-  onOpenThread: (messageId: string) => void;
-  onReact: (messageId: string, reaction: string) => Promise<void>;
-  /** Archived (read-only) channel: per-message mutation affordances are hidden (see MessageItem). */
-  readOnly?: boolean;
-  reactionsByTarget: Map<string, Message[]>;
-  repliesByParent: Map<string, Message[]>;
-  topMessages: Message[];
-  usersById: Map<string, User>;
-}
-
-/** Whether a user is currently under an active (not-yet-expired) moderator timeout. */
-function isTimedOut(user: User): boolean {
-  return user.timeoutUntil !== undefined && user.timeoutUntil > Date.now();
-}
-
-/**
- * Reactive `isTimedOut`: schedules a single re-render at the exact moment the timeout expires, so a
- * disabled composer re-enables on its own instead of waiting for an unrelated re-render.
- */
-function useIsTimedOut(user: User): boolean {
-  const [, force] = useState(0);
-  const until = user.timeoutUntil;
-
-  useEffect(() => {
-    if (until === undefined || until <= Date.now()) {
-      return;
-    }
-    const id = window.setTimeout(() => force((n) => n + 1), until - Date.now());
-    return () => window.clearTimeout(id);
-  }, [until]);
-
-  return isTimedOut(user);
-}
-
-function MessageList({
-  conversation,
-  currentUser,
-  onDelete,
-  onEdit,
-  onOpenThread,
-  onReact,
-  readOnly = false,
-  reactionsByTarget,
-  repliesByParent,
-  topMessages,
-  usersById,
-}: MessageListProps) {
-  const listRef = useRef<HTMLDivElement>(null);
-  const previousScrollHeightRef = useRef<number | undefined>(undefined);
-  // The message currently being reported (opens ReportDialog); undefined = closed.
-  const [reportMessage, setReportMessage] = useState<Message | undefined>(undefined);
-
-  useEffect(() => {
-    const el = listRef.current;
-
-    if (!el) {
-      return;
-    }
-
-    const previousScrollHeight = previousScrollHeightRef.current;
-    const distanceFromBottom =
-      previousScrollHeight === undefined ? 0 : previousScrollHeight - el.scrollTop - el.clientHeight;
-
-    previousScrollHeightRef.current = el.scrollHeight;
-
-    if (distanceFromBottom < 100) {
-      el.scrollTo({ top: el.scrollHeight });
-    }
-  }, [topMessages.length]);
-
-  return (
-    <>
-    <div className="message-list" ref={listRef}>
-      {topMessages.length ? (
-        topMessages.map((message, index) => {
-          const previous = topMessages[index - 1];
-          const newDay = !previous || dayKey(previous.createdAt) !== dayKey(message.createdAt);
-
-          return (
-            <div key={message.id}>
-              {newDay ? (
-                <div className="day-divider" role="separator">
-                  <span>{dayLabel(message.createdAt)}</span>
-                </div>
-              ) : null}
-              <MessageItem
-                currentUser={currentUser}
-                message={message}
-                onDelete={onDelete}
-                onEdit={onEdit}
-                onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
-                onReact={onReact}
-                onReport={setReportMessage}
-                readOnly={readOnly}
-                reactions={reactionSummary(
-                  reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES,
-                  message.id,
-                  currentUser.id,
-                )}
-                replyCount={repliesFor(repliesByParent.get(message.id) ?? EMPTY_MESSAGES, message.id).length}
-                usersById={usersById}
-              />
-            </div>
-          );
-        })
-      ) : (
-        <p className="empty-copy">{t("messageList.empty")}</p>
-      )}
-    </div>
-    {reportMessage ? (
-      <ReportDialog targetType="message" targetId={reportMessage.id} onClose={() => setReportMessage(undefined)} />
-    ) : null}
-    </>
-  );
-}
-
-interface ThreadPanelProps {
-  /** When true, the reply composer offers the "share location" toggle (docs/10; off by default). */
-  allowLocationSharing?: boolean;
-  currentUser: User;
-  onClose: () => void;
-  onDelete: (messageId: string) => void;
-  /** Set when the surrounding channel is archived — the reply composer disables with this reason. */
-  composerDisabledReason?: string;
-  /** Archived (read-only) channel: hide per-message mutation affordances in the thread too. */
-  readOnly?: boolean;
-  onEdit: (messageId: string, body: string) => Promise<boolean>;
-  onReact: (messageId: string, reaction: string) => Promise<void>;
-  onReply: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
-  onUploadAttachment?: (file: File) => Promise<MessageAttachment>;
-  parent: Message;
-  reactionsByTarget: Map<string, Message[]>;
-  repliesByParent: Map<string, Message[]>;
-  usersById: Map<string, User>;
-}
-
-/**
- * Renders the thread side panel containing the thread parent message, its replies, and a reply composer.
- *
- * @param currentUser - The currently signed-in user (used to determine ownership and reaction state).
- * @param parent - The parent message that the thread is showing replies for.
- * @param reactionsByTarget - Reaction messages grouped by target message id (from `groupReactionsByTarget`), used to compute reaction summaries without rescanning the conversation.
- * @param repliesByParent - Reply messages grouped by parent message id (from `groupRepliesByParent`), used to compute this thread's replies without rescanning the conversation.
- * @param usersById - Map of user id to User objects used to resolve author information for displayed messages.
- * @param onClose - Callback invoked when the panel should be closed (e.g., back or close button).
- * @param onReact - Callback invoked when a reaction action is triggered for a message.
- * @param onReply - Callback invoked with the reply body when the composer submits a new thread reply.
- *
- * @returns The thread panel JSX element.
- */
-function ThreadPanel({
-  allowLocationSharing,
-  composerDisabledReason,
-  currentUser,
-  onClose,
-  onDelete,
-  onEdit,
-  onReact,
-  onReply,
-  onUploadAttachment,
-  parent,
-  reactionsByTarget,
-  readOnly = false,
-  repliesByParent,
-  usersById,
-}: ThreadPanelProps) {
-  const timedOut = useIsTimedOut(currentUser);
-  const [reportMessage, setReportMessage] = useState<Message | undefined>(undefined);
-  const replies = repliesFor(repliesByParent.get(parent.id) ?? EMPTY_MESSAGES, parent.id);
-
-  return (
-    <aside className="thread-panel">
-      <header className="thread-header">
-        <button className="mobile-back" onClick={onClose} type="button">
-          <BackArrowIcon />
-        </button>
-        <div>
-          <p className="eyebrow">{t("thread.eyebrow")}</p>
-          <h2>{t("thread.heading")}</h2>
-        </div>
-        <button aria-label={t("thread.close")} className="close-button" onClick={onClose} type="button">
-          ×
-        </button>
-      </header>
-      <div className="thread-scroll">
-        <MessageItem
-          currentUser={currentUser}
-          message={parent}
-          onDelete={onDelete}
-          onEdit={onEdit}
-          onReact={onReact}
-          onReport={setReportMessage}
-          readOnly={readOnly}
-          reactions={reactionSummary(reactionsByTarget.get(parent.id) ?? EMPTY_MESSAGES, parent.id, currentUser.id)}
-          usersById={usersById}
-        />
-        <div className="reply-divider">
-          {replies.length ? t("message.replyCount", { n: replies.length }) : t("thread.noReplies")}
-        </div>
-        {replies.map((reply) => (
-          <MessageItem
-            currentUser={currentUser}
-            key={reply.id}
-            message={reply}
-            onDelete={onDelete}
-            onEdit={onEdit}
-            onReact={onReact}
-            onReport={setReportMessage}
-            readOnly={readOnly}
-            reactions={reactionSummary(reactionsByTarget.get(reply.id) ?? EMPTY_MESSAGES, reply.id, currentUser.id)}
-            usersById={usersById}
-          />
-        ))}
-      </div>
-      <MessageComposer
-        allowLocationSharing={allowLocationSharing}
-        disabledReason={composerDisabledReason ?? (timedOut ? t("composer.timedOut") : undefined)}
-        label={t("thread.replyLabel")}
-        onSend={onReply}
-        onUploadAttachment={onUploadAttachment}
-        placeholder={t("thread.replyLabel")}
-      />
-      {reportMessage ? (
-        <ReportDialog targetType="message" targetId={reportMessage.id} onClose={() => setReportMessage(undefined)} />
-      ) : null}
-    </aside>
   );
 }
 
@@ -2574,9 +2286,7 @@ function SearchView({
   return (
     <section className="settings-view">
       <header className="conversation-header">
-        <NavLink active={false} className="mobile-back" href="/channels">
-          <BackArrowIcon />
-        </NavLink>
+        <MobileBackLink />
         <div>
           <p className="eyebrow">{t("search.eyebrow")}</p>
           <h1>{t("search.title")}</h1>
@@ -2843,9 +2553,7 @@ function MeshView() {
   return (
     <section className="settings-view">
       <header className="conversation-header">
-        <NavLink active={false} className="mobile-back" href="/channels">
-          <BackArrowIcon />
-        </NavLink>
+        <MobileBackLink />
         <div>
           <p className="eyebrow">{t("mesh.eyebrow")}</p>
           <h1>{t("mesh.title")}</h1>
@@ -3017,14 +2725,14 @@ function SettingsView({
   const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
   const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
   // Encode the host's transport public key into the join QR (docs/08) so a scanner learns it
-  // out-of-band → MITM-resistant handshake. The displayed URL text below stays plain.
+  // out-of-band → MITM-resistant handshake. The displayed URL text below stays plain. Only a key THIS
+  // client verified from its own scanned QR is vouched for — never the one the unauthenticated bootstrap
+  // advertised — and the QR is withheld when those two disagree (see `inviteQrHostKey`).
+  const inviteQr = config ? inviteQrHostKey() : undefined;
   const qrSvg = useMemo(
     () =>
-      safeQrSvg(
-        config?.joinUrl ? joinQrUrl(config.joinUrl, config.networkConfig.transportPublicKey) : undefined,
-        "#203f34",
-      ),
-    [config?.joinUrl, config?.networkConfig.transportPublicKey],
+      config?.joinUrl && !inviteQr?.suppressed ? safeQrSvg(joinQrUrl(config.joinUrl, inviteQr?.key), "#203f34") : "",
+    [config?.joinUrl, inviteQr?.key, inviteQr?.suppressed],
   );
   const previewUser: User = {
     ...currentUser,
@@ -3094,9 +2802,7 @@ function SettingsView({
   return (
     <section className="settings-view">
       <header className="conversation-header">
-        <NavLink active={false} className="mobile-back" href="/channels">
-          <BackArrowIcon />
-        </NavLink>
+        <MobileBackLink />
         <div>
           <p className="eyebrow">{t("settings.joinEyebrow")}</p>
           <h1>{t("settings.joinTitle")}</h1>
@@ -3104,7 +2810,14 @@ function SettingsView({
       </header>
       <div className="settings-grid">
         <div className="join-panel">
-          <div className="qr-box" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+          {inviteQr?.suppressed ? (
+            <p className="form-error">{t("invite.qrKeyMismatch")}</p>
+          ) : (
+            <div className="qr-box" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+          )}
+          {inviteQr && !inviteQr.suppressed && !inviteQr.key && config?.networkConfig.transportPublicKey ? (
+            <p className="form-note">{t("invite.qrNoKeyNote")}</p>
+          ) : null}
           <p>{config?.joinUrl ?? window.location.origin}</p>
           {/* Product name + version — the node's build, not this browser's cache. Deliberately no
               translatable label word so it stays i18n-neutral. */}
@@ -3358,9 +3071,7 @@ function PeopleView({
     return (
       <section className="settings-view">
         <header className="conversation-header">
-          <NavLink active={false} className="mobile-back" href="/channels">
-            <BackArrowIcon />
-          </NavLink>
+          <MobileBackLink />
           <div>
             <p className="eyebrow">{t("people.eyebrow")}</p>
             <h1>{t("people.notAuthorizedTitle")}</h1>
@@ -3374,9 +3085,7 @@ function PeopleView({
   return (
     <section className="settings-view">
       <header className="conversation-header">
-        <NavLink active={false} className="mobile-back" href="/channels">
-          <BackArrowIcon />
-        </NavLink>
+        <MobileBackLink />
         <div>
           <p className="eyebrow">{t("people.eyebrow")}</p>
           <h1>{t("people.title")}</h1>

@@ -82,6 +82,15 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
   const [locationLat, setLocationLat] = useState("");
   const [locationLng, setLocationLng] = useState("");
   const pendingKeyRef = useRef(0);
+  // False once this composer unmounts. The caller keys the composer by conversation, so an upload that
+  // resolves after the user moved on must be dropped — never attached to whatever composer is on screen.
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
   const composerId = useId();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -117,11 +126,17 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
       setPending((previous) => [...previous, { key, name: file.name, status: "uploading" }]);
       onUploadAttachment(file)
         .then((attachment) => {
+          if (!mountedRef.current) {
+            return;
+          }
           setPending((previous) =>
             previous.map((entry) => (entry.key === key ? { ...entry, status: "ready", attachment } : entry)),
           );
         })
         .catch((uploadError: unknown) => {
+          if (!mountedRef.current) {
+            return;
+          }
           setPending((previous) =>
             previous.map((entry) =>
               entry.key === key
@@ -235,6 +250,12 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
               <span className="attachment-chip-name" title={entry.error}>
                 {entry.name}
               </span>
+              {/* The reason must be readable on touch devices too, where a `title` tooltip never shows. */}
+              {entry.status === "error" && entry.error ? (
+                <span className="attachment-chip-error" role="alert">
+                  {entry.error}
+                </span>
+              ) : null}
               <button
                 aria-label={t("composer.removeAttachment", { name: entry.name })}
                 disabled={sending}
