@@ -95,8 +95,25 @@ export function registerUserRoutes(ctx: AppContext): void {
     const user = uploader;
     const previousAvatar = user.avatar;
     const imageId = newAvatarImageId();
+    const imagePath = ctx.avatarImagePath(imageId, body.data.mimeType);
+    // An Emergency Reset can land while the file write is in flight. `user` was captured BEFORE the
+    // wipe, so applying it afterwards would write the wiped account (admin flag and all) back into
+    // the fresh store and leave an avatar file the wipe was meant to destroy — the same generation
+    // guard the sync writers use.
+    // ...and one already under way when this handler starts (the global 503 gate runs in `onRequest`,
+    // BEFORE the body is read, so a wipe can begin while a large upload body is still arriving).
+    if (ctx.wipeInProgress || ctx.awaitingWipeRestart) {
+      return reply.code(503).send(errorBody("This LOAM node is resetting"));
+    }
+
+    const generation = ctx.wipeGeneration;
     await mkdir(ctx.avatarsDir, { recursive: true });
-    await writeFile(ctx.avatarImagePath(imageId, body.data.mimeType), image);
+    await writeFile(imagePath, image);
+
+    if (ctx.wipeGeneration !== generation) {
+      await rm(imagePath, { force: true }).catch((error: unknown) => ctx.server.log.warn(error));
+      return reply.code(409).send(errorBody("This LOAM node was reset"));
+    }
 
     const updated = ctx.applyUserUpdate(user, {
       avatar: {
@@ -616,8 +633,22 @@ export function registerUserRoutes(ctx: AppContext): void {
         ...(isImage && body.data.height !== undefined ? { height: body.data.height } : {}),
         ...(isImage ? {} : { name: sanitizeAttachmentName(body.data.name) }),
       };
+      const filePath = join(ctx.attachmentsDir, attachmentFileName(attachment));
+      // Same Emergency Reset guard as the avatar upload: never leave a file (or an owner entry for a
+      // wiped user) behind a wipe that landed during the write.
+      if (ctx.wipeInProgress || ctx.awaitingWipeRestart) {
+        return reply.code(503).send(errorBody("This LOAM node is resetting"));
+      }
+
+      const generation = ctx.wipeGeneration;
       await mkdir(ctx.attachmentsDir, { recursive: true });
-      await writeFile(join(ctx.attachmentsDir, attachmentFileName(attachment)), bytes);
+      await writeFile(filePath, bytes);
+
+      if (ctx.wipeGeneration !== generation) {
+        await rm(filePath, { force: true }).catch((error: unknown) => ctx.server.log.warn(error));
+        return reply.code(409).send(errorBody("This LOAM node was reset"));
+      }
+
       ctx.attachmentOwners.set(attachment.id, { userId: currentUser.id, uploadedAt: Date.now() });
       return reply.code(201).send(attachment);
     },

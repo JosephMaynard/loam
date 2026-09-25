@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createMeshIdentity,
   currentEpoch,
   mailboxTag,
   openTransport,
@@ -186,6 +187,14 @@ vi.mock("node:fs", async (importOriginal) => {
 // so every other test — which never sets it — is unaffected; every other `node:fs/promises` export is
 // untouched (`...actual`).
 const rmGate = vi.hoisted(() => ({ promise: undefined as Promise<void> | undefined }));
+// A gate for `node:fs/promises`'s `mkdir` of ONE exact directory, used by the upload-vs-Emergency-Reset
+// tests to suspend an upload between its session check and its file write so a wipe can land in the gap.
+// `entered` fires when the gated call arrives. Inert by default (`path` undefined); reset in `afterEach`.
+const mkdirGate = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  promise: undefined as Promise<void> | undefined,
+  entered: undefined as (() => void) | undefined,
+}));
 // P1-4 (Sol round 9): a config-persist fault-injection counter. `persistConfigForRestart` is now SYNCHRONOUS
 // (durableWriteFileSync), so the injection lives in the SYNC `writeFileSync` mock above (matching the
 // `config.json.tmp-...` staging path only) — used to exercise the retry-once + proceed-with-the-wipe policy.
@@ -201,6 +210,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.rm(...args);
     },
+    mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+      if (mkdirGate.path !== undefined && String(args[0]) === mkdirGate.path) {
+        mkdirGate.entered?.();
+        await mkdirGate.promise;
+      }
+      return actual.mkdir(...args);
+    },
   };
 });
 
@@ -215,6 +231,9 @@ afterEach(async () => {
   // Belt-and-suspenders: a test that armed the P1-2(a) `rm()` gate but failed before releasing it must
   // never leave a later, unrelated test's own `rm()` calls hanging on a promise nobody will resolve.
   rmGate.promise = undefined;
+  mkdirGate.path = undefined;
+  mkdirGate.promise = undefined;
+  mkdirGate.entered = undefined;
   configWriteFailures.remaining = 0;
   openSyncFailure.path = undefined;
   openSyncFailure.failOnCall = undefined;
@@ -981,6 +1000,47 @@ describe("kill switch", () => {
 
     const fresh = await newSession(app);
     expect(fresh.isAdmin).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "avatar",
+      dir: "avatars",
+      request: { method: "PUT" as const, url: "/api/users/me/avatar-image" },
+    },
+    {
+      name: "attachment",
+      dir: "attachments",
+      request: { method: "POST" as const, url: "/api/attachments" },
+    },
+  ])("an $name upload that straddles a wipe restores nothing and leaves no file", async ({ dir, request }) => {
+    const { app, dataDir } = await makeApp({
+      killSwitch: { enabled: true },
+      identity: { allowUserAvatarEdit: true, allowUserAvatarUpload: true },
+    });
+    const admin = await newSession(app);
+    const targetDir = join(dataDir, dir);
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      mkdirGate.entered = resolve;
+    });
+    mkdirGate.promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mkdirGate.path = targetDir;
+
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]).toString("base64");
+    const upload = app.server
+      .inject({ ...request, headers: { cookie: admin.cookie }, payload: { mimeType: "image/png", data: png } })
+      .then((response) => response);
+    await entered;
+
+    expect((await postKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+    release();
+
+    expect((await upload).statusCode).toBe(409);
+    expect(app.store.loadUsers().some((user) => user.id === admin.userId)).toBe(false);
+    expect(existsSync(targetDir) ? readdirSync(targetDir) : []).toEqual([]);
   });
 
   it("keeps the kill switch enabled after a wipe so it can fire again", async () => {
@@ -6422,6 +6482,250 @@ describe("attachment + sync review hardening", () => {
     expect(messages.some((message) => message.id === oversized.id)).toBe(false); // oversized body skipped
   });
 
+  it("never lets a peer reclassify a private message or alias its attachment into the public flow", async () => {
+    // A hostile peer that knows a DM's id / attachment id (e.g. a former participant) offers (1) the DM's
+    // id re-typed as a public post and (2) a brand-new public post naming the DM's attachment id.
+    let offered: Record<string, unknown>[] = [];
+    let offeredUsers: Record<string, unknown>[] = [];
+    const peer = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/api/sync/digest") {
+        res.end(JSON.stringify({ channels: [], messages: offered.map((message) => ({ id: message.id, editedAt: message.editedAt })) }));
+        return;
+      }
+      if (req.url === "/api/sync/messages") {
+        res.end(JSON.stringify({ messages: offered, users: offeredUsers }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => peer.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => new Promise<void>((resolve) => peer.close(() => resolve())));
+    const peerUrl = `http://127.0.0.1:${(peer.address() as AddressInfo).port}`;
+
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: peerUrl }], intervalMs: 3_600_000 } });
+    const admin = await newSession(app);
+    const sender = await newSession(app);
+    const recipient = await newSession(app);
+    const attachment = await uploadAttachment(app, sender.cookie);
+    const dm = (
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: sender.cookie },
+          payload: { type: "dm", recipientUserId: recipient.userId, body: "PRIVATE", attachments: [attachment] },
+        })
+      ).json() as { message: { id: string; createdAt: number } }
+    ).message;
+    const filePath = `/api/attachments/${attachment.id}.png`;
+    expect((await app.server.inject({ method: "GET", url: filePath })).statusCode).toBe(404);
+
+    const runSync = () => app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+
+    offered = [
+      { id: dm.id, type: "channelPost", authorId: sender.userId, channelId: "general", body: "now public", createdAt: dm.createdAt, editedAt: Date.now() + 1000 },
+    ];
+    await runSync();
+    const stored = app.store.loadMessages().find((message) => message.id === dm.id);
+    expect(stored?.type).toBe("dm");
+    expect(stored && "body" in stored ? stored.body : undefined).toBe("PRIVATE");
+
+    // The identity check runs BEFORE any attachment work: a refused import must not fetch bytes or
+    // queue a retry under the local message's id (the peer 404s this file, which used to record one).
+    offered = [
+      {
+        id: dm.id, type: "channelPost", authorId: sender.userId, channelId: "general", body: "with file",
+        createdAt: dm.createdAt, editedAt: Date.now() + 2000, attachments: [{ id: "att_0123456789abcdef", mimeType: "image/png" }],
+      },
+    ];
+    await runSync();
+    expect(app.store.loadMissingAttachments()).toEqual([]);
+    expect(app.store.loadMessages().find((message) => message.id === dm.id)?.type).toBe("dm");
+
+    // A reply can't be re-parented, and ids inside the mesh replay-key namespace are never imported.
+    const post = async (payload: Record<string, unknown>) =>
+      ((await app.server.inject({ method: "POST", url: "/api/messages", headers: { cookie: sender.cookie }, payload })).json() as {
+        message: { id: string; createdAt: number };
+      }).message;
+    const parentA = await post({ type: "channelPost", channelId: "general", body: "parent A" });
+    const parentB = await post({ type: "channelPost", channelId: "general", body: "parent B" });
+    const child = await post({ type: "channelReply", channelId: "general", parentMessageId: parentA.id, body: "child" });
+    offered = [
+      { id: child.id, type: "channelReply", authorId: sender.userId, channelId: "general", parentMessageId: parentB.id, body: "moved", createdAt: child.createdAt, editedAt: Date.now() + 3000 },
+      { id: `sealed.${"a".repeat(64)}`, type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "planted", createdAt: 2 },
+    ];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === child.id)).toMatchObject({ parentMessageId: parentA.id, body: "child" });
+    expect(app.store.loadMessages().some((message) => message.id.startsWith("sealed."))).toBe(false);
+
+    // A peer can't rewrite a message a LOCAL user wrote, even with every identity field right — only
+    // records this node imported are editable by a later import.
+    offered = [
+      { id: parentA.id, type: "channelPost", authorId: sender.userId, channelId: "general", body: "PEER REWROTE THIS", createdAt: parentA.createdAt, editedAt: Date.now() + 4000 },
+    ];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === parentA.id)).toMatchObject({ body: "parent A" });
+
+    // ...while a message that CAME from the peer still takes the peer's edits.
+    const peerPost = { id: "msg.peer-own", type: "channelPost", authorId: "user.peerown", channelId: "general", body: "v1", createdAt: 3 };
+    offered = [peerPost];
+    await runSync();
+    offered = [{ ...peerPost, body: "v2", editedAt: Date.now() + 5000 }];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === peerPost.id)).toMatchObject({ body: "v2" });
+
+    offered = [
+      { id: "msg.peer-alias", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "alias", createdAt: 1, attachments: [attachment] },
+    ];
+    await runSync();
+    expect(app.store.loadMessages().some((message) => message.id === "msg.peer-alias")).toBe(false);
+
+    expect((await app.server.inject({ method: "GET", url: filePath })).statusCode).toBe(404);
+    const exported = (
+      await app.server.inject({ method: "POST", url: "/api/sync/messages", payload: { ids: [dm.id] } })
+    ).json() as { messages: unknown[] };
+    expect(exported.messages).toEqual([]);
+
+    // A moderator removal is sticky: the origin's next (newer) edit must not restore the content.
+    expect(
+      (await app.server.inject({ method: "POST", url: `/api/moderation/messages/${peerPost.id}/remove`, headers: { cookie: admin.cookie } }))
+        .statusCode,
+    ).toBe(200);
+    offered = [{ ...peerPost, body: "back again", editedAt: Date.now() + 60_000 }];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === peerPost.id)).toMatchObject({
+      body: "",
+      meta: { removedByModerator: true },
+    });
+
+    // An imported record can't be re-routed or re-attributed either (the identity check on its own —
+    // provenance passes here).
+    const other = (
+      await app.server.inject({ method: "POST", url: "/api/channels", headers: { cookie: admin.cookie }, payload: { name: "Elsewhere" } })
+    ).json() as { id: string };
+    const peerSecond = { id: "msg.peer-second", type: "channelPost", authorId: "user.peerown", channelId: "general", body: "stay", createdAt: 5 };
+    offered = [peerSecond];
+    await runSync();
+    offered = [
+      { ...peerSecond, channelId: other.id, body: "moved", editedAt: Date.now() + 6000 },
+      { ...peerSecond, authorId: sender.userId, body: "re-attributed", editedAt: Date.now() + 7000 },
+    ];
+    await runSync();
+    expect(app.store.loadMessages().find((message) => message.id === peerSecond.id)).toMatchObject({
+      channelId: "general", authorId: "user.peerown", body: "stay",
+    });
+
+    // A peer's mesh key is never adopted onto one of OUR users — even one with no live session.
+    const peerIdentity = createMeshIdentity();
+    await app.server.inject({ method: "POST", url: "/api/session/end", headers: { cookie: recipient.cookie } });
+    offeredUsers = [
+      {
+        id: recipient.userId, displayName: "x", type: "human", isAdmin: false, createdAt: 1, ephemeral: true,
+        identityKey: { alg: "ed25519", sign: peerIdentity.signPublic, kx: peerIdentity.kxPublic, kxSig: peerIdentity.kxSig },
+      },
+    ];
+    offered = [{ id: "msg.peer-third", type: "channelPost", authorId: recipient.userId, channelId: "general", body: "hi", createdAt: 6 }];
+    await runSync();
+    expect(app.store.loadUsers().find((user) => user.id === recipient.userId)?.identityKey).toBeUndefined();
+    offeredUsers = [];
+
+    // After a restart pending-upload ownership (in-memory) is gone; an unowned file already on disk must
+    // still never be bound to a public import — whatever MIME class the peer declares for its id (the
+    // download gate and the orphan sweep resolve files by ID, so a `.bin` claim would alias the `.png`).
+    const reopened = await reopenApp(app.app, app.dataDir);
+    const unownedId = "att_feedfacefeedface";
+    mkdirSync(join(app.dataDir, "attachments"), { recursive: true });
+    writeFileSync(join(app.dataDir, "attachments", `${unownedId}.png`), "unowned");
+    offered = [
+      { id: "msg.peer-orphan", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "orphan", createdAt: 4, attachments: [{ id: unownedId, mimeType: "text/plain", name: "x.txt" }] },
+      { id: "msg.peer-control", type: "channelPost", authorId: "user.peeralias", channelId: "general", body: "control", createdAt: 4 },
+    ];
+    const rerun = await reopened.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: admin.cookie } });
+    expect(rerun.statusCode).toBe(200);
+    const afterReopen = reopened.store.loadMessages().map((message) => message.id);
+    expect(afterReopen).toContain("msg.peer-control"); // the round really ran
+    expect(afterReopen).not.toContain("msg.peer-orphan");
+  });
+
+  it.each([
+    // >256 KiB over the sealed JSON route: the response schema capped `data` at the IMAGE limit.
+    { name: "a 300 KiB file over encrypted sync", pinned: true, plaintextSource: false, size: 300 * 1024 },
+    // A SMALL file isolates the other cause: the sealed route omitted `mimeType` for `.bin` files.
+    { name: "a small file over encrypted sync", pinned: false, plaintextSource: false, size: 2048 },
+    // The legacy binary GET used for a plaintext (Developer Mode) peer capped the stream at the image limit.
+    { name: "a 300 KiB file from a plaintext peer", pinned: false, plaintextSource: true, size: 300 * 1024 },
+  ])("syncs a non-image attachment: $name", async ({ pinned, plaintextSource, size }) => {
+    if (plaintextSource) {
+      process.env.LOAM_DEV_MODE = "1"; // read once, at buildApp time
+    }
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } }).finally(() => {
+      delete process.env.LOAM_DEV_MODE;
+    });
+    const sourceAdmin = await newSession(source);
+    const bytes = Buffer.alloc(size, 65);
+    const attachment = (
+      await source.server.inject({
+        method: "POST",
+        url: "/api/attachments",
+        headers: { cookie: sourceAdmin.cookie },
+        payload: { mimeType: "text/plain", name: "notes.txt", data: bytes.toString("base64") },
+      })
+    ).json() as { id: string; mimeType: string };
+    const posted = await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "a file", attachments: [attachment] },
+    });
+    expect(posted.statusCode).toBe(201);
+    await source.server.listen({ host: "127.0.0.1", port: 0 });
+    const peerUrl = `http://127.0.0.1:${(source.server.server.address() as AddressInfo).port}`;
+
+    const puller = await makeApp({
+      sync: {
+        enabled: true,
+        peers: [pinned ? { url: peerUrl, transportKey: source.getTransportPublicKey() } : { url: peerUrl }],
+        intervalMs: 3_600_000,
+      },
+    });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+
+    expect(puller.store.loadMissingAttachments()).toEqual([]);
+    const copied = readdirSync(join(puller.dataDir, "attachments"));
+    expect(copied).toHaveLength(1);
+    expect(readFileSync(join(puller.dataDir, "attachments", copied[0])).equals(bytes)).toBe(true);
+  });
+
+  it("still refuses an IMAGE over the 256 KiB image cap from a peer (the wire cap is now the 1 MiB file cap)", async () => {
+    const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
+    const sourceAdmin = await newSession(source);
+    const attachment = await uploadAttachment(source, sourceAdmin.cookie);
+    await source.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: sourceAdmin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "big image", attachments: [attachment] },
+    });
+    // A hostile/buggy peer's copy is bigger than any honest upload could be (valid PNG signature, 300 KiB).
+    const oversized = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(300 * 1024)]);
+    writeFileSync(join(source.dataDir, "attachments", `${attachment.id}.png`), oversized);
+    await source.server.listen({ host: "127.0.0.1", port: 0 });
+    const peerUrl = `http://127.0.0.1:${(source.server.server.address() as AddressInfo).port}`;
+
+    const puller = await makeApp({
+      sync: { enabled: true, peers: [{ url: peerUrl, transportKey: source.getTransportPublicKey() }], intervalMs: 3_600_000 },
+    });
+    const pullerAdmin = await newSession(puller);
+    await puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+
+    const attachmentsDir = join(puller.dataDir, "attachments");
+    expect(existsSync(attachmentsDir) ? readdirSync(attachmentsDir) : []).toEqual([]);
+    expect(puller.store.loadMissingAttachments()).toHaveLength(1); // recorded for retry, never written
+  });
+
   it("retries a transiently-failed sync attachment copy independently, without re-importing the message (docs/15 A6)", async () => {
     const source = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
     const sourceAdmin = await newSession(source);
@@ -8019,6 +8323,109 @@ describe("opportunistic mesh: sealed mailbox (docs/16)", () => {
       });
       expect((again.json() as { accepted: number }).accepted).toBe(0);
       expect((await dmBodies(nodeB, bob.cookie, contact!.id)).filter((b) => b === "carry me over the mesh")).toHaveLength(1);
+    });
+
+    it("refuses the same ciphertext replayed under a new outer id — on the recipient and on a relay", async () => {
+      // The outer message id is not covered by the seal, so a carrier can rename a valid blob at will.
+      const nodeA = await makeApp({ mesh: MESH });
+      const nodeB = await makeApp({ mesh: MESH });
+      const nodeC = await makeApp({ mesh: MESH });
+      const alice = await adminOf(nodeA);
+      const bob = await adminOf(nodeB);
+      const bobCard = await meshCard(nodeB, bob.cookie);
+      expect((await addContact(nodeA, alice.cookie, bobCard)).statusCode).toBe(200);
+      await nodeA.server.inject({
+        method: "POST",
+        url: "/api/mesh/messages",
+        headers: { cookie: alice.cookie },
+        payload: { toMeshId: bobCard.meshId, body: "only once" },
+      });
+      const [original] = ((await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
+        messages: Record<string, unknown>[];
+      }).messages;
+      const deliver = async (node: LoamApp, message: Record<string, unknown>) =>
+        ((await node.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
+          accepted: number;
+        }).accepted;
+
+      // Relay C: one carried copy, however many ids it arrives under.
+      expect(await deliver(nodeC, original)).toBe(1);
+      expect(await deliver(nodeC, { ...original, id: "seal_renamed_on_relay" })).toBe(0);
+      expect(nodeC.store.loadMessages().filter((message) => message.type === "sealed")).toHaveLength(1);
+
+      // Recipient B: one delivered DM — including after a restart (the replay record is persisted).
+      expect(await deliver(nodeB, original)).toBe(1);
+      expect(await deliver(nodeB, { ...original, id: "seal_renamed_replay" })).toBe(0);
+      const reopened = await reopenApp(nodeB.app, nodeB.dataDir);
+      expect(await deliver(reopened, { ...original, id: "seal_renamed_after_restart" })).toBe(0);
+      expect(reopened.store.loadMessages().filter((message) => message.type === "dm" && message.body === "only once")).toHaveLength(1);
+
+      // Re-SPELLING the ciphertext doesn't help either: the base64url decoder tolerates `=` + trailing junk
+      // and ignores the final character's unused bits, so these decode to the very same envelope.
+      const sealed = original.sealed as string;
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+      const lastFlipped = sealed.slice(0, -1) + alphabet[alphabet.indexOf(sealed.at(-1)!) ^ 1];
+      for (const [index, respelled] of [`${sealed}=junk`, ...(sealed.length % 4 === 0 ? [] : [lastFlipped])].entries()) {
+        expect(await deliver(reopened, { ...original, id: `seal_respelled_${index}`, sealed: respelled })).toBe(0);
+        expect(await deliver(nodeC, { ...original, id: `seal_respelled_relay_${index}`, sealed: respelled })).toBe(0);
+      }
+      expect(reopened.store.loadMessages().filter((message) => message.type === "dm" && message.body === "only once")).toHaveLength(1);
+      expect(nodeC.store.loadMessages().filter((message) => message.type === "sealed")).toHaveLength(1);
+
+      // A lifetime no honest sender can request is refused outright.
+      expect(await deliver(nodeC, { ...original, id: "seal_far_future", ttlExpiresAt: Date.now() + 30 * 24 * 3_600_000 })).toBe(0);
+    });
+
+    it("can't be censored by a carrier pre-offering the genuine blob with a fake TTL, or a planted replay-key id", async () => {
+      const nodeA = await makeApp({ mesh: MESH });
+      const nodeB = await makeApp({ mesh: MESH });
+      const alice = await adminOf(nodeA);
+      const bob = await adminOf(nodeB);
+      const bobCard = await meshCard(nodeB, bob.cookie);
+      expect((await addContact(nodeA, alice.cookie, bobCard)).statusCode).toBe(200);
+      await nodeA.server.inject({
+        method: "POST",
+        url: "/api/mesh/messages",
+        headers: { cookie: alice.cookie },
+        payload: { toMeshId: bobCard.meshId, body: "must arrive" },
+      });
+      const [genuine] = ((await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
+        messages: Record<string, unknown>[];
+      }).messages;
+      const deliver = async (message: Record<string, unknown>) =>
+        ((await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
+          accepted: number;
+        }).accepted;
+
+      // The TTL is cleartext a relay can't verify: the forged copy fails to open (AAD mismatch) and is
+      // merely carried. It must not shadow the genuine message that arrives afterwards.
+      expect(await deliver({ ...genuine, id: "seal_fake_ttl", ttlExpiresAt: (genuine.ttlExpiresAt as number) + 1 })).toBe(1);
+      // Ids inside the replay-key namespace are refused outright, so none can be planted as a tombstone.
+      expect(await deliver({ ...genuine, id: `sealed.${"0".repeat(64)}` })).toBe(0);
+
+      expect(await deliver(genuine)).toBe(1);
+      const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
+      expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toEqual(["must arrive"]);
+
+      // On a RELAY the unauthenticated outer fields are the lever: a copy with a spent hop budget, or with
+      // `meta.streaming` (which the export treats as "never offer"), must not park a dead row that shadows
+      // the genuine mail.
+      const nodeC = await makeApp({ mesh: MESH });
+      const relay = async (message: Record<string, unknown>) =>
+        ((await nodeC.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
+          accepted: number;
+        }).accepted;
+      const offered = async () =>
+        ((await nodeC.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as { messages: { hopLimit: number; meta?: unknown }[] })
+          .messages;
+
+      expect(await relay({ ...genuine, id: "seal_spent", hopLimit: 1 })).toBe(0); // nothing left to carry
+      expect(await relay({ ...genuine, id: "seal_low", hopLimit: 2, meta: { streaming: true } })).toBe(1);
+      expect(await offered()).toMatchObject([{ hopLimit: 1 }]);
+      expect((await offered())[0].meta).toBeUndefined();
+      expect(await relay(genuine)).toBe(1); // the better-provisioned copy raises the held budget…
+      expect(await offered()).toMatchObject([{ hopLimit: (genuine.hopLimit as number) - 1 }]);
+      expect(await relay({ ...genuine, id: "seal_again" })).toBe(0); // …and nothing further is gained by replays
     });
 
     it("relays through a carrier that cannot read the blob (bridge A→C→B)", async () => {

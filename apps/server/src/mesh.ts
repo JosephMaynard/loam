@@ -1,8 +1,10 @@
 // The opportunistic-mesh sealed-mail layer (docs/16): per-user mesh identities and contacts, sealing,
 // deliver-or-relay, and the expiry reaper. Extracted verbatim from app.ts (2026-09-04 split) behind the
 // shared `Runtime` view.
-import { type MeshIdentity, createMeshIdentity, currentEpoch, mailboxTag, meshIdFromSignPublic, openMailbox, sealMailbox, verifyKxBinding } from "@loam/crypto";
-import { type MeshIdentityCard, MeshIdentityCardSchema, MessageSchema, type SealedMessage, UserSchema } from "@loam/schema";
+import { createHash } from "node:crypto";
+
+import { type MeshIdentity, createMeshIdentity, currentEpoch, isCanonicalSealedBlob, mailboxTag, meshIdFromSignPublic, openMailbox, sealMailbox, verifyKxBinding } from "@loam/crypto";
+import { MESH_TTL_MAX_MS, type MeshIdentityCard, MeshIdentityCardSchema, MessageSchema, type SealedMessage, UserSchema } from "@loam/schema";
 import { makeUser } from "./identity.js";
 import { newMessageId } from "./ids.js";
 import type { Runtime } from "./runtime.js";
@@ -196,6 +198,39 @@ export function createMeshLayer(rt: Runtime) {
     rt.broadcast({ type: "messageCreated", message: dm });
   }
 
+  const SEALED_REPLAY_PREFIX = "sealed.";
+  // Hash once per held message object (a sealed row is immutable while carried).
+  const replayKeyCache = new WeakMap<SealedMessage, string>();
+
+  /** Replay key for a sealed message: a hash of the ciphertext AND the two outer fields the seal
+   * authenticates as AAD (`toTag`, `ttlExpiresAt`). The outer `id` is NOT covered by the seal, so a carrier
+   * can re-offer identical mail under a fresh id; this key identifies the one authentic message instead.
+   * The AAD fields must be in it: they're cleartext a relay can't verify, so keying on the blob alone would
+   * let a carrier offer the genuine blob with a FAKE ttl/tag first (it fails to open, gets carried) and
+   * thereby block the genuine copy arriving by another path. A variant forging those gets its own key and
+   * can never open, so it costs a relay slot at most (as any junk blob already can); a variant that keeps
+   * them and forges the UNauthenticated `hopLimit`/`meta` shares the key — `acceptSealedFromPeer` handles
+   * that (hop budget is raised by a better copy; extras are dropped on relay). Stored beside the id
+   * tombstones under the reserved `sealed.` prefix — peer-supplied ids in that namespace are refused
+   * (`isReservedReplayId`) so nobody can pre-plant one. Survives restarts; GC'd by the same horizon. */
+  function sealedReplayKey(message: SealedMessage): string {
+    let key = replayKeyCache.get(message);
+    if (!key) {
+      const digest = createHash("sha256")
+        .update(message.sealed)
+        .update(`|${message.toTag}|${message.ttlExpiresAt}`)
+        .digest("hex");
+      key = `${SEALED_REPLAY_PREFIX}${digest}`;
+      replayKeyCache.set(message, key);
+    }
+    return key;
+  }
+
+  /** True for an id inside the namespace reserved for replay keys — never valid on a peer-supplied record. */
+  function isReservedReplayId(id: string): boolean {
+    return id.startsWith(SEALED_REPLAY_PREFIX);
+  }
+
   /** Try to open a sealed blob for one of our local users and deliver it. Returns true when it was
    * ours (delivered + tombstoned so it isn't re-imported or carried further). */
   function tryDeliverSealed(message: SealedMessage): boolean {
@@ -222,8 +257,10 @@ export function createMeshLayer(rt: Runtime) {
       } else {
         rt.log.info({ messageId: message.id }, "Dropped sealed mesh mail: direct messages are disabled on this node");
       }
-      rt.store.addTombstone(message.id);
-      rt.tombstones.add(message.id);
+      for (const id of [message.id, sealedReplayKey(message)]) {
+        rt.store.addTombstone(id);
+        rt.tombstones.add(id);
+      }
       return true;
     }
     return false;
@@ -236,11 +273,44 @@ export function createMeshLayer(rt: Runtime) {
       return false;
     }
     const now = Date.now();
+    if (isReservedReplayId(message.id)) {
+      return false; // a peer may not name a record inside the replay-key namespace
+    }
     if (message.ttlExpiresAt <= now || message.hopLimit <= 0 || rt.tombstones.has(message.id)) {
       return false;
     }
-    if (rt.data.messages.some((candidate) => candidate.id === message.id)) {
-      return false; // already hold it
+    // No honest sender can ask for more than the schema's max lifetime (+ one epoch of clock skew).
+    // Refusing it keeps every replay record below well inside the tombstone GC horizon.
+    if (message.ttlExpiresAt > now + MESH_TTL_MAX_MS + MESH_EPOCH_WINDOW_MS) {
+      return false;
+    }
+    // `sealMailbox` only ever emits the canonical spelling; any other string that decodes to the same
+    // envelope is a carrier's attempt to slip one message past the string-keyed replay checks below.
+    if (!isCanonicalSealedBlob(message.sealed)) {
+      return false;
+    }
+    const replayKey = sealedReplayKey(message);
+    if (rt.tombstones.has(replayKey)) {
+      return false; // this exact mail was already delivered here — a replay under a new outer id
+    }
+    // Already hold it — by id, or the same mail re-offered under another id (which would otherwise take a
+    // second `maxCarried` slot on a relay). Compared by cached hash, never blob-to-blob: a peer picks the
+    // blob length, and thousands of equal-length 90KB string compares per inbound message would stall
+    // the event loop.
+    const held = rt.data.messages.find(
+      (candidate) => candidate.id === message.id || (candidate.type === "sealed" && sealedReplayKey(candidate) === replayKey),
+    );
+    if (held) {
+      // `hopLimit` is NOT authenticated, so a carrier can pre-offer genuine mail with a nearly spent hop
+      // budget to park a copy here that goes nowhere. Let a better-provisioned copy of the SAME mail
+      // raise the held budget instead of being shadowed by it (monotonic: never lowered).
+      if (held.type === "sealed" && sealedReplayKey(held) === replayKey && message.hopLimit - 1 > held.hopLimit) {
+        const raised = MessageSchema.parse({ ...held, hopLimit: message.hopLimit - 1 }) as SealedMessage;
+        rt.store.updateMessage(raised);
+        held.hopLimit = raised.hopLimit;
+        return true;
+      }
+      return false;
     }
     if (tryDeliverSealed(message)) {
       return true;
@@ -249,11 +319,28 @@ export function createMeshLayer(rt: Runtime) {
     if (!rt.appConfig.mesh.relay) {
       return false;
     }
+    // Nothing left to carry: a copy stored at hop 0 is never advertised again, it would only hold a slot
+    // (and, before the raise above existed, shadow the real copy).
+    if (message.hopLimit - 1 <= 0) {
+      return false;
+    }
     const carried = rt.data.messages.reduce((count, candidate) => count + (candidate.type === "sealed" ? 1 : 0), 0);
     if (carried >= rt.appConfig.mesh.maxCarried) {
       return false; // at capacity — refuse new mail (soonest-to-expire eviction is a v2 refinement)
     }
-    const relayed = MessageSchema.parse({ ...message, hopLimit: message.hopLimit - 1 });
+    // Rebuild the carried row from the fields that matter rather than spreading the peer's object:
+    // unauthenticated extras ride along otherwise — `meta.streaming`, say, which `isSyncableMessage`
+    // treats as "never export", turning a carried copy into a dead one that blocks the genuine mail.
+    const relayed = MessageSchema.parse({
+      id: message.id,
+      type: "sealed",
+      authorId: MESH_SENTINEL_AUTHOR,
+      createdAt: message.createdAt,
+      toTag: message.toTag,
+      sealed: message.sealed,
+      ttlExpiresAt: message.ttlExpiresAt,
+      hopLimit: message.hopLimit - 1,
+    });
     rt.store.insertMessage(relayed);
     rt.data.messages.push(relayed);
     return true; // opaque — no client broadcast
@@ -351,6 +438,7 @@ export function createMeshLayer(rt: Runtime) {
     ensureAllMeshIdentities,
     localTagsForWindow,
     acceptSealedFromPeer,
+    isReservedReplayId,
     addMeshContact,
     meshIdentityCard,
     sendSealed,

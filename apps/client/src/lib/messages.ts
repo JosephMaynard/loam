@@ -363,3 +363,55 @@ export function messageConversationKey(message: Message, currentUserId: string):
 
   return undefined;
 }
+
+/**
+ * Reconcile the cached messages with an authoritative full snapshot of one conversation: prune cached
+ * conversation messages (and reactions targeting them) that the server no longer has, then merge the
+ * snapshot in. The ONLY guard against pruning a legitimate message is `preFetchIds` — a message sent or
+ * received while the request was in flight was not held when it started, so it is never prunable. A
+ * message held before the request began and absent from the full snapshot IS a deletion, however new it
+ * is: an earlier "never prune anything newer than the snapshot's newest entry" guard kept a deleted
+ * NEWEST message alive forever (review 2026-09-09).
+ *
+ * @param previous - Every cached message (all conversations).
+ * @param conversation - The conversation the snapshot covers.
+ * @param serverMessages - The server's full snapshot of that conversation.
+ * @param preFetchIds - Ids of the messages held when the request started.
+ * @param currentUserId - The signed-in user's id (used to resolve DM direction).
+ * @returns The merged, ordered message list and the ids pruned from it.
+ */
+export function reconcileConversationSnapshot(
+  previous: Message[],
+  conversation: Conversation,
+  serverMessages: Message[],
+  preFetchIds: Set<string>,
+  currentUserId: string,
+): { messages: Message[]; prunedIds: string[] } {
+  const serverIds = new Set(serverMessages.map((message) => message.id));
+  const conversationIds = new Set(
+    previous
+      .filter((message) => isConversationMessage(message, conversation, currentUserId))
+      .map((message) => message.id),
+  );
+  const prunedIds: string[] = [];
+  const next = new Map<string, Message>();
+
+  for (const message of previous) {
+    const inConversation =
+      isConversationMessage(message, conversation, currentUserId) ||
+      (message.type === "reaction" && conversationIds.has(message.targetMessageId));
+
+    if (inConversation && !serverIds.has(message.id) && preFetchIds.has(message.id)) {
+      prunedIds.push(message.id);
+      continue;
+    }
+
+    next.set(message.id, message);
+  }
+
+  for (const message of serverMessages) {
+    next.set(message.id, message);
+  }
+
+  return { messages: Array.from(next.values()).sort(compareCreatedAt), prunedIds };
+}

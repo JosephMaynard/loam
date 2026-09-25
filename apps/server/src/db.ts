@@ -240,6 +240,22 @@ export interface LoamStore {
   unmarkChannelSynced(channelId: string): void;
   loadSyncedChannelIds(): string[];
   /**
+   * Record that a MESSAGE was imported from a sync peer — local-only, never exported. Only messages
+   * marked here may be edited by a later import: without it any configured peer could rewrite the body
+   * of a message a LOCAL user wrote (sync is unsigned, and the export hands a peer every field it needs
+   * to pass the same-message check). Idempotent; the mark is dropped with the message
+   * (`deleteMessage`) and wiped by the kill switch.
+   */
+  markMessageSynced(messageId: string): void;
+  isMessageSynced(messageId: string): boolean;
+  /**
+   * Record that a USER record was created by a sync import (a peer's user, not one of ours). A peer's
+   * published mesh key is only ever adopted onto such a record — a live-session test isn't durable (a
+   * logged-out or restarted local user has none). Idempotent; wiped by the kill switch.
+   */
+  markUserSynced(userId: string): void;
+  isUserSynced(userId: string): boolean;
+  /**
    * Pending join requests for private channels (P10). Idempotent add; per-channel load (the requester ids);
    * removal on approve/deny; bulk removal when a channel is deleted. Wiped by the kill switch.
    */
@@ -449,6 +465,12 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     CREATE TABLE IF NOT EXISTS synced_channels (
       channel_id TEXT PRIMARY KEY
     );
+    CREATE TABLE IF NOT EXISTS synced_messages (
+      message_id TEXT PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS synced_users (
+      user_id TEXT PRIMARY KEY
+    );
     CREATE TABLE IF NOT EXISTS channel_join_requests (
       channel_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
@@ -535,6 +557,15 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   );
   const unmarkChannelSyncedStmt = db.prepare("DELETE FROM synced_channels WHERE channel_id = ?");
   const loadSyncedChannelIdsStmt = db.prepare("SELECT channel_id FROM synced_channels");
+  const markMessageSyncedStmt = db.prepare(
+    "INSERT INTO synced_messages (message_id) VALUES (?) ON CONFLICT(message_id) DO NOTHING",
+  );
+  const unmarkMessageSyncedStmt = db.prepare("DELETE FROM synced_messages WHERE message_id = ?");
+  const isMessageSyncedStmt = db.prepare("SELECT 1 FROM synced_messages WHERE message_id = ?");
+  const markUserSyncedStmt = db.prepare(
+    "INSERT INTO synced_users (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING",
+  );
+  const isUserSyncedStmt = db.prepare("SELECT 1 FROM synced_users WHERE user_id = ?");
   const addJoinRequestStmt = db.prepare(
     "INSERT INTO channel_join_requests (channel_id, user_id, created_at) VALUES (?, ?, ?) ON CONFLICT(channel_id, user_id) DO NOTHING",
   );
@@ -616,6 +647,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     deleteMessage(messageId) {
       deleteMessageStmt.run(messageId);
+      unmarkMessageSyncedStmt.run(messageId);
     },
     putSession(token, userId) {
       putSessionStmt.run(token, userId);
@@ -730,6 +762,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     loadSyncedChannelIds() {
       return loadSyncedChannelIdsStmt.all().map((row) => (row as { channel_id: string }).channel_id);
     },
+    markMessageSynced(messageId) {
+      markMessageSyncedStmt.run(messageId);
+    },
+    isMessageSynced(messageId) {
+      return isMessageSyncedStmt.get(messageId) !== undefined;
+    },
+    markUserSynced(userId) {
+      markUserSyncedStmt.run(userId);
+    },
+    isUserSynced(userId) {
+      return isUserSyncedStmt.get(userId) !== undefined;
+    },
     addJoinRequest(channelId, userId) {
       addJoinRequestStmt.run(channelId, userId, Date.now());
     },
@@ -755,6 +799,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM missing_attachments");
         db.exec("DELETE FROM reports");
         db.exec("DELETE FROM synced_channels");
+        db.exec("DELETE FROM synced_messages");
+        db.exec("DELETE FROM synced_users");
         db.exec("DELETE FROM channel_join_requests");
       });
     },

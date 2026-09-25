@@ -5,7 +5,7 @@ import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { verifyKxBinding } from "@loam/crypto";
 import { ChannelSchema, type Message, type MessageAttachment, MessageSchema, type SealedMessage, SyncAttachmentResponseSchema, type SyncDigest, SyncDigestSchema, SyncMessagesResponseSchema, type SyncPeer, type SyncStatusReport, type User, UserSchema } from "@loam/schema";
-import { attachmentFileName, attachmentMaxBytes, isAcceptableAttachmentBytes, missingAttachmentBackoffMs, missingAttachmentMaxAgeMs, missingAttachmentMaxRecordsPerPass } from "./media.js";
+import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, isAcceptableAttachmentBytes, isImageAttachmentMime, missingAttachmentBackoffMs, missingAttachmentMaxAgeMs, missingAttachmentMaxRecordsPerPass } from "./media.js";
 import { type PeerTransportPosture, type PeerTransportSession, fetchPeerTransportPosture, handshakeWithPeer, sealedFetch } from "./sync-transport.js";
 import type { MeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
@@ -356,7 +356,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // Trust-on-first-use: adopt a valid key the FIRST time we see one for a known user, but never
         // overwrite an existing key from a later (possibly hostile) sync — a peer can't silently rebind
         // a user we already hold a key for.
-        if (!existing.identityKey && importedKey) {
+        // ...and only onto a record a sync import CREATED, never one of our own users: a local user with
+        // no key yet (mesh off, or not minted) would otherwise be bound to a peer-chosen key, and
+        // `ensureMeshIdentity` would then never publish their real one. Provenance is durable — a
+        // live-session test isn't (a logged-out or restarted local user has no session).
+        if (!existing.identityKey && importedKey && rt.store.isUserSynced(existing.id)) {
           const next = UserSchema.parse({ ...existing, identityKey: importedKey });
           rt.store.upsertUser(next);
           Object.assign(existing, next);
@@ -374,7 +378,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         pending: undefined,
         identityKey: importedKey,
       });
-      rt.store.upsertUser(sanitized);
+      rt.store.transaction(() => {
+        rt.store.upsertUser(sanitized);
+        rt.store.markUserSynced(sanitized.id);
+      });
       rt.data.users.push(sanitized);
       rt.broadcast({ type: "userUpserted", user: sanitized });
     }
@@ -405,7 +412,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (!response.ok) {
           throw new Error(`Peer answered ${response.status}`);
         }
-        return await readPeerBody(response, attachmentMaxBytes);
+        // Read up to the cap for THIS attachment's type — non-image files may be larger than images.
+        const maxBytes = isImageAttachmentMime(attachment.mimeType) ? attachmentMaxBytes : attachmentFileMaxBytes;
+        return await readPeerBody(response, maxBytes);
       } finally {
         clearTimeout(timeout);
       }
@@ -619,10 +628,98 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   // bytes, only the recipient's home node can open it. All of this is gated on `mesh.enabled`; with
   // it off nothing below runs and the public-data flow is byte-identical to today.
 
+  /** True when `message` names an attachment this node already holds for someone else: an id owned by
+   *  another local message or a pending upload, or — because pending-upload ownership is in-memory only
+   *  and lost on restart — ANY file already on disk that the identity-verified record being edited
+   *  (`existing`, the only legitimate co-owner) doesn't reference. Binding a public import to such a file
+   *  would make it anonymously downloadable. (A file left by an import interrupted between write and
+   *  insert is refused too, until the orphan sweep reaps it and the next round re-fetches it.) */
+  async function claimsForeignAttachment(message: Message, existing: Message | undefined): Promise<boolean> {
+    if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
+      return false;
+    }
+
+    const ids = new Set(message.attachments.map((attachment) => attachment.id));
+
+    for (const id of ids) {
+      if (rt.attachmentOwners.has(id)) {
+        return true;
+      }
+    }
+
+    const ownedElsewhere = rt.data.messages.some(
+      (candidate) =>
+        candidate !== existing &&
+        candidate.type !== "reaction" &&
+        candidate.type !== "sealed" &&
+        !!candidate.attachments?.some((attachment) => ids.has(attachment.id)),
+    );
+
+    if (ownedElsewhere) {
+      return true;
+    }
+
+    const alreadyReferenced = new Set(
+      existing && existing.type !== "reaction" && existing.type !== "sealed"
+        ? (existing.attachments ?? []).map((attachment) => attachment.id)
+        : [],
+    );
+
+    for (const attachment of message.attachments) {
+      if (alreadyReferenced.has(attachment.id)) {
+        continue;
+      }
+
+      // Id-keyed like every other ownership check (the download gate and the orphan sweep resolve a file
+      // by id), so declaring a different MIME class can't dodge it via a different file name.
+      for (const extension of ["png", "jpg", "webp", "bin"]) {
+        try {
+          await stat(join(rt.attachmentsDir, `${attachment.id}.${extension}`));
+          return true;
+        } catch {
+          // not on disk under this name
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /** True when a later import may edit `existing`: it must be a record this node imported (provenance),
+   *  and local moderation is sticky — a moderator removal is an in-place edit (body blanked, files
+   *  deleted, `meta.removedByModerator`), which the origin's next ordinary edit would otherwise win
+   *  newer-wins against, restoring the content and re-downloading the removed attachment. */
+  function isPeerEditable(existing: Message): boolean {
+    return !existing.meta?.removedByModerator && rt.store.isMessageSynced(existing.id);
+  }
+
+  /** True when `incoming` is an edit of `existing` — same arm, author, timestamp and routing — rather
+   *  than a different message reusing its id. */
+  function isSameMessageIdentity(existing: Message, incoming: Message): boolean {
+    if (existing.type !== incoming.type || existing.authorId !== incoming.authorId || existing.createdAt !== incoming.createdAt) {
+      return false;
+    }
+
+    if (existing.type === "channelPost" && incoming.type === "channelPost") {
+      return existing.channelId === incoming.channelId;
+    }
+
+    if (existing.type === "channelReply" && incoming.type === "channelReply") {
+      return existing.channelId === incoming.channelId && existing.parentMessageId === incoming.parentMessageId;
+    }
+
+    if (existing.type === "reaction" && incoming.type === "reaction") {
+      return existing.targetMessageId === incoming.targetMessageId;
+    }
+
+    return false;
+  }
+
   /**
    * Import a batch of peer messages: posts before replies before reactions (so parents/targets
    * land first), never into private/unknown channels (a malicious peer must not inject into a
-   * local private channel id), never over a tombstone, and edits only when strictly newer.
+   * local private channel id), never over a tombstone, and edits only when strictly newer — and only of
+   * the same message (see {@link isSameMessageIdentity}).
    */
   async function importPeerMessages(peerUrl: string, messages: Message[], generation: number): Promise<number> {
     const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
@@ -631,6 +728,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
 
     for (const message of sorted) {
       if (message.type === "dm" || message.meta?.streaming || rt.tombstones.has(message.id)) {
+        continue;
+      }
+
+      // Ids are peer-chosen. One inside the mesh replay-key namespace would, once deleted or expired
+      // here, leave a tombstone that makes this node refuse a genuine sealed message.
+      if (mesh.isReservedReplayId(message.id)) {
         continue;
       }
 
@@ -668,6 +771,21 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         (message.type === "channelReply" && !rt.appConfig.features.enableReplies) ||
         (message.type === "reaction" && !rt.appConfig.features.enableReactions)
       ) {
+        continue;
+      }
+
+      // An import may only EDIT the record it names, never turn it into a different one: the checks
+      // below vet the INCOMING message, so without this a peer that knows a private message's id could
+      // re-offer it as a public arm — reclassifying a DM into the public export (leaking its body via
+      // `Object.assign`-preserved fields, and its attachments via the download gate). Checked BEFORE any
+      // attachment fetch, so a refused import can't write bytes or queue retry work under a local id.
+      const existing = rt.data.messages.find((candidate) => candidate.id === message.id);
+
+      // ...and only a record this node itself IMPORTED. Sync is unsigned and the export hands a peer every
+      // field the identity check compares, so without provenance any configured peer could rewrite a
+      // message a LOCAL user wrote. (Messages imported before this mark existed are unmarked, so their
+      // later peer edits are ignored — fail closed.)
+      if (existing && (!isSameMessageIdentity(existing, message) || !isPeerEditable(existing))) {
         continue;
       }
 
@@ -724,6 +842,19 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           }
         }
 
+        // An attachment id belongs to exactly one message (uploads are consumed on first use). A peer
+        // message naming an id that a DIFFERENT local message — or a still-pending local upload — already
+        // owns would alias that file: the download gate resolves a file to its owning message, so a public
+        // import could make a DM / private-channel attachment anonymously fetchable. Refuse it outright.
+        if (await claimsForeignAttachment(message, existing)) {
+          continue;
+        }
+
+        // The check above awaited — a kill switch may have landed (docs/15 #2).
+        if (rt.wipeGeneration !== generation) {
+          return imported;
+        }
+
         await importPeerAttachments(peerUrl, message, generation);
         // A kill switch during the attachment fetch just wiped the store — stop before we insert
         // this (and any later) message back onto it (docs/15 #2).
@@ -732,12 +863,23 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         }
       }
 
-      const existing = rt.data.messages.find((candidate) => candidate.id === message.id);
+      // The attachment work above awaited: if the record was deleted (or appeared) locally meanwhile,
+      // drop this import rather than update a detached object and broadcast a deleted message back.
+      if (rt.data.messages.find((candidate) => candidate.id === message.id) !== existing) {
+        continue;
+      }
 
       if (existing) {
         if ((message.editedAt ?? 0) > (existing.editedAt ?? 0)) {
           const updated = MessageSchema.parse(message);
           rt.store.updateMessage(updated);
+          // Mirror the row exactly: drop optional fields the edit removed (e.g. `attachments`) before
+          // merging, or the in-memory record keeps what the database no longer has until a restart.
+          for (const key of Object.keys(existing)) {
+            if (!(key in updated)) {
+              delete (existing as Record<string, unknown>)[key];
+            }
+          }
           Object.assign(existing, updated);
           rt.broadcast({ type: "messageUpdated", message: existing });
           imported += 1;
@@ -746,7 +888,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         continue;
       }
 
-      rt.store.insertMessage(message);
+      rt.store.transaction(() => {
+        rt.store.insertMessage(message);
+        rt.store.markMessageSynced(message.id);
+      });
       rt.data.messages.push(message);
       rt.broadcast({ type: "messageCreated", message });
       imported += 1;
@@ -784,7 +929,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (!existing) {
           // A locally deleted channel is tombstoned by its id — a peer that still lists it must
           // never resurrect it here (delete is permanent; archive is the recoverable state).
-          if (rt.tombstones.has(channel.id)) {
+          if (rt.tombstones.has(channel.id) || mesh.isReservedReplayId(channel.id)) {
             continue;
           }
 
@@ -861,7 +1006,14 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           }
 
           const mine = localById.get(entry.id);
-          return !mine || (entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0));
+
+          if (!mine) {
+            return true;
+          }
+
+          // Don't even ask for an edit the import would refuse (a local-origin or moderator-removed
+          // record) — the peer's newer stamp never goes away, so it would be re-fetched every round.
+          return entry.editedAt !== undefined && entry.editedAt > (mine.editedAt ?? 0) && isPeerEditable(mine);
         })
         .map((entry) => entry.id);
 

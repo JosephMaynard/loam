@@ -23,6 +23,7 @@ keystore.properties
 
 # Built APK (from `pnpm --filter app apk`)
 *.apk
+*.aab
 
 # Metro
 .metro-health-check*

@@ -26,7 +26,11 @@ law-enforcement avoidance as the purpose.
 (A→C→B) delivery. **Phases 0–2 + v2 secure addressing are BUILT & TESTED** (see the doc's
 "Implementation status"): `packages/crypto` (`@loam/crypto`) is the Ed25519/X25519 sealed-sender
 primitive; the server has a `sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL
-table), and bounded relay (TTL/hop/cap, no acks). **v2** addresses mail by the recipient's
+table), and bounded relay (TTL/hop/cap, no acks). The outer message id isn't covered by the seal, so
+replay protection keys on a **hash of ciphertext + toTag + TTL** (`sealed.<sha256>`, stored beside the
+id tombstones on delivery) as well as the id; relays dedupe carried mail by the same key, only the
+canonical base64url spelling is accepted, and peer-supplied ids in the `sealed.` namespace are refused.
+**v2** addresses mail by the recipient's
 **self-certifying `mesh.` id** and exchanges keys via **mesh identity cards** — `GET /api/mesh/identity`
 (your card: public keys + secret `mailboxToken`) → shown as a QR / pasted → `POST /api/mesh/contacts`
 (re-verified server-side: `meshId===hash(sign)` + `kxSig` binding; stored per-user in the
@@ -48,7 +52,7 @@ gated by the launcher's per-boot `x-loam-host-token`, since loopback is reachabl
 mirror of `/api/sync/*` reusing `acceptSealedFromPeer` (desktop-tested; the Kotlin compiles in APK builds but has NOT been run
 against radios — no CI hardware). **Still not built:** the Wi-Fi Aware handshake/port-exchange finish +
 BLE fallback + Phase 4 background/battery duty-cycling (all real-device work), an in-band contact-request
-flow, group fan-out, and tombstone GC. Do not rush the unbuilt crypto/transport — that's the documented
+flow, and group fan-out. Do not rush the unbuilt crypto/transport — that's the documented
 way comparable apps (Bridgefy, FireChat) failed.
 
 ## Layout
@@ -232,9 +236,10 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   joining their audience.
 - **Search**: `GET /api/search?q=&limit=` — case-insensitive substring over message bodies, newest
   first, scoped to the caller (accessible non-archived channels + own DMs, shadow-ban respected).
-- **Attachments**: messages may carry ≤4 images (`attachments` on posts/replies/DMs; image-only
-  messages are valid). `POST /api/attachments` mirrors the avatar pipeline (base64, magic-byte vs
-  MIME, 256KB cap, rate-limited); ids are uploader-bound and consumed on first use; files served
+- **Attachments**: messages may carry ≤4 attachments (`attachments` on posts/replies/DMs;
+  attachment-only messages are valid) — images (256KB, served inline) or allowlisted non-image files
+  (1 MiB, stored as `.bin`, served octet-stream + `Content-Disposition: attachment`). `POST /api/attachments` mirrors the avatar pipeline (base64, magic-byte vs
+  MIME, 256KB images / 1 MiB other files, rate-limited); ids are uploader-bound and consumed on first use; files served
   from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch.
   Clients downscale to ≤1280px webp on-device first (`apps/client/src/lib/attachments.ts`).
   `enableAttachments` flag, default on.
@@ -249,8 +254,12 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
 - **Node-to-node sync** (docs/11): `sync.{enabled,peers,intervalMs}` config; pull-based gossip of
   **public data only** via `GET /api/sync/digest` + `POST /api/sync/messages` (404 unless enabled).
   DMs/private channels/shadow-banned authors never export. Imports are defensive (public-local
-  channels only, users stripped of authority, edits only when newer, attachments copied
-  best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.
+  channels only, users stripped of authority, edits only when newer, **only of a message this node
+  imported** (`synced_messages` provenance — a peer can't rewrite a local user's post), never of a
+  moderator-removed message (local moderation is sticky), **and only of the same message** —
+  same arm/author/timestamp/routing, so a peer can't re-type a private id into the public flow — a
+  message naming an attachment id another local message or pending upload owns is refused, attachments
+  copied best-effort). Local deletes write **tombstones** (DB table) so peers can't re-import them.
   Admin: `GET /api/admin/sync`, `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's
   join URL is its sync address.
 - **Security headers**: an `onSend` hook sets `X-Content-Type-Options: nosniff` on every response and

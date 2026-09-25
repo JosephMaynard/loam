@@ -108,8 +108,21 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
 5. **Tombstone GC** — expired-sealed tombstones **are** horizon-GC'd: they use the same `addTombstone`
    (stamped `created_at`) and are pruned by `pruneTombstonesOlderThan` past the 30-day horizon along with
    every other tombstone (docs/15 #7, landed) — no longer the unbounded-growth follow-up this once was.
-6. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
-7. **Schema bounds** — the shipped `SealedMessageSchema` uses generous round caps (`toTag` ≤ 64 chars,
+6. **Replay protection keys on the mail, not the outer id** (review 2026-09): the outer `id` isn't covered
+   by the seal, so a carrier could re-offer identical ciphertext under a fresh id and the recipient got
+   duplicate DMs. Delivery now also tombstones `sealed.<sha256(sealed | toTag | ttlExpiresAt)>`; relays
+   dedupe carried mail by the same key. The AAD fields are in the key on purpose — they're cleartext a
+   relay can't verify, so a blob-only key would let a carrier pre-offer the genuine blob under a fake TTL
+   and shadow the real copy. Only the canonical base64url spelling of a blob is accepted (the decoder is
+   tolerant, so one envelope has many spellings), peer-supplied ids inside the `sealed.` namespace are
+   refused, and a `ttlExpiresAt` beyond the 7-day max (+1 epoch skew) is dropped. `hopLimit` and `meta` are
+   NOT authenticated: a relay rebuilds the carried row from the needed fields only, doesn't carry a copy
+   with no hops left, and lets a better-provisioned copy of held mail raise the held hop budget — so a
+   carrier can't park a dead copy that shadows the genuine one. This supersedes the
+   "dedup by id" wording in §2 below. **Not covered:** an Emergency Reset clears tombstones, so replay
+   records don't survive a wipe (tied to the open mesh-key-wipe policy, docs/29 §4).
+7. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
+8. **Schema bounds** — the shipped `SealedMessageSchema` uses generous round caps (`toTag` ≤ 64 chars,
    `sealed` ≤ 90 000 chars) rather than the tight computed bounds in §2 below (22 / 87 480). Same
    headroom for the full-size envelope, just simpler numbers.
 

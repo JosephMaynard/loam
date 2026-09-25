@@ -46,10 +46,10 @@ import {
   conversationMessages,
   groupReactionsByTarget,
   groupRepliesByParent,
-  isConversationMessage,
   mergeMessagesInOrder,
   messageConversationKey,
   reactionSummary,
+  reconcileConversationSnapshot,
   repliesFor,
   topLevelMessages,
 } from "./lib/messages";
@@ -722,48 +722,22 @@ function LoamApp() {
    */
   const reconcileConversationMessages = useCallback(
     (conversation: Conversation, serverMessages: Message[], preFetchIds: Set<string>) => {
-      const serverIds = new Set(serverMessages.map((message) => message.id));
-      // Two guards against pruning legitimate messages that raced the fetch (sent locally or
-      // arriving over the socket while it was in flight): only messages we already held when the
-      // request started are prunable at all, and never anything newer than the snapshot's newest
-      // entry (server timestamps compared to server timestamps — an empty snapshot has no edge,
-      // so there the pre-fetch id set is the only, and sufficient, guard).
-      const snapshotEdge = serverMessages.reduce((newest, message) => Math.max(newest, message.createdAt), 0);
       const meId = currentUserIdRef.current;
 
       setMessages((previous) => {
-        const conversationIds = new Set(
-          previous
-            .filter((message) => isConversationMessage(message, conversation, meId))
-            .map((message) => message.id),
+        const { messages: next, prunedIds } = reconcileConversationSnapshot(
+          previous,
+          conversation,
+          serverMessages,
+          preFetchIds,
+          meId,
         );
-        const kept: Message[] = [];
 
-        for (const message of previous) {
-          const inConversation =
-            isConversationMessage(message, conversation, meId) ||
-            (message.type === "reaction" && conversationIds.has(message.targetMessageId));
-
-          if (
-            inConversation &&
-            !serverIds.has(message.id) &&
-            preFetchIds.has(message.id) &&
-            (snapshotEdge === 0 || message.createdAt <= snapshotEdge)
-          ) {
-            void deleteRecord("messages", message.id);
-            continue;
-          }
-
-          kept.push(message);
+        for (const id of prunedIds) {
+          void deleteRecord("messages", id);
         }
 
-        const next = new Map(kept.map((message) => [message.id, message]));
-
-        for (const message of serverMessages) {
-          next.set(message.id, message);
-        }
-
-        return Array.from(next.values()).sort(compareCreatedAt);
+        return next;
       });
       void putRecords("messages", serverMessages);
     },
@@ -1197,7 +1171,8 @@ function LoamApp() {
         );
 
         if (!response.ok) {
-          throw new Error(`Avatar upload failed: ${response.status}`);
+          const payload: unknown = await response.json().catch(() => undefined);
+          throw new Error(errorText(payload, `Avatar upload failed: ${response.status}`));
         }
 
         const user = UserSchema.parse(await response.json());
@@ -2096,6 +2071,9 @@ function ConversationView({
 }: ConversationViewProps) {
   const location = useLocation();
   const [membersOpen, setMembersOpen] = useState(false);
+  // The user the report dialog was opened for — bound to that id, so the dialog can't follow a route
+  // change onto a different DM and report the wrong person.
+  const [reportUserId, setReportUserId] = useState<string>();
   const timedOut = useIsTimedOut(currentUser);
   const topMessages = useMemo(
     () => (conversation ? topLevelMessages(messages, conversation) : []),
@@ -2107,9 +2085,10 @@ function ConversationView({
   const repliesByParent = useMemo(() => groupRepliesByParent(messages), [messages]);
   const reactionsByTarget = useMemo(() => groupReactionsByTarget(messages), [messages]);
 
-  // Never carry the members panel from one conversation into another.
+  // Never carry the members panel or a report dialog from one conversation into another.
   useEffect(() => {
     setMembersOpen(false);
+    setReportUserId(undefined);
   }, [conversation?.kind, conversation?.id]);
   const threadParent =
     conversation?.kind === "channel" && conversation.threadId
@@ -2163,6 +2142,12 @@ function ConversationView({
                   type="button"
                 >
                   {t("conversation.members")}
+                </button>
+              ) : conversation.kind === "dm" && usersById.get(conversation.id)?.type === "human" ? (
+                // The report-a-USER entry point (the server + dialog already supported it, but nothing
+                // opened it): reachable from the one place a person is the subject — their DM.
+                <button className="ghost-button" onClick={() => setReportUserId(conversation.id)} type="button">
+                  {t("report.userTitle")}
                 </button>
               ) : undefined
             }
@@ -2237,6 +2222,9 @@ function ConversationView({
           repliesByParent={repliesByParent}
           usersById={usersById}
         />
+      ) : null}
+      {conversation.kind === "dm" && reportUserId === conversation.id ? (
+        <ReportDialog targetType="user" targetId={reportUserId} onClose={() => setReportUserId(undefined)} />
       ) : null}
     </>
   );

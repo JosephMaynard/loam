@@ -457,6 +457,9 @@ export const SecurityConfigSchema = z.object({
 });
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
 
+/** The longest lifetime a sender may give sealed mesh mail (`mesh.ttlMs` max) — receivers refuse longer. */
+export const MESH_TTL_MAX_MS = 7 * 24 * 3_600_000;
+
 /**
  * Opportunistic-mesh / sealed-mailbox delivery (docs/16). The whole sealed-mail surface is gated on
  * `enabled` (default off) — with it off, public-data sync is byte-identical to today. `relay` (a
@@ -467,7 +470,7 @@ export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
 export const MeshConfigSchema = z.object({
   enabled: z.boolean(),
   relay: z.boolean(),
-  ttlMs: z.number().int().min(60_000).max(7 * 24 * 3_600_000),
+  ttlMs: z.number().int().min(60_000).max(MESH_TTL_MAX_MS),
   hopLimit: z.number().int().min(1).max(16),
   maxCarried: z.number().int().min(0).max(100_000),
   /** Cap on a single local user's mesh address book, so an authenticated client can't grow the
@@ -962,17 +965,20 @@ export const SyncAttachmentRequestSchema = z.object({
 export type SyncAttachmentRequest = z.infer<typeof SyncAttachmentRequestSchema>;
 
 export const SyncAttachmentResponseSchema = z.object({
-  /** The attachment bytes, standard base64. Capped at the base64 length of the 256 KiB attachment limit
-   * (`ceil(262144 / 3) * 4 = 349528` chars) and constrained to the base64 alphabet so a malformed or
-   * oversized payload is rejected at the boundary. */
+  /** The attachment bytes, standard base64. Capped at the base64 length of the LARGEST attachment a node
+   * accepts — the 1 MiB non-image file cap (`ceil(1048576 / 3) * 4 = 1398104` chars; images are capped
+   * lower, at 256 KiB, and the importer re-checks the per-type cap on the decoded bytes) — and constrained
+   * to the base64 alphabet so a malformed or oversized payload is rejected at the boundary. */
   data: z
     .string()
-    .max(349_528)
+    .max(1_398_104)
     .regex(
       /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
       "must be standard base64",
     ),
-  mimeType: z.string().min(1).max(100),
+  /** Informational (the puller trusts the MIME on the message's own attachment entry). Optional because
+   * nodes before 2026-09 omitted it for non-image files, which made every file attachment fail to sync. */
+  mimeType: z.string().min(1).max(100).optional(),
 });
 export type SyncAttachmentResponse = z.infer<typeof SyncAttachmentResponseSchema>;
 

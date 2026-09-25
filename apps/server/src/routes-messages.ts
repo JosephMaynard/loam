@@ -6,6 +6,9 @@ import { errorBody } from "./errors.js";
 
 /** Register the message routes: DMs, search, create, edit, delete. */
 export function registerMessageRoutes(ctx: AppContext): void {
+  // CONTRACT: returns the FULL conversation. The client treats it as authoritative and prunes any cached
+  // message absent from it (`reconcileConversationSnapshot`) — do not paginate/limit this without
+  // changing that, or older cached history is silently deleted on open.
   ctx.server.get<{ Params: { userId: string } }>("/api/dms/:userId", async (request, reply) => {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
     const accessError = ctx.participationError(currentUser);
