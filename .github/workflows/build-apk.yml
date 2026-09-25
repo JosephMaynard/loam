@@ -5,7 +5,11 @@ name: Build APK
 # Triggers:
 #   - push of a tag matching v*  → verify + test + build (release-signed, REQUIRED) → attach the APK to the
 #                                  Release; the Play AAB is built in the same pass and uploaded as a workflow
-#                                  artifact only (docs/30 B1 — it's for the Play Console, not the Release)
+#                                  artifact only (docs/30 B1 — it's for the Play Console, not the Release).
+#                                  Tags are vX.Y.Z, or vX.Y.Z-rc.N / vX.Y.Z-beta.N for a pre-release: same
+#                                  checks, keystore and tests, AAB included (RCs are what internal testing
+#                                  gets), but published as a GitHub PRE-release. Anything else fails the
+#                                  version check.
 #   - manual (workflow_dispatch) → build + upload the APK as a workflow artifact (no Release); debug-signed
 #                                  when the keystore secret isn't configured
 #
@@ -21,7 +25,8 @@ name: Build APK
 #     attaches it.
 #   - The keystore secrets are exposed ONLY to the one step that writes the keystore, never job-wide.
 #   - Tag builds FAIL without the keystore secret (a debug-signed release can't update installs), when the
-#     tag doesn't match the manifest versions, or when versionCode isn't above the previous release's.
+#     tag's X.Y.Z doesn't match the manifest versions, or when versionCode isn't above that of every earlier
+#     release tag (pre-releases included — Play never accepts a code twice).
 #     `pnpm test` must pass before anything is built.
 #
 # NOTE: for this to fire on a tag, the workflow file must already exist in the tagged commit — i.e. it
@@ -61,8 +66,8 @@ jobs:
           cache: pnpm
 
       - name: Check versions
-        # On a tag: the tag must equal the manifest version and versionCode must exceed the previous
-        # release's. Otherwise: every manifest agrees.
+        # On a tag: the tag's X.Y.Z (before any -rc.N / -beta.N) must equal the manifest version and
+        # versionCode must exceed every earlier release tag's. Otherwise: every manifest agrees.
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
@@ -182,3 +187,6 @@ jobs:
         with:
           files: loam-host.apk
           fail_on_unmatched_files: true
+          # vX.Y.Z-rc.N / -beta.N (check-versions rejects any other suffix) → a GitHub pre-release, so it
+          # never becomes "Latest" or the default download.
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -8,7 +8,8 @@
     "build": "pnpm -r --if-present build",
     "build:cli": "node scripts/build-cli.mjs",
     "apk": "pnpm --filter app apk",
-    "test": "pnpm -r --if-present test"
+    "test": "pnpm -r --if-present test && pnpm run test:scripts",
+    "test:scripts": "node --test 'scripts/*.test.mjs' 'cli/test/*.test.mjs'"
   },
   "devDependencies": {
     "@loam/qr": "workspace:*",
