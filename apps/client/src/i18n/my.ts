@@ -529,7 +529,7 @@ export const my: Translation = {
   "admin.deleteChannelConfirm":
     "“{name}” ကို အပြီးအပိုင် ဖျက်မလား။ ၎င်းအတွင်းရှိ စာနှင့် ပူးတွဲဖိုင်အားလုံး ဖယ်ရှားခံရပြီး ပြန်လည်ရယူ၍ မရပါ — မှတ်တမ်းသိမ်းခြင်းနှင့် မတူဘဲ ပြန်ပြင်၍ မရပါ။",
   "gate.needsQrKeyChanged":
-    "ဤ node ၏ key သည် သင်စကင်ဖတ်ခဲ့သည့် key နှင့် မကိုက်ညီတော့ပါ — host က ၎င်းကို ပြန်လည်သတ်မှတ်ခဲ့နိုင်သည်၊ သို့မဟုတ် ဤကွန်ရက်သည် ၎င်းဆိုထားသည့်အတိုင်း မဟုတ်နိုင်ပါ။ ပြန်ချိတ်ဆက်ရန် node ၏ လက်ရှိ join QR ကုဒ်ကို စကင်ဖတ်ပါ။",
+    "ဤ node ၏ key သည် သင်စကင်ဖတ်ခဲ့သည့် key နှင့် မကိုက်ညီတော့ပါ — host ကို ပြန်စတင်ခဲ့ခြင်း သို့မဟုတ် ၎င်းကို ပြန်လည်သတ်မှတ်ခဲ့ခြင်း ဖြစ်နိုင်သည်၊ သို့မဟုတ် ဤကွန်ရက်သည် ၎င်းဆိုထားသည့်အတိုင်း မဟုတ်နိုင်ပါ။ ပြန်ချိတ်ဆက်ရန် node ၏ လက်ရှိ join QR ကုဒ်ကို စကင်ဖတ်ပါ။",
   "message.report": "တိုင်ကြားရန်",
   "message.removedByModerator": "Moderator တစ်ဦးက ဖယ်ရှားခဲ့သည်",
   "report.messageTitle": "ဤစာကို တိုင်ကြားရန်",
@@ -598,6 +598,8 @@ export const my: Translation = {
   "transport.pinChangeNew": "ဤလင့်ခ်ရှိ key- {fingerprint}",
   "transport.pinChangeAccept": "Key အသစ်ကို သုံးရန်",
   "transport.pinChangeReject": "လက်ရှိ key ကို ဆက်ထားရန်",
+  "transport.pinChangeMismatch":
+    "ဤလင့်ခ်ထဲရှိ key သည် ဤ node အသုံးပြုနေသည့် key မဟုတ်သောကြောင့် ယုံကြည်၍ မရပါ။ host ၏ မျက်နှာပြင်ပေါ်တွင် ပြထားသည့် join QR ကုဒ်ကို စကင်ဖတ်ပါ။",
   "invite.qrKeyMismatch":
     "Join QR ကို ဖျောက်ထားသည်- ဤ node ကြေညာသော key သည် သင်ဝင်ရောက်ခဲ့သည့် key နှင့် မကိုက်ညီပါ။",
   "invite.qrNoKeyNote":

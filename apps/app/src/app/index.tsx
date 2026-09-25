@@ -1057,8 +1057,16 @@ export default function HostScreen() {
             // here — a LAN joiner never sees it): the client claims admin with it on its first boot under the
             // `hostDevice` bootstrap (review 2026-09-04). `originWhitelist` + `onShouldStartLoadWithRequest`
             // below pin this frame to the loopback origin, so the injected global can't reach another page.
+            // Also hand over the host's transport key (read from the loopback bootstrap above) as
+            // `__loamHostTransportKey`: the client trusts it over a stale pin, since a node with an ephemeral
+            // DB key mints a new transport key every boot and would otherwise break the host's own pin
+            // (rescan gate + "different key" prompt) on every launch (docs/04, docs/08).
             injectedJavaScriptBeforeContentLoaded={
-              hostAdminToken ? `window.__loamHostDeviceToken = ${JSON.stringify(hostAdminToken)}; true;` : undefined
+              (hostAdminToken ? `window.__loamHostDeviceToken = ${JSON.stringify(hostAdminToken)};` : '') +
+              (transportKeyFragment
+                ? `window.__loamHostTransportKey = ${JSON.stringify(decodeURIComponent(transportKeyFragment.slice('#k='.length)))};`
+                : '') +
+              ' true;'
             }
             // The LOAM client relies on the loam_session cookie, localStorage/IndexedDB, and a
             // WebSocket — enable all of them, and allow the cleartext localhost origin.

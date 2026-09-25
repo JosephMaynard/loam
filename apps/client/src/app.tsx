@@ -38,9 +38,9 @@ import { SearchResult } from "./components/SearchResult";
 import { Sidebar } from "./components/Sidebar";
 import { ApiError, fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
-import { fetchBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
+import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
-import { forgetConfirmedIdentity, recordConfirmedIdentity } from "./lib/identity";
+import { forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity, recordConfirmedIdentity } from "./lib/identity";
 import {
   compareCreatedAt,
   conversationMessages,
@@ -476,8 +476,9 @@ function LoamApp() {
   // The conversation (`conversationKey`) whose history the server answered with a 404 — it doesn't exist
   // for this user (unknown, removed, or not a member): shown as "not available", not as an error.
   const [notFoundConversation, setNotFoundConversation] = useState<string>();
-  // A `#k=` link proposed a host key different from the pinned one (see `PinChangePrompt`).
-  const [pinChange, setPinChange] = useState<{ current: string; next: string }>();
+  // A `#k=` link proposed a host key different from the pinned one, and the pin is broken (see
+  // `PinChangePrompt`; only ever shown on the rescan gate).
+  const [pinChange, setPinChange] = useState<{ current: string; next: string; matchesNode: boolean }>();
   // Deletes/edits applied by live events, so a history snapshot fetched before them can't undo them.
   const liveChangesRef = useRef(new LiveChangeJournal());
   // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). Read
@@ -516,12 +517,16 @@ function LoamApp() {
   // via `syncTick`) go straight to the network refetch instead of re-reading the whole cache and
   // clobbering fresher in-memory state with the on-disk snapshot.
   const hydratedRef = useRef(false);
+  // The identity this tab's content belongs to: the one whose cache it hydrates, then the one it confirms
+  // itself. A sibling tab confirming a different one makes this tab drop its content (see below).
+  const tabIdentityRef = useRef(readConfirmedIdentity());
   const [lastReadByConversation, setLastReadByConversation] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   // Who is connected right now (server presence events; empty when the node disables presence).
   const [onlineUserIds, setOnlineUserIds] = useState<ReadonlySet<string>>(new Set());
-  // Who this user has blocked (docs/30 B3). Server-owned; held in memory only (never IndexedDB), so a wipe
-  // or an identity change just resets it. Drives the client-side hiding of their channel content.
+  // Who this user has blocked (docs/30 B3). Server-owned; cached in IndexedDB for the confirmed identity
+  // (`lib/blocks.ts`) and hydrated with the cached content, so a cold/offline boot hides blocked authors from
+  // the first render. A wipe or an identity change resets it. Drives the client-side hiding of their content.
   const [blockedUserIds, setBlockedUserIds] = useState<ReadonlySet<string>>(() => new Set());
   const blockedUserIdsRef = useRef(blockedUserIds);
   blockedUserIdsRef.current = blockedUserIds;
@@ -969,6 +974,7 @@ function LoamApp() {
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
     forgetConfirmedIdentity();
+    tabIdentityRef.current = undefined;
     // In-memory residue: decrypted avatar/attachment `blob:` URLs and rendered message HTML would
     // otherwise outlive the wipe in the still-open tab (review 2026-09-04).
     clearImageObjectUrls();
@@ -1017,6 +1023,13 @@ function LoamApp() {
    * browser last had: the cache belonged to that previous identity (see the boot effect).
    */
   const purgeCachedContent = useCallback(async () => {
+    clearInMemoryContent();
+    localStorage.removeItem(LAST_CONVERSATION_KEY);
+    await clearAllRecords().catch(() => undefined);
+  }, []);
+
+  /** Drop every piece of content held in memory (the in-memory half of `purgeCachedContent`). */
+  function clearInMemoryContent(): void {
     setMessages([]);
     setChannels([]);
     setUsers([]);
@@ -1026,11 +1039,27 @@ function LoamApp() {
     setOnlineUserIds(new Set());
     setBlockedUserIds(new Set());
     setNotFoundConversation(undefined);
-    localStorage.removeItem(LAST_CONVERSATION_KEY);
     clearImageObjectUrls();
     clearMarkdownCache();
-    await clearAllRecords().catch(() => undefined);
-  }, []);
+  }
+
+  // Another tab confirmed a DIFFERENT identity (the node reset this browser's identity; that tab purged the
+  // shared cache). This tab still holds the previous identity's content in memory — drop it, then reload so
+  // everything (socket, transport session, cache) comes back up as the new identity. The shared IndexedDB is
+  // left alone: the other tab already purged it and may be refilling it for the new identity.
+  useEffect(
+    () =>
+      listenForIdentityChange(
+        () => tabIdentityRef.current,
+        () => {
+          tabIdentityRef.current = undefined;
+          clearInMemoryContent();
+          window.location.reload();
+        },
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `clearInMemoryContent` only calls state setters
+    [],
+  );
 
   // Tear THIS tab down if another tab initiates a device wipe (docs/20 round-4 Medium / round-5 Medium): the
   // initiating tab announces over a BroadcastChannel AND raises the durable tombstone (a `storage` event) —
@@ -1350,6 +1379,12 @@ function LoamApp() {
             return;
           }
 
+          // The block list first, so no cached post by a blocked author ever renders (or counts as unread)
+          // while the network fetch is pending or failing.
+          const cachedBlocks = cachedBlockListFor(cachedSync, readConfirmedIdentity());
+          if (cachedBlocks) {
+            setBlockedUserIds(cachedBlocks);
+          }
           setChannels(cachedChannels);
           upsertUsers([currentUser, ...cachedUsers]);
           setMessages(cachedMessages.sort(compareCreatedAt));
@@ -1405,6 +1440,7 @@ function LoamApp() {
             return;
           }
         }
+        tabIdentityRef.current = nextConfig.currentUser.id;
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
         setCurrentUser(nextConfig.currentUser);
@@ -1465,6 +1501,7 @@ function LoamApp() {
         setChannels(nextChannels);
         if (nextBlocks) {
           setBlockedUserIds(nextBlocks);
+          void persistBlockList(nextConfig.currentUser.id, nextBlocks);
         }
         // `/api/users` is the full roster: users it no longer returns are dropped, not just kept around.
         replaceRoster([nextConfig.currentUser, ...nextUsers], preFetchUserIds);
@@ -1944,7 +1981,9 @@ function LoamApp() {
   const setBlocked = useCallback(
     async (userId: string, blocked: boolean): Promise<void> => {
       try {
-        setBlockedUserIds(await setUserBlocked(userId, blocked));
+        const next = await setUserBlocked(userId, blocked);
+        setBlockedUserIds(next);
+        void persistBlockList(currentUserIdRef.current, next);
       } catch (blockError) {
         setError(blockError instanceof Error ? blockError.message : t("block.error"));
       }
@@ -1966,10 +2005,12 @@ function LoamApp() {
   }, [activeKey, newestSeen, updateLastRead]);
 
   const onAcceptPinChange = (): void => {
-    acceptPendingHostKey();
+    const accepted = acceptPendingHostKey();
     setPinChange(undefined);
-    setNeedsQr(false);
-    setSyncTick((tick) => tick + 1);
+    if (accepted) {
+      setNeedsQr(false);
+      setSyncTick((tick) => tick + 1);
+    }
   };
   const onRejectPinChange = (): void => {
     rejectPendingHostKey();
@@ -1982,10 +2023,12 @@ function LoamApp() {
         <div>
           <p className="brand-title">LOAM</p>
           {pinChange ? (
-            // A freshly opened join link carries a key other than the pinned one (e.g. the node's key was
-            // rotated and this is its new QR): only an explicit confirmation replaces the pin.
+            // The pinned key stopped working and a freshly opened join link carries another one (e.g. the
+            // node restarted with a new key and this is its new QR): only an explicit confirmation replaces
+            // the pin, and only when the link's key is the one the node reported.
             <PinChangePrompt
               current={pinChange.current}
+              matchesNode={pinChange.matchesNode}
               next={pinChange.next}
               onAccept={onAcceptPinChange}
               onReject={onRejectPinChange}
@@ -2104,7 +2147,7 @@ function LoamApp() {
       ) : routeState.screen === "people" ? (
         <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} />
       ) : routeState.screen === "search" ? (
-        <SearchView channels={channels} currentUser={currentUser} usersById={usersById} />
+        <SearchView blockedUserIds={blockedUserIds} channels={channels} currentUser={currentUser} usersById={usersById} />
       ) : routeState.screen === "mesh" && config?.networkConfig.enableMesh ? (
         <MeshView />
       ) : routeState.screen === "settings" ? (
@@ -2193,16 +2236,6 @@ function LoamApp() {
     {error ? (
       <ErrorBanner key={error.id} message={error.text} onDismiss={dismissError} transient={!error.persistent} />
     ) : null}
-    {pinChange ? (
-      <div className="invite-modal-backdrop">
-        <PinChangePrompt
-          current={pinChange.current}
-          next={pinChange.next}
-          onAccept={onAcceptPinChange}
-          onReject={onRejectPinChange}
-        />
-      </div>
-    ) : null}
     <ToastStack onDismiss={dismissToast} toasts={toasts} />
     </>
   );
@@ -2245,10 +2278,12 @@ function ToastStack({ onDismiss, toasts }: { onDismiss: (id: string) => void; to
  * renders whatever comes back. Tapping a result jumps to its conversation (or thread).
  */
 function SearchView({
+  blockedUserIds,
   channels,
   currentUser,
   usersById,
 }: {
+  blockedUserIds: ReadonlySet<string>;
   channels: Channel[];
   currentUser: User;
   usersById: Map<string, User>;
@@ -2367,6 +2402,7 @@ function SearchView({
                   authorName={author?.displayName ?? generateDisplayName(message.authorId)}
                   body={bodyFor(message)}
                   contextLabel={contextLabel(message)}
+                  hiddenAsBlocked={message.authorId !== currentUser.id && blockedUserIds.has(message.authorId)}
                   key={message.id}
                   onOpen={() => {
                     if (route) {

@@ -873,7 +873,8 @@ a {
   border-radius: 8px;
   background: var(--c-danger-2);
   color: var(--c-danger-bg-2);
-  padding: 10px 10px 10px 14px;
+  padding-block: 10px;
+  padding-inline: 14px 10px;
   box-shadow: 0 14px 34px rgba(23, 35, 29, 0.18);
 }
 
@@ -2147,6 +2148,14 @@ a {
 .search-result-button:focus-visible {
   outline: 3px solid rgba(47, 95, 76, 0.18);
   border-color: var(--c-border-3);
+}
+
+/* A hit from a blocked user: the collapsed placeholder, framed like a result but not a link. */
+.search-result-blocked {
+  border: 1px dashed var(--c-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--c-text-muted);
 }
 
 .search-result-meta {

@@ -4,7 +4,7 @@ import { useLocation } from "preact-iso";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
-import { withoutBlockedReactions } from "../lib/blocks";
+import { withoutBlockedAuthors, withoutBlockedReactions } from "../lib/blocks";
 import { dayKey, dayLabel } from "../lib/dates";
 import {
   groupReactionsByTarget,
@@ -427,7 +427,7 @@ function MessageList({
                     message.id,
                     currentUser.id,
                   )}
-                  replyCount={repliesFor(repliesByParent.get(message.id) ?? EMPTY_MESSAGES, message.id).length}
+                  replyCount={withoutBlockedAuthors(repliesFor(repliesByParent.get(message.id) ?? EMPTY_MESSAGES, message.id), blockedUserIds).length}
                   usersById={usersById}
                 />
               </div>

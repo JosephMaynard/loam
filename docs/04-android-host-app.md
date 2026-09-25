@@ -387,11 +387,16 @@ support it); avoid Android-only Easy Connect for v1.
   `credentials: "include"` — but same-origin (WebView → localhost) is simplest; prefer that.
 - **After an Emergency Reset** the node rotates its transport key. The host screen re-fetches
   `/api/bootstrap` for the new `#k=` and remounts the WebView when the client reports the `wipe` event
-  (which also clears its old pin). A host WebView that **missed** the event (its socket was down when the
-  reset ran) still holds the old pin, so the new `#k=` now raises the key-change confirmation (both
-  fingerprints) instead of being adopted silently; the operator confirms it on the host's own screen. The
-  client also purges its cached data when its server-confirmed identity changes, so a missed wipe doesn't
-  leave old messages on screen.
+  (which also clears its old pin). The WebView is also handed the node's key directly: alongside the
+  per-boot host token (`window.__loamHostDeviceToken`), `injectedJavaScriptBeforeContentLoaded` sets
+  `window.__loamHostTransportKey` to the key from the loopback `/api/bootstrap`, and the client adopts it
+  over any stale or broken pin without asking. That covers a WebView that **missed** the wipe event, and
+  a node with an ephemeral DB key, which mints a new transport key on **every boot** — without it the host's
+  own screen would hit the rescan gate and a "different key" prompt on each launch. The injection only
+  happens in the host's own WebView, pinned to the loopback origin (`originWhitelist` +
+  `onShouldStartLoadWithRequest`), so a LAN browser never gets it; LAN joiners of an ephemeral-key node
+  rescan the QR after each host restart (docs/08). The client also purges its cached data when its
+  server-confirmed identity changes, so a missed wipe doesn't leave old messages on screen.
 
 ## Monorepo question — settled
 

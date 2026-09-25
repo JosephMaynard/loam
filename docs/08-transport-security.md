@@ -58,9 +58,22 @@
 >
 > **Client pin rules (pre-release review 2026-09-25).** A `#k=` fragment only ever *establishes* a pin for
 > an origin that has none (or re-confirms the same key). A **different** key never silently replaces the
-> pin: it is parked as a pending change the user must accept or reject, shown both emoji fingerprints —
-> any same-origin navigation can carry a `#k=` (a link posted in a channel, say), so silent replacement
-> would let any member lock others out or, from an on-path position, swap in their own key. Message
+> pin — any same-origin navigation can carry a `#k=` (a link posted in a channel, say), so silent
+> replacement would let any member lock others out or, from an on-path position, swap in their own key.
+> It is parked as a pending change, and: (1) if the current pin still handshakes, the node holds that key
+> (a node has exactly one), so the link is dropped without asking; (2) only once the pin is **broken** (the
+> node's handshake reported another key — a restart of an ephemeral-key node, an Emergency Reset) is the
+> change offered, showing both emoji fingerprints; (3) **Accept** works only when the link's key equals the
+> key the node itself reported in that mismatching handshake (on a load that starts with an already-broken
+> pin, a key-only probe handshake learns it; nothing is derived or kept). A link whose key the node doesn't
+> hold is shown as "this link's key doesn't match the node — rescan the QR at the host", with no Accept.
+> An on-path attacker who can forge the handshake *and* plant the link still gets as far as the prompt;
+> the fingerprints are what the user checks against the host's screen. **Android host WebView:** the
+> launcher injects the key it read from its own server over loopback (`window.__loamHostTransportKey`, see
+> docs/04), and the client adopts it directly over any pin, so a node with an ephemeral DB key — which
+> mints a new transport key every boot — doesn't break the host's own pin on every launch. LAN browsers
+> never get that global; for them a restarted ephemeral-key node is a real key change: pin broken → the
+> gate explains the node's key changed (for example after a restart or reset) → rescan the QR. Message
 > markdown strips any fragment with a `k=` parameter from links. The join/invite QR a client shows others
 > carries `#k=` **only** from its own QR-verified session key — never the `networkConfig.transportPublicKey`
 > it learned over the plaintext bootstrap — and is suppressed outright when the advertised key contradicts

@@ -3,9 +3,7 @@ import { useLayoutEffect, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { requestJson } from "../lib/api";
-
-/** What Tab can land on inside the dialog. */
-const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+import { trapFocus } from "../lib/focus-trap";
 
 interface ReportDialogProps {
   targetType: ReportTargetType;
@@ -37,31 +35,6 @@ export function ReportDialog({ targetType, targetId, onClose }: ReportDialogProp
       }
     };
   }, []);
-
-  /** Keep Tab / Shift+Tab cycling inside the modal (it's `aria-modal`; focus must not wander behind it). */
-  function trapFocus(event: KeyboardEvent): void {
-    const dialog = dialogRef.current;
-    if (event.key !== "Tab" || !dialog) {
-      return;
-    }
-    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-      (element) => !element.hasAttribute("disabled"),
-    );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0]!;
-    const last = focusable[focusable.length - 1]!;
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || active === dialog)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
 
   async function submit(): Promise<void> {
     setBusy(true);
@@ -100,7 +73,7 @@ export function ReportDialog({ targetType, targetId, onClose }: ReportDialogProp
             onClose();
             return;
           }
-          trapFocus(event);
+          trapFocus(dialogRef.current, event);
         }}
         ref={dialogRef}
         role="dialog"

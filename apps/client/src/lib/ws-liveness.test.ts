@@ -77,6 +77,31 @@ describe("WebSocket liveness watchdog (review 2026-09-25)", () => {
     expect(onDead).not.toHaveBeenCalled();
   });
 
+  it("a dead timer that fires late after a page freeze waits for buffered frames instead of dropping the socket", () => {
+    const onDead = vi.fn();
+    const watchdog = createLivenessWatchdog(onDead);
+    watchdog.frame(true);
+    // Frozen for 10 minutes: the wall clock moved but the timer didn't run; it fires on resume, far past due.
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    vi.advanceTimersByTime(HEARTBEAT_DEAD_AFTER_MS);
+    expect(onDead).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(100);
+    watchdog.frame(true); // the ping the browser held while the page was frozen
+    vi.advanceTimersByTime(HEARTBEAT_RECHECK_GRACE_MS);
+    expect(onDead).not.toHaveBeenCalled();
+  });
+
+  it("a late dead timer still declares the socket dead when nothing arrives during the grace", () => {
+    const onDead = vi.fn();
+    const watchdog = createLivenessWatchdog(onDead);
+    watchdog.frame(true);
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    vi.advanceTimersByTime(HEARTBEAT_DEAD_AFTER_MS);
+    expect(onDead).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(HEARTBEAT_RECHECK_GRACE_MS);
+    expect(onDead).toHaveBeenCalledTimes(1);
+  });
+
   it("a recent frame makes the re-check a no-op, and stop() cancels everything", () => {
     const onDead = vi.fn();
     const watchdog = createLivenessWatchdog(onDead);

@@ -18,6 +18,9 @@ export const HEARTBEAT_DEAD_AFTER_MS = 2 * HEARTBEAT_INTERVAL_MS + 10_000;
 export const HEARTBEAT_STALE_AFTER_MS = HEARTBEAT_INTERVAL_MS + 5_000;
 /** How long an explicit re-check waits for frames buffered while the page was frozen to be delivered. */
 export const HEARTBEAT_RECHECK_GRACE_MS = 3_000;
+/** A dead timer firing more than this after it was due ran late — the page was frozen or throttled — so
+ * the silence may just be frames still queued behind the resume; it takes the re-check grace path instead. */
+export const HEARTBEAT_LATE_TIMER_SLACK_MS = 2_000;
 
 export interface LivenessWatchdog {
   /** A frame arrived on the socket; `heartbeat` when it was the server's ping. */
@@ -52,7 +55,34 @@ export function createLivenessWatchdog(onDead: () => void, options: LivenessOpti
   let stopped = false;
   let lastSeen = now();
   let deadTimer: ReturnType<typeof setTimeout> | undefined;
+  let deadDueAt = 0;
   let recheckTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Wait `recheckGraceMs` for frames buffered while the page was frozen before concluding nothing came. */
+  function recheckAfterGrace(): void {
+    if (recheckTimer !== undefined) {
+      return;
+    }
+    const checkedAt = now();
+    recheckTimer = setTimeout(() => {
+      recheckTimer = undefined;
+      if (lastSeen < checkedAt) {
+        declareDead();
+      }
+    }, recheckGraceMs);
+  }
+
+  function onDeadTimer(): void {
+    deadTimer = undefined;
+    // Fired well past its due time: the page was frozen (a backgrounded tab, a suspended WebView), and the
+    // frames the server sent meanwhile are only now being delivered. Give them the grace window rather than
+    // dropping a healthy socket on resume.
+    if (now() - deadDueAt > HEARTBEAT_LATE_TIMER_SLACK_MS) {
+      recheckAfterGrace();
+      return;
+    }
+    declareDead();
+  }
 
   function declareDead(): void {
     if (stopped) {
@@ -87,21 +117,16 @@ export function createLivenessWatchdog(onDead: () => void, options: LivenessOpti
       if (deadTimer !== undefined) {
         clearTimeout(deadTimer);
       }
-      deadTimer = setTimeout(declareDead, deadAfterMs);
+      deadDueAt = lastSeen + deadAfterMs;
+      deadTimer = setTimeout(onDeadTimer, deadAfterMs);
     },
     check() {
-      if (stopped || !armed || recheckTimer !== undefined || now() - lastSeen <= staleAfterMs) {
+      if (stopped || !armed || now() - lastSeen <= staleAfterMs) {
         return;
       }
       // Frames the browser buffered while the page was frozen are dispatched right after it resumes — give
       // them a moment before concluding nothing is coming.
-      const checkedAt = now();
-      recheckTimer = setTimeout(() => {
-        recheckTimer = undefined;
-        if (lastSeen < checkedAt) {
-          declareDead();
-        }
-      }, recheckGraceMs);
+      recheckAfterGrace();
     },
     stop,
   };

@@ -529,7 +529,7 @@ export const tr: Translation = {
   "admin.deleteChannelConfirm":
     "“{name}” kalıcı olarak silinsin mi? İçindeki tüm mesajlar ve ekler kaldırılır ve geri yüklenemez — arşivlemenin aksine bu işlem geri alınamaz.",
   "gate.needsQrKeyChanged":
-    "Bu düğümün anahtarı artık taradığınız anahtarla eşleşmiyor — ana bilgisayar anahtarı sıfırlamış olabilir veya bu ağ iddia ettiği ağ olmayabilir. Yeniden bağlanmak için düğümün güncel katılma QR kodunu tarayın.",
+    "Bu düğümün anahtarı artık taradığınız anahtarla eşleşmiyor — ana bilgisayar yeniden başlatılmış veya anahtarı sıfırlamış olabilir veya bu ağ iddia ettiği ağ olmayabilir. Yeniden bağlanmak için düğümün güncel katılma QR kodunu tarayın.",
   "message.report": "Bildir",
   "message.removedByModerator": "Bir moderatör tarafından kaldırıldı",
   "report.messageTitle": "Bu mesajı bildir",
@@ -598,6 +598,8 @@ export const tr: Translation = {
   "transport.pinChangeNew": "Bu bağlantıdaki anahtar: {fingerprint}",
   "transport.pinChangeAccept": "Yeni anahtarı kullan",
   "transport.pinChangeReject": "Mevcut anahtarımı koru",
+  "transport.pinChangeMismatch":
+    "Bu bağlantıdaki anahtar bu düğümün kullandığı anahtar değil, bu yüzden güvenilemez. Ana bilgisayarın ekranında gösterilen katılma QR kodunu tarayın.",
   "invite.qrKeyMismatch":
     "Katılma QR’ı gizlendi: bu düğümün duyurduğu anahtar, katıldığınız anahtarla eşleşmiyor.",
   "invite.qrNoKeyNote":

@@ -13,8 +13,11 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
 - **Key pinning is fail-closed.** A QR-joined client can no longer fall back to plaintext on an
   `optional` node when its handshake fails, and refuses plaintext fetches/sockets outright. A node whose
   key changed (Emergency Reset, stale poster) shows a "scan the current join QR" gate instead of looping.
-  A join link carrying a *different* key now asks first, showing both fingerprints, instead of quietly
-  replacing the pin. On a pinned session the client refuses an unsealed tunnel reply (an on-path attacker
+  A join link carrying a *different* key never quietly replaces the pin: while the pinned key still
+  works the link is ignored, and once the node's key has really changed the client asks (showing both
+  fingerprints) and accepts only the key the node itself reports. The Android host's own screen is handed
+  the node's key by the launcher, so a node with an ephemeral database key (a new transport key every boot)
+  no longer shows the host a rescan screen on every launch. On a pinned session the client refuses an unsealed tunnel reply (an on-path attacker
   could otherwise forge one, e.g. a mesh contact card). The invite QR a client shows carries the node key
   only from its own QR-verified session, and join-key fragments are stripped from links in messages.
 - **Plaintext transport can't be configured any more.** `security.transportEncryption: "off"` is refused
@@ -73,7 +76,12 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
 
 ### Fixed
 - **Dead connections are noticed.** The server sends a heartbeat on every WebSocket; a client that stops
-  hearing it reconnects, and re-checks when the device comes back online or the page becomes visible.
+  hearing it reconnects, and re-checks when the device comes back online or the page becomes visible. A
+  check that runs late because the page was frozen waits briefly for queued frames instead of dropping a
+  healthy connection.
+- When a node resets this browser's identity, other open tabs of LOAM drop the old identity's messages and
+  reload too. Tunnelled images still on screen after a wipe or identity change load again instead of
+  showing broken.
 - **Android keeps hosting with the screen off**: the foreground service is re-asserted whenever the app
   returns to the foreground (a start from the background can be refused), and the notification permission
   is requested so the "LOAM is hosting" notice shows on Android 13+. A system-stopped hotspot (tethering,
@@ -129,9 +137,10 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
 ### Added
 - **Blocking.** Block someone from their DM header; unblock there or in Settings. Blocking stops DMs, DM
   reactions and typing both ways, stops either of you inviting the other into a private channel or handing
-  them one, and hides the person's channel posts, replies and reactions on your device. They aren't told:
-  a DM to someone who blocked them gets a generic "not available" answer that doesn't say why. The list is
-  private to you, never synced, and cleared by Emergency Reset.
+  them one, and hides the person's channel posts, replies and reactions on your device, search results
+  included. They aren't told: a DM to someone who blocked them gets a generic "not available" answer that
+  doesn't say why. The list is private to you, never synced, and cleared by Emergency Reset; the device keeps
+  a copy so blocked people stay hidden when it starts offline.
 - **Privacy policy** at [loamnet.com/privacy](https://loamnet.com/privacy), linked from the site footer,
   the client's Settings and the Android host menu.
 - **Report this user** from a DM's header.

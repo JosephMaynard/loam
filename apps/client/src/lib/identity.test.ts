@@ -1,6 +1,35 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CONFIRMED_USER_KEY, forgetConfirmedIdentity, recordConfirmedIdentity } from "./identity";
+import { CONFIRMED_USER_KEY, forgetConfirmedIdentity, listenForIdentityChange, recordConfirmedIdentity } from "./identity";
+
+describe("listenForIdentityChange (review 2026-09-25: multi-tab purge)", () => {
+  function fire(key: string, newValue: string | null): void {
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue }));
+  }
+
+  it("fires only when a sibling confirms a different identity than this tab's", () => {
+    let mine: string | undefined = "user.a";
+    const onChange = vi.fn();
+    const unsubscribe = listenForIdentityChange(() => mine, onChange);
+
+    fire(CONFIRMED_USER_KEY, "user.a"); // same identity
+    fire("loam.somethingElse", "user.b"); // another key
+    fire(CONFIRMED_USER_KEY, null); // removed by a wipe — the wipe listener's job
+    expect(onChange).not.toHaveBeenCalled();
+
+    fire(CONFIRMED_USER_KEY, "user.b");
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    mine = undefined; // this tab holds no identity's content
+    fire(CONFIRMED_USER_KEY, "user.c");
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+    mine = "user.a";
+    fire(CONFIRMED_USER_KEY, "user.d");
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+});
 
 afterEach(() => localStorage.clear());
 

@@ -1543,7 +1543,11 @@ describe("review fixes 2026-09-04 (client transport) — round 2: a broken pin f
     vi.stubGlobal("fetch", vi.fn(handshakeResponder(real2)));
     await expect(ensureSession("optional", real2.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
     expect(getCachedHostPublicKey()).toBe(real.publicKey);
-    expect(getPendingHostKeyChange()).toEqual({ current: fingerprint(real.publicKey), next: fingerprint(real2.publicKey) });
+    expect(getPendingHostKeyChange()).toEqual({
+      current: fingerprint(real.publicKey),
+      next: fingerprint(real2.publicKey),
+      matchesNode: true, // the node itself reports real2 (probed), so the rescanned QR is acceptable
+    });
     expect(acceptPendingHostKey()).toBe(true);
     await ensureSession("optional", real2.publicKey);
     expect(getSession()?.hostPublicKey).toBe(real2.publicKey);

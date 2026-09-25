@@ -11,7 +11,7 @@
  * that knows the wire framing; callers never touch `sealTransport`/`openTransport` directly.
  */
 import { openTransport, sealTransport, transportClientDerive, transportClientHello, transportFingerprint } from "@loam/crypto";
-import { TransportHandshakeResponseSchema, type TransportEncryption } from "@loam/schema";
+import { TransportHandshakeResponseSchema, type TransportEncryption, type TransportHandshakeResponse } from "@loam/schema";
 
 /** localStorage key for an operator-configured server origin override (Android host / advanced
  * self-hosters); empty/absent means same-origin requests. Shared with `app.tsx`. */
@@ -51,7 +51,7 @@ export class TransportNeedsQrError extends Error {
   constructor(reason: "missing" | "changed" = "missing") {
     super(
       reason === "changed"
-        ? "This node's key no longer matches the one you scanned (the host may have reset it, or this network is not what it claims); scan its current join QR to reconnect."
+        ? "This node's key no longer matches the one you scanned (the host may have restarted or reset it, or this network is not what it claims); scan its current join QR to reconnect."
         : "This node requires a scanned join QR to connect securely.",
     );
     this.name = "TransportNeedsQrError";
@@ -201,8 +201,10 @@ function consumeHashKey(): string | undefined {
   // channel, say (pre-release review 2026-09-25). So it only ever ESTABLISHES a pin silently; it never
   // silently REPLACES a different one. Replacing it would let any member lock others out (their next
   // handshake mismatches the node's real key → a pin-broken rescan gate), or — with an on-path position —
-  // swap in an attacker's key. A different key is parked as a pending change the user must accept
-  // explicitly, seeing both fingerprints (`getPendingHostKeyChange` / `acceptPendingHostKey`).
+  // swap in an attacker's key. A different key is parked as a pending change: it is dropped silently if the
+  // current pin still handshakes (the node has exactly one key), and offered to the user only once the pin
+  // is broken — and acceptable only if it equals the key the node itself reported (`getPendingHostKeyChange`
+  // / `acceptPendingHostKey`).
   const current = getCachedHostPublicKey();
   if (current !== undefined && current !== key) {
     pendingHostKey = key;
@@ -222,6 +224,7 @@ function adoptHostKey(key: string): void {
   memoryHostKey = key;
   memoryPinBroken = false;
   pendingHostKey = undefined;
+  observedHostKey = undefined;
   try {
     localStorage.setItem(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin(), key);
     localStorage.removeItem(PIN_BROKEN_STORAGE_PREFIX + keyStorageOrigin());
@@ -234,28 +237,41 @@ function adoptHostKey(key: string): void {
  * only: a reload without re-opening the link simply drops it (the existing pin stays in force). */
 let pendingHostKey: string | undefined;
 
+/** The host key the node itself reported in a handshake that contradicted the pin (this load, memory only).
+ * A pending `#k=` may replace the pin only if it equals this key: a link whose key the node doesn't hold can
+ * only be someone else's key (a planted link or QR sticker), and pinning it would lock the user out — or,
+ * for an on-path attacker, hand them the session (pre-release review 2026-09-25). */
+let observedHostKey: string | undefined;
+
 /**
- * The key change a `#k=` link proposed this load, if it differed from the pinned key — with both emoji
- * fingerprints so the UI can show the user what they'd be trusting. `undefined` when there is nothing to
- * decide.
+ * The key change a `#k=` link proposed this load — offered ONLY while the current pin is broken (the node's
+ * handshake contradicted it); with a healthy pin a differing link is simply dropped. Carries both emoji
+ * fingerprints so the UI can show the user what they'd be trusting, and `matchesNode`: whether the link's
+ * key is the one the node actually reported. When it isn't, the change can't be accepted — the user must
+ * rescan the QR shown at the host. `undefined` when there is nothing to decide.
  */
-export function getPendingHostKeyChange(): { current: string; next: string } | undefined {
+export function getPendingHostKeyChange(): { current: string; next: string; matchesNode: boolean } | undefined {
   const current = getCachedHostPublicKey();
-  if (pendingHostKey === undefined || current === undefined || current === pendingHostKey) {
+  if (pendingHostKey === undefined || current === undefined || current === pendingHostKey || !isHostKeyPinBroken()) {
     return undefined;
   }
-  return { current: transportFingerprint(current), next: transportFingerprint(pendingHostKey) };
+  return {
+    current: transportFingerprint(current),
+    next: transportFingerprint(pendingHostKey),
+    matchesNode: observedHostKey === pendingHostKey,
+  };
 }
 
 /**
  * The user explicitly accepted the pending key (they just scanned the node's current QR in person — e.g.
- * after an Emergency Reset rotated it). Pin it, clear the broken marker, and drop the live session (it was
- * derived against the old key) so the next boot/reconnect pass handshakes against the new one; the socket
- * owner is told so a socket sealed under the old session is reopened.
+ * after an Emergency Reset or a restart rotated it). Refused unless the pin is broken AND the pending key is
+ * exactly the key the node reported (see `observedHostKey`). Pins it, clears the broken marker, and drops the
+ * live session (it was derived against the old key) so the next boot/reconnect pass handshakes against the
+ * new one; the socket owner is told so a socket sealed under the old session is reopened.
  */
 export function acceptPendingHostKey(): boolean {
   const next = pendingHostKey;
-  if (next === undefined) {
+  if (next === undefined || !isHostKeyPinBroken() || next !== observedHostKey) {
     return false;
   }
   adoptHostKey(next);
@@ -325,6 +341,7 @@ export function clearCachedHostPublicKey(): void {
   memoryHostKey = undefined;
   memoryPinBroken = false;
   pendingHostKey = undefined;
+  observedHostKey = undefined;
   try {
     localStorage.removeItem(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin());
     localStorage.removeItem(PIN_BROKEN_STORAGE_PREFIX + keyStorageOrigin());
@@ -431,12 +448,36 @@ function notifySessionReplaced(): void {
  */
 async function handshake(hostPublicKey: string, qrPinned: boolean): Promise<void> {
   const hello = transportClientHello();
+  const parsed = await postHandshake(hello.ephemeralPublic);
+
+  if (parsed.hostPublicKey !== hostPublicKey) {
+    if (qrPinned) {
+      // Remember what the node says it holds: a pending `#k=` may replace the pin only if it matches.
+      observedHostKey = parsed.hostPublicKey;
+      markHostKeyPinBroken();
+      throw new TransportNeedsQrError("changed");
+    }
+    throw new Error("Transport handshake returned a different host key than advertised");
+  }
+
+  const key = transportClientDerive({
+    clientEphemeralSecret: hello.ephemeralSecret,
+    hostPublic: hostPublicKey,
+    hostEphemeralPublic: parsed.hostEphemeralPublic,
+  });
+
+  session = { sessionId: parsed.sessionId, key, hostPublicKey, seq: 0, bound: false, wsServerSeq: 0 };
+}
+
+/** POST one `/api/transport/handshake` and return the validated reply. Throws on any network or validation
+ * failure. */
+async function postHandshake(clientEphemeralPublic: string): Promise<TransportHandshakeResponse> {
   const response = await fetch(apiUrl("/api/transport/handshake"), {
     method: "POST",
     // The handshake is anonymous bootstrap; a bound/required client omits the cookie here too (docs/20).
     credentials: sessionCredentials(),
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ clientEphemeralPublic: hello.ephemeralPublic }),
+    body: JSON.stringify({ clientEphemeralPublic }),
   });
 
   if (!response.ok) {
@@ -448,22 +489,34 @@ async function handshake(hostPublicKey: string, qrPinned: boolean): Promise<void
   if (!parsed.success) {
     throw new Error("Transport handshake returned an invalid response");
   }
+  return parsed.data;
+}
 
-  if (parsed.data.hostPublicKey !== hostPublicKey) {
-    if (qrPinned) {
-      markHostKeyPinBroken();
-      throw new TransportNeedsQrError("changed");
-    }
-    throw new Error("Transport handshake returned a different host key than advertised");
+/**
+ * Learn which host key the node currently reports, without deriving or keeping a session. Used on a load
+ * that starts with a broken pin AND a pending `#k=`, so the user may accept the link only if it is the
+ * node's real key. Best effort: a failure leaves `observedHostKey` unset, so Accept stays unavailable.
+ */
+async function observeNodeHostKey(): Promise<void> {
+  try {
+    observedHostKey = (await postHandshake(transportClientHello().ephemeralPublic)).hostPublicKey;
+  } catch {
+    // Unreachable node: nothing observed this pass.
   }
+}
 
-  const key = transportClientDerive({
-    clientEphemeralSecret: hello.ephemeralSecret,
-    hostPublic: hostPublicKey,
-    hostEphemeralPublic: parsed.data.hostEphemeralPublic,
-  });
-
-  session = { sessionId: parsed.data.sessionId, key, hostPublicKey, seq: 0, bound: false, wsServerSeq: 0 };
+/**
+ * The host transport key the Android launcher injected into ITS OWN WebView (`window.__loamHostTransportKey`,
+ * docs/04). The launcher read it from its embedded server over loopback, so inside that WebView it is as
+ * authoritative as a scanned QR, and it must win over a stale pin: a node with an ephemeral DB key mints a
+ * new transport key on every boot, which would otherwise break the host's own pin (gate + "different key"
+ * prompt) on every launch. A LAN browser never has this global — only the host's WebView injects it, and that
+ * WebView is pinned to the loopback origin — and a page on another origin can't set a global on this one. A
+ * non-string value (DOM clobbering) is ignored.
+ */
+function launcherHostKey(): string | undefined {
+  const value: unknown = (window as { __loamHostTransportKey?: unknown }).__loamHostTransportKey;
+  return typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value) ? value : undefined;
 }
 
 /**
@@ -484,6 +537,13 @@ async function handshake(hostPublicKey: string, qrPinned: boolean): Promise<void
  * retry paths (`reHandshake`, and `loadConfig`'s resume recovery) force a fresh handshake to recover.
  */
 export async function ensureSession(mode: TransportEncryption, configHostKey?: string): Promise<void> {
+  // Inside the Android host's own WebView the launcher-provided key is trusted directly (`launcherHostKey`):
+  // adopt it before the `#k=` is read, so the launcher's own fragment is a quiet confirmation rather than a
+  // "different key" prompt on every boot of an ephemeral-key node.
+  const launcherKey = launcherHostKey();
+  if (launcherKey !== undefined && (getCachedHostPublicKey() !== launcherKey || isHostKeyPinBroken())) {
+    adoptHostKey(launcherKey);
+  }
   const hashKey = consumeHashKey();
   const qrKey = hashKey ?? getCachedHostPublicKey();
 
@@ -503,6 +563,11 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   if (qrKey && !hashKey && isHostKeyPinBroken()) {
     session = undefined;
     sessionQrVerified = false;
+    if (pendingHostKey !== undefined) {
+      // A differing `#k=` came with this load: learn whether it is the node's real key, so the gate can offer
+      // it (and only then) instead of a dead end.
+      await observeNodeHostKey();
+    }
     throw new TransportNeedsQrError("changed");
   }
 
@@ -533,11 +598,21 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   // Reuse a live session already bound to this host key — don't re-handshake and orphan a live WS (above).
   if (session && session.hostPublicKey === hostPublicKey) {
     sessionQrVerified = hostPublicKey === qrKey;
+    dropPendingIfPinHealthy(hostPublicKey, qrKey);
     return;
   }
 
   await handshake(hostPublicKey, hostPublicKey === qrKey);
   sessionQrVerified = hostPublicKey === qrKey;
+  dropPendingIfPinHealthy(hostPublicKey, qrKey);
+}
+
+/** The pinned key just handshook (or its live session was reused), so the node holds it; a differing `#k=`
+ * parked this load can't be the node's key and is dropped without asking (pre-release review 2026-09-25). */
+function dropPendingIfPinHealthy(hostPublicKey: string, qrKey: string | undefined): void {
+  if (qrKey !== undefined && hostPublicKey === qrKey) {
+    pendingHostKey = undefined;
+  }
 }
 
 /**
@@ -1069,20 +1144,30 @@ export async function encryptedImageUrl(path: string): Promise<string> {
     return inFlight;
   }
 
+  const generation = imageCacheGeneration;
   const pending = (async () => {
     try {
       const response = await encryptedFetch("GET", path);
       if (!response.ok) {
         return ""; // fail closed — no direct, unencrypted fallback GET
       }
-      const objectUrl = URL.createObjectURL(await response.blob());
+      const blob = await response.blob();
+      if (generation !== imageCacheGeneration) {
+        // The cache was cleared (a wipe or an identity change) while this was in flight: don't bring the
+        // old identity's image back into it.
+        return "";
+      }
+      const objectUrl = URL.createObjectURL(blob);
       evictImageUrlIfFull();
       imageObjectUrls.set(path, objectUrl);
       return objectUrl;
     } catch {
       return ""; // fail closed
     } finally {
-      imageUrlInFlight.delete(path);
+      // After a clear the map may already hold a NEWER fetch for this path; leave that one alone.
+      if (generation === imageCacheGeneration) {
+        imageUrlInFlight.delete(path);
+      }
     }
   })();
 
@@ -1090,14 +1175,46 @@ export async function encryptedImageUrl(path: string): Promise<string> {
   return pending;
 }
 
-/** Revoke every cached image object URL (on wipe / test reset) so blobs aren't leaked. */
+/** Bumped by every `clearImageObjectUrls`. An image fetch that started under an older generation doesn't
+ * cache its result, and `useEncryptedImage` re-resolves mounted images when it changes. */
+let imageCacheGeneration = 0;
+const imageCacheListeners = new Set<() => void>();
+
+/** The current image-cache generation (see `clearImageObjectUrls`). */
+export function getImageCacheGeneration(): number {
+  return imageCacheGeneration;
+}
+
+/** Be told when the image cache is cleared, so a mounted image re-resolves its now-revoked URL. Returns an
+ * unsubscribe. */
+export function subscribeImageCacheCleared(listener: () => void): () => void {
+  imageCacheListeners.add(listener);
+  return () => {
+    imageCacheListeners.delete(listener);
+  };
+}
+
+/**
+ * Revoke every cached image object URL (wipe, identity change, test reset) so blobs aren't leaked. Holder
+ * counts are KEPT: those elements are still mounted, and each releases exactly once when it unmounts or
+ * re-resolves — clearing the counts here would let those later releases drive other paths' counts wrong
+ * (pre-release review 2026-09-25). Instead the generation is bumped and listeners told, so every mounted
+ * image drops its revoked `blob:` URL and resolves again.
+ */
 export function clearImageObjectUrls(): void {
   for (const url of imageObjectUrls.values()) {
     URL.revokeObjectURL(url);
   }
   imageObjectUrls.clear();
   imageUrlInFlight.clear();
-  imageUrlHolders.clear();
+  imageCacheGeneration += 1;
+  for (const listener of imageCacheListeners) {
+    try {
+      listener();
+    } catch {
+      // A listener failure must not stop the others from re-resolving.
+    }
+  }
 }
 
 /** Append the live session's `?enc=<sessionId>` to a WebSocket URL (docs/08), so the server knows to
@@ -1321,9 +1438,11 @@ export function resetTransportStateForTests(): void {
   memoryHostKey = undefined;
   memoryPinBroken = false;
   pendingHostKey = undefined;
+  observedHostKey = undefined;
   reHandshakeInFlight = undefined;
   mintSuppressed = false;
   wipeTokenSnapshot = undefined;
   wipeServerUrlSnapshot = undefined;
   clearImageObjectUrls();
+  imageUrlHolders.clear();
 }

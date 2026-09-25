@@ -496,7 +496,7 @@ export const en = {
   // by a scanned join QR — there is no safe way to connect without one.
   "gate.needsQrTitle": "Scan the join QR to connect securely",
   "gate.needsQrBody": "Scan this node's join QR code with your device to connect — there's no other way to connect securely.",
-  "gate.needsQrKeyChanged": "This node's key no longer matches the one you scanned — the host may have reset it, or this network is not what it claims to be. Scan the node's current join QR code to reconnect.",
+  "gate.needsQrKeyChanged": "This node's key no longer matches the one you scanned — the host may have restarted or reset it, or this network is not what it claims to be. Scan the node's current join QR code to reconnect.",
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",
@@ -669,6 +669,8 @@ export const en = {
   "transport.pinChangeNew": "Key in this link: {fingerprint}",
   "transport.pinChangeAccept": "Use the new key",
   "transport.pinChangeReject": "Keep my current key",
+  "transport.pinChangeMismatch":
+    "The key in this link isn't the one this node is using, so it can't be trusted. Scan the join QR code shown on the host's screen.",
   // Invite / join QR shown to others.
   "invite.qrKeyMismatch":
     "The join QR is hidden: the key this node advertises doesn't match the key you joined with.",

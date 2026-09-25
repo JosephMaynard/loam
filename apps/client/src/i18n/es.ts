@@ -529,7 +529,7 @@ export const es: Translation = {
   "admin.deleteChannelConfirm":
     "¿Eliminar permanentemente «{name}»? Todos sus mensajes y adjuntos se borrarán y no se podrán recuperar — a diferencia de archivar, no se puede deshacer.",
   "gate.needsQrKeyChanged":
-    "La clave de este nodo ya no coincide con la que escaneaste — puede que el anfitrión la haya restablecido, o que esta red no sea lo que dice ser. Escanea el QR de acceso actual del nodo para reconectarte.",
+    "La clave de este nodo ya no coincide con la que escaneaste — puede que el anfitrión se haya reiniciado o la haya restablecido, o que esta red no sea lo que dice ser. Escanea el QR de acceso actual del nodo para reconectarte.",
   "message.report": "Denunciar",
   "message.removedByModerator": "Eliminado por un moderador",
   "report.messageTitle": "Denunciar este mensaje",
@@ -598,6 +598,8 @@ export const es: Translation = {
   "transport.pinChangeNew": "Clave de este enlace: {fingerprint}",
   "transport.pinChangeAccept": "Usar la nueva clave",
   "transport.pinChangeReject": "Mantener mi clave actual",
+  "transport.pinChangeMismatch":
+    "La clave de este enlace no es la que usa este nodo, así que no se puede confiar en ella. Escanea el código QR de acceso que aparece en la pantalla del anfitrión.",
   "invite.qrKeyMismatch":
     "El QR de acceso está oculto: la clave que anuncia este nodo no coincide con la clave con la que te uniste.",
   "invite.qrNoKeyNote":

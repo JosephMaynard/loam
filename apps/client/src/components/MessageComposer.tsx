@@ -82,15 +82,9 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
   const [locationLat, setLocationLat] = useState("");
   const [locationLng, setLocationLng] = useState("");
   const pendingKeyRef = useRef(0);
-  // False once this composer unmounts. The caller keys the composer by conversation, so an upload that
-  // resolves after the user moved on must be dropped — never attached to whatever composer is on screen.
-  const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
-      mountedRef.current = false;
-    },
-    [],
-  );
+  // An upload that resolves after the user moved to another conversation can't land in the new composer:
+  // the caller keys the composer by conversation, so the new one is a separate instance, and Preact ignores a
+  // state update on an unmounted component (ConversationView.test.tsx covers it).
   const composerId = useId();
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -126,17 +120,11 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
       setPending((previous) => [...previous, { key, name: file.name, status: "uploading" }]);
       onUploadAttachment(file)
         .then((attachment) => {
-          if (!mountedRef.current) {
-            return;
-          }
           setPending((previous) =>
             previous.map((entry) => (entry.key === key ? { ...entry, status: "ready", attachment } : entry)),
           );
         })
         .catch((uploadError: unknown) => {
-          if (!mountedRef.current) {
-            return;
-          }
           setPending((previous) =>
             previous.map((entry) =>
               entry.key === key

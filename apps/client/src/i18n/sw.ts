@@ -529,7 +529,7 @@ export const sw: Translation = {
   "admin.deleteChannelConfirm":
     "Futa “{name}” kabisa? Kila ujumbe na kiambatisho ndani yake kitaondolewa na hakiwezi kurejeshwa — tofauti na kuhifadhi kwenye kumbukumbu, hakuna kutendua.",
   "gate.needsQrKeyChanged":
-    "Ufunguo wa nodi hii haulingani tena na ule uliouchanganua — huenda mwenyeji ameuweka upya, au mtandao huu si ule unaodai kuwa. Changanua msimbo wa QR wa kujiunga wa sasa wa nodi ili kuunganisha tena.",
+    "Ufunguo wa nodi hii haulingani tena na ule uliouchanganua — huenda mwenyeji amewashwa upya au ameuweka upya, au mtandao huu si ule unaodai kuwa. Changanua msimbo wa QR wa kujiunga wa sasa wa nodi ili kuunganisha tena.",
   "message.report": "Ripoti",
   "message.removedByModerator": "Imeondolewa na msimamizi",
   "report.messageTitle": "Ripoti ujumbe huu",
@@ -598,6 +598,8 @@ export const sw: Translation = {
   "transport.pinChangeNew": "Ufunguo ulio kwenye kiungo hiki: {fingerprint}",
   "transport.pinChangeAccept": "Tumia ufunguo mpya",
   "transport.pinChangeReject": "Baki na ufunguo wangu wa sasa",
+  "transport.pinChangeMismatch":
+    "Ufunguo ulio kwenye kiungo hiki si ule ambao nodi hii inatumia, kwa hivyo hauwezi kuaminiwa. Changanua msimbo wa QR wa kujiunga unaoonyeshwa kwenye skrini ya mwenyeji.",
   "invite.qrKeyMismatch":
     "QR ya kujiunga imefichwa: ufunguo ambao nodi hii inatangaza haulingani na ufunguo uliojiunga nao.",
   "invite.qrNoKeyNote":

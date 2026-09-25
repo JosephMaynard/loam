@@ -1,8 +1,12 @@
 import { createTransportIdentity, openTransport, sealTransport, transportServerAccept } from "@loam/crypto";
+import { h, render } from "preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   acceptPendingHostKey,
+  clearImageObjectUrls,
+  getImageCacheGeneration,
+  subscribeImageCacheCleared,
   encryptedFetch,
   encryptedImageUrl,
   ensureSession,
@@ -17,10 +21,10 @@ import {
   releaseImageUrl,
   resetTransportStateForTests,
   retainImageUrl,
-  subscribeSessionReplaced,
   TransportNeedsQrError,
   UnsealedTunnelResponseError,
 } from "./transport";
+import { useEncryptedImage } from "./use-encrypted-image";
 
 // Pre-release review 2026-09-25: the pinned (tunnel) client's handling of unsealed replies, `#k=` links
 // that differ from an existing pin, the invite-QR key source, and the tunnelled-image URL cache.
@@ -182,14 +186,21 @@ describe("a #k= link never silently replaces an existing pin (finding #3)", () =
     expect(getCachedHostPublicKey()).toBe(real.publicKey);
     expect(isHostKeyPinBroken()).toBe(true);
     expect(window.location.hash).toBe(""); // the fragment is still stripped from the address bar
-    expect(getPendingHostKeyChange()).toEqual({ current: fingerprint(real.publicKey), next: fingerprint(posted.publicKey) });
+    // The node still reports `real`, so the posted key is not the node's: shown, but not acceptable.
+    expect(getPendingHostKeyChange()).toEqual({
+      current: fingerprint(real.publicKey),
+      next: fingerprint(posted.publicKey),
+      matchesNode: false,
+    });
+    expect(acceptPendingHostKey()).toBe(false);
+    expect(getCachedHostPublicKey()).toBe(real.publicKey);
 
     rejectPendingHostKey();
     expect(getPendingHostKeyChange()).toBeUndefined();
     expect(getCachedHostPublicKey()).toBe(real.publicKey);
   });
 
-  it("with a healthy pin, a posted #k= leaves the live session alone; accepting it swaps the pin and drops the old session", async () => {
+  it("with a healthy pin, a posted #k= is dropped silently: no prompt, nothing to accept, live session untouched", async () => {
     const real = createTransportIdentity();
     const posted = createTransportIdentity();
     localStorage.setItem(PIN_KEY(), real.publicKey);
@@ -200,17 +211,160 @@ describe("a #k= link never silently replaces an existing pin (finding #3)", () =
     window.location.hash = `#k=${posted.publicKey}`;
     await ensureSession("optional", real.publicKey); // a resync pass on this load
     expect(getSession()).toBe(original);
-    expect(getCachedHostPublicKey()).toBe(real.publicKey);
-
-    const replaced = vi.fn();
-    const unsubscribe = subscribeSessionReplaced(replaced);
-    expect(acceptPendingHostKey()).toBe(true);
-    unsubscribe();
-    expect(getCachedHostPublicKey()).toBe(posted.publicKey);
-    expect(isHostKeyPinBroken()).toBe(false);
-    expect(getSession()).toBeUndefined();
-    expect(replaced).toHaveBeenCalledTimes(1);
     expect(getPendingHostKeyChange()).toBeUndefined();
+    expect(acceptPendingHostKey()).toBe(false);
+    expect(getCachedHostPublicKey()).toBe(real.publicKey);
+    expect(isHostKeyPinBroken()).toBe(false);
+    expect(getSession()).toBe(original);
+
+    // Later on the same load the node restarts with a new key: the pin breaks, but the link dropped earlier
+    // must not resurface as an offer.
+    const rotated = createTransportIdentity();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) =>
+        url === "/api/transport/handshake" ? handshakeReply(rotated, init).response : new Response(null, { status: 401 }),
+      ),
+    );
+    await expect(encryptedFetch("GET", "/api/channels")).rejects.toThrow(); // 401 → re-handshake → mismatch
+    expect(isHostKeyPinBroken()).toBe(true);
+    expect(getPendingHostKeyChange()).toBeUndefined();
+  });
+
+  it("with a healthy pin on a fresh load, a posted #k= is dropped after the pin handshakes", async () => {
+    const real = createTransportIdentity();
+    const posted = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), real.publicKey);
+    window.location.hash = `#k=${posted.publicKey}`;
+    vi.stubGlobal("fetch", handshakeOnly(real));
+
+    await ensureSession("optional", real.publicKey);
+    expect(getSession()?.hostPublicKey).toBe(real.publicKey);
+    expect(getPendingHostKeyChange()).toBeUndefined();
+    expect(acceptPendingHostKey()).toBe(false);
+    expect(getCachedHostPublicKey()).toBe(real.publicKey);
+  });
+
+  it("a posted #k= while the node is merely unreachable (pin not broken) is never offered", async () => {
+    const real = createTransportIdentity();
+    const posted = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), real.publicKey);
+    window.location.hash = `#k=${posted.publicKey}`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("handshake dropped");
+      }),
+    );
+
+    await expect(ensureSession("optional", real.publicKey)).rejects.toThrow("handshake dropped");
+    expect(isHostKeyPinBroken()).toBe(false);
+    expect(getPendingHostKeyChange()).toBeUndefined();
+    expect(acceptPendingHostKey()).toBe(false);
+    expect(getCachedHostPublicKey()).toBe(real.publicKey);
+  });
+
+  it("a broken pin + the node's real new key in the link → Accept is offered and works", async () => {
+    const old = createTransportIdentity();
+    const rotated = createTransportIdentity(); // the node restarted with a fresh key
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    window.location.hash = `#k=${rotated.publicKey}`; // the user rescanned the host's current QR
+    vi.stubGlobal("fetch", handshakeOnly(rotated));
+
+    // The pin's handshake mismatches → broken, and the node's reported key is recorded.
+    const failure = await ensureSession("optional", rotated.publicKey).catch((error: unknown) => error);
+    expect((failure as TransportNeedsQrError).reason).toBe("changed");
+    expect(getPendingHostKeyChange()).toEqual({
+      current: fingerprint(old.publicKey),
+      next: fingerprint(rotated.publicKey),
+      matchesNode: true,
+    });
+
+    expect(acceptPendingHostKey()).toBe(true);
+    expect(getCachedHostPublicKey()).toBe(rotated.publicKey);
+    expect(isHostKeyPinBroken()).toBe(false);
+    await ensureSession("optional", rotated.publicKey);
+    expect(getSession()?.hostPublicKey).toBe(rotated.publicKey);
+  });
+
+  it("a key change noticed mid-session gates, and the rescanned QR is then acceptable", async () => {
+    const old = createTransportIdentity();
+    const rotated = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    vi.stubGlobal("fetch", handshakeOnly(old));
+    await ensureSession("optional", old.publicKey);
+    expect(getSession()?.hostPublicKey).toBe(old.publicKey);
+
+    // The node restarts with a new key: the next request's re-handshake contradicts the pin.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) =>
+        url === "/api/transport/handshake" ? handshakeReply(rotated, init).response : new Response(null, { status: 401 }),
+      ),
+    );
+    await expect(encryptedFetch("GET", "/api/channels")).rejects.toThrow();
+    expect(isHostKeyPinBroken()).toBe(true);
+
+    // The user rescans the host's current QR.
+    window.location.hash = `#k=${rotated.publicKey}`;
+    await expect(ensureSession("optional", rotated.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
+    expect(getSession()).toBeUndefined(); // the gate dropped the session derived under the old key
+    expect(getPendingHostKeyChange()?.matchesNode).toBe(true);
+    expect(acceptPendingHostKey()).toBe(true);
+    expect(getCachedHostPublicKey()).toBe(rotated.publicKey);
+    vi.stubGlobal("fetch", handshakeOnly(rotated));
+    await ensureSession("optional", rotated.publicKey);
+    expect(getSession()?.hostPublicKey).toBe(rotated.publicKey);
+  });
+
+  it("a broken pin + a link whose key the node does NOT hold → shown as a mismatch, Accept refused", async () => {
+    const old = createTransportIdentity();
+    const rotated = createTransportIdentity();
+    const evil = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    window.location.hash = `#k=${evil.publicKey}`; // a planted link / QR sticker
+    vi.stubGlobal("fetch", handshakeOnly(rotated));
+
+    await expect(ensureSession("optional", rotated.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
+    expect(getPendingHostKeyChange()?.matchesNode).toBe(false);
+    expect(acceptPendingHostKey()).toBe(false);
+    expect(getCachedHostPublicKey()).toBe(old.publicKey);
+    expect(isHostKeyPinBroken()).toBe(true);
+  });
+
+  it("a pin broken on an EARLIER load: the node's key is probed so a matching link can be accepted", async () => {
+    const old = createTransportIdentity();
+    const rotated = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    localStorage.setItem(PIN_BROKEN_KEY(), "1");
+    window.location.hash = `#k=${rotated.publicKey}`;
+    const node = handshakeOnly(rotated);
+    vi.stubGlobal("fetch", node);
+
+    await expect(ensureSession("optional", rotated.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
+    expect(getSession()).toBeUndefined(); // the probe never becomes a session
+    expect(getPendingHostKeyChange()?.matchesNode).toBe(true);
+    expect(acceptPendingHostKey()).toBe(true);
+    expect(getCachedHostPublicKey()).toBe(rotated.publicKey);
+  });
+
+  it("a broken pin whose probe fails leaves the link unacceptable", async () => {
+    const old = createTransportIdentity();
+    const rotated = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    localStorage.setItem(PIN_BROKEN_KEY(), "1");
+    window.location.hash = `#k=${rotated.publicKey}`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("unreachable");
+      }),
+    );
+
+    await expect(ensureSession("optional", rotated.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
+    expect(getPendingHostKeyChange()?.matchesNode).toBe(false);
+    expect(acceptPendingHostKey()).toBe(false);
+    expect(getCachedHostPublicKey()).toBe(old.publicKey);
   });
 
   it("rescanning the SAME key is a quiet confirmation (no prompt)", async () => {
@@ -222,6 +376,70 @@ describe("a #k= link never silently replaces an existing pin (finding #3)", () =
     await ensureSession("optional", real.publicKey);
     expect(getPendingHostKeyChange()).toBeUndefined();
     expect(getSession()?.hostPublicKey).toBe(real.publicKey);
+  });
+});
+
+describe("the Android host's own WebView trusts the launcher's key (ephemeral-key node, new key every boot)", () => {
+  type HostWindow = Window & { __loamHostTransportKey?: unknown };
+
+  afterEach(() => {
+    delete (window as HostWindow).__loamHostTransportKey;
+  });
+
+  it("pinned OLD + launcher key NEW + #k=NEW → NEW adopted silently: no gate, no prompt", async () => {
+    const old = createTransportIdentity();
+    const rebooted = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    (window as HostWindow).__loamHostTransportKey = rebooted.publicKey;
+    window.location.hash = `#k=${rebooted.publicKey}`;
+    vi.stubGlobal("fetch", handshakeOnly(rebooted));
+
+    await ensureSession("optional", rebooted.publicKey);
+    expect(getSession()?.hostPublicKey).toBe(rebooted.publicKey);
+    expect(getCachedHostPublicKey()).toBe(rebooted.publicKey);
+    expect(isHostKeyPinBroken()).toBe(false);
+    expect(getPendingHostKeyChange()).toBeUndefined();
+    expect(inviteQrHostKey()).toEqual({ key: rebooted.publicKey, suppressed: false });
+  });
+
+  it("the launcher key also repairs a pin a previous boot marked broken (a reload without #k=)", async () => {
+    const old = createTransportIdentity();
+    const rebooted = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    localStorage.setItem(PIN_BROKEN_KEY(), "1");
+    (window as HostWindow).__loamHostTransportKey = rebooted.publicKey;
+    vi.stubGlobal("fetch", handshakeOnly(rebooted));
+
+    await ensureSession("required", rebooted.publicKey);
+    expect(getSession()?.hostPublicKey).toBe(rebooted.publicKey);
+    expect(isHostKeyPinBroken()).toBe(false);
+  });
+
+  it("without the launcher key (a LAN browser) the same situation breaks the pin and asks", async () => {
+    const old = createTransportIdentity();
+    const rebooted = createTransportIdentity();
+    localStorage.setItem(PIN_KEY(), old.publicKey);
+    window.location.hash = `#k=${rebooted.publicKey}`;
+    vi.stubGlobal("fetch", handshakeOnly(rebooted));
+
+    const failure = await ensureSession("optional", rebooted.publicKey).catch((error: unknown) => error);
+    expect((failure as TransportNeedsQrError).reason).toBe("changed");
+    expect(getCachedHostPublicKey()).toBe(old.publicKey);
+    expect(getPendingHostKeyChange()?.matchesNode).toBe(true);
+  });
+
+  it("a non-string global (DOM clobbering) or a malformed key is ignored", async () => {
+    const old = createTransportIdentity();
+    const rebooted = createTransportIdentity();
+    for (const bogus of [document.createElement("a"), "not a key!", ""]) {
+      resetTransportStateForTests();
+      localStorage.clear();
+      localStorage.setItem(PIN_KEY(), old.publicKey);
+      (window as HostWindow).__loamHostTransportKey = bogus;
+      vi.stubGlobal("fetch", handshakeOnly(rebooted));
+      await expect(ensureSession("optional", rebooted.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
+      expect(getCachedHostPublicKey()).toBe(old.publicKey);
+    }
   });
 });
 
@@ -284,5 +502,77 @@ describe("the tunnelled-image URL cache never revokes a URL still on screen (fin
     releaseImageUrl("/img/0"); // unmounted → evictable again, oldest first
     await encryptedImageUrl("/img/201");
     expect(revoke).toHaveBeenLastCalledWith(held);
+  });
+});
+
+describe("clearing the image cache while images are mounted (review 2026-09-25 #6)", () => {
+  async function tunnelWithBlobs(): Promise<{ revoke: ReturnType<typeof vi.spyOn> }> {
+    const host = createTransportIdentity();
+    window.location.hash = `#k=${host.publicKey}`;
+    vi.stubGlobal("fetch", tunnelNode(host, (inner) => ({ status: 200, json: { path: inner.p } })));
+    let counter = 0;
+    vi.spyOn(URL, "createObjectURL").mockImplementation(() => `blob:test/${(counter += 1)}`);
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    await ensureSession("required", host.publicKey);
+    return { revoke };
+  }
+
+  it("keeps holder counts, so an image still mounted after the clear is never evicted", async () => {
+    const { revoke } = await tunnelWithBlobs();
+    retainImageUrl("/img/held"); // mounted before the clear, still mounted after it
+    await encryptedImageUrl("/img/held");
+    clearImageObjectUrls();
+    const reResolved = await encryptedImageUrl("/img/held"); // the mounted element re-resolves
+    for (let i = 0; i < 200; i += 1) {
+      await encryptedImageUrl(`/img/${i}`);
+    }
+    expect(revoke).not.toHaveBeenCalledWith(reResolved);
+  });
+
+  it("bumps the generation and tells subscribers", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeImageCacheCleared(listener);
+    const before = getImageCacheGeneration();
+    clearImageObjectUrls();
+    unsubscribe();
+    expect(getImageCacheGeneration()).toBe(before + 1);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("an image fetch in flight across the clear is not cached (no old-identity image comes back)", async () => {
+    await tunnelWithBlobs();
+    const inFlight = encryptedImageUrl("/img/a");
+    clearImageObjectUrls();
+    expect(await inFlight).toBe("");
+    expect(await encryptedImageUrl("/img/a")).toMatch(/^blob:test\//);
+  });
+
+  it("a mounted useEncryptedImage re-resolves its revoked blob: URL after the clear", async () => {
+    await tunnelWithBlobs();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    function Img() {
+      return h("img", { src: useEncryptedImage("/img/a") });
+    }
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 30; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    };
+    try {
+      render(h(Img, null), container);
+      await settle();
+      const first = container.querySelector("img")?.getAttribute("src");
+      expect(first).toMatch(/^blob:test\//);
+
+      clearImageObjectUrls(); // revokes `first`
+      await settle();
+      const second = container.querySelector("img")?.getAttribute("src");
+      expect(second).toMatch(/^blob:test\//);
+      expect(second).not.toBe(first);
+    } finally {
+      render(null, container);
+      container.remove();
+    }
   });
 });

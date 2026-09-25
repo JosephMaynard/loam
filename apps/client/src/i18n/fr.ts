@@ -529,7 +529,7 @@ export const fr: Translation = {
   "admin.deleteChannelConfirm":
     "Supprimer définitivement « {name} » ? Tous ses messages et pièces jointes seront effacés sans possibilité de restauration — contrairement à l’archivage, c’est irréversible.",
   "gate.needsQrKeyChanged":
-    "La clé de ce nœud ne correspond plus à celle que vous avez scannée — l’hôte l’a peut-être réinitialisée, ou ce réseau n’est pas celui qu’il prétend être. Scannez le QR d’accès actuel du nœud pour vous reconnecter.",
+    "La clé de ce nœud ne correspond plus à celle que vous avez scannée — l’hôte a peut-être redémarré ou l’a réinitialisée, ou ce réseau n’est pas celui qu’il prétend être. Scannez le QR d’accès actuel du nœud pour vous reconnecter.",
   "message.report": "Signaler",
   "message.removedByModerator": "Retiré par un modérateur",
   "report.messageTitle": "Signaler ce message",
@@ -598,6 +598,8 @@ export const fr: Translation = {
   "transport.pinChangeNew": "Clé dans ce lien : {fingerprint}",
   "transport.pinChangeAccept": "Utiliser la nouvelle clé",
   "transport.pinChangeReject": "Garder ma clé actuelle",
+  "transport.pinChangeMismatch":
+    "La clé de ce lien n’est pas celle qu’utilise ce nœud : elle n’est donc pas fiable. Scannez le QR d’accès affiché sur l’écran de l’hôte.",
   "invite.qrKeyMismatch":
     "Le QR d’accès est masqué : la clé annoncée par ce nœud ne correspond pas à celle avec laquelle vous l’avez rejoint.",
   "invite.qrNoKeyNote":

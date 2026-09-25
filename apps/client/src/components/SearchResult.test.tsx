@@ -56,6 +56,30 @@ describe("SearchResult", () => {
     expect(host.querySelector(".search-result-body")?.getAttribute("dir")).toBe("auto");
   });
 
+  it("collapses a blocked author's hit to a placeholder until Show (no name, body or link)", async () => {
+    const onOpen = vi.fn();
+    const host = mount(
+      <SearchResult
+        authorName="loud.iron.crow"
+        body="harassing text"
+        contextLabel="#general"
+        hiddenAsBlocked
+        onOpen={onOpen}
+        time="09:41"
+      />,
+    );
+
+    expect(host.textContent).toContain("Message from a blocked user");
+    expect(host.textContent).not.toContain("loud.iron.crow");
+    expect(host.textContent).not.toContain("harassing text");
+    expect(host.querySelector(".search-result-button")).toBeNull();
+
+    host.querySelector("button")!.click(); // Show
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(host.textContent).toContain("harassing text");
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it("invokes onOpen when the row is clicked", () => {
     const onOpen = vi.fn();
     const host = mount(

@@ -137,6 +137,18 @@ describe("channel content from a blocked user", () => {
     expect(thread.textContent).not.toContain("reply from troll");
     expect(thread.textContent).toContain("Message from a blocked user");
   });
+
+  it("leaves their replies out of a post's reply count", () => {
+    const reply = (id: string, authorId: string): Message =>
+      ({ id, type: "channelReply", channelId: "general", parentMessageId: "p1", authorId, body: id, createdAt: 102 }) as Message;
+    const messages = [post("p1", friend.id), reply("r1", troll.id), reply("r2", troll.id), reply("r3", friend.id)];
+
+    const blocked = mount(view({ blockedUserIds: BLOCKED, messages }));
+    expect(blocked.querySelector(".conversation .message-list")!.textContent).toContain("1 reply");
+
+    const unblocked = mount(view({ messages }));
+    expect(unblocked.querySelector(".conversation .message-list")!.textContent).toContain("3 replies");
+  });
 });
 
 describe("a DM with someone you blocked", () => {

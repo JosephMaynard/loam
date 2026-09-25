@@ -529,7 +529,7 @@ export const pt: Translation = {
   "admin.deleteChannelConfirm":
     "Excluir permanentemente “{name}”? Todas as mensagens e anexos dele serão removidos e não poderão ser restaurados — ao contrário do arquivamento, não há como desfazer.",
   "gate.needsQrKeyChanged":
-    "A chave deste nó não corresponde mais à que você escaneou — o anfitrião pode tê-la redefinido, ou esta rede não é o que diz ser. Escaneie o QR de acesso atual do nó para reconectar.",
+    "A chave deste nó não corresponde mais à que você escaneou — o anfitrião pode ter reiniciado ou tê-la redefinido, ou esta rede não é o que diz ser. Escaneie o QR de acesso atual do nó para reconectar.",
   "message.report": "Denunciar",
   "message.removedByModerator": "Removido por um moderador",
   "report.messageTitle": "Denunciar esta mensagem",
@@ -598,6 +598,8 @@ export const pt: Translation = {
   "transport.pinChangeNew": "Chave neste link: {fingerprint}",
   "transport.pinChangeAccept": "Usar a nova chave",
   "transport.pinChangeReject": "Manter minha chave atual",
+  "transport.pinChangeMismatch":
+    "A chave deste link não é a que este nó está usando, então não é confiável. Escaneie o código QR de acesso exibido na tela do anfitrião.",
   "invite.qrKeyMismatch":
     "O QR de acesso está oculto: a chave que este nó anuncia não corresponde à chave com que você entrou.",
   "invite.qrNoKeyNote":

@@ -357,8 +357,11 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `optional` node (under `required` an anonymous session gets 401) — and the
   response sealed back, so paths/queries are hidden too. On a live pinned session the client refuses an
   unsealed tunnel reply (except a GET/HEAD 401, which triggers one re-handshake). **Key pinning:** a `#k=`
-  fragment only establishes a pin; a different key is parked as a pending change the user must accept
-  (`PinChangePrompt`, both fingerprints shown), never silently swapped. Markdown strips `#k=` fragments
+  fragment only establishes a pin; a different key is never silently swapped — it is dropped if the pin
+  still handshakes, offered (`PinChangePrompt`, both fingerprints, on the rescan gate) only once the pin is
+  broken, and acceptable only if it equals the key the node reported. The Android host's WebView is handed
+  the node key (`window.__loamHostTransportKey`, injected beside the host token) and adopts it over any
+  pin, since an ephemeral-DB-key node mints a new transport key every boot. Markdown strips `#k=` fragments
   from message links, and a client's invite QR carries `#k=` only from its own QR-verified session
   (hidden on an advertised-key mismatch). `optional`
   mode keeps per-route body sealing (paths visible). **Image encryption** (required mode): avatar/
@@ -466,7 +469,7 @@ kill switch. See `docs/09-security-profiles.md`.
   re-check it and skip the backoff.
 - **Identity & roster reconcile**: `lib/identity.ts` stores the server-confirmed user id
   (`loam.confirmedUserId`); when it changes (e.g. an Emergency Reset the client missed) the local cache is
-  purged. `lib/roster.ts` `reconcileRoster` drops users the full `/api/users` list no longer returns.
+  purged, and other open tabs (a `storage` event on that key) drop their in-memory content and reload. `lib/roster.ts` `reconcileRoster` drops users the full `/api/users` list no longer returns.
 - **Conversations**: `components/ConversationView.tsx` (header, `MessageList`, `ThreadPanel`) is keyed by
   conversation (`kind:id`; the thread panel by parent id), so drafts, pending attachments, report dialogs
   and scroll state never follow the user into another conversation. A `LiveChangeJournal`
@@ -479,11 +482,13 @@ kill switch. See `docs/09-security-profiles.md`.
   `MobileBackLink` / `PinChangePrompt` (see transport) live in `src/components/` too.
 - All server payloads are re-validated client-side with the same Zod schemas (`parseSocketEvent`,
   `parseMessageResponse`).
-- **Blocking** (`lib/blocks.ts`): the block list is fetched from `/api/users/me/blocks` at boot and held
-  **in memory only** (never IndexedDB; reset by a wipe or identity change). A Block button sits beside
+- **Blocking** (`lib/blocks.ts`): the block list is fetched from `/api/users/me/blocks` at boot and cached
+  in IndexedDB (the `sync` store, tagged with the confirmed identity), hydrated before the cached content
+  so a cold/offline boot never shows blocked authors; the wipe deletes it and the identity-change purge
+  clears it. A Block button sits beside
   "Report this user" in a human DM's header; a blocked DM shows a banner with Unblock and a disabled
-  composer; in channels a blocked author's posts/replies collapse to a placeholder with Show, and their
-  reactions, typing, toasts and unread counts are dropped. `BlockedUsersPanel` in Settings lists them for
+  composer; in channels and search results a blocked author's posts/replies collapse to a placeholder with
+  Show, and their reactions, typing, toasts, reply counts and unread counts are dropped. `BlockedUsersPanel` in Settings lists them for
   unblocking, and Settings links the privacy policy (`https://loamnet.com/privacy`; the Android host menu
   links it too, `apps/app/src/constants/links.ts`).
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
