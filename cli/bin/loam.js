@@ -50,10 +50,16 @@ Options:
   --port <n>        Port to listen on (default 3000, or $PORT)
   --data-dir <dir>  Where to store the SQLite DB + avatars
                     (default $XDG_DATA_HOME/loam or ~/.loam)
-  --encrypt [key]   Encrypt the database at rest (SQLCipher). With a value, use it
-                    as the passphrase; bare, use an ephemeral RAM-only key.
-                    Requires the optional native driver (installed automatically
-                    unless it failed to build).
+  --encrypt         Encrypt the database at rest (SQLCipher). The passphrase comes
+                    from $LOAM_DB_KEY if set, otherwise you are prompted for it
+                    (not echoed). An empty answer — or no terminal to prompt on —
+                    uses an ephemeral RAM-only key (data unreadable after exit).
+  --encrypt ephemeral
+                    Use an ephemeral RAM-only key without prompting.
+  --encrypt <pass>  Use <pass> directly. Discouraged: it is visible to other users
+                    in \`ps\` and saved in your shell history.
+                    Encryption requires the optional native driver (installed
+                    automatically unless it failed to build).
   -h, --help        Show this help
 
 Scan the printed QR (or open the printed URL) from another device on the same
@@ -90,10 +96,93 @@ if (!process.env.LOAM_VERSION) {
   }
 }
 
+/**
+ * Read a line from the terminal without echoing it (for the DB passphrase). Ctrl-C aborts the launch.
+ * Only called when stdin is a TTY.
+ */
+function promptHidden(question) {
+  const { stdin, stdout } = process;
+  return new Promise((resolve) => {
+    let value = "";
+    const cleanup = () => {
+      stdin.removeListener("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdout.write("\n");
+    };
+    const onData = (chunk) => {
+      for (const ch of chunk) {
+        if (ch === "\r" || ch === "\n" || ch === "\u0004") {
+          cleanup();
+          resolve(value);
+          return;
+        }
+        if (ch === "\u0003") {
+          cleanup();
+          process.exit(130);
+        }
+        if (ch === "\u007f" || ch === "\b") {
+          value = value.slice(0, -1);
+        } else if (ch >= " ") {
+          value += ch;
+        }
+      }
+    };
+    stdout.write(question);
+    stdin.setEncoding("utf8");
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
+}
+
+/**
+ * Resolve the `--encrypt` key WITHOUT putting a passphrase in argv where avoidable (pre-release review
+ * 2026-09-25): an argv passphrase is readable by every local user via `ps` and lands in shell history.
+ * Order: `--encrypt <value>` (warned; `ephemeral` is not a secret) → $LOAM_DB_KEY → an interactive no-echo
+ * prompt (confirmed twice when no database exists yet, so a typo can't lock a brand-new DB) → ephemeral.
+ */
+async function resolveEncryptionKey() {
+  const fromArgs = optionValue("--encrypt");
+  if (fromArgs !== undefined) {
+    if (fromArgs !== "ephemeral") {
+      console.warn(
+        "Warning: a passphrase given on the command line is visible to other users (`ps`) and saved in your\n" +
+          "shell history. Prefer `LOAM_DB_KEY=… loam --encrypt`, or bare `--encrypt` to be prompted.",
+      );
+    }
+    return fromArgs;
+  }
+  if (process.env.LOAM_DB_KEY) {
+    return process.env.LOAM_DB_KEY;
+  }
+  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
+    console.warn("--encrypt: no $LOAM_DB_KEY and no terminal to prompt on — using an ephemeral RAM-only key.");
+    return "ephemeral";
+  }
+  const isNewDatabase = !existsSync(join(dataDir, "loam.db"));
+  for (;;) {
+    const passphrase = await promptHidden(
+      "Database passphrase (leave empty for an ephemeral RAM-only key): ",
+    );
+    if (!passphrase) {
+      return "ephemeral";
+    }
+    if (!isNewDatabase) {
+      return passphrase;
+    }
+    const confirmation = await promptHidden("Confirm the passphrase for the new database: ");
+    if (confirmation === passphrase) {
+      return passphrase;
+    }
+    console.error("The passphrases didn't match — try again.");
+  }
+}
+
 if (args.includes("--encrypt")) {
-  // A passphrase if provided, else "ephemeral" → a random RAM-only key (lost on reboot). Either way
-  // the store must live on disk (not :memory:), which it does (dataDir above). See docs/02.
-  process.env.LOAM_DB_KEY = optionValue("--encrypt") ?? process.env.LOAM_DB_KEY ?? "ephemeral";
+  // A passphrase, or "ephemeral" → a random RAM-only key (lost on reboot). Either way the store must
+  // live on disk (not :memory:), which it does (dataDir above). See docs/02.
+  process.env.LOAM_DB_KEY = await resolveEncryptionKey();
 }
 
 const bundlePath = join(pkgRoot, "dist/loam-server.js");
