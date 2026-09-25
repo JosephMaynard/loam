@@ -40,6 +40,8 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      # Every workspace's Vitest suite, then `node --test` over scripts/*.test.mjs (check-versions' tag
+      # rules) and cli/test/ (the root package.json `test:scripts`).
       - name: Unit tests
         run: pnpm test
 

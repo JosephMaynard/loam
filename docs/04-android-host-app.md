@@ -66,6 +66,9 @@ plain `pnpm install` may skip.
 **Stale-prebuild guard.** `android/` is generated and gitignored, so a direct `./gradlew` on an old one
 would ship its old manifest. The config plugin stamps `android/loam-prebuild.sha256` (a hash of `app.json`
 + `plugins/*.js`) at prebuild and adds a Gradle check that fails `preBuild` when they no longer match.
+A unit test parses the Groovy hashing back out and checks it against the JS; set
+`LOAM_GRADLE_GUARD_TEST=1` (with `gradle` on PATH or `LOAM_GRADLE=<path>`) to also run the guard under a
+real Gradle against a JS-written stamp (~15–30 s, so not in CI).
 Regenerate with `CI=1 npx expo prebuild --platform android --clean` (the `apk` script always does);
 `-PloamSkipPrebuildCheck` bypasses it for local native debugging only.
 
@@ -92,7 +95,9 @@ to build without a keystore (Play rejects a debug-signed bundle, and it sets
 loud debug-signing banner unless acknowledged with `--debug-signed` or `LOAM_ALLOW_DEBUG_SIGNING=1`.
 A debug-signed APK can't update a release-signed install, and each machine's debug key differs. The
 tag-triggered `build-apk.yml` job fails outright without the keystore secret; it runs `aab`, attaches the
-APK to the GitHub Release and uploads the bundle as the `loam-host-aab` workflow artifact. `release.jks` and `keystore.properties` are gitignored; **back them
+APK to the GitHub Release and uploads the bundle as the `loam-host-aab` workflow artifact. Tags are
+`vX.Y.Z`, or `vX.Y.Z-rc.N` / `vX.Y.Z-beta.N` for a pre-release (same gates and AAB, published as a GitHub
+pre-release); `versionCode` must beat every earlier release tag's, pre-releases included. `release.jks` and `keystore.properties` are gitignored; **back them
 up** (losing the key means users must uninstall before they can update). For Play Store distribution,
 enable Play App Signing and treat this key as the upload key. See `keystore.properties.example` for
 the file format if you'd rather supply your own key than generate one.
@@ -144,7 +149,11 @@ one it needs, so both ship):
   `apps/app/native-prebuilds/multiple-ciphers/` (tarball + reproducible build recipe + README, all
   committed). `fetch:native` extracts it into `node_modules/better-sqlite3-multiple-ciphers/build/Release/`.
   So the encrypted driver **now ships on-device** and `security.dbEncryption` modes take effect on a
-  real device build (subject to on-device `PRAGMA key` runtime verification — docs/01).
+  real device build (subject to on-device `PRAGMA key` runtime verification — docs/01). If it still
+  won't load, the host screen locks (`db_encryption_driver_missing`: **Retry**, or a confirmed **Start
+  without encryption**). The confirmation depends on the mode: in `ephemeral` the launcher has already
+  deleted the old database, so it says so; in `persistent`/`passphrase` the encrypted file stays on disk
+  and can be preserved (the actions live in `src/lib/driver-missing-recovery.ts`, with tests).
 
 The `.node` binaries themselves are **not committed** in `nodejs-assets/` (gitignored build output) —
 re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` sha256-verifies **each**
@@ -178,9 +187,10 @@ vendored tarball before installing it. Each JS-wrapper npm version and its
   `<device-transfer>`. At targetSdk 31+ `allowBackup=false` alone does **not** stop Android 12+
   device-to-device transfer, which would otherwise copy `loam.db`, avatars, attachments and
   `config.json` to a new phone.
-- **Optional hardware.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network) and Bluetooth/BLE are declared
-  `uses-feature required="false"`, so Play doesn't hide the listing from devices without them; the app
-  degrades (no hotspot, no mesh).
+- **Optional hardware.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE and the portrait
+  screen (implied by `orientation: "portrait"`) are declared `uses-feature required="false"`, so Play
+  doesn't hide the listing from devices without them (Chromebooks included); the app degrades (no
+  hotspot, no mesh, letterboxed on a landscape-only screen).
 - **Unused template permissions blocked** (`SYSTEM_ALERT_WINDOW`, `READ/WRITE_EXTERNAL_STORAGE`, via
   `android.blockedPermissions`), and `CHANGE_NETWORK_STATE` declared for the Wi-Fi Aware data path.
 - **Deep links ignored.** `app.json` keeps the `loam://` scheme (Expo Router resolves its root URL

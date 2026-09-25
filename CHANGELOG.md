@@ -96,6 +96,14 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
 - Search rejects a malformed query with a 400; a malformed link no longer crashes routing.
 - Sync: offers refused under an old policy are fetched again right after an admin config save or a change
   to a channel's archived, posting or replies setting, instead of up to an hour later.
+- `loam --encrypt`: an empty passphrase for an existing database is refused (it used to pick an ephemeral
+  key that can never open it), a pasted passphrase and confirmation are no longer cut at the first line,
+  and the missing-driver message says to reinstall `loamnet` rather than install the driver globally,
+  where `loam` never looks.
+- Android: the "Start without encryption" confirmation no longer tells an ephemeral-mode host that its old
+  database stays on disk; it was already deleted.
+- The Play listing no longer hides from landscape-only devices such as Chromebooks: the portrait screen is
+  declared optional.
 - An Emergency Reset journal whose saved config predates this release (`off` transport, an old bot id) is
   repaired like `config.json` instead of locking the node as corrupt, and a repaired stored config is
   written back once, so its warning doesn't repeat every boot.
@@ -117,8 +125,10 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   the `loam-host-aab` workflow artifact (not attached to the Release); a themed (monochrome) app icon.
 - Every one of the 14 non-English locales now covers every string, with a test that keeps it that way
   (machine-translated, pending native review).
-- CI checks that all package versions agree; tag builds also check the tag and that `versionCode` went
-  up. A stale generated Android project now fails the build instead of shipping old settings.
+- CI checks that all package versions agree; tag builds also check the tag and that `versionCode` is above
+  every earlier release tag's. `vX.Y.Z-rc.N` and `vX.Y.Z-beta.N` tags build like releases (keystore, tests,
+  the AAB) and are published as GitHub pre-releases. A stale generated Android project now fails the build
+  instead of shipping old settings.
 
 ### Changed
 - **Archived channels are read-only but visible** (readable, searchable, listed with a badge; composing,

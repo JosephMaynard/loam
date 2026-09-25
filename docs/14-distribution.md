@@ -52,14 +52,17 @@ run). Output lands in `cli/dist/` and `cli/client/`, both gitignored.
 |------|-------------|---------|
 | `--port <n>` | `PORT` | `3000` (or `$PORT`) |
 | `--data-dir <dir>` | `LOAM_DATA_DIR` | `$XDG_DATA_HOME/loam` or `~/.loam` — **user-writable, never inside the global package** |
-| `--encrypt` | `LOAM_DB_KEY` | off. Bare `--encrypt` takes `$LOAM_DB_KEY` if set, else prompts without echo (asked twice for a new database; an empty answer = `ephemeral`); with no terminal and no env it uses `ephemeral`. `--encrypt ephemeral` skips the prompt. `--encrypt <value>` still works but warns — an argv passphrase shows in `ps` and shell history. |
+| `--encrypt` | `LOAM_DB_KEY` | off. Bare `--encrypt` takes `$LOAM_DB_KEY` if set, else prompts without echo (asked twice for a new database, and an empty answer = `ephemeral`; for an existing `loam.db` an empty answer is refused and it asks again, since a fresh ephemeral key can't open it). Pasting both lines at once works. With no terminal and no env it uses `ephemeral`. `--encrypt ephemeral` skips the prompt. `--encrypt <value>` still works but warns — an argv passphrase shows in `ps` and shell history. |
 
 A `LOAM_DB_KEY` already in the environment encrypts the node even without the flag (the server reads it
 directly). It also sets `LOAM_CLIENT_DIST` to the packaged `client/` dir and `LOAM_JOIN_HOST` to the
 first LAN IPv4, prints the LAN URL + a terminal QR (via the bundled `@loam/qr`), then `await`s the
 server. When encryption is requested (`--encrypt` or `LOAM_DB_KEY`), the launcher first **probes the
 SQLCipher driver** (loads it and opens an in-memory DB, so the native addon really loads) before
-prompting or booting; if it won't load, it exits with a targeted install hint. (Letting the server try
+prompting or booting; if it won't load, it exits with a hint. The driver resolves from the package's own
+`dist/` (it's loamnet's optional dependency), so the hint prints that path and says to reinstall loamnet
+and check the install output for the native build error. A separately installed global copy of the driver
+is never found. (Letting the server try
 instead was unsafe: its keyed-open recovery path could leave a plaintext `loam.db` in a fresh data dir.)
 
 ## Publishing

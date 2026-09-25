@@ -76,12 +76,18 @@ device checks below, and size headroom before a production track.
   in `plugins/with-loam-host.js` (still device-unverified, like the rest of Phase 3).
 - **Themed icon.** `monochromeImage` **added** (a white wordmark on transparent). Still open: a proper
   adaptive foreground layer (the same PNG serves icon, adaptive foreground and favicon).
-- **Device filtering — fixed.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network) and Bluetooth/BLE are declared
-  `uses-feature … required="false"`, so tablets/Chromebooks without them see the listing (no hotspot / no
-  mesh there).
+- **Device filtering — fixed.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE and the
+  portrait screen (implied by `orientation: "portrait"`) are declared `uses-feature … required="false"`, so
+  tablets/Chromebooks without them see the listing (no hotspot / no mesh there).
 - **`versionCode` — checked in CI.** Still hand-edited in `app.json`, but `scripts/check-versions.mjs
-  --release-tag` fails a tag build unless the tag equals the manifest version and `versionCode` is greater
-  than the previous release tag's; `ci.yml` checks on every push/PR that all manifest versions agree.
+  --release-tag` fails a tag build unless the tag's `X.Y.Z` equals the manifest version and `versionCode`
+  is greater than that of **every** earlier release tag (read from each tag's `app.json`); `ci.yml` checks
+  on every push/PR that all manifest versions agree. Tests: `scripts/check-versions.test.mjs`.
+  **Release candidates:** tag `vX.Y.Z-rc.N` (or `-beta.N`) with the manifests still at `X.Y.Z`. It gets the
+  same keystore/test gates and the AAB for internal testing, and is published as a GitHub **pre-release**.
+  Play never takes a `versionCode` twice, so each RC needs its own and the final `vX.Y.Z` a higher one.
+  **For 0.5.0:** v0.4.0 shipped `versionCode` 6, so the first 0.5.0 tag needs **≥ 7** (currently 6 — bump
+  it), and the final v0.5.0 needs more than the last RC's.
 - **Release workflow hardened.** Every action in `build-apk.yml`/`ci.yml` is pinned to a commit SHA,
   checkouts don't persist the token, the build job is read-only, and a separate release job (`contents:
   write`, runs no repo code) attaches the APK. Keystore secrets reach only the signing step; a tag build
