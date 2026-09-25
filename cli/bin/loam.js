@@ -10,6 +10,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { createLineBuffer } from "./line-buffer.js";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
 const args = process.argv.slice(2);
@@ -53,8 +55,9 @@ Options:
                     (default $XDG_DATA_HOME/loam or ~/.loam)
   --encrypt         Encrypt the database at rest (SQLCipher). The passphrase comes
                     from $LOAM_DB_KEY if set, otherwise you are prompted for it
-                    (not echoed). An empty answer — or no terminal to prompt on —
-                    uses an ephemeral RAM-only key (data unreadable after exit).
+                    (not echoed). For a new database, an empty answer — or no
+                    terminal to prompt on — uses an ephemeral RAM-only key (data
+                    unreadable after exit); an existing database needs its passphrase.
   --encrypt ephemeral
                     Use an ephemeral RAM-only key without prompting.
   --encrypt <pass>  Use <pass> directly. Discouraged: it is visible to other users
@@ -97,14 +100,23 @@ if (!process.env.LOAM_VERSION) {
   }
 }
 
+// Shared across prompts: a pasted "pass\npass\n" arrives as one chunk and answers both the passphrase and
+// its confirmation, so lines past the first must survive until the next prompt asks.
+const passphraseInput = createLineBuffer();
+
 /**
  * Read a line from the terminal without echoing it (for the DB passphrase). Ctrl-C aborts the launch.
  * Only called when stdin is a TTY.
  */
 function promptHidden(question) {
   const { stdin, stdout } = process;
+  stdout.write(question);
+  const queued = passphraseInput.next();
+  if (queued !== undefined) {
+    stdout.write("\n");
+    return Promise.resolve(queued);
+  }
   return new Promise((resolve) => {
-    let value = "";
     const cleanup = () => {
       stdin.removeListener("data", onData);
       stdin.setRawMode(false);
@@ -112,24 +124,16 @@ function promptHidden(question) {
       stdout.write("\n");
     };
     const onData = (chunk) => {
-      for (const ch of chunk) {
-        if (ch === "\r" || ch === "\n" || ch === "\u0004") {
-          cleanup();
-          resolve(value);
-          return;
-        }
-        if (ch === "\u0003") {
-          cleanup();
-          process.exit(130);
-        }
-        if (ch === "\u007f" || ch === "\b") {
-          value = value.slice(0, -1);
-        } else if (ch >= " ") {
-          value += ch;
-        }
+      if (passphraseInput.push(chunk) === "interrupt") {
+        cleanup();
+        process.exit(130);
+      }
+      const line = passphraseInput.next();
+      if (line !== undefined) {
+        cleanup();
+        resolve(line);
       }
     };
-    stdout.write(question);
     stdin.setEncoding("utf8");
     stdin.setRawMode(true);
     stdin.resume();
@@ -142,6 +146,8 @@ function promptHidden(question) {
  * 2026-09-25): an argv passphrase is readable by every local user via `ps` and lands in shell history.
  * Order: `--encrypt <value>` (warned; `ephemeral` is not a secret) → $LOAM_DB_KEY → an interactive no-echo
  * prompt (confirmed twice when no database exists yet, so a typo can't lock a brand-new DB) → ephemeral.
+ * An empty answer means ephemeral only for a NEW database: a fresh RAM-only key can never open an existing
+ * one (the server would just stop on an unreadable-database error), so there it asks again.
  */
 async function resolveEncryptionKey() {
   const fromArgs = optionValue("--encrypt");
@@ -161,13 +167,23 @@ async function resolveEncryptionKey() {
     console.warn("--encrypt: no $LOAM_DB_KEY and no terminal to prompt on — using an ephemeral RAM-only key.");
     return "ephemeral";
   }
-  const isNewDatabase = !existsSync(join(dataDir, "loam.db"));
+  const databasePath = join(dataDir, "loam.db");
+  const isNewDatabase = !existsSync(databasePath);
   for (;;) {
     const passphrase = await promptHidden(
-      "Database passphrase (leave empty for an ephemeral RAM-only key): ",
+      isNewDatabase
+        ? "Database passphrase (leave empty for an ephemeral RAM-only key): "
+        : "Database passphrase: ",
     );
     if (!passphrase) {
-      return "ephemeral";
+      if (isNewDatabase) {
+        return "ephemeral";
+      }
+      console.error(
+        `${databasePath} already exists, and an ephemeral key can never open it. Enter its passphrase ` +
+          "(Ctrl-C to quit), or use a different --data-dir for a new database.",
+      );
+      continue;
     }
     if (!isNewDatabase) {
       return passphrase;
@@ -202,13 +218,25 @@ function encryptedDriverLoads() {
   }
 }
 
+/**
+ * Why encryption can't start, and the fix. The driver is resolved from the loamnet package itself (its
+ * optionalDependency, next to dist/), so a separate global install of the driver is never found — the fix
+ * is reinstalling loamnet so that optional dependency builds.
+ */
+function printDriverMissingHint() {
+  console.error(
+    "\nEncryption requested but the native SQLCipher driver (better-sqlite3-multiple-ciphers) is unavailable.\n" +
+      `It is loaded from the loamnet package itself (resolved from ${dirname(bundlePath)}); it's an optional\n` +
+      "dependency, so it is missing when its native build failed during install. Reinstall loamnet and check\n" +
+      "the install output for the build error (it needs a C/C++ toolchain and Python when no prebuilt binary\n" +
+      "fits your platform):  npm install -g loamnet\n" +
+      "Or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
+  );
+}
+
 if (args.includes("--encrypt") || process.env.LOAM_DB_KEY) {
   if (!encryptedDriverLoads()) {
-    console.error(
-      "\nEncryption requested but the native SQLCipher driver is unavailable.\n" +
-        "Install it with:  npm install -g better-sqlite3-multiple-ciphers\n" +
-        "or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
-    );
+    printDriverMissingHint();
     process.exit(1);
   }
 }
@@ -274,11 +302,7 @@ try {
   // Only treat this as a missing-driver case when the error actually names the SQLCipher module —
   // a bare `Cannot find module` match would misreport any unrelated missing dependency.
   if (process.env.LOAM_DB_KEY && String(error?.message ?? "").includes("better-sqlite3-multiple-ciphers")) {
-    console.error(
-      "\nEncryption requested but the native SQLCipher driver is unavailable.\n" +
-        "Install it with:  npm install -g better-sqlite3-multiple-ciphers\n" +
-        "or run without --encrypt for an unencrypted local database.",
-    );
+    printDriverMissingHint();
     process.exit(1);
   }
   throw error;
