@@ -163,21 +163,37 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
      (it would show up in this node's own digest). A batch imports only the ids it asked for, under the
      list it asked for them on, so a peer can't push them unasked. A blob taken in again later (say over
      the radio, once relaying is on) is refused, never carried: carrying it would depend on whether the
-     first copy was delivered.
-   - *The whole horizon.* A mark is keyed by id alone and lives from the moment the offer was taken in
+     first copy was delivered. (Given the separate namespaces below, the record check on the public list can
+     only match a `seal_` id, which that list refuses anyway. It stays as defence in depth.)
+   - *Any id.* The outer id isn't sealed, so a peer can re-offer the same mail under fresh ids. Once the
+     body is in hand, the mark also records the mail's replay key (`sealed.<sha256>`), and an offer whose
+     replay key has a live mark is refused like a seen id and never carried. Without this, after relaying
+     was switched on (or a full relay freed a slot), the dropped copy came back carried and showed up in the
+     digest while the delivered one stayed refused. One exception keeps a carrier from censoring a relay:
+     a copy with no hop left, taken in while the node relays and has room, is marked by id only, so the
+     genuine copy with hops left can still be carried. That shows a peer nothing new, because in that state
+     a copy with hops left would have been carried on the spot (the relaying residual below).
+   - *Timing.* Delivering a blob (decrypt, DB writes, a broadcast) takes longer than dropping one, so
+     importing each sealed batch before fetching the next let the peer time the gap (about 3 ms with no
+     local mail, about 130 ms for 40 deliveries). A round now fetches every sealed batch first, after the
+     public batches and their attachment fetches, and imports them only after the whole sync loop's
+     requests to every peer are done. Rounds start on the interval clock (a 5 s tick after `intervalMs`
+     from the previous round's start), so how long the imports take doesn't move the next round's first
+     request unless it takes longer than a tick.
+   - *The whole horizon.* A mark is keyed by id (the replay key rides along, see *Any id*) and lives from the moment the offer was taken in
      (the sync round's clock, one value for the whole round) for the 30-day tombstone horizon + the 7-day
      TTL max + two epochs. That outlives every tombstone the offer can leave (the delivery tombstone, or
      a carried copy's tombstone at its expiry), so until the mark lapses every outcome is suppressed and
      afterwards none is. It used to expire at the offer's advertised `ttlExpiresAt`, so re-advertising the
      same ids with a later TTL after the first one passed fetched only the dropped ones, while the
      delivered ids were still tombstoned. A repeat mark never extends a live row.
-   The record is not a tombstone (it never refuses an import on its own), it survives restarts and config
+   The record is not a tombstone (it refuses no public import), it survives restarts and config
    changes, and only an Emergency Reset clears it. *Separate namespaces.* Every build (v0.4.0 included)
    names a sealed message `seal_<hex>` and nothing else uses that prefix, so a sealed offer must carry a
    `seal_` id and a public record may not. A peer therefore can't list sealed ids among public messages at
    all, and can't name a sealed offer after a public message it has seen to keep the real one out.
    Consequences: a node that switches relaying on, or frees space under `maxCarried`,
-   doesn't go back for blobs it dropped earlier (other carriers still can). **Bounds:** the record holds
+   doesn't go back for blobs it dropped earlier, and doesn't carry them if they come back under new ids (other carriers still can). **Bounds:** the record holds
    at most 200 000 ids, and each source (a sync peer URL, or the radio bridge) at most 50 000 of them.
    When a source reaches its quota the node pulls no new sealed offers from that source, and when the
    record is full it pulls none at all, until marks lapse. It never evicts marks, since an evicted mark
@@ -185,7 +201,17 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    the per-source quota keeps one hostile peer advertising junk ids from switching sealed pulls off for
    every peer for the whole retention. An honest peer holds at most `maxCarried` blobs at once, so it
    reaches its quota only by offering about 1 300 distinct sealed messages a day for the whole window.
-   The radio bridge counts as one source, and several hostile peers together can still fill the record.
+   The radio bridge counts as one source and obeys the same bounds: once the radio's quota or the global
+   cap is reached, a blob that would need a new mark is refused before it is marked or delivered, whether
+   or not it is for a local user. Before this, radio marks skipped both checks, so one radio neighbour
+   could push the record past the global cap and stop every sync peer's sealed pulls for the whole
+   retention. An inbound call carries at most 64 blobs in a 1 MiB body, 240 calls a minute. One hostile
+   neighbour can still use up the radio quota and stop radio intake for everyone nearby, and several
+   hostile sync peers together can still fill the record. `POST /api/mesh/inbound` answers `{ ok: true }`
+   whatever became of the blobs, and the launcher's courier refreshes its outbound list and have-mail hint
+   a fixed 2 s after each receipt. It used to re-advertise only when the answer said a blob was accepted,
+   which on a node with relaying off meant only after a delivery, so the neighbour that pushed the blob saw
+   it delivered.
    The recipient's tag set spans `now − MESH_TTL_MAX_MS` … `now + 1 epoch` (not `now − ` this node's own
    `mesh.ttlMs`: the lifetime is the *sender's* choice), memoised per epoch. **What still leaks:** on a
    **relaying** node a pulled blob that is delivered locally is tombstoned and never appears in its digest,
@@ -198,7 +224,10 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    the seen mark, which tells a prober "carried here" — the same thing the digest already showed.) A **relay-off** node never advertises pulled mail at all (its
    digest holds only mail its own users sealed), so what it pulls never shows in its digest; hop-1 blobs
    are never carried by anyone, so their absence says nothing either. Closing it needs cover traffic or
-   deliberately carrying (re-advertising) delivered mail — v2.
+   deliberately carrying (re-advertising) delivered mail — v2. Smaller timing residuals: the
+   missing-attachment retry runs on its own 30 s timer and can be delayed by a delivery that runs at the
+   same moment, and the inbound call itself takes longer when it delivers. The courier's refresh doesn't
+   wait for that call, and the difference is milliseconds against a 2 s delay and radio latency.
 
 ---
 

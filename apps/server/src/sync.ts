@@ -1170,7 +1170,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // relayed onward (hop-decremented, bounded), or dropped. Never falls through to store+broadcast.
       // (`acceptSealedFromPeer` applies the tombstone / reserved-id / expiry checks itself.)
       if (message.type === "sealed") {
-        if (mesh.acceptSealedFromPeer(message, peerUrl, batch.seenAt)) {
+        // The round already applied the seen-record quota before fetching (see the sealed pull in syncWithPeer).
+        if (mesh.acceptSealedFromPeer(message, peerUrl, batch.seenAt, true)) {
           imported += 1;
         }
         continue;
@@ -1255,8 +1256,18 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     return { imported, deferred };
   }
 
-  /** One pull round against one peer: digest → diff (skipping tombstones) → fetch → import. */
-  async function syncWithPeer(peer: SyncPeer): Promise<void> {
+  /**
+   * One pull round against one peer: digest → diff (skipping tombstones) → fetch → import.
+   *
+   * Sealed mail is imported only after the round's LAST request to the peer (docs/16 §9): delivering a blob
+   * (decrypt, DB writes, a broadcast) takes measurably longer than dropping one, so importing a batch between
+   * fetches let the peer time the gap before the next request and learn whether that batch held mail for a
+   * local user. Every sealed batch is fetched first (public batches and their attachment fetches come before
+   * them), then the fetched sealed batches are imported. With `sealedDeliveries` (the sync loop passes one for
+   * the whole round across all peers) the import is queued there instead, so one peer's delivery can't delay
+   * another peer's requests either; without it the import runs at the end of this peer's round.
+   */
+  async function syncWithPeer(peer: SyncPeer, sealedDeliveries?: (() => Promise<void>)[]): Promise<void> {
     // Snapshot the wipe generation: if a kill switch fires mid-round, every post-await check below
     // abandons the round rather than writing peer data back onto the wiped store (docs/15 #2).
     const generation = rt.wipeGeneration;
@@ -1477,7 +1488,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       const meter = { wastedBytes: 0 };
       let sawTooLarge = false;
 
-      /** Fetch + import one batch. A batch whose CONTENT is unusable (over the size cap, not JSON, fails the
+      // Sealed batches fetched this round, imported only once the round's requests are all out.
+      const sealedFetched: { ids: string[]; payload: { messages: Message[]; users: User[] } }[] = [];
+
+      /** Fetch + import one batch (a sealed batch is only fetched here: it goes to `sealedFetched`, imported
+       *  after the round's last request). A batch whose CONTENT is unusable (over the size cap, not JSON, fails the
        *  schema) is split in half and retried, down to single ids, so one oversized or malformed message
        *  can't sink the rest (#2) — and a single unusable id is remembered as refused. A too-large answer
        *  also shrinks this peer's later batches of that kind. Splitting stops, and the peer counts as failing
@@ -1525,6 +1540,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         }
         if (rt.wipeGeneration !== generation) {
           return "wiped";
+        }
+        if (kind === "sealed") {
+          // Held until every request of the round is out (see the doc comment on syncWithPeer).
+          sealedFetched.push({ ids, payload });
+          return { imported: 0 };
         }
         const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds, {
           ids: new Set(ids),
@@ -1578,6 +1598,42 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       if (imported) {
         rt.log.info(`Synced ${imported} message(s) from peer ${peer.url}`);
       }
+
+      if (sealedFetched.length) {
+        /** Import the round's sealed batches (deliver / carry / drop) and settle their seen marks. */
+        const deliverSealed = async (): Promise<void> => {
+          let accepted = 0;
+          try {
+            for (const { ids, payload } of sealedFetched) {
+              if (rt.wipeGeneration !== generation) {
+                return;
+              }
+              const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds, {
+                ids: new Set(ids),
+                kind: "sealed",
+                seenAt: now,
+              });
+              if (rt.wipeGeneration !== generation) {
+                return;
+              }
+              settleBatch(ids, result.deferred);
+              accepted += result.imported;
+            }
+          } catch (error) {
+            status.lastError = error instanceof Error ? error.message : "Sync failed";
+            rt.log.warn(`Sync with peer ${peer.url}: importing sealed mail failed: ${status.lastError}`);
+          }
+          status.imported += accepted;
+          if (accepted) {
+            rt.log.info(`Took in ${accepted} sealed message(s) from peer ${peer.url}`);
+          }
+        };
+        if (sealedDeliveries) {
+          sealedDeliveries.push(deliverSealed);
+        } else {
+          await deliverSealed();
+        }
+      }
     } catch (error) {
       status.lastError = error instanceof Error ? error.message : "Sync failed";
       rt.log.warn(`Sync with peer ${peer.url} failed: ${status.lastError}`);
@@ -1601,7 +1657,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // Peers sync concurrently — syncWithPeer never rejects (it records failures in its own
       // status entry), and the import path re-checks message existence after its last await, so
       // interleaved rounds can't double-insert.
-      await Promise.all(rt.appConfig.sync.peers.map((peer) => syncWithPeer(peer)));
+      // Sealed mail from every peer is imported only after all of them are done (see syncWithPeer).
+      const sealedDeliveries: (() => Promise<void>)[] = [];
+      await Promise.all(rt.appConfig.sync.peers.map((peer) => syncWithPeer(peer, sealedDeliveries)));
+      for (const deliver of sealedDeliveries) {
+        await deliver();
+      }
     } finally {
       syncRunning = false;
     }

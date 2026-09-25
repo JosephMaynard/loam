@@ -7,7 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { Channel, Message, SyncDigest, User } from "@loam/schema";
+import { createMeshIdentity, currentEpoch, mailboxTag, sealMailbox } from "@loam/crypto";
+import type { Channel, Message, Report, SyncDigest, User } from "@loam/schema";
 
 import { buildApp, type LoamApp } from "./app.js";
 import { openStore, QuarantinedRowError } from "./db.js";
@@ -470,5 +471,147 @@ describe("Emergency Reset removes quarantined rows like any other", () => {
     expect(app.store.loadChannels().some((candidate) => candidate.id === "announcements")).toBe(true);
     await app.close();
     expect(rawData(dataDir, "channels", "announcements")).not.toBe("{");
+  });
+});
+
+describe("upgrade: stored rows outside users/channels/messages (verifier round, 2026-09-25)", () => {
+  it("a v0.4 report naming an over-long target id doesn't fail boot or the moderator queue, and stays on disk", async () => {
+    const dataDir = tempDataDir();
+    const first = await boot(dataDir);
+    const admin = await newSession(first);
+    await first.close();
+    const now = Date.now();
+    const valid: Report = {
+      id: "rpt_0000000000000001",
+      targetType: "user",
+      targetId: admin.userId,
+      reporterUserId: admin.userId,
+      reason: "spam",
+      createdAt: now,
+      status: "open",
+    };
+    // v0.4.0's IdSchema was unbounded: a report on a peer-synced message could name a 200-char id.
+    const legacy = { ...valid, id: "rpt_0000000000000002", targetType: "message", targetId: "m".repeat(200), createdAt: now + 1 };
+    const insertReport = (report: { id: string; createdAt: number }) =>
+      rawRun(dataDir, "INSERT INTO reports (id, status, created_at, data) VALUES (?, 'open', ?, ?)", report.id, report.createdAt, JSON.stringify(report));
+    insertReport(valid);
+    insertReport(legacy);
+    // As on a database first opened by 0.5: the one-time provenance backfill (which reads open reports) runs.
+    rawRun(dataDir, "DELETE FROM config WHERE key = 'migration.syncedUsersBackfill.v1'");
+
+    const logs: string[] = [];
+    const app = await boot(dataDir, { logger: true, logStream: { write: (line) => void logs.push(line) } });
+    const warning = logs.map((line) => JSON.parse(line) as { storedRows?: Record<string, unknown> }).find((entry) => entry.storedRows);
+    expect(warning?.storedRows?.reports).toEqual({ repaired: 0, quarantined: 1, dependent: 0 });
+
+    const queue = await app.server.inject({ method: "GET", url: "/api/moderation/reports", headers: { cookie: admin.cookie } });
+    expect(queue.statusCode).toBe(200);
+    expect((queue.json() as Report[]).map((report) => report.id)).toEqual([valid.id]);
+    const resolve = await app.server.inject({
+      method: "POST",
+      url: `/api/moderation/reports/${legacy.id}/resolve`,
+      headers: { cookie: admin.cookie },
+      payload: { resolution: "dismissed" },
+    });
+    expect(resolve.statusCode).toBe(404);
+    await app.close();
+
+    const db = new DatabaseSync(join(dataDir, "loam.db"));
+    try {
+      expect((db.prepare("SELECT data FROM reports WHERE id = ?").get(legacy.id) as { data: string }).data).toBe(JSON.stringify(legacy));
+      // The backfill completed (its flag is set), so it isn't re-attempted on every boot.
+      expect(db.prepare("SELECT 1 FROM config WHERE key = 'migration.syncedUsersBackfill.v1'").get()).toBeDefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("a mesh identity stored for a quarantined user isn't loaded, so mail to it is carried, not a failed delivery", async () => {
+    const expiry = Date.now() + 3_600_000;
+    let offered: Message[] = [];
+    const peer = await startPeer({
+      digest: () => ({
+        channels: [],
+        messages: [],
+        sealed: offered.map((message) => ({
+          id: message.id,
+          toTag: (message as { toTag: string }).toTag,
+          ttlExpiresAt: expiry,
+          hopLimit: 3,
+        })),
+      }),
+      messages: () => offered,
+    });
+    const dataDir = tempDataDir({
+      ...syncConfig(peer.url),
+      mesh: { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 100, maxContacts: 100 },
+    });
+    const first = await boot(dataDir);
+    const admin = await newSession(first);
+    await first.close();
+    // A v0.4 build minted a mesh identity for every human, peer-imported ones with over-long ids included.
+    const longId = `user.${"q".repeat(130)}`;
+    const identity = createMeshIdentity();
+    rawRun(
+      dataDir,
+      "INSERT INTO users (id, data) VALUES (?, ?)",
+      longId,
+      JSON.stringify({ id: longId, displayName: "Legacy", type: "human", isAdmin: false, createdAt: 1, ephemeral: true }),
+    );
+    rawRun(dataDir, "INSERT INTO mesh_identities (user_id, data) VALUES (?, ?)", longId, JSON.stringify(identity));
+
+    const app = await boot(dataDir);
+    expect(app.store.quarantine().users.has(longId)).toBe(true);
+    const toTag = mailboxTag(identity.mailboxToken, currentEpoch(Date.now(), 24 * 3_600_000));
+    const sender = createMeshIdentity();
+    const blob = sealMailbox({
+      recipientKxPublic: identity.kxPublic,
+      sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
+      plaintext: "for a quarantined user",
+      aad: `${toTag}|${expiry}`,
+    });
+    offered = [
+      { id: "seal_0000000000000001", type: "sealed", authorId: "mesh.sealed", createdAt: Date.now(), toTag, sealed: blob, ttlExpiresAt: expiry, hopLimit: 3 },
+    ] as Message[];
+    const status = await runSync(app, admin.cookie);
+    expect(status?.lastError).toBeUndefined();
+    const stored = app.store.loadMessages();
+    expect(stored.some((message) => message.type === "dm")).toBe(false);
+    expect(stored.some((message) => message.id === "seal_0000000000000001" && message.type === "sealed")).toBe(true);
+    // The row stays on disk untouched.
+    expect(app.store.loadMeshIdentities().some((row) => row.userId === longId)).toBe(true);
+  });
+});
+
+describe("upgrade: retention reaches quarantined message rows (verifier round, 2026-09-25)", () => {
+  it("deletes and tombstones an expired quarantined row with the quarantined rows under it, and keeps a live one", async () => {
+    const dataDir = tempDataDir();
+    const first = await boot(dataDir);
+    const admin = await newSession(first);
+    const post = async (payload: Record<string, unknown>) =>
+      (
+        (await first.server.inject({ method: "POST", url: "/api/messages", headers: { cookie: admin.cookie }, payload })).json() as {
+          message: Message;
+        }
+      ).message;
+    const root = await post({ type: "channelPost", channelId: "general", body: "old legacy body" });
+    const reply = await post({ type: "channelReply", channelId: "general", parentMessageId: root.id, body: "reply to it" });
+    const recent = await post({ type: "channelPost", channelId: "general", body: "recent legacy body" });
+    const valid = await post({ type: "channelPost", channelId: "general", body: "valid and recent" });
+    await first.close();
+    const legacyAuthor = `user.${"z".repeat(130)}`;
+    rawRun(dataDir, "UPDATE messages SET data = ?, created_at = 1000 WHERE id = ?", JSON.stringify({ ...root, authorId: legacyAuthor, createdAt: 1000 }), root.id);
+    rawRun(dataDir, "UPDATE messages SET data = ? WHERE id = ?", JSON.stringify({ ...recent, authorId: legacyAuthor }), recent.id);
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ retention: { messageTtlMs: 3_600_000 } }));
+
+    // The boot sweep runs the reaper once.
+    const app = await boot(dataDir);
+    expect(app.store.quarantine().messages).toEqual(new Set([recent.id]));
+    expect(app.store.loadTombstones()).toEqual(expect.arrayContaining([root.id, reply.id]));
+    expect(app.store.loadMessages().some((message) => message.id === valid.id)).toBe(true);
+    await app.close();
+    expect(rawData(dataDir, "messages", root.id)).toBeUndefined();
+    expect(rawData(dataDir, "messages", reply.id)).toBeUndefined();
+    expect(rawData(dataDir, "messages", recent.id)).toBeDefined();
   });
 });

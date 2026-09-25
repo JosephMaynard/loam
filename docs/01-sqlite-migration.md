@@ -135,9 +135,26 @@ channel-slug allocation treat the id as taken; sync channel and author imports s
 message ids join the in-memory tombstone set for the boot, so a pull never requests them. A session or
 identity token for a quarantined user isn't honoured (the caller gets a new identity), and a new id is
 never minted into one. Reading or posting into a quarantined channel gets the same 404 as an unknown
-channel. One boot warning reports the repaired and quarantined counts per table. Quarantined rows aren't
-touched by retention either; an operator can inspect or export them with any SQLite tool, and
-`wipeAll()` (Emergency Reset) deletes them like any other row.
+channel. One boot warning reports the repaired and quarantined counts per table. An operator can inspect or
+export quarantined rows with any SQLite tool, and `wipeAll()` (Emergency Reset) deletes them like any other
+row.
+
+**Retention still applies to quarantined messages.** A legacy row can hold a private body, so the retention
+reaper (and its boot sweep) also reads the quarantined message rows from disk
+(`loadQuarantinedMessageRows`: id, `channel_id`, `created_at`, and the reaction target or reply parent) and
+deletes each one older than its TTL: the channel's `messageTtlMs` when that channel is loaded, else
+`retention.messageTtlMs`. Quarantined replies and reactions under a deleted row go with it. They are
+tombstoned like any expiry, `deleteMessage` releases the id from the quarantine, and nothing is broadcast.
+
+**Other stored rows.** The other tables hold plain columns the loaders read without a schema, except these:
+open **reports** are parsed per row (`loadOpenReports`/`getReport`). A report 0.4 wrote about a peer message
+whose id is longer than 128 characters no longer validates. It is skipped and left on disk, and it is counted
+under `reports` in the boot warning, so neither the one-time `synced_users` backfill (which reads open
+reports) nor `GET /api/moderation/reports` can fail on it. Resolving it answers 404. Reports have no quarantine
+set because their ids are minted locally. A **mesh identity** row whose user is quarantined isn't loaded
+either, like that user's sessions: delivering to it would build a DM naming an id the schema refuses. Mesh
+contacts are re-validated on load (`MeshIdentityCardSchema`), the stored config row is repaired or fails
+closed (`sanitizeLegacyConfigJson`), and a malformed transport identity is regenerated.
 
 ## Testing (landed with Phase A)
 

@@ -50,7 +50,10 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   message or user. Messages under a quarantined channel, and replies and reactions under a quarantined
   message, are quarantined too. Previously the row was only skipped: a private channel with one over-long
   member id disappeared, and a peer's public channel with the same name was then written over it, exposing
-  its retained messages. A boot warning gives the counts; Emergency Reset removes the rows.
+  its retained messages. A boot warning gives the counts; Emergency Reset removes the rows, and retention
+  (`retention.messageTtlMs` or a channel TTL) deletes quarantined messages once they expire. An open report
+  0.4 wrote about a peer message with an over-long id is skipped the same way; it used to make every boot of
+  an upgraded node fail.
 - **Node-to-node sync.** A peer can no longer edit a post a local user wrote, re-type a private message
   into a public channel, bind a local or pending attachment to its own message, undo a moderator's
   removal, or add new replies or reactions under a post a moderator removed here. Only the authors of
@@ -74,7 +77,11 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   messages or re-advertising them with a later TTL no longer makes it re-fetch only the blobs it dropped
   (which told the serving peer which ones it had delivered). Sealed offers must carry a `seal_` id and
   public records may not, so the two lists never share an id. Each source may fill at most 50 000 of the
-  record's 200 000 entries; past that the node stops pulling new sealed offers from that source. A node with relaying off and no local mesh identity pulls
+  record's 200 000 entries; past that the node stops pulling new sealed offers from that source, and blobs
+  arriving over the radio bridge obey the same bounds. The record also keeps each mail's replay key, so the
+  same mail re-offered under new ids isn't carried either. A sync round imports the sealed mail it fetched
+  only after its last request, so request timing can't show which batches held local mail, and the radio
+  bridge's answer and the courier's re-advertising no longer depend on whether a blob was delivered. A node with relaying off and no local mesh identity pulls
   no sealed mail, and `mesh.maxSealedPullPerRound` (default 80) caps sealed pulls per round for metered
   links. Mesh identities are only minted for local users, and rows an older build minted for synced users
   are deleted at boot; a database upgraded from 0.4.0 first has its peer-imported users identified and

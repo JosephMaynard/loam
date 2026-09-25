@@ -38,6 +38,14 @@ export type StoredRowReport = {
   dependent: number;
 };
 
+/** A quarantined message row's routing columns (see `LoamStore.loadQuarantinedMessageRows`). */
+export type QuarantinedMessageRow = {
+  id: string;
+  channelId: string | null;
+  parentId: string | null;
+  createdAt: number;
+};
+
 /** Thrown by a store write that would create or overwrite a quarantined row (see `StoreQuarantine`). */
 export class QuarantinedRowError extends Error {
   constructor(table: keyof StoreQuarantine, id: string) {
@@ -195,6 +203,13 @@ export interface LoamStore {
    * rows (`upsertUser`, `upsertChannel`, `insertMessage`, `updateMessage`) throw `QuarantinedRowError`.
    */
   quarantine(): StoreQuarantine;
+  /**
+   * The routing columns of every quarantined message row still on disk, for the retention reaper (a
+   * quarantined row is never loaded, so the in-memory sweep can't see it): `parentId` is a reaction's target
+   * or — read leniently from the stored JSON — a reply's parent. Deleting one with `deleteMessage` releases
+   * its id from the quarantine.
+   */
+  loadQuarantinedMessageRows(): QuarantinedMessageRow[];
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
   /** Delete a single user row by id. Used for the legacy demo-user cleanup (`user.1234`/`user.5678`);
@@ -273,10 +288,15 @@ export interface LoamStore {
    * the same call both files a new report and persists a resolution (status flips open → resolved).
    */
   upsertReport(report: Report): void;
-  /** A single report by id (for the resolve flow), or undefined. */
+  /** A single report by id (for the resolve flow), or undefined — also for a row that no longer validates. */
   getReport(id: string): Report | undefined;
-  /** All still-open reports, newest first — the moderator queue. */
-  loadOpenReports(): Report[];
+  /**
+   * All still-open reports, newest first — the moderator queue. A row that no longer validates (e.g. a v0.4
+   * report naming a peer message id past `ID_MAX_LENGTH`) is skipped and left on disk, like the quarantined
+   * rows of `loadUsers`; the count goes to `onReport`. Reports have no quarantine set: their ids are minted
+   * here (`rpt_<16 hex>`), so no other path can claim one.
+   */
+  loadOpenReports(onReport?: (report: StoredRowReport) => void): Report[];
   /**
    * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
    * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
@@ -333,8 +353,14 @@ export interface LoamStore {
    * keeps its first stamp) and only re-arms one already past its expiry. `source` (the sync peer URL, or the
    * radio bridge) feeds the per-source quota. Wiped by the kill switch; expired rows are pruned by the reaper.
    */
-  markSealedOfferSeen(offerId: string, expiresAt: number, source: string, nowMs: number): void;
+  markSealedOfferSeen(offerId: string, expiresAt: number, source: string, nowMs: number, replayKey?: string): void;
   isSealedOfferSeen(offerId: string, nowMs: number): boolean;
+  /**
+   * True when a live mark records `replayKey` (the offer's `sealed.<sha256>` replay key, set by the mark made
+   * when its body was taken in): the same mail was taken in before under SOME id. A repeat mark of a live row
+   * only fills a missing replay key; like the rest of the row it is re-armed only once the row has lapsed.
+   */
+  isSealedReplaySeen(replayKey: string, nowMs: number): boolean;
   pruneSealedOffersSeen(nowMs: number): void;
   /** Live (unexpired) rows — all of them, or only those taken in from `source`. */
   countSealedOffersSeen(nowMs?: number, source?: string): number;
@@ -471,6 +497,12 @@ function parseStoredMessage(raw: unknown): ParsedRow<Message> | undefined {
   }
 
   return undefined;
+}
+
+/** Parse a stored report row. No repair exists: an invalid row yields `undefined` (the loader skips it). */
+function parseStoredReport(raw: unknown): ParsedRow<Report> | undefined {
+  const parsed = ReportSchema.safeParse(raw);
+  return parsed.success ? { value: parsed.data, repaired: false } : undefined;
 }
 
 /**
@@ -690,6 +722,11 @@ function createSealedOffersSeenTable(db: SqliteConnection): void {
     db.exec("ALTER TABLE sealed_offers_seen ADD COLUMN source TEXT NOT NULL DEFAULT ''");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_sealed_offers_seen_source ON sealed_offers_seen (source, expires_at)");
+  // The replay key (docs/16 §9) came later still: an older row has none (NULL), which matches nothing.
+  if (!columns.some((column) => column.name === "replay_key")) {
+    db.exec("ALTER TABLE sealed_offers_seen ADD COLUMN replay_key TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sealed_offers_seen_replay ON sealed_offers_seen (replay_key)");
 }
 
 /**
@@ -814,6 +851,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
      WHERE id = ?`,
   );
   const deleteMessageStmt = db.prepare("DELETE FROM messages WHERE id = ?");
+  const quarantinedMessageRowStmt = db.prepare(
+    "SELECT id, channel_id, target_message_id, created_at, data FROM messages WHERE id = ?",
+  );
   const deleteUserStmt = db.prepare("DELETE FROM users WHERE id = ?");
   const putSessionStmt = db.prepare(
     "INSERT INTO sessions (token, user_id) VALUES (?, ?) ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id",
@@ -866,7 +906,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   );
   const getReportStmt = db.prepare("SELECT data FROM reports WHERE id = ?");
   const loadOpenReportsStmt = db.prepare(
-    "SELECT data FROM reports WHERE status = 'open' ORDER BY created_at DESC, rowid DESC",
+    "SELECT id, data FROM reports WHERE status = 'open' ORDER BY created_at DESC, rowid DESC",
   );
   const markChannelSyncedStmt = db.prepare(
     "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
@@ -901,13 +941,20 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   );
   const isUserBlockedStmt = db.prepare("SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?");
   const deleteUserBlocksForUserStmt = db.prepare("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?");
-  // A live row keeps its first stamp (as `addTombstone` does); only a lapsed one is re-armed.
+  // A live row keeps its first stamp (as `addTombstone` does) and only gains a replay key it lacked; a lapsed
+  // row is re-armed whole. (Every right-hand side of an UPDATE reads the row's OLD values.)
   const markSealedOfferSeenStmt = db.prepare(
-    `INSERT INTO sealed_offers_seen (offer_id, expires_at, source) VALUES (?, ?, ?)
-     ON CONFLICT(offer_id) DO UPDATE SET expires_at = excluded.expires_at, source = excluded.source
-     WHERE sealed_offers_seen.expires_at <= ?`,
+    `INSERT INTO sealed_offers_seen (offer_id, expires_at, source, replay_key) VALUES (?, ?, ?, ?)
+     ON CONFLICT(offer_id) DO UPDATE SET
+       expires_at = CASE WHEN sealed_offers_seen.expires_at <= ? THEN excluded.expires_at ELSE sealed_offers_seen.expires_at END,
+       source = CASE WHEN sealed_offers_seen.expires_at <= ? THEN excluded.source ELSE sealed_offers_seen.source END,
+       replay_key = CASE WHEN sealed_offers_seen.expires_at <= ? THEN excluded.replay_key
+                         ELSE COALESCE(sealed_offers_seen.replay_key, excluded.replay_key) END`,
   );
   const isSealedOfferSeenStmt = db.prepare("SELECT 1 FROM sealed_offers_seen WHERE offer_id = ? AND expires_at > ?");
+  const isSealedReplaySeenStmt = db.prepare(
+    "SELECT 1 FROM sealed_offers_seen WHERE replay_key = ? AND expires_at > ? LIMIT 1",
+  );
   const pruneSealedOffersSeenStmt = db.prepare("DELETE FROM sealed_offers_seen WHERE expires_at <= ?");
   const countSealedOffersSeenStmt = db.prepare("SELECT COUNT(*) AS total FROM sealed_offers_seen WHERE expires_at > ?");
   const countSealedOffersSeenBySourceStmt = db.prepare(
@@ -1009,6 +1056,31 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     quarantine() {
       return quarantine;
     },
+    loadQuarantinedMessageRows() {
+      const rows: QuarantinedMessageRow[] = [];
+      for (const id of quarantinedMessages) {
+        const row = quarantinedMessageRowStmt.get(id);
+        if (!row) {
+          continue;
+        }
+        let parentId = typeof row.target_message_id === "string" ? row.target_message_id : null;
+        if (parentId === null) {
+          try {
+            const data = JSON.parse(row.data as string) as { parentMessageId?: unknown } | null;
+            parentId = typeof data?.parentMessageId === "string" ? data.parentMessageId : null;
+          } catch {
+            // unparseable JSON: no parent to follow
+          }
+        }
+        rows.push({
+          id,
+          channelId: typeof row.channel_id === "string" ? row.channel_id : null,
+          parentId,
+          createdAt: Number(row.created_at),
+        });
+      }
+      return rows;
+    },
     loadSessions() {
       return db
         .prepare("SELECT token, user_id FROM sessions ORDER BY rowid")
@@ -1060,6 +1132,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     deleteMessage(messageId) {
       deleteMessageStmt.run(messageId);
       unmarkMessageSyncedStmt.run(messageId);
+      // The row is gone, so there is nothing left to protect: the id leaves the quarantine (callers tombstone it).
+      quarantinedMessages.delete(messageId);
     },
     putSession(token, userId) {
       putSessionStmt.run(token, userId);
@@ -1161,12 +1235,20 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     getReport(id) {
       const row = getReportStmt.get(id) as { data: string } | undefined;
-      return row ? ReportSchema.parse(JSON.parse(row.data)) : undefined;
+      if (!row) {
+        return undefined;
+      }
+      try {
+        return parseStoredReport(JSON.parse(row.data))?.value;
+      } catch {
+        return undefined;
+      }
     },
-    loadOpenReports() {
-      return loadOpenReportsStmt
-        .all()
-        .map((row) => ReportSchema.parse(JSON.parse((row as { data: string }).data)));
+    loadOpenReports(onReport) {
+      // Nothing may claim a report id (see the interface note), so the scan's quarantine set is throwaway.
+      const { loaded, report } = scanStoredRows(loadOpenReportsStmt.all(), parseStoredReport, new Set());
+      reportStoredRows(report, onReport);
+      return loaded;
     },
     markChannelSynced(channelId) {
       markChannelSyncedStmt.run(channelId);
@@ -1213,11 +1295,14 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     isUserBlocked(blockerId, blockedId) {
       return isUserBlockedStmt.get(blockerId, blockedId) !== undefined;
     },
-    markSealedOfferSeen(offerId, expiresAt, source, nowMs) {
-      markSealedOfferSeenStmt.run(offerId, expiresAt, source, nowMs);
+    markSealedOfferSeen(offerId, expiresAt, source, nowMs, replayKey) {
+      markSealedOfferSeenStmt.run(offerId, expiresAt, source, replayKey ?? null, nowMs, nowMs, nowMs);
     },
     isSealedOfferSeen(offerId, nowMs) {
       return isSealedOfferSeenStmt.get(offerId, nowMs) !== undefined;
+    },
+    isSealedReplaySeen(replayKey, nowMs) {
+      return isSealedReplaySeenStmt.get(replayKey, nowMs) !== undefined;
     },
     pruneSealedOffersSeen(nowMs) {
       pruneSealedOffersSeenStmt.run(nowMs);

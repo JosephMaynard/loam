@@ -464,6 +464,21 @@ function refreshMesh() {
   });
 }
 
+// Delay from a radio receipt to the outbound refresh it triggers (coalesced: one pending refresh at a time).
+const MESH_REFRESH_AFTER_RECEIVE_MS = 2_000;
+let meshReceiveRefreshTimer = null;
+
+/** Refresh the outbound cache once, MESH_REFRESH_AFTER_RECEIVE_MS after a blob arrived (whatever became of it). */
+function scheduleMeshRefreshAfterReceive() {
+  if (meshReceiveRefreshTimer) {
+    return;
+  }
+  meshReceiveRefreshTimer = setTimeout(() => {
+    meshReceiveRefreshTimer = null;
+    refreshMesh();
+  }, MESH_REFRESH_AFTER_RECEIVE_MS);
+}
+
 /** Push every outbound blob we haven't already sent to this peer this session. */
 function meshPushToPeer(peerId) {
   if (!meshEnabled || !peerId || !meshOutbound.length) {
@@ -514,12 +529,12 @@ rnBridge.channel.on('loam-mesh-received', (payload) => {
   } catch (err) {
     return; // malformed transfer — drop
   }
-  meshRequest('POST', '/api/mesh/inbound', { messages: [message] }, (err, status, json) => {
-    if (!err && status === 200 && json && json.accepted > 0) {
-      // Accepting mail may change what we now hold to carry — refresh our outbound + have-mail hint.
-      refreshMesh();
-    }
-  });
+  // Taking mail in may change what we now hold to carry — refresh our outbound + have-mail hint. On a fixed
+  // delay from RECEIPT, for every blob alike, and never on the inbound answer (which is outcome-free anyway):
+  // re-advertising only when a blob was accepted told the neighbour that pushed it, on a non-relaying node,
+  // that it had just been delivered here (docs/16 §9).
+  scheduleMeshRefreshAfterReceive();
+  meshRequest('POST', '/api/mesh/inbound', { messages: [message] }, () => {});
 });
 
 rnBridge.channel.on('loam-mesh-error', (payload) => {

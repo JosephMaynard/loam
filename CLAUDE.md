@@ -213,7 +213,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `store.quarantine()` (`ctx`/`rt.quarantine`), with messages under a quarantined channel/message
   quarantined too. No path may claim a quarantined id: the DAL writes throw `QuarantinedRowError`;
   seeding, channel-slug allocation, sync channel/author import and session minting skip it; quarantined
-  message ids join the in-memory tombstone set. One boot warning gives the counts (docs/01). `config.json` and the `avatars/` dir remain plain files. There is no
+  message ids join the in-memory tombstone set. The retention reaper still deletes (and tombstones) expired
+  quarantined message rows, read straight from disk. Open reports that fail `ReportSchema` are skipped and
+  counted, and a quarantined user's mesh identity isn't loaded. One boot warning gives the counts (docs/01). `config.json` and the `avatars/` dir remain plain files. There is no
   `markDirty`/flush interval any more — call the matching `store.*` method after mutating in-memory
   state, then `broadcast(...)`. `.loam/` is gitignored.
 - **Sessions/identity**: two modes (docs/20). **Anonymous** (plaintext or `optional` without a pinned
@@ -335,11 +337,14 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   deleted; a batch imports only the ids it requested, under the list it requested them on.
   The sealed puller fetches every admissible sealed offer (soonest expiry first), never just its own
   tags, so a serving peer can't learn where a recipient lives; every sealed id it fetched or took in over
-  the radio bridge goes in the durable `sealed_offers_seen` table (keyed by id, kept tombstone horizon + 7-day
-  TTL max + 2 days from intake, so it outlives any tombstone) and is skipped on **both** digest lists (with
-  tombstoned and `sealed.` ids; sealed offers must be `seal_…` ids and public records may not, so the lists
-  never share an id), whatever its outcome (only the kill switch clears it; ≤200 000 ids,
-  ≤50 000 per source, then no new sealed pulls from that source). With
+  the radio bridge goes in the durable `sealed_offers_seen` table (keyed by id, with the mail's replay key
+  alongside, kept tombstone horizon + 7-day TTL max + 2 days from intake, so it outlives any tombstone) and
+  is skipped on **both** digest lists (with tombstoned and `sealed.` ids; sealed offers must be `seal_…` ids
+  and public records may not, so the lists never share an id), whatever its outcome; mail whose replay key
+  was seen is never carried, and a hop-spent copy taken in while relaying with room marks only its id (only the kill
+  switch clears the record; ≤200 000 ids, ≤50 000 per source, then no new sealed pulls from that source, and
+  the radio bridge refuses new blobs). A round imports its fetched sealed batches only after the whole sync
+  loop's requests are done, and `/api/mesh/inbound` answers `{ ok: true }` whatever became of the blobs. With
   relay off and no local mesh identity it pulls no sealed mail. `sync.token` never rides a plaintext pull
   (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that
   negotiated encryption this boot is never silently downgraded. Admin: `GET /api/admin/sync`,

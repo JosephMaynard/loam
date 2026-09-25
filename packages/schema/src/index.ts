@@ -1142,16 +1142,21 @@ export type MeshOutboundResponse = z.infer<typeof MeshOutboundResponseSchema>;
  * transport (Phase 3, docs/16 / docs/17). Each is fed through the same defensive `acceptSealedFromPeer`
  * path the sync layer uses (TTL / hop / tombstone / storage-cap checks, then deliver-if-ours-else-relay),
  * so this endpoint adds no new trust: it is just a second, radio-fed doorway into the existing relay.
- * Loopback-only + gated on `mesh.enabled`; bounded to one transfer batch.
+ * Loopback + host-token only, gated on `mesh.enabled`; bounded to one transfer batch (the courier sends one
+ * blob per call).
  */
 export const MeshInboundRequestSchema = z.object({
-  messages: z.array(SealedMessageSchema).min(1).max(500),
+  messages: z.array(SealedMessageSchema).min(1).max(64),
 });
 export type MeshInboundRequest = z.infer<typeof MeshInboundRequestSchema>;
 
+/**
+ * The inbound answer is the same whatever became of the blobs (delivered, carried or dropped): the courier
+ * must not act on the outcome, or a radio neighbour could read a delivery off the node's next advertisement
+ * (docs/16 §9).
+ */
 export const MeshInboundResponseSchema = z.object({
-  /** How many of the offered blobs were accepted (delivered locally or taken on to carry). */
-  accepted: z.number().int().nonnegative(),
+  ok: z.literal(true),
 });
 export type MeshInboundResponse = z.infer<typeof MeshInboundResponseSchema>;
 

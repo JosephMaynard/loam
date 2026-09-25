@@ -78,7 +78,9 @@ keyed by id + version, so it isn't re-downloaded every round. The memory is RAM-
 entries per peer, oldest evicted), and expires (**1 h**). Sealed offers are handled differently: every
 sealed id this node fetched or received, whatever became of it, goes into a durable node-wide record
 (`sealed_offers_seen`) that outlives every tombstone the offer could leave, and is never fetched again from
-either digest list, nor imported as a channel (docs/16 §9). A reply/reaction whose
+either digest list, nor imported as a channel (docs/16 §9). The mark also carries the mail's replay key, so
+the same mail re-offered under a fresh id is fetched but never carried. A round imports its sealed batches
+only after its last request to every peer, so the request timing can't show which batches held local mail. A reply/reaction whose
 parent/target is still on offer this round is deferred, not remembered. Refused replies are cached, not
 tombstoned: a tombstone is node-wide and durable, and the id is peer-chosen. The kill switch clears it; a
 restart re-fetches each refused public offer once. A change to the local policy that decided a refusal also

@@ -205,6 +205,11 @@ export function createMeshLayer(rt: Runtime) {
     localTagCache.clear(); // keyed by secret mailbox tokens — never outlive the identities they came from
     backfillLegacySyncedUsers();
     for (const { userId, data: json } of rt.store.loadMeshIdentities()) {
+      if (rt.quarantine.users.has(userId)) {
+        // Its user row is quarantined (not loaded): like that user's sessions, the row stays on disk unused —
+        // a delivery to it would build a DM naming an id the schema no longer accepts.
+        continue;
+      }
       let identity: MeshIdentity;
       try {
         identity = JSON.parse(json) as MeshIdentity;
@@ -523,15 +528,21 @@ export function createMeshLayer(rt: Runtime) {
    * id among public messages changes nothing about WHICH offers it re-downloads: a peer diffing fetch sets
    * can't tell the recipient's node from a node that dropped the blob. `seenAt` is the sync round's clock (one
    * value for every offer in the round), so even the expiry instant can't reflect how long each offer took to
-   * process. A live mark is never extended.
+   * process. A live mark is never extended. `replayKey` (known once the body is in hand) goes on the same
+   * mark: the same mail re-offered under a fresh outer id is then recognised too ({@link isSealedReplaySeen}).
    */
-  function rememberSealedOffer(id: string, seenAt: number, source: string): void {
-    rt.store.markSealedOfferSeen(id, seenAt + sealedSeenRetentionMs(), source, Date.now());
+  function rememberSealedOffer(id: string, seenAt: number, source: string, replayKey?: string): void {
+    rt.store.markSealedOfferSeen(id, seenAt + sealedSeenRetentionMs(), source, Date.now(), replayKey);
   }
 
   /** True when sealed offer `id` was already fetched or received here and its mark hasn't lapsed. */
   function isSealedOfferSeen(id: string, now: number): boolean {
     return rt.store.isSealedOfferSeen(id, now);
+  }
+
+  /** True when mail with this replay key was already taken in here (under any id) and that mark hasn't lapsed. */
+  function isSealedReplaySeen(replayKey: string, now: number): boolean {
+    return rt.store.isSealedReplaySeen(replayKey, now);
   }
 
   /** True when the seen-offer record can take no more marks from `source` (its quota) or from anyone (the
@@ -564,8 +575,15 @@ export function createMeshLayer(rt: Runtime) {
   /** Handle a sealed message pulled from a peer: deliver locally, else relay onward (hop-decremented,
    * bounded), else drop. Never broadcast to clients. Returns true when accepted (delivered or carried).
    * `source` / `seenAt` stamp the seen-offer mark: the sync puller passes the peer URL and its round clock;
-   * the radio bridge takes the defaults. */
-  function acceptSealedFromPeer(message: SealedMessage, source: string = RADIO_SOURCE, seenAt: number = Date.now()): boolean {
+   * the radio bridge takes the defaults. `quotaChecked` is the sync puller's: it applied
+   * {@link sealedSeenAtCapacity} for the whole round before fetching, and marks every fetched offer seen
+   * whatever this returns, so refusing one here would only lose it. */
+  function acceptSealedFromPeer(
+    message: SealedMessage,
+    source: string = RADIO_SOURCE,
+    seenAt: number = Date.now(),
+    quotaChecked = false,
+  ): boolean {
     if (!rt.appConfig.mesh.enabled) {
       return false;
     }
@@ -573,16 +591,33 @@ export function createMeshLayer(rt: Runtime) {
     if (!sealedOfferAdmissible(message, now)) {
       return false;
     }
-    // Every admissible offer this node takes in is remembered, whatever happens to it below — so a later
-    // sync offer of the same id is skipped the same way whether it was delivered, carried or dropped.
     const seenBefore = isSealedOfferSeen(message.id, now);
-    rememberSealedOffer(message.id, seenAt, source);
-    // `sealMailbox` only ever emits the canonical spelling; any other string that decodes to the same
-    // envelope is a carrier's attempt to slip one message past the string-keyed replay checks below.
-    if (!isCanonicalSealedBlob(message.sealed)) {
+    // The seen record's bounds hold for the radio bridge too: an offer that would need a NEW mark is refused
+    // outright once its source's quota or the global cap is reached — the rule the sync puller applies per
+    // round — delivered or not alike, so the refusal says nothing about the recipient. Without it one radio
+    // neighbour could push the table past the global cap and stop every sync peer's sealed pulls.
+    if (!seenBefore && !quotaChecked && sealedSeenAtCapacity(source, now)) {
       return false;
     }
-    const replayKey = sealedReplayKey(message);
+    // `sealMailbox` only ever emits the canonical spelling; any other string that decodes to the same
+    // envelope is a carrier's attempt to slip one message past the string-keyed replay checks below.
+    const canonical = isCanonicalSealedBlob(message.sealed);
+    const replayKey = canonical ? sealedReplayKey(message) : undefined;
+    // Mail taken in before under ANOTHER outer id: the id alone can't tell, since a carrier renames at will.
+    const replaySeenBefore = replayKey !== undefined && isSealedReplaySeen(replayKey, now);
+    // Every admissible offer this node takes in is remembered, whatever happens to it below — so a later
+    // sync offer of the same id (or, via its replay key, of the same mail under a fresh id) is treated the
+    // same way whether it was delivered, carried or dropped. One exception keeps a carrier from censoring a
+    // relay: a copy with no hop left, offered while this node relays and has room, is marked by id only, so
+    // the genuine, better-provisioned copy can still be carried when it arrives. That reveals nothing new: in
+    // that state a copy WITH a hop left would have been carried (or delivered) on the spot, which the
+    // offering peer could have seen in the digest anyway (the relaying-node residual in docs/16 §9).
+    const hopOnlyDrop =
+      rt.appConfig.mesh.relay && !sealedOfferCarriable(message) && sealedHeldCount() < rt.appConfig.mesh.maxCarried;
+    rememberSealedOffer(message.id, seenAt, source, hopOnlyDrop ? undefined : replayKey);
+    if (replayKey === undefined) {
+      return false;
+    }
     if (rt.tombstones.has(replayKey)) {
       return false; // this exact mail was already delivered here — a replay under a new outer id
     }
@@ -605,10 +640,12 @@ export function createMeshLayer(rt: Runtime) {
       }
       return false;
     }
-    // An id taken in before and not held now was delivered (then it's tombstoned and refused above) or
-    // dropped. A dropped one stays dropped — taking it now (say relaying was switched on since) would make
-    // "carried" versus "refused" depend on whether it was delivered here the first time.
-    if (seenBefore) {
+    // Mail taken in before — under this id or, by its replay key, under any other — and not held now was
+    // delivered (then it's tombstoned and refused above) or dropped. A dropped one stays dropped — taking it
+    // now (say relaying was switched on since, or a full relay freed a slot) would make "carried" versus
+    // "refused" depend on whether it was delivered here the first time, and a peer re-offering the same mail
+    // under fresh ids would read the answer off this node's next digest.
+    if (seenBefore || replaySeenBefore) {
       return false;
     }
     if (tryDeliverSealed(message)) {
@@ -735,6 +772,7 @@ export function createMeshLayer(rt: Runtime) {
     sealedOfferCarriable,
     rememberSealedOffer,
     isSealedOfferSeen,
+    isSealedReplaySeen,
     sealedSeenAtCapacity,
     forget,
     sealedHeldCount,

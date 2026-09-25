@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { createMeshIdentity, currentEpoch, mailboxTag, sealMailbox } from "@loam/crypto";
 import { MeshIdentityCardSchema, type MeshIdentityCard } from "@loam/schema";
@@ -369,6 +370,31 @@ describe("the seen-offer record's bounds", () => {
     expect(store.countSealedOffersSeen()).toBe(0);
   });
 
+  it("keeps a replay key on the mark: a live row only gains a missing one, a lapsed row is re-armed with the new one", () => {
+    // An older table (no replay_key column) gains it on open.
+    const dir = mkdtempSync(join(tmpdir(), "loam-review-race-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const legacy = new DatabaseSync(join(dir, "loam.db"));
+    legacy.exec("CREATE TABLE sealed_offers_seen (offer_id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, source TEXT NOT NULL DEFAULT '')");
+    legacy.prepare("INSERT INTO sealed_offers_seen (offer_id, expires_at, source) VALUES ('seal_old', 1000, 'p')").run();
+    legacy.close();
+    const store = openStore(join(dir, "loam.db"));
+    cleanups.push(() => store.close());
+    expect(store.isSealedOfferSeen("seal_old", 0)).toBe(true);
+
+    store.markSealedOfferSeen("seal_a", 1_000, "p", 0);
+    expect(store.isSealedReplaySeen("sealed.k1", 0)).toBe(false);
+    store.markSealedOfferSeen("seal_a", 9_000, "p", 10, "sealed.k1"); // live: gains the key, keeps its stamp
+    expect(store.isSealedReplaySeen("sealed.k1", 999)).toBe(true);
+    expect(store.isSealedReplaySeen("sealed.k1", 1_000)).toBe(false);
+    store.markSealedOfferSeen("seal_a", 9_000, "p", 20, "sealed.k2"); // live with a key: unchanged
+    expect(store.isSealedReplaySeen("sealed.k2", 20)).toBe(false);
+    store.markSealedOfferSeen("seal_a", 9_000, "p", 1_000, "sealed.k2"); // lapsed: re-armed whole
+    expect(store.isSealedReplaySeen("sealed.k2", 5_000)).toBe(true);
+    expect(store.isSealedReplaySeen("sealed.k1", 5_000)).toBe(false);
+    expect(store.countSealedOffersSeen(5_000, "p")).toBe(1);
+  });
+
   it("a peer that filled its own quota stops only its own sealed pulls", async () => {
     const one = await probingPeer();
     const two = await probingPeer();
@@ -530,5 +556,108 @@ describe("an in-flight sync import can't undo a moderator removal (#3)", () => {
     expect(app.store.loadMessages().some((message) => message.id === "peer_reply")).toBe(false);
     expect(attachmentFiles(attachmentsDir)).toEqual([]);
     expect(app.store.loadMissingAttachments()).toEqual([]);
+  });
+});
+
+describe("sealed mail is imported only after the round's last request (verifier round: timing)", () => {
+  it("no request to any peer in the round follows a delivery", async () => {
+    // Timing oracle: importing a sealed batch between fetches made the gap before the next request longer
+    // exactly when the batch held mail for a local user. Here each peer notes, at every request it gets,
+    // whether the puller had delivered anything yet.
+    let app: LoamApp | undefined;
+    const seenAtRequest: { peer: string; path: string; delivered: number }[] = [];
+    const delivered = () => (app ? app.store.loadMessages().filter((message) => message.type === "dm").length : 0);
+    const records: Record<"one" | "two", SealedRecord[]> = { one: [], two: [] };
+    const serve = (name: "one" | "two", digestDelayMs: number) =>
+      fakePeer(async (path, body) => {
+        seenAtRequest.push({ peer: name, path, delivered: delivered() });
+        if (path === "/api/sync/digest") {
+          await new Promise((resolve) => setTimeout(resolve, digestDelayMs));
+          return {
+            channels: [],
+            messages: [],
+            sealed: records[name].map(({ id, toTag, ttlExpiresAt, hopLimit }) => ({ id, toTag, ttlExpiresAt, hopLimit })),
+          };
+        }
+        if (path === "/api/sync/messages") {
+          const ids = new Set((body as { ids: string[] }).ids);
+          return { messages: records[name].filter((record) => ids.has(record.id)), users: [] };
+        }
+        return undefined;
+      });
+    const one = await serve("one", 0);
+    // Peer two answers its digest late, so peer one's round is over before peer two fetches anything.
+    const two = await serve("two", 300);
+    ({ app } = await makeApp({
+      sync: { enabled: true, peers: [{ url: one.url }, { url: two.url }], intervalMs: 3_600_000 },
+      mesh: MESH_NO_RELAY,
+    }));
+    const cookie = await newSession(app);
+    const card = MeshIdentityCardSchema.parse(
+      (await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie } })).json(),
+    );
+    const expiry = Date.now() + 3_600_000;
+    // 41 offers from peer one = two 40-id batches, the local user's mail in the first.
+    records.one = [
+      sealedRecord("seal_a000", expiry, card),
+      ...Array.from({ length: 40 }, (_, index) => sealedRecord(`seal_a${String(index + 1).padStart(3, "0")}`, expiry)),
+    ];
+    records.two = [sealedRecord("seal_b000", expiry)];
+    seenAtRequest.length = 0;
+    await syncRound(app, cookie);
+
+    expect(requestedIds(one)).toHaveLength(41);
+    expect(requestedIds(two)).toEqual(["seal_b000"]);
+    expect(one.requests.filter((request) => request.path === "/api/sync/messages")).toHaveLength(2);
+    expect(seenAtRequest.filter((entry) => entry.path === "/api/sync/messages")).toHaveLength(3);
+    expect(seenAtRequest.filter((entry) => entry.delivered > 0)).toEqual([]);
+    expect(delivered()).toBe(1);
+  });
+});
+
+describe("the same mail re-offered under fresh ids (verifier round: replay-key seen marks)", () => {
+  /** What this node would advertise and hold as carried mail. */
+  async function carried(app: LoamApp): Promise<{ digest: string[]; held: string[] }> {
+    const digest = (await app.server.inject({ method: "GET", url: "/api/sync/digest" })).json() as { sealed?: { id: string }[] };
+    return {
+      digest: (digest.sealed ?? []).map((entry) => entry.id),
+      held: app.store.loadMessages().filter((message) => message.type === "sealed").map((message) => message.id),
+    };
+  }
+
+  it("after relaying is switched on, neither the delivered nor the dropped mail is carried", async () => {
+    const { app, cookie, peer, state } = await deliveredAndDropped();
+    const patched = await app.server.inject({ method: "PATCH", url: "/api/admin/config", headers: { cookie }, payload: { mesh: { relay: true } } });
+    expect(patched.statusCode).toBe(200);
+
+    state.records = state.records.map((record) => ({ ...record, id: `${record.id}_again` }));
+    const mark = peer.requests.length;
+    await syncRound(app, cookie);
+    // Both are fetched (the ids are new) and both are refused: the dropped one isn't carried and advertised.
+    expect(new Set(requestedIds(peer, mark))).toEqual(new Set(["seal_mine_again", "seal_foreign_again"]));
+    expect(await carried(app)).toEqual({ digest: [], held: [] });
+    expect(app.store.loadMessages().filter((message) => message.type === "dm")).toHaveLength(1);
+  });
+
+  it("nor once a full relay has room again", async () => {
+    const { peer, state } = await probingPeer();
+    const { app } = await makeApp({
+      sync: { enabled: true, peers: [{ url: peer.url }], intervalMs: 3_600_000 },
+      mesh: { ...MESH_NO_RELAY, relay: true, maxCarried: 0 },
+    });
+    const cookie = await newSession(app);
+    const card = MeshIdentityCardSchema.parse(
+      (await app.server.inject({ method: "GET", url: "/api/mesh/identity", headers: { cookie } })).json(),
+    );
+    const expiry = Date.now() + 3_600_000;
+    state.records = [sealedRecord("seal_mine", expiry, card), sealedRecord("seal_foreign", expiry)];
+    await syncRound(app, cookie);
+    expect(await carried(app)).toEqual({ digest: [], held: [] }); // full: the foreign mail is dropped
+
+    const patched = await app.server.inject({ method: "PATCH", url: "/api/admin/config", headers: { cookie }, payload: { mesh: { maxCarried: 10 } } });
+    expect(patched.statusCode).toBe(200);
+    state.records = state.records.map((record) => ({ ...record, id: `${record.id}_again` }));
+    await syncRound(app, cookie);
+    expect(await carried(app)).toEqual({ digest: [], held: [] });
   });
 });

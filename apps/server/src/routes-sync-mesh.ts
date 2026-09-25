@@ -3,7 +3,7 @@
 // from app.ts (2026-09-04 split) over the shared AppContext.
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, SyncMessagesRequestSchema } from "@loam/schema";
+import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, type MeshInboundResponse, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, SyncMessagesRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { attachmentFileName, parseAttachmentFileName } from "./media.js";
@@ -353,7 +353,9 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
 
   ctx.server.post(
     "/api/mesh/inbound",
-    { config: { rateLimit: { max: 240, timeWindow: "1 minute", allowList: () => false } } },
+    // An explicit 1 MiB body cap (the global default, pinned here): ~11 maximum-size blobs per call, at most 64
+    // blobs of any size (the schema).
+    { bodyLimit: 1024 * 1024, config: { rateLimit: { max: 240, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       if (!ctx.appConfig.mesh.enabled || !ctx.meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
@@ -364,16 +366,15 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
         return reply.code(400).send(errorBody("Invalid mesh inbound request"));
       }
 
-      // `mesh.acceptSealedFromPeer` is the single trust boundary: it re-checks TTL/hop/tombstone/dedup and
-      // the per-node storage cap, then delivers-if-ours or relays-onward (hop-decremented). A blob that
-      // fails any check is silently ignored, exactly as an inbound sync copy would be.
-      let accepted = 0;
+      // `mesh.acceptSealedFromPeer` is the single trust boundary: it re-checks TTL/hop/tombstone/dedup, the
+      // seen-record quota of the radio source and the per-node storage cap, then delivers-if-ours or
+      // relays-onward (hop-decremented). A blob that fails any check is silently ignored, exactly as an inbound
+      // sync copy would be. The answer never says which (see MeshInboundResponseSchema).
       for (const message of body.data.messages) {
-        if (ctx.mesh.acceptSealedFromPeer(message)) {
-          accepted += 1;
-        }
+        ctx.mesh.acceptSealedFromPeer(message);
       }
-      return { accepted };
+      const response: MeshInboundResponse = { ok: true };
+      return response;
     },
   );
 

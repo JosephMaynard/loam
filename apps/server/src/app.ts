@@ -1725,12 +1725,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       channels: store.loadChannels(noteStoredRows("channels")),
       messages: store.loadMessages(noteStoredRows("messages")),
     };
+    // Open reports are read from the DB on demand (never mirrored); scanned here only to count the invalid ones.
+    store.loadOpenReports(noteStoredRows("reports"));
     if (Object.keys(storedRowReports).length) {
       server.log.warn(
         { storedRows: storedRowReports },
         "Some stored rows no longer validate: the safely repairable ones were repaired in memory; the rest are " +
           "quarantined (not loaded, their ids refused to sync, seeding and new channels) and remain on disk " +
-          "untouched. An Emergency Reset removes them with everything else.",
+          "untouched, except that retention (retention.messageTtlMs) still deletes quarantined messages once " +
+          "they expire. An Emergency Reset removes them with everything else.",
       );
     }
     finalizeInterruptedStreams();
@@ -1989,6 +1992,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // now" — a 0 would make `createdAt < now - 0` true for every message in a non-TTL channel.
       return channelTtl ?? (globalTtl || undefined);
     };
+    reapExpiredQuarantinedMessages(now, (channelId) =>
+      (channelId ? channelsById.get(channelId)?.messageTtlMs : undefined) ?? (globalTtl || undefined),
+    );
+
     const expired = data.messages.filter((message) => {
       if (message.meta?.streaming) {
         return false;
@@ -2016,6 +2023,52 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     deleteMessages([...doomed.values()]);
     server.log.info(`Retention reaper deleted ${doomed.size} expired message(s)`);
+  }
+
+  /**
+   * Retention for QUARANTINED message rows (docs/01): they are never loaded, so the in-memory sweep above can't
+   * see them, yet a legacy row can hold a private body. A row goes once it is older than the TTL of its channel
+   * (a loaded channel's override, else the node default — the only TTL readable for a quarantined channel),
+   * taking the quarantined rows under it (replies, reactions) with it like the normal cascade. Deleted and
+   * tombstoned exactly like a normal expiry (the id was already refused in memory); the delete releases the
+   * id from the quarantine. Nothing is broadcast: no client was ever served these rows by this build.
+   */
+  function reapExpiredQuarantinedMessages(now: number, ttlForChannel: (channelId: string | null) => number | undefined): void {
+    if (!store.quarantine().messages.size) {
+      return;
+    }
+    const rows = store.loadQuarantinedMessageRows();
+    const doomed = new Set(
+      rows
+        .filter((row) => {
+          const ttl = ttlForChannel(row.channelId);
+          return ttl !== undefined && row.createdAt < now - ttl;
+        })
+        .map((row) => row.id),
+    );
+    let grew = doomed.size > 0;
+    while (grew) {
+      grew = false;
+      for (const row of rows) {
+        if (!doomed.has(row.id) && row.parentId !== null && doomed.has(row.parentId)) {
+          doomed.add(row.id);
+          grew = true;
+        }
+      }
+    }
+    if (!doomed.size) {
+      return;
+    }
+    store.transaction(() => {
+      for (const id of doomed) {
+        store.deleteMessage(id);
+        store.addTombstone(id);
+      }
+    });
+    for (const id of doomed) {
+      tombstones.add(id);
+    }
+    server.log.info(`Retention reaper deleted ${doomed.size} expired quarantined message row(s)`);
   }
 
   /** Whether any live message references attachment `id` (read at call time — never a snapshot). */

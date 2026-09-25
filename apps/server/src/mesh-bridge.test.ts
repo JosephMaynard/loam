@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createMeshIdentity, currentEpoch, mailboxTag, sealMailbox } from "@loam/crypto";
 import { type MeshIdentityCard, MeshIdentityCardSchema } from "@loam/schema";
 
 import { buildApp, type AppOptions, type LoamApp } from "./app.js";
@@ -112,6 +113,35 @@ function addContact(app: LoamApp, cookie: string, card: MeshIdentityCard): Promi
   return app.server.inject({ method: "POST", url: "/api/mesh/contacts", headers: { cookie }, payload: card });
 }
 
+/** What an inbound blob can change on a node: its DMs and its sealed rows (with their hop budget). */
+function heldMail(app: LoamApp): Map<string, number> {
+  return new Map(
+    app.store
+      .loadMessages()
+      .filter((message) => message.type === "dm" || message.type === "sealed")
+      .map((message) => [message.id, message.type === "sealed" ? message.hopLimit : -1]),
+  );
+}
+
+/**
+ * POST blobs to the inbound bridge as the courier does. The answer never says what became of them (docs/16
+ * §9: a courier acting on it re-advertised only after a delivery), so what was accepted — delivered (a new
+ * DM), carried (a new sealed row) or a raised hop budget — is read off the store instead.
+ */
+async function inbound(app: LoamApp, messages: unknown[]): Promise<number> {
+  const before = heldMail(app);
+  const response = await app.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages } });
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toEqual({ ok: true });
+  let changed = 0;
+  for (const [id, hopLimit] of heldMail(app)) {
+    if (before.get(id) !== hopLimit) {
+      changed += 1;
+    }
+  }
+  return changed;
+}
+
 describe("opportunistic mesh: transport bridge", () => {
   describe("transport bridge (GET /api/mesh/outbound + POST /api/mesh/inbound)", () => {
     it("404s both endpoints when mesh is disabled", async () => {
@@ -156,25 +186,14 @@ describe("opportunistic mesh: transport bridge", () => {
       expect(JSON.stringify(outbound.messages)).not.toContain("carry me over the mesh");
 
       // The receiving node's courier POSTs the received blob to its inbound endpoint → delivered.
-      const inbound = await nodeB.server.inject({
-        method: "POST",
-        url: "/api/mesh/inbound",
-        payload: { messages: outbound.messages },
-      });
-      expect(inbound.statusCode).toBe(200);
-      expect((inbound.json() as { accepted: number }).accepted).toBe(1);
+      expect(await inbound(nodeB, outbound.messages)).toBe(1);
 
       const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
       expect(contact).toBeDefined();
       expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("carry me over the mesh");
 
       // Idempotent: re-delivering the same blob is a no-op (dedup by id + tombstone), not a dupe DM.
-      const again = await nodeB.server.inject({
-        method: "POST",
-        url: "/api/mesh/inbound",
-        payload: { messages: outbound.messages },
-      });
-      expect((again.json() as { accepted: number }).accepted).toBe(0);
+      expect(await inbound(nodeB, outbound.messages)).toBe(0);
       expect((await dmBodies(nodeB, bob.cookie, contact!.id)).filter((b) => b === "carry me over the mesh")).toHaveLength(1);
     });
 
@@ -198,16 +217,14 @@ describe("opportunistic mesh: transport bridge", () => {
       const { messages } = (await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
         messages: { id: string }[];
       };
-      const inbound = await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages } });
-      expect((inbound.json() as { accepted: number }).accepted).toBe(0); // not ours, not relaying: dropped
+      expect(await inbound(nodeB, messages)).toBe(0); // not ours, not relaying: dropped
       expect(nodeB.store.isSealedOfferSeen(messages[0]!.id, Date.now())).toBe(true);
 
       // Handed the same blob again once relaying is on (after a restart), it stays dropped (review 2026-09-25
       // #2): carrying it now would make "carried" vs "refused" depend on whether the first copy was delivered.
       writeFileSync(join(nodeB.dataDir, "config.json"), JSON.stringify({ mesh: MESH }));
       const relayB = await reopenApp(nodeB.app, nodeB.dataDir);
-      const again = await relayB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages } });
-      expect((again.json() as { accepted: number }).accepted).toBe(0);
+      expect(await inbound(relayB, messages)).toBe(0);
       expect(relayB.store.loadMessages().some((message) => message.type === "sealed")).toBe(false);
     });
 
@@ -229,10 +246,7 @@ describe("opportunistic mesh: transport bridge", () => {
       const [original] = ((await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
         messages: Record<string, unknown>[];
       }).messages;
-      const deliver = async (node: LoamApp, message: Record<string, unknown>) =>
-        ((await node.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
-          accepted: number;
-        }).accepted;
+      const deliver = (node: LoamApp, message: Record<string, unknown>) => inbound(node, [message]);
 
       // Relay C: one carried copy, however many ids it arrives under.
       expect(await deliver(nodeC, original)).toBe(1);
@@ -278,10 +292,7 @@ describe("opportunistic mesh: transport bridge", () => {
       const [genuine] = ((await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
         messages: Record<string, unknown>[];
       }).messages;
-      const deliver = async (message: Record<string, unknown>) =>
-        ((await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
-          accepted: number;
-        }).accepted;
+      const deliver = (message: Record<string, unknown>) => inbound(nodeB, [message]);
 
       // The TTL is cleartext a relay can't verify: the forged copy fails to open (AAD mismatch) and is
       // merely carried. It must not shadow the genuine message that arrives afterwards.
@@ -297,10 +308,7 @@ describe("opportunistic mesh: transport bridge", () => {
       // `meta.streaming` (which the export treats as "never offer"), must not park a dead row that shadows
       // the genuine mail.
       const nodeC = await makeApp({ mesh: MESH });
-      const relay = async (message: Record<string, unknown>) =>
-        ((await nodeC.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } })).json() as {
-          accepted: number;
-        }).accepted;
+      const relay = (message: Record<string, unknown>) => inbound(nodeC, [message]);
       const offered = async () =>
         ((await nodeC.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as { messages: { hopLimit: number; meta?: unknown }[] })
           .messages;
@@ -339,13 +347,7 @@ describe("opportunistic mesh: transport bridge", () => {
       const fromA = (await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
         messages: unknown[];
       };
-      expect(
-        (
-          (
-            await nodeC.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: fromA.messages } })
-          ).json() as { accepted: number }
-        ).accepted,
-      ).toBe(1);
+      expect(await inbound(nodeC, fromA.messages)).toBe(1);
       // Carol cannot read it.
       const cSealed = nodeC.store.loadMessages().find((m) => m.type === "sealed");
       expect(cSealed).toBeDefined();
@@ -356,13 +358,7 @@ describe("opportunistic mesh: transport bridge", () => {
         messages: unknown[];
       };
       expect(fromC.messages).toHaveLength(1);
-      expect(
-        (
-          (
-            await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: fromC.messages } })
-          ).json() as { accepted: number }
-        ).accepted,
-      ).toBe(1);
+      expect(await inbound(nodeB, fromC.messages)).toBe(1);
       const contact = (await roster(nodeB, bob.cookie)).find((entry) => entry.id.startsWith("mesh."));
       expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("meet at the docks");
     });
@@ -396,6 +392,93 @@ describe("opportunistic mesh: transport bridge", () => {
       // falls through to the required-mode transport gate (401 — "needs an encrypted session"). It never
       // reaches the handler, so the exemption grants a LAN joiner nothing.
       expect(out.statusCode).toBe(401);
+    });
+  });
+
+  describe("the radio bridge reveals and risks nothing about delivery (verifier round, 2026-09-25)", () => {
+    /** One blob sealed on `sender` for the owner of `card` (added as a contact first). */
+    async function sealedFor(sender: LoamApp, senderCookie: string, card: MeshIdentityCard): Promise<Record<string, unknown>> {
+      expect((await addContact(sender, senderCookie, card)).statusCode).toBe(200);
+      const before = new Set(
+        ((await sender.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as { messages: { id: string }[] }).messages.map(
+          (message) => message.id,
+        ),
+      );
+      const sent = await sender.server.inject({
+        method: "POST",
+        url: "/api/mesh/messages",
+        headers: { cookie: senderCookie },
+        payload: { toMeshId: card.meshId, body: `for ${card.meshId}` },
+      });
+      expect(sent.statusCode).toBe(200);
+      const { messages } = (await sender.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
+        messages: (Record<string, unknown> & { id: string })[];
+      };
+      return messages.find((message) => !before.has(message.id))!;
+    }
+
+    function strangerBlob(id: string): Record<string, unknown> {
+      const stranger = createMeshIdentity();
+      const sender = createMeshIdentity();
+      const now = Date.now();
+      const ttlExpiresAt = now + 3_600_000;
+      const toTag = mailboxTag(stranger.mailboxToken, currentEpoch(now, 24 * 3_600_000));
+      const sealed = sealMailbox({
+        recipientKxPublic: stranger.kxPublic,
+        sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
+        plaintext: id,
+        aad: `${toTag}|${ttlExpiresAt}`,
+      });
+      return { id, type: "sealed", authorId: "mesh.sealed", createdAt: now, toTag, sealed, ttlExpiresAt, hopLimit: 3 };
+    }
+
+    it("answers a delivered, a carried and a dropped blob identically", async () => {
+      const sender = await makeApp({ mesh: MESH });
+      const alice = await adminOf(sender);
+      for (const relay of [false, true]) {
+        const node = await makeApp({ mesh: { ...MESH, relay } });
+        const bob = await adminOf(node);
+        const forBob = await sealedFor(sender, alice.cookie, await meshCard(node, bob.cookie));
+        const answers = new Set<string>();
+        for (const message of [forBob, strangerBlob(`seal_stranger_${String(relay)}`)]) {
+          const response = await node.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages: [message] } });
+          expect(response.statusCode).toBe(200);
+          answers.add(response.body);
+        }
+        expect([...answers]).toEqual([JSON.stringify({ ok: true })]);
+      }
+    });
+
+    it("refuses new blobs once the radio's quota is spent — mail for a local user too — and never passes the global cap", async () => {
+      const sender = await makeApp({ mesh: MESH });
+      const alice = await adminOf(sender);
+      const node = await makeApp({ mesh: { ...MESH, relay: false } });
+      const bob = await adminOf(node);
+      const forBob = await sealedFor(sender, alice.cookie, await meshCard(node, bob.cookie));
+      const now = Date.now();
+      node.store.transaction(() => {
+        for (let index = 0; index < 50_000; index += 1) {
+          node.store.markSealedOfferSeen(`seal_junk_${index}`, now + 86_400_000, "radio", now);
+        }
+      });
+      // Refused before any mark or delivery: uniform, so it says nothing about the recipient.
+      expect(await inbound(node, [forBob])).toBe(0);
+      expect(node.store.isSealedOfferSeen(forBob.id as string, Date.now())).toBe(false);
+      expect(node.store.countSealedOffersSeen(Date.now(), "radio")).toBe(50_000);
+
+      // The global cap binds the radio too, however few marks it holds: one neighbour can't stop every sync
+      // peer's sealed pulls by pushing the record past it.
+      const relay = await makeApp({ mesh: MESH });
+      relay.store.transaction(() => {
+        for (const source of ["http://peer-0", "http://peer-1", "http://peer-2", "http://peer-3"]) {
+          for (let index = 0; index < 50_000; index += 1) {
+            relay.store.markSealedOfferSeen(`seal_${source.slice(-6)}_${index}`, now + 86_400_000, source, now);
+          }
+        }
+      });
+      expect(await inbound(relay, [strangerBlob("seal_radio_0"), strangerBlob("seal_radio_1")])).toBe(0);
+      expect(relay.store.countSealedOffersSeen(Date.now())).toBe(200_000);
+      expect(relay.store.countSealedOffersSeen(Date.now(), "radio")).toBe(0);
     });
   });
 
