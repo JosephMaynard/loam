@@ -58,6 +58,7 @@ development on the same transport-agnostic layer.
 - 🕶️ **Ephemeral, privacy-preserving identities**: every joiner gets a deterministic, memorable display name and avatar derived from a random id. No email, no phone number.
 - 💬 **Real messaging**: public and private (invite-only) channels, threaded replies, direct messages, reactions, image and file attachments, and message search.
 - 🛡️ **Host controls**: optional join approval, plus greeter and moderator roles to vet newcomers and ban or shadow-ban when needed.
+- 🚫 **Report and block**: anyone can report a message or a person to the node's moderators, or block someone. Blocking stops DMs both ways and hides that person's channel messages on your device, and they aren't notified.
 - 🕸️ **Node-to-node sync (optional)**: two LOAM nodes that can reach each other sync their public channels, so separate hotspots converge into one conversation ([docs/11](docs/11-node-sync.md)).
 - 🤖 **Optional local AI**: point it at a laptop's [Ollama](https://ollama.com) model, or run a small downloadable model on the Android host itself (via llama.rn). Either way a bot appears as a DM contact and its replies stream in. Off by default, operator-installed, and entirely local.
 - 🔌 **Rides out connection drops**: the client keeps what it has seen in the browser's local database and reconnects on its own when the hotspot blips. (A home-screen install and the offline app shell need a browser "secure context", which a plain-`http://` hotspot address is not — so joiners get them only from the Android host's own screen or an HTTPS self-host. See [Security](#security).)
@@ -547,6 +548,9 @@ messages in plaintext while running, so a compromised host, a device seized whil
 key in memory, or coercion of a known passphrase can still expose data. Anyone whose safety depends
 on this should seek a professional security review and not treat LOAM as sufficient on its own. See
 [`SECURITY.md`](SECURITY.md) and the [docs](#documentation) for the full threat model.
+
+The [privacy policy](https://loamnet.com/privacy) covers what the app and the website store; it's also
+linked from the client's Settings and the Android host's menu.
 
 > **A note on intent.** These protections exist to protect *ordinary people*: during emergencies, in
 > communities cut off from connectivity, and in everyday situations where privacy and safety matter. They

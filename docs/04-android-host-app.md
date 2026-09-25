@@ -91,7 +91,8 @@ to build without a keystore (Play rejects a debug-signed bundle, and it sets
 `LOAM_REQUIRE_RELEASE_SIGNING=1` so the plugin fails prebuild too), and `pnpm --filter app apk` prints a
 loud debug-signing banner unless acknowledged with `--debug-signed` or `LOAM_ALLOW_DEBUG_SIGNING=1`.
 A debug-signed APK can't update a release-signed install, and each machine's debug key differs. The
-tag-triggered `build-apk.yml` job fails outright without the keystore secret. `release.jks` and `keystore.properties` are gitignored; **back them
+tag-triggered `build-apk.yml` job fails outright without the keystore secret; it runs `aab`, attaches the
+APK to the GitHub Release and uploads the bundle as the `loam-host-aab` workflow artifact. `release.jks` and `keystore.properties` are gitignored; **back them
 up** (losing the key means users must uninstall before they can update). For Play Store distribution,
 enable Play App Signing and treat this key as the upload key. See `keystore.properties.example` for
 the file format if you'd rather supply your own key than generate one.

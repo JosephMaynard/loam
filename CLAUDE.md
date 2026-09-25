@@ -26,7 +26,8 @@ law-enforcement avoidance as the purpose.
 (A→C→B) delivery. **Phases 0–2 + v2 secure addressing are BUILT & TESTED** (see the doc's
 "Implementation status"): `packages/crypto` (`@loam/crypto`) is the Ed25519/X25519 sealed-sender
 primitive; the server has a `sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL
-table), and bounded relay (TTL/hop/cap, no acks). The outer message id isn't covered by the seal, so
+table; minted only for local users — a row an older build minted for a synced user is deleted at boot and
+its forged `identityKey` stripped), and bounded relay (TTL/hop/cap, no acks). The outer message id isn't covered by the seal, so
 replay protection keys on a **hash of ciphertext + toTag + TTL** (`sealed.<sha256>`, stored beside the
 id tombstones on delivery) as well as the id; relays dedupe carried mail by the same key, only the
 canonical base64url spelling is accepted, and peer-supplied ids in the `sealed.` namespace are refused.
@@ -89,7 +90,9 @@ scripts/check-versions.mjs` (every workspace `package.json`, `cli/package.json` 
 `expo.version` must agree), `pnpm build`, `pnpm test`, then the apps/app typecheck on push/PR to
 `master`. `build-apk.yml` (tag builds) pins every action to a commit SHA, runs `check-versions
 --release-tag vX.Y.Z` (tag == version, `versionCode` > the previous release tag's), build + test +
-typecheck, then signs; a separate least-privilege release job attaches the APK.
+typecheck, then signs; a separate least-privilege release job attaches the APK. Tag builds also run `pnpm --filter
+app aab` and upload the Play bundle as the `loam-host-aab` workflow artifact (never attached to the
+Release). Dependabot (`.github/dependabot.yml`) bumps npm deps and the SHA-pinned `github-actions` weekly.
 
 **Tests**: `packages/*` (schema, display-name, avatar, qr, crypto), `apps/server` (`src/db.test.ts` for the
 DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
@@ -193,8 +196,12 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   checkpoints and `assertNotPlaintextSqliteFile` refuses a file that starts with the plaintext SQLite
   header (a codec-less driver build silently ignores `PRAGMA key`). **Fail closed**: an encrypted mode
   whose SQLCipher driver won't load never falls back to plaintext — the Android launcher locks with
-  `db_encryption_driver_missing` (Retry, or a confirmed "Start without encryption"), and the `loamnet`
-  CLI probes the driver before prompting or booting. On first
+  `db_encryption_driver_missing` (Retry, or a confirmed "Start without encryption"), the `loamnet`
+  CLI probes the driver before prompting or booting, and the server itself (`store-lifecycle.ts`) raises
+  the same fatal code when a keyed open fails and the driver won't load (no recovery chain; the embedded
+  runtime stays alive to report it). A failed keyed open on a node with no prior database removes what
+  the open created and rethrows, and the plaintext probe only runs on a file with the plaintext header —
+  so a failed keyed open never leaves a plaintext file behind. On first
   boot with legacy data, `importLegacyJsonData()` migrates the old `*.json` files into the DB and
   renames them `*.json.bak`. `config.json` and the `avatars/` dir remain plain files. There is no
   `markDirty`/flush interval any more — call the matching `store.*` method after mutating in-memory
@@ -303,7 +310,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   / 40-id sealed batches under an 8 MiB response cap (the sealed cap allows for the 4/3 envelope), at
   most 4 000 public / 80 sealed ids per round, and a batch that is too large or fails the schema is
   bisected down to the offending id. Offers fetched and refused are remembered per peer in RAM (id +
-  version, 1 h TTL, ≤20 000 per peer, cleared by the kill switch) so they aren't re-downloaded every round.
+  version, 1 h TTL, ≤20 000 per peer) so they aren't re-downloaded every round; the kill switch, every admin
+  config save and a channel `archived`/`allowPosting`/`allowReplies` change forget them
+  (`sync.forgetRefusedOffers()`), so the next round refetches.
   The sealed puller fetches every admissible sealed offer (soonest expiry first), never just its own
   tags, so a serving peer can't learn where a recipient lives. `sync.token` never rides a plaintext pull
   (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that
@@ -372,7 +381,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `GET/POST /api/channels/:channelId/members`,
   `DELETE /api/channels/:channelId/members/:userId`, `GET /api/messages/:channelId`,
   `GET /api/dms/:userId`, `POST /api/messages`, `PATCH/DELETE /api/messages/:messageId`,
-  `GET /api/search` (400 on a malformed querystring), `GET /api/moderation/users` +
+  `GET /api/search` (400 on a malformed querystring), `GET /api/users/me/blocks` +
+  `PUT/DELETE /api/users/me/blocks/:userId` (the caller's own block list; 30/min),
+  `GET /api/moderation/users` +
   `PATCH /api/moderation/users/:userId` (admin/moderator ban + shadow-ban + timeout: `timeoutMs` is a
   duration, applied and clamped to 7 days on the server clock; the legacy absolute `timeoutUntil` is
   clamped too), `GET /api/access/pending` +
@@ -387,6 +398,16 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   admitted socket gets a content-free `{"type":"ping"}` immediately and every 25 s
   (`WS_HEARTBEAT_INTERVAL_MS`) via `wsSend` — sealed + sequenced when encrypted, never before key
   confirmation.
+- **User blocking** (docs/30 B3): a member's private block list in the `user_blocks` DAL table (write-
+  through, read straight from the DB; `deleteUser` drops rows on both sides, `wipeAll`/kill switch clears
+  it; never synced, broadcast or put on a user record; `UserBlockListSchema { blockedUserIds }`). Only a
+  visible human can be blocked (self, bot, system and `mesh.` ids → 400 `block_not_allowed`; unknown,
+  banned, pending → 404). `dmBlockError()` refuses new DMs, DM reactions and edits of old DMs in **both
+  directions** (removing your own reaction and deleting stay allowed); `/api/typing` drops DM typing
+  silently. The blocker gets `dm_blocked_by_you`; the blocked sender gets the generic `dm_unavailable`,
+  which a DM to a **banned or pending** recipient now also returns (those used to be accepted). Channel
+  content is still delivered — the blocker's client hides it. Mesh mail bypasses `createMessage`, so mesh
+  senders can't be blocked, and channel invites don't consult blocks.
 - **Moderator-removed messages** can't be edited by their author (403 `message_removed`) and take no new
   replies or reactions.
 - **Avatar uploads**: base64 JSON body, ≤128KB, magic-byte signature checked against declared MIME,
@@ -439,6 +460,13 @@ kill switch. See `docs/09-security-profiles.md`.
   `MobileBackLink` / `PinChangePrompt` (see transport) live in `src/components/` too.
 - All server payloads are re-validated client-side with the same Zod schemas (`parseSocketEvent`,
   `parseMessageResponse`).
+- **Blocking** (`lib/blocks.ts`): the block list is fetched from `/api/users/me/blocks` at boot and held
+  **in memory only** (never IndexedDB; reset by a wipe or identity change). A Block button sits beside
+  "Report this user" in a human DM's header; a blocked DM shows a banner with Unblock and a disabled
+  composer; in channels a blocked author's posts/replies collapse to a placeholder with Show, and their
+  reactions, typing, toasts and unread counts are dropped. `BlockedUsersPanel` in Settings lists them for
+  unblocking, and Settings links the privacy policy (`https://loamnet.com/privacy`; the Android host menu
+  links it too, `apps/app/src/constants/links.ts`).
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
   `DOMPurify`, hardens links (safe protocols only, `rel=noreferrer target=_blank`) and strips `#k=`
   fragments. Any new rendered-HTML path must go through this — never inject raw message HTML.

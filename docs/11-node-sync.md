@@ -61,7 +61,10 @@ blob this node can't carry by policy — relay off, no hop left — is remembere
 key embeds the relay setting so switching relaying on voids those verdicts at once). A reply/reaction whose
 parent/target is still on offer this round is deferred, not remembered. Refused replies are cached, not
 tombstoned: a tombstone is node-wide and durable, and the id is peer-chosen. The kill switch clears it; a
-restart re-fetches each refused offer once.
+restart re-fetches each refused offer once. A change to the local policy that decided a refusal also clears
+it (`forgetRefusedOffers()`, which keeps the transport sessions and downgrade history): every admin config
+save (`PATCH /api/admin/config`), and a channel edit that changes `archived`, `allowPosting` or
+`allowReplies`. The next round then fetches those offers again instead of waiting out the hour.
 
 **Tombstones**: every local deletion (author/admin delete, reaction toggle-off, retention reaper)
 records the id in a `tombstones` table, so a peer that still holds the message can never hand it

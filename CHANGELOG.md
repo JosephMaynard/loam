@@ -22,8 +22,10 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   Developer Mode (`LOAM_DEV_MODE`, never in production) is the only plaintext path.
 - **Encrypted databases fail closed.** If the SQLCipher driver won't load, an encrypted Android node now
   stops on a lock screen (Retry, or a confirmed "Start without encryption") instead of silently running on
-  plaintext SQLite; the `loam` CLI checks the driver before it starts. After every keyed open the server
-  refuses a database file that is still plaintext.
+  plaintext SQLite; the `loam` CLI checks the driver before it starts, and the server locks with the same
+  error when a keyed open fails for lack of the driver. After every keyed open the server refuses a
+  database file that is still plaintext, and a keyed open that fails on a new node no longer leaves a
+  plaintext file behind.
 - **CLI passphrases stay out of `ps` and shell history.** Bare `loam --encrypt` takes `$LOAM_DB_KEY` or
   prompts without echo; `--encrypt <passphrase>` still works but warns.
 - **Android host.** The host phone's own screen claims admin with a per-boot token (`hostDevice`), so no
@@ -48,7 +50,7 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   canonical encoding is accepted, and a forged hop budget or metadata can no longer shadow genuine mail.
   A node now fetches every eligible sealed offer rather than only its own mail, so the serving peer can't
   learn which node a recipient uses (docs/16 states the remaining leak). Mesh identities are only minted
-  for local users.
+  for local users, and rows an older build minted for synced users are deleted at boot.
 - **Emergency Reset.** An upload landing mid-reset can no longer restore the pre-reset user or leave a
   file behind; start-fresh recovery snapshots are swept too; an assistant reply streaming across a reset
   is abandoned; a device that was offline during the reset clears its local copy when it next connects.
@@ -92,16 +94,27 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   cleaned up at boot; the `npx loamnet` join QR carries the node key; the 1 MB attachment limit is
   actually reachable.
 - Search rejects a malformed query with a 400; a malformed link no longer crashes routing.
+- Sync: offers refused under an old policy are fetched again right after an admin config save or a change
+  to a channel's archived, posting or replies setting, instead of up to an hour later.
+- An Emergency Reset journal whose saved config predates this release (`off` transport, an old bot id) is
+  repaired like `config.json` instead of locking the node as corrupt, and a repaired stored config is
+  written back once, so its warning doesn't repeat every boot.
 
 ### Added
-- **Privacy policy** at [loamnet.com/privacy](https://loamnet.com/privacy), linked from the site footer.
+- **Blocking.** Block someone from their DM header; unblock there or in Settings. Blocking stops DMs, DM
+  reactions and typing both ways and hides the person's channel posts, replies and reactions on your
+  device. They aren't told: a DM to someone who blocked them gets the same "not available" answer as one to
+  a banned member. The list is private to you, never synced, and cleared by Emergency Reset.
+- **Privacy policy** at [loamnet.com/privacy](https://loamnet.com/privacy), linked from the site footer,
+  the client's Settings and the Android host menu.
 - **Report this user** from a DM's header.
 - Channel **Delete** (permanent, with its messages, reactions and files; sync never re-imports it).
 - A download confirmation for on-device models, stating the size and warning about mobile or metered
   data.
 - A dismissible error notice at the top of the screen, a "conversation not available" state, and a
   recoverable crash screen.
-- `pnpm --filter app aab` builds an Android App Bundle for Google Play; a themed (monochrome) app icon.
+- `pnpm --filter app aab` builds an Android App Bundle for Google Play, and tag builds in CI produce it as
+  the `loam-host-aab` workflow artifact (not attached to the Release); a themed (monochrome) app icon.
 - Every one of the 14 non-English locales now covers every string, with a test that keeps it that way
   (machine-translated, pending native review).
 - CI checks that all package versions agree; tag builds also check the tag and that `versionCode` went
@@ -112,7 +125,9 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   actions and roster growth frozen). See the upgrade notes.
 - Release signing: `pnpm --filter app aab` refuses to build without a release keystore, and a
   debug-signed APK build warns unless acknowledged with `--debug-signed`. CI actions are pinned to commit
-  SHAs, and the job that publishes releases is separate from the build.
+  SHAs (Dependabot bumps them weekly), and the job that publishes releases is separate from the build.
+- **DMs to banned or not-yet-approved members are refused** (`dm_unavailable`). They used to be accepted.
+  It's the same answer a blocked sender gets, so it doesn't reveal a block.
 - Android: Wi-Fi, location and Bluetooth are declared optional hardware (so Play doesn't filter out
   tablets and Chromebooks); unused template permissions are blocked; incoming `loam://` links only ever
   open the host screen.

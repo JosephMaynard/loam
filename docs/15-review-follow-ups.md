@@ -56,7 +56,9 @@ ranked within each group. Each entry names the file and the concrete change.
    host-panel / NodeLinkControl); live re-handshake on a runtime mode flip.
 6. ~~**On-device SQLCipher.**~~ **SHIPPED**: the multiple-ciphers ABI-108 android-arm64 prebuild is
    cross-compiled and vendored (sha256-pinned), so `security.dbEncryption` keys the Android DB, and an
-   encrypted mode whose driver won't load now fails closed instead of booting plaintext. Remaining: runtime
+   encrypted mode whose driver won't load now fails closed instead of booting plaintext — on the launcher
+   and in the server itself (`db_encryption_driver_missing`, no recovery chain), and a failed keyed open
+   never creates a plaintext file (docs/01). Remaining: runtime
    verification on a physical arm64 phone (docs/01, docs/04).
 6a. **Node-to-node sync now rides the transport channel — but inter-node MITM is TOFU by default.**
    **BUILT** (`feat/sync-transport-encryption`, `apps/server/src/sync-transport.ts` + `fetchPeerJson`):

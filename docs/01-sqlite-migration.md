@@ -190,6 +190,15 @@ launcher side) talk over the existing `nodejs.channel` bridge, mirroring the req
    **Start without encryption** (switches the mode to Off). There is no plaintext fallback under an
    encrypted selection any more (it used to boot plaintext with a dismissible
    `db_encryption_unavailable` notice).
+   The server repeats the check on its side (`store-lifecycle.ts`, for a desktop/Pi node or a launcher
+   probe that passed but an open that didn't): when a keyed open fails and the driver won't load, it
+   reports the same fatal `db_encryption_driver_missing` and locks, without entering the migration /
+   plaintext-probe / start-fresh chain (nothing on disk is wrong, so no destructive recovery is offered).
+   `embedded-main.ts` keeps the runtime alive for that code so the launcher's Retry / Start-without-
+   encryption block isn't replaced by `boot_failed`. A failed keyed open on a node that had **no
+   database before this boot** removes whatever the open created (a codec that never engaged writes a
+   plaintext file) and rethrows, and the plaintext probe only runs on a file that already carries the
+   plaintext SQLite header — so a failed keyed open never leaves a plaintext database behind.
 5. **Ephemeral wipe.** For `mode === 'ephemeral'`, main.js deletes any stale `loam.db`/`loam.db-wal`/
    `loam.db-shm` files in `dataDir` (best-effort, `ENOENT` ignored) *before* requiring the server —
    because the key is fresh every launch, a DB encrypted under a previous launch's key can never be

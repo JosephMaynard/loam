@@ -63,8 +63,8 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
   local users, per-user mesh keypairs live server-side (DB `mesh_identities`, public keys published
   on the user record + synced), and the E2E guarantee is against **carrier nodes**, not a user's home
   host. Identities are minted **only for local users** — never for a sync-imported user or a `mesh.*`
-  sender record; a row an older build minted for a synced user is overwritten at boot and the forged
-  `identityKey` stripped from that user. `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
+  sender record; a row an older build minted for a synced user is deleted at boot (with any `null`
+  placeholder an earlier fix wrote) and the forged `identityKey` stripped from that user. `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
   DM.
 - **Phase 2 — bounded relay (server)**: carriers import sealed blobs opaquely and deliver-if-ours,
   else relay onward (hop-decremented, per-carrier cap), else drop; the reaper expires + tombstones by

@@ -160,6 +160,27 @@ not a dial — removing an admin is done by re-bootstrapping the node (or firing
 starting fresh), *not* by one admin stripping another. This avoids mutual-demotion wars where two
 admins race to remove each other. Promote carefully.
 
+**Members can block each other.** Anyone can block another person from the **Block** button in their DM
+header, and unblock them from the DM or from **Settings → Blocked people**. This is personal, not
+moderation:
+
+- A block list is private to the member who made it. No admin view or API shows it, it isn't broadcast or
+  synced to other nodes, and Emergency Reset clears it with everything else.
+- It stops DMs **both ways** (new messages, reactions and edits of older ones; typing indicators too). On
+  the blocker's device, the blocked person's posts and replies in channels collapse to "Message from a
+  blocked user" (with Show) and their reactions, typing and notifications disappear. The node still
+  delivers channel content to everyone; the hiding happens on the blocker's device.
+- The blocked person isn't notified. A DM to someone who blocked them gets the same "Direct messages to
+  this person aren't available" as a DM to a banned or not-yet-approved member.
+- It doesn't replace reports. Harassment you should know about still needs **Report this user**, and only
+  moderators can ban, time out or remove messages.
+
+Known limits: the blocked person can still work it out (the recipient is plainly active but their DMs
+fail); a mesh sender can't be blocked (mesh mail arrives outside the normal message path); blocks don't
+stop someone inviting the blocker into a private channel; and because the client keeps the list in
+memory only, a device that reloads while it can't reach the node shows cached posts from blocked people
+until it reconnects.
+
 ## 6. Linking nodes into a mesh
 
 Two LOAM nodes that can reach each other can **sync their public channels** so separate hotspots
