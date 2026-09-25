@@ -178,6 +178,31 @@ describe("opportunistic mesh: transport bridge", () => {
       expect((await dmBodies(nodeB, bob.cookie, contact!.id)).filter((b) => b === "carry me over the mesh")).toHaveLength(1);
     });
 
+    it("remembers a blob taken in over the radio even when it drops it, like one it delivered", async () => {
+      // A sync peer offering the same id later must be skipped whatever became of the radio copy
+      // (docs/16 §9): dropped ones may not be re-fetched while delivered ones stay tombstoned.
+      const nodeA = await makeApp({ mesh: MESH });
+      const nodeB = await makeApp({ mesh: { ...MESH, relay: false } });
+      const nodeC = await makeApp({ mesh: MESH });
+      const alice = await adminOf(nodeA);
+      await adminOf(nodeB);
+      const carol = await adminOf(nodeC);
+      const carolCard = await meshCard(nodeC, carol.cookie);
+      expect((await addContact(nodeA, alice.cookie, carolCard)).statusCode).toBe(200);
+      await nodeA.server.inject({
+        method: "POST",
+        url: "/api/mesh/messages",
+        headers: { cookie: alice.cookie },
+        payload: { toMeshId: carolCard.meshId, body: "for carol, not bob" },
+      });
+      const { messages } = (await nodeA.server.inject({ method: "GET", url: "/api/mesh/outbound" })).json() as {
+        messages: { id: string }[];
+      };
+      const inbound = await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages } });
+      expect((inbound.json() as { accepted: number }).accepted).toBe(0); // not ours, not relaying: dropped
+      expect(nodeB.store.isSealedOfferSeen(messages[0]!.id, Date.now())).toBe(true);
+    });
+
     it("refuses the same ciphertext replayed under a new outer id — on the recipient and on a relay", async () => {
       // The outer message id is not covered by the seal, so a carrier can rename a valid blob at will.
       const nodeA = await makeApp({ mesh: MESH });

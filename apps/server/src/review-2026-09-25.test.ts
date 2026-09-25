@@ -384,6 +384,22 @@ describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL (#1
     expect(reopened.store.countSealedOffersSeen()).toBe(2);
   });
 
+  it("a sealed offer the peer then doesn't serve is still remembered, not asked for every round", async () => {
+    const withheld = sealedRecord("seal_withheld");
+    const peer = await fakePeer((path) => {
+      if (path === "/api/sync/digest") {
+        const { id, toTag, ttlExpiresAt, hopLimit } = withheld;
+        return { channels: [], messages: [], sealed: [{ id, toTag, ttlExpiresAt, hopLimit }] };
+      }
+      return path === "/api/sync/messages" ? { messages: [], users: [] } : undefined;
+    });
+    const { app, admin } = await puller(peer.url, { mesh: MESH_RELAY });
+    for (let round = 0; round < 3; round += 1) {
+      await syncRound(app, admin.cookie);
+    }
+    expect(requestedIds(peer)).toEqual(["seal_withheld"]);
+  });
+
   it("Emergency Reset clears the durable seen-offer record", async () => {
     const foreign = sealedRecord("seal_foreign");
     const peer = await servingPeer([foreign]);
@@ -663,7 +679,7 @@ describe("peer users: only accepted authors, no reserved ids, no mesh keys minte
   });
 
   it("refuses the whole llm.* namespace and non-human author records", async () => {
-    const otherBot = { ...peerAuthor, id: "llm.someone.else", displayName: "Peer assistant", type: "bot" };
+    const otherBot = { ...peerAuthor, id: "llm.someone.else", displayName: "Peer assistant" }; // claims human
     const disguisedBot = { ...peerAuthor, id: "user.robot", displayName: "Totally human", type: "bot" };
     const system = { ...peerAuthor, id: "user.sys", displayName: "System", type: "system" };
     const records = [
