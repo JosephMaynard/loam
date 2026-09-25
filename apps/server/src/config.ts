@@ -1,6 +1,6 @@
 // LoamConfig defaults, layered merge, and legacy-profile reconciliation. Extracted from app.ts
 // (2026-09-04 split).
-import { BotIdSchema, LoamConfigSchema, securityProfilePreset, type LoamConfig, type LoamConfigUpdate } from "@loam/schema";
+import { BotIdSchema, LLM_MODEL_MAX_LENGTH, LoamConfigSchema, securityProfilePreset, type LoamConfig, type LoamConfigUpdate } from "@loam/schema";
 
 import { hashSecret, isHashedSecret } from "./secrets.js";
 
@@ -171,6 +171,7 @@ export function mergeConfig(base: LoamConfig, update: LoamConfigUpdate): LoamCon
  * - `llm.ollama.botId` outside the reserved `llm.` namespace → dropped (the default bot id applies), so a
  *   bot id can never name a person's account.
  * - `llm.ollama.botDisplayName` over 80 chars → truncated to the user display-name bound.
+ * - `llm.ollama.model` / `llm.onDevice.model` over `LLM_MODEL_MAX_LENGTH` → truncated to that bound.
  */
 export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repairs: string[] } {
   const repairs: string[] = [];
@@ -196,6 +197,14 @@ export function sanitizeLegacyConfigJson(json: unknown): { json: unknown; repair
     if (typeof ollama.botDisplayName === "string" && ollama.botDisplayName.length > 80) {
       ollama.botDisplayName = ollama.botDisplayName.slice(0, 80);
       repairs.push("llm.ollama.botDisplayName is longer than 80 characters; truncated");
+    }
+  }
+
+  for (const backend of ["ollama", "onDevice"] as const) {
+    const block = isRecord(json.llm) ? json.llm[backend] : undefined;
+    if (isRecord(block) && typeof block.model === "string" && block.model.length > LLM_MODEL_MAX_LENGTH) {
+      block.model = block.model.slice(0, LLM_MODEL_MAX_LENGTH);
+      repairs.push(`llm.${backend}.model is longer than ${LLM_MODEL_MAX_LENGTH} characters; truncated`);
     }
   }
 

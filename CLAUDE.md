@@ -205,7 +205,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   the open created and rethrows, and the plaintext probe only runs on a file with the plaintext header —
   so a failed keyed open never leaves a plaintext file behind. On first
   boot with legacy data, `importLegacyJsonData()` migrates the old `*.json` files into the DB and
-  renames them `*.json.bak`. `config.json` and the `avatars/` dir remain plain files. There is no
+  renames them `*.json.bak`. A stored user/channel/message row that no longer validates (e.g. an id an
+  older release wrote past `ID_MAX_LENGTH`) is skipped at load with a counted warning and left on disk,
+  not fatal; an over-long `meta.model` is truncated instead. `config.json` and the `avatars/` dir remain plain files. There is no
   `markDirty`/flush interval any more — call the matching `store.*` method after mutating in-memory
   state, then `broadcast(...)`. `.loam/` is gitignored.
 - **Sessions/identity**: two modes (docs/20). **Anonymous** (plaintext or `optional` without a pinned
@@ -236,7 +238,7 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   merge time and verified with `verifySecret()`; never store or compare them in the clear.
   `security.transportEncryption: "off"` is refused by PATCH (400); an `"off"` in `config.json` or a
   persisted DB row is coerced to `"optional"` with a warning (`sanitizeLegacyConfigJson`, which also
-  repairs a legacy bot id / over-long bot name, so an upgrade never fails boot). The launcher-owned
+  repairs a legacy bot id / over-long bot name / over-long model label, so an upgrade never fails boot). The launcher-owned
   `llm.onDevice` block is the exception to "DB wins": when `config.json` carries it, it is
   authoritative (the launcher's model activate/deactivate writes there), so an admin save can't freeze it.
 - **Rate limiting**: `@fastify/rate-limit` runs globally (300/min/IP) with per-route caps on uploads,

@@ -107,6 +107,9 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
 - An Emergency Reset journal whose saved config predates this release (`off` transport, an old bot id) is
   repaired like `config.json` instead of locking the node as corrupt, and a repaired stored config is
   written back once, so its warning doesn't repeat every boot.
+- A node upgraded from 0.4 boots even when its database or `config.json` holds values past the new
+  bounds: a stored user, channel or message with an id over 128 characters is skipped (logged, left on
+  disk), and an assistant model label over 120 characters is truncated.
 
 ### Added
 - **Blocking.** Block someone from their DM header; unblock there or in Settings. Blocking stops DMs, DM

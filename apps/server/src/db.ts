@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import {
   ChannelSchema,
+  LLM_MODEL_MAX_LENGTH,
   MessageSchema,
   ReportSchema,
   UserSchema,
@@ -144,9 +145,14 @@ function openConnection(path: string, options: OpenStoreOptions): SqliteConnecti
  * the same surface without touching the server (see docs/01-sqlite-migration.md).
  */
 export interface LoamStore {
-  loadUsers(): User[];
-  loadChannels(): Channel[];
-  loadMessages(): Message[];
+  /**
+   * Load every stored row of a table. A row that no longer validates (e.g. one written by an older
+   * release before an id/length bound existed) is skipped rather than failing the whole boot: it stays
+   * on disk untouched, is not loaded, and is counted through `onSkipped` so the caller can log it.
+   */
+  loadUsers(onSkipped?: (count: number) => void): User[];
+  loadChannels(onSkipped?: (count: number) => void): Channel[];
+  loadMessages(onSkipped?: (count: number) => void): Message[];
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
   /** Delete a single user row by id. Used for the legacy demo-user cleanup (`user.1234`/`user.5678`);
@@ -330,11 +336,11 @@ function messageColumns(message: Message): [string, string, string | null, strin
 
 /**
  * Parse a stored user row. Rows written before avatar image ids were constrained to `avt_<16 hex>` may
- * carry an avatar naming some other path (the pre-fix `PATCH /api/users/me` hole); rather than let one
- * such row fail the whole boot, the unusable avatar is dropped (the user falls back to a generated one).
- * Any other invalid row still throws, as before.
+ * carry an avatar naming some other path (the pre-fix `PATCH /api/users/me` hole); rather than drop the
+ * whole user, the unusable avatar is dropped (the user falls back to a generated one). Any other invalid
+ * row yields `undefined` (the loader skips it).
  */
-function parseStoredUser(raw: unknown): User {
+function parseStoredUser(raw: unknown): User | undefined {
   const parsed = UserSchema.safeParse(raw);
 
   if (parsed.success) {
@@ -346,10 +352,82 @@ function parseStoredUser(raw: unknown): User {
   if (record && typeof record === "object" && record.avatar && typeof record.avatar === "object" && "imageId" in record.avatar) {
     const { avatar: _unusable, ...rest } = record as Record<string, unknown>;
     void _unusable;
-    return UserSchema.parse(rest);
+    const repaired = UserSchema.safeParse(rest);
+    return repaired.success ? repaired.data : undefined;
   }
 
-  throw parsed.error;
+  return undefined;
+}
+
+/**
+ * Parse every stored row with `parse`, keeping the ones that validate. A row that is unparseable JSON
+ * or fails its schema (written by an older release before a bound such as `ID_MAX_LENGTH` existed) is
+ * skipped, not thrown: one legacy row must not stop an upgraded node from booting. The row stays on disk;
+ * the skipped count goes to `onSkipped` (only when non-zero) so the caller can log it.
+ */
+function parseStoredRows<T>(
+  rows: readonly SqliteRow[],
+  parse: (raw: unknown) => T | undefined,
+  onSkipped?: (count: number) => void,
+): T[] {
+  const loaded: T[] = [];
+  let skipped = 0;
+
+  for (const row of rows) {
+    let value: T | undefined;
+
+    try {
+      value = parse(JSON.parse(row.data as string));
+    } catch {
+      value = undefined;
+    }
+
+    if (value === undefined) {
+      skipped += 1;
+    } else {
+      loaded.push(value);
+    }
+  }
+
+  if (skipped > 0) {
+    onSkipped?.(skipped);
+  }
+
+  return loaded;
+}
+
+/**
+ * Parse a stored message row. An assistant message written before `meta.model` was bounded can carry a
+ * longer (cosmetic) model label; that label is truncated rather than the whole message dropped. Any other
+ * invalid row yields `undefined` (the loader skips it).
+ */
+function parseStoredMessage(raw: unknown): Message | undefined {
+  const parsed = MessageSchema.safeParse(raw);
+
+  if (parsed.success) {
+    return parsed.data;
+  }
+
+  const record = raw as { meta?: { model?: unknown } } | null;
+
+  if (record && typeof record === "object" && record.meta && typeof record.meta === "object") {
+    const model = record.meta.model;
+
+    if (typeof model === "string" && model.length > LLM_MODEL_MAX_LENGTH) {
+      const repaired = MessageSchema.safeParse({ ...record, meta: { ...record.meta, model: model.slice(0, LLM_MODEL_MAX_LENGTH) } });
+      return repaired.success ? repaired.data : undefined;
+    }
+  }
+
+  return undefined;
+}
+
+/** `safeParse` adapter for `parseStoredRows`: the parsed value, or undefined when invalid. */
+function safeParseWith<T>(schema: { safeParse(raw: unknown): { success: true; data: T } | { success: false } }) {
+  return (raw: unknown): T | undefined => {
+    const parsed = schema.safeParse(raw);
+    return parsed.success ? parsed.data : undefined;
+  };
 }
 
 /**
@@ -718,23 +796,22 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   );
 
   const store: LoamStore = {
-    loadUsers() {
-      return db
-        .prepare("SELECT data FROM users ORDER BY rowid")
-        .all()
-        .map((row) => parseStoredUser(JSON.parse(row.data as string)));
+    loadUsers(onSkipped) {
+      return parseStoredRows(db.prepare("SELECT data FROM users ORDER BY rowid").all(), parseStoredUser, onSkipped);
     },
-    loadChannels() {
-      return db
-        .prepare("SELECT data FROM channels ORDER BY rowid")
-        .all()
-        .map((row) => ChannelSchema.parse(JSON.parse(row.data as string)));
+    loadChannels(onSkipped) {
+      return parseStoredRows(
+        db.prepare("SELECT data FROM channels ORDER BY rowid").all(),
+        safeParseWith<Channel>(ChannelSchema),
+        onSkipped,
+      );
     },
-    loadMessages() {
-      return db
-        .prepare("SELECT data FROM messages ORDER BY created_at, rowid")
-        .all()
-        .map((row) => MessageSchema.parse(JSON.parse(row.data as string)));
+    loadMessages(onSkipped) {
+      return parseStoredRows(
+        db.prepare("SELECT data FROM messages ORDER BY created_at, rowid").all(),
+        parseStoredMessage,
+        onSkipped,
+      );
     },
     loadSessions() {
       return db

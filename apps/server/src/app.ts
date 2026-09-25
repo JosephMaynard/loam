@@ -1690,10 +1690,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       server.log.info("Imported legacy .loam JSON data into SQLite (originals renamed to *.json.bak)");
     }
 
+    // A row an older release wrote that no longer validates (e.g. an id past `ID_MAX_LENGTH`) is skipped,
+    // not fatal: an upgraded node must still boot. The row stays on disk; the count is logged.
+    const logSkipped = (table: string) => (count: number) =>
+      server.log.warn({ table, count }, `Skipped ${count} stored ${table} row(s) that no longer validate`);
     data = {
-      users: store.loadUsers(),
-      channels: store.loadChannels(),
-      messages: store.loadMessages(),
+      users: store.loadUsers(logSkipped("users")),
+      channels: store.loadChannels(logSkipped("channels")),
+      messages: store.loadMessages(logSkipped("messages")),
     };
     finalizeInterruptedStreams();
     tombstones.clear();
