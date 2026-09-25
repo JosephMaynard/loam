@@ -5,6 +5,7 @@
 // is the built-in node:sqlite (Node ≥22) — zero node-gyp; `--encrypt` opts into the optional native
 // SQLCipher driver.
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -179,16 +180,43 @@ async function resolveEncryptionKey() {
   }
 }
 
-if (args.includes("--encrypt")) {
-  // A passphrase, or "ephemeral" → a random RAM-only key (lost on reboot). Either way the store must
-  // live on disk (not :memory:), which it does (dataDir above). See docs/02.
-  process.env.LOAM_DB_KEY = await resolveEncryptionKey();
-}
-
 const bundlePath = join(pkgRoot, "dist/loam-server.js");
 if (!existsSync(bundlePath)) {
   console.error(`Missing ${bundlePath}. The package looks incomplete — reinstall loamnet.`);
   process.exit(1);
+}
+
+/**
+ * Whether the optional SQLCipher driver actually loads, resolved exactly as the bundled server resolves it
+ * (from dist/). `require` only loads the JS wrapper — opening an in-memory DB forces the native addon.
+ * Checked BEFORE the server starts: if the keyed open fails inside the server, its recovery path can
+ * leave an unencrypted database file behind — never let an encrypted launch get that far.
+ */
+function encryptedDriverLoads() {
+  try {
+    const Database = createRequire(bundlePath)("better-sqlite3-multiple-ciphers");
+    new Database(":memory:").close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+if (args.includes("--encrypt") || process.env.LOAM_DB_KEY) {
+  if (!encryptedDriverLoads()) {
+    console.error(
+      "\nEncryption requested but the native SQLCipher driver is unavailable.\n" +
+        "Install it with:  npm install -g better-sqlite3-multiple-ciphers\n" +
+        "or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
+    );
+    process.exit(1);
+  }
+}
+
+if (args.includes("--encrypt")) {
+  // A passphrase, or "ephemeral" → a random RAM-only key (lost on reboot). Either way the store must
+  // live on disk (not :memory:), which it does (dataDir above). See docs/02.
+  process.env.LOAM_DB_KEY = await resolveEncryptionKey();
 }
 
 const { startEmbeddedServer, firstLanIPv4, encodeQR, renderQRToTerminal } = await import(
