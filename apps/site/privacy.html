@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy policy · LOAM</title>
+    <meta
+      name="description"
+      content="How the LOAM app and the loamnet.com website handle data. The app has no accounts, no analytics and no cloud: what you post stays on the host device that runs the network."
+    />
+    <link rel="icon" href="/loam.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/loam-512.png" />
+    <meta name="theme-color" content="#17231d" />
+    <link rel="canonical" href="https://loamnet.com/privacy" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <nav class="nav" aria-label="Primary">
+        <a class="brand" href="/" aria-label="LOAM home">
+          <img src="/loam.svg" alt="" class="brand-mark" width="36" height="36" />
+          <span class="brand-word">LOAM</span>
+        </a>
+        <button class="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Menu">
+          <span class="nav-toggle-bar"></span>
+          <span class="nav-toggle-bar"></span>
+        </button>
+        <ul class="nav-links" id="nav-links">
+          <li><a href="/#how">How it works</a></li>
+          <li><a href="/#features">Features</a></li>
+          <li><a href="/#open">Open source</a></li>
+          <li>
+            <a class="btn btn-nav" href="https://github.com/JosephMaynard/loam" rel="noreferrer">
+              GitHub
+            </a>
+          </li>
+        </ul>
+      </nav>
+    </header>
+
+    <main id="main" class="section legal">
+      <div class="wrap legal-body">
+        <p class="eyebrow">Legal</p>
+        <h1 class="section-title">Privacy policy</h1>
+        <p class="legal-meta">Last updated 25 September 2026</p>
+
+        <p>
+          This policy covers two things: the <strong>LOAM app</strong> (the Android host app, the web client
+          people join with, and the self-hosted server) and the <strong>loamnet.com website</strong>. They
+          work very differently, so they have separate sections. LOAM is published by Magic Zebra Ltd.
+        </p>
+
+        <h2 id="app">The LOAM app</h2>
+
+        <h3>Who holds your data</h3>
+        <p>
+          LOAM has no central server and no cloud service. Whoever starts a LOAM network (the
+          <em>host</em>) runs the server on their own phone, laptop or Raspberry Pi. Everything posted on that
+          network is stored on the host's device. Magic Zebra Ltd never receives it, cannot see it, and has
+          no copy of it. The host decides how their network is configured, so on a given network the host
+          controls the data described below.
+        </p>
+
+        <h3>No accounts, analytics or tracking</h3>
+        <p>
+          The app has no sign-up, and it never asks for an email address, phone number or real name. It
+          contains no analytics, advertising, crash reporting or third-party tracking code.
+        </p>
+
+        <h3>What the host device stores</h3>
+        <ul>
+          <li>
+            <strong>Your identity on that network:</strong> a random user id (such as
+            <code>user.1a2b3c4d…</code>), the display name generated from it or one you choose, and your
+            avatar settings or an avatar image you upload. A session cookie links your browser to that id.
+          </li>
+          <li>
+            <strong>What you post:</strong> channel messages, replies, direct messages, reactions, and any
+            images or files you attach. A location appears only if you add it to a message yourself.
+          </li>
+          <li>
+            <strong>Moderation records:</strong> reports you file, and actions the host or moderators take
+            (bans, timeouts, removed messages, join approvals).
+          </li>
+          <li>
+            <strong>Network settings</strong> chosen by the host.
+          </li>
+        </ul>
+        <p>
+          Your own device keeps a copy of the conversations you have open so the app keeps working offline.
+          That copy is deleted when the network is reset.
+        </p>
+
+        <h3>How long it is kept, and how it is deleted</h3>
+        <ul>
+          <li>
+            By default, data stays on the host device until someone deletes it. You can delete your own
+            messages. The host can make messages expire automatically after a set time.
+          </li>
+          <li>
+            The host can run an <strong>Emergency Reset</strong>, which deletes every message, user, image
+            and file on the network and clears the copies on devices connected at the time. A device that was
+            offline clears its copy the next time it reconnects.
+          </li>
+          <li>
+            The host can turn on encryption of the stored database. With encryption on, a reset destroys the
+            key, so the deleted data cannot be recovered from the device's storage.
+          </li>
+          <li>
+            Uninstalling the Android host app deletes everything it stored.
+          </li>
+        </ul>
+
+        <h3>When data leaves the host device</h3>
+        <p>
+          In the default setup, nothing leaves the host device except the messages delivered to the people
+          on that network, over the local Wi-Fi or hotspot. When you join by scanning the host's QR code, the
+          app encrypts the traffic between your device and the host. Data leaves the host device only if the host turns on one of these features:
+        </p>
+        <ul>
+          <li>
+            <strong>Sync with other LOAM networks:</strong> public channel messages, their attachments, and
+            their authors' display names and avatar settings are copied to the networks the host links
+            to. Direct messages and private channels are never synced.
+          </li>
+          <li>
+            <strong>Remote assistant:</strong> if the host connects the assistant to a model running on
+            another computer, messages you send to the assistant go to that computer. The on-device assistant
+            runs entirely on the host phone.
+          </li>
+          <li>
+            <strong>Mesh delivery</strong> (experimental): messages to your mesh contacts may be carried
+            by other LOAM networks, sealed so that only the recipient can read them.
+          </li>
+        </ul>
+        <p>
+          When the host downloads an on-device assistant model, the host phone fetches the file from Hugging
+          Face. That request is between the host phone and Hugging Face and contains no LOAM user data.
+        </p>
+
+        <h3>Android permissions</h3>
+        <ul>
+          <li>
+            <strong>Nearby Wi-Fi devices and location:</strong> Android requires these to start a local
+            hotspot. LOAM does not read or record your location.
+          </li>
+          <li>
+            <strong>Notifications:</strong> used to show that the phone is hosting a network.
+          </li>
+          <li>
+            <strong>Bluetooth and Wi-Fi Aware</strong> (mesh, experimental): used to find nearby LOAM
+            devices to exchange sealed messages.
+          </li>
+        </ul>
+
+        <h3>Children</h3>
+        <p>
+          LOAM is not directed at children under 13 and collects no information that would identify a child.
+        </p>
+
+        <h2 id="website">The loamnet.com website</h2>
+        <p>
+          The website uses <a href="https://posthog.com" rel="noreferrer">PostHog</a> analytics, hosted in the
+          EU, to count page visits and clicks on the download and GitHub links. It sets no cookies and stores
+          nothing on your device, and it creates no profile of you. PostHog receives the page address, your
+          browser type and your IP address, from which it derives an approximate country. The site is hosted
+          by Vercel, which keeps standard server logs.
+        </p>
+        <p>
+          Downloads of the app are served by GitHub (or Google Play), under their own privacy policies.
+        </p>
+
+        <h2 id="contact">Contact and changes</h2>
+        <p>
+          Questions about this policy go to Magic Zebra Ltd through the
+          <a href="https://github.com/JosephMaynard/loam/issues" rel="noreferrer">LOAM issue tracker</a>.
+          Questions about data on a particular LOAM network go to that network's host, who holds it. Changes to
+          this policy are published on this page with a new date.
+        </p>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap footer-grid">
+        <div class="footer-brand">
+          <img src="/loam.svg" alt="" class="brand-mark" width="32" height="32" />
+          <div>
+            <p class="brand-word">LOAM</p>
+            <p class="footer-tag">Off-grid, local-first messaging.</p>
+          </div>
+        </div>
+        <nav class="footer-links" aria-label="Footer">
+          <a href="/#how">How it works</a>
+          <a href="/#features">Features</a>
+          <a href="/privacy">Privacy</a>
+          <a href="https://github.com/JosephMaynard/loam" rel="noreferrer">GitHub</a>
+        </nav>
+      </div>
+      <div class="wrap footer-legal">
+        <span>loamnet.com</span>
+        <span>AGPL-3.0 &middot; &copy; <span id="year">2026</span> Magic Zebra Ltd</span>
+      </div>
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
