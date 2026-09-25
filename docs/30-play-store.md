@@ -15,8 +15,17 @@ channel; Play is an additional one.
   check. **Re-verify after any llama.rn, nodejs-mobile or SQLite-prebuild bump.**
 - **No dynamic code.** expo-updates absent; the server bundle is built at build time; no `eval`. The on-device
   model download is *data* (GGUF), which policy allows.
-- **No telemetry** in the app or server (PostHog is marketing-site only). "No data collected" is defensible
-  for Data safety — caveat: an operator can point `llm.ollama.baseUrl` or a sync peer off-LAN.
+- **No telemetry** in the app or server (PostHog is marketing-site only). For Data safety, "No data
+  collected" holds **only while no path sends user data off the host device**: the default build keeps
+  messages, avatars and attachments on the phone and its hotspot LAN, and the on-device LLM runs locally.
+  It stops holding once the operator configures a path off the device — `llm.ollama.baseUrl` pointed at
+  another machine (DM text to the assistant goes there) or a sync peer (public-channel posts, their attachments and
+  their authors' display names and avatar settings are copied to that node). If the listing should cover those configurations, declare the
+  transmitted types (messages, user-generated content, name/avatar) as **collected**, and as **optional**
+  only if every user can use the app without them. Sync is operator-initiated, not a per-user action, so the
+  "user-initiated transfer" exemption doesn't obviously apply; the service-provider exemption needs a
+  developer-instructed processor, which an operator's own peer isn't. Loopback traffic between the launcher
+  and the embedded server stays inside the app and isn't sharing.
 - Cleartext to loopback/LAN is allowed; `allowBackup=false`; not debuggable; only the launcher activity is
   exported; no `QUERY_ALL_PACKAGES` / battery-optimisation / background-location permissions. Kiosk mode is
   plain `startLockTask()`, not device-owner. No accounts, so the account-deletion requirement doesn't apply.
@@ -26,7 +35,7 @@ channel; Play is an additional one.
 | | Item | State |
 |---|---|---|
 | B1 | **App Bundle.** Play only takes an `.aab` for new apps. | **Build path added:** `pnpm --filter app aab` runs `bundleRelease` after the APK → `apps/app/loam-host.aab`. *Not yet exercised end-to-end* — run it once and upload to an internal-testing track. **Owner:** enrol in Play App Signing; the repo keystore (`pnpm --filter app keystore`) becomes the **upload** key. Add the AAB to `build-apk.yml` once the local run is proven. |
-| B2 | **Privacy policy.** Play needs a public URL (and the app should link it). `apps/site` has no `/privacy`. | **Open — owner text.** The honest content is short: no accounts, no analytics, nothing leaves the host device/LAN unless the operator configures a remote LLM or sync peer; what the host stores (messages, avatars, attachments) and how Emergency Reset / retention remove it. |
+| B2 | **Privacy policy.** Play **requires** a public privacy-policy URL in the listing **and** a link inside the app. `apps/site` has no `/privacy` yet. | **Open — owner text.** Add `/privacy` to `apps/site`, link it from the Play listing and from the app (settings/about). The honest content is short: no accounts, no analytics, nothing leaves the host device/LAN unless the operator configures a remote LLM or sync peer; what the host stores (messages, avatars, attachments) and how Emergency Reset / retention remove it. |
 | B3 | **User blocking.** Play's user-generated-content policy expects in-app **block** as well as report. There is report + operator ban/shadow-ban/timeout, but a joiner cannot block another user. | **Open — next feature branch.** Minimum: per-user block list (server-side, per session user), the server refuses DMs from a blocked user, the client hides a blocked user's messages, a Block control beside Report in the DM header, and a list to unblock in Settings. |
 
 ## Declarations and high-risk items

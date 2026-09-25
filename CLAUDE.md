@@ -239,7 +239,7 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
 - **Attachments**: messages may carry ≤4 attachments (`attachments` on posts/replies/DMs;
   attachment-only messages are valid) — images (256KB, served inline) or allowlisted non-image files
   (1 MiB, stored as `.bin`, served octet-stream + `Content-Disposition: attachment`). `POST /api/attachments` mirrors the avatar pipeline (base64, magic-byte vs
-  MIME, 256KB cap, rate-limited); ids are uploader-bound and consumed on first use; files served
+  MIME, 256KB images / 1 MiB other files, rate-limited); ids are uploader-bound and consumed on first use; files served
   from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch.
   Clients downscale to ≤1280px webp on-device first (`apps/client/src/lib/attachments.ts`).
   `enableAttachments` flag, default on.
