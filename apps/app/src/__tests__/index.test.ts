@@ -53,6 +53,7 @@ vi.mock('@/lib/db-encryption', () => ({
   // `DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE` is referenced at module scope (in a Set); the rest are
   // only used inside the component body, so inert stubs are enough for import to succeed.
   DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE: 'db_encryption_plaintext_unconverted',
+  DB_ENCRYPTION_DRIVER_MISSING_CODE: 'db_encryption_driver_missing',
   DB_ENCRYPTION_MODE_READ_ERROR: '__read_error__',
   applyDbModeChange: vi.fn(),
   dbEncryptionRecoveryForCode: vi.fn(),

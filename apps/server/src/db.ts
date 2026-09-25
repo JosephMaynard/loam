@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -353,11 +353,52 @@ export function openStore(path: string, options: OpenStoreOptions = {}): LoamSto
     // Only an encrypted (SQLCipher) connection exposes `.pragma()` — threaded through separately so
     // `buildStore` can implement `rekey()` (P1-1, Sol round 5) without needing to know the driver.
     const pragma = options.encryptionKey ? (db as EncryptedDatabase).pragma.bind(db as EncryptedDatabase) : undefined;
-    return buildStore(db, pragma);
+    const store = buildStore(db, pragma);
+    if (pragma) {
+      // Prove the codec engaged (pre-release review 2026-09-25): a build of the driver without the cipher
+      // compiled in accepts `PRAGMA key` as a silent no-op and writes an ordinary plaintext database. Fold
+      // the schema writes from the WAL into the main file, then refuse the store if that file starts with
+      // the plaintext SQLite header. A real SQLCipher file is ciphertext from byte 0.
+      pragma("wal_checkpoint(PASSIVE)");
+      assertNotPlaintextSqliteFile(path);
+    }
+    return store;
   } catch (error) {
     // A wrong encryption key surfaces here (the first pragma/DDL fails); don't leak the handle.
     db.close();
     throw error;
+  }
+}
+
+/** The 16-byte header every PLAINTEXT SQLite database file starts with (sqlite.org/fileformat.html). */
+const PLAINTEXT_SQLITE_HEADER = Buffer.from("SQLite format 3\0", "latin1");
+
+/**
+ * Throw if the database file at `path` starts with the plaintext SQLite header — i.e. a store that was
+ * opened with an encryption key is not actually encrypted on disk. A missing or shorter-than-header file
+ * passes (nothing plaintext was written). Exported for tests; `openStore` runs it after every keyed open.
+ */
+export function assertNotPlaintextSqliteFile(path: string): void {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  try {
+    const header = Buffer.alloc(PLAINTEXT_SQLITE_HEADER.length);
+    const bytesRead = readSync(fd, header, 0, header.length, 0);
+    if (bytesRead === header.length && header.equals(PLAINTEXT_SQLITE_HEADER)) {
+      throw new Error(
+        "Refusing to use the database: it was opened with an encryption key but is PLAINTEXT on disk " +
+          "(the SQLCipher codec did not engage — check the better-sqlite3-multiple-ciphers build).",
+      );
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 

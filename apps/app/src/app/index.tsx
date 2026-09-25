@@ -17,6 +17,7 @@ import { SERVER_PORT } from '@/lib/join-url';
 import {
   applyDbModeChange,
   clearStoredDbKeys,
+  DB_ENCRYPTION_DRIVER_MISSING_CODE,
   DB_ENCRYPTION_MODE_READ_ERROR,
   DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
   dbEncryptionRecoveryForCode,
@@ -56,6 +57,7 @@ const DB_ENCRYPTION_ERROR_CODES = new Set([
   'db_encryption_unavailable',
   'db_encryption_no_key',
   'db_encryption_locked',
+  DB_ENCRYPTION_DRIVER_MISSING_CODE,
   DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
 ]);
 
@@ -493,6 +495,7 @@ export default function HostScreen() {
           if (
             (current === DB_UNREADABLE_CODE ||
               current === DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE ||
+              current === DB_ENCRYPTION_DRIVER_MISSING_CODE ||
               current === DB_LOCKED_CODE) &&
             (payload.code === undefined || payload.code === 'boot_timeout')
           ) {
@@ -836,6 +839,22 @@ export default function HostScreen() {
     setRevertMessage('Switching encryption off and restarting…');
   };
 
+  // `db_encryption_driver_missing` recovery (pre-release review 2026-09-25): the SQLCipher module didn't
+  // load, so the launcher refused to start. Switching to Off is a real security downgrade — the database
+  // and everything after it is stored UNENCRYPTED — so it needs an explicit confirmation, never a single tap.
+  const confirmStartUnencrypted = () => {
+    Alert.alert(
+      'Start without encryption?',
+      'Encrypted storage is unavailable on this device. Switching encryption off stores the database ' +
+        'UNENCRYPTED from now on. An existing encrypted database stays on disk but cannot be opened without ' +
+        'encryption — you will be offered to preserve it and start a fresh one.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Switch encryption off', style: 'destructive', onPress: () => void handleRevertToOff() },
+      ],
+    );
+  };
+
   // Bridge from the WebView's web content (the LOAM client) back to this native screen. The client's
   // `wipe` WS-event handler (apps/client/src/app.tsx) posts `{"type":"loam-wipe"}` via
   // `window.ReactNativeWebView.postMessage` when the SERVER announces a node reset, and future message
@@ -1116,6 +1135,7 @@ export default function HostScreen() {
     errorCode !== DB_UNREADABLE_CODE &&
     errorCode !== DB_LOCKED_CODE &&
     errorCode !== DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE &&
+    errorCode !== DB_ENCRYPTION_DRIVER_MISSING_CODE &&
     DB_ENCRYPTION_ERROR_CODES.has(errorCode);
   // FATAL db_encryption_unreadable (P1-1, Sol round 3, AF8/design#1): boot genuinely failed and the
   // embedded runtime stayed alive specifically so this recovery can work — see DB_UNREADABLE_CODE's
@@ -1127,6 +1147,10 @@ export default function HostScreen() {
   // (delete existing data & start encrypted, or switch encryption back off) — never a silent plaintext
   // downgrade under an encrypted selection. Uses the shared code→recovery classifier for the mapping.
   const dbPlaintextUnconverted = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'plaintext-unconverted';
+  // FATAL db_encryption_driver_missing (pre-release review 2026-09-25): an encrypted mode is selected but the
+  // SQLCipher driver failed to load. The launcher stays LOCKED (it used to boot plaintext with a dismissible
+  // notice); the operator either retries or explicitly switches encryption off.
+  const dbDriverMissing = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'driver-missing';
 
   return (
     <ThemedView style={styles.center}>
@@ -1308,6 +1332,43 @@ export default function HostScreen() {
           ) : null}
         </ThemedView>
       ) : null}
+      {/* FATAL, NOT dismissible — encrypted storage can't load on this device, and the host refuses to start
+          unencrypted under an encrypted selection. Retry re-probes the driver; "Start without encryption"
+          is the only way to plaintext, behind a confirmation. A subsequent `ready` clears this (onStatus). */}
+      {dbDriverMissing ? (
+        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+          <ThemedText type="smallBold">Encrypted storage is unavailable — the host did not start.</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            {errorMessage ?? 'The encrypted-storage module failed to load on this device.'}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+            Nothing was stored unencrypted. Retry, or switch encryption off to run this host WITHOUT
+            encryption.
+          </ThemedText>
+          <ThemedView style={styles.noticeBannerActions}>
+            <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy || revertBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+              </ThemedView>
+            </Pressable>
+            <Pressable onPress={confirmStartUnencrypted} disabled={unlockBusy || revertBusy} accessibilityRole="button">
+              <ThemedView type="backgroundElement" style={styles.retry}>
+                <ThemedText type="link">{revertBusy ? 'Switching…' : 'Start without encryption'}</ThemedText>
+              </ThemedView>
+            </Pressable>
+          </ThemedView>
+          {unlockMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {unlockMessage}
+            </ThemedText>
+          ) : null}
+          {revertMessage ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+              {revertMessage}
+            </ThemedText>
+          ) : null}
+        </ThemedView>
+      ) : null}
       {/* P1-2(b): a wipe-key-clear attempt failed and was NOT acked as complete — the launcher's durable
           marker is still pending, so this must never look like a benign notice; it stays until a retry
           succeeds. Shown in both the ready and non-ready views (see the matching block above) since a
@@ -1367,7 +1428,7 @@ export default function HostScreen() {
                 <ThemedText type="link">Retry</ThemedText>
               </ThemedView>
             </Pressable>
-          ) : dbUnreadable || dbLocked || dbPlaintextUnconverted ? null : (
+          ) : dbUnreadable || dbLocked || dbPlaintextUnconverted || dbDriverMissing ? null : (
             // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process) —
             // except for `dbUnreadable` (P1-1, Sol round 3), `dbLocked` (P1-1, Sol round 4), and
             // `dbPlaintextUnconverted` (P1-4-RN, Sol round 8), all of which have their own in-app recovery

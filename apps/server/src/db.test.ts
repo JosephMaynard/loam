@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { Channel, Message, User } from "@loam/schema";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { importLegacyJsonData, openStore, type LoamStore } from "./db.js";
+import { assertNotPlaintextSqliteFile, importLegacyJsonData, openStore, type LoamStore } from "./db.js";
 
 function makeUser(id: string, overrides: Partial<User> = {}): User {
   return {
@@ -816,5 +816,79 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
         plain.close();
       }
     });
+  });
+});
+
+// Pre-release review 2026-09-25: a keyed open must PROVE the file on disk is ciphertext. A driver build
+// without the codec compiled in accepts `PRAGMA key` as a silent no-op and writes plaintext SQLite.
+describe("encrypted store — plaintext-on-disk guard", () => {
+  let dataDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "loam-enc-guard-"));
+    dbPath = join(dataDir, "loam.db");
+  });
+
+  afterEach(() => {
+    vi.doUnmock("node:module");
+    vi.resetModules();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("assertNotPlaintextSqliteFile rejects a plaintext DB and accepts ciphertext / an absent file", () => {
+    const plain = new DatabaseSync(dbPath);
+    plain.exec("CREATE TABLE t (x INTEGER)");
+    plain.close();
+    expect(() => assertNotPlaintextSqliteFile(dbPath)).toThrow(/PLAINTEXT/);
+
+    rmSync(dbPath);
+    expect(() => assertNotPlaintextSqliteFile(dbPath)).not.toThrow();
+
+    const encrypted = openStore(dbPath, { encryptionKey: "k" });
+    encrypted.close();
+    expect(() => assertNotPlaintextSqliteFile(dbPath)).not.toThrow();
+  });
+
+  it("openStore refuses a keyed open whose driver silently ignores PRAGMA key (codec-less build)", async () => {
+    // A stand-in for a codec-less better-sqlite3-multiple-ciphers: `cipher`/`key` pragmas are no-ops, so
+    // the "encrypted" database is written as ordinary plaintext SQLite.
+    class CodecLessDatabase {
+      private readonly inner: DatabaseSync;
+      constructor(path: string) {
+        this.inner = new DatabaseSync(path);
+      }
+      exec(sql: string) {
+        this.inner.exec(sql);
+      }
+      prepare(sql: string) {
+        return this.inner.prepare(sql);
+      }
+      close() {
+        this.inner.close();
+      }
+      pragma(source: string) {
+        if (/^\s*(key|cipher)\s*=/i.test(source)) {
+          return undefined;
+        }
+        return this.inner.prepare(`PRAGMA ${source}`).all();
+      }
+    }
+    vi.doMock("node:module", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:module")>();
+      return {
+        ...actual,
+        createRequire: (url: string | URL) => {
+          const real = actual.createRequire(url);
+          return (id: string) => (id === "better-sqlite3-multiple-ciphers" ? CodecLessDatabase : real(id));
+        },
+      };
+    });
+    vi.resetModules();
+    const { openStore: openStoreWithCodecLessDriver } = await import("./db.js");
+
+    expect(() => openStoreWithCodecLessDriver(dbPath, { encryptionKey: "k" })).toThrow(/PLAINTEXT/);
+    // The fake really did write plaintext — the guard, not some other failure, is what refused it.
+    expect(readFileSync(dbPath).subarray(0, 15).toString("ascii")).toBe("SQLite format 3");
   });
 });

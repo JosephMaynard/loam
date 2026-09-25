@@ -20,6 +20,7 @@ vi.mock("expo-crypto", () => cryptoMock);
 
 const {
   DB_ENCRYPTION_MODE_READ_ERROR,
+  DB_ENCRYPTION_DRIVER_MISSING_CODE,
   DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
   applyDbModeChange,
   clearStoredPassphrase,
@@ -586,6 +587,13 @@ describe("dbEncryptionRecoveryForCode (P1-4-RN, Sol round 8)", () => {
   it("maps the other DB-encryption recovery codes to their own recovery UI", () => {
     expect(dbEncryptionRecoveryForCode("db_encryption_unreadable")).toBe("unreadable");
     expect(dbEncryptionRecoveryForCode("db_encryption_locked")).toBe("locked");
+    expect(dbEncryptionRecoveryForCode(DB_ENCRYPTION_DRIVER_MISSING_CODE)).toBe("driver-missing");
+  });
+
+  it("the driver-missing code matches the launcher's (boot-config.js) byte for byte", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const launcher = require("../../nodejs-project-template/boot-config.js");
+    expect(launcher.DB_ENCRYPTION_DRIVER_MISSING_CODE).toBe(DB_ENCRYPTION_DRIVER_MISSING_CODE);
   });
 
   it("returns null for codes with no dedicated recovery (and for undefined)", () => {

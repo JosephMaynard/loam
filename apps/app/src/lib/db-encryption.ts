@@ -1011,6 +1011,11 @@ async function applyDbModeChangeLocked(
  * CONVERSION is a documented FUTURE enhancement (docs/21) — not built. */
 export const DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE = 'db_encryption_plaintext_unconverted' as const;
 
+/** Boot-error code (pre-release review 2026-09-25): an encrypted mode is selected but the SQLCipher native
+ * driver failed to load, so the launcher LOCKED instead of booting plaintext. Recovery: Retry, or an explicit
+ * switch to `off`. Mirrors `DB_ENCRYPTION_DRIVER_MISSING_CODE` in nodejs-project-template/boot-config.js. */
+export const DB_ENCRYPTION_DRIVER_MISSING_CODE = 'db_encryption_driver_missing' as const;
+
 /**
  * P1-4-RN (Sol round 8): whether SELECTING `next` is a destructive action that must be gated behind an
  * explicit operator confirmation before it is persisted. Any encrypted mode
@@ -1031,7 +1036,7 @@ export function dbModeSelectionIsDestructive(next: DbEncryptionMode): boolean {
  * or `null` for codes with no dedicated recovery. Pure so `index.tsx`'s code→recovery mapping (which
  * decides whether to show the destructive plaintext-unconverted / start-fresh / unlock UI) is
  * harness-testable. */
-export type DbEncryptionRecovery = 'plaintext-unconverted' | 'unreadable' | 'locked';
+export type DbEncryptionRecovery = 'plaintext-unconverted' | 'unreadable' | 'locked' | 'driver-missing';
 export function dbEncryptionRecoveryForCode(code: string | undefined): DbEncryptionRecovery | null {
   switch (code) {
     case DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE:
@@ -1040,6 +1045,8 @@ export function dbEncryptionRecoveryForCode(code: string | undefined): DbEncrypt
       return 'unreadable';
     case 'db_encryption_locked':
       return 'locked';
+    case DB_ENCRYPTION_DRIVER_MISSING_CODE:
+      return 'driver-missing';
     default:
       return null;
   }
