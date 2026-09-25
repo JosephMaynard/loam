@@ -1,11 +1,49 @@
 // Admin: claim, config read/patch, kill switch, and the unauthenticated panic token. Extracted verbatim
 // from app.ts (2026-09-04 split) over the shared AppContext.
 import { AdminClaimRequestSchema, KillSwitchRequestSchema, type LoamConfig, LoamConfigUpdateSchema, PanicRequestSchema, UserSchema } from "@loam/schema";
+import { readFileSync } from "node:fs";
+
 import type { AppContext } from "./app-context.js";
 import { mergeConfig } from "./config.js";
 import { errorBody } from "./errors.js";
 import { makeAdminSetupCode } from "./identity.js";
 import { timingSafeEqualStrings, verifySecret } from "./secrets.js";
+
+/**
+ * Keep config.json authoritative for the launcher-owned `llm.onDevice` block. When config.json carries it,
+ * the load ignores the DB row's copy (see `withoutLauncherOwnedKeys`), so an admin edit of `llm.onDevice`
+ * saved only to the DB would be silently undone at the next boot. Such an edit is written through to
+ * config.json instead (the launcher's own read-modify-write format: every other key is preserved), durably.
+ *
+ * @returns `"skipped"` when the edit doesn't change `llm.onDevice` or config.json doesn't carry it (the DB
+ *   row then holds it as for any other key), `"written"` on a durable write, `"failed"` otherwise.
+ */
+function writeThroughLauncherOwnedOnDevice(ctx: AppContext, previous: LoamConfig, next: LoamConfig): "skipped" | "written" | "failed" {
+  if (JSON.stringify(previous.llm.onDevice) === JSON.stringify(next.llm.onDevice)) {
+    return "skipped";
+  }
+
+  let file: unknown;
+  try {
+    file = JSON.parse(readFileSync(ctx.configPath, "utf8"));
+  } catch (error) {
+    // Absent file → nothing owns the key. An unreadable one failed (or will fail) the boot, so it can't be
+    // the source of the running config's `llm.onDevice` either.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return "skipped";
+    }
+    ctx.server.log.error(error, "Could not read config.json to save llm.onDevice");
+    return "failed";
+  }
+
+  const llm = file && typeof file === "object" ? (file as { llm?: unknown }).llm : undefined;
+  if (!llm || typeof llm !== "object" || (llm as { onDevice?: unknown }).onDevice === undefined) {
+    return "skipped";
+  }
+
+  (llm as { onDevice: unknown }).onDevice = next.llm.onDevice;
+  return ctx.lifecycle.durableWriteFileSync(ctx.configPath, JSON.stringify(file, null, 2)) ? "written" : "failed";
+}
 
 /** Register the admin routes: claim, config get/patch, kill switch, panic token. */
 export function registerAdminRoutes(ctx: AppContext): void {
@@ -212,6 +250,12 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // would 500 here and then fail the next boot.
     if (ctx.llm.botConfigError(next)) {
       return reply.code(400).send(errorBody("Invalid config values"));
+    }
+
+    // Before anything is applied: a launcher-owned `llm.onDevice` edit that can't reach config.json would be
+    // reverted at the next boot, so refuse the whole save rather than half-apply it.
+    if (writeThroughLauncherOwnedOnDevice(ctx, ctx.appConfig, next) === "failed") {
+      return reply.code(500).send(errorBody("Internal server error"));
     }
 
     const switchedToSetupCode = next.admin.bootstrap === "setupCode" && ctx.appConfig.admin.bootstrap !== "setupCode";

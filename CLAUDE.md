@@ -240,7 +240,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   persisted DB row is coerced to `"optional"` with a warning (`sanitizeLegacyConfigJson`, which also
   repairs a legacy bot id / over-long bot name / over-long model label, so an upgrade never fails boot). The launcher-owned
   `llm.onDevice` block is the exception to "DB wins": when `config.json` carries it, it is
-  authoritative (the launcher's model activate/deactivate writes there), so an admin save can't freeze it.
+  authoritative (the launcher's model activate/deactivate writes there), so an admin save can't freeze it;
+  an admin PATCH that changes `llm.onDevice` is then written through to `config.json` (durably, other keys
+  kept; a failed write refuses the save with a 500) so it survives a restart.
 - **Rate limiting**: `@fastify/rate-limit` runs globally (300/min/IP) with per-route caps on uploads,
   sync, mesh, search, claim and panic; those per-route configs set `allowList: () => false` so tunnel
   re-dispatches (exempt from the global limiter) still count. Claim/panic add their own semantic attempt

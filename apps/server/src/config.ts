@@ -234,7 +234,9 @@ export function sanitizeLegacyFullConfigJson(json: unknown): { json: unknown; re
  * without this a single admin save froze whatever `llm.onDevice` was effective at that moment and every
  * later activate/deactivate from the launcher was silently overridden on the next boot. The caller
  * applies this to the DB layer only when config.json actually carries `llm.onDevice` — a desktop/Pi node
- * whose config.json never mentions it keeps the admin's persisted value.
+ * whose config.json never mentions it keeps the admin's persisted value. When config.json does carry it,
+ * an admin edit of `llm.onDevice` is written through to config.json instead (routes-admin.ts
+ * `writeThroughLauncherOwnedOnDevice`), so the file stays the one source for the block.
  */
 export function withoutLauncherOwnedKeys(update: LoamConfigUpdate): LoamConfigUpdate {
   if (!update.llm?.onDevice) {

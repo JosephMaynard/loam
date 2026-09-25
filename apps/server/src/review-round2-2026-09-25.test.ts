@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -156,5 +156,62 @@ describe("sync import honours a local moderator removal for new replies and reac
     const ids = puller.store.loadMessages().map((message) => message.id);
     expect(ids).not.toContain(replyId);
     expect(ids).not.toContain(reactionId);
+  });
+});
+
+describe("an admin edit of llm.onDevice survives a restart when config.json owns the block", () => {
+  /** The effective `llm.onDevice` block, as the admin config API reports it. */
+  async function onDevice(app: LoamApp, cookie: string): Promise<{ enabled: boolean; model?: string }> {
+    const response = await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie } });
+    return (response.json() as { llm: { onDevice: { enabled: boolean; model?: string } } }).llm.onDevice;
+  }
+
+  it("writes the edit through to config.json, and a later launcher edit of config.json still wins", async () => {
+    const launcherConfig = { node: { name: "Host" }, llm: { onDevice: { enabled: true, model: "gemma", modelPath: "/data/m.gguf" } } };
+    const dataDir = tempDataDir(launcherConfig);
+    const first = await boot(dataDir);
+    const admin = await newSession(first);
+    expect((await onDevice(first, admin.cookie)).enabled).toBe(true);
+
+    const patched = await first.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { llm: { onDevice: { enabled: false } } },
+    });
+    expect(patched.statusCode).toBe(200);
+    await first.close();
+
+    // config.json now carries the edit, with every other key it had kept.
+    const file = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as typeof launcherConfig;
+    expect(file.node.name).toBe("Host");
+    expect(file.llm.onDevice).toMatchObject({ enabled: false, model: "gemma", modelPath: "/data/m.gguf" });
+
+    const second = await boot(dataDir);
+    expect((await onDevice(second, admin.cookie)).enabled).toBe(false);
+    await second.close();
+
+    // The launcher's model manager re-activates a model by rewriting config.json — that still wins.
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ ...file, llm: { onDevice: { ...file.llm.onDevice, enabled: true, model: "qwen" } } }));
+    const third = await boot(dataDir);
+    expect(await onDevice(third, admin.cookie)).toMatchObject({ enabled: true, model: "qwen" });
+  });
+
+  it("leaves config.json alone when it doesn't carry llm.onDevice (the DB row holds the edit)", async () => {
+    const dataDir = tempDataDir({ node: { name: "Pi" } });
+    const first = await boot(dataDir);
+    const admin = await newSession(first);
+    const before = readFileSync(join(dataDir, "config.json"), "utf8");
+    await first.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: { llm: { onDevice: { enabled: true } } },
+    });
+    await first.close();
+    expect(readFileSync(join(dataDir, "config.json"), "utf8")).toBe(before);
+
+    const second = await boot(dataDir);
+    expect((await onDevice(second, admin.cookie)).enabled).toBe(true);
   });
 });
