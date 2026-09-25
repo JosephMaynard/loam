@@ -330,10 +330,15 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   RAM (id + version, 1 h TTL, ≤20 000 per peer) so they aren't re-downloaded every round; the kill switch,
   every admin config save and a channel `archived`/`allowPosting`/`allowReplies` change forget them
   (`sync.forgetRefusedOffers()`), so the next round refetches.
+  Every import check (`vetPeerImport`) runs again right before commit, after the attachment awaits, so a
+  moderator removal/delete/archive/parent removal made mid-flight wins and the discarded import's files are
+  deleted; a batch imports only the ids it requested, under the list it requested them on.
   The sealed puller fetches every admissible sealed offer (soonest expiry first), never just its own
   tags, so a serving peer can't learn where a recipient lives; every sealed id it fetched or took in over
-  the radio bridge goes in the durable `sealed_offers_seen` table until the offer's TTL and is never fetched
-  again, whatever its outcome (only the kill switch clears it; ≤200 000 ids, then no new sealed pulls). With
+  the radio bridge goes in the durable `sealed_offers_seen` table (keyed by id, kept tombstone horizon + 7-day
+  TTL max + 2 days from intake, so it outlives any tombstone) and is skipped on **both** digest lists (with
+  tombstoned and `sealed.` ids), whatever its outcome (only the kill switch clears it; ≤200 000 ids,
+  ≤50 000 per source, then no new sealed pulls from that source). With
   relay off and no local mesh identity it pulls no sealed mail. `sync.token` never rides a plaintext pull
   (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that
   negotiated encryption this boot is never silently downgraded. Admin: `GET /api/admin/sync`,

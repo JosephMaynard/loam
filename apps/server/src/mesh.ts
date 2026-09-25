@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { type MeshIdentity, createMeshIdentity, currentEpoch, isCanonicalSealedBlob, mailboxTag, meshIdFromSignPublic, openMailbox, sealMailbox, verifyKxBinding } from "@loam/crypto";
 import { MESH_TTL_MAX_MS, type MeshIdentityCard, MeshIdentityCardSchema, MessageSchema, type SealedMessage, UserSchema } from "@loam/schema";
 import { makeUser } from "./identity.js";
+import { defaultTombstoneHorizonMs } from "./defaults.js";
 import { newMessageId } from "./ids.js";
 import type { Runtime } from "./runtime.js";
 
@@ -23,8 +24,8 @@ export function createMeshLayer(rt: Runtime) {
    * regardless of `mesh.enabled` so turning mesh off doesn't strand already-expired sealed rows. */
   function reapExpiredSealed(): void {
     const now = Date.now();
-    // Seen-offer marks past their offer's own TTL: such an offer is inadmissible anyway (expired), so
-    // forgetting it can't make the puller fetch it again.
+    // Seen-offer marks past their retention (`sealedSeenRetentionMs`, which outlives every tombstone the
+    // offer could have produced): from here on the id is fetchable again whatever became of it.
     rt.store.pruneSealedOffersSeen(now);
     const expired = rt.data.messages.filter(
       (message): message is SealedMessage => message.type === "sealed" && message.ttlExpiresAt <= now,
@@ -475,29 +476,58 @@ export function createMeshLayer(rt: Runtime) {
     return offer.ttlExpiresAt <= now + MESH_TTL_MAX_MS + MESH_EPOCH_WINDOW_MS;
   }
 
-  // Hard cap on the durable seen-offer record. At the cap the puller stops fetching NEW sealed offers (until
-  // entries expire) rather than evicting: an evicted mark would let a dropped offer be fetched again while
-  // a delivered one stays tombstoned — the very difference the record exists to hide.
+  // Bounds on the durable seen-offer record (docs/16 §9). At a bound the puller stops fetching NEW sealed offers
+  // rather than evicting marks: an evicted mark would let a dropped offer be fetched again while a delivered
+  // one stays tombstoned — the very difference the record exists to hide. Stopping is fail-closed (it treats
+  // every offer alike), but it is also a denial of service, and with marks now kept for ~39 days a single
+  // hostile peer advertising junk ids could otherwise switch sealed pulls off for everyone for that long. So
+  // each source (a sync peer URL, or the radio bridge) has its own quota: a peer that fills its quota stops
+  // only its own sealed pulls, and the global cap (four quotas' worth, ~20–60 MB of ids) is the backstop that
+  // bounds the table on disk. An honest peer holds at most `maxCarried` blobs at a time, so it reaches the
+  // quota only by offering ~1 300 distinct sealed messages a day for the whole retention window.
   const SEALED_SEEN_MAX = 200_000;
+  const SEALED_SEEN_MAX_PER_SOURCE = 50_000;
+  /** The seen-record `source` of blobs handed in over the loopback radio bridge (`/api/mesh/inbound`). */
+  const RADIO_SOURCE = "radio";
+
+  /**
+   * How long a seen mark lives, from the moment the offer was taken in (docs/16 §9). It must outlive EVERY
+   * tombstone the offer can leave behind, so that for its whole life the id is suppressed no matter what
+   * became of it, and afterwards nothing distinguishes the outcomes either: a delivery tombstones the id at
+   * delivery (lives `tombstoneHorizonMs`), and a carried copy is tombstoned when it expires — at most
+   * MESH_TTL_MAX_MS + one epoch after it was taken in — and that tombstone lives the horizon too. One more
+   * epoch of slack covers a slow round and the reaper's tick. Derived from when the node TOOK the offer in,
+   * never from its advertised `ttlExpiresAt`: a peer can re-advertise the same id with any TTL it likes.
+   */
+  function sealedSeenRetentionMs(): number {
+    return (rt.options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs) + MESH_TTL_MAX_MS + 2 * MESH_EPOCH_WINDOW_MS;
+  }
 
   /**
    * Remember that this node has fetched or received sealed offer `id` — delivered, carried or dropped alike
-   * — until the offer's own expiry (docs/16 §9). The puller never fetches a remembered id again, so a restart,
-   * a config save or a relay toggle changes nothing about WHICH offers it re-downloads: a peer diffing fetch
-   * sets across those events can't tell the recipient's node from a node that dropped the blob.
+   * — for {@link sealedSeenRetentionMs} from `seenAt` (docs/16 §9). The puller never fetches a remembered id
+   * again, on any digest list, so a restart, a config save, a relay toggle, a re-advertised TTL or listing the
+   * id among public messages changes nothing about WHICH offers it re-downloads: a peer diffing fetch sets
+   * can't tell the recipient's node from a node that dropped the blob. `seenAt` is the sync round's clock (one
+   * value for every offer in the round), so even the expiry instant can't reflect how long each offer took to
+   * process. A live mark is never extended.
    */
-  function rememberSealedOffer(id: string, ttlExpiresAt: number): void {
-    rt.store.markSealedOfferSeen(id, ttlExpiresAt);
+  function rememberSealedOffer(id: string, seenAt: number, source: string): void {
+    rt.store.markSealedOfferSeen(id, seenAt + sealedSeenRetentionMs(), source, Date.now());
   }
 
-  /** True when sealed offer `id` was already fetched or received here and hasn't expired. */
+  /** True when sealed offer `id` was already fetched or received here and its mark hasn't lapsed. */
   function isSealedOfferSeen(id: string, now: number): boolean {
     return rt.store.isSealedOfferSeen(id, now);
   }
 
-  /** True when the seen-offer record is full (see SEALED_SEEN_MAX): pull no new sealed offers this round. */
-  function sealedSeenAtCapacity(): boolean {
-    return rt.store.countSealedOffersSeen() >= SEALED_SEEN_MAX;
+  /** True when the seen-offer record can take no more marks from `source` (its quota) or from anyone (the
+   *  global cap): pull no new sealed offers from that source this round (see SEALED_SEEN_MAX). */
+  function sealedSeenAtCapacity(source: string, now: number): boolean {
+    return (
+      rt.store.countSealedOffersSeen(now) >= SEALED_SEEN_MAX ||
+      rt.store.countSealedOffersSeen(now, source) >= SEALED_SEEN_MAX_PER_SOURCE
+    );
   }
 
   /** Drop every in-memory secret-derived cache: identities, contacts and the tag memo (Emergency Reset lockdown). */
@@ -519,17 +549,21 @@ export function createMeshLayer(rt: Runtime) {
   }
 
   /** Handle a sealed message pulled from a peer: deliver locally, else relay onward (hop-decremented,
-   * bounded), else drop. Never broadcast to clients. Returns true when accepted (delivered or carried). */
-  function acceptSealedFromPeer(message: SealedMessage): boolean {
+   * bounded), else drop. Never broadcast to clients. Returns true when accepted (delivered or carried).
+   * `source` / `seenAt` stamp the seen-offer mark: the sync puller passes the peer URL and its round clock;
+   * the radio bridge takes the defaults. */
+  function acceptSealedFromPeer(message: SealedMessage, source: string = RADIO_SOURCE, seenAt: number = Date.now()): boolean {
     if (!rt.appConfig.mesh.enabled) {
       return false;
     }
-    if (!sealedOfferAdmissible(message, Date.now())) {
+    const now = Date.now();
+    if (!sealedOfferAdmissible(message, now)) {
       return false;
     }
     // Every admissible offer this node takes in is remembered, whatever happens to it below — so a later
     // sync offer of the same id is skipped the same way whether it was delivered, carried or dropped.
-    rememberSealedOffer(message.id, message.ttlExpiresAt);
+    const seenBefore = isSealedOfferSeen(message.id, now);
+    rememberSealedOffer(message.id, seenAt, source);
     // `sealMailbox` only ever emits the canonical spelling; any other string that decodes to the same
     // envelope is a carrier's attempt to slip one message past the string-keyed replay checks below.
     if (!isCanonicalSealedBlob(message.sealed)) {
@@ -556,6 +590,12 @@ export function createMeshLayer(rt: Runtime) {
         held.hopLimit = raised.hopLimit;
         return true;
       }
+      return false;
+    }
+    // An id taken in before and not held now was delivered (then it's tombstoned and refused above) or
+    // dropped. A dropped one stays dropped — taking it now (say relaying was switched on since) would make
+    // "carried" versus "refused" depend on whether it was delivered here the first time.
+    if (seenBefore) {
       return false;
     }
     if (tryDeliverSealed(message)) {

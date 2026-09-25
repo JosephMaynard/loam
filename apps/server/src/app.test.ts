@@ -6885,20 +6885,21 @@ describe("attachment + sync review hardening", () => {
     const app = await makeApp({ sync: { enabled: true, peers: [{ url: unreachablePeerUrl }] } });
     const admin = await newSession(app);
 
-    // A record referencing a REAL local message (so it survives the F2b/message-exists checks and
-    // reaches its first genuine `await` — `await stat(filePath)` on the still-missing file — instead of
-    // being dropped synchronously). That's what makes the first call still "in flight" (suspended, not
-    // yet past its `try`/`finally`) at the instant the second, overlapping call is fired.
+    // A record referencing a REAL local message that lists the attachment (so it survives the F2b and
+    // message-references-attachment checks and reaches its first genuine `await` — `await stat(filePath)`
+    // — instead of being dropped synchronously). That's what makes the first call still "in flight"
+    // (suspended, not yet past its `try`/`finally`) at the instant the second, overlapping call is fired.
+    const attachment = await uploadAttachment(app, admin.cookie);
     const posted = (await app.server.inject({
       method: "POST",
       url: "/api/messages",
       headers: { cookie: admin.cookie },
-      payload: { type: "channelPost", channelId: "general", body: "carries a missing attachment" },
+      payload: { type: "channelPost", channelId: "general", body: "carries a missing attachment", attachments: [attachment] },
     })).json() as { message: { id: string } };
 
     app.store.addMissingAttachment({
       messageId: posted.message.id,
-      attachmentId: "att_1",
+      attachmentId: attachment.id,
       mimeType: "image/png",
       peerUrl: unreachablePeerUrl,
     });

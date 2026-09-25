@@ -604,10 +604,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     return Buffer.from(result.data, "base64");
   }
 
-  /** Best-effort copy of an imported message's attachment files from the peer that has them. */
-  async function importPeerAttachments(peerUrl: string, message: Message, generation: number): Promise<void> {
+  /** Best-effort copy of an imported message's attachment files from the peer that has them. Returns the
+   *  attachments whose files THIS call wrote, so a caller that then discards the import can remove them. */
+  async function importPeerAttachments(peerUrl: string, message: Message, generation: number): Promise<MessageAttachment[]> {
+    const written: MessageAttachment[] = [];
     if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
-      return;
+      return written;
     }
 
     for (const attachment of message.attachments) {
@@ -626,7 +628,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // The fetch awaited: a kill switch meanwhile wiped the store, so a work item recorded now would land
         // a pre-wipe message id in the fresh post-wipe DB (review 2026-09-25 #9).
         if (rt.wipeGeneration !== generation) {
-          return;
+          return written;
         }
 
         if (!isAcceptableAttachmentBytes(bytes, attachment.mimeType)) {
@@ -641,11 +643,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // dir, so nothing may recreate it and write an orphaned file the wipe was meant to destroy — docs/15 #2.)
         await mkdir(rt.attachmentsDir, { recursive: true });
         await writeFile(filePath, bytes);
+        written.push(attachment);
 
         // ...and if the wipe landed *during* the write, remove the file we just orphaned.
         if (rt.wipeGeneration !== generation) {
           await rm(filePath, { force: true });
-          return;
+          return written;
         }
       } catch {
         // Best-effort at import time: the fetch genuinely failed (peer unreachable, attachment gone, or a
@@ -657,11 +660,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         // ...unless a kill switch landed while the fetch was in flight: then the store is the fresh post-wipe
         // one and this pre-wipe work item must not reach it (review 2026-09-25 #9).
         if (rt.wipeGeneration !== generation) {
-          return;
+          return written;
         }
         rt.store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
       }
     }
+    return written;
   }
 
   /**
@@ -737,9 +741,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           continue;
         }
 
-        // The message this attachment belonged to is gone locally (deleted/tombstoned/expired since) —
-        // nothing left to attach it to.
-        if (!rt.data.messages.some((message) => message.id === record.messageId)) {
+        // The message this attachment belonged to is gone locally (deleted/tombstoned/expired since), or no
+        // longer names it (a moderator removal blanks the attachments; a later edit may drop one) — nothing
+        // left to attach it to, and fetching it would put removed content back on disk.
+        if (!messageReferencesAttachment(record.messageId, record.attachmentId)) {
           rt.store.clearMissingAttachment(record.messageId, record.attachmentId);
           continue;
         }
@@ -772,6 +777,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
             return;
           }
 
+          // The fetch awaited: a moderator removal or delete meanwhile must win (review 2026-09-25 #3).
+          if (!messageReferencesAttachment(record.messageId, record.attachmentId)) {
+            rt.store.clearMissingAttachment(record.messageId, record.attachmentId);
+            continue;
+          }
+
           if (!isAcceptableAttachmentBytes(bytes, record.mimeType)) {
             rt.store.bumpMissingAttachmentAttempts(
               record.messageId,
@@ -787,6 +798,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           if (rt.wipeGeneration !== generation) {
             await rm(filePath, { force: true });
             return;
+          }
+
+          // ...and one that landed during the write leaves the file unreferenced: remove it again.
+          if (!isAttachmentReferenced(record.attachmentId)) {
+            await rm(filePath, { force: true });
           }
 
           rt.store.clearMissingAttachment(record.messageId, record.attachmentId);
@@ -902,12 +918,225 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     return false;
   }
 
+  /** True when message `messageId` exists here and still lists attachment `attachmentId`. */
+  function messageReferencesAttachment(messageId: string, attachmentId: string): boolean {
+    const message = rt.data.messages.find((candidate) => candidate.id === messageId);
+    return (
+      !!message &&
+      message.type !== "reaction" &&
+      message.type !== "sealed" &&
+      !!message.attachments?.some((attachment) => attachment.id === attachmentId)
+    );
+  }
+
+  /** What {@link vetPeerImport} decided about one public-arm peer message. */
+  type ImportVerdict = "import" | "refuse" | "defer";
+
+  /**
+   * Every check a public-arm peer message (post / reply / reaction) must pass to land here, against the node's
+   * CURRENT state. Synchronous on purpose: `importPeerMessages` runs it before the attachment work and again
+   * right before committing, after every await (review 2026-09-25 #3) — a moderator removal, a delete, an
+   * archive, a policy change or a parent removal that lands while attachments are in flight must win, and a
+   * moderator removal is an in-place edit that a reference-equality check alone can't see.
+   *
+   * "defer" means the reply parent / reaction target hasn't arrived YET but is still on offer this round.
+   */
+  function vetPeerImport(
+    message: Message,
+    existing: Message | undefined,
+    usersById: ReadonlyMap<string, User>,
+    pendingIds: ReadonlySet<string>,
+  ): ImportVerdict {
+    if (message.type === "dm" || message.type === "sealed" || message.meta?.streaming || rt.tombstones.has(message.id)) {
+      return "refuse";
+    }
+
+    // Ids are peer-chosen. One inside the mesh replay-key namespace would, once deleted or expired
+    // here, leave a tombstone that makes this node refuse a genuine sealed message.
+    if (mesh.isReservedReplayId(message.id)) {
+      return "refuse";
+    }
+
+    // Skip an over-cap imported body (docs/25 SW2) — a hostile peer amplification guard. Only the
+    // body-bearing public arms have a `body`; reactions are unaffected.
+    if (
+      (message.type === "channelPost" || message.type === "channelReply") &&
+      Buffer.byteLength(message.body, "utf8") > maxSyncImportBodyBytes
+    ) {
+      return "refuse";
+    }
+
+    // Never import content attributed to one of *our* admins/moderators/greeters — a compromised or
+    // hostile peer could otherwise inject a message that renders as authored by this node's admin
+    // (local ids are discoverable; they're exported as message authorIds in the sync digest).
+    if (rt.isLocallyAuthoritative(message.authorId)) {
+      return "refuse";
+    }
+
+    // A public message may not claim a reserved author (a `mesh.*` sender record or an `llm.*` bot) or a
+    // non-human one — it would render as that identity here (review 2026-09-25 #8).
+    if (!isAcceptablePeerAuthor(message.authorId, usersById)) {
+      return "refuse";
+    }
+
+    // Node-wide feature flags govern what content may EXIST on this node, not just what local users may
+    // create (review 2026-09-04): a node that has switched channel posting, replies, or reactions off
+    // must not acquire that content from a peer either — `createMessage` refuses the same three.
+    if (
+      ((message.type === "channelPost" || message.type === "channelReply") && !rt.appConfig.features.enablePublicChannels) ||
+      (message.type === "channelReply" && !rt.appConfig.features.enableReplies) ||
+      (message.type === "reaction" && !rt.appConfig.features.enableReactions)
+    ) {
+      return "refuse";
+    }
+
+    // An import may only EDIT the record it names, never turn it into a different one: the checks
+    // below vet the INCOMING message, so without this a peer that knows a private message's id could
+    // re-offer it as a public arm — reclassifying a DM into the public export (leaking its body via
+    // `Object.assign`-preserved fields, and its attachments via the download gate). Checked BEFORE any
+    // attachment fetch, so a refused import can't write bytes or queue retry work under a local id.
+    // ...and only a record this node itself IMPORTED. Sync is unsigned and the export hands a peer every
+    // field the identity check compares, so without provenance any configured peer could rewrite a
+    // message a LOCAL user wrote. (Messages imported before this mark existed are unmarked, so their
+    // later peer edits are ignored — fail closed.) An edit must also be strictly newer — decided before any
+    // attachment is fetched, so a stale version can't write files it will never reference.
+    if (
+      existing &&
+      (!isSameMessageIdentity(existing, message) ||
+        !isPeerEditable(existing) ||
+        (message.editedAt ?? 0) <= (existing.editedAt ?? 0))
+    ) {
+      return "refuse";
+    }
+
+    if (message.type === "reaction") {
+      const target = rt.data.messages.find((candidate) => candidate.id === message.targetMessageId);
+
+      // The reaction's target must exist locally and be public-audience (no DM/private targets). A target
+      // still on offer this round may simply not have landed yet — retry next round, don't remember it.
+      if (!target) {
+        return pendingIds.has(message.targetMessageId) && !rt.tombstones.has(message.targetMessageId) ? "defer" : "refuse";
+      }
+      if (rt.messageAudienceUserIds(message) !== undefined) {
+        return "refuse";
+      }
+      // Like `createMessage`: no NEW reactions on a moderator-removed message (local moderation is sticky).
+      if (!existing && target.meta?.removedByModerator) {
+        return "refuse";
+      }
+
+      // ...and its channel must still accept new content here — `createMessage` refuses a reaction in an
+      // archived channel, so an import must too (round-2 review): a peer that hasn't archived the channel
+      // must not keep landing reactions into one this node has.
+      if (target.type === "channelPost" || target.type === "channelReply") {
+        const targetChannel = rt.ensureChannel(target.channelId);
+
+        if (!targetChannel || targetChannel.archived) {
+          return "refuse";
+        }
+      }
+      return "import";
+    }
+
+    const channel = rt.ensureChannel(message.channelId);
+
+    if (!channel || channel.visibility !== "public" || channel.archived) {
+      return "refuse";
+    }
+
+    // The channel's posting policy (owner-only / admins-only / replies off) applies to imports too —
+    // otherwise a peer could land posts in a read-only announcements channel under any ordinary author
+    // id, bypassing the lockdown (review 2026-09-04) — including a PEER-ORIGIN channel, whose policy
+    // the peer's metadata merge or a local admin may have tightened since. The one rule that can't be
+    // evaluated for a peer-origin channel is `owner`: imports strip `ownerUserId` (a peer must never
+    // name a local authority), so for those the origin's owner check is trusted and only the
+    // evaluable rules (archived, replies off) apply here (round-2 review).
+    const isReply = message.type === "channelReply";
+    const ownerRuleUnavailable = rt.syncedChannelIds.has(channel.id) && channel.allowPosting === "owner";
+    if (ownerRuleUnavailable) {
+      if (channel.archived || (isReply && !channel.allowReplies)) {
+        return "refuse";
+      }
+    } else if (rt.channelPostingError(channel, message.authorId, isReply) !== undefined) {
+      return "refuse";
+    }
+
+    // A reply needs a valid local parent in the same channel (posts sort first, so a parent
+    // in the same batch already landed). A parent we tombstoned or never had stays deleted —
+    // and takes its replies with it, matching the local cascade semantics. (The refused reply is
+    // remembered per peer by the caller rather than tombstoned: a tombstone is node-wide and durable,
+    // and a peer choosing the reply's id could use one to pre-block a genuine id arriving elsewhere.)
+    // A parent still on offer this round may just be in a later batch — retry next round instead.
+    if (message.type === "channelReply") {
+      const parent = rt.data.messages.find((candidate) => candidate.id === message.parentMessageId);
+
+      if (!parent) {
+        return pendingIds.has(message.parentMessageId) && !rt.tombstones.has(message.parentMessageId) ? "defer" : "refuse";
+      }
+      if (parent.type !== "channelPost" || parent.channelId !== message.channelId) {
+        return "refuse";
+      }
+      // Like `createMessage`: a moderator-removed post takes no NEW replies from a peer either.
+      if (!existing && parent.meta?.removedByModerator) {
+        return "refuse";
+      }
+    }
+
+    return "import";
+  }
+
+  /** True when a live message, or a pending local upload, references attachment `id`. */
+  function isAttachmentReferenced(id: string): boolean {
+    if (rt.attachmentOwners.has(id)) {
+      return true;
+    }
+    return rt.data.messages.some(
+      (candidate) =>
+        candidate.type !== "reaction" &&
+        candidate.type !== "sealed" &&
+        !!candidate.attachments?.some((attachment) => attachment.id === id),
+    );
+  }
+
+  /**
+   * Undo what a DISCARDED import left behind (review 2026-09-25 #3): delete each attachment file it wrote that
+   * no live message (and no pending upload) references, and drop the retry work it queued for attachments the
+   * record now holding its id doesn't reference — so refused content, a moderator-removed attachment above
+   * all, is neither kept on disk nor fetched back later by `retryMissingAttachments`.
+   */
+  async function discardImportedAttachments(message: Message, written: readonly MessageAttachment[]): Promise<void> {
+    if (message.type === "reaction" || message.type === "sealed") {
+      return;
+    }
+    const live = rt.data.messages.find((candidate) => candidate.id === message.id);
+    const keep = new Set(
+      live && live.type !== "reaction" && live.type !== "sealed" ? (live.attachments ?? []).map((attachment) => attachment.id) : [],
+    );
+    for (const attachment of message.attachments ?? []) {
+      if (!keep.has(attachment.id)) {
+        rt.store.clearMissingAttachment(message.id, attachment.id);
+      }
+    }
+    // Decided synchronously for every file before the first delete is issued, so nothing interleaves.
+    const doomed = written.filter((attachment) => !isAttachmentReferenced(attachment.id));
+    await Promise.all(doomed.map((attachment) => rm(join(rt.attachmentsDir, attachmentFileName(attachment)), { force: true })));
+  }
+
   /**
    * Import a batch of peer messages: posts before replies before reactions (so parents/targets
    * land first), never into private/unknown channels (a malicious peer must not inject into a
    * local private channel id), never over a tombstone, and edits only when strictly newer — and only of
    * the same message (see {@link isSameMessageIdentity}). The author record of each ACCEPTED message is
    * imported from `users` just before it lands (never the rest of the payload's users).
+   *
+   * Only records this batch ASKED for are considered, and only under the list they were asked for on: a
+   * sealed record answering a public request (or the reverse), or one nobody requested, is ignored. The
+   * digest selection is what keeps tombstones and the sealed-offer history from telling a peer anything
+   * (docs/16 §9); records pushed unasked would route around it.
+   *
+   * Every public-arm check ({@link vetPeerImport}) runs twice: before the attachment fetches, and again at
+   * commit, after the last await — so a moderator removal, delete or policy change that landed meanwhile
+   * wins, and whatever the discarded import wrote is removed ({@link discardImportedAttachments}).
    *
    * Returns the number imported plus the ids refused only because their reply parent / reaction target
    * hasn't arrived YET but is still on offer this round (`pendingIds`) — the caller must not remember those
@@ -919,6 +1148,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     users: User[],
     generation: number,
     pendingIds: ReadonlySet<string>,
+    batch: { ids: ReadonlySet<string>; kind: "public" | "sealed"; seenAt: number },
   ): Promise<{ imported: number; deferred: Set<string> }> {
     const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
     const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
@@ -927,151 +1157,32 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     let imported = 0;
 
     for (const message of sorted) {
-      if (message.type === "dm" || message.meta?.streaming || rt.tombstones.has(message.id)) {
-        continue;
-      }
-
-      // Ids are peer-chosen. One inside the mesh replay-key namespace would, once deleted or expired
-      // here, leave a tombstone that makes this node refuse a genuine sealed message.
-      if (mesh.isReservedReplayId(message.id)) {
-        continue;
-      }
-
-      // Skip an over-cap imported body (docs/25 SW2) — a hostile peer amplification guard. Only the
-      // body-bearing public arms have a `body`; reactions/sealed are unaffected.
-      if (
-        (message.type === "channelPost" || message.type === "channelReply") &&
-        Buffer.byteLength(message.body, "utf8") > maxSyncImportBodyBytes
-      ) {
-        continue;
-      }
-
-      // Never import content attributed to one of *our* admins/moderators/greeters — a compromised or
-      // hostile peer could otherwise inject a message that renders as authored by this node's admin
-      // (local ids are discoverable; they're exported as message authorIds in the sync digest).
-      if (rt.isLocallyAuthoritative(message.authorId)) {
+      if (!batch.ids.has(message.id) || (message.type === "sealed") !== (batch.kind === "sealed")) {
         continue;
       }
 
       // Sealed mailbox mail (opportunistic-mesh, docs/16) is handled entirely apart from the public
       // flow: it's never broadcast to clients — it's decrypted-and-delivered to a local recipient, or
       // relayed onward (hop-decremented, bounded), or dropped. Never falls through to store+broadcast.
+      // (`acceptSealedFromPeer` applies the tombstone / reserved-id / expiry checks itself.)
       if (message.type === "sealed") {
-        if (mesh.acceptSealedFromPeer(message)) {
+        if (mesh.acceptSealedFromPeer(message, peerUrl, batch.seenAt)) {
           imported += 1;
         }
         continue;
       }
 
-      // A public message may not claim a reserved author (a `mesh.*` sender record or an `llm.*` bot) or a
-      // non-human one — it would render as that identity here (review 2026-09-25 #8).
-      if (!isAcceptablePeerAuthor(message.authorId, usersById)) {
-        continue;
-      }
-
-      // Node-wide feature flags govern what content may EXIST on this node, not just what local users may
-      // create (review 2026-09-04): a node that has switched channel posting, replies, or reactions off
-      // must not acquire that content from a peer either — `createMessage` refuses the same three.
-      if (
-        ((message.type === "channelPost" || message.type === "channelReply") && !rt.appConfig.features.enablePublicChannels) ||
-        (message.type === "channelReply" && !rt.appConfig.features.enableReplies) ||
-        (message.type === "reaction" && !rt.appConfig.features.enableReactions)
-      ) {
-        continue;
-      }
-
-      // An import may only EDIT the record it names, never turn it into a different one: the checks
-      // below vet the INCOMING message, so without this a peer that knows a private message's id could
-      // re-offer it as a public arm — reclassifying a DM into the public export (leaking its body via
-      // `Object.assign`-preserved fields, and its attachments via the download gate). Checked BEFORE any
-      // attachment fetch, so a refused import can't write bytes or queue retry work under a local id.
       const existing = rt.data.messages.find((candidate) => candidate.id === message.id);
-
-      // ...and only a record this node itself IMPORTED. Sync is unsigned and the export hands a peer every
-      // field the identity check compares, so without provenance any configured peer could rewrite a
-      // message a LOCAL user wrote. (Messages imported before this mark existed are unmarked, so their
-      // later peer edits are ignored — fail closed.)
-      if (existing && (!isSameMessageIdentity(existing, message) || !isPeerEditable(existing))) {
+      const verdict = vetPeerImport(message, existing, usersById, pendingIds);
+      if (verdict !== "import") {
+        if (verdict === "defer") {
+          deferred.add(message.id);
+        }
         continue;
       }
 
-      if (message.type === "reaction") {
-        const target = rt.data.messages.find((candidate) => candidate.id === message.targetMessageId);
-
-        // The reaction's target must exist locally and be public-audience (no DM/private targets). A target
-        // still on offer this round may simply not have landed yet — retry next round, don't remember it.
-        if (!target) {
-          if (pendingIds.has(message.targetMessageId) && !rt.tombstones.has(message.targetMessageId)) {
-            deferred.add(message.id);
-          }
-          continue;
-        }
-        if (rt.messageAudienceUserIds(message) !== undefined) {
-          continue;
-        }
-        // Like `createMessage`: no NEW reactions on a moderator-removed message (local moderation is sticky).
-        if (!existing && target.meta?.removedByModerator) {
-          continue;
-        }
-
-        // ...and its channel must still accept new content here — `createMessage` refuses a reaction in an
-        // archived channel, so an import must too (round-2 review): a peer that hasn't archived the channel
-        // must not keep landing reactions into one this node has.
-        if (target.type === "channelPost" || target.type === "channelReply") {
-          const targetChannel = rt.ensureChannel(target.channelId);
-
-          if (!targetChannel || targetChannel.archived) {
-            continue;
-          }
-        }
-      } else {
-        const channel = rt.ensureChannel(message.channelId);
-
-        if (!channel || channel.visibility !== "public" || channel.archived) {
-          continue;
-        }
-
-        // The channel's posting policy (owner-only / admins-only / replies off) applies to imports too —
-        // otherwise a peer could land posts in a read-only announcements channel under any ordinary author
-        // id, bypassing the lockdown (review 2026-09-04) — including a PEER-ORIGIN channel, whose policy
-        // the peer's metadata merge or a local admin may have tightened since. The one rule that can't be
-        // evaluated for a peer-origin channel is `owner`: imports strip `ownerUserId` (a peer must never
-        // name a local authority), so for those the origin's owner check is trusted and only the
-        // evaluable rules (archived, replies off) apply here (round-2 review).
-        const isReply = message.type === "channelReply";
-        const ownerRuleUnavailable = rt.syncedChannelIds.has(channel.id) && channel.allowPosting === "owner";
-        if (ownerRuleUnavailable) {
-          if (channel.archived || (isReply && !channel.allowReplies)) {
-            continue;
-          }
-        } else if (rt.channelPostingError(channel, message.authorId, isReply) !== undefined) {
-          continue;
-        }
-
-        // A reply needs a valid local parent in the same channel (posts sort first, so a parent
-        // in the same batch already landed). A parent we tombstoned or never had stays deleted —
-        // and takes its replies with it, matching the local cascade semantics. (The refused reply is
-        // remembered per peer by the caller rather than tombstoned: a tombstone is node-wide and durable,
-        // and a peer choosing the reply's id could use one to pre-block a genuine id arriving elsewhere.)
-        // A parent still on offer this round may just be in a later batch — retry next round instead.
-        if (message.type === "channelReply") {
-          const parent = rt.data.messages.find((candidate) => candidate.id === message.parentMessageId);
-
-          if (!parent) {
-            if (pendingIds.has(message.parentMessageId) && !rt.tombstones.has(message.parentMessageId)) {
-              deferred.add(message.id);
-            }
-            continue;
-          }
-          if (parent.type !== "channelPost" || parent.channelId !== message.channelId) {
-            continue;
-          }
-          // Like `createMessage`: a moderator-removed post takes no NEW replies from a peer either.
-          if (!existing && parent.meta?.removedByModerator) {
-            continue;
-          }
-        }
-
+      let written: MessageAttachment[] = [];
+      if (message.type !== "reaction") {
         // An attachment id belongs to exactly one message (uploads are consumed on first use). A peer
         // message naming an id that a DIFFERENT local message — or a still-pending local upload — already
         // owns would alias that file: the download gate resolves a file to its owning message, so a public
@@ -1085,7 +1196,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           return { imported, deferred };
         }
 
-        await importPeerAttachments(peerUrl, message, generation);
+        written = await importPeerAttachments(peerUrl, message, generation);
         // A kill switch during the attachment fetch just wiped the store — stop before we insert
         // this (and any later) message back onto it (docs/15 #2).
         if (rt.wipeGeneration !== generation) {
@@ -1093,33 +1204,37 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         }
       }
 
-      // The attachment work above awaited: if the record was deleted (or appeared) locally meanwhile,
-      // drop this import rather than update a detached object and broadcast a deleted message back.
-      if (rt.data.messages.find((candidate) => candidate.id === message.id) !== existing) {
-        continue;
-      }
-
-      if (existing) {
-        if ((message.editedAt ?? 0) > (existing.editedAt ?? 0)) {
-          importPeerAuthor(message.authorId, usersById);
-          const updated = MessageSchema.parse(message);
-          rt.store.updateMessage(updated);
-          // Mirror the row exactly: drop optional fields the edit removed (e.g. `attachments`) before
-          // merging, or the in-memory record keeps what the database no longer has until a restart.
-          for (const key of Object.keys(existing)) {
-            if (!(key in updated)) {
-              delete (existing as Record<string, unknown>)[key];
-            }
-          }
-          Object.assign(existing, updated);
-          rt.broadcast({ type: "messageUpdated", message: existing });
-          imported += 1;
+      // The work above awaited. Decide again on the state as it is NOW: the record may have been deleted (or
+      // appeared) locally or — an in-place edit that reference equality can't see — removed by a moderator;
+      // its parent may be gone; the channel may have been archived or locked. Any of those discards the
+      // import (the caller then remembers it as refused) together with the files it wrote.
+      const current = rt.data.messages.find((candidate) => candidate.id === message.id);
+      if (current !== existing || vetPeerImport(message, existing, usersById, pendingIds) !== "import") {
+        await discardImportedAttachments(message, written);
+        if (rt.wipeGeneration !== generation) {
+          return { imported, deferred };
         }
-
         continue;
       }
 
       importPeerAuthor(message.authorId, usersById);
+
+      if (existing) {
+        const updated = MessageSchema.parse(message);
+        rt.store.updateMessage(updated);
+        // Mirror the row exactly: drop optional fields the edit removed (e.g. `attachments`) before
+        // merging, or the in-memory record keeps what the database no longer has until a restart.
+        for (const key of Object.keys(existing)) {
+          if (!(key in updated)) {
+            delete (existing as Record<string, unknown>)[key];
+          }
+        }
+        Object.assign(existing, updated);
+        rt.broadcast({ type: "messageUpdated", message: existing });
+        imported += 1;
+        continue;
+      }
+
       rt.store.transaction(() => {
         rt.store.insertMessage(message);
         rt.store.markMessageSynced(message.id);
@@ -1164,6 +1279,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
           // …nor claim a quarantined id: that stored row (possibly a private channel) is still on disk
           // with its messages, which a same-id public import would expose.
           if (rt.tombstones.has(channel.id) || rt.quarantine.channels.has(channel.id) || mesh.isReservedReplayId(channel.id)) {
+            continue;
+          }
+          // Nor may a sealed offer id: a delivered one is tombstoned, a dropped one only in the seen-offer
+          // record, so importing it would show up in this node's own digest for dropped ids only (docs/16 §9).
+          if (mesh.isSealedOfferSeen(channel.id, Date.now())) {
             continue;
           }
 
@@ -1235,14 +1355,24 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       const now = Date.now();
       const localById = new Map(rt.data.messages.map((message) => [message.id, message]));
       // What each requested id was asked for, so a batch can tell afterwards which offers it REFUSED.
-      const offers = new Map<string, { kind: "public"; editedAt?: number } | { kind: "sealed"; ttlExpiresAt: number; hopLimit: number }>();
+      const offers = new Map<string, { kind: "public"; editedAt?: number } | { kind: "sealed" }>();
 
       const publicWanted: string[] = [];
       for (const entry of digest.messages) {
         if (publicWanted.length >= MAX_PUBLIC_IDS_PER_ROUND) {
           break;
         }
-        if (rt.tombstones.has(entry.id) || isRefusedOffer(peer.url, publicOfferKey(entry.id, entry.editedAt), now)) {
+        // Skipped exactly like on the sealed list (review 2026-09-25 #2): an id in the seen-offer record, and
+        // any id in the replay-key namespace. A sealed offer this node delivered is tombstoned while one it
+        // dropped is only in the seen record, so a peer re-listing sealed ids (or their `sealed.<hash>` replay
+        // keys, which anyone holding the blob can compute) among PUBLIC messages would otherwise get back a
+        // request for exactly the dropped ones.
+        if (
+          rt.tombstones.has(entry.id) ||
+          mesh.isReservedReplayId(entry.id) ||
+          mesh.isSealedOfferSeen(entry.id, now) ||
+          isRefusedOffer(peer.url, publicOfferKey(entry.id, entry.editedAt), now)
+        ) {
           continue;
         }
 
@@ -1267,12 +1397,14 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // downloads each blob its peer carries once, like a relay would.
       //
       // "Once" must hold for every outcome alike (review 2026-09-25 follow-up). Every sealed id this node has
-      // fetched or received is in the durable, node-wide seen-offer record until the offer's own TTL, and is
-      // never fetched again — delivered, carried or dropped. (Delivered ids used to be skipped for good via
-      // their tombstone while dropped ones sat in a RAM cache that a restart, any admin config save or a relay
-      // toggle cleared; the next round then re-fetched exactly the foreign blobs, and a peer diffing the two
-      // fetch sets learned which blobs were delivered here.) A node that later starts relaying therefore
-      // doesn't go back for blobs it dropped earlier; other carriers still can.
+      // fetched or received is in the durable, node-wide seen-offer record and is never fetched again, on
+      // either digest list — delivered, carried or dropped. The record is keyed by id alone and outlives
+      // every tombstone the offer can leave (`mesh.rememberSealedOffer`), so neither a re-advertised TTL nor
+      // time passing can make a dropped id fetchable while a delivered one is still tombstoned (#2). (Delivered
+      // ids used to be skipped for good via their tombstone while dropped ones sat in a RAM cache that a
+      // restart, any admin config save or a relay toggle cleared; the next round then re-fetched exactly the
+      // foreign blobs, and a peer diffing the two fetch sets learned which blobs were delivered here.) A node
+      // that later starts relaying therefore doesn't go back for blobs it dropped earlier; other carriers can.
       //
       // Skipped entirely when there is nothing to do with a blob: relaying is off and no local user holds a
       // mesh identity (nothing to deliver, nothing to carry). That decision doesn't look at tags either.
@@ -1284,8 +1416,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         sealedBudget > 0 &&
         (rt.appConfig.mesh.relay || mesh.meshIdentities.size > 0)
       ) {
-        if (mesh.sealedSeenAtCapacity()) {
-          rt.log.warn("Sync: the sealed seen-offer record is full; pulling no new sealed mail until entries expire");
+        if (mesh.sealedSeenAtCapacity(peer.url, now)) {
+          rt.log.warn(`Sync: the sealed seen-offer record is full for peer ${peer.url}; pulling no new sealed mail from it until entries expire`);
         } else {
           const candidates = digest.sealed
             .filter(
@@ -1299,7 +1431,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
             .slice(0, sealedBudget);
           for (const entry of candidates) {
             sealedWanted.push(entry.id);
-            offers.set(entry.id, { kind: "sealed", ttlExpiresAt: entry.ttlExpiresAt, hopLimit: entry.hopLimit });
+            offers.set(entry.id, { kind: "sealed" });
           }
         }
       }
@@ -1318,7 +1450,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
             continue;
           }
           if (offer.kind === "sealed") {
-            mesh.rememberSealedOffer(id, offer.ttlExpiresAt);
+            // Stamped with the round's clock, like the marks `acceptSealedFromPeer` made during the import.
+            mesh.rememberSealedOffer(id, now, peer.url);
             continue;
           }
           if (deferred.has(id) || rt.tombstones.has(id)) {
@@ -1388,7 +1521,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (rt.wipeGeneration !== generation) {
           return "wiped";
         }
-        const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds);
+        const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds, {
+          ids: new Set(ids),
+          kind,
+          seenAt: now,
+        });
         if (rt.wipeGeneration !== generation) {
           return "wiped";
         }

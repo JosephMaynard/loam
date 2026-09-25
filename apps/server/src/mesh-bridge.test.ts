@@ -201,6 +201,14 @@ describe("opportunistic mesh: transport bridge", () => {
       const inbound = await nodeB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages } });
       expect((inbound.json() as { accepted: number }).accepted).toBe(0); // not ours, not relaying: dropped
       expect(nodeB.store.isSealedOfferSeen(messages[0]!.id, Date.now())).toBe(true);
+
+      // Handed the same blob again once relaying is on (after a restart), it stays dropped (review 2026-09-25
+      // #2): carrying it now would make "carried" vs "refused" depend on whether the first copy was delivered.
+      writeFileSync(join(nodeB.dataDir, "config.json"), JSON.stringify({ mesh: MESH }));
+      const relayB = await reopenApp(nodeB.app, nodeB.dataDir);
+      const again = await relayB.server.inject({ method: "POST", url: "/api/mesh/inbound", payload: { messages } });
+      expect((again.json() as { accepted: number }).accepted).toBe(0);
+      expect(relayB.store.loadMessages().some((message) => message.type === "sealed")).toBe(false);
     });
 
     it("refuses the same ciphertext replayed under a new outer id — on the recipient and on a relay", async () => {

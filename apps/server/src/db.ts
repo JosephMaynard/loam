@@ -326,15 +326,18 @@ export interface LoamStore {
   isUserBlocked(blockerId: string, blockedId: string): boolean;
   /**
    * Durable memory of sealed mesh offers this node already fetched or received, whatever became of them
-   * (delivered, carried or dropped — docs/16). The sync puller never fetches a remembered id again until
-   * `expiresAt` (the offer's own `ttlExpiresAt`), so a restart or config change can't make it refetch the
-   * dropped ones while the delivered ones stay tombstoned — a difference the serving peer could read. The
-   * later expiry wins on a repeat mark. Wiped by the kill switch; expired rows are pruned by the mesh reaper.
+   * (delivered, carried or dropped — docs/16 §9). Keyed by offer id ONLY: the sync puller skips a remembered
+   * id on EVERY digest list until `expiresAt`, which the caller derives from when the offer was taken in
+   * (never from the offer's advertised TTL, which a peer can rewrite), set so the record outlives any
+   * tombstone the offer could have produced. A repeat mark never extends a live row (like a tombstone, it
+   * keeps its first stamp) and only re-arms one already past its expiry. `source` (the sync peer URL, or the
+   * radio bridge) feeds the per-source quota. Wiped by the kill switch; expired rows are pruned by the reaper.
    */
-  markSealedOfferSeen(offerId: string, expiresAt: number): void;
+  markSealedOfferSeen(offerId: string, expiresAt: number, source: string, nowMs: number): void;
   isSealedOfferSeen(offerId: string, nowMs: number): boolean;
   pruneSealedOffersSeen(nowMs: number): void;
-  countSealedOffersSeen(): number;
+  /** Live (unexpired) rows — all of them, or only those taken in from `source`. */
+  countSealedOffersSeen(nowMs?: number, source?: string): number;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -668,18 +671,25 @@ function migrateMissingAttachmentsNextAttempt(db: SqliteConnection): void {
 }
 
 /**
- * The durable record of sealed mesh offers this node has already fetched or received (docs/16, review
- * 2026-09-25 follow-up): offer id → the offer's own `ttlExpiresAt`. Kept apart from the main schema block
- * because it's owned by the mesh pull policy, not the core data model.
+ * The durable record of sealed mesh offers this node has already fetched or received (docs/16 §9): offer
+ * id → when the record lapses, plus the source it came from (for the per-source quota). Kept apart from the
+ * main schema block because it's owned by the mesh pull policy, not the core data model. `source` was added
+ * after the table first landed (pre-release), so an older table gains it here.
  */
 function createSealedOffersSeenTable(db: SqliteConnection): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sealed_offers_seen (
       offer_id TEXT PRIMARY KEY,
-      expires_at INTEGER NOT NULL
+      expires_at INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_sealed_offers_seen_expiry ON sealed_offers_seen (expires_at);
   `);
+  const columns = db.prepare("PRAGMA table_info(sealed_offers_seen)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "source")) {
+    db.exec("ALTER TABLE sealed_offers_seen ADD COLUMN source TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sealed_offers_seen_source ON sealed_offers_seen (source, expires_at)");
 }
 
 /**
@@ -891,13 +901,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   );
   const isUserBlockedStmt = db.prepare("SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?");
   const deleteUserBlocksForUserStmt = db.prepare("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?");
+  // A live row keeps its first stamp (as `addTombstone` does); only a lapsed one is re-armed.
   const markSealedOfferSeenStmt = db.prepare(
-    `INSERT INTO sealed_offers_seen (offer_id, expires_at) VALUES (?, ?)
-     ON CONFLICT(offer_id) DO UPDATE SET expires_at = MAX(expires_at, excluded.expires_at)`,
+    `INSERT INTO sealed_offers_seen (offer_id, expires_at, source) VALUES (?, ?, ?)
+     ON CONFLICT(offer_id) DO UPDATE SET expires_at = excluded.expires_at, source = excluded.source
+     WHERE sealed_offers_seen.expires_at <= ?`,
   );
   const isSealedOfferSeenStmt = db.prepare("SELECT 1 FROM sealed_offers_seen WHERE offer_id = ? AND expires_at > ?");
   const pruneSealedOffersSeenStmt = db.prepare("DELETE FROM sealed_offers_seen WHERE expires_at <= ?");
-  const countSealedOffersSeenStmt = db.prepare("SELECT COUNT(*) AS total FROM sealed_offers_seen");
+  const countSealedOffersSeenStmt = db.prepare("SELECT COUNT(*) AS total FROM sealed_offers_seen WHERE expires_at > ?");
+  const countSealedOffersSeenBySourceStmt = db.prepare(
+    "SELECT COUNT(*) AS total FROM sealed_offers_seen WHERE source = ? AND expires_at > ?",
+  );
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -1198,8 +1213,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     isUserBlocked(blockerId, blockedId) {
       return isUserBlockedStmt.get(blockerId, blockedId) !== undefined;
     },
-    markSealedOfferSeen(offerId, expiresAt) {
-      markSealedOfferSeenStmt.run(offerId, expiresAt);
+    markSealedOfferSeen(offerId, expiresAt, source, nowMs) {
+      markSealedOfferSeenStmt.run(offerId, expiresAt, source, nowMs);
     },
     isSealedOfferSeen(offerId, nowMs) {
       return isSealedOfferSeenStmt.get(offerId, nowMs) !== undefined;
@@ -1207,8 +1222,11 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     pruneSealedOffersSeen(nowMs) {
       pruneSealedOffersSeenStmt.run(nowMs);
     },
-    countSealedOffersSeen() {
-      return Number((countSealedOffersSeenStmt.get() as { total: number } | undefined)?.total ?? 0);
+    countSealedOffersSeen(nowMs = 0, source) {
+      const row = (source === undefined
+        ? countSealedOffersSeenStmt.get(nowMs)
+        : countSealedOffersSeenBySourceStmt.get(source, nowMs)) as { total: number } | undefined;
+      return Number(row?.total ?? 0);
     },
     wipeAll() {
       store.transaction(() => {

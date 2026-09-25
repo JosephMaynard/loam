@@ -42,7 +42,17 @@ it names an attachment id whose file is already on disk (under any extension) an
 doesn't reference. **Local moderation is sticky:** a message a moderator removed no longer takes peer edits
 (the removal is an in-place edit the origin's next edit would otherwise win against) and takes no new
 peer replies or reactions (as `createMessage` refuses them locally), and un-editable
-records aren't even requested from the digest. A peer's mesh key is only ever adopted onto a user record a
+records aren't even requested from the digest. **Every check runs twice** (`vetPeerImport`): before the
+attachment downloads and again right before the record is committed, after the last await (review
+2026-09-25 #3). A removal is an in-place edit, so the old "is it still the same object" test passed after
+one; now a moderator removal, delete or tombstone, provenance change, parent removal, archive, posting-policy
+or feature-flag change made while attachments were downloading discards the import, and the attachment files
+that import wrote (unless a live message or pending upload references them) and its retry work items are
+deleted with it. The missing-attachment retry likewise drops a work item whose message no longer lists the
+attachment (a removal blanks the list), checks again after the fetch, and deletes a file that lost its last
+reference during the write. A batch imports **only the records it asked for, and only under the digest list
+it asked for them on**: a sealed record answering a public request (or the reverse), or a record nobody
+requested, is ignored. A peer's mesh key is only ever adopted onto a user record a
 sync import created (`synced_users`), never one of this node's own users. An imported message body over **256KB** is skipped (`maxSyncImportBodyBytes`): the stored
 body schema is deliberately uncapped so long *local* LLM replies round-trip, but a hostile peer must not be
 able to amplify ~8MB bodies onto a syncing node (docs/25 SW2). Message ids are globally unique, so gossip is
@@ -67,7 +77,8 @@ didn't end up holding (a reply to a deleted post, a post into an archived channe
 keyed by id + version, so it isn't re-downloaded every round. The memory is RAM-only, bounded (**20 000**
 entries per peer, oldest evicted), and expires (**1 h**). Sealed offers are handled differently: every
 sealed id this node fetched or received, whatever became of it, goes into a durable node-wide record
-(`sealed_offers_seen`) until the offer's own TTL and is never fetched again (docs/16 §9). A reply/reaction whose
+(`sealed_offers_seen`) that outlives every tombstone the offer could leave, and is never fetched again from
+either digest list, nor imported as a channel (docs/16 §9). A reply/reaction whose
 parent/target is still on offer this round is deferred, not remembered. Refused replies are cached, not
 tombstoned: a tombstone is node-wide and durable, and the id is peer-chosen. The kill switch clears it; a
 restart re-fetches each refused public offer once. A change to the local policy that decided a refusal also

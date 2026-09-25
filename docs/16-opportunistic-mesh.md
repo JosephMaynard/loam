@@ -148,17 +148,43 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    `mesh.maxSealedPullPerRound` (default 80) per round. A node with relaying off and no local mesh identity
    pulls no sealed mail at all: it has nothing to deliver or carry, and the decision ignores tags.
    **"Once" holds for every outcome alike.** Every sealed id the node fetches over sync or takes in over
-   the radio bridge goes into a durable, node-wide record (`sealed_offers_seen`, until the offer's own
-   `ttlExpiresAt`), whether it was delivered, carried or dropped, and is never fetched again. Before this,
-   delivered ids were skipped for good via their tombstone while dropped ones sat in a per-peer RAM cache
-   that a restart, any admin config save or a relay toggle cleared; the next round re-fetched exactly the
-   foreign blobs, and a peer diffing the two fetch sets learned which ones had been delivered. The record
-   is not a tombstone (it expires with the offer and never refuses an import — a peer-chosen id can't
-   pre-block genuine mail through it), it survives restarts and config changes, and only an Emergency
-   Reset clears it. Consequences: a node that switches relaying on, or frees space under `maxCarried`,
-   doesn't go back for blobs it dropped earlier (other carriers still can); and the record is capped at
-   200 000 ids — at the cap the node pulls no new sealed offers until entries expire, rather than evicting
-   marks, which would re-open the difference.
+   the radio bridge goes into a durable, node-wide record (`sealed_offers_seen`), whether it was delivered,
+   carried or dropped, and is never fetched again. Before this, delivered ids were skipped for good via
+   their tombstone while dropped ones sat in a per-peer RAM cache that a restart, any admin config save or a
+   relay toggle cleared; the next round re-fetched exactly the foreign blobs, and a peer diffing the two
+   fetch sets learned which ones had been delivered. The rule is that **no fetch decision may depend on
+   whether a sealed id was delivered here, for as long as any trace of it remains** (branch review
+   2026-09-25 #2 found two ways round the first version):
+   - *Every list.* The record and the tombstones are checked on **both** digest lists: an id is skipped if
+     it is tombstoned, in the record, or in the `sealed.` replay-key namespace, whether it's offered as
+     sealed mail or as a public message (a delivered id is tombstoned, a dropped one only in the record, so
+     re-listing sealed ids — or their replay keys, which anyone holding the blob can compute — among public
+     messages used to fetch exactly the dropped ones). A public channel with such an id isn't imported either
+     (it would show up in this node's own digest). A batch imports only the ids it asked for, under the
+     list it asked for them on, so a peer can't push them unasked. A blob taken in again later (say over
+     the radio, once relaying is on) is refused, never carried: carrying it would depend on whether the
+     first copy was delivered.
+   - *The whole horizon.* A mark is keyed by id alone and lives from the moment the offer was taken in
+     (the sync round's clock, one value for the whole round) for the 30-day tombstone horizon + the 7-day
+     TTL max + two epochs. That outlives every tombstone the offer can leave (the delivery tombstone, or
+     a carried copy's tombstone at its expiry), so until the mark lapses every outcome is suppressed and
+     afterwards none is. It used to expire at the offer's advertised `ttlExpiresAt`, so re-advertising the
+     same ids with a later TTL after the first one passed fetched only the dropped ones, while the
+     delivered ids were still tombstoned. A repeat mark never extends a live row.
+   The record is not a tombstone (it never refuses an import on its own), it survives restarts and config
+   changes, and only an Emergency Reset clears it. **Cost:** a peer that sees a public message's id before
+   this node does can offer it as sealed mail first and keep the genuine public message out for the
+   record's ~39 days (it could already pre-block an id for the tombstone horizon by getting it carried
+   until it expires). Consequences: a node that switches relaying on, or frees space under `maxCarried`,
+   doesn't go back for blobs it dropped earlier (other carriers still can). **Bounds:** the record holds
+   at most 200 000 ids, and each source (a sync peer URL, or the radio bridge) at most 50 000 of them.
+   When a source reaches its quota the node pulls no new sealed offers from that source, and when the
+   record is full it pulls none at all, until marks lapse. It never evicts marks, since an evicted mark
+   would re-open the difference. Stopping pulls treats every offer alike, so it is fail-closed on privacy;
+   the per-source quota keeps one hostile peer advertising junk ids from switching sealed pulls off for
+   every peer for the whole retention. An honest peer holds at most `maxCarried` blobs at once, so it
+   reaches its quota only by offering about 1 300 distinct sealed messages a day for the whole window.
+   The radio bridge counts as one source, and several hostile peers together can still fill the record.
    The recipient's tag set spans `now − MESH_TTL_MAX_MS` … `now + 1 epoch` (not `now − ` this node's own
    `mesh.ttlMs`: the lifetime is the *sender's* choice), memoised per epoch. **What still leaks:** on a
    **relaying** node a pulled blob that is delivered locally is tombstoned and never appears in its digest,
@@ -166,7 +192,9 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    pulls this node's digest can infer that a blob it served with `hopLimit ≥ 2` (one that would otherwise
    have been carried) was delivered here when it never shows up — ambiguous only when the node was at
    `maxCarried` or already held that mail. (A blob refused at capacity is never fetched again either, so
-   regaining room adds no refetch pattern; only this digest signal remains.) A **relay-off** node never advertises pulled mail at all (its
+   regaining room adds no refetch pattern; only this digest signal remains. A carried copy is tombstoned
+   when the reaper finds it expired; if the node was off for days past that point, the tombstone can outlive
+   the seen mark, which tells a prober "carried here" — the same thing the digest already showed.) A **relay-off** node never advertises pulled mail at all (its
    digest holds only mail its own users sealed), so what it pulls never shows in its digest; hop-1 blobs
    are never carried by anyone, so their absence says nothing either. Closing it needs cover traffic or
    deliberately carrying (re-advertising) delivered mail — v2.

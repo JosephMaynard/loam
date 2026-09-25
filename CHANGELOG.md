@@ -57,16 +57,23 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   accepted messages are imported, and mesh ids, the whole `llm.*` assistant namespace and non-human
   (bot/system) author records are refused. A peer that answers every batch with junk can no longer make
   a round issue thousands of requests: splitting a bad batch has a per-round request and byte budget,
-  after which the peer fails the round, and too-large answers shrink later batches. The
+  after which the peer fails the round, and too-large answers shrink later batches. An import is checked
+  again right before it lands, after its attachments download, so a moderator removal, delete, archive or
+  parent removal made meanwhile wins, and the files a discarded import wrote are deleted; the
+  missing-attachment retry no longer fetches a file back for a message that no longer lists it. Only
+  records the puller asked for, on the list it asked for them on, are imported. The
   sync token is never sent on a plaintext pull, a `required` node refuses plaintext pulls, and a peer that
   negotiated encryption is never silently downgraded.
 - **Mesh.** Replay protection keys on the sealed content (ciphertext, routing tag and expiry), only the
   canonical encoding is accepted, and a forged hop budget or metadata can no longer shadow genuine mail.
   A node now fetches every eligible sealed offer rather than only its own mail, so the serving peer can't
   learn which node a recipient uses (docs/16 states the remaining leak). Every sealed offer a node has
-  fetched or received is remembered durably until it expires, whatever became of it, so a restart, a
-  config save or switching relaying on no longer makes it re-fetch only the blobs it dropped (which told
-  the serving peer which ones it had delivered). A node with relaying off and no local mesh identity pulls
+  fetched or received is remembered durably, whatever became of it, for longer than any tombstone it can
+  leave (the 30-day tombstone horizon plus the 7-day TTL maximum and two days' slack), and skipped on
+  every digest list, so a restart, a config save, switching relaying on, re-listing the ids as public
+  messages or re-advertising them with a later TTL no longer makes it re-fetch only the blobs it dropped
+  (which told the serving peer which ones it had delivered). Each source may fill at most 50 000 of the
+  record's 200 000 entries; past that the node stops pulling new sealed offers from that source. A node with relaying off and no local mesh identity pulls
   no sealed mail, and `mesh.maxSealedPullPerRound` (default 80) caps sealed pulls per round for metered
   links. Mesh identities are only minted for local users, and rows an older build minted for synced users
   are deleted at boot; a database upgraded from 0.4.0 first has its peer-imported users identified and
