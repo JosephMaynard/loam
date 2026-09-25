@@ -42,8 +42,8 @@ external one (2026-08-15), the server split, and Play Store groundwork. Will shi
   session tokens 256-bit; admin-claim and panic attempt limits also count requests made through the
   tunnel; inbound WebSocket frames are capped at 16 KiB.
 - **Node-to-node sync.** A peer can no longer edit a post a local user wrote, re-type a private message
-  into a public channel, bind a local or pending attachment to its own message, or undo a moderator's
-  removal. Only the authors of accepted messages are imported, and mesh or assistant ids are refused. The
+  into a public channel, bind a local or pending attachment to its own message, undo a moderator's
+  removal, or add new replies or reactions under a post a moderator removed here. Only the authors of accepted messages are imported, and mesh or assistant ids are refused. The
   sync token is never sent on a plaintext pull, a `required` node refuses plaintext pulls, and a peer that
   negotiated encryption is never silently downgraded.
 - **Mesh.** Replay protection keys on the sealed content (ciphertext, routing tag and expiry), only the

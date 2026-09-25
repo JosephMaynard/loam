@@ -305,7 +305,7 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   DMs/private channels/shadow-banned authors never export. Imports are defensive (public-local
   channels only, users stripped of authority, edits only when newer, **only of a message this node
   imported** (`synced_messages` provenance — a peer can't rewrite a local user's post), never of a
-  moderator-removed message (local moderation is sticky), **and only of the same message** —
+  moderator-removed message nor a new reply/reaction under one (local moderation is sticky), **and only of the same message** —
   same arm/author/timestamp/routing, so a peer can't re-type a private id into the public flow — a
   message naming an attachment id another local message or pending upload owns is refused, attachments
   copied best-effort). Only the **author of an accepted message** is imported as a user (never every user

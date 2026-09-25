@@ -966,6 +966,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
         if (rt.messageAudienceUserIds(message) !== undefined) {
           continue;
         }
+        // Like `createMessage`: no NEW reactions on a moderator-removed message (local moderation is sticky).
+        if (!existing && target.meta?.removedByModerator) {
+          continue;
+        }
 
         // ...and its channel must still accept new content here — `createMessage` refuses a reaction in an
         // archived channel, so an import must too (round-2 review): a peer that hasn't archived the channel
@@ -1017,6 +1021,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
             continue;
           }
           if (parent.type !== "channelPost" || parent.channelId !== message.channelId) {
+            continue;
+          }
+          // Like `createMessage`: a moderator-removed post takes no NEW replies from a peer either.
+          if (!existing && parent.meta?.removedByModerator) {
             continue;
           }
         }

@@ -38,7 +38,8 @@ unsigned; signed sync (docs/29 Track B) is the real fix. Messages imported befor
 existed are unmarked, so later peer edits to them are ignored (fail closed). An import is also refused if
 it names an attachment id whose file is already on disk (under any extension) and that the edited record
 doesn't reference. **Local moderation is sticky:** a message a moderator removed no longer takes peer edits
-(the removal is an in-place edit the origin's next edit would otherwise win against), and un-editable
+(the removal is an in-place edit the origin's next edit would otherwise win against) and takes no new
+peer replies or reactions (as `createMessage` refuses them locally), and un-editable
 records aren't even requested from the digest. A peer's mesh key is only ever adopted onto a user record a
 sync import created (`synced_users`), never one of this node's own users. An imported message body over **256KB** is skipped (`maxSyncImportBodyBytes`): the stored
 body schema is deliberately uncapped so long *local* LLM replies round-trip, but a hostile peer must not be

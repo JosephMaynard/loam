@@ -117,3 +117,44 @@ describe("rows an older release wrote past today's bounds don't stop an upgraded
     expect(rawRowCount(dataDir, "messages", longId)).toBe(1);
   });
 });
+
+describe("sync import honours a local moderator removal for new replies and reactions", () => {
+  it("refuses a peer's new reply or reaction under a post this node's moderator removed", async () => {
+    const sync = { enabled: true, peers: [], intervalMs: 3_600_000 };
+    const source = await boot(tempDataDir({ sync }));
+    const sourceAdmin = await newSession(source);
+    const postMessage = (payload: Record<string, unknown>) =>
+      source.server.inject({ method: "POST", url: "/api/messages", headers: { cookie: sourceAdmin.cookie }, payload });
+    const created = await postMessage({ type: "channelPost", channelId: "general", body: "contested" });
+    const postId = (created.json() as { message: { id: string } }).message.id;
+    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
+
+    const puller = await boot(tempDataDir({ sync: { ...sync, peers: [{ url: sourceUrl }] } }));
+    const pullerAdmin = await newSession(puller);
+    const runSync = () =>
+      puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
+    await runSync();
+    expect(puller.store.loadMessages().some((message) => message.id === postId)).toBe(true);
+
+    const removed = await puller.server.inject({
+      method: "POST",
+      url: `/api/moderation/messages/${postId}/remove`,
+      headers: { cookie: pullerAdmin.cookie },
+      payload: {},
+    });
+    expect(removed.statusCode).toBe(200);
+
+    // The source never saw the removal, so it accepts a reply and a reaction under the post.
+    const reply = await postMessage({ type: "channelReply", channelId: "general", parentMessageId: postId, body: "pile-on" });
+    expect(reply.statusCode).toBe(201);
+    const reaction = await postMessage({ type: "reaction", targetMessageId: postId, reaction: "👍" });
+    expect(reaction.statusCode).toBe(201);
+    const replyId = (reply.json() as { message: { id: string } }).message.id;
+    const reactionId = (reaction.json() as { message: { id: string } }).message.id;
+
+    expect((await runSync()).statusCode).toBe(200);
+    const ids = puller.store.loadMessages().map((message) => message.id);
+    expect(ids).not.toContain(replyId);
+    expect(ids).not.toContain(reactionId);
+  });
+});
