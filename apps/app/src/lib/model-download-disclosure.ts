@@ -2,6 +2,7 @@
 // Catalog models are 0.8–4.5 GB; a surprise download of that size over mobile data is exactly what Play's
 // guidance (and common sense) says must not happen. The app has no network-type API (no expo-network /
 // NetInfo dependency), so the Wi-Fi / metered-data warning is shown for EVERY download, not just metered.
+import type { ShowAlert } from './show-alert';
 
 export type DownloadDisclosure = { title: string; message: string; confirmLabel: string };
 
@@ -21,4 +22,21 @@ export function modelDownloadDisclosure(name: string, sizeLabel: string | undefi
       'cancels the download.',
     confirmLabel: 'Download',
   };
+}
+
+/**
+ * Show the disclosure and start the download ONLY when the operator presses its confirm button — Cancel (or
+ * dismissing the dialog) starts nothing. `showAlert` is `Alert.alert` in the app, a mock in the tests.
+ */
+export function confirmModelDownload(
+  showAlert: ShowAlert,
+  name: string,
+  sizeLabel: string | undefined,
+  start: () => void,
+): void {
+  const text = modelDownloadDisclosure(name, sizeLabel);
+  showAlert(text.title, text.message, [
+    { text: 'Cancel', style: 'cancel' },
+    { text: text.confirmLabel, onPress: start },
+  ]);
 }

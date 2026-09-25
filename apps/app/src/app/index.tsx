@@ -16,7 +16,6 @@ import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { SERVER_PORT } from '@/lib/join-url';
 import {
-  applyDbModeChange,
   clearStoredDbKeys,
   DB_ENCRYPTION_DRIVER_MISSING_CODE,
   DB_ENCRYPTION_MODE_READ_ERROR,
@@ -32,6 +31,7 @@ import {
   type DbEncryptionMode,
   type StartFreshIntent,
 } from '@/lib/db-encryption';
+import { confirmStartUnencrypted, retryKeyResolution, switchEncryptionOffAndRetry } from '@/lib/driver-missing-recovery';
 import { ensureHostService } from '@/lib/host-service';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
@@ -344,6 +344,9 @@ export default function HostScreen() {
   // whether the mode is `passphrase`, to offer a "mistyped it? enter it again" path (review 2026-09-04 —
   // with the passphrase prompted at EVERY start, a typo now lands here rather than auto-unlocking).
   const dbUnreadableForMode = status === 'error' && errorCode === DB_UNREADABLE_CODE;
+  // And the driver-missing lock: its "Start without encryption" confirmation says different things about
+  // the existing database in ephemeral mode (already deleted) than in persistent/passphrase (kept on disk).
+  const dbDriverMissing = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'driver-missing';
 
   // Once the locked (or unreadable) state becomes active, learn which mode is actually configured (purely
   // to decide whether to show the passphrase input, which only makes sense for 'passphrase' mode). A
@@ -351,7 +354,7 @@ export default function HostScreen() {
   // recovery input to show), so a transient read failure just leaves the plain-Retry UI rather than a
   // bogus mode value.
   useEffect(() => {
-    if (!dbLocked && !dbUnreadableForMode) {
+    if (!dbLocked && !dbUnreadableForMode && !dbDriverMissing) {
       return;
     }
     let cancelled = false;
@@ -363,7 +366,7 @@ export default function HostScreen() {
     return () => {
       cancelled = true;
     };
-  }, [dbLocked, dbUnreadableForMode]);
+  }, [dbLocked, dbUnreadableForMode, dbDriverMissing]);
 
   // P1-2(b), Sol round 4: clear the device key material and, ONLY on a VERIFIED success, ack the
   // launcher (`loam-wipe-complete`) so it deletes its durable `.loam-wipe-phase` file. On ANY
@@ -822,10 +825,11 @@ export default function HostScreen() {
     // P1-b (Sol round 6): re-assert the mode-name hint for the known locked mode so a subsequent transient
     // key-request failure locks rather than downgrading to plaintext. Best-effort; skipped if the mode
     // couldn't be read (a transient read-error leaves `lockedMode` undefined — see the effect above).
-    if (lockedMode) {
-      void setDbModeHint(nodejs.channel, lockedMode);
-    }
-    const result = await requestDbUnlock(nodejs.channel);
+    const result = await retryKeyResolution({
+      lockedMode,
+      writeHint: (m) => setDbModeHint(nodejs.channel, m),
+      requestUnlock: () => requestDbUnlock(nodejs.channel),
+    });
     if (!result.ok) {
       setUnlockBusy(false);
       setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
@@ -844,20 +848,19 @@ export default function HostScreen() {
   const handleRevertToOff = async () => {
     setRevertBusy(true);
     setRevertMessage(undefined);
-    const outcome = await applyDbModeChange('off', {
+    const outcome = await switchEncryptionOffAndRetry({
       readMode: getDbEncryptionMode,
       writeMode: setDbEncryptionMode,
       writeHint: (m) => setDbModeHint(nodejs.channel, m),
+      requestUnlock: () => requestDbUnlock(nodejs.channel),
     });
-    if (!outcome.applied) {
+    if (!outcome.ok) {
       setRevertBusy(false);
-      setRevertMessage(`Couldn't switch encryption off — ${outcome.error ?? 'unknown error'}. You can try again.`);
-      return;
-    }
-    const result = await requestDbUnlock(nodejs.channel);
-    if (!result.ok) {
-      setRevertBusy(false);
-      setRevertMessage(`Couldn't retry — ${result.error ?? 'unknown error'}. You can try again.`);
+      setRevertMessage(
+        outcome.failed === 'mode'
+          ? `Couldn't switch encryption off — ${outcome.error}. You can try again.`
+          : `Couldn't retry — ${outcome.error}. You can try again.`,
+      );
       return;
     }
     // The retry's OUTCOME (ready / a different boot error) arrives via `loam-status` — see onStatus's
@@ -868,18 +871,10 @@ export default function HostScreen() {
   // `db_encryption_driver_missing` recovery (pre-release review 2026-09-25): the SQLCipher module didn't
   // load, so the launcher refused to start. Switching to Off is a real security downgrade — the database
   // and everything after it is stored UNENCRYPTED — so it needs an explicit confirmation, never a single tap.
-  const confirmStartUnencrypted = () => {
-    Alert.alert(
-      'Start without encryption?',
-      'Encrypted storage is unavailable on this device. Switching encryption off stores the database ' +
-        'UNENCRYPTED from now on. An existing encrypted database stays on disk but cannot be opened without ' +
-        'encryption — you will be offered to preserve it and start a fresh one.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Switch encryption off', style: 'destructive', onPress: () => void handleRevertToOff() },
-      ],
-    );
-  };
+  // The copy depends on the locked mode (ephemeral: the old database is already gone — see
+  // `startUnencryptedConfirmation`).
+  const handleStartUnencryptedPress = () =>
+    confirmStartUnencrypted(Alert.alert, lockedMode, () => void handleRevertToOff());
 
   // Bridge from the WebView's web content (the LOAM client) back to this native screen. The client's
   // `wipe` WS-event handler (apps/client/src/app.tsx) posts `{"type":"loam-wipe"}` via
@@ -1188,8 +1183,8 @@ export default function HostScreen() {
   const dbPlaintextUnconverted = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'plaintext-unconverted';
   // FATAL db_encryption_driver_missing (pre-release review 2026-09-25): an encrypted mode is selected but the
   // SQLCipher driver failed to load. The launcher stays LOCKED (it used to boot plaintext with a dismissible
-  // notice); the operator either retries or explicitly switches encryption off.
-  const dbDriverMissing = status === 'error' && dbEncryptionRecoveryForCode(errorCode) === 'driver-missing';
+  // notice); the operator either retries or explicitly switches encryption off. (`dbDriverMissing` is
+  // derived above the ready-return, beside `dbLocked`, because the lockedMode effect needs it too.)
 
   return (
     <ThemedView style={styles.center}>
@@ -1390,7 +1385,7 @@ export default function HostScreen() {
                 <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry'}</ThemedText>
               </ThemedView>
             </Pressable>
-            <Pressable onPress={confirmStartUnencrypted} disabled={unlockBusy || revertBusy} accessibilityRole="button">
+            <Pressable onPress={handleStartUnencryptedPress} disabled={unlockBusy || revertBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
                 <ThemedText type="link">{revertBusy ? 'Switching…' : 'Start without encryption'}</ThemedText>
               </ThemedView>

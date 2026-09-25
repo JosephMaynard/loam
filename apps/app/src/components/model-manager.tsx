@@ -15,7 +15,7 @@ import {
   STORAGE_HEADROOM_BYTES,
   type DeviceCapabilities,
 } from '@/lib/device-capabilities';
-import { modelDownloadDisclosure } from '@/lib/model-download-disclosure';
+import { confirmModelDownload } from '@/lib/model-download-disclosure';
 import {
   deactivateAction,
   deleteAction,
@@ -684,13 +684,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    */
   /** Show the size + Wi-Fi/metered-data disclosure (docs/30 H4) and start the download only on an explicit
    * confirm. `sizeBytes` undefined = unknown up front (a custom URL). */
-  const confirmThenDownload = (name: string, sizeBytes: number | undefined, start: () => void) => {
-    const text = modelDownloadDisclosure(name, sizeBytes === undefined ? undefined : formatBytes(sizeBytes));
-    Alert.alert(text.title, text.message, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: text.confirmLabel, onPress: start },
-    ]);
-  };
+  const confirmThenDownload = (name: string, sizeBytes: number | undefined, start: () => void) =>
+    confirmModelDownload(Alert.alert, name, sizeBytes === undefined ? undefined : formatBytes(sizeBytes), start);
 
   /** The "Add & download" button: validate the URL first (so a bad one errors without a prompt), then
    * confirm, then run the real download (which re-validates — `prepareCustomModelDownload` is pure). */
