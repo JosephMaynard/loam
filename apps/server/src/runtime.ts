@@ -31,6 +31,8 @@ export type Runtime = {
   readonly wipeInProgress: boolean;
   log: FastifyBaseLogger;
   options: AppOptions;
+  /** The transport-encryption mode actually in force (Developer Mode projects `off`). */
+  effectiveTransportEncryption(): LoamConfig["security"]["transportEncryption"];
   attachmentsDir: string;
   /** Uploads not yet consumed by a message, keyed by attachment id (uploader-bound). */
   attachmentOwners: Map<string, { userId: string; uploadedAt: number }>;

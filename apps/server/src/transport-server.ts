@@ -9,7 +9,7 @@ import { TransportHandshakeRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { hashIdentityToken, makeIdentityToken, makeSessionUserId } from "./identity.js";
-import type { FastifyRequest } from "fastify";
+import { type FastifyRequest, LogController } from "fastify";
 
 // Live transport sessions: sessionId → derived key + expiry + anti-replay window. In-memory only;
 // cleared by the kill switch. Ephemeral handshakes mean a lost entry just forces a re-handshake.
@@ -47,12 +47,12 @@ function isInternalDispatchForLogging(request: { headers?: Record<string, unknow
 }
 
 /**
- * Fastify's `disableRequestLogging` predicate: never log a tunnel re-dispatch (review 2026-09-25 #10). Its
- * URL is the real path + query the tunnel exists to hide (`/api/search?q=…`), and server logs outlive an
- * Emergency Reset. The OUTER `POST /api/transport/tunnel` is still logged, which is all the wire shows too.
+ * The server's request-log controller: never log a tunnel re-dispatch (review 2026-09-25 #10). Its URL is the
+ * real path + query the tunnel exists to hide (`/api/search?q=…`), and server logs outlive an Emergency
+ * Reset. The OUTER `POST /api/transport/tunnel` is still logged, which is all the wire shows too.
  */
-export function skipInternalRequestLogging(request: { headers?: Record<string, unknown> }): boolean {
-  return isInternalDispatchForLogging(request);
+export function loamLogController(): LogController {
+  return new LogController({ disableRequestLogging: (request) => isInternalDispatchForLogging(request) });
 }
 
 /**
@@ -897,7 +897,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
     // (identity bootstrap through the tunnel) — the browser must see Set-Cookie to store it. A bound
     // session's inner request mints no cookie (identity came via `x-loam-user`), so there's nothing to
     // forward there.
-    // The inner request is never request-logged (it would print the hidden path — `skipInternalRequestLogging`),
+    // The inner request is never request-logged (it would print the hidden path — `loamLogController`),
     // which also silences its 5xx error line; keep a path-free trace of the failure on the outer request.
     if (injected.statusCode >= 500) {
       request.log.error({ method, status: injected.statusCode }, "A tunnelled request failed");
