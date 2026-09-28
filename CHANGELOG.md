@@ -4,10 +4,11 @@ All notable changes to LOAM are recorded here. LOAM is a local-first, off-grid m
 `README.md` and `MISSION.md`). Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 the project is pre-1.0, so the surface can still change. Dates are UTC.
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-09-28
 
 The pre-release review release: fixes from two full-codebase reviews (2026-09-04, 2026-09-25) and an
-external one (2026-08-15), the server split, per-user blocking, and Play Store groundwork.
+external one (2026-08-15), the server split, per-user blocking, Play Store groundwork, a Wi-Fi hosting
+mode for the Android host, and a redesigned client.
 
 ### Security
 - **Key pinning is fail-closed.** A QR-joined client can no longer fall back to plaintext on an
@@ -168,6 +169,13 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   that no longer validates is quarantined (see Security).
 
 ### Added
+- **Wi-Fi hosting mode** on the Android host. The Share · Host screen opens with a Hotspot / Wi-Fi choice
+  (remembered across launches; Hotspot stays the default). Wi-Fi mode hosts on the network the phone is
+  already on: no hotspot, no location permission, and one join QR for everyone on that Wi-Fi. It advertises
+  the phone's own Wi-Fi address; a VPN, mobile data or the phone's own tethering never reach the QR, and with
+  Wi-Fi off there is no QR, only "connect this phone to a Wi-Fi network first". Guest, hotel and campus
+  networks that keep devices apart are called out on the screen (docs/04 "Hosting modes"). Compiled and
+  unit-tested; not yet verified on a physical phone.
 - **Blocking.** Block someone from their DM header; unblock there or in Settings. Blocking stops DMs, DM
   reactions and typing both ways, stops either of you inviting the other into a private channel or handing
   them one, and hides the person's channel posts, replies and reactions on your device, search results
@@ -192,6 +200,18 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   instead of shipping old settings.
 
 ### Changed
+- **The client is redesigned.** An earthy palette (linen in light mode, dark loam in dark, moss green for
+  actions, a brighter brand orange) on the native font stack, one design system (`apps/client/DESIGN.md`),
+  and the chat conventions people already know: bubbles with the time inside, consecutive messages grouped
+  under one avatar, a hover toolbar on desktop and a long-press sheet on touch instead of a permanent row of
+  icons, reaction chips, a pill composer, a conversation header whose title is never squeezed by buttons
+  (Members, Report and Block live in a menu), settings, admin, people and search on a card layout,
+  confirmations as proper dialogs, and "N new messages" toasts that coalesce per conversation. Renders on old
+  Android WebViews (the build targets Chrome 80) and in the five right-to-left locales.
+- **The on-screen keyboard no longer pushes the header off screen.** The client is a fixed frame sized to
+  the visible viewport, so an open keyboard shrinks the layout instead of scrolling the page, and the
+  message list stays on the newest message. The Android host shrinks its WebView for the keyboard as well.
+- Android host: the native top bar, menus and share screen use the client's palette.
 - **Archived channels are read-only but visible** (readable, searchable, listed with a badge; composing,
   actions and roster growth frozen). See the upgrade notes.
 - Release signing: `pnpm --filter app aab` refuses to build without a release keystore, and a
@@ -213,6 +233,8 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
 - A `config.json` with `"transportEncryption": "off"` now boots as `optional`; set `LOAM_DEV_MODE=1` (not
   in production) if you need plaintext for debugging.
 - Existing session ids keep working; new ones are `user.` + 16 hex characters.
+- Android host: an updated install keeps hosting in Hotspot mode as before; pick **Wi-Fi** on the Share
+  screen to host on an existing network.
 
 ## [0.4.0] - 2026-08-08
 
