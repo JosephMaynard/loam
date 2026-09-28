@@ -13,10 +13,8 @@ export const bn: Translation = {
   "common.remove": "সরান",
   "common.requestFailed": "অনুরোধ ব্যর্থ: {status}",
 
-  "conversation.emptyEyebrow": "স্থানীয় নোড প্রস্তুত",
-  "conversation.emptyTitle": "একটি চ্যানেল বা সরাসরি বার্তা বেছে নিন।",
-  "conversation.emptyBody":
-    "বার্তা, উত্তর ও প্রতিক্রিয়া স্থানীয়ভাবে সংরক্ষিত থাকে এবং সার্ভার চালু থাকা অবস্থায় ল্যাপটপ বা Raspberry Pi-এর মাধ্যমে সিঙ্ক হয়।",
+  "conversation.emptyTitle": "একটি চ্যানেল বা একজন ব্যক্তি বেছে নিন",
+  "conversation.emptyBody": "বার্তাগুলো ইন্টারনেটে নয়, এই স্থানীয় নোডেই থাকে।",
   "conversation.members": "সদস্যরা",
   "conversation.kindChannel": "চ্যানেল",
   "conversation.kindDm": "সরাসরি বার্তা",
@@ -26,7 +24,7 @@ export const bn: Translation = {
 
   "messageList.empty": "এখনও কোনো বার্তা নেই। সবার প্রয়োজনীয় ব্যবহারিক তথ্য দিয়ে শুরু করুন।",
 
-  "message.editedTag": "(সম্পাদিত)",
+  "message.editedTag": "সম্পাদিত",
   "message.editAriaLabel": "বার্তা সম্পাদনা করুন",
   "message.attachedImageAlt": "সংযুক্ত ছবি",
   "message.streaming": "স্ট্রিমিং",
@@ -379,8 +377,8 @@ export const bn: Translation = {
   "invite.show": "⧉ কাউকে আমন্ত্রণ জানান",
   "invite.title": "কাউকে আমন্ত্রণ জানান",
   "invite.close": "আমন্ত্রণ বন্ধ করুন",
-  "invite.wifiButton": "ওয়াই-ফাই হটস্পট QR দেখান",
-  "invite.wifiHint": "হোস্টের ওয়াই-ফাই QR খোলে যাতে মানুষ প্রথমে নেটওয়ার্কে যোগ দিতে পারে।",
+  "invite.wifiButton": "হোস্টের শেয়ার স্ক্রিন খুলুন",
+  "invite.wifiHint": "হোস্ট অ্যাপ থেকে হটস্পট বা ওয়াই-ফাই যোগদানের QR দেখায়।",
 
   "nodeLink.hide": "× লিঙ্ক লুকান",
   "nodeLink.show": "⧉ আরেকটি নোড যুক্ত করুন",
@@ -622,5 +620,23 @@ export const bn: Translation = {
   "error.channel_member_unavailable": "এই ব্যক্তি এই চ্যানেলের জন্য উপলব্ধ নন",
   "error.block_not_allowed": "এই ব্যবহারকারীকে ব্লক করা যায় না",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "কথোপকথনের বিকল্প",
+  "message.actionsTitle": "বার্তার বিকল্প",
+  "message.actionsAt": "বার্তার বিকল্প, {time}-এ পাঠানো",
+  "message.reactWith": "{emoji} দিয়ে প্রতিক্রিয়া জানান",
+  "message.moreActions": "আরও বিকল্প",
+  "message.copyText": "লেখা কপি করুন",
+  "messageList.newMessages": "নতুন বার্তা",
+  "thread.inChannel": "#{name}-এ",
+  "report.done": "হয়ে গেছে",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "সেটিংস",
+  "settings.avatarFace": "মুখ",
+  "settings.avatarInitial": "আদ্যক্ষর",
+  "settings.avatarPattern": "নকশা",
+  "admin.nav.label": "বিভাগ",
+  "admin.nav.sync": "সিঙ্ক",
+  "admin.nav.mesh": "মেশ",
+  "moderation.banConfirm": "{name}-কে নিষিদ্ধ করবেন? কোনো মডারেটর নিষেধাজ্ঞা না তোলা পর্যন্ত তিনি এই নেটওয়ার্কে ঢুকতে পারবেন না।",
+  "toast.newMessages": { one: "{place}-এ {n}টি নতুন বার্তা", other: "{place}-এ {n}টি নতুন বার্তা" },
 };

@@ -3,7 +3,10 @@ import { useEffect, useId, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { ATTACHMENT_MAX_COUNT } from "../lib/attachments";
-import { IconAttach, IconSend as SendIcon } from "./icons";
+import { IconAttach, IconClose, IconMapPin, IconSend } from "./icons";
+
+/** The textarea grows with its content up to about six lines, then scrolls (matches `max-height` in CSS). */
+const TEXTAREA_MAX_PX = 150;
 
 interface MessageComposerProps {
   /** When true, the composer offers the "share location" toggle (docs/10; off by default). */
@@ -25,7 +28,28 @@ type PendingAttachment = {
   status: "uploading" | "ready" | "error";
   attachment?: MessageAttachment;
   error?: string;
+  /** A local `blob:` preview of an image, for the chip's thumbnail (revoked when the chip goes). */
+  previewUrl?: string;
 };
+
+/** A thumbnail URL for a picked image, when the browser can make one cheaply (no decode happens here). */
+function previewFor(file: File): string | undefined {
+  if (!file.type.startsWith("image/") || typeof URL.createObjectURL !== "function") {
+    return undefined;
+  }
+  try {
+    return URL.createObjectURL(file);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Release a chip's preview URL. */
+function revokePreview(entry: PendingAttachment): void {
+  if (entry.previewUrl && typeof URL.revokeObjectURL === "function") {
+    URL.revokeObjectURL(entry.previewUrl);
+  }
+}
 
 /**
  * Parse the composer's location draft fields into a `MessageLocation`, mirroring
@@ -73,6 +97,11 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
   const locationIncomplete =
     locationOpen && !draftLocation && (locationLabel.trim() !== "" || locationLat.trim() !== "" || locationLng.trim() !== "");
 
+  // Keep the latest chips reachable from the unmount cleanup, which must revoke their preview URLs.
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  useEffect(() => () => pendingRef.current.forEach(revokePreview), []);
+
   useEffect(() => {
     const textArea = textAreaRef.current;
 
@@ -81,8 +110,23 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
     }
 
     textArea.style.height = "auto";
-    textArea.style.height = `${Math.min(textArea.scrollHeight, 168)}px`;
+    if (textArea.scrollHeight) {
+      textArea.style.height = `${Math.min(textArea.scrollHeight, TEXTAREA_MAX_PX)}px`;
+    }
   }, [value]);
+
+  /** Drop one chip (and its preview). */
+  function removePending(key: string): void {
+    setPending((previous) =>
+      previous.filter((item) => {
+        if (item.key === key) {
+          revokePreview(item);
+          return false;
+        }
+        return true;
+      }),
+    );
+  }
 
   function attachFiles(files: File[] | null): void {
     if (!onUploadAttachment || !files || !files.length) {
@@ -94,7 +138,8 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
     for (const file of files.slice(0, Math.max(0, room))) {
       pendingKeyRef.current += 1;
       const key = `att-${pendingKeyRef.current}`;
-      setPending((previous) => [...previous, { key, name: file.name, status: "uploading" }]);
+      const previewUrl = previewFor(file);
+      setPending((previous) => [...previous, { key, name: file.name, status: "uploading", previewUrl }]);
       onUploadAttachment(file)
         .then((attachment) => {
           setPending((previous) =>
@@ -179,6 +224,7 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
     try {
       await onSend(body, readyAttachments.length ? readyAttachments : undefined, draftLocation);
       setValue("");
+      pending.forEach(revokePreview);
       setPending([]);
       closeLocationForm();
     } catch {
@@ -194,167 +240,186 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
   if (disabledReason) {
     return (
       <div className="composer composer-disabled" role="status">
-        {disabledReason}
+        <p className="composer-disabled-text">{disabledReason}</p>
       </div>
     );
   }
 
+  const canSend = (!!value.trim() || !!readyAttachments.length || !!draftLocation) && !sending && !uploading && !locationIncomplete;
+
   return (
     <form
-      className={onUploadAttachment || allowLocationSharing ? "composer has-attach" : "composer"}
+      className="composer"
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
       }}
     >
       {pending.length ? (
-        <div className="composer-attachments">
+        <ul className="composer-attachments">
           {pending.map((entry) => (
-            <span className={`attachment-chip ${entry.status}`} key={entry.key}>
-              {entry.status === "uploading" ? "⏳ " : entry.status === "error" ? "⚠ " : "🖼 "}
-              <span className="attachment-chip-name" title={entry.error}>
-                {entry.name}
-              </span>
-              {/* The reason must be readable on touch devices too, where a `title` tooltip never shows. */}
-              {entry.status === "error" && entry.error ? (
-                <span className="attachment-chip-error" role="alert">
-                  {entry.error}
+            <li className={`attachment-chip ${entry.status}`} key={entry.key}>
+              {entry.previewUrl ? (
+                <img alt="" className="attachment-chip-thumb" src={entry.previewUrl} />
+              ) : (
+                <span aria-hidden="true" className="attachment-chip-icon">
+                  <IconAttach size={16} />
                 </span>
-              ) : null}
+              )}
+              <span className="attachment-chip-text">
+                <span className="attachment-chip-name" title={entry.name}>
+                  {entry.name}
+                </span>
+                {/* The reason must be readable on touch devices too, where a `title` tooltip never shows. */}
+                {entry.status === "error" && entry.error ? (
+                  <span className="attachment-chip-error" role="alert">
+                    {entry.error}
+                  </span>
+                ) : entry.status === "uploading" ? (
+                  <span aria-hidden="true" className="attachment-chip-progress" />
+                ) : null}
+              </span>
               <button
                 aria-label={t("composer.removeAttachment", { name: entry.name })}
+                className="btn btn-icon btn-sm btn-ghost attachment-chip-remove"
                 disabled={sending}
-                onClick={() => setPending((previous) => previous.filter((item) => item.key !== entry.key))}
+                onClick={() => removePending(entry.key)}
                 type="button"
               >
-                ×
+                <IconClose size={16} />
               </button>
-            </span>
+            </li>
           ))}
-        </div>
+        </ul>
       ) : null}
       {allowLocationSharing && locationOpen ? (
         <div className="composer-location-form">
-          <input
-            aria-label={t("composer.locationLabel")}
-            className="composer-location-label"
-            dir="auto"
-            onInput={(event) => setLocationLabel(event.currentTarget.value)}
-            placeholder={t("composer.locationLabelPlaceholder")}
-            type="text"
-            value={locationLabel}
-          />
-          <input
-            aria-label={t("composer.locationLat")}
-            className="composer-location-coord"
-            inputMode="decimal"
-            max={90}
-            min={-90}
-            onInput={(event) => setLocationLat(event.currentTarget.value)}
-            placeholder={t("composer.locationLat")}
-            step="any"
-            type="number"
-            value={locationLat}
-          />
-          <input
-            aria-label={t("composer.locationLng")}
-            className="composer-location-coord"
-            inputMode="decimal"
-            max={180}
-            min={-180}
-            onInput={(event) => setLocationLng(event.currentTarget.value)}
-            placeholder={t("composer.locationLng")}
-            step="any"
-            type="number"
-            value={locationLng}
-          />
+          <label className="field composer-location-field">
+            <span className="field-label">{t("composer.locationLabel")}</span>
+            <input
+              className="input composer-location-label"
+              dir="auto"
+              onInput={(event) => setLocationLabel(event.currentTarget.value)}
+              placeholder={t("composer.locationLabelPlaceholder")}
+              type="text"
+              value={locationLabel}
+            />
+            <span className="field-hint">{t("composer.shareLocationHint")}</span>
+          </label>
+          <label className="field composer-location-coord">
+            <span className="field-label">{t("composer.locationLat")}</span>
+            <input
+              className="input"
+              inputMode="decimal"
+              max={90}
+              min={-90}
+              onInput={(event) => setLocationLat(event.currentTarget.value)}
+              step="any"
+              type="number"
+              value={locationLat}
+            />
+          </label>
+          <label className="field composer-location-coord">
+            <span className="field-label">{t("composer.locationLng")}</span>
+            <input
+              className="input"
+              inputMode="decimal"
+              max={180}
+              min={-180}
+              onInput={(event) => setLocationLng(event.currentTarget.value)}
+              step="any"
+              type="number"
+              value={locationLng}
+            />
+          </label>
         </div>
       ) : null}
-      <label className="sr-only" for={composerId}>
-        {label}
-      </label>
-      {onUploadAttachment || allowLocationSharing ? (
-        <div className="composer-tools">
-          {onUploadAttachment ? (
-            <>
-              <input
-                accept="image/*,.pdf,.txt,.csv,.md,.json,.zip,.doc,.docx,.xlsx,.pptx"
-                className="sr-only"
-                multiple
-                onInput={(event) => {
-                  attachFiles(event.currentTarget.files ? Array.from(event.currentTarget.files) : null);
-                  event.currentTarget.value = "";
-                }}
-                ref={fileInputRef}
-                type="file"
-              />
-              <button
-                aria-label={t("composer.attachImage")}
-                className="composer-attach"
-                disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
-                onClick={() => fileInputRef.current?.click()}
-                title={t("composer.attachImageHint")}
-                type="button"
-              >
-                <IconAttach />
-              </button>
-            </>
-          ) : null}
-          {allowLocationSharing ? (
+      <div className="composer-well">
+        {onUploadAttachment ? (
+          <>
+            <input
+              accept="image/*,.pdf,.txt,.csv,.md,.json,.zip,.doc,.docx,.xlsx,.pptx"
+              className="sr-only"
+              multiple
+              onInput={(event) => {
+                attachFiles(event.currentTarget.files ? Array.from(event.currentTarget.files) : null);
+                event.currentTarget.value = "";
+              }}
+              ref={fileInputRef}
+              tabIndex={-1}
+              type="file"
+            />
             <button
-              aria-label={t("composer.shareLocation")}
-              aria-pressed={locationOpen}
-              className="composer-attach composer-location-toggle"
-              disabled={sending}
-              onClick={() => (locationOpen ? closeLocationForm() : setLocationOpen(true))}
-              title={t("composer.shareLocationHint")}
+              aria-label={t("composer.attachImage")}
+              className="btn btn-icon btn-ghost composer-attach"
+              disabled={sending || pending.filter((entry) => entry.status !== "error").length >= ATTACHMENT_MAX_COUNT}
+              onClick={() => fileInputRef.current?.click()}
               type="button"
             >
-              📍
+              <IconAttach />
             </button>
-          ) : null}
-        </div>
-      ) : null}
-      <textarea
-        dir="auto"
-        id={composerId}
-        onInput={(event) => {
-          setValue(event.currentTarget.value);
-          if (event.currentTarget.value.trim()) {
-            onTyping?.();
-          }
-        }}
-        onKeyDown={(event) => {
-          // Enter-to-send on devices with a PRECISE pointer (desktop/laptop hosts, incl. the Electron
-          // target): Enter submits, Shift+Enter inserts a newline. On touch (coarse pointer) Enter stays a
-          // newline — the on-screen keyboard's return key must never fire a send mid-compose. Skip while an
-          // IME is composing (`isComposing`) so Enter confirms the candidate rather than sending.
-          if (
-            event.key === "Enter" &&
-            !event.shiftKey &&
-            !event.isComposing &&
-            typeof window !== "undefined" &&
-            window.matchMedia?.("(pointer: fine)").matches
-          ) {
-            event.preventDefault();
-            void submit();
-          }
-        }}
-        onPaste={handlePaste}
-        placeholder={placeholder}
-        ref={textAreaRef}
-        rows={1}
-        value={value}
-      />
-      <button
-        aria-label={t("composer.send")}
-        className="composer-send"
-        disabled={(!value.trim() && !readyAttachments.length && !draftLocation) || sending || uploading || locationIncomplete}
-        title={t("composer.send")}
-        type="submit"
-      >
-        <SendIcon />
-      </button>
+          </>
+        ) : null}
+        {allowLocationSharing ? (
+          <button
+            aria-label={t("composer.shareLocation")}
+            aria-pressed={locationOpen}
+            className={
+              locationOpen
+                ? "btn btn-icon btn-ghost composer-attach composer-location-toggle is-active"
+                : "btn btn-icon btn-ghost composer-attach composer-location-toggle"
+            }
+            disabled={sending}
+            onClick={() => (locationOpen ? closeLocationForm() : setLocationOpen(true))}
+            type="button"
+          >
+            <IconMapPin />
+          </button>
+        ) : null}
+        <label className="sr-only" for={composerId}>
+          {label}
+        </label>
+        <textarea
+          className="composer-input"
+          dir="auto"
+          id={composerId}
+          onInput={(event) => {
+            setValue(event.currentTarget.value);
+            if (event.currentTarget.value.trim()) {
+              onTyping?.();
+            }
+          }}
+          onKeyDown={(event) => {
+            // Enter-to-send on devices with a PRECISE pointer (desktop/laptop hosts, incl. the Electron
+            // target): Enter submits, Shift+Enter inserts a newline. On touch (coarse pointer) Enter stays a
+            // newline — the on-screen keyboard's return key must never fire a send mid-compose. Skip while an
+            // IME is composing (`isComposing`) so Enter confirms the candidate rather than sending.
+            if (
+              event.key === "Enter" &&
+              !event.shiftKey &&
+              !event.isComposing &&
+              typeof window !== "undefined" &&
+              window.matchMedia?.("(pointer: fine)").matches
+            ) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+          onPaste={handlePaste}
+          placeholder={placeholder}
+          ref={textAreaRef}
+          rows={1}
+          value={value}
+        />
+        <button
+          aria-label={t("composer.send")}
+          className="btn btn-icon btn-accent composer-send"
+          disabled={!canSend}
+          type="submit"
+        >
+          <IconSend size={18} />
+        </button>
+      </div>
     </form>
   );
 }

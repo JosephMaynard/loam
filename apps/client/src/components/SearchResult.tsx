@@ -44,9 +44,13 @@ export function SearchResult({
     <li className="search-result">
       <button className="search-result-button" onClick={onOpen} type="button">
         <span className="search-result-meta">
-          <strong>{authorName}</strong>
-          <span> · {contextLabel}</span>
-          <span> · {time}</span>
+          <strong className="search-result-author" dir="auto">
+            {authorName}
+          </strong>
+          <span className="search-result-context" dir="auto">
+            {contextLabel}
+          </span>
+          <time className="search-result-time">{time}</time>
         </span>
         <span className="search-result-body" dir="auto">
           {body}

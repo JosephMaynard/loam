@@ -13,10 +13,8 @@ export const ps: Translation = {
   "common.remove": "ړنګول",
   "common.requestFailed": "غوښتنه ناکامه شوه: {status}",
 
-  "conversation.emptyEyebrow": "محلي نوډ چمتو دی",
-  "conversation.emptyTitle": "یو چینل یا مستقیم پیغام وټاکئ.",
-  "conversation.emptyBody":
-    "پیغامونه، ځوابونه او غبرګونونه په محلي ډول خوندي کیږي او تر هغه چې سرور فعال وي د لپ‌ټاپ یا Raspberry Pi له لارې همغږي کیږي.",
+  "conversation.emptyTitle": "یو چینل یا یو کس وټاکئ",
+  "conversation.emptyBody": "پیغامونه په همدې محلي نوډ کې پاتې کیږي، نه په انټرنېټ کې.",
   "conversation.members": "غړي",
   "conversation.kindChannel": "چینل",
   "conversation.kindDm": "مستقیم پیغام",
@@ -26,7 +24,7 @@ export const ps: Translation = {
 
   "messageList.empty": "تر اوسه پیغام نشته. د هغه عملي جزئیاتو سره پیل وکړئ چې هر څوک ورته اړتیا لري.",
 
-  "message.editedTag": "(سمون‌شوی)",
+  "message.editedTag": "سمون‌شوی",
   "message.editAriaLabel": "پیغام سمول",
   "message.attachedImageAlt": "ضمیمه انځور",
   "message.streaming": "خپریږي",
@@ -379,8 +377,8 @@ export const ps: Translation = {
   "invite.show": "⧉ یو څوک وبلئ",
   "invite.title": "یو څوک وبلئ",
   "invite.close": "بلنه بندول",
-  "invite.wifiButton": "د وایفای هاټ سپاټ QR کوډ ښودل",
-  "invite.wifiHint": "د کوربه وایفای QR کوډ خلاصوي ترڅو خلک لومړی شبکې ته ننوځي.",
+  "invite.wifiButton": "د کوربه د شریکولو پرده پرانیزئ",
+  "invite.wifiHint": "د کوربه اپ څخه د هاټ سپاټ یا وایفای د ننوتلو QR کوډ ښیي.",
 
   "nodeLink.hide": "× لینک پټول",
   "nodeLink.show": "⧉ بل نوډ نښلول",
@@ -622,5 +620,23 @@ export const ps: Translation = {
   "error.channel_member_unavailable": "دا کس د دې چینل لپاره شتون نه لري",
   "error.block_not_allowed": "دا کاروونکی نه شي بندېدای",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "د خبرو اترو اختیارونه",
+  "message.actionsTitle": "د پیغام کړنې",
+  "message.actionsAt": "د پیغام کړنې، په {time} لېږل شوی",
+  "message.reactWith": "په {emoji} غبرګون",
+  "message.moreActions": "نورې کړنې",
+  "message.copyText": "متن کاپي کړئ",
+  "messageList.newMessages": "نوي پیغامونه",
+  "thread.inChannel": "په #{name} کې",
+  "report.done": "بشپړ شو",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "امستنې",
+  "settings.avatarFace": "مخ",
+  "settings.avatarInitial": "لومړی توری",
+  "settings.avatarPattern": "نمونه",
+  "admin.nav.label": "برخې",
+  "admin.nav.sync": "همغږي",
+  "admin.nav.mesh": "مش",
+  "moderation.banConfirm": "{name} بند کړئ؟ تر هغه چې یو څارونکی یې بندیز لرې نه کړي، دې شبکې ته لاسرسی نه لري.",
+  "toast.newMessages": { one: "په {place} کې {n} نوی پیغام", other: "په {place} کې {n} نوي پیغامونه" },
 };

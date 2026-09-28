@@ -13,10 +13,8 @@ export const ar: Translation = {
   "common.remove": "إزالة",
   "common.requestFailed": "فشل الطلب: {status}",
 
-  "conversation.emptyEyebrow": "العقدة المحلية جاهزة",
-  "conversation.emptyTitle": "اختر قناة أو رسالة مباشرة.",
-  "conversation.emptyBody":
-    "تُحفظ الرسائل والردود والتفاعلات محليًا وتتزامن عبر الحاسوب المحمول أو جهاز راسبيري باي ما دام الخادم يعمل.",
+  "conversation.emptyTitle": "اختر قناة أو شخصًا",
+  "conversation.emptyBody": "تبقى الرسائل على هذه العقدة المحلية، لا على الإنترنت.",
   "conversation.members": "الأعضاء",
   "conversation.kindChannel": "قناة",
   "conversation.kindDm": "رسالة مباشرة",
@@ -26,7 +24,7 @@ export const ar: Translation = {
 
   "messageList.empty": "لا رسائل بعد. ابدأ بالتفاصيل العملية التي يحتاجها الجميع.",
 
-  "message.editedTag": "(معدّل)",
+  "message.editedTag": "معدّل",
   "message.editAriaLabel": "تعديل الرسالة",
   "message.attachedImageAlt": "صورة مرفقة",
   "message.streaming": "يُبثّ",
@@ -393,8 +391,8 @@ export const ar: Translation = {
   "invite.show": "⧉ ادعُ شخصًا",
   "invite.title": "ادعُ شخصًا",
   "invite.close": "إغلاق الدعوة",
-  "invite.wifiButton": "إظهار رمز QR لنقطة اتصال Wi-Fi",
-  "invite.wifiHint": "يفتح رمز QR الخاص بشبكة Wi-Fi للمضيف حتى يتمكن الأشخاص من الانضمام إلى الشبكة أولاً.",
+  "invite.wifiButton": "فتح شاشة المشاركة في المضيف",
+  "invite.wifiHint": "يعرض رمز QR لنقطة الاتصال أو لشبكة Wi-Fi من تطبيق المضيف.",
 
   "nodeLink.hide": "× إخفاء الرابط",
   "nodeLink.show": "⧉ ربط عقدة أخرى",
@@ -636,5 +634,30 @@ export const ar: Translation = {
   "error.channel_member_unavailable": "هذا الشخص غير متاح لهذه القناة",
   "error.block_not_allowed": "لا يمكن حظر هذا المستخدم",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "خيارات المحادثة",
+  "message.actionsTitle": "إجراءات الرسالة",
+  "message.actionsAt": "إجراءات الرسالة، أُرسلت {time}",
+  "message.reactWith": "تفاعل بـ {emoji}",
+  "message.moreActions": "إجراءات أخرى",
+  "message.copyText": "نسخ النص",
+  "messageList.newMessages": "رسائل جديدة",
+  "thread.inChannel": "في #{name}",
+  "report.done": "تم",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "الإعدادات",
+  "settings.avatarFace": "وجه",
+  "settings.avatarInitial": "حرف أول",
+  "settings.avatarPattern": "نقش",
+  "admin.nav.label": "الأقسام",
+  "admin.nav.sync": "المزامنة",
+  "admin.nav.mesh": "شبكة mesh",
+  "moderation.banConfirm": "حظر {name}؟ سيفقد الوصول إلى هذه الشبكة حتى يرفع أحد المشرفين الحظر.",
+  "toast.newMessages": {
+    zero: "{n} رسالة جديدة في {place}",
+    one: "{n} رسالة جديدة في {place}",
+    two: "{n} رسالتان جديدتان في {place}",
+    few: "{n} رسائل جديدة في {place}",
+    many: "{n} رسالة جديدة في {place}",
+    other: "{n} رسالة جديدة في {place}",
+  },
 };

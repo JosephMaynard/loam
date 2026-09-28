@@ -5,6 +5,7 @@ import { LocationProvider } from "preact-iso";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Conversation } from "../lib/protocol";
+import { installViewportSync } from "../lib/viewport";
 import { ConversationView, type ConversationViewProps } from "./ConversationView";
 
 // Pre-release review 2026-09-25: everything conversation-scoped (composer draft, pending/in-flight
@@ -144,7 +145,11 @@ describe("ConversationView is scoped per conversation", () => {
 
   it("an open message report dialog does not follow into the next conversation", async () => {
     const host = mount(view({ conversation: GENERAL, messages: [post("p1")] }));
-    host.querySelector<HTMLButtonElement>(".message-report")!.click();
+    host.querySelector<HTMLButtonElement>(".message-more")!.click();
+    await tick();
+    Array.from(host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find((item) => item.textContent === "Report")!
+      .click();
     await tick();
     expect(host.querySelector(".report-dialog")).not.toBeNull();
 
@@ -193,5 +198,131 @@ describe("mobile back controls have an accessible name", () => {
     for (const back of backs) {
       expect(back.getAttribute("aria-label")).toBe("Back");
     }
+  });
+});
+
+describe("the conversation header", () => {
+  it("keeps DM actions in the overflow menu: the title is never crowded by buttons", async () => {
+    const host = mount(view({ conversation: DM, onSetBlocked: async () => {} }));
+    const header = host.querySelector(".conversation .screen-header")!;
+    expect(header.querySelector(".screen-title")?.textContent).toBe("Ada");
+    expect(header.querySelector(".screen-subtitle")?.textContent).toContain(peer.id);
+    // Only the back link and the ⋮ trigger are buttons/links in the header.
+    expect(header.querySelectorAll(".screen-header-actions button").length).toBe(1);
+
+    header.querySelector<HTMLButtonElement>(".menu-trigger")!.click();
+    await tick();
+    const labels = Array.from(host.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent);
+    expect(labels).toEqual(["Search messages", "Report this user", "Block"]);
+  });
+
+  it("shows Online in a DM header when the peer is connected", () => {
+    const host = mount(view({ conversation: DM, onlineUserIds: new Set([peer.id]) }));
+    expect(host.querySelector(".conversation .screen-subtitle")?.textContent).toContain("Online");
+    expect(host.querySelector(".conversation .screen-header .presence-dot")).not.toBeNull();
+  });
+
+  it("offers a Members button (with the count) for a private channel, opening the members dialog", async () => {
+    const secret = {
+      id: "secret",
+      name: "secret",
+      visibility: "private",
+      ownerUserId: me.id,
+      memberUserIds: [me.id, peer.id],
+      createdAt: 1,
+    } as Channel;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("[]", { status: 200 }));
+    const host = mount(view({ channels: [general, secret], conversation: { kind: "channel", id: "secret" } }));
+    const button = host.querySelector<HTMLButtonElement>(".members-button")!;
+    expect(button.textContent).toContain("2");
+    button.click();
+    await tick();
+    expect(host.querySelector(".members-dialog")?.getAttribute("role")).toBe("dialog");
+    fetchMock.mockRestore();
+  });
+});
+
+describe("the message list", () => {
+  it("groups consecutive messages: one avatar and name for the group", () => {
+    const messages = [post("p1"), { ...post("p2"), createdAt: 160 } as Message, { ...post("p3", me.id), createdAt: 200 } as Message];
+    const host = mount(view({ messages }));
+    const items = Array.from(host.querySelectorAll(".conversation .message"));
+    expect(items.map((item) => [item.classList.contains("group-first"), item.classList.contains("group-last")])).toEqual([
+      [true, false],
+      [false, true],
+      [true, true],
+    ]);
+    expect(host.querySelectorAll(".conversation .message-author").length).toBe(1);
+    expect(host.querySelectorAll(".conversation .message-gutter .avatar").length).toBe(1);
+  });
+
+  it("shows the typing indicator inside the list area, as a live region", () => {
+    const host = mount(view({ typers: ["Ada"] }));
+    const indicator = host.querySelector(".message-list-wrap .typing-indicator")!;
+    expect(indicator.getAttribute("aria-live")).toBe("polite");
+    expect(indicator.textContent).toContain("Ada is typing");
+    // Never a sibling of the composer (it can't push the composer off screen).
+    expect(host.querySelector(".conversation > .typing-indicator")).toBeNull();
+  });
+
+  /** Give the list fake scroll metrics (jsdom has no layout) and record programmatic scrolls. */
+  function fakeScroller(list: HTMLElement, metrics: { scrollHeight: number; clientHeight: number; scrollTop: number }) {
+    Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => metrics.scrollHeight });
+    Object.defineProperty(list, "clientHeight", { configurable: true, get: () => metrics.clientHeight });
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      get: () => metrics.scrollTop,
+      set: (value: number) => {
+        metrics.scrollTop = Math.min(value, metrics.scrollHeight - metrics.clientHeight);
+      },
+    });
+    return metrics;
+  }
+
+  it("follows new messages at the bottom, but offers a 'new messages' pill after scrolling up", async () => {
+    const first = [post("p1")];
+    const host = mount(view({ messages: first }));
+    const list = host.querySelector<HTMLElement>(".conversation .message-list")!;
+    const metrics = fakeScroller(list, { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 });
+
+    // At the bottom: a new message keeps it pinned.
+    metrics.scrollHeight = 1100;
+    rerender(host, view({ messages: [...first, { ...post("p2"), createdAt: 200 } as Message] }));
+    await tick();
+    expect(metrics.scrollTop).toBe(700);
+    expect(host.querySelector(".new-messages-pill")).toBeNull();
+
+    // Scrolled up to read history: new messages don't yank the view; a pill appears instead.
+    metrics.scrollTop = 100;
+    list.dispatchEvent(new Event("scroll"));
+    metrics.scrollHeight = 1200;
+    rerender(host, view({ messages: [...first, { ...post("p2"), createdAt: 200 } as Message, { ...post("p3"), createdAt: 300 } as Message] }));
+    await tick();
+    expect(metrics.scrollTop).toBe(100);
+    const pill = host.querySelector<HTMLButtonElement>(".new-messages-pill")!;
+    expect(pill.textContent).toContain("New messages");
+
+    pill.click();
+    await tick();
+    expect(metrics.scrollTop).toBe(800);
+    expect(host.querySelector(".new-messages-pill")).toBeNull();
+  });
+
+  it("re-pins to the bottom when the keyboard shrinks the viewport", async () => {
+    const visual = Object.assign(new EventTarget(), { height: 700, offsetTop: 0, scale: 1 });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: visual });
+    const stop = installViewportSync(window);
+    const host = mount(view({ messages: [post("p1")] }));
+    const list = host.querySelector<HTMLElement>(".conversation .message-list")!;
+    const metrics = fakeScroller(list, { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 });
+
+    // The keyboard opens: the list gets shorter, so the old scrollTop no longer reaches the end.
+    metrics.clientHeight = 200;
+    visual.height = 400;
+    visual.dispatchEvent(new Event("resize"));
+    expect(metrics.scrollTop).toBe(800);
+
+    stop();
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: undefined });
   });
 });

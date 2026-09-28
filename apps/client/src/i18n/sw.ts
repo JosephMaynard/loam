@@ -13,10 +13,8 @@ export const sw: Translation = {
   "common.remove": "Ondoa",
   "common.requestFailed": "Ombi limeshindwa: {status}",
 
-  "conversation.emptyEyebrow": "Nodi ya ndani iko tayari",
-  "conversation.emptyTitle": "Chagua kituo au ujumbe wa moja kwa moja.",
-  "conversation.emptyBody":
-    "Ujumbe, majibu na miitikio huhifadhiwa ndani na kusawazishwa kupitia kompyuta ndogo au Raspberry Pi wakati seva inaendelea kufanya kazi.",
+  "conversation.emptyTitle": "Chagua kituo au mtu",
+  "conversation.emptyBody": "Ujumbe hukaa kwenye nodi hii ya ndani, si kwenye intaneti.",
   "conversation.members": "Wanachama",
   "conversation.kindChannel": "Kituo",
   "conversation.kindDm": "Ujumbe wa moja kwa moja",
@@ -26,7 +24,7 @@ export const sw: Translation = {
 
   "messageList.empty": "Bado hakuna ujumbe. Anza na maelezo ya vitendo ambayo kila mtu anahitaji.",
 
-  "message.editedTag": "(imehaririwa)",
+  "message.editedTag": "imehaririwa",
   "message.editAriaLabel": "Hariri ujumbe",
   "message.attachedImageAlt": "Picha iliyoambatishwa",
   "message.streaming": "Inatiririsha",
@@ -379,8 +377,8 @@ export const sw: Translation = {
   "invite.show": "⧉ Mwalike mtu",
   "invite.title": "Mwalike mtu",
   "invite.close": "Funga mwaliko",
-  "invite.wifiButton": "Onyesha QR ya hotspot ya Wi-Fi",
-  "invite.wifiHint": "Inafungua QR ya Wi-Fi ya mwenyeji ili watu waweze kujiunga na mtandao kwanza.",
+  "invite.wifiButton": "Fungua skrini ya kushiriki ya mwenyeji",
+  "invite.wifiHint": "Inaonyesha QR ya hotspot au ya Wi-Fi kutoka programu ya mwenyeji.",
 
   "nodeLink.hide": "× Ficha kiungo",
   "nodeLink.show": "⧉ Unganisha nodi nyingine",
@@ -622,5 +620,23 @@ export const sw: Translation = {
   "error.channel_member_unavailable": "Mtu huyu hapatikani kwa kituo hiki",
   "error.block_not_allowed": "Mtumiaji huyu hawezi kuzuiwa",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Chaguo za mazungumzo",
+  "message.actionsTitle": "Vitendo vya ujumbe",
+  "message.actionsAt": "Vitendo vya ujumbe, ulitumwa saa {time}",
+  "message.reactWith": "Jibu kwa {emoji}",
+  "message.moreActions": "Vitendo zaidi",
+  "message.copyText": "Nakili maandishi",
+  "messageList.newMessages": "Ujumbe mpya",
+  "thread.inChannel": "katika #{name}",
+  "report.done": "Imekamilika",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Mipangilio",
+  "settings.avatarFace": "Uso",
+  "settings.avatarInitial": "Herufi ya kwanza",
+  "settings.avatarPattern": "Mchoro",
+  "admin.nav.label": "Sehemu",
+  "admin.nav.sync": "Usawazishaji",
+  "admin.nav.mesh": "Mesh",
+  "moderation.banConfirm": "Umpige marufuku {name}? Atapoteza ufikiaji wa mtandao huu hadi msimamizi aondoe marufuku.",
+  "toast.newMessages": { one: "ujumbe mpya {n} katika {place}", other: "jumbe mpya {n} katika {place}" },
 };

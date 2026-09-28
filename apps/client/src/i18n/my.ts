@@ -13,10 +13,8 @@ export const my: Translation = {
   "common.remove": "ဖယ်ရှားရန်",
   "common.requestFailed": "တောင်းဆိုမှု မအောင်မြင်ပါ- {status}",
 
-  "conversation.emptyEyebrow": "ဒေသတွင်း node အသင့်ဖြစ်ပြီ",
-  "conversation.emptyTitle": "channel သို့မဟုတ် တိုက်ရိုက်စာ ရွေးပါ။",
-  "conversation.emptyBody":
-    "စာများ၊ ပြန်စာများနှင့် တုံ့ပြန်မှုများကို ဒေသတွင်း သိမ်းဆည်းပြီး ဆာဗာ လည်ပတ်နေစဉ် laptop သို့မဟုတ် Raspberry Pi မှတစ်ဆင့် sync လုပ်သည်။",
+  "conversation.emptyTitle": "channel တစ်ခု သို့မဟုတ် လူတစ်ဦး ရွေးပါ",
+  "conversation.emptyBody": "စာများသည် အင်တာနက်ပေါ်တွင် မဟုတ်ဘဲ ဤဒေသတွင်း node ပေါ်တွင်သာ ရှိသည်။",
   "conversation.members": "အဖွဲ့ဝင်များ",
   "conversation.kindChannel": "Channel",
   "conversation.kindDm": "တိုက်ရိုက်စာ",
@@ -26,7 +24,7 @@ export const my: Translation = {
 
   "messageList.empty": "စာမရှိသေးပါ။ လူတိုင်းလိုအပ်သော လက်တွေ့အသေးစိတ်ဖြင့် စတင်ပါ။",
 
-  "message.editedTag": "(တည်းဖြတ်ပြီး)",
+  "message.editedTag": "တည်းဖြတ်ပြီး",
   "message.editAriaLabel": "စာ တည်းဖြတ်ရန်",
   "message.attachedImageAlt": "ပူးတွဲပုံ",
   "message.streaming": "ထုတ်လွှင့်နေသည်",
@@ -379,8 +377,8 @@ export const my: Translation = {
   "invite.show": "⧉ တစ်ဦးကို ဖိတ်ရန်",
   "invite.title": "တစ်ဦးကို ဖိတ်ရန်",
   "invite.close": "ဖိတ်ကြားချက် ပိတ်ရန်",
-  "invite.wifiButton": "Wi-Fi hotspot QR ကို ပြရန်",
-  "invite.wifiHint": "လူများ ကွန်ရက်ကို ဦးစွာ ဝင်နိုင်ရန် host ၏ Wi-Fi QR ကို ဖွင့်ပေးသည်။",
+  "invite.wifiButton": "host ၏ မျှဝေရန် စခရင်ကို ဖွင့်ရန်",
+  "invite.wifiHint": "host app မှ hotspot သို့မဟုတ် Wi-Fi ဝင်ရောက်ရန် QR ကို ပြသည်။",
 
   "nodeLink.hide": "× လင့်ခ် ဖျောက်ရန်",
   "nodeLink.show": "⧉ အခြား node ချိတ်ရန်",
@@ -622,5 +620,23 @@ export const my: Translation = {
   "error.channel_member_unavailable": "ဤသူသည် ဤ channel အတွက် မရနိုင်ပါ",
   "error.block_not_allowed": "ဤအသုံးပြုသူကို ပိတ်ဆို့၍ မရပါ",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "စကားဝိုင်း ရွေးချယ်စရာများ",
+  "message.actionsTitle": "စာ လုပ်ဆောင်ချက်များ",
+  "message.actionsAt": "စာ လုပ်ဆောင်ချက်များ၊ {time} တွင် ပို့ခဲ့သည်",
+  "message.reactWith": "{emoji} ဖြင့် တုံ့ပြန်ရန်",
+  "message.moreActions": "နောက်ထပ် လုပ်ဆောင်ချက်များ",
+  "message.copyText": "စာသား ကူးယူရန်",
+  "messageList.newMessages": "စာအသစ်များ",
+  "thread.inChannel": "#{name} တွင်",
+  "report.done": "ပြီးပါပြီ",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "ဆက်တင်များ",
+  "settings.avatarFace": "မျက်နှာ",
+  "settings.avatarInitial": "အစစာလုံး",
+  "settings.avatarPattern": "ပုံစံ",
+  "admin.nav.label": "အပိုင်းများ",
+  "admin.nav.sync": "Sync",
+  "admin.nav.mesh": "Mesh",
+  "moderation.banConfirm": "{name} ကို ပိတ်ပင်မလား။ moderator က ပိတ်ပင်မှု မဖြေမချင်း ဤကွန်ရက်ကို အသုံးပြု၍ မရတော့ပါ။",
+  "toast.newMessages": { other: "{place} တွင် စာအသစ် {n} စောင်" },
 };

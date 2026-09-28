@@ -2,6 +2,7 @@ import type { LoamConfig } from "@loam/schema";
 
 import { t } from "../i18n";
 import { clamp } from "../lib/numbers";
+import { CardHeader, SwitchRow } from "./ScreenParts";
 
 type MeshConfig = LoamConfig["mesh"];
 
@@ -28,33 +29,27 @@ export function MeshPanel({
   onChange: (update: Partial<MeshConfig>) => void;
 }) {
   return (
-    <div className="profile-panel">
-      <div>
-        <p className="eyebrow">{t("admin.networkEyebrow")}</p>
-        <h2>{t("admin.meshHeading")}</h2>
-      </div>
-      <label className="admin-toggle">
-        <input
+    <div className="card">
+      <CardHeader level={3} title={t("admin.meshHeading")} />
+      <div className="switch-list">
+        <SwitchRow
           checked={mesh.enabled}
+          description={t("admin.meshNote")}
           disabled={saving}
-          onInput={(event) => onChange({ enabled: event.currentTarget.checked })}
-          type="checkbox"
+          label={t("admin.meshEnable")}
+          onChange={(enabled) => onChange({ enabled })}
         />
-        {t("admin.meshEnable")}
-      </label>
-      <p className="form-note">{t("admin.meshNote")}</p>
-      <label className="admin-toggle">
-        <input
+        <SwitchRow
           checked={mesh.relay}
           disabled={saving || !mesh.enabled}
-          onInput={(event) => onChange({ relay: event.currentTarget.checked })}
-          type="checkbox"
+          label={t("admin.meshRelay")}
+          onChange={(relay) => onChange({ relay })}
         />
-        {t("admin.meshRelay")}
-      </label>
-      <label>
-        {t("admin.meshLifetimeLabel")}
+      </div>
+      <label className="field">
+        <span className="field-label">{t("admin.meshLifetimeLabel")}</span>
         <input
+          className="input input-narrow"
           disabled={saving || !mesh.enabled}
           max={MESH_TTL_HOURS_MAX}
           min={MESH_TTL_HOURS_MIN}
@@ -70,56 +65,61 @@ export function MeshPanel({
           type="number"
           value={String(Math.round((mesh.ttlMs / 3_600_000) * 100) / 100)}
         />
+        <span className="field-hint">{t("admin.meshLifetimeNote")}</span>
       </label>
-      <p className="form-note">{t("admin.meshLifetimeNote")}</p>
-      <label>
-        {t("admin.meshHopLimitLabel")}
-        <input
-          disabled={saving || !mesh.enabled}
-          max={16}
-          min={1}
-          onInput={(event) => {
-            const hopLimit = Number.parseInt(event.currentTarget.value, 10);
-            if (Number.isFinite(hopLimit)) {
-              onChange({ hopLimit: clamp(hopLimit, 1, 16) });
-            }
-          }}
-          type="number"
-          value={String(mesh.hopLimit)}
-        />
-      </label>
-      <label>
-        {t("admin.meshMaxCarriedLabel")}
-        <input
-          disabled={saving || !mesh.enabled}
-          max={100_000}
-          min={0}
-          onInput={(event) => {
-            const maxCarried = Number.parseInt(event.currentTarget.value, 10);
-            if (Number.isFinite(maxCarried)) {
-              onChange({ maxCarried: clamp(maxCarried, 0, 100_000) });
-            }
-          }}
-          type="number"
-          value={String(mesh.maxCarried)}
-        />
-      </label>
-      <label>
-        {t("admin.meshMaxContactsLabel")}
-        <input
-          disabled={saving || !mesh.enabled}
-          max={100_000}
-          min={0}
-          onInput={(event) => {
-            const maxContacts = Number.parseInt(event.currentTarget.value, 10);
-            if (Number.isFinite(maxContacts)) {
-              onChange({ maxContacts: clamp(maxContacts, 0, 100_000) });
-            }
-          }}
-          type="number"
-          value={String(mesh.maxContacts)}
-        />
-      </label>
+      <div className="field-grid">
+        <label className="field">
+          <span className="field-label">{t("admin.meshHopLimitLabel")}</span>
+          <input
+            className="input"
+            disabled={saving || !mesh.enabled}
+            max={16}
+            min={1}
+            onInput={(event) => {
+              const hopLimit = Number.parseInt(event.currentTarget.value, 10);
+              if (Number.isFinite(hopLimit)) {
+                onChange({ hopLimit: clamp(hopLimit, 1, 16) });
+              }
+            }}
+            type="number"
+            value={String(mesh.hopLimit)}
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">{t("admin.meshMaxCarriedLabel")}</span>
+          <input
+            className="input"
+            disabled={saving || !mesh.enabled}
+            max={100_000}
+            min={0}
+            onInput={(event) => {
+              const maxCarried = Number.parseInt(event.currentTarget.value, 10);
+              if (Number.isFinite(maxCarried)) {
+                onChange({ maxCarried: clamp(maxCarried, 0, 100_000) });
+              }
+            }}
+            type="number"
+            value={String(mesh.maxCarried)}
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">{t("admin.meshMaxContactsLabel")}</span>
+          <input
+            className="input"
+            disabled={saving || !mesh.enabled}
+            max={100_000}
+            min={0}
+            onInput={(event) => {
+              const maxContacts = Number.parseInt(event.currentTarget.value, 10);
+              if (Number.isFinite(maxContacts)) {
+                onChange({ maxContacts: clamp(maxContacts, 0, 100_000) });
+              }
+            }}
+            type="number"
+            value={String(mesh.maxContacts)}
+          />
+        </label>
+      </div>
     </div>
   );
 }

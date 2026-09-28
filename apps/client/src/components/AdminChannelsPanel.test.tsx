@@ -28,6 +28,12 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** A button inside the open alertdialog, by its text. */
+function dialogButton(host: HTMLElement, text: string): HTMLButtonElement {
+  const dialog = host.querySelector('[role="alertdialog"]') as HTMLElement;
+  return Array.from(dialog.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === text)!;
+}
+
 const admin: User = {
   id: "user.admin",
   displayName: "Ada Admin",
@@ -99,8 +105,6 @@ describe("AdminChannelsPanel", () => {
       return new Response(JSON.stringify(channels), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const confirmMock = vi.fn(() => false);
-    vi.stubGlobal("confirm", confirmMock);
 
     const host = mount(<AdminChannelsPanel currentUser={admin} onChannelUpsert={() => {}} />);
     await flush();
@@ -118,13 +122,17 @@ describe("AdminChannelsPanel", () => {
     // Cancelled confirm: no DELETE leaves the client, the row stays.
     act(() => deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await flush();
-    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[role="alertdialog"]')?.textContent).toContain("general");
+    act(() => dialogButton(host, "Cancel").click());
+    await flush();
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "DELETE")).toBe(false);
     expect(host.querySelectorAll(".admin-channel")).toHaveLength(2);
 
     // Accepted confirm: the DELETE goes to the right channel id and the row disappears.
-    confirmMock.mockReturnValue(true);
     act(() => deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+    act(() => dialogButton(host, "Delete").click());
     await flush();
     const deleteCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "DELETE");
     expect(String(deleteCall?.[0])).toContain("/api/channels/channel.general");
@@ -141,8 +149,6 @@ describe("AdminChannelsPanel", () => {
         return new Response(JSON.stringify(channels), { status: 200 });
       }),
     );
-    vi.stubGlobal("confirm", vi.fn(() => true));
-
     const host = mount(<AdminChannelsPanel currentUser={admin} onChannelUpsert={() => {}} />);
     await flush();
 
@@ -153,6 +159,8 @@ describe("AdminChannelsPanel", () => {
       (button) => button.textContent === "Delete",
     ) as HTMLButtonElement;
     act(() => deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+    act(() => dialogButton(host, "Delete").click());
     await flush();
 
     expect(host.querySelectorAll(".admin-channel")).toHaveLength(2);

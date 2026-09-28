@@ -13,10 +13,8 @@ export const ru: Translation = {
   "common.remove": "Убрать",
   "common.requestFailed": "Ошибка запроса: {status}",
 
-  "conversation.emptyEyebrow": "Локальный узел готов",
-  "conversation.emptyTitle": "Выберите канал или личное сообщение.",
-  "conversation.emptyBody":
-    "Сообщения, ответы и реакции хранятся локально и синхронизируются через ноутбук или Raspberry Pi, пока сервер работает.",
+  "conversation.emptyTitle": "Выберите канал или человека",
+  "conversation.emptyBody": "Сообщения хранятся на этом локальном узле, а не в интернете.",
   "conversation.members": "Участники",
   "conversation.kindChannel": "Канал",
   "conversation.kindDm": "Личное сообщение",
@@ -26,7 +24,7 @@ export const ru: Translation = {
 
   "messageList.empty": "Сообщений пока нет. Начните с практичной детали, нужной всем.",
 
-  "message.editedTag": "(изменено)",
+  "message.editedTag": "изменено",
   "message.editAriaLabel": "Редактировать сообщение",
   "message.attachedImageAlt": "Прикреплённое изображение",
   "message.streaming": "Трансляция",
@@ -389,8 +387,8 @@ export const ru: Translation = {
   "invite.show": "⧉ Пригласить кого-нибудь",
   "invite.title": "Пригласить кого-нибудь",
   "invite.close": "Закрыть приглашение",
-  "invite.wifiButton": "Показать QR-код Wi-Fi точки доступа",
-  "invite.wifiHint": "Открывает QR-код Wi-Fi хоста, чтобы люди могли сначала подключиться к сети.",
+  "invite.wifiButton": "Открыть экран «Поделиться» на хосте",
+  "invite.wifiHint": "Показывает QR-код точки доступа или Wi-Fi из приложения хоста.",
 
   "nodeLink.hide": "× Скрыть ссылку",
   "nodeLink.show": "⧉ Связать другой узел",
@@ -632,5 +630,28 @@ export const ru: Translation = {
   "error.channel_member_unavailable": "Этот человек недоступен для этого канала",
   "error.block_not_allowed": "Этого пользователя нельзя заблокировать",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Параметры беседы",
+  "message.actionsTitle": "Действия с сообщением",
+  "message.actionsAt": "Действия с сообщением, отправлено в {time}",
+  "message.reactWith": "Отреагировать {emoji}",
+  "message.moreActions": "Другие действия",
+  "message.copyText": "Копировать текст",
+  "messageList.newMessages": "Новые сообщения",
+  "thread.inChannel": "в #{name}",
+  "report.done": "Готово",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Настройки",
+  "settings.avatarFace": "Лицо",
+  "settings.avatarInitial": "Инициал",
+  "settings.avatarPattern": "Узор",
+  "admin.nav.label": "Разделы",
+  "admin.nav.sync": "Синхронизация",
+  "admin.nav.mesh": "Mesh-сеть",
+  "moderation.banConfirm": "Забанить {name}? Этот человек потеряет доступ к сети, пока модератор его не разбанит.",
+  "toast.newMessages": {
+    one: "{n} новое сообщение в {place}",
+    few: "{n} новых сообщения в {place}",
+    many: "{n} новых сообщений в {place}",
+    other: "{n} нового сообщения в {place}",
+  },
 };

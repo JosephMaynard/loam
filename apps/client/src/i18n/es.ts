@@ -13,10 +13,8 @@ export const es: Translation = {
   "common.remove": "Quitar",
   "common.requestFailed": "Error en la solicitud: {status}",
 
-  "conversation.emptyEyebrow": "Nodo local listo",
-  "conversation.emptyTitle": "Elige un canal o mensaje directo.",
-  "conversation.emptyBody":
-    "Los mensajes, respuestas y reacciones se guardan localmente y se sincronizan a través del portátil o la Raspberry Pi mientras el servidor está en marcha.",
+  "conversation.emptyTitle": "Elige un canal o una persona",
+  "conversation.emptyBody": "Los mensajes viven en este nodo local, no en internet.",
   "conversation.members": "Miembros",
   "conversation.kindChannel": "Canal",
   "conversation.kindDm": "Mensaje directo",
@@ -26,7 +24,7 @@ export const es: Translation = {
 
   "messageList.empty": "Aún no hay mensajes. Empieza con el detalle práctico que todos necesitan.",
 
-  "message.editedTag": "(editado)",
+  "message.editedTag": "editado",
   "message.editAriaLabel": "Editar mensaje",
   "message.attachedImageAlt": "Imagen adjunta",
   "message.streaming": "Transmitiendo",
@@ -379,8 +377,8 @@ export const es: Translation = {
   "invite.show": "⧉ Invitar a alguien",
   "invite.title": "Invitar a alguien",
   "invite.close": "Cerrar invitación",
-  "invite.wifiButton": "Mostrar QR del hotspot Wi-Fi",
-  "invite.wifiHint": "Abre el QR Wi-Fi del host para que la gente pueda unirse primero a la red.",
+  "invite.wifiButton": "Abrir la pantalla de compartir del host",
+  "invite.wifiHint": "Muestra el QR del hotspot o de la red Wi-Fi desde la app del host.",
 
   "nodeLink.hide": "× Ocultar enlace",
   "nodeLink.show": "⧉ Enlazar otro nodo",
@@ -622,5 +620,27 @@ export const es: Translation = {
   "error.channel_member_unavailable": "Esta persona no está disponible para este canal",
   "error.block_not_allowed": "No se puede bloquear a este usuario",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Opciones de la conversación",
+  "message.actionsTitle": "Acciones del mensaje",
+  "message.actionsAt": "Acciones del mensaje, enviado a las {time}",
+  "message.reactWith": "Reaccionar con {emoji}",
+  "message.moreActions": "Más acciones",
+  "message.copyText": "Copiar texto",
+  "messageList.newMessages": "Mensajes nuevos",
+  "thread.inChannel": "en #{name}",
+  "report.done": "Listo",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Ajustes",
+  "settings.avatarFace": "Cara",
+  "settings.avatarInitial": "Inicial",
+  "settings.avatarPattern": "Patrón",
+  "admin.nav.label": "Secciones",
+  "admin.nav.sync": "Sincronización",
+  "admin.nav.mesh": "Malla",
+  "moderation.banConfirm": "¿Vetar a {name}? Pierde el acceso a esta red hasta que un moderador le quite el veto.",
+  "toast.newMessages": {
+    one: "{n} mensaje nuevo en {place}",
+    many: "{n} mensajes nuevos en {place}",
+    other: "{n} mensajes nuevos en {place}",
+  },
 };

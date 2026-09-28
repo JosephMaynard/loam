@@ -13,10 +13,8 @@ export const fa: Translation = {
   "common.remove": "برداشتن",
   "common.requestFailed": "درخواست ناموفق بود: {status}",
 
-  "conversation.emptyEyebrow": "گره محلی آماده است",
-  "conversation.emptyTitle": "یک کانال یا پیام مستقیم انتخاب کنید.",
-  "conversation.emptyBody":
-    "پیام‌ها، پاسخ‌ها و واکنش‌ها به‌صورت محلی ذخیره می‌شوند و تا زمانی که سرور روی لپ‌تاپ یا رزبری‌پای در حال اجراست همگام‌سازی می‌شوند.",
+  "conversation.emptyTitle": "یک کانال یا یک نفر را انتخاب کنید",
+  "conversation.emptyBody": "پیام‌ها روی همین گره محلی می‌مانند، نه روی اینترنت.",
   "conversation.members": "اعضا",
   "conversation.kindChannel": "کانال",
   "conversation.kindDm": "پیام مستقیم",
@@ -26,7 +24,7 @@ export const fa: Translation = {
 
   "messageList.empty": "هنوز پیامی نیست. با جزئیات عملی که همه لازم دارند شروع کنید.",
 
-  "message.editedTag": "(ویرایش‌شده)",
+  "message.editedTag": "ویرایش‌شده",
   "message.editAriaLabel": "ویرایش پیام",
   "message.attachedImageAlt": "تصویر پیوست",
   "message.streaming": "در حال پخش",
@@ -379,8 +377,8 @@ export const fa: Translation = {
   "invite.show": "⧉ دعوت از کسی",
   "invite.title": "دعوت از کسی",
   "invite.close": "بستن دعوت",
-  "invite.wifiButton": "نمایش کد QR هات‌اسپات وای‌فای",
-  "invite.wifiHint": "کد QR وای‌فای میزبان را باز می‌کند تا افراد ابتدا بتوانند به شبکه بپیوندند.",
+  "invite.wifiButton": "باز کردن صفحهٔ اشتراک‌گذاری میزبان",
+  "invite.wifiHint": "کد QR هات‌اسپات یا وای‌فای را از برنامهٔ میزبان نشان می‌دهد.",
 
   "nodeLink.hide": "× پنهان‌کردن پیوند",
   "nodeLink.show": "⧉ پیوند گرهٔ دیگر",
@@ -622,5 +620,23 @@ export const fa: Translation = {
   "error.channel_member_unavailable": "این فرد برای این کانال در دسترس نیست",
   "error.block_not_allowed": "این کاربر را نمی‌توان مسدود کرد",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "گزینه‌های گفتگو",
+  "message.actionsTitle": "اقدامات پیام",
+  "message.actionsAt": "اقدامات پیام، ارسال‌شده در {time}",
+  "message.reactWith": "واکنش با {emoji}",
+  "message.moreActions": "اقدامات بیشتر",
+  "message.copyText": "کپی متن",
+  "messageList.newMessages": "پیام‌های جدید",
+  "thread.inChannel": "در #{name}",
+  "report.done": "انجام شد",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "تنظیمات",
+  "settings.avatarFace": "چهره",
+  "settings.avatarInitial": "حرف اول",
+  "settings.avatarPattern": "الگو",
+  "admin.nav.label": "بخش‌ها",
+  "admin.nav.sync": "همگام‌سازی",
+  "admin.nav.mesh": "مش",
+  "moderation.banConfirm": "{name} مسدود شود؟ تا وقتی یک ناظر مسدودی را رفع نکند، به این شبکه دسترسی ندارد.",
+  "toast.newMessages": { one: "{n} پیام تازه در {place}", other: "{n} پیام تازه در {place}" },
 };

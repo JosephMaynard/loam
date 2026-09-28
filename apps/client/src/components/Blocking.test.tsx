@@ -85,6 +85,12 @@ function buttonNamed(host: HTMLElement, name: string): HTMLButtonElement | undef
   return Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === name);
 }
 
+/** Open the conversation header's ⋮ menu (Report and Block live there) and wait for it to render. */
+async function openHeaderMenu(host: HTMLElement): Promise<void> {
+  host.querySelector<HTMLButtonElement>(".conversation .screen-header .menu-trigger")!.click();
+  await tick();
+}
+
 describe("channel content from a blocked user", () => {
   it("collapses their post to a placeholder (no name, body or avatar) that reveals on tap", async () => {
     const host = mount(
@@ -112,7 +118,7 @@ describe("channel content from a blocked user", () => {
   it("stops counting their reactions", () => {
     const messages = [post("p1", friend.id), reaction("r1", troll.id, "p1", "💩"), reaction("r2", friend.id, "p1", "👍")];
     const host = mount(view({ blockedUserIds: BLOCKED, messages }));
-    const counts = Array.from(host.querySelectorAll(".reaction")).map((node) => node.textContent);
+    const counts = Array.from(host.querySelectorAll(".reaction-chip")).map((node) => node.textContent);
     expect(counts).toEqual(["👍 1"]);
   });
 
@@ -169,11 +175,12 @@ describe("a DM with someone you blocked", () => {
     expect(host.querySelector(".composer-disabled")?.textContent).toContain("Unblock them to send a message");
     // The old conversation stays readable (it's the user's own DM).
     expect(host.querySelector(".message-list")?.textContent).toContain("dm d1");
-    // No "Block" button while already blocked; Report stays.
+    // No "Block" while already blocked; Report stays (both in the header's ⋮ menu).
+    await openHeaderMenu(host);
     expect(buttonNamed(host, "Block")).toBeUndefined();
     expect(buttonNamed(host, "Report this user")).toBeDefined();
 
-    buttonNamed(host, "Unblock")!.click();
+    host.querySelector<HTMLButtonElement>(".blocked-banner button")!.click();
     await tick();
     expect(onSetBlocked).toHaveBeenCalledWith(troll.id, false);
   });
@@ -185,20 +192,23 @@ describe("a DM with someone you blocked", () => {
 
     expect(host.querySelector(".blocked-banner")).toBeNull();
     expect(host.querySelector(".conversation .composer textarea")).not.toBeNull();
-    const block = buttonNamed(host, "Block")!;
+    await openHeaderMenu(host);
     expect(buttonNamed(host, "Report this user")).toBeDefined();
 
-    block.click(); // declined
+    buttonNamed(host, "Block")!.click(); // declined
+    await tick();
     expect(onSetBlocked).not.toHaveBeenCalled();
-    block.click(); // confirmed
+    await openHeaderMenu(host);
+    buttonNamed(host, "Block")!.click(); // confirmed
     expect(confirm).toHaveBeenCalledTimes(2);
     expect(String(confirm.mock.calls[0]?.[0])).toContain("Friend");
     expect(onSetBlocked).toHaveBeenCalledWith(friend.id, true);
   });
 
-  it("never offers Block for the assistant bot or a mesh sender", () => {
+  it("never offers Block for the assistant bot or a mesh sender", async () => {
     const meshSender: User = { ...friend, id: "mesh.abcdefghijklmnopqrstuvwxyz", displayName: "Far away" };
     const botHost = mount(view({ conversation: { kind: "dm", id: bot.id }, onSetBlocked: async () => {} }));
+    await openHeaderMenu(botHost);
     expect(buttonNamed(botHost, "Block")).toBeUndefined();
     const meshHost = mount(
       view({
@@ -207,6 +217,7 @@ describe("a DM with someone you blocked", () => {
         usersById: new Map([me, meshSender].map((user) => [user.id, user])),
       }),
     );
+    await openHeaderMenu(meshHost);
     expect(buttonNamed(meshHost, "Block")).toBeUndefined();
   });
 });

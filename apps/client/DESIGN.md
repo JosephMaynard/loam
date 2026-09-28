@@ -282,8 +282,27 @@ Search, Settings, People, Mesh and Admin already use it (title only; the old eye
 
 ## Other primitives
 
-- **Toasts** (`ToastStack` in `app.tsx`): bottom inline-end corner on tablet/desktop, top of the screen on
-  phones (the composer owns the bottom). Elevated card, 14px title, 13px two-line body.
+- **Toasts** (`components/ToastStack.tsx`): bottom inline-end corner on tablet/desktop; on phones just under
+  the 56px screen header (the composer owns the bottom). Elevated card, 14px title, 13px two-line body.
+  Messages in one conversation coalesce into one toast ("3 new messages in #general", the `toast.newMessages`
+  plural, over the newest message) and at most two conversations show at once; tapping dismisses the group.
+  `ToastItem.place` / `.author` feed the coalesced text.
+- **Screen layout** (`screens.css`): under a `ScreenHeader`, one scrolling `.screen-body` holding a
+  `.screen-column` (max 720px, centred, 16px gutters on phones, 16px gap) of `.card`s; cards get 20px
+  padding from 720px up. `.empty-note` for "nothing here yet", `.screen-footnote` for a closing link.
+- **Card parts** (`components/ScreenParts.tsx`): `CardHeader` (`title`, `description`, trailing `actions`,
+  `level` 2 or 3) → `.card-header`; `.card-actions` (right-aligned button row; `.card-actions-start`),
+  `.card-section` (a hairline-separated sub-part with a `.card-subtitle`), `.card-danger` (red border and
+  title, for danger zones), `.field-grid`, `.inline-field` (input + button), `.mono-field`, `.select-sm`.
+- **Switch rows**: `SwitchRow` (`label`, `description`, `checked`, `onChange`) is a 52px `label.switch-row`
+  with the text on the start side and `input.toggle` on the end; stack them in `.switch-list` for
+  hairlines between.
+- **Row text**: inside a `.list-row`, `.row-text` > `.row-title` + `.row-meta`; `.row-actions` for trailing
+  `.btn-sm`s; `.row-detail` spans the full width under the row (an error, an inline form).
+- **ConfirmDialog** (`components/ConfirmDialog.tsx`): the `role="alertdialog"` confirmation for destructive
+  actions (wipe, Emergency Reset, ban, delete channel, make admin). Title, consequence, optional typed-word
+  guard (`confirmWord="wipe"`, passed back to `onConfirm(typed)`), Cancel + a danger (or `danger={false}`
+  primary) button; focus lands on Cancel or the word field. No `window.confirm` in the screens any more.
 - **Error banner** (`ErrorBanner`): top-centred, `--danger-solid` with white text, icon close button.
 - **Notice**: `.notice` (neutral well) / `.notice-danger` for inline messages inside a screen.
 - **Empty state**: `.empty-state > div` with an optional `.eyebrow`, a heading and muted copy.
@@ -356,15 +375,16 @@ Screens agent (`app.tsx` SettingsView / PeopleView / SearchView / MeshView, `Adm
 `BlockedUsersPanel`, `AvatarImageEditor`, `NodeLinkControl`, `AddSyncPeerControl`, `SyncStatusPanel`,
 `LlmPanel`, `MeshPanel`, `GettingStartedPanel`, `SearchResult`; rewrite `screens.css`):
 
-- [ ] Settings, admin, people, search and mesh on the card system: `.card` sections with `.card-title`,
+- [x] Settings, admin, people, search and mesh on the card system: `.card` sections with `.card-title`,
       `.field` / `.input` / `.select` / `.check-row` / `.toggle` controls, `.list` / `.list-row` for people,
       peers, blocked users and reports, `.badge-*` for roles/states, `.btn` variants for every button.
-- [ ] One column on phones, a comfortable max width (about 720px) centred on desktop instead of the old
+      (The views now live in `src/views/`; admin has a section-pill nav and a sticky Save bar.)
+- [x] One column on phones, a comfortable max width (about 720px) centred on desktop instead of the old
       two-column grid.
-- [ ] Search: search field in or under the `ScreenHeader`, results as list rows.
-- [ ] Avatar editor and identity panel use `Avatar size="xl"`.
-- [ ] Destructive actions (wipe device, kill switch, ban) confirm with `Dialog role="alertdialog"`.
-- [ ] Strings: `invite.wifiButton` → "Open the host's share screen"; `invite.wifiHint` → "Shows the
-      hotspot or Wi-Fi join QR from the host app." (English values in `en.ts`; see i18n above for the
-      other catalogs.)
-- [ ] Delete the "Legacy button rows" section and the COMPAT rules this makes unused.
+- [x] Search: search field in or under the `ScreenHeader`, results as list rows.
+- [x] Avatar editor and identity panel use `Avatar size="xl"`.
+- [x] Destructive actions (wipe device, kill switch, ban) confirm with `Dialog role="alertdialog"`
+      (`ConfirmDialog`; channel delete and make-admin too).
+- [x] Strings: `invite.wifiButton` → "Open the host's share screen"; `invite.wifiHint` → "Shows the
+      hotspot or Wi-Fi join QR from the host app." (All 15 catalogs updated.)
+- [x] Delete the "Legacy button rows" section and the COMPAT rules this makes unused.

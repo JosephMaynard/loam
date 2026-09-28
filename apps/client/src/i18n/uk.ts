@@ -13,10 +13,8 @@ export const uk: Translation = {
   "common.remove": "Прибрати",
   "common.requestFailed": "Помилка запиту: {status}",
 
-  "conversation.emptyEyebrow": "Локальний вузол готовий",
-  "conversation.emptyTitle": "Оберіть канал або пряме повідомлення.",
-  "conversation.emptyBody":
-    "Повідомлення, відповіді та реакції зберігаються локально й синхронізуються через ноутбук чи Raspberry Pi, поки сервер працює.",
+  "conversation.emptyTitle": "Оберіть канал або людину",
+  "conversation.emptyBody": "Повідомлення зберігаються на цьому локальному вузлі, а не в інтернеті.",
   "conversation.members": "Учасники",
   "conversation.kindChannel": "Канал",
   "conversation.kindDm": "Пряме повідомлення",
@@ -26,7 +24,7 @@ export const uk: Translation = {
 
   "messageList.empty": "Повідомлень ще немає. Почніть із практичної деталі, потрібної всім.",
 
-  "message.editedTag": "(відредаговано)",
+  "message.editedTag": "відредаговано",
   "message.editAriaLabel": "Редагувати повідомлення",
   "message.attachedImageAlt": "Долучене зображення",
   "message.streaming": "Трансляція",
@@ -389,8 +387,8 @@ export const uk: Translation = {
   "invite.show": "⧉ Запросити когось",
   "invite.title": "Запросити когось",
   "invite.close": "Закрити запрошення",
-  "invite.wifiButton": "Показати QR-код Wi-Fi точки доступу",
-  "invite.wifiHint": "Відкриває QR-код Wi-Fi хоста, щоб люди могли спочатку приєднатися до мережі.",
+  "invite.wifiButton": "Відкрити екран поширення на хості",
+  "invite.wifiHint": "Показує QR-код точки доступу або Wi-Fi із застосунку хоста.",
 
   "nodeLink.hide": "× Сховати посилання",
   "nodeLink.show": "⧉ Зв’язати інший вузол",
@@ -632,5 +630,28 @@ export const uk: Translation = {
   "error.channel_member_unavailable": "Ця людина недоступна для цього каналу",
   "error.block_not_allowed": "Цього користувача не можна заблокувати",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Параметри розмови",
+  "message.actionsTitle": "Дії з повідомленням",
+  "message.actionsAt": "Дії з повідомленням, надіслано о {time}",
+  "message.reactWith": "Відреагувати {emoji}",
+  "message.moreActions": "Інші дії",
+  "message.copyText": "Копіювати текст",
+  "messageList.newMessages": "Нові повідомлення",
+  "thread.inChannel": "у #{name}",
+  "report.done": "Готово",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Налаштування",
+  "settings.avatarFace": "Обличчя",
+  "settings.avatarInitial": "Ініціал",
+  "settings.avatarPattern": "Візерунок",
+  "admin.nav.label": "Розділи",
+  "admin.nav.sync": "Синхронізація",
+  "admin.nav.mesh": "Mesh-мережа",
+  "moderation.banConfirm": "Заблокувати {name}? Ця людина втратить доступ до мережі, доки модератор її не розблокує.",
+  "toast.newMessages": {
+    one: "{n} нове повідомлення в {place}",
+    few: "{n} нові повідомлення в {place}",
+    many: "{n} нових повідомлень в {place}",
+    other: "{n} нового повідомлення в {place}",
+  },
 };

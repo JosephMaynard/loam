@@ -13,10 +13,8 @@ export const fr: Translation = {
   "common.remove": "Retirer",
   "common.requestFailed": "Échec de la requête : {status}",
 
-  "conversation.emptyEyebrow": "Nœud local prêt",
-  "conversation.emptyTitle": "Choisissez un canal ou un message direct.",
-  "conversation.emptyBody":
-    "Les messages, réponses et réactions sont conservés localement et se synchronisent via l’ordinateur portable ou le Raspberry Pi tant que le serveur fonctionne.",
+  "conversation.emptyTitle": "Choisissez un canal ou une personne",
+  "conversation.emptyBody": "Les messages restent sur ce nœud local, pas sur Internet.",
   "conversation.members": "Membres",
   "conversation.kindChannel": "Canal",
   "conversation.kindDm": "Message direct",
@@ -26,7 +24,7 @@ export const fr: Translation = {
 
   "messageList.empty": "Aucun message pour l’instant. Commencez par le détail pratique dont tout le monde a besoin.",
 
-  "message.editedTag": "(modifié)",
+  "message.editedTag": "modifié",
   "message.editAriaLabel": "Modifier le message",
   "message.attachedImageAlt": "Image jointe",
   "message.streaming": "En cours",
@@ -379,8 +377,8 @@ export const fr: Translation = {
   "invite.show": "⧉ Inviter quelqu’un",
   "invite.title": "Inviter quelqu’un",
   "invite.close": "Fermer l’invitation",
-  "invite.wifiButton": "Afficher le QR du point d’accès Wi-Fi",
-  "invite.wifiHint": "Ouvre le QR Wi-Fi de l’hôte pour que les gens puissent d’abord rejoindre le réseau.",
+  "invite.wifiButton": "Ouvrir l’écran de partage de l’hôte",
+  "invite.wifiHint": "Affiche le QR du point d’accès ou du Wi-Fi depuis l’app de l’hôte.",
 
   "nodeLink.hide": "× Masquer le lien",
   "nodeLink.show": "⧉ Relier un autre nœud",
@@ -622,5 +620,27 @@ export const fr: Translation = {
   "error.channel_member_unavailable": "Cette personne n’est pas disponible pour ce canal",
   "error.block_not_allowed": "Cet utilisateur ne peut pas être bloqué",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Options de la conversation",
+  "message.actionsTitle": "Actions du message",
+  "message.actionsAt": "Actions du message, envoyé à {time}",
+  "message.reactWith": "Réagir avec {emoji}",
+  "message.moreActions": "Plus d’actions",
+  "message.copyText": "Copier le texte",
+  "messageList.newMessages": "Nouveaux messages",
+  "thread.inChannel": "dans #{name}",
+  "report.done": "Terminé",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Paramètres",
+  "settings.avatarFace": "Visage",
+  "settings.avatarInitial": "Initiale",
+  "settings.avatarPattern": "Motif",
+  "admin.nav.label": "Sections",
+  "admin.nav.sync": "Synchronisation",
+  "admin.nav.mesh": "Maillage",
+  "moderation.banConfirm": "Bannir {name} ? Cette personne perd l’accès à ce réseau jusqu’à ce qu’un modérateur la débannisse.",
+  "toast.newMessages": {
+    one: "{n} nouveau message dans {place}",
+    many: "{n} nouveaux messages dans {place}",
+    other: "{n} nouveaux messages dans {place}",
+  },
 };

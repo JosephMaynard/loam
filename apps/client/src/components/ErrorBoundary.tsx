@@ -41,7 +41,7 @@ export class ErrorBoundary extends Component<{ children: ComponentChildren }, Er
           <img alt="LOAM" className="gate-mark" src={loamMark} />
           <h1>{t("app.crashTitle")}</h1>
           <p>{t("app.crashBody")}</p>
-          <div className="dialog-actions crash-actions">
+          <div className="dialog-actions">
             <button className="btn btn-primary" onClick={this.goHome} type="button">
               {t("app.crashHome")}
             </button>

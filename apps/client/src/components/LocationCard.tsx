@@ -1,6 +1,7 @@
 import type { MessageLocation } from "@loam/schema";
 
 import { t } from "../i18n";
+import { IconMapPin } from "./icons";
 
 /**
  * Compact card rendering a shared location (docs/10) below a message body: a pin, the human label
@@ -19,10 +20,12 @@ export function LocationCard({ location }: { location: MessageLocation }) {
   return (
     <div className="location-card">
       <span aria-hidden="true" className="location-pin">
-        📍
+        <IconMapPin size={18} />
       </span>
       <div className="location-details">
-        <span className="location-label">{primary}</span>
+        <span className="location-label" dir="auto">
+          {primary}
+        </span>
         {location.label && coordsText ? <span className="location-coords">{coordsText}</span> : null}
         {hasCoords ? (
           <a className="location-open-maps" href={`geo:${location.lat},${location.lng}`}>

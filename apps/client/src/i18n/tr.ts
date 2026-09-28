@@ -13,10 +13,8 @@ export const tr: Translation = {
   "common.remove": "Kaldır",
   "common.requestFailed": "İstek başarısız: {status}",
 
-  "conversation.emptyEyebrow": "Yerel düğüm hazır",
-  "conversation.emptyTitle": "Bir kanal veya doğrudan mesaj seçin.",
-  "conversation.emptyBody":
-    "Mesajlar, yanıtlar ve tepkiler yerel olarak saklanır ve sunucu çalıştığı sürece dizüstü bilgisayar veya Raspberry Pi üzerinden eşitlenir.",
+  "conversation.emptyTitle": "Bir kanal veya bir kişi seçin",
+  "conversation.emptyBody": "Mesajlar internette değil, bu yerel düğümde durur.",
   "conversation.members": "Üyeler",
   "conversation.kindChannel": "Kanal",
   "conversation.kindDm": "Doğrudan mesaj",
@@ -26,7 +24,7 @@ export const tr: Translation = {
 
   "messageList.empty": "Henüz mesaj yok. Herkesin ihtiyaç duyduğu pratik ayrıntıyla başlayın.",
 
-  "message.editedTag": "(düzenlendi)",
+  "message.editedTag": "düzenlendi",
   "message.editAriaLabel": "Mesajı düzenle",
   "message.attachedImageAlt": "Ekli görsel",
   "message.streaming": "Akış",
@@ -379,8 +377,8 @@ export const tr: Translation = {
   "invite.show": "⧉ Birini davet et",
   "invite.title": "Birini davet et",
   "invite.close": "Daveti kapat",
-  "invite.wifiButton": "Wi-Fi erişim noktası QR kodunu göster",
-  "invite.wifiHint": "Kişilerin önce ağa katılabilmesi için sunucunun Wi-Fi QR kodunu açar.",
+  "invite.wifiButton": "Sunucunun paylaşım ekranını aç",
+  "invite.wifiHint": "Sunucu uygulamasındaki erişim noktası veya Wi-Fi katılım QR kodunu gösterir.",
 
   "nodeLink.hide": "× Bağlantıyı gizle",
   "nodeLink.show": "⧉ Başka bir düğüm bağla",
@@ -622,5 +620,23 @@ export const tr: Translation = {
   "error.channel_member_unavailable": "Bu kişi bu kanal için uygun değil",
   "error.block_not_allowed": "Bu kullanıcı engellenemez",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Sohbet seçenekleri",
+  "message.actionsTitle": "Mesaj işlemleri",
+  "message.actionsAt": "Mesaj işlemleri, gönderilme saati {time}",
+  "message.reactWith": "{emoji} ile tepki ver",
+  "message.moreActions": "Diğer işlemler",
+  "message.copyText": "Metni kopyala",
+  "messageList.newMessages": "Yeni mesajlar",
+  "thread.inChannel": "#{name} kanalında",
+  "report.done": "Tamam",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Ayarlar",
+  "settings.avatarFace": "Yüz",
+  "settings.avatarInitial": "Baş harf",
+  "settings.avatarPattern": "Desen",
+  "admin.nav.label": "Bölümler",
+  "admin.nav.sync": "Eşitleme",
+  "admin.nav.mesh": "Mesh ağı",
+  "moderation.banConfirm": "{name} yasaklansın mı? Bir moderatör yasağı kaldırana kadar bu ağa erişemez.",
+  "toast.newMessages": { one: "{place} içinde {n} yeni mesaj", other: "{place} içinde {n} yeni mesaj" },
 };

@@ -57,7 +57,7 @@ export function PinChangePrompt({ current, next, matchesNode, onAccept, onReject
           {t("transport.pinChangeReject")}
         </button>
         {matchesNode ? (
-          <button className="btn btn-danger danger-button" onClick={onAccept} type="button">
+          <button className="btn btn-danger" onClick={onAccept} type="button">
             {t("transport.pinChangeAccept")}
           </button>
         ) : null}

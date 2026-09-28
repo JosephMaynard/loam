@@ -1,11 +1,11 @@
 import type { Channel, Message, MessageAttachment, MessageLocation, User } from "@loam/schema";
-import type { ComponentChildren } from "preact";
 import { useLocation } from "preact-iso";
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { withoutBlockedAuthors, withoutBlockedReactions } from "../lib/blocks";
-import { dayKey, dayLabel } from "../lib/dates";
+import { dayLabel } from "../lib/dates";
+import { groupMessages } from "../lib/message-groups";
 import {
   groupReactionsByTarget,
   groupRepliesByParent,
@@ -15,17 +15,23 @@ import {
 } from "../lib/messages";
 import type { Conversation } from "../lib/protocol";
 import { useIsTimedOut } from "../lib/timeout";
-import { BackArrowIcon } from "./BackArrowIcon";
+import { onViewportResize } from "../lib/viewport";
+import { Avatar } from "./Avatar";
 import { ChannelMembersPanel } from "./ChannelMembersPanel";
+import { Dialog } from "./Dialog";
+import { IconClose, IconFlag, IconHash, IconLock, IconSearch, IconShield, IconUsers } from "./icons";
+import type { MenuItem } from "./Menu";
 import { MessageComposer } from "./MessageComposer";
 import { MessageItem } from "./MessageItem";
-import { MobileBackLink } from "./MobileBackLink";
 import { ReportDialog } from "./ReportDialog";
+import { ScreenHeader } from "./ScreenHeader";
 
 /** Shared empty array for grouped-map lookups with no matches, to avoid a fresh allocation per message. */
 const EMPTY_MESSAGES: Message[] = [];
 /** Shared empty block list (the default when the caller passes none). */
 const NO_BLOCKS: ReadonlySet<string> = new Set();
+/** Within this many px of the end, a list counts as "at the bottom" and follows new messages. */
+const PIN_THRESHOLD_PX = 80;
 
 /** Stable per-conversation identity (`channel:<id>` / `dm:<peerId>`) — a thread is part of its channel. */
 export function conversationIdentity(conversation: Conversation): string {
@@ -43,6 +49,8 @@ export interface ConversationViewProps {
   messages: Message[];
   /** The server said this conversation doesn't exist for this user (unknown, removed, or not a member). */
   notFound?: boolean;
+  /** Who is connected (presence events). Shows the online dot and "Online" in a DM header. */
+  onlineUserIds?: ReadonlySet<string>;
   onChannelUpsert: (channels: Channel[]) => void;
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
@@ -82,7 +90,6 @@ export function ConversationView(props: ConversationViewProps) {
     return (
       <section className="conversation empty-state">
         <div>
-          <p className="eyebrow">{t("conversation.emptyEyebrow")}</p>
           <h1>{t("conversation.emptyTitle")}</h1>
           <p>{t("conversation.emptyBody")}</p>
         </div>
@@ -99,6 +106,15 @@ function backRouteForThread(conversation: Conversation): string {
     : `/dm/${encodeURIComponent(conversation.id)}`;
 }
 
+/** The typing line: "Ada is typing…", "Ada and Bo are typing…", or "Several people are typing…". */
+function typingText(typers: string[]): string {
+  return typers.length === 1
+    ? t("typing.one", { name: typers[0]! })
+    : typers.length === 2
+      ? t("typing.two", { a: typers[0]!, b: typers[1]! })
+      : t("typing.many");
+}
+
 /** One conversation's pane. Only ever mounted keyed by `conversationIdentity` (see `ConversationView`). */
 function ConversationPane({
   allowAttachments,
@@ -108,6 +124,7 @@ function ConversationPane({
   conversation,
   currentUser,
   notFound = false,
+  onlineUserIds,
   onTyping,
   typers,
   messages,
@@ -149,6 +166,7 @@ function ConversationPane({
     conversation.kind === "channel" ? channels.find((channel) => channel.id === conversation.id) : undefined;
   const isPrivateChannel = activeChannel?.visibility === "private";
   const dmPeer = conversation.kind === "dm" ? usersById.get(conversation.id) : undefined;
+  const peerOnline = conversation.kind === "dm" && !!onlineUserIds?.has(conversation.id);
   // Only people can be blocked — not the assistant bot, and not a mesh sender (the server refuses both).
   const canBlockPeer = !!onSetBlocked && dmPeer?.type === "human" && !conversation.id.startsWith("mesh.");
   const dmBlocked = conversation.kind === "dm" && blockedUserIds.has(conversation.id);
@@ -161,10 +179,12 @@ function ConversationPane({
       : timedOut
         ? t("composer.timedOut")
         : undefined;
-  const title =
-    conversation.kind === "channel"
-      ? `${isPrivateChannel ? "🔒" : "#"} ${activeChannel?.name ?? conversation.id}`
-      : dmPeer?.displayName ?? conversation.id;
+  const channelName = activeChannel?.name ?? conversation.id;
+  const title = conversation.kind === "channel" ? channelName : dmPeer?.displayName ?? conversation.id;
+  const memberCount = isPrivateChannel
+    ? new Set([...(activeChannel?.memberUserIds ?? []), ...(activeChannel?.ownerUserId ? [activeChannel.ownerUserId] : [])])
+        .size
+    : 0;
 
   function confirmBlock(): void {
     if (onSetBlocked && window.confirm(t("block.confirm", { name: title }))) {
@@ -172,13 +192,78 @@ function ConversationPane({
     }
   }
 
+  const leading =
+    conversation.kind === "dm" ? (
+      <Avatar avatar={dmPeer?.avatar} id={conversation.id} presence={peerOnline ? "online" : undefined} size="md" />
+    ) : (
+      <span aria-hidden="true" className="channel-glyph">
+        {isPrivateChannel ? <IconLock size={18} /> : <IconHash size={18} />}
+      </span>
+    );
+  // A DM's subtitle is the peer's id (their identity; display names are only near-unique), led by
+  // "Online" while they're connected. A channel's is its topic.
+  const subtitle =
+    conversation.kind === "dm" ? (
+      <>
+        {peerOnline ? <span className="presence-text">{t("sidebar.online")}</span> : null}
+        <span className="peer-id">{conversation.id}</span>
+      </>
+    ) : (
+      activeChannel?.description
+    );
+  const menuItems: MenuItem[] = [
+    ...(isPrivateChannel && activeChannel
+      ? [{ label: t("conversation.members"), icon: <IconUsers />, onSelect: () => setMembersOpen(true) }]
+      : []),
+    { label: t("sidebar.searchMessages"), icon: <IconSearch />, onSelect: () => location.route("/search") },
+    // The report-a-USER entry point: the one place a person is the subject is their DM. Block sits beside
+    // it (Play UGC policy, docs/30 B3); once blocked, the banner below offers Unblock as well.
+    ...(conversation.kind === "dm" && dmPeer?.type === "human"
+      ? [{ label: t("report.userTitle"), icon: <IconFlag />, onSelect: () => setReportUserId(conversation.id) }]
+      : []),
+    ...(canBlockPeer
+      ? [
+          dmBlocked
+            ? {
+                label: t("block.unblock"),
+                icon: <IconShield />,
+                onSelect: () => void onSetBlocked?.(conversation.id, false),
+              }
+            : { label: t("block.block"), icon: <IconShield />, onSelect: confirmBlock, danger: true },
+        ]
+      : []),
+  ];
+  const header = (
+    <ScreenHeader
+      actions={
+        isPrivateChannel && activeChannel && !notFound ? (
+          <button
+            aria-expanded={membersOpen}
+            aria-haspopup="dialog"
+            className="btn btn-secondary btn-sm members-button"
+            onClick={() => setMembersOpen(true)}
+            type="button"
+          >
+            <IconUsers size={18} />
+            <span className="members-button-label">{t("conversation.members")}</span>
+            <span className="members-button-count">{memberCount}</span>
+          </button>
+        ) : undefined
+      }
+      className="conversation-header"
+      leading={leading}
+      menuItems={notFound ? undefined : menuItems}
+      menuLabel={t("conversation.moreActions")}
+      subtitle={notFound ? undefined : subtitle}
+      title={title}
+    />
+  );
+
   if (notFound) {
     return (
       <section className="conversation">
-        <div className="conversation-top">
-          <ConversationHeader conversation={conversation} title={title} />
-        </div>
-        <div className="message-list conversation-not-found" role="status">
+        {header}
+        <div className="conversation-not-found" role="status">
           <h2>{t("conversation.notFoundTitle")}</h2>
           <p className="empty-copy">{t("conversation.notFoundBody")}</p>
         </div>
@@ -189,59 +274,23 @@ function ConversationPane({
   return (
     <>
       <section className="conversation">
-        {/* One wrapper = one grid row: .conversation is a strict header/list/composer 3-row grid. */}
-        <div className="conversation-top">
-          <ConversationHeader
-            conversation={conversation}
-            description={activeChannel?.description}
-            title={title}
-            trailing={
-              isPrivateChannel ? (
-                <button
-                  aria-expanded={membersOpen}
-                  className="ghost-button"
-                  onClick={() => setMembersOpen((previous) => !previous)}
-                  type="button"
-                >
-                  {t("conversation.members")}
-                </button>
-              ) : conversation.kind === "dm" && dmPeer?.type === "human" ? (
-                // The report-a-USER entry point (the server + dialog already supported it, but nothing
-                // opened it): reachable from the one place a person is the subject — their DM. Block sits
-                // beside it (Play UGC policy, docs/30 B3); once blocked, the banner below offers Unblock.
-                <>
-                  <button className="ghost-button" onClick={() => setReportUserId(conversation.id)} type="button">
-                    {t("report.userTitle")}
-                  </button>
-                  {canBlockPeer && !dmBlocked ? (
-                    <button className="ghost-button" onClick={confirmBlock} type="button">
-                      {t("block.block")}
-                    </button>
-                  ) : null}
-                </>
-              ) : undefined
-            }
-          />
-          {isPrivateChannel && membersOpen && activeChannel ? (
-            <ChannelMembersPanel
-              channel={activeChannel}
-              currentUser={currentUser}
-              onChannelUpsert={onChannelUpsert}
-              onLeftChannel={onLeftChannel}
-              users={users}
-            />
-          ) : null}
-          {dmBlocked ? (
-            <div className="blocked-banner" role="status">
+        {header}
+        {dmBlocked ? (
+          <div className="conversation-banner">
+            <div className="notice blocked-banner" role="status">
               <span>{t("block.dmBanner")}</span>
               {onSetBlocked ? (
-                <button className="ghost-button" onClick={() => void onSetBlocked(conversation.id, false)} type="button">
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void onSetBlocked(conversation.id, false)}
+                  type="button"
+                >
                   {t("block.unblock")}
                 </button>
               ) : null}
             </div>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
         <MessageList
           blockedUserIds={hiddenAuthors}
           conversation={conversation}
@@ -258,21 +307,13 @@ function ConversationPane({
           reactionsByTarget={reactionsByTarget}
           repliesByParent={repliesByParent}
           topMessages={topMessages}
+          typers={typers}
           usersById={usersById}
         />
-        {typers.length ? (
-          <p className="typing-indicator" aria-live="polite">
-            {typers.length === 1
-              ? t("typing.one", { name: typers[0]! })
-              : typers.length === 2
-                ? t("typing.two", { a: typers[0]!, b: typers[1]! })
-                : t("typing.many")}
-          </p>
-        ) : null}
         <MessageComposer
           allowLocationSharing={allowLocationSharing}
           disabledReason={composerDisabledReason}
-          label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? conversation.id : title })}
+          label={t("conversation.composerLabel", { name: conversation.kind === "channel" ? `#${channelName}` : title })}
           onSend={onSend}
           onTyping={onTyping}
           onUploadAttachment={allowAttachments ? onUploadAttachment : undefined}
@@ -290,6 +331,7 @@ function ConversationPane({
         <ThreadPanel
           allowLocationSharing={allowLocationSharing}
           blockedUserIds={hiddenAuthors}
+          channelName={channelName}
           currentUser={currentUser}
           key={threadParent.id}
           onClose={() => location.route(backRouteForThread(conversation))}
@@ -308,6 +350,17 @@ function ConversationPane({
           usersById={usersById}
         />
       ) : null}
+      {isPrivateChannel && activeChannel && membersOpen ? (
+        <Dialog className="members-dialog" onClose={() => setMembersOpen(false)} title={t("members.heading")}>
+          <ChannelMembersPanel
+            channel={activeChannel}
+            currentUser={currentUser}
+            onChannelUpsert={onChannelUpsert}
+            onLeftChannel={onLeftChannel}
+            users={users}
+          />
+        </Dialog>
+      ) : null}
       {conversation.kind === "dm" && reportUserId === conversation.id ? (
         <ReportDialog targetType="user" targetId={reportUserId} onClose={() => setReportUserId(undefined)} />
       ) : null}
@@ -315,28 +368,108 @@ function ConversationPane({
   );
 }
 
-function ConversationHeader({
-  conversation,
-  description,
-  title,
-  trailing,
-}: {
-  conversation: Conversation;
-  description?: string;
-  title: string;
-  trailing?: ComponentChildren;
-}) {
-  return (
-    <header className="conversation-header">
-      <MobileBackLink />
-      <div className="conversation-heading">
-        <p className="eyebrow">{conversation.kind === "channel" ? t("conversation.kindChannel") : t("conversation.kindDm")}</p>
-        <h1>{title}</h1>
-        {description ? <p className="conversation-description">{description}</p> : null}
-      </div>
-      {trailing ? <div className="conversation-header-actions">{trailing}</div> : null}
-    </header>
-  );
+/** Distance (px) between the bottom of a scroller's viewport and the end of its content. */
+function distanceFromBottom(element: HTMLElement): number {
+  return element.scrollHeight - element.scrollTop - element.clientHeight;
+}
+
+/**
+ * Keep a scrolling list pinned to its newest content, chat-style.
+ *
+ * The list follows new content only while the reader is at (or near) the bottom; once they scroll up to
+ * read history, it stays put and counts what arrived below instead (the "new messages" pill). It re-pins
+ * when the visible viewport changes (the on-screen keyboard opening, via `onViewportResize`), when the
+ * list itself resizes (the composer growing, a banner), and when an image inside finishes loading, so
+ * the newest message never ends up hidden behind the keyboard or the composer.
+ *
+ * @param listRef - The scrolling element.
+ * @param items - The list's items, oldest first; a new identity re-runs the pin (edits, streaming too).
+ * @param currentUserId - A message you just sent always scrolls into view, even when scrolled up.
+ * @param extra - Anything else that changes the content height (e.g. whether the typing pill shows).
+ */
+function useBottomPin(
+  listRef: { current: HTMLElement | null },
+  items: Message[],
+  currentUserId: string,
+  extra?: unknown,
+) {
+  const pinnedRef = useRef(true);
+  const lastIdRef = useRef<string | null | undefined>(undefined);
+  const [unseen, setUnseen] = useState(0);
+
+  function scrollToBottom(): void {
+    const element = listRef.current;
+    if (element) {
+      element.scrollTop = element.scrollHeight;
+    }
+    pinnedRef.current = true;
+    setUnseen(0);
+  }
+
+  function repinIfPinned(): void {
+    const element = listRef.current;
+    if (element && pinnedRef.current) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }
+
+  function onScroll(): void {
+    const element = listRef.current;
+    if (!element) {
+      return;
+    }
+    pinnedRef.current = distanceFromBottom(element) < PIN_THRESHOLD_PX;
+    if (pinnedRef.current) {
+      setUnseen(0);
+    }
+  }
+
+  // Layout effect, so the jump happens before paint (no flash of the old scroll position).
+  useLayoutEffect(() => {
+    const last = items[items.length - 1];
+    const previousLastId = lastIdRef.current;
+    lastIdRef.current = last?.id ?? null;
+
+    if (previousLastId === undefined) {
+      scrollToBottom(); // Opening a conversation shows its newest messages.
+      return;
+    }
+
+    if (pinnedRef.current) {
+      repinIfPinned(); // The reader is following along.
+      return;
+    }
+
+    if (!last || last.id === previousLastId) {
+      return; // An edit, reaction or streamed token above: leave the reader where they are.
+    }
+
+    if (last.authorId === currentUserId) {
+      scrollToBottom();
+      return;
+    }
+
+    const previousIndex = previousLastId === null ? -1 : items.findIndex((item) => item.id === previousLastId);
+    const added = previousIndex >= 0 ? items.length - 1 - previousIndex : 1;
+    setUnseen((count) => count + added);
+  }, [items, extra]);
+
+  // A layout effect so the subscription exists from the first frame (a keyboard can open immediately).
+  useLayoutEffect(() => {
+    const unsubscribe = onViewportResize(repinIfPinned);
+    const element = listRef.current;
+    let observer: ResizeObserver | undefined;
+    if (element && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(() => repinIfPinned());
+      observer.observe(element);
+    }
+    return () => {
+      unsubscribe();
+      observer?.disconnect();
+    };
+  }, []);
+
+  return { onScroll, onLoadCapture: repinIfPinned, scrollToBottom, unseen };
 }
 
 interface MessageListProps {
@@ -353,12 +486,15 @@ interface MessageListProps {
   reactionsByTarget: Map<string, Message[]>;
   repliesByParent: Map<string, Message[]>;
   topMessages: Message[];
+  typers: string[];
   usersById: Map<string, User>;
 }
 
 /**
- * The scrolling message list. Mounted per conversation (it lives in the keyed pane), so its scroll
- * bookkeeping and an open report dialog start fresh in every conversation.
+ * The scrolling message list, with the typing pill and the "new messages" pill floating over its bottom
+ * edge (inside the list area, so neither can ever push the composer off screen). Mounted per
+ * conversation (it lives in the keyed pane), so its scroll bookkeeping and an open report dialog start
+ * fresh in every conversation.
  */
 function MessageList({
   blockedUserIds,
@@ -372,75 +508,104 @@ function MessageList({
   reactionsByTarget,
   repliesByParent,
   topMessages,
+  typers,
   usersById,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
-  const previousScrollHeightRef = useRef<number | undefined>(undefined);
   // The message currently being reported (opens ReportDialog); undefined = closed.
   const [reportMessage, setReportMessage] = useState<Message | undefined>(undefined);
-
-  useEffect(() => {
-    const el = listRef.current;
-
-    if (!el) {
-      return;
-    }
-
-    const previousScrollHeight = previousScrollHeightRef.current;
-    const distanceFromBottom =
-      previousScrollHeight === undefined ? 0 : previousScrollHeight - el.scrollTop - el.clientHeight;
-
-    previousScrollHeightRef.current = el.scrollHeight;
-
-    if (distanceFromBottom < 100) {
-      el.scrollTo?.({ top: el.scrollHeight });
-    }
-  }, [topMessages.length]);
+  const typing = typers.length > 0;
+  const pin = useBottomPin(listRef, topMessages, currentUser.id, typing);
+  const grouped = useMemo(
+    () => groupMessages(topMessages, { isolate: (message) => blockedUserIds.has(message.authorId) }),
+    [blockedUserIds, topMessages],
+  );
 
   return (
-    <>
-      <div className="message-list" ref={listRef}>
-        {topMessages.length ? (
-          topMessages.map((message, index) => {
-            const previous = topMessages[index - 1];
-            const newDay = !previous || dayKey(previous.createdAt) !== dayKey(message.createdAt);
-
-            return (
-              <div key={message.id}>
-                {newDay ? (
-                  <div className="day-divider" role="separator">
-                    <span>{dayLabel(message.createdAt)}</span>
-                  </div>
-                ) : null}
-                <MessageItem
-                  currentUser={currentUser}
-                  hiddenAsBlocked={blockedUserIds.has(message.authorId)}
-                  message={message}
-                  onDelete={onDelete}
-                  onEdit={onEdit}
-                  onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
-                  onReact={onReact}
-                  onReport={setReportMessage}
-                  readOnly={readOnly}
-                  reactions={reactionSummary(
-                    reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES,
-                    message.id,
-                    currentUser.id,
-                  )}
-                  replyCount={withoutBlockedAuthors(repliesFor(repliesByParent.get(message.id) ?? EMPTY_MESSAGES, message.id), blockedUserIds).length}
-                  usersById={usersById}
-                />
-              </div>
-            );
-          })
+    <div className={typing ? "message-list-wrap is-typing" : "message-list-wrap"}>
+      <div className="message-list" onLoadCapture={pin.onLoadCapture} onScroll={pin.onScroll} ref={listRef}>
+        {grouped.length ? (
+          grouped.map(({ first, last, message, newDay }) => (
+            <div className="message-slot" key={message.id}>
+              {newDay ? (
+                <div className="day-divider" role="separator">
+                  <span>{dayLabel(message.createdAt)}</span>
+                </div>
+              ) : null}
+              <MessageItem
+                currentUser={currentUser}
+                groupFirst={first}
+                groupLast={last}
+                hiddenAsBlocked={blockedUserIds.has(message.authorId)}
+                message={message}
+                onDelete={onDelete}
+                onEdit={onEdit}
+                onOpenThread={conversation.kind === "channel" ? onOpenThread : undefined}
+                onReact={onReact}
+                onReport={setReportMessage}
+                readOnly={readOnly}
+                reactions={reactionSummary(
+                  reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES,
+                  message.id,
+                  currentUser.id,
+                )}
+                replyCount={withoutBlockedAuthors(repliesFor(repliesByParent.get(message.id) ?? EMPTY_MESSAGES, message.id), blockedUserIds).length}
+                showAuthor={conversation.kind === "channel"}
+                usersById={usersById}
+              />
+            </div>
+          ))
         ) : (
-          <p className="empty-copy">{t("messageList.empty")}</p>
+          <p className="empty-copy message-list-empty">{t("messageList.empty")}</p>
         )}
+      </div>
+      <div className="message-list-overlay">
+        {/* Always mounted, so screen readers hear each change of this live region. */}
+        <p aria-live="polite" className={typing ? "typing-indicator" : "typing-indicator is-idle"}>
+          {typing ? (
+            <>
+              <span aria-hidden="true" className="typing-dots">
+                <span />
+                <span />
+                <span />
+              </span>
+              <span className="typing-text">{typingText(typers)}</span>
+            </>
+          ) : null}
+        </p>
+        {pin.unseen > 0 ? (
+          <button className="btn btn-primary btn-sm new-messages-pill" onClick={pin.scrollToBottom} type="button">
+            <IconArrowDown />
+            {t("messageList.newMessages")}
+          </button>
+        ) : null}
       </div>
       {reportMessage ? (
         <ReportDialog targetType="message" targetId={reportMessage.id} onClose={() => setReportMessage(undefined)} />
       ) : null}
-    </>
+    </div>
+  );
+}
+
+/** Down arrow for the "new messages" pill, drawn like the shared icon set in `icons.tsx`. */
+function IconArrowDown() {
+  return (
+    <svg
+      aria-hidden="true"
+      class="icon"
+      fill="none"
+      focusable="false"
+      height={16}
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width={16}
+    >
+      <path d="M12 5v14" />
+      <path d="M19 12l-7 7-7-7" />
+    </svg>
   );
 }
 
@@ -449,6 +614,8 @@ interface ThreadPanelProps {
   allowLocationSharing?: boolean;
   /** Authors whose posts collapse to a "blocked user" placeholder. */
   blockedUserIds?: ReadonlySet<string>;
+  /** The channel the thread belongs to (the header's "in #name"). */
+  channelName: string;
   currentUser: User;
   onClose: () => void;
   onDelete: (messageId: string) => void;
@@ -467,23 +634,15 @@ interface ThreadPanelProps {
 }
 
 /**
- * Renders the thread side panel containing the thread parent message, its replies, and a reply composer.
- * Mounted keyed by the parent message id (see `ConversationPane`).
- *
- * @param currentUser - The currently signed-in user (used to determine ownership and reaction state).
- * @param parent - The parent message that the thread is showing replies for.
- * @param reactionsByTarget - Reaction messages grouped by target message id (from `groupReactionsByTarget`), used to compute reaction summaries without rescanning the conversation.
- * @param repliesByParent - Reply messages grouped by parent message id (from `groupRepliesByParent`), used to compute this thread's replies without rescanning the conversation.
- * @param usersById - Map of user id to User objects used to resolve author information for displayed messages.
- * @param onClose - Callback invoked when the panel should be closed (e.g., back or close button).
- * @param onReact - Callback invoked when a reaction action is triggered for a message.
- * @param onReply - Callback invoked with the reply body when the composer submits a new thread reply.
- *
- * @returns The thread panel JSX element.
+ * The thread panel: the parent message, a "N replies" divider, the replies (grouped like the main list)
+ * and a reply composer. A 360px side panel on desktop, the whole screen on phones (and on narrow tablets,
+ * where it replaces the conversation); the shell's `thread-open` class does the switching. Mounted keyed
+ * by the parent message id (see `ConversationPane`).
  */
 function ThreadPanel({
   allowLocationSharing,
   blockedUserIds = NO_BLOCKS,
+  channelName,
   composerDisabledReason,
   currentUser,
   onClose,
@@ -500,23 +659,32 @@ function ThreadPanel({
 }: ThreadPanelProps) {
   const timedOut = useIsTimedOut(currentUser);
   const [reportMessage, setReportMessage] = useState<Message | undefined>(undefined);
-  const replies = repliesFor(repliesByParent.get(parent.id) ?? EMPTY_MESSAGES, parent.id);
+  const replies = useMemo(
+    () => repliesFor(repliesByParent.get(parent.id) ?? EMPTY_MESSAGES, parent.id),
+    [parent.id, repliesByParent],
+  );
+  const grouped = useMemo(
+    () => groupMessages(replies, { isolate: (message) => blockedUserIds.has(message.authorId) }),
+    [blockedUserIds, replies],
+  );
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pin = useBottomPin(scrollRef, replies, currentUser.id);
 
   return (
     <aside className="thread-panel">
-      <header className="thread-header">
-        <button aria-label={t("common.back")} className="mobile-back" onClick={onClose} type="button">
-          <BackArrowIcon />
-        </button>
-        <div>
-          <p className="eyebrow">{t("thread.eyebrow")}</p>
-          <h2>{t("thread.heading")}</h2>
-        </div>
-        <button aria-label={t("thread.close")} className="close-button" onClick={onClose} type="button">
-          ×
-        </button>
-      </header>
-      <div className="thread-scroll">
+      <ScreenHeader
+        actions={
+          <button aria-label={t("thread.close")} className="btn btn-icon btn-ghost thread-close" onClick={onClose} type="button">
+            <IconClose />
+          </button>
+        }
+        className="thread-header"
+        headingLevel={2}
+        onBack={onClose}
+        subtitle={t("thread.inChannel", { name: channelName })}
+        title={t("thread.eyebrow")}
+      />
+      <div className="thread-scroll" onLoadCapture={pin.onLoadCapture} onScroll={pin.onScroll} ref={scrollRef}>
         <MessageItem
           currentUser={currentUser}
           hiddenAsBlocked={blockedUserIds.has(parent.authorId)}
@@ -529,21 +697,23 @@ function ThreadPanel({
           reactions={reactionSummary(reactionsByTarget.get(parent.id) ?? EMPTY_MESSAGES, parent.id, currentUser.id)}
           usersById={usersById}
         />
-        <div className="reply-divider">
-          {replies.length ? t("message.replyCount", { n: replies.length }) : t("thread.noReplies")}
+        <div className="thread-divider" role="separator">
+          <span>{replies.length ? t("message.replyCount", { n: replies.length }) : t("thread.noReplies")}</span>
         </div>
-        {replies.map((reply) => (
+        {grouped.map(({ first, last, message }) => (
           <MessageItem
             currentUser={currentUser}
-            hiddenAsBlocked={blockedUserIds.has(reply.authorId)}
-            key={reply.id}
-            message={reply}
+            groupFirst={first}
+            groupLast={last}
+            hiddenAsBlocked={blockedUserIds.has(message.authorId)}
+            key={message.id}
+            message={message}
             onDelete={onDelete}
             onEdit={onEdit}
             onReact={onReact}
             onReport={setReportMessage}
             readOnly={readOnly}
-            reactions={reactionSummary(reactionsByTarget.get(reply.id) ?? EMPTY_MESSAGES, reply.id, currentUser.id)}
+            reactions={reactionSummary(reactionsByTarget.get(message.id) ?? EMPTY_MESSAGES, message.id, currentUser.id)}
             usersById={usersById}
           />
         ))}

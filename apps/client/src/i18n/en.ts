@@ -30,10 +30,8 @@ export const en = {
   "common.requestFailed": "Request failed: {status}",
 
   // Conversation view (channel / DM shell + empty state).
-  "conversation.emptyEyebrow": "Local node ready",
-  "conversation.emptyTitle": "Choose a channel or direct message.",
-  "conversation.emptyBody":
-    "Messages, replies and reactions persist locally and sync through the laptop or Raspberry Pi server while it is running.",
+  "conversation.emptyTitle": "Pick a channel or a person",
+  "conversation.emptyBody": "Messages live on this local node, not on the internet.",
   "conversation.members": "Members",
   "conversation.kindChannel": "Channel",
   "conversation.kindDm": "Direct message",
@@ -45,7 +43,7 @@ export const en = {
   "messageList.empty": "No messages yet. Start with the practical detail everyone needs.",
 
   // A single message (meta, edit form, reactions, thread/edit/delete controls).
-  "message.editedTag": "(edited)",
+  "message.editedTag": "edited",
   "message.editAriaLabel": "Edit message",
   "message.attachedImageAlt": "Attached image",
   "message.attachedFile": "Attached file",
@@ -444,8 +442,8 @@ export const en = {
   "invite.show": "⧉ Invite someone",
   "invite.title": "Invite someone",
   "invite.close": "Close invite",
-  "invite.wifiButton": "Show Wi-Fi hotspot QR",
-  "invite.wifiHint": "Opens the host's Wi-Fi QR so people can join the network first.",
+  "invite.wifiButton": "Open the host's share screen",
+  "invite.wifiHint": "Shows the hotspot or Wi-Fi join QR from the host app.",
 
   // Node-link control (admin sync panel).
   "nodeLink.hide": "× Hide link",
@@ -695,7 +693,25 @@ export const en = {
   "error.channel_member_unavailable": "This person isn't available for this channel",
   "error.block_not_allowed": "This user can't be blocked",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Conversation options",
+  "message.actionsTitle": "Message actions",
+  "message.actionsAt": "Message actions, sent {time}",
+  "message.reactWith": "React with {emoji}",
+  "message.moreActions": "More actions",
+  "message.copyText": "Copy text",
+  "messageList.newMessages": "New messages",
+  "thread.inChannel": "in #{name}",
+  "report.done": "Done",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Settings",
+  "settings.avatarFace": "Face",
+  "settings.avatarInitial": "Initial",
+  "settings.avatarPattern": "Pattern",
+  "admin.nav.label": "Sections",
+  "admin.nav.sync": "Sync",
+  "admin.nav.mesh": "Mesh",
+  "moderation.banConfirm": "Ban {name}? They lose access to this network until a moderator unbans them.",
+  "toast.newMessages": { one: "{n} new message in {place}", other: "{n} new messages in {place}" },
 };
 
 /**

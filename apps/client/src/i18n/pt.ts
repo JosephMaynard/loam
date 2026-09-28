@@ -13,10 +13,8 @@ export const pt: Translation = {
   "common.remove": "Remover",
   "common.requestFailed": "Falha na solicitação: {status}",
 
-  "conversation.emptyEyebrow": "Nó local pronto",
-  "conversation.emptyTitle": "Escolha um canal ou mensagem direta.",
-  "conversation.emptyBody":
-    "Mensagens, respostas e reações são mantidas localmente e sincronizam pelo notebook ou Raspberry Pi enquanto o servidor está em execução.",
+  "conversation.emptyTitle": "Escolha um canal ou uma pessoa",
+  "conversation.emptyBody": "As mensagens ficam neste nó local, não na internet.",
   "conversation.members": "Membros",
   "conversation.kindChannel": "Canal",
   "conversation.kindDm": "Mensagem direta",
@@ -26,7 +24,7 @@ export const pt: Translation = {
 
   "messageList.empty": "Ainda não há mensagens. Comece pelo detalhe prático que todos precisam.",
 
-  "message.editedTag": "(editado)",
+  "message.editedTag": "editado",
   "message.editAriaLabel": "Editar mensagem",
   "message.attachedImageAlt": "Imagem anexada",
   "message.streaming": "Transmitindo",
@@ -379,8 +377,8 @@ export const pt: Translation = {
   "invite.show": "⧉ Convidar alguém",
   "invite.title": "Convidar alguém",
   "invite.close": "Fechar convite",
-  "invite.wifiButton": "Mostrar QR do hotspot Wi-Fi",
-  "invite.wifiHint": "Abre o QR Wi-Fi do anfitrião para que as pessoas possam entrar na rede primeiro.",
+  "invite.wifiButton": "Abrir a tela de compartilhamento do anfitrião",
+  "invite.wifiHint": "Mostra o QR do hotspot ou do Wi-Fi a partir do app do anfitrião.",
 
   "nodeLink.hide": "× Ocultar link",
   "nodeLink.show": "⧉ Vincular outro nó",
@@ -622,5 +620,27 @@ export const pt: Translation = {
   "error.channel_member_unavailable": "Esta pessoa não está disponível para este canal",
   "error.block_not_allowed": "Este usuário não pode ser bloqueado",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "Opções da conversa",
+  "message.actionsTitle": "Ações da mensagem",
+  "message.actionsAt": "Ações da mensagem, enviada às {time}",
+  "message.reactWith": "Reagir com {emoji}",
+  "message.moreActions": "Mais ações",
+  "message.copyText": "Copiar texto",
+  "messageList.newMessages": "Novas mensagens",
+  "thread.inChannel": "em #{name}",
+  "report.done": "Concluído",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "Configurações",
+  "settings.avatarFace": "Rosto",
+  "settings.avatarInitial": "Inicial",
+  "settings.avatarPattern": "Padrão",
+  "admin.nav.label": "Seções",
+  "admin.nav.sync": "Sincronização",
+  "admin.nav.mesh": "Malha",
+  "moderation.banConfirm": "Banir {name}? A pessoa perde o acesso a esta rede até que um moderador a desbana.",
+  "toast.newMessages": {
+    one: "{n} mensagem nova em {place}",
+    many: "{n} mensagens novas em {place}",
+    other: "{n} mensagens novas em {place}",
+  },
 };

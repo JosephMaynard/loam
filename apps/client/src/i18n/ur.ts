@@ -13,10 +13,8 @@ export const ur: Translation = {
   "common.remove": "ہٹائیں",
   "common.requestFailed": "درخواست ناکام: {status}",
 
-  "conversation.emptyEyebrow": "مقامی نوڈ تیار ہے",
-  "conversation.emptyTitle": "کوئی چینل یا براہِ راست پیغام منتخب کریں۔",
-  "conversation.emptyBody":
-    "پیغامات، جوابات اور ردِعمل مقامی طور پر محفوظ رہتے ہیں اور جب تک سرور چل رہا ہے لیپ ٹاپ یا Raspberry Pi کے ذریعے ہم آہنگ ہوتے ہیں۔",
+  "conversation.emptyTitle": "کوئی چینل یا کوئی شخص منتخب کریں",
+  "conversation.emptyBody": "پیغامات اسی مقامی نوڈ پر رہتے ہیں، انٹرنیٹ پر نہیں۔",
   "conversation.members": "اراکین",
   "conversation.kindChannel": "چینل",
   "conversation.kindDm": "براہِ راست پیغام",
@@ -26,7 +24,7 @@ export const ur: Translation = {
 
   "messageList.empty": "ابھی کوئی پیغام نہیں۔ اُس عملی تفصیل سے آغاز کریں جو سب کو درکار ہے۔",
 
-  "message.editedTag": "(ترمیم شدہ)",
+  "message.editedTag": "ترمیم شدہ",
   "message.editAriaLabel": "پیغام میں ترمیم کریں",
   "message.attachedImageAlt": "منسلک تصویر",
   "message.streaming": "نشر ہو رہا ہے",
@@ -379,8 +377,8 @@ export const ur: Translation = {
   "invite.show": "⧉ کسی کو مدعو کریں",
   "invite.title": "کسی کو مدعو کریں",
   "invite.close": "دعوت بند کریں",
-  "invite.wifiButton": "وائی فائی ہاٹ اسپاٹ QR دکھائیں",
-  "invite.wifiHint": "میزبان کا وائی فائی QR کھولتا ہے تاکہ لوگ پہلے نیٹ ورک میں شامل ہو سکیں۔",
+  "invite.wifiButton": "میزبان کی شیئر اسکرین کھولیں",
+  "invite.wifiHint": "میزبان ایپ سے ہاٹ اسپاٹ یا وائی فائی میں شامل ہونے کا QR دکھاتا ہے۔",
 
   "nodeLink.hide": "× لنک چھپائیں",
   "nodeLink.show": "⧉ دوسرا نوڈ جوڑیں",
@@ -622,5 +620,23 @@ export const ur: Translation = {
   "error.channel_member_unavailable": "یہ شخص اس چینل کے لیے دستیاب نہیں ہے",
   "error.block_not_allowed": "اس صارف کو بلاک نہیں کیا جا سکتا",
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  "conversation.moreActions": "گفتگو کے اختیارات",
+  "message.actionsTitle": "پیغام کے اقدامات",
+  "message.actionsAt": "پیغام کے اقدامات، {time} پر بھیجا گیا",
+  "message.reactWith": "{emoji} سے ردِعمل دیں",
+  "message.moreActions": "مزید اقدامات",
+  "message.copyText": "متن کاپی کریں",
+  "messageList.newMessages": "نئے پیغامات",
+  "thread.inChannel": "#{name} میں",
+  "report.done": "ہو گیا",
   // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
+  "settings.title": "ترتیبات",
+  "settings.avatarFace": "چہرہ",
+  "settings.avatarInitial": "پہلا حرف",
+  "settings.avatarPattern": "نمونہ",
+  "admin.nav.label": "حصے",
+  "admin.nav.sync": "ہم آہنگی",
+  "admin.nav.mesh": "میش",
+  "moderation.banConfirm": "{name} پر پابندی لگائیں؟ جب تک کوئی ناظم پابندی نہ ہٹائے، وہ اس نیٹ ورک تک رسائی نہیں کر سکیں گے۔",
+  "toast.newMessages": { one: "{place} میں {n} نیا پیغام", other: "{place} میں {n} نئے پیغامات" },
 };

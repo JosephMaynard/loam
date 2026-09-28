@@ -96,41 +96,53 @@ export function SyncStatusPanel() {
     }
     return (
       <div className="sync-status">
-        <p className="form-error">{error}</p>
-        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          {t("common.refresh")}
-        </button>
+        <p className="notice notice-danger">
+          {error}
+          <button className="btn btn-ghost btn-sm" onClick={() => setReloadKey((key) => key + 1)} type="button">
+            {t("common.refresh")}
+          </button>
+        </p>
       </div>
     );
   }
 
   return (
     <div className="sync-status">
-      <div className="panel-heading">
-        <p className="eyebrow">
+      <div className="sync-status-header">
+        <h4 className="card-subtitle">
           {t("admin.syncStatusEyebrow")}
           {report.enabled ? (
-            <>
+            <span className="card-subtitle-meta">
               {" · "}
               {t("admin.syncEvery", { seconds: Math.round(report.intervalMs / 1000) })}
-            </>
+            </span>
           ) : null}
-        </p>
-        <div className="moderation-actions">
-          <button className="ghost-button" disabled={running} onClick={() => setReloadKey((key) => key + 1)} type="button">
+        </h4>
+        <div className="row-actions">
+          <button
+            className="btn btn-ghost btn-sm"
+            disabled={running}
+            onClick={() => setReloadKey((key) => key + 1)}
+            type="button"
+          >
             {t("common.refresh")}
           </button>
-          <button disabled={running || !report.enabled} onClick={() => void runNow()} type="button">
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={running || !report.enabled}
+            onClick={() => void runNow()}
+            type="button"
+          >
             {running ? t("admin.syncing") : t("admin.syncNow")}
           </button>
         </div>
       </div>
-      <ul className="moderation-list">
+      <ul className="list">
         {report.peers.map((peer) => (
-          <li className="moderation-row sync-peer" key={peer.url}>
-            <div className="moderation-name">
-              <strong>{peer.label ?? peer.url}</strong>
-              <span>
+          <li className="list-row sync-peer" key={peer.url}>
+            <div className="row-text row-text-first">
+              <strong className="row-title">{peer.label ?? peer.url}</strong>
+              <span className={peer.status?.lastError ? "row-meta row-meta-danger" : "row-meta"}>
                 {peer.status?.lastError
                   ? t("admin.peerError", { error: peer.status.lastError })
                   : peer.status?.lastSuccessAt

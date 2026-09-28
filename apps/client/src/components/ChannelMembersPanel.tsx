@@ -18,6 +18,7 @@ interface ChannelMembersPanelProps {
  * The Members panel for a private channel: lists the roster, lets the owner/admin invite people,
  * transfer ownership, and remove members (self-remove = leave). Fetches its own roster and re-fetches
  * whenever the membership set changes. The server enforces every action; this is the UI surface.
+ * `ConversationView` shows it inside a `Dialog` (a sheet on phones), which supplies the heading.
  */
 export function ChannelMembersPanel({
   channel,
@@ -228,83 +229,97 @@ export function ChannelMembersPanel({
     }
   }
 
+  const canLeave = memberIds.has(currentUser.id) && channel.ownerUserId !== currentUser.id;
+
   return (
-    <div className="channel-members-panel">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">{t("members.eyebrow")}</p>
-          <h2>{t("members.heading")}</h2>
-        </div>
-        {memberIds.has(currentUser.id) && channel.ownerUserId !== currentUser.id ? (
-          <button className="danger-button" disabled={busy} onClick={() => void remove(currentUser.id)} type="button">
-            {t("members.leave")}
-          </button>
-        ) : null}
-      </div>
+    <div className="members-panel">
       {!loaded && !error ? <p className="form-note">{t("members.loading")}</p> : null}
       {loaded ? (
-        <ul className="moderation-list">
+        <ul className="list member-list">
           {members.map((member) => (
-            <li className="moderation-row" key={member.id}>
-              <div className="moderation-identity">
-                <Avatar avatar={member.avatar} id={member.id} />
-                <div className="moderation-name">
-                  <strong>{member.displayName}</strong>
-                  <span>{member.id === channel.ownerUserId ? t("members.owner") : member.id}</span>
-                </div>
+            <li className="list-row member-row" key={member.id}>
+              <Avatar avatar={member.avatar} id={member.id} size="md" />
+              <div className="member-name">
+                <strong dir="auto">{member.displayName}</strong>
+                {member.id === channel.ownerUserId ? (
+                  <span className="badge badge-primary">{t("members.owner")}</span>
+                ) : (
+                  <span className="member-id">{member.id}</span>
+                )}
               </div>
               {canManage && member.id !== channel.ownerUserId ? (
-                <div className="moderation-actions">
+                <div className="member-actions">
                   {canGrow ? (
-                    <button className="ghost-button" disabled={busy} onClick={() => void transfer(member.id)} type="button">
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      disabled={busy}
+                      onClick={() => void transfer(member.id)}
+                      type="button"
+                    >
                       {t("members.makeOwner")}
                     </button>
                   ) : null}
-                  <button className="danger-button" disabled={busy} onClick={() => void remove(member.id)} type="button">
+                  <button
+                    className="btn btn-secondary btn-sm member-remove"
+                    disabled={busy}
+                    onClick={() => void remove(member.id)}
+                    type="button"
+                  >
                     {t("common.remove")}
                   </button>
                 </div>
-              ) : null}
+              ) : (
+                <span />
+              )}
             </li>
           ))}
         </ul>
       ) : null}
       {canGrow ? (
-        <label className="admin-toggle">
+        <label className="check-row">
           <input
             checked={!!channel.allowJoinRequests}
+            className="toggle"
             disabled={busy}
             onInput={() => void toggleJoinRequests()}
             type="checkbox"
           />
-          {t("members.allowJoinRequests")}
+          <span>{t("members.allowJoinRequests")}</span>
         </label>
       ) : null}
       {canGrow && joinRequests.length ? (
-        <div className="join-requests">
-          <h3>{t("members.joinRequestsHeading")}</h3>
-          <ul className="moderation-list">
+        <section className="members-section">
+          <h3 className="members-section-title">{t("members.joinRequestsHeading")}</h3>
+          <ul className="list member-list">
             {joinRequests.map((requester) => (
-              <li className="moderation-row" key={requester.id}>
-                <div className="moderation-identity">
-                  <Avatar avatar={requester.avatar} id={requester.id} />
-                  <div className="moderation-name">
-                    <strong>{requester.displayName}</strong>
-                    <span>{requester.id}</span>
-                  </div>
+              <li className="list-row member-row" key={requester.id}>
+                <Avatar avatar={requester.avatar} id={requester.id} size="md" />
+                <div className="member-name">
+                  <strong dir="auto">{requester.displayName}</strong>
+                  <span className="member-id">{requester.id}</span>
                 </div>
-                <div className="moderation-actions">
-                  <button disabled={busy} onClick={() => void approveRequest(requester.id)} type="button">
+                <div className="member-actions">
+                  <button
+                    className="btn btn-primary btn-sm"
+                    disabled={busy}
+                    onClick={() => void approveRequest(requester.id)}
+                    type="button"
+                  >
                     {t("members.approve")}
                   </button>
-                  <button className="danger-button" disabled={busy} onClick={() => void denyRequest(requester.id)} type="button">
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    disabled={busy}
+                    onClick={() => void denyRequest(requester.id)}
+                    type="button"
+                  >
                     {t("members.deny")}
                   </button>
                 </div>
               </li>
             ))}
           </ul>
-        </div>
+        </section>
       ) : null}
       {canGrow ? (
         <form
@@ -314,9 +329,14 @@ export function ChannelMembersPanel({
             void invite();
           }}
         >
-          <label>
-            {t("members.inviteLabel")}
-            <select disabled={busy || !invitable.length} onInput={(event) => setInviteId(event.currentTarget.value)} value={inviteId}>
+          <label className="field">
+            <span className="field-label">{t("members.inviteLabel")}</span>
+            <select
+              className="select"
+              disabled={busy || !invitable.length}
+              onInput={(event) => setInviteId(event.currentTarget.value)}
+              value={inviteId}
+            >
               <option value="">{invitable.length ? t("members.choosePerson") : t("members.allMembers")}</option>
               {invitable.map((user) => (
                 <option key={user.id} value={user.id}>
@@ -325,12 +345,26 @@ export function ChannelMembersPanel({
               ))}
             </select>
           </label>
-          <button disabled={busy || !inviteId} type="submit">
+          <button className="btn btn-primary" disabled={busy || !inviteId} type="submit">
             {t("members.invite")}
           </button>
         </form>
       ) : null}
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {canLeave ? (
+        <button
+          className="btn btn-danger btn-block members-leave"
+          disabled={busy}
+          onClick={() => void remove(currentUser.id)}
+          type="button"
+        >
+          {t("members.leave")}
+        </button>
+      ) : null}
     </div>
   );
 }

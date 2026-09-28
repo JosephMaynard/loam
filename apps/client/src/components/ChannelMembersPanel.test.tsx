@@ -96,7 +96,7 @@ describe("ChannelMembersPanel", () => {
     );
     await flush();
 
-    const rows = Array.from(host.querySelectorAll(".moderation-row"));
+    const rows = Array.from(host.querySelectorAll(".member-row"));
     expect(rows).toHaveLength(2);
     expect(host.textContent).toContain("Olive Owner");
     expect(host.textContent).toContain("Manny Member");
@@ -136,8 +136,8 @@ describe("ChannelMembersPanel", () => {
     await flush();
 
     expect(host.querySelector(".member-invite-form")).toBeNull();
-    expect(host.querySelector(".moderation-actions")).toBeNull();
+    expect(host.querySelector(".member-actions")).toBeNull();
     // A non-owner member can still leave.
-    expect(host.querySelector(".danger-button")?.textContent).toContain("Leave");
+    expect(host.querySelector(".members-leave")?.textContent).toContain("Leave");
   });
 });
