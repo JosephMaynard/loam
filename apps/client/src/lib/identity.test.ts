@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CONFIRMED_USER_KEY, forgetConfirmedIdentity, listenForIdentityChange, recordConfirmedIdentity } from "./identity";
+import { CONFIRMED_USER_KEY, confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, recordConfirmedIdentity } from "./identity";
 
 describe("listenForIdentityChange (review 2026-09-25: multi-tab purge)", () => {
   function fire(key: string, newValue: string | null): void {
@@ -54,5 +54,47 @@ describe("recordConfirmedIdentity (review 2026-09-25: missed-wipe purge)", () =>
     recordConfirmedIdentity("user.a");
     forgetConfirmedIdentity();
     expect(recordConfirmedIdentity("user.b")).toBe(false);
+  });
+});
+
+describe("confirmIdentity (CodeRabbit, PR #130: record only after a successful purge)", () => {
+  it("records a first-ever identity without purging", async () => {
+    const purge = vi.fn(async () => undefined);
+    expect(await confirmIdentity("user.a", purge)).toBe("unchanged");
+    expect(purge).not.toHaveBeenCalled();
+    expect(localStorage.getItem(CONFIRMED_USER_KEY)).toBe("user.a");
+  });
+
+  it("purges before recording a different identity, and the record lands only after the purge resolved", async () => {
+    recordConfirmedIdentity("user.a");
+    const seen: (string | null)[] = [];
+    const purge = vi.fn(async () => {
+      seen.push(localStorage.getItem(CONFIRMED_USER_KEY));
+    });
+    expect(await confirmIdentity("user.b", purge)).toBe("purged");
+    expect(seen).toEqual(["user.a"]); // still the old identity while the purge ran
+    expect(localStorage.getItem(CONFIRMED_USER_KEY)).toBe("user.b");
+  });
+
+  it("retries a failed purge once, then records", async () => {
+    recordConfirmedIdentity("user.a");
+    const purge = vi.fn().mockRejectedValueOnce(new Error("blocked")).mockResolvedValueOnce(undefined);
+    expect(await confirmIdentity("user.b", purge, { retryDelayMs: 0 })).toBe("purged");
+    expect(purge).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem(CONFIRMED_USER_KEY)).toBe("user.b");
+  });
+
+  it("leaves the OLD identity recorded when the purge keeps failing, so the next boot purges again", async () => {
+    recordConfirmedIdentity("user.a");
+    const purge = vi.fn(async () => {
+      throw new Error("quota");
+    });
+    expect(await confirmIdentity("user.b", purge, { retryDelayMs: 0 })).toBe("purge_failed");
+    expect(purge).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem(CONFIRMED_USER_KEY)).toBe("user.a");
+    // The next boot sees the difference again.
+    const purgeOk = vi.fn(async () => undefined);
+    expect(await confirmIdentity("user.b", purgeOk)).toBe("purged");
+    expect(localStorage.getItem(CONFIRMED_USER_KEY)).toBe("user.b");
   });
 });

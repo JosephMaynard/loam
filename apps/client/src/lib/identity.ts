@@ -64,3 +64,37 @@ export function forgetConfirmedIdentity(): void {
     // Nothing durable to clear.
   }
 }
+
+export type ConfirmIdentityOutcome = "unchanged" | "purged" | "purge_failed";
+
+/**
+ * Adopt `userId` as the server-confirmed identity, purging the previous identity's cached content FIRST
+ * when it differs (the missed-wipe case). The record is written only once `purge` has succeeded — the
+ * record is what tells sibling tabs to reload, so it must land on a cleared cache, and a purge that failed
+ * (an IndexedDB error) or never finished (the tab was killed) must leave the OLD identity recorded so the
+ * next boot compares, finds the difference, and purges again. One retry after `retryDelayMs` covers a
+ * transient IndexedDB failure (a blocked transaction); a second failure is reported, not hidden.
+ */
+export async function confirmIdentity(
+  userId: string,
+  purge: () => Promise<void>,
+  options: { retryDelayMs?: number } = {},
+): Promise<ConfirmIdentityOutcome> {
+  const previous = readConfirmedIdentity();
+  if (previous === undefined || previous === userId) {
+    recordConfirmedIdentity(userId);
+    return "unchanged";
+  }
+  try {
+    await purge();
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs ?? 500));
+    try {
+      await purge();
+    } catch {
+      return "purge_failed";
+    }
+  }
+  recordConfirmedIdentity(userId);
+  return "purged";
+}

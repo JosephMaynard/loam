@@ -40,7 +40,7 @@ import { ApiError, fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } f
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
 import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
-import { forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity, recordConfirmedIdentity } from "./lib/identity";
+import { confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity } from "./lib/identity";
 import {
   compareCreatedAt,
   conversationMessages,
@@ -1022,10 +1022,20 @@ function LoamApp() {
    * `purgeLocalData`, which is a wipe). Used when the node confirms a different identity than the one this
    * browser last had: the cache belonged to that previous identity (see the boot effect).
    */
+  /**
+   * Drop every piece of cached content, in memory and on disk. REJECTS when the on-disk clear failed (the
+   * in-memory half has already happened): the identity-change path must not confirm the new identity over
+   * a cache it couldn't clear (CodeRabbit, PR #130), while a wipe — which also deletes the database — treats
+   * it as best-effort. A storage failure on the last-conversation key alone is not a failed purge.
+   */
   const purgeCachedContent = useCallback(async () => {
     clearInMemoryContent();
-    localStorage.removeItem(LAST_CONVERSATION_KEY);
-    await clearAllRecords().catch(() => undefined);
+    try {
+      localStorage.removeItem(LAST_CONVERSATION_KEY);
+    } catch {
+      // Nothing durable to clear.
+    }
+    await clearAllRecords();
   }, []);
 
   /** Drop every piece of content held in memory (the in-memory half of `purgeCachedContent`). */
@@ -1434,18 +1444,18 @@ function LoamApp() {
         // reset (an Emergency Reset whose `wipe` event this backgrounded device missed, an expired cookie, a
         // revoked token). Everything cached belongs to the previous identity: purge it before carrying on as
         // the new one, rather than merging a stranger's DMs and private channels into this session. The new
-        // identity is recorded only AFTER the purge (CodeRabbit, PR #130): a tab killed mid-purge would
-        // otherwise boot next time with the new identity already confirmed and the old content still cached,
-        // and a sibling tab (reloaded by the `storage` event the record fires) could hydrate the not-yet-
-        // cleared cache. Recorded last, a crash before the record simply re-purges on the next pass.
-        const previousIdentity = readConfirmedIdentity();
-        if (previousIdentity !== undefined && previousIdentity !== nextConfig.currentUser.id) {
-          await purgeCachedContent();
-          if (!active) {
-            return;
-          }
+        // identity is recorded only AFTER a SUCCESSFUL purge (`confirmIdentity`; CodeRabbit, PR #130): a tab
+        // killed mid-purge, or a purge the cache refused, must leave the old identity recorded so the next
+        // boot purges again, and a sibling tab (reloaded by the `storage` event the record fires) must only
+        // ever hydrate an already-cleared cache. On a persistent failure this session still carries on as
+        // the new identity — its memory was cleared and refills from the server — just unrecorded.
+        const identity = await confirmIdentity(nextConfig.currentUser.id, purgeCachedContent);
+        if (!active) {
+          return;
         }
-        recordConfirmedIdentity(nextConfig.currentUser.id);
+        if (identity === "purge_failed") {
+          console.warn("LOAM: could not clear the previous identity's cached content; it will be retried on the next start.");
+        }
         tabIdentityRef.current = nextConfig.currentUser.id;
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
