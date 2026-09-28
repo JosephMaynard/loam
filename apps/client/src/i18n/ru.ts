@@ -16,8 +16,6 @@ export const ru: Translation = {
   "conversation.emptyTitle": "Выберите канал или человека",
   "conversation.emptyBody": "Сообщения хранятся на этом локальном узле, а не в интернете.",
   "conversation.members": "Участники",
-  "conversation.kindChannel": "Канал",
-  "conversation.kindDm": "Личное сообщение",
   "conversation.composerLabel": "Сообщение для {name}",
   "conversation.composerPlaceholderChannel": "Опубликуйте новость",
   "conversation.composerPlaceholderDm": "Отправьте личное сообщение",
@@ -42,7 +40,6 @@ export const ru: Translation = {
   "composer.uploadFailed": "Не удалось загрузить.",
   "composer.removeAttachment": "Убрать {name}",
   "composer.attachImage": "Прикрепить изображение",
-  "composer.attachImageHint": "Прикрепить изображение (перед загрузкой размер меняется на этом устройстве)",
   "composer.send": "Отправить",
 
   "composer.shareLocation": "Поделиться местоположением",
@@ -73,7 +70,6 @@ export const ru: Translation = {
   "members.invite": "Пригласить",
 
   "thread.eyebrow": "Тред",
-  "thread.heading": "Ответы",
   "thread.close": "Закрыть тред",
   "thread.noReplies": "Ответов пока нет",
   "thread.replyLabel": "Ответить в треде",
@@ -629,6 +625,12 @@ export const ru: Translation = {
   "error.dm_blocked_by_you": "Вы заблокировали этого человека. Разблокируйте его, чтобы отправить сообщение",
   "error.channel_member_unavailable": "Этот человек недоступен для этого канала",
   "error.block_not_allowed": "Этого пользователя нельзя заблокировать",
+  "toast.newMessagesFrom": {
+    one: "{n} новое сообщение от {place}",
+    few: "{n} новых сообщения от {place}",
+    many: "{n} новых сообщений от {place}",
+    other: "{n} нового сообщения от {place}",
+  },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "Параметры беседы",
   "message.actionsTitle": "Действия с сообщением",

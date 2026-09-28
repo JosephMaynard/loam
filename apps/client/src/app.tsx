@@ -632,16 +632,19 @@ function LoamApp() {
       let title = authorName;
       let place = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
+      let direct = true;
 
       if (message.type === "channelPost" || message.type === "channelReply") {
         const channelName = channelsRef.current.find((channel) => channel.id === message.channelId)?.name ?? message.channelId;
         title = `${authorName} · #${channelName}`;
         place = `#${channelName}`;
         route = routeForConversation({ kind: "channel", id: message.channelId });
+        direct = false;
       }
 
-      // `place` + `author` let ToastStack coalesce a burst into "3 new messages in #general".
-      pushToast({ id: `${message.id}:${Date.now()}`, title, body, route, place, author: authorName });
+      // `place` + `author` let ToastStack coalesce a burst into "3 new messages in #general" (or, for a
+      // DM, "3 new messages from <person>").
+      pushToast({ id: `${message.id}:${Date.now()}`, title, body, route, place, author: authorName, direct });
     },
     [pushToast],
   );
@@ -2157,6 +2160,7 @@ function LoamApp() {
           conversation={activeConversation}
           currentUser={currentUser}
           notFound={!!activeKey && notFoundConversation === activeKey}
+          onlineUserIds={onlineUserIds}
           onTyping={() => {
             if (activeConversation) {
               sendTyping(activeConversation);

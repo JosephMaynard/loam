@@ -16,8 +16,6 @@ export const uk: Translation = {
   "conversation.emptyTitle": "Оберіть канал або людину",
   "conversation.emptyBody": "Повідомлення зберігаються на цьому локальному вузлі, а не в інтернеті.",
   "conversation.members": "Учасники",
-  "conversation.kindChannel": "Канал",
-  "conversation.kindDm": "Пряме повідомлення",
   "conversation.composerLabel": "Повідомлення до {name}",
   "conversation.composerPlaceholderChannel": "Опублікуйте оновлення",
   "conversation.composerPlaceholderDm": "Надішліть пряме повідомлення",
@@ -42,7 +40,6 @@ export const uk: Translation = {
   "composer.uploadFailed": "Не вдалося завантажити.",
   "composer.removeAttachment": "Прибрати {name}",
   "composer.attachImage": "Долучити зображення",
-  "composer.attachImageHint": "Долучити зображення (розмір змінюється на цьому пристрої перед завантаженням)",
   "composer.send": "Надіслати",
 
   "composer.shareLocation": "Поділитися місцем",
@@ -73,7 +70,6 @@ export const uk: Translation = {
   "members.invite": "Запросити",
 
   "thread.eyebrow": "Гілка",
-  "thread.heading": "Відповіді",
   "thread.close": "Закрити гілку",
   "thread.noReplies": "Відповідей ще немає",
   "thread.replyLabel": "Відповісти в гілці",
@@ -629,6 +625,12 @@ export const uk: Translation = {
   "error.dm_blocked_by_you": "Ви заблокували цю людину. Розблокуйте її, щоб надіслати повідомлення",
   "error.channel_member_unavailable": "Ця людина недоступна для цього каналу",
   "error.block_not_allowed": "Цього користувача не можна заблокувати",
+  "toast.newMessagesFrom": {
+    one: "{n} нове повідомлення від {place}",
+    few: "{n} нові повідомлення від {place}",
+    many: "{n} нових повідомлень від {place}",
+    other: "{n} нового повідомлення від {place}",
+  },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "Параметри розмови",
   "message.actionsTitle": "Дії з повідомленням",

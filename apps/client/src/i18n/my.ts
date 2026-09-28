@@ -16,8 +16,6 @@ export const my: Translation = {
   "conversation.emptyTitle": "channel တစ်ခု သို့မဟုတ် လူတစ်ဦး ရွေးပါ",
   "conversation.emptyBody": "စာများသည် အင်တာနက်ပေါ်တွင် မဟုတ်ဘဲ ဤဒေသတွင်း node ပေါ်တွင်သာ ရှိသည်။",
   "conversation.members": "အဖွဲ့ဝင်များ",
-  "conversation.kindChannel": "Channel",
-  "conversation.kindDm": "တိုက်ရိုက်စာ",
   "conversation.composerLabel": "{name} သို့ စာ",
   "conversation.composerPlaceholderChannel": "အပ်ဒိတ်တစ်ခု တင်ပါ",
   "conversation.composerPlaceholderDm": "တိုက်ရိုက်စာ ပို့ပါ",
@@ -37,7 +35,6 @@ export const my: Translation = {
   "composer.uploadFailed": "တင်ခြင်း မအောင်မြင်ပါ။",
   "composer.removeAttachment": "{name} ကို ဖယ်ရှားရန်",
   "composer.attachImage": "ပုံ ပူးတွဲရန်",
-  "composer.attachImageHint": "ပုံ ပူးတွဲရန် (မတင်မီ ဤစက်တွင် အရွယ်ပြန်ချိန်ညှိသည်)",
   "composer.send": "ပို့ရန်",
 
   "composer.shareLocation": "တည်နေရာ မျှဝေရန်",
@@ -68,7 +65,6 @@ export const my: Translation = {
   "members.invite": "ဖိတ်ရန်",
 
   "thread.eyebrow": "Thread",
-  "thread.heading": "ပြန်စာများ",
   "thread.close": "Thread ပိတ်ရန်",
   "thread.noReplies": "ပြန်စာ မရှိသေးပါ",
   "thread.replyLabel": "Thread တွင် ပြန်စာ",
@@ -619,6 +615,7 @@ export const my: Translation = {
   "error.dm_blocked_by_you": "သင်သည် ဤသူကို ပိတ်ဆို့ထားသည်။ မက်ဆေ့ချ်ပို့ရန် ပိတ်ဆို့မှုကို ဖြုတ်ပါ",
   "error.channel_member_unavailable": "ဤသူသည် ဤ channel အတွက် မရနိုင်ပါ",
   "error.block_not_allowed": "ဤအသုံးပြုသူကို ပိတ်ဆို့၍ မရပါ",
+  "toast.newMessagesFrom": { other: "{place} ထံမှ စာအသစ် {n} စောင်" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "စကားဝိုင်း ရွေးချယ်စရာများ",
   "message.actionsTitle": "စာ လုပ်ဆောင်ချက်များ",

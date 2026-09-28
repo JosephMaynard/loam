@@ -185,24 +185,36 @@ describe("a DM with someone you blocked", () => {
     expect(onSetBlocked).toHaveBeenCalledWith(troll.id, false);
   });
 
-  it("offers Block beside Report, confirming first", async () => {
+  it("offers Block beside Report, confirming in an alertdialog first", async () => {
     const onSetBlocked = vi.fn(async () => {});
-    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     const host = mount(view({ conversation: { kind: "dm", id: friend.id }, onSetBlocked }));
+    /** The confirmation's buttons, by label; `undefined` while no confirmation is open. */
+    const confirmButton = (label: string) =>
+      Array.from(host.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')).find(
+        (button) => button.textContent?.trim() === label,
+      );
 
     expect(host.querySelector(".blocked-banner")).toBeNull();
     expect(host.querySelector(".conversation .composer textarea")).not.toBeNull();
     await openHeaderMenu(host);
     expect(buttonNamed(host, "Report this user")).toBeDefined();
 
-    buttonNamed(host, "Block")!.click(); // declined
+    buttonNamed(host, "Block")!.click();
+    await tick();
+    const dialog = host.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("Friend");
+    confirmButton("Cancel")!.click(); // declined
     await tick();
     expect(onSetBlocked).not.toHaveBeenCalled();
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
+
     await openHeaderMenu(host);
-    buttonNamed(host, "Block")!.click(); // confirmed
-    expect(confirm).toHaveBeenCalledTimes(2);
-    expect(String(confirm.mock.calls[0]?.[0])).toContain("Friend");
+    buttonNamed(host, "Block")!.click();
+    await tick();
+    confirmButton("Block")!.click(); // confirmed
+    await tick();
     expect(onSetBlocked).toHaveBeenCalledWith(friend.id, true);
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
   });
 
   it("never offers Block for the assistant bot or a mesh sender", async () => {

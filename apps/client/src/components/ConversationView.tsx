@@ -18,8 +18,9 @@ import { useIsTimedOut } from "../lib/timeout";
 import { onViewportResize } from "../lib/viewport";
 import { Avatar } from "./Avatar";
 import { ChannelMembersPanel } from "./ChannelMembersPanel";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
-import { IconClose, IconFlag, IconHash, IconLock, IconSearch, IconShield, IconUsers } from "./icons";
+import { IconArrowDown, IconClose, IconFlag, IconHash, IconLock, IconSearch, IconShield, IconUsers } from "./icons";
 import type { MenuItem } from "./Menu";
 import { MessageComposer } from "./MessageComposer";
 import { MessageItem } from "./MessageItem";
@@ -144,6 +145,9 @@ function ConversationPane({
   const [membersOpen, setMembersOpen] = useState(false);
   // The user the report dialog was opened for — bound to that id (and, via the key, to this conversation).
   const [reportUserId, setReportUserId] = useState<string>();
+  // Blocking interrupts with a ConfirmDialog (alertdialog) rather than window.confirm, like every other
+  // consequential action in the app.
+  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
   const timedOut = useIsTimedOut(currentUser);
   const topMessages = useMemo(() => topLevelMessages(messages, conversation), [conversation, messages]);
   // Grouped once per `messages` change so the render loop below can look up each message's
@@ -187,8 +191,8 @@ function ConversationPane({
     : 0;
 
   function confirmBlock(): void {
-    if (onSetBlocked && window.confirm(t("block.confirm", { name: title }))) {
-      void onSetBlocked(conversation.id, true);
+    if (onSetBlocked) {
+      setBlockConfirmOpen(true);
     }
   }
 
@@ -363,6 +367,19 @@ function ConversationPane({
       ) : null}
       {conversation.kind === "dm" && reportUserId === conversation.id ? (
         <ReportDialog targetType="user" targetId={reportUserId} onClose={() => setReportUserId(undefined)} />
+      ) : null}
+      {blockConfirmOpen && onSetBlocked ? (
+        <ConfirmDialog
+          confirmLabel={t("block.block")}
+          onCancel={() => setBlockConfirmOpen(false)}
+          onConfirm={() => {
+            setBlockConfirmOpen(false);
+            void onSetBlocked(conversation.id, true);
+          }}
+          title={t("block.block")}
+        >
+          {t("block.confirm", { name: title })}
+        </ConfirmDialog>
       ) : null}
     </>
   );
@@ -584,28 +601,6 @@ function MessageList({
         <ReportDialog targetType="message" targetId={reportMessage.id} onClose={() => setReportMessage(undefined)} />
       ) : null}
     </div>
-  );
-}
-
-/** Down arrow for the "new messages" pill, drawn like the shared icon set in `icons.tsx`. */
-function IconArrowDown() {
-  return (
-    <svg
-      aria-hidden="true"
-      class="icon"
-      fill="none"
-      focusable="false"
-      height={16}
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      stroke-width="2"
-      viewBox="0 0 24 24"
-      width={16}
-    >
-      <path d="M12 5v14" />
-      <path d="M19 12l-7 7-7-7" />
-    </svg>
   );
 }
 

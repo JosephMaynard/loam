@@ -16,8 +16,6 @@ export const sw: Translation = {
   "conversation.emptyTitle": "Chagua kituo au mtu",
   "conversation.emptyBody": "Ujumbe hukaa kwenye nodi hii ya ndani, si kwenye intaneti.",
   "conversation.members": "Wanachama",
-  "conversation.kindChannel": "Kituo",
-  "conversation.kindDm": "Ujumbe wa moja kwa moja",
   "conversation.composerLabel": "Ujumbe kwa {name}",
   "conversation.composerPlaceholderChannel": "Chapisha taarifa mpya",
   "conversation.composerPlaceholderDm": "Tuma ujumbe wa moja kwa moja",
@@ -37,7 +35,6 @@ export const sw: Translation = {
   "composer.uploadFailed": "Kupakia kumeshindwa.",
   "composer.removeAttachment": "Ondoa {name}",
   "composer.attachImage": "Ambatisha picha",
-  "composer.attachImageHint": "Ambatisha picha (hupunguzwa ukubwa kwenye kifaa hiki kabla ya kupakia)",
   "composer.send": "Tuma",
 
   "composer.shareLocation": "Shiriki mahali",
@@ -68,7 +65,6 @@ export const sw: Translation = {
   "members.invite": "Alika",
 
   "thread.eyebrow": "Uzi",
-  "thread.heading": "Majibu",
   "thread.close": "Funga uzi",
   "thread.noReplies": "Bado hakuna majibu",
   "thread.replyLabel": "Jibu kwenye uzi",
@@ -619,6 +615,7 @@ export const sw: Translation = {
   "error.dm_blocked_by_you": "Umemzuia mtu huyu. Ondoa kizuizi ili kumtumia ujumbe",
   "error.channel_member_unavailable": "Mtu huyu hapatikani kwa kituo hiki",
   "error.block_not_allowed": "Mtumiaji huyu hawezi kuzuiwa",
+  "toast.newMessagesFrom": { one: "ujumbe mpya {n} kutoka kwa {place}", other: "jumbe mpya {n} kutoka kwa {place}" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "Chaguo za mazungumzo",
   "message.actionsTitle": "Vitendo vya ujumbe",

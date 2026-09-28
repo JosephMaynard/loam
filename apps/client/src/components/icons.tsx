@@ -269,3 +269,23 @@ export function IconMapPin(props: IconProps) {
     </Svg>
   );
 }
+
+/** Copy (two overlapping sheets). */
+export function IconCopy(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect height="13" rx="2" width="13" x="9" y="9" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </Svg>
+  );
+}
+
+/** Arrow pointing down (the "new messages" pill). */
+export function IconArrowDown(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 5v14" />
+      <path d="M19 12l-7 7-7-7" />
+    </Svg>
+  );
+}

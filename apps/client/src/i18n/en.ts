@@ -33,8 +33,6 @@ export const en = {
   "conversation.emptyTitle": "Pick a channel or a person",
   "conversation.emptyBody": "Messages live on this local node, not on the internet.",
   "conversation.members": "Members",
-  "conversation.kindChannel": "Channel",
-  "conversation.kindDm": "Direct message",
   "conversation.composerLabel": "Message {name}",
   "conversation.composerPlaceholderChannel": "Post an update",
   "conversation.composerPlaceholderDm": "Send a direct message",
@@ -58,7 +56,6 @@ export const en = {
   "composer.uploadFailed": "Upload failed.",
   "composer.removeAttachment": "Remove {name}",
   "composer.attachImage": "Attach an image",
-  "composer.attachImageHint": "Attach an image (resized on this device before upload)",
   "composer.send": "Send",
 
   // Message composer — share a location (docs/10; no map, no GPS — a named label or coordinates).
@@ -100,7 +97,6 @@ export const en = {
 
   // Thread side panel.
   "thread.eyebrow": "Thread",
-  "thread.heading": "Replies",
   "thread.close": "Close thread",
   "thread.noReplies": "No replies yet",
   "thread.replyLabel": "Reply in thread",
@@ -692,6 +688,7 @@ export const en = {
   "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
   "error.channel_member_unavailable": "This person isn't available for this channel",
   "error.block_not_allowed": "This user can't be blocked",
+  "toast.newMessagesFrom": { one: "{n} new message from {place}", other: "{n} new messages from {place}" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "Conversation options",
   "message.actionsTitle": "Message actions",

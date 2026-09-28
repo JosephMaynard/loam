@@ -16,8 +16,6 @@ export const tr: Translation = {
   "conversation.emptyTitle": "Bir kanal veya bir kişi seçin",
   "conversation.emptyBody": "Mesajlar internette değil, bu yerel düğümde durur.",
   "conversation.members": "Üyeler",
-  "conversation.kindChannel": "Kanal",
-  "conversation.kindDm": "Doğrudan mesaj",
   "conversation.composerLabel": "{name} için mesaj",
   "conversation.composerPlaceholderChannel": "Bir güncelleme paylaşın",
   "conversation.composerPlaceholderDm": "Doğrudan mesaj gönderin",
@@ -37,7 +35,6 @@ export const tr: Translation = {
   "composer.uploadFailed": "Yükleme başarısız.",
   "composer.removeAttachment": "{name} ögesini kaldır",
   "composer.attachImage": "Görsel ekle",
-  "composer.attachImageHint": "Görsel ekle (yüklemeden önce bu cihazda yeniden boyutlandırılır)",
   "composer.send": "Gönder",
 
   "composer.shareLocation": "Konum paylaş",
@@ -68,7 +65,6 @@ export const tr: Translation = {
   "members.invite": "Davet et",
 
   "thread.eyebrow": "Konu",
-  "thread.heading": "Yanıtlar",
   "thread.close": "Konuyu kapat",
   "thread.noReplies": "Henüz yanıt yok",
   "thread.replyLabel": "Konuda yanıtla",
@@ -619,6 +615,7 @@ export const tr: Translation = {
   "error.dm_blocked_by_you": "Bu kişiyi engellediniz. Mesaj göndermek için engeli kaldırın",
   "error.channel_member_unavailable": "Bu kişi bu kanal için uygun değil",
   "error.block_not_allowed": "Bu kullanıcı engellenemez",
+  "toast.newMessagesFrom": { one: "{place} adlı kişiden {n} yeni mesaj", other: "{place} adlı kişiden {n} yeni mesaj" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "Sohbet seçenekleri",
   "message.actionsTitle": "Mesaj işlemleri",

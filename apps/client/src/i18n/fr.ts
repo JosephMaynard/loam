@@ -16,8 +16,6 @@ export const fr: Translation = {
   "conversation.emptyTitle": "Choisissez un canal ou une personne",
   "conversation.emptyBody": "Les messages restent sur ce nœud local, pas sur Internet.",
   "conversation.members": "Membres",
-  "conversation.kindChannel": "Canal",
-  "conversation.kindDm": "Message direct",
   "conversation.composerLabel": "Message à {name}",
   "conversation.composerPlaceholderChannel": "Publier une mise à jour",
   "conversation.composerPlaceholderDm": "Envoyer un message direct",
@@ -37,7 +35,6 @@ export const fr: Translation = {
   "composer.uploadFailed": "Échec de l’envoi.",
   "composer.removeAttachment": "Retirer {name}",
   "composer.attachImage": "Joindre une image",
-  "composer.attachImageHint": "Joindre une image (redimensionnée sur cet appareil avant l’envoi)",
   "composer.send": "Envoyer",
 
   "composer.shareLocation": "Partager la position",
@@ -68,7 +65,6 @@ export const fr: Translation = {
   "members.invite": "Inviter",
 
   "thread.eyebrow": "Fil",
-  "thread.heading": "Réponses",
   "thread.close": "Fermer le fil",
   "thread.noReplies": "Aucune réponse pour l’instant",
   "thread.replyLabel": "Répondre dans le fil",
@@ -619,6 +615,11 @@ export const fr: Translation = {
   "error.dm_blocked_by_you": "Vous avez bloqué cette personne. Débloquez-la pour lui envoyer un message",
   "error.channel_member_unavailable": "Cette personne n’est pas disponible pour ce canal",
   "error.block_not_allowed": "Cet utilisateur ne peut pas être bloqué",
+  "toast.newMessagesFrom": {
+    one: "{n} nouveau message de {place}",
+    many: "{n} nouveaux messages de {place}",
+    other: "{n} nouveaux messages de {place}",
+  },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "Options de la conversation",
   "message.actionsTitle": "Actions du message",

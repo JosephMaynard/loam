@@ -16,8 +16,6 @@ export const bn: Translation = {
   "conversation.emptyTitle": "একটি চ্যানেল বা একজন ব্যক্তি বেছে নিন",
   "conversation.emptyBody": "বার্তাগুলো ইন্টারনেটে নয়, এই স্থানীয় নোডেই থাকে।",
   "conversation.members": "সদস্যরা",
-  "conversation.kindChannel": "চ্যানেল",
-  "conversation.kindDm": "সরাসরি বার্তা",
   "conversation.composerLabel": "{name}-কে বার্তা",
   "conversation.composerPlaceholderChannel": "একটি আপডেট পোস্ট করুন",
   "conversation.composerPlaceholderDm": "একটি সরাসরি বার্তা পাঠান",
@@ -37,7 +35,6 @@ export const bn: Translation = {
   "composer.uploadFailed": "আপলোড ব্যর্থ।",
   "composer.removeAttachment": "{name} সরান",
   "composer.attachImage": "একটি ছবি সংযুক্ত করুন",
-  "composer.attachImageHint": "একটি ছবি সংযুক্ত করুন (আপলোডের আগে এই ডিভাইসে আকার ছোট করা হয়)",
   "composer.send": "পাঠান",
 
   "composer.shareLocation": "অবস্থান শেয়ার করুন",
@@ -68,7 +65,6 @@ export const bn: Translation = {
   "members.invite": "আমন্ত্রণ",
 
   "thread.eyebrow": "থ্রেড",
-  "thread.heading": "উত্তরসমূহ",
   "thread.close": "থ্রেড বন্ধ করুন",
   "thread.noReplies": "এখনও কোনো উত্তর নেই",
   "thread.replyLabel": "থ্রেডে উত্তর দিন",
@@ -619,6 +615,7 @@ export const bn: Translation = {
   "error.dm_blocked_by_you": "আপনি এই ব্যক্তিকে ব্লক করেছেন। বার্তা পাঠাতে তাঁকে আনব্লক করুন",
   "error.channel_member_unavailable": "এই ব্যক্তি এই চ্যানেলের জন্য উপলব্ধ নন",
   "error.block_not_allowed": "এই ব্যবহারকারীকে ব্লক করা যায় না",
+  "toast.newMessagesFrom": { one: "{place} থেকে {n}টি নতুন বার্তা", other: "{place} থেকে {n}টি নতুন বার্তা" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "কথোপকথনের বিকল্প",
   "message.actionsTitle": "বার্তার বিকল্প",

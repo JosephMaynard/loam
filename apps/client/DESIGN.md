@@ -16,15 +16,16 @@ fonts, no icon fonts, no `backdrop-filter`, no heavy shadows.
 | `src/global.css` | Only `@import`s, in this order. Vite inlines them. |
 | `src/styles/tokens.css` | Every colour, size, radius, duration and z-index, light + dark. |
 | `src/styles/base.css` | Reset, typography, links, the global focus ring, `.sr-only`, scrollbars, the no-scroll document. |
-| `src/styles/components.css` | Icons, buttons, fields, badges, status pill, avatar, menu, dialog/sheet, toast, error banner, notice, empty state, day divider, card, list row, and the COMPAT block. |
+| `src/styles/components.css` | Icons, buttons, fields, badges, status pill, avatar, menu, dialog/sheet, toast, error banner, notice, empty state, day divider, card, list row. |
 | `src/styles/shell.css` | App frame, pane grid and breakpoints, screen header, sidebar/Home, invite dialog, gate screens, dev-mode banner. |
-| `src/styles/conversation.css` | Message list, bubbles, actions, composer, thread panel, members panel, report dialog. **Wave 2 rewrites.** |
-| `src/styles/screens.css` | Settings, admin, people, search, mesh, avatar editor. **Wave 2 rewrites.** |
+| `src/styles/conversation.css` | Message list, bubbles, actions, composer, thread panel, members panel, report dialog. |
+| `src/styles/screens.css` | Settings, admin, people, search, mesh, avatar editor, toasts on phones. |
 | `src/components/icons.tsx` | The icon set. |
 | `src/components/Dialog.tsx`, `Menu.tsx`, `ScreenHeader.tsx`, `Avatar.tsx` | The component primitives. |
 | `src/lib/viewport.ts` | Keyboard-aware viewport sync (`--vvh`) and `onViewportResize`. |
 
-Built CSS is about 48 KB minified (9 KB gzip). Keep it under 50 KB: wave 2 should delete more than it adds.
+Built CSS is about 56 KB minified (11 KB gzip) after the conversation and screens rewrites. Keep it under
+60 KB; when adding a component, delete or merge a rule for it.
 
 ## Browser floor
 
@@ -139,7 +140,7 @@ Inline SVG, 24×24 viewBox, 2px round strokes in `currentColor`, `aria-hidden`. 
 `IconBack` · `IconClose` · `IconSend` · `IconAttach` · `IconMore` (vertical kebab) · `IconReply` ·
 `IconSmile` · `IconEdit` · `IconTrash` · `IconFlag` · `IconSearch` · `IconSettings` · `IconHash` ·
 `IconLock` · `IconUsers` · `IconCheck` · `IconPlus` · `IconChevronRight` · `IconWifi` · `IconMail` ·
-`IconShield` · `IconMapPin`.
+`IconShield` · `IconMapPin` · `IconCopy` · `IconArrowDown`.
 
 `BackArrowIcon.tsx` is a thin re-export of `IconBack` for old imports. Sizes in use: 20 in buttons, 18 in
 sidebar rows, 16 in dense per-message actions.
@@ -331,44 +332,42 @@ Every user-facing string goes through `t()`. New keys go in `src/i18n/en.ts` onl
 back to English at runtime. **But** `i18n.test.ts` has a release gate, "every shipped locale covers every
 en key", which fails as soon as `en.ts` gains a key the 14 other catalogs lack. Wave 1 added no keys (it
 reused existing ones, made `Menu`'s label a required prop, and changed only the English *value* of
-`newChannel.new` to drop its "+"; the sidebar strips a leading "+" from older translations). Wave 2 will
-need new keys (e.g. "More actions", "Copy text"). The orchestrator must choose: run the batched translation
-pass, or add an explicit, reviewed "pending translation" allowlist to that test. Don't quietly weaken it.
+`newChannel.new` to drop its "+"; the sidebar strips a leading "+" from older translations). The decision
+(2026-09-28): keep the gate. Whoever adds a key to `en.ts` adds its translation to all 14 other catalogs in
+the same change (docs/13: the catalogs are LLM-translated pending native review), under the anchor
+comments at the end of each catalog. Don't quietly weaken the test.
 
-## COMPAT (delete in wave 2)
+## COMPAT
 
-- No `--c-*` tokens remain; `conversation.css` and `screens.css` were moved onto the new tokens directly,
-  so there is no token alias block to delete.
-- `components.css` ends with a COMPAT block: unclassed `button`s, `.ghost-button`, `.danger-button`,
-  `.close-button`, `.admin-toggle`, and `.invite-modal-backdrop` / `.invite-modal` / `.invite-modal-header`
-  for `ReportDialog`'s hand-rolled overlay. `screens.css` has "Legacy button rows" (`.profile-actions
-  button` and friends). Remove each as its last user moves to `.btn` / `Dialog` / `.check-row`.
-- `.wiped-screen` stays as a second class on gate screens only for anything still selecting it.
+Nothing left. Wave 2 removed the legacy `--c-*` tokens, the unclassed-button rules, `.ghost-button` /
+`.danger-button` / `.close-button` / `.admin-toggle`, the hand-rolled invite overlay and the "legacy button
+rows". Every button carries a `.btn` class; every overlay is a `Dialog`. `.wiped-screen` remains only as a
+second class on gate screens.
 
-## Wave 2 checklist
+## Wave 2 checklist (done 2026-09-28)
 
 Conversation agent (`ConversationView`, `MessageItem`, `MessageComposer`, `ReportDialog`,
 `ChannelMembersPanel`, `LocationCard`, `Attachment*`; rewrite `conversation.css`):
 
-- [ ] Header → `ScreenHeader`: channel glyph or DM avatar as `leading`, the channel topic or presence as
+- [x] Header → `ScreenHeader`: channel glyph or DM avatar as `leading`, the channel topic or presence as
       `subtitle`; "Report this user", "Block" and "Members" move into `menuItems` (the DM title must never
       be truncated by buttons again). Thread panel header → `ScreenHeader` with `onBack` + `headingLevel={2}`.
-- [ ] Bubbles with the time inside (bottom inline-end corner, `--fg-faint`-ish on the bubble), not on a
+- [x] Bubbles with the time inside (bottom inline-end corner, `--fg-faint`-ish on the bubble), not on a
       line above; author name only on the first bubble of a group.
-- [ ] Group consecutive messages from the same author within a few minutes: one avatar (`sm`, aligned to
+- [x] Group consecutive messages from the same author within a few minutes: one avatar (`sm`, aligned to
       the group's last bubble, not floating below it), tighter gaps, tail only on the last bubble.
-- [ ] Hover actions on desktop (a small floating toolbar: react, reply, ⋮), long-press / ⋮ on touch opening
+- [x] Hover actions on desktop (a small floating toolbar: react, reply, ⋮), long-press / ⋮ on touch opening
       the `Menu` sheet with react, reply, edit, delete, report. No permanently visible per-message icon row.
       The invisible quick-reaction buttons currently take space and push "Reply" off to the side.
-- [ ] Reactions as compact pills under the bubble; reply count as a link-style pill.
-- [ ] Pill composer: attach and location as `.btn-icon.btn-ghost` inside a rounded field, auto-growing
+- [x] Reactions as compact pills under the bubble; reply count as a link-style pill.
+- [x] Pill composer: attach and location as `.btn-icon.btn-ghost` inside a rounded field, auto-growing
       textarea, `.btn-accent` round send button, all bottom-aligned; safe-area bottom padding.
-- [ ] Typing indicator inside the list area (absolutely positioned just above the composer, or as the last
+- [x] Typing indicator inside the list area (absolutely positioned just above the composer, or as the last
       list item), not a flex row between list and composer.
-- [ ] Message list subscribes to `onViewportResize` and re-pins to the bottom when the keyboard opens.
-- [ ] `ReportDialog` → `Dialog`; `ChannelMembersPanel` → a `Dialog` sheet or a card; blocked-DM banner →
+- [x] Message list subscribes to `onViewportResize` and re-pins to the bottom when the keyboard opens.
+- [x] `ReportDialog` → `Dialog`; `ChannelMembersPanel` → a `Dialog` sheet or a card; blocked-DM banner →
       `.notice`; jumbo emoji, mentions (`--accent` edge), removed/edited states on tokens.
-- [ ] Replace the remaining `.ghost-button` / `.danger-button` / `.close-button` / bare buttons with `.btn`
+- [x] Replace the remaining `.ghost-button` / `.danger-button` / `.close-button` / bare buttons with `.btn`
       classes, give message avatars a `size`, and delete the matching COMPAT rules.
 
 Screens agent (`app.tsx` SettingsView / PeopleView / SearchView / MeshView, `AdminView` and its panels,

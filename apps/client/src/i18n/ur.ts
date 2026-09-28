@@ -16,8 +16,6 @@ export const ur: Translation = {
   "conversation.emptyTitle": "کوئی چینل یا کوئی شخص منتخب کریں",
   "conversation.emptyBody": "پیغامات اسی مقامی نوڈ پر رہتے ہیں، انٹرنیٹ پر نہیں۔",
   "conversation.members": "اراکین",
-  "conversation.kindChannel": "چینل",
-  "conversation.kindDm": "براہِ راست پیغام",
   "conversation.composerLabel": "{name} کو پیغام",
   "conversation.composerPlaceholderChannel": "کوئی اپ ڈیٹ پوسٹ کریں",
   "conversation.composerPlaceholderDm": "براہِ راست پیغام بھیجیں",
@@ -37,7 +35,6 @@ export const ur: Translation = {
   "composer.uploadFailed": "اپ لوڈ ناکام۔",
   "composer.removeAttachment": "{name} ہٹائیں",
   "composer.attachImage": "تصویر منسلک کریں",
-  "composer.attachImageHint": "تصویر منسلک کریں (اپ لوڈ سے پہلے اِسی آلے پر سائز تبدیل ہوتا ہے)",
   "composer.send": "بھیجیں",
 
   "composer.shareLocation": "مقام شیئر کریں",
@@ -68,7 +65,6 @@ export const ur: Translation = {
   "members.invite": "مدعو کریں",
 
   "thread.eyebrow": "دھاگہ",
-  "thread.heading": "جوابات",
   "thread.close": "دھاگہ بند کریں",
   "thread.noReplies": "ابھی کوئی جواب نہیں",
   "thread.replyLabel": "دھاگے میں جواب دیں",
@@ -619,6 +615,7 @@ export const ur: Translation = {
   "error.dm_blocked_by_you": "آپ نے اس شخص کو بلاک کیا ہے۔ پیغام بھیجنے کے لیے انہیں اَن بلاک کریں",
   "error.channel_member_unavailable": "یہ شخص اس چینل کے لیے دستیاب نہیں ہے",
   "error.block_not_allowed": "اس صارف کو بلاک نہیں کیا جا سکتا",
+  "toast.newMessagesFrom": { one: "{place} کی طرف سے {n} نیا پیغام", other: "{place} کی طرف سے {n} نئے پیغامات" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "گفتگو کے اختیارات",
   "message.actionsTitle": "پیغام کے اقدامات",

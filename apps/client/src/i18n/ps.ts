@@ -16,8 +16,6 @@ export const ps: Translation = {
   "conversation.emptyTitle": "یو چینل یا یو کس وټاکئ",
   "conversation.emptyBody": "پیغامونه په همدې محلي نوډ کې پاتې کیږي، نه په انټرنېټ کې.",
   "conversation.members": "غړي",
-  "conversation.kindChannel": "چینل",
-  "conversation.kindDm": "مستقیم پیغام",
   "conversation.composerLabel": "{name} ته پیغام",
   "conversation.composerPlaceholderChannel": "یو تازه‌معلومات خپور کړئ",
   "conversation.composerPlaceholderDm": "یو مستقیم پیغام واستوئ",
@@ -37,7 +35,6 @@ export const ps: Translation = {
   "composer.uploadFailed": "پورته کول ناکام شو.",
   "composer.removeAttachment": "{name} لرې کړئ",
   "composer.attachImage": "انځور ضمیمه کول",
-  "composer.attachImageHint": "انځور ضمیمه کړئ (له پورته کولو مخکې پر همدې وسیله بیا اندازه کیږي)",
   "composer.send": "لیږل",
 
   "composer.shareLocation": "د موقعیت شریکول",
@@ -68,7 +65,6 @@ export const ps: Translation = {
   "members.invite": "بلنه",
 
   "thread.eyebrow": "لړۍ",
-  "thread.heading": "ځوابونه",
   "thread.close": "لړۍ بندول",
   "thread.noReplies": "تر اوسه ځواب نشته",
   "thread.replyLabel": "په لړۍ کې ځواب",
@@ -619,6 +615,7 @@ export const ps: Translation = {
   "error.dm_blocked_by_you": "تاسو دا کس بند کړی دی. د پیغام لېږلو لپاره یې بندیز لرې کړئ",
   "error.channel_member_unavailable": "دا کس د دې چینل لپاره شتون نه لري",
   "error.block_not_allowed": "دا کاروونکی نه شي بندېدای",
+  "toast.newMessagesFrom": { one: "د {place} له خوا {n} نوی پیغام", other: "د {place} له خوا {n} نوي پیغامونه" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "د خبرو اترو اختیارونه",
   "message.actionsTitle": "د پیغام کړنې",

@@ -16,8 +16,6 @@ export const fa: Translation = {
   "conversation.emptyTitle": "یک کانال یا یک نفر را انتخاب کنید",
   "conversation.emptyBody": "پیام‌ها روی همین گره محلی می‌مانند، نه روی اینترنت.",
   "conversation.members": "اعضا",
-  "conversation.kindChannel": "کانال",
-  "conversation.kindDm": "پیام مستقیم",
   "conversation.composerLabel": "پیام به {name}",
   "conversation.composerPlaceholderChannel": "یک به‌روزرسانی ارسال کنید",
   "conversation.composerPlaceholderDm": "یک پیام مستقیم بفرستید",
@@ -37,7 +35,6 @@ export const fa: Translation = {
   "composer.uploadFailed": "بارگذاری ناموفق بود.",
   "composer.removeAttachment": "برداشتن {name}",
   "composer.attachImage": "پیوست تصویر",
-  "composer.attachImageHint": "پیوست تصویر (پیش از بارگذاری روی این دستگاه تغییر اندازه می‌یابد)",
   "composer.send": "ارسال",
 
   "composer.shareLocation": "اشتراک‌گذاری مکان",
@@ -68,7 +65,6 @@ export const fa: Translation = {
   "members.invite": "دعوت",
 
   "thread.eyebrow": "رشته",
-  "thread.heading": "پاسخ‌ها",
   "thread.close": "بستن رشته",
   "thread.noReplies": "هنوز پاسخی نیست",
   "thread.replyLabel": "پاسخ در رشته",
@@ -619,6 +615,7 @@ export const fa: Translation = {
   "error.dm_blocked_by_you": "شما این فرد را مسدود کرده‌اید. برای فرستادن پیام، مسدودی را بردارید",
   "error.channel_member_unavailable": "این فرد برای این کانال در دسترس نیست",
   "error.block_not_allowed": "این کاربر را نمی‌توان مسدود کرد",
+  "toast.newMessagesFrom": { one: "{n} پیام تازه از {place}", other: "{n} پیام تازه از {place}" },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "گزینه‌های گفتگو",
   "message.actionsTitle": "اقدامات پیام",

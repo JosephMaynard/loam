@@ -16,8 +16,6 @@ export const ar: Translation = {
   "conversation.emptyTitle": "اختر قناة أو شخصًا",
   "conversation.emptyBody": "تبقى الرسائل على هذه العقدة المحلية، لا على الإنترنت.",
   "conversation.members": "الأعضاء",
-  "conversation.kindChannel": "قناة",
-  "conversation.kindDm": "رسالة مباشرة",
   "conversation.composerLabel": "رسالة إلى {name}",
   "conversation.composerPlaceholderChannel": "انشر تحديثًا",
   "conversation.composerPlaceholderDm": "أرسل رسالة مباشرة",
@@ -44,7 +42,6 @@ export const ar: Translation = {
   "composer.uploadFailed": "فشل الرفع.",
   "composer.removeAttachment": "إزالة {name}",
   "composer.attachImage": "إرفاق صورة",
-  "composer.attachImageHint": "إرفاق صورة (يُعاد تحجيمها على هذا الجهاز قبل الرفع)",
   "composer.send": "إرسال",
 
   "composer.shareLocation": "مشاركة الموقع",
@@ -75,7 +72,6 @@ export const ar: Translation = {
   "members.invite": "دعوة",
 
   "thread.eyebrow": "سلسلة",
-  "thread.heading": "الردود",
   "thread.close": "إغلاق السلسلة",
   "thread.noReplies": "لا ردود بعد",
   "thread.replyLabel": "الرد في السلسلة",
@@ -633,6 +629,14 @@ export const ar: Translation = {
   "error.dm_blocked_by_you": "لقد حظرت هذا الشخص. ألغِ حظره لترسل إليه رسالة",
   "error.channel_member_unavailable": "هذا الشخص غير متاح لهذه القناة",
   "error.block_not_allowed": "لا يمكن حظر هذا المستخدم",
+  "toast.newMessagesFrom": {
+    zero: "{n} رسالة جديدة من {place}",
+    one: "{n} رسالة جديدة من {place}",
+    two: "{n} رسالتان جديدتان من {place}",
+    few: "{n} رسائل جديدة من {place}",
+    many: "{n} رسالة جديدة من {place}",
+    other: "{n} رسالة جديدة من {place}",
+  },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "خيارات المحادثة",
   "message.actionsTitle": "إجراءات الرسالة",

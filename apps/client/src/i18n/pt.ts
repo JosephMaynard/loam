@@ -16,8 +16,6 @@ export const pt: Translation = {
   "conversation.emptyTitle": "Escolha um canal ou uma pessoa",
   "conversation.emptyBody": "As mensagens ficam neste nó local, não na internet.",
   "conversation.members": "Membros",
-  "conversation.kindChannel": "Canal",
-  "conversation.kindDm": "Mensagem direta",
   "conversation.composerLabel": "Mensagem para {name}",
   "conversation.composerPlaceholderChannel": "Publique uma atualização",
   "conversation.composerPlaceholderDm": "Envie uma mensagem direta",
@@ -37,7 +35,6 @@ export const pt: Translation = {
   "composer.uploadFailed": "Falha no envio.",
   "composer.removeAttachment": "Remover {name}",
   "composer.attachImage": "Anexar uma imagem",
-  "composer.attachImageHint": "Anexar uma imagem (redimensionada neste dispositivo antes do envio)",
   "composer.send": "Enviar",
 
   "composer.shareLocation": "Compartilhar localização",
@@ -68,7 +65,6 @@ export const pt: Translation = {
   "members.invite": "Convidar",
 
   "thread.eyebrow": "Tópico",
-  "thread.heading": "Respostas",
   "thread.close": "Fechar tópico",
   "thread.noReplies": "Ainda não há respostas",
   "thread.replyLabel": "Responder no tópico",
@@ -619,6 +615,11 @@ export const pt: Translation = {
   "error.dm_blocked_by_you": "Você bloqueou esta pessoa. Desbloqueie-a para enviar uma mensagem",
   "error.channel_member_unavailable": "Esta pessoa não está disponível para este canal",
   "error.block_not_allowed": "Este usuário não pode ser bloqueado",
+  "toast.newMessagesFrom": {
+    one: "{n} mensagem nova de {place}",
+    many: "{n} mensagens novas de {place}",
+    other: "{n} mensagens novas de {place}",
+  },
   // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
   "conversation.moreActions": "Opções da conversa",
   "message.actionsTitle": "Ações da mensagem",

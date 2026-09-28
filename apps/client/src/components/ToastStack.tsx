@@ -13,6 +13,8 @@ export type ToastItem = {
   place?: string;
   /** Who wrote the message (a coalesced channel toast prefixes the newest body with it). */
   author?: string;
+  /** A direct message: a coalesced toast then reads "from <person>" rather than "in <place>". */
+  direct?: boolean;
 };
 
 /** At most this many conversations show a toast at once; older ones wait in state and expire unseen. */
@@ -75,7 +77,12 @@ export function ToastStack({ onDismiss, toasts }: { onDismiss: (id: string) => v
             type="button"
           >
             <strong className="toast-title">
-              {count > 1 ? t("toast.newMessages", { n: count, place: newest.place ?? newest.title }) : newest.title}
+              {count > 1
+                ? t(newest.direct ? "toast.newMessagesFrom" : "toast.newMessages", {
+                    n: count,
+                    place: newest.place ?? newest.title,
+                  })
+                : newest.title}
             </strong>
             <span className="toast-body" dir="auto">
               {count > 1 && newest.author && newest.author !== newest.place

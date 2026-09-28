@@ -13,7 +13,7 @@ import { AttachmentFile } from "./AttachmentFile";
 import { AttachmentImage } from "./AttachmentImage";
 import { Avatar } from "./Avatar";
 import { Dialog } from "./Dialog";
-import { IconChevronRight, IconEdit, IconFlag, IconReply, IconTrash } from "./icons";
+import { IconChevronRight, IconCopy, IconEdit, IconFlag, IconReply, IconTrash } from "./icons";
 import { LocationCard } from "./LocationCard";
 import { Menu, type MenuItem } from "./Menu";
 
@@ -46,28 +46,6 @@ interface MessageItemProps {
   groupLast?: boolean;
   /** Show the author's name on a group's first bubble (channels). A DM never does: the header says who. */
   showAuthor?: boolean;
-}
-
-/** Copy (two overlapping sheets), drawn like the shared icon set in `icons.tsx`. */
-function IconCopy() {
-  return (
-    <svg
-      aria-hidden="true"
-      class="icon"
-      fill="none"
-      focusable="false"
-      height={20}
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      stroke-width="2"
-      viewBox="0 0 24 24"
-      width={20}
-    >
-      <rect height="13" rx="2" width="13" x="9" y="9" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  );
 }
 
 /**
@@ -416,7 +394,15 @@ export function MessageItem({
             )}
           </div>
           {hasActions && !editing ? (
-            <div aria-label={t("message.actionsTitle")} className="message-toolbar" role="toolbar">
+            <div
+              aria-label={t("message.actionsTitle")}
+              className="message-toolbar"
+              // A pointer click must not focus a toolbar button: the toolbar shows while it has focus (so
+              // keyboard users can reach it), and a focused button would pin it open after the click while
+              // the mouse has already moved on to the next message. Keyboard focus is unaffected.
+              onMouseDown={(event) => event.preventDefault()}
+              role="toolbar"
+            >
               {canReact
                 ? QUICK_REACTIONS.map((reaction) => (
                     <button
