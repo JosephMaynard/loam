@@ -148,9 +148,19 @@ for (const name of templateFiles) {
 // copied → Node throws MODULE_NOT_FOUND at boot before the server starts). Fails the build loudly.
 assertRelativeRequiresResolve(join(outDir, "main.js"), outDir);
 
-const hasNative = existsSync(
-  join(outDir, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node"),
-);
+// Both SQLite native prebuilds must be in place (pre-release review 2026-09-25). The plain driver is what
+// every `off`-mode boot opens; the SQLCipher one (better-sqlite3-multiple-ciphers) backs every encrypted
+// mode, and without it the launcher now LOCKS an encrypted node rather than booting it plaintext — so an
+// APK missing it ships a build where encryption can never be turned on. Fail the bundle instead of warning.
+// `LOAM_ALLOW_MISSING_NATIVE=1` skips this for a desktop-only bundle smoke test (never for an APK).
+const nativePrebuilds = [
+  ["better-sqlite3", join(outDir, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node")],
+  [
+    "better-sqlite3-multiple-ciphers",
+    join(outDir, "node_modules", "better-sqlite3-multiple-ciphers", "build", "Release", "better_sqlite3.node"),
+  ],
+];
+const missingNative = nativePrebuilds.filter(([, file]) => !existsSync(file)).map(([name]) => name);
 
 const bytes = statSync(outFile).size;
 const inputs = Object.keys(result.metafile.inputs).length;
@@ -159,8 +169,17 @@ console.log(
 );
 console.log(`✓ Copied web client → ${clientOut.replace(`${repoRoot}/`, "")}`);
 console.log(`✓ Copied launcher template (${templateFiles.join(", ")})`);
-console.log(
-  hasNative
-    ? "✓ better-sqlite3 native prebuild present"
-    : "⚠ better-sqlite3 native prebuild MISSING — run `pnpm --filter app fetch:native` before building the APK.",
-);
+if (missingNative.length === 0) {
+  console.log("✓ SQLite native prebuilds present (better-sqlite3 + better-sqlite3-multiple-ciphers)");
+} else if (process.env.LOAM_ALLOW_MISSING_NATIVE === "1") {
+  console.warn(
+    `⚠ Native prebuild(s) MISSING: ${missingNative.join(", ")} — allowed by LOAM_ALLOW_MISSING_NATIVE=1. ` +
+      "This bundle must NOT go into an APK.",
+  );
+} else {
+  console.error(
+    `✗ Native prebuild(s) MISSING: ${missingNative.join(", ")} — run \`pnpm --filter app fetch:native\` first ` +
+      "(or set LOAM_ALLOW_MISSING_NATIVE=1 for a desktop-only smoke bundle).",
+  );
+  process.exit(1);
+}

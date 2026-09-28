@@ -27,7 +27,38 @@ export type HostState = {
   serverUrl?: string;
   /** All detected host IPv4 addresses, listed under Step 2 so a joiner can try another if needed. */
   addresses?: string[];
+  /**
+   * Why Step 2 has no URL while the hotspot is up: its (randomly assigned) address is still being looked
+   * for, or couldn't be told apart from the phone's other networks — then Step 2 shows the manual route
+   * (the joiner's Wi-Fi "Gateway" address) instead of a QR to a guess.
+   */
+  hotspotAddress?: 'searching' | 'unknown';
+  /** Every address the host currently holds that could be the hotspot's, `interface address` each, for
+   * the manual fallback. */
+  detected?: string[];
+  /** Devices connected to LOAM from off this phone right now — the proof the join path works. */
+  connectedClients?: number;
+  /** The transport `#k=` fragment, appended to the manual-route URL so a hardened node still admits it. */
+  manualFragment?: string;
 };
+
+/** "1 phone connected" / "3 phones connected". */
+export function connectedLabel(count: number): string {
+  return `${count} ${count === 1 ? 'phone' : 'phones'} connected`;
+}
+
+/**
+ * The line under the status pill: the live count whenever anyone is connected (shared-WiFi joiners count
+ * even while the hotspot is down), a "none yet" while the host is running so the operator knows the count
+ * is live, nothing before the host is up.
+ */
+export function connectedLine(state: Pick<HostState, 'status' | 'connectedClients'>): string | undefined {
+  const count = state.connectedClients ?? 0;
+  if (count > 0) {
+    return connectedLabel(count);
+  }
+  return state.status === 'running' ? 'No phones connected yet' : undefined;
+}
 
 const STATUS_LABEL: Record<HostState['status'], string> = {
   starting: 'Starting host…',
@@ -55,6 +86,11 @@ export function HostPanel({ state }: { state: HostState }) {
         style={styles.statusPill}>
         <ThemedText type="small">{STATUS_LABEL[state.status]}</ThemedText>
       </ThemedView>
+      {connectedLine(state) ? (
+        <ThemedText type="smallBold" style={styles.connected}>
+          {connectedLine(state)}
+        </ThemedText>
+      ) : null}
 
       <ThemedText type="small" themeColor="textSecondary" style={styles.rationale}>
         Android requires location permission to create a WiFi hotspot. LOAM never uses, requests, or
@@ -103,6 +139,23 @@ export function HostPanel({ state }: { state: HostState }) {
               </ThemedText>
             ) : null}
           </>
+        ) : state.hotspotAddress === 'searching' ? (
+          <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
+            Finding the hotspot&apos;s address…
+          </ThemedText>
+        ) : state.hotspotAddress === 'unknown' ? (
+          <>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
+              Couldn&apos;t work out which address the hotspot is using. On the joining phone, open the
+              Wi-Fi details for {state.hotspot?.ssid ?? 'this hotspot'}, find the Gateway (or Router)
+              address, and open http://that-address:3000{state.manualFragment ?? ''} in the browser.
+            </ThemedText>
+            {state.detected && state.detected.length > 0 ? (
+              <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
+                This host&apos;s addresses: {state.detected.join(' · ')}
+              </ThemedText>
+            ) : null}
+          </>
         ) : (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
             Waiting for the server address…
@@ -130,6 +183,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.one,
     borderRadius: Spacing.four,
+  },
+  connected: {
+    textAlign: 'center',
   },
   step: {
     alignSelf: 'stretch',

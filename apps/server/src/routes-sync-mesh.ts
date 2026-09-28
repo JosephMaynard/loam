@@ -3,10 +3,11 @@
 // from app.ts (2026-09-04 split) over the shared AppContext.
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, SyncMessagesRequestSchema } from "@loam/schema";
+import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, type MeshInboundResponse, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, SyncMessagesRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { attachmentFileName, parseAttachmentFileName } from "./media.js";
+import { localInterfaceAddresses, remoteClientAddresses } from "./net.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 /** Register the node-to-node sync endpoints and the opportunistic-mesh endpoints (cards, contacts, send, bridge, admin sync). */
@@ -328,12 +329,39 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
   // radio-fed mirror of the `/api/sync/*` sealed path: `outbound` is the same set the sync digest
   // offers (full records, so the courier ships bytes without a second round trip); `inbound` runs each
   // blob through the same defensive `mesh.acceptSealedFromPeer` used by sync imports. Both 404 (identical to
-  // absent) unless `mesh.enabled`, and both refuse non-loopback callers so only this device's launcher
-  // can reach them. Public-data sync is completely untouched.
+  // absent) unless `mesh.enabled`, and both refuse any caller that isn't loopback AND presenting the
+  // launcher's per-boot host token (`meshBridgeCallerAuthorized`) — so a host with no launcher (desktop/Pi)
+  // has no bridge at all. Public-data sync is completely untouched.
+
+  // Who is connected from OFF this host, for the Android share screen (docs/04 "The Step-2 address"): the
+  // distinct non-loopback peer addresses of the admitted WebSockets. The launcher polls it beside its
+  // host-info tick and the share screen shows "1 phone connected" — the only proof that the whole hotspot
+  // path works — and uses a joiner's address to confirm which interface the hotspot is on. Same caller rule
+  // as the mesh bridge (loopback + the launcher's per-boot token; a desktop/Pi has no launcher and 404s),
+  // but NOT gated on mesh — it is about hosting, not mail. Addresses never leave the host: the launcher
+  // hands them to the host's own screen only.
+  ctx.server.get(
+    "/api/host/clients",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute", allowList: () => false } } },
+    async (request, reply) => {
+      if (!ctx.meshBridgeCallerAuthorized(request)) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+      return {
+        clients: remoteClientAddresses(
+          [...ctx.sockets].map((session) => session.remoteAddress),
+          // The host's own addresses: a browser on the host phone opening the hotspot URL is not a joiner.
+          localInterfaceAddresses(),
+        ),
+      };
+    },
+  );
 
   ctx.server.get(
     "/api/mesh/outbound",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    // `allowList: () => false` so an internal tunnel re-dispatch can't inherit the global limiter's tunnel
+    // exemption on these routes (same rule as `semanticRateLimit`).
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       if (!ctx.appConfig.mesh.enabled || !ctx.meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
@@ -350,7 +378,9 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
 
   ctx.server.post(
     "/api/mesh/inbound",
-    { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } },
+    // An explicit 1 MiB body cap (the global default, pinned here): ~11 maximum-size blobs per call, at most 64
+    // blobs of any size (the schema).
+    { bodyLimit: 1024 * 1024, config: { rateLimit: { max: 240, timeWindow: "1 minute", allowList: () => false } } },
     async (request, reply) => {
       if (!ctx.appConfig.mesh.enabled || !ctx.meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
@@ -361,16 +391,15 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
         return reply.code(400).send(errorBody("Invalid mesh inbound request"));
       }
 
-      // `mesh.acceptSealedFromPeer` is the single trust boundary: it re-checks TTL/hop/tombstone/dedup and
-      // the per-node storage cap, then delivers-if-ours or relays-onward (hop-decremented). A blob that
-      // fails any check is silently ignored, exactly as an inbound sync copy would be.
-      let accepted = 0;
+      // `mesh.acceptSealedFromPeer` is the single trust boundary: it re-checks TTL/hop/tombstone/dedup, the
+      // seen-record quota of the radio source and the per-node storage cap, then delivers-if-ours or
+      // relays-onward (hop-decremented). A blob that fails any check is silently ignored, exactly as an inbound
+      // sync copy would be. The answer never says which (see MeshInboundResponseSchema).
       for (const message of body.data.messages) {
-        if (ctx.mesh.acceptSealedFromPeer(message)) {
-          accepted += 1;
-        }
+        ctx.mesh.acceptSealedFromPeer(message);
       }
-      return { accepted };
+      const response: MeshInboundResponse = { ok: true };
+      return response;
     },
   );
 

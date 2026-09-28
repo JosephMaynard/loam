@@ -4,27 +4,84 @@ import { PermissionsAndroid, Platform } from 'react-native';
 import {
   addHotspotStoppedListener,
   isHotspotSupported,
+  readHotspotAddressCandidates,
   startHotspot,
   stopHotspot,
+  type HotspotAddressCandidate,
   type HotspotCredentials,
 } from '../../modules/loam-hotspot';
+import {
+  eligibleHotspotCandidates,
+  mergeHotspotCandidates,
+  pickHotspotAddress,
+  type HostInterface,
+} from '@/lib/hotspot-address';
 
 /**
  * Lifecycle of the local-only hotspot:
  * - `idle`       — not started yet.
  * - `requesting` — asking for the runtime location/nearby-WiFi permission.
  * - `starting`   — permission granted, waiting on `WifiManager.LocalOnlyHotspot`.
- * - `running`    — up; `credentials` holds the generated SSID + password.
+ * - `running`    — up; `credentials` holds the generated SSID + password, and the address fields below
+ *                  fill in as the hotspot's (randomly assigned) address is found.
  * - `error`      — couldn't start (permission denied, no WiFi hardware, driver failure); `error`
  *                  holds a human-readable reason. LOAM's Step-2 URL QR is still shown (docs/04).
  */
 export type HotspotPhase = 'idle' | 'requesting' | 'starting' | 'running' | 'error';
 
+/** `searching` during the burst of probes right after the hotspot comes up; `settled` once that burst is
+ * over (found or not — a slow re-check keeps running while the hotspot is up). */
+export type HotspotAddressSearch = 'searching' | 'settled';
+
 export type HotspotState = {
   phase: HotspotPhase;
   credentials?: HotspotCredentials;
   error?: string;
+  /** The hotspot's own address once found (`running` only) — what the Step-2 join URL must use. */
+  address?: string;
+  /** The interface `address` sits on (diagnostics). */
+  addressInterface?: string;
+  /** Every address the host holds that could be the hotspot's, for the manual fallback when none is sure. */
+  candidates?: HotspotAddressCandidate[];
+  addressSearch?: HotspotAddressSearch;
+  /** True once a connected joiner's address proved `address` is the interface serving the hotspot. */
+  addressConfirmed?: boolean;
 };
+
+// --- Second source + proof, fed by the host screen (index.tsx) from the launcher's `loam-hostinfo` ------
+// The launcher's own interface enumeration (a different code path to the same kernel data) and the peer
+// addresses of the devices currently connected to the server. Module-scoped like the hotspot state, so a
+// remount never loses them.
+let latestLauncherInterfaces: HostInterface[] = [];
+let launcherInterfacesReceived = false;
+// The launcher's list as it stood just before the CURRENT hotspot start — the launcher-side twin of the
+// native module's pre-start snapshot. `undefined` when no list had arrived by then (then a launcher-only
+// candidate can't be called "new", so it never gets that score).
+let launcherSnapshot: string[] | undefined;
+let latestClients: string[] = [];
+// The native module's last candidate list, so a launcher/client update can re-run the pick at once.
+let lastNativeCandidates: HotspotAddressCandidate[] = [];
+
+/** The launcher reported its interfaces (every ~5 s and on request). Re-picks immediately while running. */
+export function noteLauncherInterfaces(interfaces: HostInterface[]): void {
+  latestLauncherInterfaces = interfaces;
+  launcherInterfacesReceived = true;
+  repickAddress();
+}
+
+/** The launcher reported who is connected from off this phone. Re-picks immediately while running. */
+export function noteConnectedClients(clients: string[]): void {
+  latestClients = clients;
+  repickAddress();
+}
+
+/** Re-run the address decision over everything known now, without touching the probe schedule. */
+function repickAddress(): void {
+  if (sharedState.phase !== 'running') {
+    return;
+  }
+  decideAddress(sharedState.addressSearch === 'settled');
+}
 
 // Android permits exactly one LocalOnlyHotspot per process, and the host overlay mounts/unmounts as
 // it opens and closes. So the hotspot state lives at module scope (survives remounts) and the hook
@@ -140,6 +197,8 @@ export async function ensureHotspot(): Promise<void> {
     }
 
     publish({ phase: 'starting' });
+    // Twin of the native pre-start snapshot: what the launcher saw before the hotspot existed.
+    launcherSnapshot = launcherInterfacesReceived ? latestLauncherInterfaces.map((entry) => entry.address) : undefined;
     const credentials = await startWithTimeout();
     if (myGen !== generation) {
       // A shutdown (or newer start) landed while we were starting: release the hotspot we just
@@ -147,7 +206,8 @@ export async function ensureHotspot(): Promise<void> {
       stopHotspot();
       return;
     }
-    publish({ phase: 'running', credentials });
+    publish({ phase: 'running', credentials, addressSearch: 'searching' });
+    void trackHotspotAddress(myGen);
   } catch (error) {
     if (myGen === generation) {
       publish({
@@ -161,6 +221,104 @@ export async function ensureHotspot(): Promise<void> {
       inFlight = false;
     }
   }
+}
+
+// When to probe for the hotspot's address after it reports `running`, in ms since then. The SoftAP
+// interface gets its (random) address from the tethering service a moment AFTER onStarted, so the first
+// probes usually miss; the burst covers a slow OEM stack without the operator staring at a blank Step 2.
+const ADDRESS_PROBE_AT_MS = [0, 500, 1000, 2000, 3000, 5000, 8000, 12000, 16000, 20000];
+// After the burst, keep re-checking for as long as the hotspot runs — briskly for the first minute (an
+// address that only turned up late), then slowly (an address the stack reassigns without stopping the
+// hotspot). Cheap: one interface enumeration per tick.
+const ADDRESS_RECHECK_EARLY_MS = 5_000;
+const ADDRESS_RECHECK_EARLY_UNTIL_MS = 60_000;
+const ADDRESS_RECHECK_INTERVAL_MS = 15_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Find (and keep finding) the hotspot's own address for the start identified by `myGen`: probe the
+ * native candidate list on the burst schedule, then slowly, publishing `address`/`candidates` into the
+ * running state whenever they change. Exits as soon as the start is superseded (a shutdown, a newer
+ * start, a system stop that moved the phase off `running`). Never throws — the native read resolves
+ * `[]` on failure, which surfaces as "couldn't detect" rather than an error.
+ */
+async function trackHotspotAddress(myGen: number): Promise<void> {
+  let probe = 0;
+  let elapsed = 0;
+  lastNativeCandidates = [];
+  for (;;) {
+    const inBurst = probe < ADDRESS_PROBE_AT_MS.length;
+    const dueAt = inBurst
+      ? ADDRESS_PROBE_AT_MS[probe]
+      : elapsed + (elapsed < ADDRESS_RECHECK_EARLY_UNTIL_MS ? ADDRESS_RECHECK_EARLY_MS : ADDRESS_RECHECK_INTERVAL_MS);
+    if (dueAt > elapsed) {
+      await sleep(dueAt - elapsed);
+      elapsed = dueAt;
+    }
+    if (myGen !== generation || sharedState.phase !== 'running') {
+      return;
+    }
+    const raw = await readHotspotAddressCandidates();
+    if (myGen !== generation || sharedState.phase !== 'running') {
+      return;
+    }
+    lastNativeCandidates = raw;
+    probe += 1;
+    if (decideAddress(probe >= ADDRESS_PROBE_AT_MS.length)) {
+      // Found: the burst is over whatever probe this was; only the re-check continues.
+      probe = ADDRESS_PROBE_AT_MS.length;
+    }
+  }
+}
+
+/**
+ * The address decision over everything known now — the native candidates, the launcher's list (with its
+ * own pre-start snapshot) and the connected joiners — published into the running state. Returns whether
+ * an address was chosen.
+ */
+function decideAddress(settled: boolean): boolean {
+  const merged = mergeHotspotCandidates(lastNativeCandidates, latestLauncherInterfaces, launcherSnapshot);
+  const pick = pickHotspotAddress(merged, { clientAddresses: latestClients });
+  publishAddress({
+    address: pick?.candidate.address,
+    addressInterface: pick?.candidate.name,
+    candidates: eligibleHotspotCandidates(merged),
+    addressSearch: settled || pick ? 'settled' : 'searching',
+    addressConfirmed: pick?.confirmed ?? false,
+  });
+  return pick !== undefined;
+}
+
+/** Merge address findings into the running state, publishing only on a real change (re-renders cost). */
+function publishAddress(
+  next: Pick<HotspotState, 'address' | 'addressInterface' | 'candidates' | 'addressSearch' | 'addressConfirmed'>,
+): void {
+  const current = sharedState;
+  if (current.phase !== 'running') {
+    return;
+  }
+  const unchanged =
+    current.address === next.address &&
+    current.addressInterface === next.addressInterface &&
+    current.addressSearch === next.addressSearch &&
+    current.addressConfirmed === next.addressConfirmed &&
+    JSON.stringify(current.candidates ?? []) === JSON.stringify(next.candidates ?? []);
+  if (unchanged) {
+    return;
+  }
+  if (current.address !== next.address || current.addressConfirmed !== next.addressConfirmed) {
+    // One line in logcat (ReactNativeJS) per decision change — the evidence a bug report from another
+    // phone needs. Addresses are the host's own; nothing about joiners is logged.
+    console.log(
+      `[loam-hotspot] address ${next.address ?? 'unknown'} on ${next.addressInterface ?? '-'}` +
+        `${next.addressConfirmed ? ' (confirmed by a joiner)' : ''}; candidates: ` +
+        (next.candidates ?? []).map((candidate) => `${candidate.name} ${candidate.address}`).join(', '),
+    );
+  }
+  publish({ ...current, ...next });
 }
 
 // Whether the native "the system stopped the hotspot" listener is installed (once per process — the

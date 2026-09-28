@@ -31,7 +31,7 @@ Electron's **main process** becomes the launcher:
 | `apps/client/dist` (served + SPA fallback, as the CLI does) | `electron-builder` config + per-OS targets |
 | `net.ts` `resolveLanIPv4()` (VPN-filtered LAN IP for the join QR) | `@electron/rebuild` step for the native SQLite driver |
 | `@loam/qr` + the client's existing `InviteControl` (reuse for the join UI — no native chrome) | optional: auto-update, OS-keychain key storage |
-| `cli/cli-entry.ts` + `cli/scripts/build-cli.mjs` (near-drop-in launcher + esbuild recipe) | |
+| `cli/cli-entry.ts` + `scripts/build-cli.mjs` (near-drop-in launcher + esbuild recipe) | |
 
 Lives as a new `apps/desktop` workspace. Electron main runs real Node, so bundling isn't strictly required
 (unlike nodejs-mobile) — it can import `@loam/server`'s `dist/` directly or reuse the CLI bundle.

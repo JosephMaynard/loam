@@ -34,7 +34,8 @@ esbuild over `cli/cli-entry.ts`:
   library (not a boot-on-import `main`) lets `bin/loam.js` own env setup and the QR print before the
   server starts.
 - The **`@loam/*` workspace packages are inlined** from their compiled `dist/` (run `pnpm -r build`
-  first — `prepublishOnly` does).
+  first — `prepublishOnly` does). `build-cli.mjs` fails early if any of them (`schema`, `display-name`,
+  `avatar`, `qr`, `crypto`) hasn't been built.
 - The **three SQLite drivers stay external**: `node:sqlite` (the builtin default), `better-sqlite3`,
   and `better-sqlite3-multiple-ciphers`. Only the ciphers driver is a package dependency, and it is an
   **`optionalDependency`** — so encryption is opt-in and a native build failure never aborts
@@ -51,12 +52,18 @@ run). Output lands in `cli/dist/` and `cli/client/`, both gitignored.
 |------|-------------|---------|
 | `--port <n>` | `PORT` | `3000` (or `$PORT`) |
 | `--data-dir <dir>` | `LOAM_DATA_DIR` | `$XDG_DATA_HOME/loam` or `~/.loam` — **user-writable, never inside the global package** |
-| `--encrypt [key]` | `LOAM_DB_KEY` | off; a value → passphrase, bare → `ephemeral` (RAM-only key) |
+| `--encrypt` | `LOAM_DB_KEY` | off. Bare `--encrypt` takes `$LOAM_DB_KEY` if set, else prompts without echo (asked twice for a new database, and an empty answer = `ephemeral`; for an existing `loam.db` an empty answer is refused and it asks again, since a fresh ephemeral key can't open it). Pasting both lines at once works. With no terminal and no env it uses `ephemeral`. `--encrypt ephemeral` skips the prompt. `--encrypt <value>` still works but warns — an argv passphrase shows in `ps` and shell history. |
 
-It also sets `LOAM_CLIENT_DIST` to the packaged `client/` dir and `LOAM_JOIN_HOST` to the first LAN
-IPv4, prints the LAN URL + a terminal QR (via the bundled `@loam/qr`), then `await`s the server. If
-`--encrypt` is used but the native SQLCipher driver isn't installed, it prints a targeted hint instead
-of a stack trace.
+A `LOAM_DB_KEY` already in the environment encrypts the node even without the flag (the server reads it
+directly). It also sets `LOAM_CLIENT_DIST` to the packaged `client/` dir and `LOAM_JOIN_HOST` to the
+first LAN IPv4, prints the LAN URL + a terminal QR (via the bundled `@loam/qr`), then `await`s the
+server. When encryption is requested (`--encrypt` or `LOAM_DB_KEY`), the launcher first **probes the
+SQLCipher driver** (loads it and opens an in-memory DB, so the native addon really loads) before
+prompting or booting; if it won't load, it exits with a hint. The driver resolves from the package's own
+`dist/` (it's loamnet's optional dependency), so the hint prints that path and says to reinstall loamnet
+and check the install output for the native build error. A separately installed global copy of the driver
+is never found. (Letting the server try
+instead was unsafe: its keyed-open recovery path could leave a plaintext `loam.db` in a fresh data dir.)
 
 ## Publishing
 
@@ -77,6 +84,7 @@ cd cli && npm pack                      # inspect the tarball
 npm install -g --prefix /tmp/x ./loamnet-*.tgz
 /tmp/x/bin/loam --port 3068 --data-dir /tmp/loam-data
 # → boots with no node-gyp, prints a scannable QR, serves the PWA on the LAN URL,
-#   persists to /tmp/loam-data/loam.db (plain SQLite). `--encrypt <pass>` writes an
-#   encrypted DB (no "SQLite format 3" header) using the optional native driver.
+#   persists to /tmp/loam-data/loam.db (plain SQLite). `LOAM_DB_KEY=<pass> loam --encrypt`
+#   (or bare `--encrypt` and answer the prompt) writes an encrypted DB (no "SQLite format 3"
+#   header) using the optional native driver.
 ```

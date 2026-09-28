@@ -3,6 +3,8 @@ import { useLocation } from "preact-iso";
 
 interface NavLinkProps {
   active: boolean;
+  /** Accessible name, required when the link's content is icon-only (e.g. the mobile back arrow). */
+  ariaLabel?: string;
   children: ComponentChildren;
   className?: string;
   href: string;
@@ -14,13 +16,14 @@ interface NavLinkProps {
  * `aria-current="page"` when `active`, and takes an optional `className` override for non-nav uses
  * (e.g. the mobile back button).
  */
-export function NavLink({ active, children, className, href }: NavLinkProps) {
+export function NavLink({ active, ariaLabel, children, className, href }: NavLinkProps) {
   const location = useLocation();
   const linkClassName = className ?? `nav-link${active ? " active" : ""}`;
 
   return (
     <a
       aria-current={active ? "page" : undefined}
+      aria-label={ariaLabel}
       className={linkClassName}
       href={href}
       onClick={(event) => {

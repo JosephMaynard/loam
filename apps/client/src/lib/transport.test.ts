@@ -2,6 +2,7 @@ import { createTransportIdentity, openTransport, sealTransport, transportServerA
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  acceptPendingHostKey,
   apiUrl,
   clearCachedHostPublicKey,
   clearStoredIdentityToken,
@@ -11,12 +12,17 @@ import {
   fingerprint,
   getCachedHostPublicKey,
   getHostKeyMismatch,
+  getPendingHostKeyChange,
   getSession,
+  inviteQrHostKey,
   isHostKeyPinBroken,
   handleWsFrame,
   isTunnelActive,
   logoutSecureIdentity,
   mayFallBackToPlaintext,
+  rejectPendingHostKey,
+  releaseImageUrl,
+  retainImageUrl,
   resumeIdentity,
   resetTransportStateForTests,
   setMintSuppressed,
@@ -25,6 +31,7 @@ import {
   wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
+  UnsealedTunnelResponseError,
   wsUrl,
 } from "./transport";
 
@@ -1491,8 +1498,8 @@ describe("review fixes 2026-09-04 (client transport) — round 2: a broken pin f
     const original = getSession();
     expect(original?.hostPublicKey).toBe(real.publicKey);
 
-    const response = await encryptedFetch("GET", "/api/channels");
-    expect(response.status).toBe(401); // the request fails; it is NOT retried in plaintext
+    // The request fails (an unsealed reply is never handed to the caller); it is NOT retried in plaintext.
+    await expect(encryptedFetch("GET", "/api/channels")).rejects.toThrow("Transport session expired");
     expect(handshakes).toBe(2);
     // The still-valid session is untouched (the server never dropped it) and the pin is intact.
     expect(getSession()).toBe(original);
@@ -1529,10 +1536,19 @@ describe("review fixes 2026-09-04 (client transport) — round 2: a broken pin f
     expect(() => wsUrl("ws://x/ws")).toThrow(/encrypted session/);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    // The operator's CURRENT QR (say, after an Emergency Reset the node is `real2`) re-establishes trust.
+    // The operator's CURRENT QR (say, after an Emergency Reset the node is `real2`) re-establishes trust —
+    // but only once the user explicitly accepts the changed key (a `#k=` never silently replaces a pin).
     const real2 = createTransportIdentity();
     window.location.hash = `#k=${real2.publicKey}`;
     vi.stubGlobal("fetch", vi.fn(handshakeResponder(real2)));
+    await expect(ensureSession("optional", real2.publicKey)).rejects.toBeInstanceOf(TransportNeedsQrError);
+    expect(getCachedHostPublicKey()).toBe(real.publicKey);
+    expect(getPendingHostKeyChange()).toEqual({
+      current: fingerprint(real.publicKey),
+      next: fingerprint(real2.publicKey),
+      matchesNode: true, // the node itself reports real2 (probed), so the rescanned QR is acceptable
+    });
+    expect(acceptPendingHostKey()).toBe(true);
     await ensureSession("optional", real2.publicKey);
     expect(getSession()?.hostPublicKey).toBe(real2.publicKey);
     expect(isHostKeyPinBroken()).toBe(false);

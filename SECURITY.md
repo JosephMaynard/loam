@@ -99,8 +99,10 @@ trade-offs — not open bugs:
   attribute imported messages to an ordinary (non-privileged) local user id — signed authorship is
   the tracked long-term fix ([docs/29](docs/29-next-phase.md)).
 - **On-device Android database encryption is shipped** (SQLCipher via
-  better-sqlite3-multiple-ciphers, [docs/04](docs/04-android-host-app.md)); OS backup is disabled.
-  Final on-device runtime verification is the current release gate ([docs/21](docs/21-device-verification-checklist.md)).
+  better-sqlite3-multiple-ciphers, [docs/04](docs/04-android-host-app.md)) and fails closed: an
+  encrypted mode whose driver won't load locks rather than falling back to plaintext. OS cloud backup
+  and Android 12+ device-to-device transfer are both excluded. Final on-device runtime verification is
+  the current release gate ([docs/21](docs/21-device-verification-checklist.md)).
 - **Uploaded media (attachments, avatars) is stored as plaintext files outside the encrypted
   database** — destroying the database key does *not* cryptographically erase media; the kill switch
   deletes the files, which is best-effort on flash storage. Media-at-rest encryption is tracked in
@@ -108,6 +110,43 @@ trade-offs — not open bugs:
 - **Logical delete is not secure flash erasure** without encryption ([docs/02](docs/02-kill-switch.md)).
 
 ## Review history
+
+### 2026-09-25 — pre-release review (with the 2026-09-09 review's findings)
+
+Two reviews ahead of the 0.5.0 release, each finding re-verified against the source. **Fixed on
+`fix/pre-release-2026-09-25`:**
+
+**Server** — a profile edit could point a user's avatar at, and a later replacement delete, a file other
+than their own avatar (`imageId` is now exactly `avt_<16hex>` and may only name the user's current
+image); on an approval-policy node a successful admin claim left the claimer pending;
+`transportEncryption: "off"` was still accepted from the admin API and config files (now refused, or
+coerced to `optional`; plaintext is Developer Mode only); `llm.ollama.botId` could name an existing
+person and turn them into a bot (now an `llm.*` id no human holds); a moderator-removed message could
+still be edited by its author, replied to or reacted to; an upload racing an Emergency Reset could
+restore the pre-wipe user or leave its file behind; moderator timeouts trusted the moderator's device
+clock (now a duration, clamped to 7 days on the server clock); the claim and panic caps didn't count
+tunnel re-dispatches; tunnel re-dispatches were request-logged with their real path and query,
+undoing the tunnel's path hiding in the logs; the ephemeral and plaintext Emergency Reset paths left
+preserved-recovery snapshots behind.
+
+**Sync and mesh** — a sync peer could rewrite a post a local user wrote, re-type a private message id
+into the public flow, alias a local private attachment into an anonymous download, or undo a
+moderator's removal with its next edit; a peer-supplied mesh key could be adopted onto a local user;
+sealed-mail replay protection keyed on the unsealed outer id, and a carrier could shadow genuine mail
+with a forged hop budget, TTL or alternative base64 spelling; a node pulled exactly its own sealed
+mail, telling the serving peer where the recipient lives; the sync token could be sent on a plaintext
+pull; the mesh bridge accepted any loopback caller when no host token was set (behind a same-host
+reverse proxy, that is every LAN client).
+
+**Client** — an unsealed tunnel reply on a pinned session reached the caller (an on-path attacker could
+forge, for example, a mesh identity card); a `#k=` link could silently replace a pinned host key; a
+member's invite QR could pass on an unverified key; a device that missed an Emergency Reset kept its
+old cache under the next identity (it now purges when the server-confirmed identity changes).
+
+**Android host** — an encrypted mode whose SQLCipher driver failed to load booted on plaintext (now
+fails closed); Android 12+ device-to-device transfer copied the database and media; the foreground
+service could be refused when started from the background, leaving the host frozen at screen-off; a
+release AAB could be silently debug-signed (now refused without a release keystore).
 
 ### 2026-09-04 — full-codebase review (Fable 5.1)
 

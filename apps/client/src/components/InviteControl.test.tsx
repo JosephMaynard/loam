@@ -35,6 +35,17 @@ describe("InviteControl", () => {
     expect(mount(<InviteControl />).querySelector(".invite-control")).toBeNull();
   });
 
+  it("withholds the QR and says why when the node's advertised key contradicts ours (review 2026-09-25)", async () => {
+    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" qrSuppressed qrUrl="http://192.168.0.5:3000" />);
+    root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+
+    expect(root.querySelector(".invite-modal-qr")).toBeNull();
+    expect(root.querySelector(".invite-modal .form-error")?.textContent).toContain("doesn't match the key you joined with");
+    // The plain URL is still shown so people can type it.
+    expect(root.querySelector(".invite-modal-url")?.textContent).toBe("http://192.168.0.5:3000");
+  });
+
   it("starts closed: a trigger button, no modal", () => {
     const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
     expect(root.querySelector("button")).not.toBeNull();

@@ -12,6 +12,33 @@ import { encryptedFetch } from "./transport";
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
+ * A non-2xx reply from a LOAM endpoint. `message` is the localized, human-readable text (as before);
+ * `status` and the server's stable error `code` (when it sent one) let callers branch on WHAT failed
+ * without string-matching that text — which is localized and server-supplied, so it can never be relied
+ * on (pre-release review 2026-09-25: a `message.endsWith("404")` check never matched).
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(status: number, payload: unknown, fallback: string) {
+    super(errorText(payload, fallback));
+    this.name = "ApiError";
+    this.status = status;
+    const code = payload && typeof payload === "object" ? (payload as { code?: unknown }).code : undefined;
+    if (typeof code === "string") {
+      this.code = code;
+    }
+  }
+}
+
+/** Build the `ApiError` for a failed response, reading its JSON error body if it has one. */
+async function apiErrorFrom(response: Response): Promise<ApiError> {
+  const payload: unknown = await response.json().catch(() => undefined);
+  return new ApiError(response.status, payload, t("common.requestFailed", { status: response.status }));
+}
+
+/**
  * GET a JSON endpoint through the transport-encryption wrapper (a byte-for-byte passthrough when no
  * session is active — see `encryptedFetch`). Used for every content endpoint; `/api/config` is
  * deliberately NOT routed through this (see `fetchConfigJson`) — it must stay readable before any
@@ -25,8 +52,7 @@ export async function fetchJson<T>(path: string, timeoutMs = REQUEST_TIMEOUT_MS)
     const response = await encryptedFetch("GET", path, undefined, { signal: controller.signal });
 
     if (!response.ok) {
-      const payload: unknown = await response.json().catch(() => undefined);
-      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
+      throw await apiErrorFrom(response);
     }
 
     return response.json() as Promise<T>;
@@ -57,8 +83,7 @@ export async function requestChannel(method: "POST" | "PATCH", path: string, bod
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const message = errorText(payload, t("common.requestFailed", { status: response.status }));
-      throw new Error(message);
+      throw new ApiError(response.status, payload, t("common.requestFailed", { status: response.status }));
     }
 
     const parsed = ChannelSchema.safeParse(payload);
@@ -74,12 +99,12 @@ export async function requestChannel(method: "POST" | "PATCH", path: string, bod
 }
 
 /**
- * POST/PATCH/DELETE a JSON endpoint through the transport wrapper and return the parsed body (unvalidated
+ * POST/PUT/PATCH/DELETE a JSON endpoint through the transport wrapper and return the parsed body (unvalidated
  * — the caller narrows). Throws a localized error on a non-2xx. For endpoints whose response shape the
  * caller doesn't need to schema-validate (reports, moderation actions, resolves).
  */
 export async function requestJson<T>(
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -91,7 +116,7 @@ export async function requestJson<T>(
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
+      throw new ApiError(response.status, payload, t("common.requestFailed", { status: response.status }));
     }
 
     return payload as T;

@@ -29,6 +29,20 @@ describe("renderMarkdown", () => {
     expect(html).not.toMatch(/href="javascript:/i);
   });
 
+  it("strips a join-QR host-key fragment (#k=) from links so a posted link can't re-pin anyone (review 2026-09-25)", () => {
+    const sameOrigin = renderMarkdown("[agenda](/#k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA)");
+    expect(sameOrigin).toContain("agenda");
+    expect(sameOrigin).not.toContain("#k=");
+    expect(sameOrigin).toContain('href="/"');
+
+    const absolute = renderMarkdown(`[join](${window.location.origin}/channels#k=BBBB)`);
+    expect(absolute).not.toContain("#k=");
+    expect(absolute).toContain(`href="${window.location.origin}/channels"`);
+
+    // An ordinary fragment is left alone.
+    expect(renderMarkdown("[section](https://example.com/page#notes)")).toContain('href="https://example.com/page#notes"');
+  });
+
   it("hardens safe http(s) links with rel and target", () => {
     const html = renderMarkdown("[loam](https://example.com)");
     expect(html).toContain('href="https://example.com"');

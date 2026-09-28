@@ -104,8 +104,8 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 
 | # | Item | Doc | Size |
 |---|------|-----|------|
-| D1 | `app.tsx` still ~3,519 lines (down from ~5,400; much extracted) — remaining extraction is lower-ROI now | 15#21 | M |
-| D2 | Dead `notifyIfHidden` (`app.tsx:342`/`:596`) can never fire — wire it (→P15) or remove | 15#22 | S |
+| D1 | `app.tsx` still ~3,600 lines (down from ~5,400; conversation panes, error banner/boundary, admin panels etc. now in `src/components/`) — remaining extraction is lower-ROI now | 15#21 | M |
+| D2 | ~~Dead `notifyIfHidden` can never fire~~ — **removed** (in-app toast is the signal; OS push for the Android host stays P15) | 15#22 | S |
 | D3 | Native-speaker review of the 14 machine-translated i18n catalogs (structure tested, quality not) | 13 | ongoing |
 
 ## 7. Infra / device-verification
@@ -149,10 +149,13 @@ shared-tag race, desktop Enter-to-send, shadow-ban attachment defense-in-depth).
   the stored schema stays uncapped so long local LLM replies round-trip. Tested (docs/11).
 
 **Android host — device-specific, needs on-ROM testing (don't change the working join flow blind):**
-- **HW1 (MED)** `lanAddresses()` excludes any `bridge*`/`dummy*`/`veth*` interface, but some ROMs bridge
-  tethering onto `bridge0` → the join QR silently falls back to the `192.168.49.1` guess and nobody can join.
-  Fix = prefer the known `192.168.49.0/24` hotspot subnet, or stop excluding `bridge`. `main.js:137`. **Test
-  across ROMs before changing** — it touches the core join path.
+- ~~**HW1 (MED)** `lanAddresses()` excludes any `bridge*`/`dummy*`/`veth*` interface, but some ROMs bridge
+  tethering onto `bridge0` → the join QR silently falls back to the `192.168.49.1` guess and nobody can join.~~
+  **DONE (2026-09-28)** — and the premise was worse than HW1 said: Android assigns the hotspot a *random*
+  address per start, `192.168.49.1` is Wi-Fi Direct's, so the "guess" never worked on any phone. The host now
+  discovers the hotspot's address natively (docs/04 "The Step-2 address"); `bridge*` is no longer excluded
+  anywhere. **Confirmed on the Galaxy S25 Ultra** (2026-09-28: Step 2 resolved to `10.80.217.150`, a second
+  phone joined). A Pixel (`wlan1`/`ap0` naming) is still untested.
 
 **Mesh Phase 3 (native, documented-unverified — for the 2-phone device-test session):**
 - **PH1 (HIGH, deterministic)** BLE legacy advertisement overflows the 31-byte cap (128-bit service UUID +
@@ -170,7 +173,6 @@ shared-tag race, desktop Enter-to-send, shadow-ban attachment defense-in-depth).
   (`main.js:462`). Plus assorted nits (executor dead-code, `RECEIVER_EXPORTED` flag, invalid
   `fullBackupContent` value).
 
-**Misc low/nit (client + host):** `notifyIfHidden` is dead (no `requestPermission` call — tie to P15 or
-remove, `app.tsx:342`); `stopHostService` exported but never called (no "stop hosting" affordance); `.tmp-*`
+**Misc low/nit (client + host):** ~~`notifyIfHidden` is dead~~ (removed, D2); `stopHostService` exported but never called (no "stop hosting" affordance); `.tmp-*`
 model-store files can leak on a crash mid-save; an `'aborted'` download shows no UI feedback; Settings join-QR
 lacks a `role="img"`/label. None are defects; all cheap if picked up.

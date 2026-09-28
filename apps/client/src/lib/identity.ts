@@ -1,0 +1,112 @@
+/**
+ * The last identity the SERVER confirmed for this browser (not the pre-hydration placeholder id), kept so
+ * a boot can tell when the node handed back a different identity — its session was reset (Emergency
+ * Reset, an expired cookie, a revoked token) while this browser was away and missed the `wipe` event.
+ * The locally cached content then belongs to someone else and is purged (pre-release review 2026-09-25).
+ */
+export const CONFIRMED_USER_KEY = "loam.confirmedUserId";
+
+/**
+ * Record `userId` as the server-confirmed identity. Returns `true` when a DIFFERENT identity had been
+ * confirmed before. The first-ever confirmation (nothing stored) is not a change. Storage failures read as
+ * "no change". The boot flow compares with {@link readConfirmedIdentity} FIRST, purges the cached content,
+ * and records only afterwards — the record is what tells sibling tabs to reload (`listenForIdentityChange`),
+ * so it must land on an already-cleared cache, and a crash mid-purge must leave the old identity in place
+ * so the next boot purges again.
+ */
+export function recordConfirmedIdentity(userId: string): boolean {
+  let previous: string | null = null;
+  try {
+    previous = localStorage.getItem(CONFIRMED_USER_KEY);
+    localStorage.setItem(CONFIRMED_USER_KEY, userId);
+  } catch {
+    return false;
+  }
+  return previous !== null && previous !== userId;
+}
+
+/**
+ * The identity the server last confirmed for this browser, if any. Storage failures read as none — right
+ * for the callers that only tag or filter by it (the tab identity, the cached block list). The purge
+ * decision must NOT use this: `confirmIdentity` reads storage itself and treats a failure as "unknown",
+ * which purges (CodeRabbit, PR #130) — never as "unrecorded", which would skip the purge.
+ */
+export function readConfirmedIdentity(): string | undefined {
+  try {
+    return localStorage.getItem(CONFIRMED_USER_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Watch for ANOTHER tab confirming a different identity (pre-release review 2026-09-25). Tabs share
+ * IndexedDB and localStorage: when one of them learns the node reset this browser's identity, it purges the
+ * shared cache — but a sibling tab still holds the previous identity's content in memory (and may have
+ * hydrated it just before the purge). `mine()` is the identity this tab's content belongs to (`undefined`
+ * while it holds none); `onChange` runs when a sibling records a different one. A removal (a wipe) is left
+ * to the wipe listener. Returns an unsubscribe.
+ */
+export function listenForIdentityChange(mine: () => string | undefined, onChange: () => void): () => void {
+  const onStorage = (event: StorageEvent): void => {
+    if (event.key !== CONFIRMED_USER_KEY || event.newValue === null) {
+      return;
+    }
+    const current = mine();
+    if (current !== undefined && current !== event.newValue) {
+      onChange();
+    }
+  };
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
+}
+
+/** Forget the confirmed identity (part of a wipe). */
+export function forgetConfirmedIdentity(): void {
+  try {
+    localStorage.removeItem(CONFIRMED_USER_KEY);
+  } catch {
+    // Nothing durable to clear.
+  }
+}
+
+export type ConfirmIdentityOutcome = "unchanged" | "purged" | "purge_failed";
+
+/**
+ * Adopt `userId` as the server-confirmed identity, purging the previous identity's cached content FIRST
+ * when it differs (the missed-wipe case). The record is written only once `purge` has succeeded — the
+ * record is what tells sibling tabs to reload, so it must land on a cleared cache, and a purge that failed
+ * (an IndexedDB error) or never finished (the tab was killed) must leave the OLD identity recorded so the
+ * next boot compares, finds the difference, and purges again. One retry after `retryDelayMs` covers a
+ * transient IndexedDB failure (a blocked transaction); a second failure is reported, not hidden.
+ */
+export async function confirmIdentity(
+  userId: string,
+  purge: () => Promise<void>,
+  options: { retryDelayMs?: number } = {},
+): Promise<ConfirmIdentityOutcome> {
+  // A storage failure is NOT "nothing recorded": the cache may well belong to another identity and there is
+  // no way to tell, so it is purged — a refetch is the price of not knowing, never a leak.
+  let previous: string | null | undefined;
+  try {
+    previous = localStorage.getItem(CONFIRMED_USER_KEY) ?? undefined;
+  } catch {
+    previous = null;
+  }
+  if (previous === undefined || previous === userId) {
+    recordConfirmedIdentity(userId);
+    return "unchanged";
+  }
+  try {
+    await purge();
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs ?? 500));
+    try {
+      await purge();
+    } catch {
+      return "purge_failed";
+    }
+  }
+  recordConfirmedIdentity(userId);
+  return "purged";
+}

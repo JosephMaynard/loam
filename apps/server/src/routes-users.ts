@@ -2,11 +2,11 @@
 // upload/serve. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { AttachmentUploadRequestSchema, AvatarImageUploadRequestSchema, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, RolesUpdateRequestSchema, TypingRequestSchema, type User, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
+import { AttachmentUploadRequestSchema, AvatarImageUploadRequestSchema, MODERATION_TIMEOUT_MAX_MS, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { newMessageId } from "./ids.js";
-import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, avatarImageHasExpectedSignature, isImageAttachmentMime, newAttachmentId, newAvatarImageId, parseAttachmentFileName, parseAvatarImageId, sanitizeAttachmentName } from "./media.js";
+import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, avatarImageHasExpectedSignature, isAvatarImageId, isImageAttachmentMime, newAttachmentId, newAvatarImageId, parseAttachmentFileName, parseAvatarImageId, sanitizeAttachmentName } from "./media.js";
 
 /** Register user, profile/avatar, roles, moderation/report, join-approval, typing, and attachment routes. */
 export function registerUserRoutes(ctx: AppContext): void {
@@ -48,6 +48,13 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     if (profileTimeoutError) {
       return reply.code(403).send(errorBody(profileTimeoutError));
+    }
+
+    // Only the upload route mints image avatars; a profile edit may not point at any image file.
+    const avatarError = ctx.clientAvatarUpdateError(user, body.data.avatar);
+
+    if (avatarError) {
+      return reply.code(400).send(errorBody(avatarError));
     }
 
     return ctx.applyUserUpdate(user, body.data);
@@ -124,8 +131,14 @@ export function registerUserRoutes(ctx: AppContext): void {
       },
     });
 
-    // Keep only the latest image per user — remove the replaced file (best effort).
-    if (previousAvatar?.kind === "image" && previousAvatar.imageId && previousAvatar.mimeType) {
+    // Keep only the latest image per user — remove the replaced file (best effort). Only ever a genuine
+    // server-minted avatar id: the id becomes a path under avatars/, so anything else is never touched.
+    if (
+      previousAvatar?.kind === "image" &&
+      previousAvatar.imageId &&
+      isAvatarImageId(previousAvatar.imageId) &&
+      previousAvatar.mimeType
+    ) {
       await rm(ctx.avatarImagePath(previousAvatar.imageId, previousAvatar.mimeType), { force: true }).catch(
         (error: unknown) => ctx.server.log.warn(error),
       );
@@ -151,6 +164,13 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     if (!user) {
       return reply.code(404).send(errorBody("User does not exist"));
+    }
+
+    // Same rule as the self-edit: an admin edit can't aim a user's avatar at an arbitrary image file.
+    const avatarError = ctx.clientAvatarUpdateError(user, body.data.avatar);
+
+    if (avatarError) {
+      return reply.code(400).send(errorBody(avatarError));
     }
 
     return ctx.applyUserUpdate(user, body.data);
@@ -254,10 +274,17 @@ export function registerUserRoutes(ctx: AppContext): void {
       changes.shadowBanned = body.data.shadowBanned;
     }
 
-    if (body.data.timeoutUntil !== undefined) {
-      // `null` lifts the timeout (cleared to undefined); a number sets it. A past value is harmless (the
-      // posting gate treats only a future `timeoutUntil` as active).
-      changes.timeoutUntil = body.data.timeoutUntil ?? undefined;
+    // The expiry is computed from THIS node's clock and clamped to MODERATION_TIMEOUT_MAX_MS, never taken
+    // from the moderator's device clock (a skewed phone could otherwise mint a years-long — or an already
+    // expired — timeout). `timeoutMs` (a duration) is the current form; the legacy absolute `timeoutUntil`
+    // is still honoured but clamped the same way. `null` lifts the timeout (cleared to undefined).
+    const now = Date.now();
+
+    if (body.data.timeoutMs !== undefined) {
+      changes.timeoutUntil = now + Math.min(body.data.timeoutMs, MODERATION_TIMEOUT_MAX_MS);
+    } else if (body.data.timeoutUntil !== undefined) {
+      changes.timeoutUntil =
+        body.data.timeoutUntil === null ? undefined : Math.min(body.data.timeoutUntil, now + MODERATION_TIMEOUT_MAX_MS);
     }
 
     // Broadcast the userUpserted first (so the target's own client learns it is banned), then tear
@@ -388,6 +415,84 @@ export function registerUserRoutes(ctx: AppContext): void {
     },
   );
 
+  // ---- User blocking (docs/30 B3) ----------------------------------------------------------------
+  // A member's own block list. Private: only its owner ever reads it (never broadcast, never on a user
+  // record, never synced). Blocking refuses DMs and DM reactions both ways (createMessage/dmBlockError);
+  // channel content from a blocked user is hidden by the blocker's client, not withheld by the server.
+
+  /** The caller's block list, as every block route answers it. */
+  function blockListFor(userId: string): UserBlockList {
+    return { blockedUserIds: ctx.store.loadUserBlocks(userId) };
+  }
+
+  ctx.server.get("/api/users/me/blocks", async (request, reply) => {
+    const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+    const accessError = ctx.participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
+    return blockListFor(currentUser.id);
+  });
+
+  // Block a person. Only someone the caller can see on the roster (unknown, banned and pending users all
+  // answer the same 404), and only a real person: not yourself, the assistant bot, a system user, or a
+  // mesh sender (mesh mail arrives outside createMessage, so a block there couldn't be honoured).
+  // Blocking an admin or moderator is allowed: it changes only what the blocker sees and who can DM them.
+  ctx.server.put<{ Params: { userId: string } }>(
+    "/api/users/me/blocks/:userId",
+    ctx.semanticRateLimit(30),
+    async (request, reply) => {
+      const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+      const accessError = ctx.participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const target = ctx.visibleUsers(currentUser).find((user) => user.id === request.params.userId);
+
+      if (!target) {
+        return reply.code(404).send(errorBody("User does not exist"));
+      }
+
+      if (target.id === currentUser.id || target.type !== "human" || ctx.isMeshSentinelUser(target.id)) {
+        return reply.code(400).send(errorBody("This user can't be blocked"));
+      }
+
+      ctx.store.addUserBlock(currentUser.id, target.id);
+      return blockListFor(currentUser.id);
+    },
+  );
+
+  // Unblock. Idempotent for anyone on the caller's list or roster; an id that is neither answers the
+  // same 404 as an unknown user.
+  ctx.server.delete<{ Params: { userId: string } }>(
+    "/api/users/me/blocks/:userId",
+    ctx.semanticRateLimit(30),
+    async (request, reply) => {
+      const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+      const accessError = ctx.participationError(currentUser);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      const targetId = request.params.userId;
+
+      if (
+        !ctx.store.isUserBlocked(currentUser.id, targetId) &&
+        !ctx.visibleUsers(currentUser).some((user) => user.id === targetId)
+      ) {
+        return reply.code(404).send(errorBody("User does not exist"));
+      }
+
+      ctx.store.removeUserBlock(currentUser.id, targetId);
+      return blockListFor(currentUser.id);
+    },
+  );
+
   // Moderator removal of a message — the "honest tombstone": blank the body + attachments and mark it
   // removed with an optional sanitized public reason, rather than a silent delete. Broadcast so readers
   // see "removed by a moderator" (a private-channel tombstone still reaches only its members). Mods/admins.
@@ -484,7 +589,9 @@ export function registerUserRoutes(ctx: AppContext): void {
       } else if (
         ctx.appConfig.features.enableDMs &&
         body.data.recipientUserId &&
-        ctx.data.users.some((user) => user.id === body.data.recipientUserId)
+        ctx.data.users.some((user) => user.id === body.data.recipientUserId) &&
+        // No "typing…" across a block (either way) — same silent 204, so it reveals nothing.
+        ctx.dmBlockError(currentUser.id, body.data.recipientUserId) === undefined
       ) {
         ctx.broadcast({ type: "typing", userId: currentUser.id, dmUserId: body.data.recipientUserId });
       }

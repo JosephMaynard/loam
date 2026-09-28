@@ -82,6 +82,8 @@ function TrashIcon() {
 
 interface MessageItemProps {
   currentUser: User;
+  /** The author is someone the current user blocked (docs/30 B3): collapse to a placeholder, revealable on tap. */
+  hiddenAsBlocked?: boolean;
   message: Message;
   onDelete: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => Promise<boolean>;
@@ -112,6 +114,7 @@ interface MessageItemProps {
  */
 export function MessageItem({
   currentUser,
+  hiddenAsBlocked = false,
   message,
   onDelete,
   onEdit,
@@ -138,6 +141,8 @@ export function MessageItem({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
+  // A blocked author's message stays collapsed until the reader deliberately taps "Show" (per message).
+  const [revealed, setRevealed] = useState(false);
   const bodyText = bodyFor(message);
   // WhatsApp-style "jumbo emoji": a lone/short burst of emoji (1-3, no other text, no attachments)
   // renders big with no bubble — never while actively editing the message.
@@ -184,6 +189,24 @@ export function MessageItem({
     if (ok) {
       setEditing(false);
     }
+  }
+
+  if (hiddenAsBlocked && !isMine && !revealed) {
+    // No avatar, name, body, attachments or actions — just the fact that something is here.
+    return (
+      <article className="message message-blocked">
+        <div className="message-main">
+          <div className="message-bubble">
+            <div className="message-removed" dir="auto">
+              <em>{t("block.hiddenMessage")}</em>{" "}
+              <button className="link-button" onClick={() => setRevealed(true)} type="button">
+                {t("block.show")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </article>
+    );
   }
 
   return (

@@ -50,6 +50,17 @@ describe("i18n catalogs", () => {
     }
   });
 
+  it("every shipped locale covers every en key (release gate: no untranslated UI)", () => {
+    // `Translation` is Partial so a feature can land in English first, but a release must not ship with
+    // gaps (review 2026-09-25 found 62 keys missing from all 14 catalogs). The batched translation pass
+    // that fills new keys has to keep this green.
+    for (const locale of LOCALES) {
+      const catalog = ALL_CATALOGS[locale] as Record<string, unknown>;
+      const missing = EN_KEYS.filter((key) => catalog[key] === undefined);
+      expect(missing, `locale ${locale} missing keys`).toEqual([]);
+    }
+  });
+
   it("plural values cover exactly the CLDR categories for their locale", () => {
     const pluralKeys = EN_KEYS.filter((key) => isPlural((en as Record<string, unknown>)[key]));
     expect(pluralKeys.length).toBeGreaterThan(0);

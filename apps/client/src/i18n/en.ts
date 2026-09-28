@@ -207,7 +207,7 @@ export const en = {
     "Anyone joins and posts immediately. Messages are kept and Emergency Reset is off — maximum access, for disaster-relief style use.",
   "admin.profileStandardTitle": "Standard",
   "admin.profileStandardSummary":
-    "Anyone with the join link participates; messages are kept and Emergency Reset is off. (Same enforced settings as Open until transport encryption lands.)",
+    "Anyone with the join link participates; messages are kept and Emergency Reset is off. (Currently enforces the same settings as Open.)",
   "admin.profileHardenedTitle": "Hardened",
   "admin.profileHardenedSummary":
     "New joiners must be approved, messages expire after 1 hour, and Emergency Reset is enabled. For privacy-sensitive settings.",
@@ -496,7 +496,7 @@ export const en = {
   // by a scanned join QR — there is no safe way to connect without one.
   "gate.needsQrTitle": "Scan the join QR to connect securely",
   "gate.needsQrBody": "Scan this node's join QR code with your device to connect — there's no other way to connect securely.",
-  "gate.needsQrKeyChanged": "This node's key no longer matches the one you scanned — the host may have reset it, or this network is not what it claims to be. Scan the node's current join QR code to reconnect.",
+  "gate.needsQrKeyChanged": "This node's key no longer matches the one you scanned — the host may have restarted or reset it, or this network is not what it claims to be. Scan the node's current join QR code to reconnect.",
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",
@@ -522,6 +522,9 @@ export const en = {
   "error.channel_replies_disabled": "Replies are disabled in this channel",
   "error.channel_owner_post_only": "Only the channel owner can post in this channel",
   "error.channel_admins_post_only": "Only admins can post in this channel",
+  "error.message_removed": "This message was removed by a moderator",
+  "error.assistant_busy": "The assistant is busy; try again shortly",
+  "error.internal_error": "Something went wrong on this LOAM node",
   "error.channel_posting_disabled": "Channel posting is disabled on this LOAM node",
   "error.channel_create_disabled": "Creating channels is disabled on this LOAM node",
   "error.confirmation_required": "Confirmation required: send { \"confirm\": \"wipe\" }",
@@ -641,6 +644,56 @@ export const en = {
   "typing.one": "{name} is typing…",
   "typing.two": "{a} and {b} are typing…",
   "typing.many": "Several people are typing…",
+
+  // Accessible name for the icon-only mobile back buttons, and a generic dismiss control (error banner).
+  "common.back": "Back",
+  "common.dismiss": "Dismiss",
+  // Developer Mode banner: shown on every screen while the node runs with transport encryption off.
+  "devMode.banner":
+    "⚠️ Developer Mode — messages are sent unencrypted and can be read by anyone on this network. Do not use for anything private.",
+  // A picked attachment exceeds the node's upload limit ({limit} is e.g. "1 MB").
+  "composer.fileTooLarge": "{name} is too large to send (limit {limit}).",
+  // A channel/DM the server says doesn't exist for this user (unknown, removed, or not a member).
+  "conversation.notFoundTitle": "Conversation not available",
+  "conversation.notFoundBody": "This channel doesn't exist, was removed, or you're not a member of it.",
+  // Top-level error screen (a rendering crash).
+  "app.crashTitle": "Something went wrong",
+  "app.crashBody": "LOAM hit an unexpected error while showing this screen.",
+  "app.crashHome": "Go to channels",
+  "app.crashReload": "Reload",
+  // A join link carrying a security key different from the one this browser already trusts for the node.
+  "transport.pinChangeTitle": "This link carries a different security key",
+  "transport.pinChangeBody":
+    "You joined this node with a different key. Only use the new key if you just scanned the node's current join QR code in person — otherwise someone may be impersonating it.",
+  "transport.pinChangeCurrent": "Key you joined with: {fingerprint}",
+  "transport.pinChangeNew": "Key in this link: {fingerprint}",
+  "transport.pinChangeAccept": "Use the new key",
+  "transport.pinChangeReject": "Keep my current key",
+  "transport.pinChangeMismatch":
+    "The key in this link isn't the one this node is using, so it can't be trusted. Scan the join QR code shown on the host's screen.",
+  // Invite / join QR shown to others.
+  "invite.qrKeyMismatch":
+    "The join QR is hidden: the key this node advertises doesn't match the key you joined with.",
+  "invite.qrNoKeyNote":
+    "This QR doesn't include the node's security key, because your own connection wasn't verified by scanning a join QR.",
+  // User blocking (docs/30 B3) and the in-app privacy policy link (docs/30 B2).
+  "block.block": "Block",
+  "block.unblock": "Unblock",
+  "block.confirm": "Block {name}? They won't be able to send you direct messages, and their messages in channels will be hidden from you. LOAM won't notify them.",
+  "block.dmBanner": "You blocked this user.",
+  "block.composerDisabled": "You blocked this user. Unblock them to send a message.",
+  "block.hiddenMessage": "Message from a blocked user",
+  "block.show": "Show",
+  "block.error": "Couldn't update your block list.",
+  "settings.privacyEyebrow": "Privacy",
+  "settings.blockedTitle": "Blocked people",
+  "settings.blockedNote": "People you block can't send you direct messages, and their channel messages are hidden from you. LOAM doesn't notify them.",
+  "settings.blockedEmpty": "You haven't blocked anyone.",
+  "settings.privacyPolicy": "Privacy policy",
+  "error.dm_unavailable": "Direct messages to this person aren't available",
+  "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
+  "error.channel_member_unavailable": "This person isn't available for this channel",
+  "error.block_not_allowed": "This user can't be blocked",
 };
 
 /**

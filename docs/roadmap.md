@@ -44,8 +44,8 @@ Researched but not committed — briefings for Fable/owner to prioritize.
   admin config. Build the admin config plumbing once; both use it.
 - **3 has a hard prerequisite: admin bootstrap.** *(Solved — landed with initiative 3 part A.)*
   Admin now comes from the pluggable `admin.bootstrap` strategies (`firstUser` default, `setupCode`,
-  `passphrase`, `none`; `hostDevice` reserved for the Android host) via `POST /api/admin/claim`;
-  the legacy admin seed ids were demoted. See `CLAUDE.md` and 03.
+  `passphrase`, `none`; `hostDevice`, forced on the Android host by its per-boot launcher token) via
+  `POST /api/admin/claim`; the legacy seed users are deleted at boot. See `CLAUDE.md` and 03.
 - **4 pulls on everything.** If the phone hosts the server, the storage/kill-switch/admin work must run
   under whatever Android runtime you choose, which constrains the SQLite driver (initiative 1). Decide
   the Android hosting model early even if you build it last.

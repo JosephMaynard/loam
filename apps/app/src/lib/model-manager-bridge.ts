@@ -25,8 +25,11 @@
 //
 // Because nodejs-mobile can't restart its runtime in-process (see index.tsx), this takes effect the
 // NEXT time the app (re)starts the embedded server — the caller is expected to say so in the UI.
+import { addOwnListener, type BridgeSubscription } from './bridge-listener';
+
 export interface BridgeChannel {
-  addListener(name: string, handler: (payload: unknown) => void): void;
+  // Returns RN's EventSubscription at runtime (see bridge-listener.ts); `void` covers test doubles.
+  addListener(name: string, handler: (payload: unknown) => void): BridgeSubscription | void;
   removeAllListeners(name: string): void;
   post(name: string, payload: unknown): void;
 }
@@ -86,7 +89,9 @@ function roundTrip(
       }
       settled = true;
       clearTimeout(timer);
-      channel.removeAllListeners('loam-model-set-active-result');
+      // Only THIS round trip's listener — an overlapping one (e.g. a retry racing a late ack, or two
+      // overlays) must keep its own; removeAllListeners here made the other one time out.
+      removeListener();
       resolve(result);
     };
 
@@ -105,7 +110,7 @@ function roundTrip(
       finish({ status: 'timeout', error: TIMEOUT_ERROR });
     }, timeoutMs);
 
-    channel.addListener('loam-model-set-active-result', onResult);
+    const removeListener = addOwnListener(channel, 'loam-model-set-active-result', onResult);
     try {
       channel.post('loam-model-set-active', { requestId, ...payload });
     } catch (error) {

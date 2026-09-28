@@ -270,3 +270,95 @@ describe("verifyTransportKeypair (docs/20 #7)", () => {
     expect(verifyTransportKeypair(id.publicKey, "!!!not-base64!!!")).toBe(false); // malformed
   });
 });
+
+describe("base64url codec (fast path, review 2026-09-25 #11)", () => {
+  // The ORIGINAL per-character codec, kept here as the reference the fast one must match bit-for-bit —
+  // including its tolerance (stop at `=`, drop a partial tail's spare bits) that the canonical check guards.
+  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  function referenceEncode(bytes: Uint8Array): string {
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b0 = bytes[i];
+      const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      out += ALPHABET[b0 >> 2];
+      out += ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)];
+      if (i + 1 < bytes.length) out += ALPHABET[((b1 & 0x0f) << 2) | (b2 >> 6)];
+      if (i + 2 < bytes.length) out += ALPHABET[b2 & 0x3f];
+    }
+    return out;
+  }
+  function referenceDecode(str: string): Uint8Array {
+    const out: number[] = [];
+    let buffer = 0;
+    let bits = 0;
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i);
+      if (code === 0x3d) break;
+      const value = ALPHABET.indexOf(str[i]);
+      if (value < 0) throw new Error("invalid base64url");
+      buffer = (buffer << 6) | value;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out.push((buffer >> bits) & 0xff);
+        buffer &= (1 << bits) - 1;
+      }
+    }
+    return Uint8Array.from(out);
+  }
+  function referenceCanonical(blob: string): boolean {
+    try {
+      return blob.length > 0 && referenceEncode(referenceDecode(blob)) === blob;
+    } catch {
+      return false;
+    }
+  }
+  function testKey(): string {
+    return transportClientDerive({
+      clientEphemeralSecret: transportClientHello().ephemeralSecret,
+      hostPublic: createTransportIdentity().publicKey,
+      hostEphemeralPublic: createTransportIdentity().publicKey,
+    });
+  }
+
+  it("agrees with the reference codec on canonical-spelling decisions for random + adversarial strings", () => {
+    const junk = "=+/!é";
+    let seed = 1;
+    const rand = () => {
+      seed = (seed * 1_103_515_245 + 12_345) & 0x7fffffff;
+      return seed;
+    };
+    for (let n = 0; n < 5_000; n++) {
+      const length = rand() % 23;
+      let candidate = "";
+      for (let i = 0; i < length; i++) {
+        // Mostly alphabet characters, occasionally padding / junk, so every branch is exercised.
+        candidate += rand() % 10 === 0 ? junk[rand() % junk.length] : ALPHABET[rand() % 64];
+      }
+      expect(isCanonicalSealedBlob(candidate)).toBe(referenceCanonical(candidate));
+    }
+  });
+
+  it("round-trips every tail length through a sealed transport envelope", () => {
+    const key = testKey();
+    for (const length of [0, 1, 2, 3, 4, 5, 63, 64, 65, 1000]) {
+      const plaintext = "x".repeat(length);
+      const sealed = sealTransport(key, plaintext, "aad");
+      expect(isCanonicalSealedBlob(sealed)).toBe(true);
+      expect(referenceEncode(referenceDecode(sealed))).toBe(sealed);
+      expect(openTransport(key, sealed, "aad")).toBe(plaintext);
+    }
+  });
+
+  it("opens a tunnel-sized (≈4 MiB) envelope without a long event-loop stall", () => {
+    const key = testKey();
+    const plaintext = "a".repeat(3 * 1024 * 1024);
+    const sealed = sealTransport(key, plaintext, "aad");
+    expect(sealed.length).toBeGreaterThan(4_000_000);
+    const started = performance.now();
+    expect(openTransport(key, sealed, "aad")).toBe(plaintext);
+    // Mostly the AEAD now; generous so a slow CI box doesn't flake.
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+});

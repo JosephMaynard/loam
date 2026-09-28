@@ -34,7 +34,7 @@ signed authors), and the sync-peer impersonation finding are all the same capabi
 carrying signatures verifiable without trusting the relaying node. **Caveat (Sol):** the convergence
 is real but the *slice size* is not settled — "signed messages" only beat impersonation if the
 verifier knows which key legitimately belongs to which author, and that binding question (who signs?
-node or user? how does an anonymous `user.<8hex>` acquire a key? who may sign a tombstone?) may pull
+node or user? how does an anonymous `user.<16hex>` acquire a key? who may sign a tombstone?) may pull
 in most of M4. A **node-signed provenance** slice ("node A asserts this message came from A") is
 honestly M-sized, fixes peer impersonation, and defers the user-identity questions entirely. Sol
 round 2 decides which slice is real; do not force the prettier one (§ Track 4).

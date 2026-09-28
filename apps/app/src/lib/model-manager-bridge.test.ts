@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BridgeChannel } from "@/lib/model-manager-bridge";
 import { clearActiveModel, setActiveModel } from "@/lib/model-manager-bridge";
+import { makeRnLikeChannel } from "@/test-utils/rn-channel";
 
 type Responder = (payload: Record<string, unknown>, emit: (result: unknown) => void) => void;
 
@@ -97,6 +98,20 @@ describe("bridge roundTrip — timeout vs explicit failure (P2-1)", () => {
     const result = await setActiveModel(channel, { modelPath: "file:///m.gguf" }, 5, 2);
     expect(result.status).toBe("timeout");
     expect(posts).toHaveLength(2);
+  });
+
+  it("two overlapping round trips each get their own ack (pre-release review 2026-09-25)", async () => {
+    // removeAllListeners on finish used to drop the other round trip's listener → spurious timeout.
+    const channel = makeRnLikeChannel();
+    const first = setActiveModel(channel, { modelPath: "file:///a.gguf" }, 200, 1);
+    const second = clearActiveModel(channel, 200, 1);
+    const [a, b] = channel.posted.map((p) => (p.payload as { requestId: string }).requestId);
+
+    channel.emit("loam-model-set-active-result", { requestId: a, ok: true });
+    await expect(first).resolves.toEqual({ status: "ok" });
+    channel.emit("loam-model-set-active-result", { requestId: b, ok: true });
+    await expect(second).resolves.toEqual({ status: "ok" });
+    expect(channel.listenerCount("loam-model-set-active-result")).toBe(0);
   });
 
   it("clearActiveModel shares the same timeout-retry semantics", async () => {

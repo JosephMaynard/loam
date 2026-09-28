@@ -1,6 +1,6 @@
 // Messages: DMs, search, create, edit, delete. Extracted verbatim from app.ts (2026-09-04 split) over the
 // shared AppContext.
-import { type Message, MessageCreateRequestSchema, MessageEditRequestSchema, MessageSchema } from "@loam/schema";
+import { type Message, MessageCreateRequestSchema, MessageEditRequestSchema, MessageSchema, SearchQuerySchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 
@@ -25,7 +25,7 @@ export function registerMessageRoutes(ctx: AppContext): void {
   // Shadow-banned authors' messages stay visible only to themselves, matching the broadcast filter.
   // Substring search scans the whole message mirror per call, so it gets its own semantic cap
   // (counted through the tunnel too — see semanticRateLimit) on top of the global limiter.
-  ctx.server.get<{ Querystring: { q?: string; limit?: string } }>(
+  ctx.server.get(
     "/api/search",
     ctx.semanticRateLimit(60),
     async (request, reply) => {
@@ -36,14 +36,22 @@ export function registerMessageRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody(accessError));
     }
 
-    const query = (request.query.q ?? "").trim();
+    // Validate the querystring shape: a repeated key (`?q=a&q=b`) arrives as an ARRAY, which used to reach
+    // `.trim()` and surface as a 500 echoing the TypeError.
+    const params = SearchQuerySchema.safeParse(request.query);
+
+    if (!params.success) {
+      return reply.code(400).send(errorBody("Invalid request"));
+    }
+
+    const query = (params.data.q ?? "").trim();
 
     if (!query) {
       return reply.code(400).send(errorBody("Provide a search query (?q=)"));
     }
 
     const needle = query.toLowerCase();
-    const parsedLimit = Number.parseInt(request.query.limit ?? "", 10);
+    const parsedLimit = Number.parseInt(params.data.limit ?? "", 10);
     const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 25;
     const channelsById = new Map(ctx.data.channels.map((channel) => [channel.id, channel]));
     const results: Message[] = [];
@@ -94,7 +102,15 @@ export function registerMessageRoutes(ctx: AppContext): void {
       return reply.code(400).send(errorBody("Invalid message request"));
     }
 
-    const result = ctx.createMessage(body.data, ctx.getSessionUserId(request, reply));
+    const authorId = ctx.getSessionUserId(request, reply);
+
+    // A DM to the assistant starts a streamed LLM reply; refuse up front (nothing created) when this
+    // user already has one streaming or the node-wide bound is reached, instead of queueing unboundedly.
+    if (body.data.type === "dm" && ctx.llm.assistantBusyFor(body.data.recipientUserId, authorId)) {
+      return reply.code(429).send(errorBody("The assistant is busy; try again shortly"));
+    }
+
+    const result = ctx.createMessage(body.data, authorId);
 
     if (result.error) {
       // Moderation rejections (banned/pending author) are 403; everything else is a bad request.
@@ -115,7 +131,7 @@ export function registerMessageRoutes(ctx: AppContext): void {
     }
 
     ctx.broadcast({ type: "messageCreated", message: result.message });
-    void ctx.llm.createAssistantResponse(result.message);
+    void ctx.llm.createAssistantResponse(result.message).catch((error: unknown) => ctx.server.log.error(error));
     return reply.code(201).send(result);
   });
 
@@ -209,6 +225,12 @@ export function registerMessageRoutes(ctx: AppContext): void {
 
     if (target.meta?.streaming) {
       return reply.code(409).send(errorBody("This message is still being written"));
+    }
+
+    // A moderator-removed message is an honest tombstone: its author can't edit the body back in (the
+    // spread below keeps `removedByModerator` but would restore content under it).
+    if (target.meta?.removedByModerator) {
+      return reply.code(403).send(errorBody("This message was removed by a moderator"));
     }
 
     const body = MessageEditRequestSchema.safeParse(request.body);

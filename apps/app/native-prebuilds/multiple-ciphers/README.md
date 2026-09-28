@@ -139,14 +139,15 @@ pin. See the cross-compile recipe in `docs/01-sqlite-migration.md` for the full 
 
 ## Why vendored (not a hosted pin)
 
-The plain `better-sqlite3` driver is fetched at build time from a **published** upstream release
-(`digidem/better-sqlite3-nodejs-mobile`). No equivalent `better-sqlite3-multiple-ciphers` release
-exists for Android / ABI 108 yet, so LOAM vendors a **self-built** artifact here (committed to the
-repo, with the reproducible recipe alongside for audit/rebuild).
+No `better-sqlite3-multiple-ciphers` release exists for Android / ABI 108, so LOAM vendors a
+**self-built** artifact here (committed to the repo, with the reproducible recipe alongside for
+audit/rebuild). The plain `better-sqlite3` driver comes from a published upstream release
+(`digidem/better-sqlite3-nodejs-mobile`), but it is vendored too since upstream re-generated that
+release's assets on 2026-08-17 — see `../better-sqlite3/README.md`.
 
-**Future:** if digidem's (or another) prebuild release matrix adds a MultipleCiphers android-arm64
-ABI-108 artifact upstream, switch `fetch-native-modules.mjs` to download + sha256-pin the hosted
-tarball (as the plain driver already does) and retire this vendored copy.
+**Future:** if an upstream prebuild matrix adds a MultipleCiphers android-arm64 ABI-108 artifact, a
+hosted download + sha256 pin is possible, but the plain driver's experience argues for keeping a
+vendored copy of whatever binary was device-tested.
 
 ## Runtime support: what's proven vs. the remaining release gate
 

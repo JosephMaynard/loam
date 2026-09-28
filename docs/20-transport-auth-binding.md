@@ -39,7 +39,10 @@ The server **cannot** know how a client learned the host key (QR scan vs. config
   client gets full protection.)
 - Global mode governs whether binding is *mandatory*: **`required`** ⇒ an `anonymous` session may reach
   only bootstrap/handshake/resume (it must bind to touch content). **`optional`** ⇒ a session may bind
-  (secure) **or** stay anonymous + cookie-auth (best-effort, unchanged). **`off`** ⇒ plaintext.
+  (secure) **or** stay anonymous + cookie-auth (best-effort, unchanged). **`off`** ⇒ plaintext — no longer
+  an operator setting (`PATCH` rejects it, a stored `"off"` is coerced to `optional`); it is only ever the
+  *effective* mode under Developer Mode (`LOAM_DEV_MODE`, refused under `NODE_ENV=production`). "optional/off"
+  below means "a node that doesn't require binding".
 
 ## 3. The credential model — a NEW, separate namespace (review blocker #1, the crux)
 
@@ -176,6 +179,12 @@ client → server   AAD "loam.ws.proof.v1"        { type:"proof",     connection
   compare identical values). The client **verifies** them before using the response — especially before
   storing a returned identity **token**. Closes review #3 (constant-aad tunnel responses cross-fed).
 - **Re-handshake resumes before retrying;** concurrent re-handshakes share one in-flight op.
+- **Unsealed tunnel replies are never used** (pre-release review 2026-09-25). On a live tunnel session the
+  client acts on exactly one unsealed reply: a `401` to a `GET`/`HEAD`, which triggers one re-handshake +
+  retry (an unsafe method is never retried — the outer status is unauthenticated and the request may already
+  have run). Every other unsealed reply (403, 409, 429, 503, …) surfaces as an `UnsealedTunnelResponseError`,
+  never as a `Response` — otherwise an on-path attacker could forge content such as a `GET /api/mesh/identity`
+  card (mesh contact key substitution), messages or images.
 
 ## 10. Server changes (summary)
 
@@ -303,3 +312,22 @@ blackholed-network dimensions. The findings below were fixed:
 
 These are lifecycle-robustness fixes, not auth-protocol changes — the §1–§14 auth-binding guarantees are
 unchanged.
+
+## 17. Liveness and missed-wipe detection (pre-release review 2026-09-25)
+
+- **WS heartbeat (server, `realtime.ts`).** A LOAM client never sends after key confirmation, so a socket
+  whose peer vanished (phone left the hotspot, host slept, an AP dropped the flow) never errors and the
+  client would sit "live" forever, missing events. Every **admitted** socket gets a content-free
+  `{"type":"ping"}` immediately and then every `WS_HEARTBEAT_INTERVAL_MS` = **25 s**, sent through `wsSend`
+  (so it is sealed + sequenced like any frame on an encrypted socket). Nothing is sent before key
+  confirmation, it carries no presence data, and it stops on close.
+- **Watchdog (client, `lib/ws-liveness.ts`).** Per socket, armed by the first ping (a node that predates
+  heartbeats is never torn down); no frame for `2 × 25 s + 10 s` = **60 s** declares the socket dead, and
+  it is abandoned and reconnected. On `visibilitychange` (visible) / `online` a socket waiting out a
+  reconnect backoff retries at once, and an open one is re-checked (a gap over 30 s means a missed beat,
+  judged after a 3 s grace for frames buffered while the page was frozen).
+- **Identity-change purge (client, `lib/identity.ts`).** The client records the last identity the server
+  confirmed (`loam.confirmedUserId`). If a later `/api/config` returns a **different** `currentUser` — its
+  session was reset while it was away (an Emergency Reset whose `wipe` event it missed, an expired cookie,
+  a revoked token) — it purges its cached content before carrying on as the new identity, instead of
+  merging the previous identity's DMs and private channels into the new session.

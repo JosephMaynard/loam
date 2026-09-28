@@ -16,16 +16,23 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Nothing here pushes; don't leave the token in .git/config for build/test scripts to read.
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .node-version
           cache: pnpm
+
+      # Every workspace package.json, cli/package.json and apps/app/app.json expo.version must agree.
+      - name: Check versions
+        run: node scripts/check-versions.mjs
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -33,6 +40,8 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      # Every workspace's Vitest suite, then `node --test` over scripts/*.test.mjs (check-versions' tag
+      # rules) and cli/test/ (the root package.json `test:scripts`).
       - name: Unit tests
         run: pnpm test
 

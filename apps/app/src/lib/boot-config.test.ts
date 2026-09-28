@@ -11,7 +11,12 @@
 import { describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { computeDbBootEnv, applyBootEnvTo, DB_KEY_LOCKED_ERROR } = require("../../nodejs-project-template/boot-config.js");
+const {
+  computeDbBootEnv,
+  applyBootEnvTo,
+  DB_KEY_LOCKED_ERROR,
+  DB_ENCRYPTION_DRIVER_MISSING_CODE,
+} = require("../../nodejs-project-template/boot-config.js");
 
 const withDriver = () => ({ probeEncryptedDriver: () => true });
 const noDriver = () => ({ probeEncryptedDriver: () => false });
@@ -42,17 +47,42 @@ describe("computeDbBootEnv — no stale key leaks across attempts (Sol Fable-rou
     expect(applied.LOAM_DB_ENCRYPTION_MODE).toBe("off");
   });
 
-  it("a missing-SQLCipher-driver downgrade of an encrypted key resolves to plaintext WITHOUT the key", () => {
-    const cfg = computeDbBootEnv(
-      { mode: "passphrase", key: "an-encrypted-key" },
-      { hint: { status: "present", mode: "passphrase" }, dbExists: true, ...noDriver() },
-    );
+  it("a missing SQLCipher driver LOCKS every encrypted selection — never plaintext, never an 'off' hint", () => {
+    // Pre-release review 2026-09-25: this branch used to boot plaintext and write an 'off' hint.
+    for (const [mode, key] of [
+      ["passphrase", "an-encrypted-key"],
+      ["persistent", "a-device-key"],
+      ["ephemeral", undefined],
+    ] as const) {
+      const cfg = computeDbBootEnv(
+        { mode, key },
+        { hint: { status: "present", mode }, dbExists: true, ...noDriver() },
+      );
+      expect(cfg.outcome).toBe("locked");
+      expect(cfg.env).toEqual({});
+      expect(cfg.writeHint).toBe(mode);
+      expect(cfg.writeHint).not.toBe("off");
+      expect(cfg.bootError?.code).toBe(DB_ENCRYPTION_DRIVER_MISSING_CODE);
+      // Clear-then-apply leaves NO plaintext driver selection and no key behind.
+      const applied = applyContract({ LOAM_DB_KEY: "stale", LOAM_DB_DRIVER: "better-sqlite3" }, cfg.env);
+      expect(applied.LOAM_DB_KEY).toBeUndefined();
+      expect(applied.LOAM_DB_DRIVER).toBeUndefined();
+      expect(applied.LOAM_DB_ENCRYPTION_MODE).toBeUndefined();
+    }
+  });
+
+  it("a missing driver in ephemeral mode still deletes the previous launch's (unreadable) DB", () => {
+    const cfg = computeDbBootEnv({ mode: "ephemeral" }, { hint: absentHint, dbExists: true, ...noDriver() });
+    expect(cfg.outcome).toBe("locked");
+    expect(cfg.deleteStaleEphemeralDb).toBe(true);
+    const fixed = computeDbBootEnv({ mode: "persistent", key: "K" }, { hint: absentHint, dbExists: true, ...noDriver() });
+    expect(fixed.deleteStaleEphemeralDb).toBeUndefined();
+  });
+
+  it("with the driver missing, only an explicit switch to 'off' boots plaintext", () => {
+    const cfg = computeDbBootEnv({ mode: "off" }, { hint: { status: "present", mode: "passphrase" }, dbExists: true, ...noDriver() });
     expect(cfg.outcome).toBe("proceed");
-    expect(cfg.env.LOAM_DB_KEY).toBeUndefined();
-    expect(cfg.env.LOAM_DB_ENCRYPTION_MODE).toBe("off");
-    expect(cfg.env.LOAM_DB_DRIVER).toBe("better-sqlite3");
-    expect(cfg.bootError?.code).toBe("db_encryption_unavailable");
-    expect(applyContract({ LOAM_DB_KEY: "an-encrypted-key" }, cfg.env).LOAM_DB_KEY).toBeUndefined();
+    expect(cfg.env).toEqual({ LOAM_DB_ENCRYPTION_MODE: "off", LOAM_DB_DRIVER: "better-sqlite3" });
   });
 
   it("a locked-error where plaintext IS permitted (hint off) boots plaintext with no key", () => {

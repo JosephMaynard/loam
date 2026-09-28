@@ -3,8 +3,9 @@
 > **Status: Phases 0–2 BUILT & TESTED; Phase 3 SCAFFOLDED (native-unverified).** The sealed-mailbox
 > A→C→B delivery works today over the existing sync transport (configured peers / courier). The
 > Phase-3 opportunistic transport (BLE discovery + Wi-Fi Aware bulk transfer) is now scaffolded end to
-> end — native Expo module, TS transport abstraction, launcher courier, and two loopback bridge
-> endpoints — but the Kotlin has **not** been compiled or run against radios (CI has none). See
+> end — native Expo module, TS transport abstraction, launcher courier, and two launcher-only bridge
+> endpoints (loopback + the launcher's host token) — but the Kotlin, which compiles in APK builds, has
+> **not** been run against radios (CI has none). See
 > **docs/17** for the exact real-device test procedure and every stub/risk. The rest of this doc is the
 > full design; the box below records what actually shipped and where it differs.
 
@@ -60,8 +61,17 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
 - **Phase 1 — sealed mailbox (server)**: `sealed` `Message` arm, `User.identityKey`, `mesh` config,
   `SyncDigest.sealed`. **Entirely server-side** — because LOAM's host is already trusted for its own
   local users, per-user mesh keypairs live server-side (DB `mesh_identities`, public keys published
-  on the user record + synced) and the E2E guarantee is against **carrier nodes**, not a user's home
-  host. `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
+  on the user record + synced), and the E2E guarantee is against **carrier nodes**, not a user's home
+  host. Identities are minted **only for local users** — never for a sync-imported user or a `mesh.*`
+  sender record; a row an older build minted for a synced user is deleted at boot (with any `null`
+  placeholder an earlier fix wrote) and the forged `identityKey` stripped from that user. A database from
+  v0.4.0 or earlier has no `synced_users` table, so on its first boot a one-time backfill marks as synced
+  every human with no session, no identity token, no authority/moderation state and no local-only footprint
+  (DMs, private-channel content, mesh contacts, blocks, reports, channel ownership or membership), then
+  deletes `mesh.*` user records no local DM references and resets the rest to the generated default. The
+  safety of the rule rests on the first two conditions: a user with neither can't be signed in as, so a
+  local user wrongly marked loses only a mesh identity nobody can use. It runs once per database (a
+  config-table flag). `POST /api/mesh/messages` seals to a known recipient's key; delivery decrypts into an ordinary
   DM.
 - **Phase 2 — bounded relay (server)**: carriers import sealed blobs opaquely and deliver-if-ours,
   else relay onward (hop-decremented, per-carrier cap), else drop; the reaper expires + tombstones by
@@ -94,9 +104,11 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    verified** (was "not built"). What landed: a new `apps/app/modules/loam-mesh-transport` Expo module
    (Kotlin BLE advertise/scan + a fixed LOAM GATT service, Wi-Fi Aware publish/subscribe + a data-path
    socket, a BLE-only chunked *fallback* left as a marked TODO), a TS `MeshTransport` abstraction +
-   RN↔launcher courier bridge (`apps/app/src/mesh/`), and two **loopback-only** server endpoints
-   (on Android also gated by the launcher's per-boot host token — docs/17)
-   (`GET /api/mesh/outbound` + `POST /api/mesh/inbound`) that let the in-process launcher shuttle sealed
+   RN↔launcher courier bridge (`apps/app/src/mesh/`), and two **launcher-only** server endpoints
+   (`GET /api/mesh/outbound` + `POST /api/mesh/inbound`; they need a loopback caller **and** the
+   launcher's per-boot `x-loam-host-token` on every host — loopback alone is reachable by every installed
+   app on Android and by every LAN client behind a same-host reverse proxy or the Vite dev proxy — so a
+   desktop/Pi node, which has no host token, has no bridge and 404s; docs/17) that let the in-process launcher shuttle sealed
    blobs between the radio and the existing relay — a radio-fed mirror of the `/api/sync/*` sealed path,
    reusing `acceptSealedFromPeer` verbatim so no new crypto/relay trust is introduced. The bridge
    endpoints are covered by desktop tests (A→B, A→C→B carrier-can't-read, idempotent re-delivery,
@@ -125,6 +137,97 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
 8. **Schema bounds** — the shipped `SealedMessageSchema` uses generous round caps (`toTag` ≤ 64 chars,
    `sealed` ≤ 90 000 chars) rather than the tight computed bounds in §2 below (22 / 87 480). Same
    headroom for the full-size envelope, just simpler numbers.
+9. **Pull policy and its residual leak** (review 2026-09-25). The sync puller used to fetch only sealed
+   offers whose tag was local whenever it wasn't relaying (relay off — the default — at `maxCarried`, or a
+   hop-1 blob), which told the serving peer exactly which node a tag's recipient lives on. It now fetches
+   **every admissible offer** — the same outer-field checks `acceptSealedFromPeer` applies
+   (`sealedOfferAdmissible`: not tombstoned, not in the `sealed.` namespace, unexpired, hop left, TTL
+   within the 7-day max + one epoch) — soonest-expiry first, at most 80 per round in 40-id batches,
+   **regardless of tag**; the import then delivers what's ours, carries what it can, and drops the rest.
+   The cost: a non-relaying node downloads each blob its peer offers once, as a relay would, and at most
+   `mesh.maxSealedPullPerRound` (default 80) per round. A node with relaying off and no local mesh identity
+   pulls no sealed mail at all: it has nothing to deliver or carry, and the decision ignores tags.
+   **"Once" holds for every outcome alike.** Every sealed id the node fetches over sync or takes in over
+   the radio bridge goes into a durable, node-wide record (`sealed_offers_seen`), whether it was delivered,
+   carried or dropped, and is never fetched again. Before this, delivered ids were skipped for good via
+   their tombstone while dropped ones sat in a per-peer RAM cache that a restart, any admin config save or a
+   relay toggle cleared; the next round re-fetched exactly the foreign blobs, and a peer diffing the two
+   fetch sets learned which ones had been delivered. The rule is that **no fetch decision may depend on
+   whether a sealed id was delivered here, for as long as any trace of it remains** (branch review
+   2026-09-25 #2 found two ways round the first version):
+   - *Every list.* The record and the tombstones are checked on **both** digest lists: an id is skipped if
+     it is tombstoned, in the record, or in the `sealed.` replay-key namespace, whether it's offered as
+     sealed mail or as a public message (a delivered id is tombstoned, a dropped one only in the record, so
+     re-listing sealed ids — or their replay keys, which anyone holding the blob can compute — among public
+     messages used to fetch exactly the dropped ones). A public channel with such an id isn't imported either
+     (it would show up in this node's own digest). A batch imports only the ids it asked for, under the
+     list it asked for them on, so a peer can't push them unasked. A blob taken in again later (say over
+     the radio, once relaying is on) is refused, never carried: carrying it would depend on whether the
+     first copy was delivered. (Given the separate namespaces below, the record check on the public list can
+     only match a `seal_` id, which that list refuses anyway. It stays as defence in depth.)
+   - *Any id.* The outer id isn't sealed, so a peer can re-offer the same mail under fresh ids. Once the
+     body is in hand, the mark also records the mail's replay key (`sealed.<sha256>`), and an offer whose
+     replay key has a live mark is refused like a seen id and never carried. Without this, after relaying
+     was switched on (or a full relay freed a slot), the dropped copy came back carried and showed up in the
+     digest while the delivered one stayed refused. One exception keeps a carrier from censoring a relay:
+     a copy with no hop left, taken in while the node relays and has room, is marked by id only, so the
+     genuine copy with hops left can still be carried. That shows a peer nothing new, because in that state
+     a copy with hops left would have been carried on the spot (the relaying residual below).
+   - *Timing.* Delivering a blob (decrypt, DB writes, a broadcast) takes longer than dropping one, so
+     importing each sealed batch before fetching the next let the peer time the gap (about 3 ms with no
+     local mail, about 130 ms for 40 deliveries). A round now fetches every sealed batch first, after the
+     public batches and their attachment fetches, and imports them only after the whole sync loop's
+     requests to every peer are done. Rounds start on the interval clock (a 5 s tick after `intervalMs`
+     from the previous round's start), so how long the imports take doesn't move the next round's first
+     request unless it takes longer than a tick.
+   - *The whole horizon.* A mark is keyed by id (the replay key rides along, see *Any id*) and lives from the moment the offer was taken in
+     (the sync round's clock, one value for the whole round) for the 30-day tombstone horizon + the 7-day
+     TTL max + two epochs. That outlives every tombstone the offer can leave (the delivery tombstone, or
+     a carried copy's tombstone at its expiry), so until the mark lapses every outcome is suppressed and
+     afterwards none is. It used to expire at the offer's advertised `ttlExpiresAt`, so re-advertising the
+     same ids with a later TTL after the first one passed fetched only the dropped ones, while the
+     delivered ids were still tombstoned. A repeat mark never extends a live row.
+   The record is not a tombstone (it refuses no public import), it survives restarts and config
+   changes, and only an Emergency Reset clears it. *Separate namespaces.* Every build (v0.4.0 included)
+   names a sealed message `seal_<hex>` and nothing else uses that prefix, so a sealed offer must carry a
+   `seal_` id and a public record may not. A peer therefore can't list sealed ids among public messages at
+   all, and can't name a sealed offer after a public message it has seen to keep the real one out.
+   Consequences: a node that switches relaying on, or frees space under `maxCarried`,
+   doesn't go back for blobs it dropped earlier, and doesn't carry them if they come back under new ids (other carriers still can). **Bounds:** the record holds
+   at most 200 000 ids, and each source (a sync peer URL, or the radio bridge) at most 50 000 of them.
+   When a source reaches its quota the node pulls no new sealed offers from that source, and when the
+   record is full it pulls none at all, until marks lapse. It never evicts marks, since an evicted mark
+   would re-open the difference. Stopping pulls treats every offer alike, so it is fail-closed on privacy;
+   the per-source quota keeps one hostile peer advertising junk ids from switching sealed pulls off for
+   every peer for the whole retention. An honest peer holds at most `maxCarried` blobs at once, so it
+   reaches its quota only by offering about 1 300 distinct sealed messages a day for the whole window.
+   The radio bridge counts as one source and obeys the same bounds: once the radio's quota or the global
+   cap is reached, a blob that would need a new mark is refused before it is marked or delivered, whether
+   or not it is for a local user. Before this, radio marks skipped both checks, so one radio neighbour
+   could push the record past the global cap and stop every sync peer's sealed pulls for the whole
+   retention. An inbound call carries at most 64 blobs in a 1 MiB body, 240 calls a minute. One hostile
+   neighbour can still use up the radio quota and stop radio intake for everyone nearby, and several
+   hostile sync peers together can still fill the record. `POST /api/mesh/inbound` answers `{ ok: true }`
+   whatever became of the blobs, and the launcher's courier refreshes its outbound list and have-mail hint
+   a fixed 2 s after each receipt. It used to re-advertise only when the answer said a blob was accepted,
+   which on a node with relaying off meant only after a delivery, so the neighbour that pushed the blob saw
+   it delivered.
+   The recipient's tag set spans `now − MESH_TTL_MAX_MS` … `now + 1 epoch` (not `now − ` this node's own
+   `mesh.ttlMs`: the lifetime is the *sender's* choice), memoised per epoch. **What still leaks:** on a
+   **relaying** node a pulled blob that is delivered locally is tombstoned and never appears in its digest,
+   while a carried one reappears there hop-decremented. So a peer that both serves blobs to this node and
+   pulls this node's digest can infer that a blob it served with `hopLimit ≥ 2` (one that would otherwise
+   have been carried) was delivered here when it never shows up — ambiguous only when the node was at
+   `maxCarried` or already held that mail. (A blob refused at capacity is never fetched again either, so
+   regaining room adds no refetch pattern; only this digest signal remains. A carried copy is tombstoned
+   when the reaper finds it expired; if the node was off for days past that point, the tombstone can outlive
+   the seen mark, which tells a prober "carried here" — the same thing the digest already showed.) A **relay-off** node never advertises pulled mail at all (its
+   digest holds only mail its own users sealed), so what it pulls never shows in its digest; hop-1 blobs
+   are never carried by anyone, so their absence says nothing either. Closing it needs cover traffic or
+   deliberately carrying (re-advertising) delivered mail — v2. Smaller timing residuals: the
+   missing-attachment retry runs on its own 30 s timer and can be delayed by a delivery that runs at the
+   same moment, and the inbound call itself takes longer when it delivers. The courier's refresh doesn't
+   wait for that call, and the difference is milliseconds against a 2 s delay and radio latency.
 
 ---
 
@@ -141,7 +244,7 @@ routing** — a well-mapped design space (IETF DTN, the epidemic-routing literat
 ## Why this is an *evolution* of LOAM, not a different app
 
 LOAM's node-to-node sync engine (`docs/11`; `buildSyncDigest` / `syncWithPeer` / `importPeerMessages`
-/ tombstones in `apps/server/src/app.ts`) is **already a store-carry-forward gossip substrate**. It
+/ tombstones in `apps/server/src/sync.ts`) is **already a store-carry-forward gossip substrate**. It
 reconciles data between peers that share a network "for even a little while," and `docs/11` already
 describes the manual version — *"sequential (courier) sync … also covers physically carrying a node
 between sites."* This initiative **automates the courier and makes it multi-hop and private.**
@@ -174,8 +277,8 @@ public-data sync that works today. A node with `mesh` disabled behaves exactly a
 
 ### 1. Cryptographic identity
 
-Today `makeSessionUserId()` mints `user.<8hex>` from a random UUID and the **`loam_session` cookie is
-the real identity** — no key material, node-scoped, and destroyed by a wipe/new device. Unusable for
+Today `makeSessionUserId()` mints `user.<16hex>` from `randomBytes(8)` and the **`loam_session` cookie
+(or, for a bound session, the transport session key — docs/20) is the real identity** — no key material, node-scoped, and destroyed by a wipe/new device. Unusable for
 DTN addressing (can't encrypt "to B" or verify "from A", and cross-node id collisions — cosmetic
 today — would become a security bug).
 
@@ -185,14 +288,14 @@ session identity (which keeps working unchanged for LAN-local use):
 - **Signing: Ed25519** (long-term identity + message authentication). **Agreement: X25519** (sealed-
   mailbox ECDH). The NaCl/libsodium/Scuttlebutt/Signal canon — boring on purpose.
 - **Self-certifying id:** `meshId = "mesh." + base32(SHA-256(ed25519_pub)[0..15])` (~26 chars). The
-  `mesh.` prefix distinguishes it from a legacy `user.<8hex>` everywhere ids flow; verification is
+  `mesh.` prefix distinguishes it from a legacy `user.<16hex>` everywhere ids flow; verification is
   intrinsic (recompute the hash from the pubkey — SSB's property, no PKI). A `mesh.` id feeds the
   existing `display-name`/`avatar` packages unchanged, so it gets a stable name + SVG avatar for free.
 - `UserSchema` gains an **optional** `identityKey: { alg:"ed25519", sign, kx, kxSig }` block (base64url
   32-byte pubkeys; `kxSig` a 64-byte signature) — additive, old records validate unchanged. Because the
   `mesh.` id derives from **`sign` only**, a raw `kx` is unauthenticated and a carrier could swap it to
   hijack the sealed channel, so `kx` must be **bound to `sign`**: the identity owner publishes
-  `kxSig = Ed25519(sign_sk, "loam.mesh.kxbind.v1" ‖ kx)`. `importPeerUsers` (which already strips
+  `kxSig = Ed25519(sign_sk, "loam.mesh.kxbind.v1" ‖ kx)`. `importPeerAuthor` (formerly `importPeerUsers`; it already strips
   authority on import) **must verify, for any record carrying `identityKey`:** (a) the user's id derives
   from `identityKey.sign` (the un-spoofable-id check), and (b) `kxSig` is a valid signature by `sign`
   over `kx` — **dropping any user whose id/key disagree or whose `kx` is missing, malformed, or
@@ -325,7 +428,7 @@ check; the author sentinel means **sender shadow-ban is enforced at *creation*, 
 round-trips a `sealed` message through the existing `SyncMessagesResponseSchema` once the union has the
 arm (**no new endpoint**). The `dm` type is **untouched** — LAN-local plaintext DMs to a co-present
 recipient flow through the host as today; `sealed` is the cross-node, host-can't-read path. Client
-decides: recipient is a live LAN `user.<8hex>` → normal `dm`; recipient is an absent `mesh.` identity →
+decides: recipient is a live LAN `user.<16hex>` → normal `dm`; recipient is an absent `mesh.` identity →
 compose `sealed`.
 
 ### 3. Bounded epidemic relay (converge, don't flood)
@@ -459,7 +562,7 @@ per-OEM battery-optimization allowlisting to be needed (document it honestly).
 
 | Concern | Reused | Changed | Net-new |
 |---|---|---|---|
-| Identity | `makeSessionUserId`, `display-name`/`avatar` | `importPeerUsers` (verify id↔`sign`, `kx`↔`sign`), `UserSchema` (+`identityKey`+`kxSig`) | `packages/crypto`, keyseed storage |
+| Identity | `makeSessionUserId`, `display-name`/`avatar` | `importPeerAuthor` (verify id↔`sign`, `kx`↔`sign`), `UserSchema` (+`identityKey`+`kxSig`) | `packages/crypto`, keyseed storage |
 | Sealed mail | `MessageSchema` union, `createMessage`, `newMessageId` | new `sealed` arm; `db.ts` columns/index | seal/open, `toTag`, padding, compose+inbox UI |
 | Relay bounds | reaper, `tombstones` set+table, `store.addTombstone` | reaper TTL branch, tombstone GC horizon, `importPeerMessages` hop/cap/ack | `mesh` config, eviction, blinded acks (§3 — blocked) |
 | Sync layering | `runSyncLoop`, `fetchPeerJson`, `syncPeerAuthorized`, `/api/sync/*` | `buildSyncDigest`, `syncWithPeer`, `importPeerMessages`, `isSyncableMessage`, `SyncDigestSchema` | ack kind, sealed digest arrays |
@@ -508,8 +611,8 @@ order. **A later phase must never ship before its predecessor's gate is green.**
 - **Landed (scaffold):** `apps/app/modules/loam-mesh-transport` (BLE advertise/scan + GATT service,
   Wi-Fi Aware publish/subscribe + data-path socket, BLE-only chunked fallback TODO), the TS
   `MeshTransport` + `mesh-courier` bridge (`apps/app/src/mesh/`), the launcher courier brain
-  (`nodejs-project-template/main.js`), and the loopback `GET /api/mesh/outbound` / `POST /api/mesh/inbound`
-  endpoints. Manifest perms (BLUETOOTH_ADVERTISE/SCAN/CONNECT + optional BLE/Wi-Fi-Aware features) via
+  (`nodejs-project-template/main.js`), and the launcher-only `GET /api/mesh/outbound` /
+  `POST /api/mesh/inbound` endpoints (loopback + per-boot host token). Manifest perms (BLUETOOTH_ADVERTISE/SCAN/CONNECT + optional BLE/Wi-Fi-Aware features) via
   `with-loam-host.js`. Bridge endpoints are desktop-tested; the native transport is **unverified** (no
   radios in CI). See **docs/17**.
 - **Gate (NOT YET MET — needs hardware):** two physical Android phones, app foregrounded, auto-discover

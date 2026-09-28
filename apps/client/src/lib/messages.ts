@@ -386,7 +386,8 @@ export function reconcileConversationSnapshot(
   serverMessages: Message[],
   preFetchIds: Set<string>,
   currentUserId: string,
-): { messages: Message[]; prunedIds: string[] } {
+  liveChanges: LiveChanges = NO_LIVE_CHANGES,
+): { messages: Message[]; prunedIds: string[]; applied: Message[] } {
   const serverIds = new Set(serverMessages.map((message) => message.id));
   const conversationIds = new Set(
     previous
@@ -409,9 +410,130 @@ export function reconcileConversationSnapshot(
     next.set(message.id, message);
   }
 
+  // The snapshot was taken when the request was served; a live `messageDeleted`/`messageUpdated` that
+  // arrived while it was in flight is NEWER than it (pre-release review 2026-09-25). Never resurrect a
+  // message deleted since the fetch began, and keep a live edit/stream update over the snapshot's copy
+  // unless the snapshot carries a strictly newer edit.
+  const applied: Message[] = [];
   for (const message of serverMessages) {
+    if (liveChanges.deletedIds.has(message.id)) {
+      continue;
+    }
+    const local = next.get(message.id);
+    if (local && liveChanges.updatedIds.has(message.id) && editedAtOf(message) <= editedAtOf(local)) {
+      continue;
+    }
     next.set(message.id, message);
+    applied.push(message);
   }
 
-  return { messages: Array.from(next.values()).sort(compareCreatedAt), prunedIds };
+  return { messages: Array.from(next.values()).sort(compareCreatedAt), prunedIds, applied };
+}
+
+/** A message's last-edit time (0 when never edited, or for arms that can't be edited). */
+function editedAtOf(message: Message): number {
+  return "editedAt" in message && typeof message.editedAt === "number" ? message.editedAt : 0;
+}
+
+/** Ids a live event deleted or updated since a given `LiveChangeJournal.mark()`. */
+export type LiveChanges = { deletedIds: ReadonlySet<string>; updatedIds: ReadonlySet<string> };
+
+const NO_LIVE_CHANGES: LiveChanges = { deletedIds: new Set(), updatedIds: new Set() };
+
+/**
+ * Remembers which message ids live socket events deleted or updated, so a conversation-history snapshot
+ * that was requested BEFORE those events (and so predates them) can't undo them when it lands. A fetch
+ * takes a `mark()` when it starts and asks `since(mark)` when it reconciles. Entries older than
+ * `retentionMs` are dropped — far longer than any request can be in flight (10s timeout).
+ */
+export class LiveChangeJournal {
+  private seq = 0;
+  private readonly deleted = new Map<string, { seq: number; at: number }>();
+  private readonly updated = new Map<string, { seq: number; at: number }>();
+
+  private readonly retentionMs: number;
+  private readonly now: () => number;
+
+  constructor(retentionMs = 60_000, now: () => number = () => Date.now()) {
+    this.retentionMs = retentionMs;
+    this.now = now;
+  }
+
+  /** A position to compare later changes against (call when a fetch starts). */
+  mark(): number {
+    return this.seq;
+  }
+
+  recordDeleted(id: string): void {
+    this.record(this.deleted, id);
+  }
+
+  recordUpdated(id: string): void {
+    this.record(this.updated, id);
+  }
+
+  /** The ids deleted / updated after `mark`. */
+  since(mark: number): LiveChanges {
+    const pick = (map: Map<string, { seq: number }>): Set<string> =>
+      new Set([...map].filter(([, entry]) => entry.seq > mark).map(([id]) => id));
+    return { deletedIds: pick(this.deleted), updatedIds: pick(this.updated) };
+  }
+
+  private record(map: Map<string, { seq: number; at: number }>, id: string): void {
+    this.seq += 1;
+    const now = this.now();
+    // Re-insert so iteration order stays oldest-first, which lets the prune stop at the first fresh entry.
+    map.delete(id);
+    map.set(id, { seq: this.seq, at: now });
+    for (const target of [this.deleted, this.updated]) {
+      for (const [key, entry] of target) {
+        if (now - entry.at <= this.retentionMs) {
+          break;
+        }
+        target.delete(key);
+      }
+    }
+  }
+}
+
+/**
+ * The newest `createdAt` among a conversation's messages (reactions excluded — they never count as
+ * unread) — the conversation's read marker once it has been on screen. Server-assigned timestamps, so
+ * unlike the client's own clock it compares correctly with the `createdAt` of later messages (pre-release
+ * review 2026-09-25: a `Date.now()` marker from a clock running ahead hid genuinely new messages).
+ */
+export function newestMessageTimestamp(messages: Message[]): number | undefined {
+  let newest: number | undefined;
+  for (const message of messages) {
+    if (message.type !== "reaction" && (newest === undefined || message.createdAt > newest)) {
+      newest = message.createdAt;
+    }
+  }
+  return newest;
+}
+
+/**
+ * Unread (non-own) posts/replies/DMs per conversation key: those created after the conversation's read
+ * marker (see `newestMessageTimestamp`). Reactions never count.
+ */
+export function countUnreadByConversation(
+  messages: Message[],
+  lastReadByConversation: Record<string, number>,
+  currentUserId: string,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const message of messages) {
+    if (message.authorId === currentUserId) {
+      continue;
+    }
+
+    const key = messageConversationKey(message, currentUserId);
+
+    if (key && message.createdAt > (lastReadByConversation[key] ?? 0)) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+
+  return counts;
 }

@@ -8,9 +8,9 @@
 import { Platform } from 'react-native';
 
 import LoamHotspotModule from './src/LoamHotspotModule';
-import type { HotspotCredentials } from './src/LoamHotspot.types';
+import type { HotspotAddressCandidate, HotspotCredentials } from './src/LoamHotspot.types';
 
-export type { HotspotCredentials } from './src/LoamHotspot.types';
+export type { HotspotAddressCandidate, HotspotCredentials } from './src/LoamHotspot.types';
 
 /** True when the native hotspot module is present (Android with the module linked). */
 export function isHotspotSupported(): boolean {
@@ -45,6 +45,23 @@ export function addHotspotStoppedListener(handler: () => void): () => void {
   }
 }
 
+/**
+ * The host's current IPv4 addresses, annotated for the hotspot-address picker (`src/lib/hotspot-address.ts`).
+ * Resolves with `[]` when unsupported or when the native enumeration fails — never rejects — so the share
+ * screen degrades to its "couldn't detect the address" hint rather than an error.
+ */
+export async function readHotspotAddressCandidates(): Promise<HotspotAddressCandidate[]> {
+  if (!LoamHotspotModule) {
+    return [];
+  }
+  try {
+    const candidates = await LoamHotspotModule.hotspotAddressCandidates();
+    return Array.isArray(candidates) ? candidates : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Stops the hotspot if one is running. A no-op when unsupported, and never throws. */
 export function stopHotspot(): void {
   try {
@@ -57,13 +74,16 @@ export function stopHotspot(): void {
 
 /**
  * Start a foreground service so the host keeps serving while the screen is off / the app is
- * backgrounded (docs/04). A no-op when unsupported; never throws.
+ * backgrounded (docs/04). Idempotent. Returns whether the start went through (false when unsupported or
+ * refused — API 31+ refuses from the background); never throws. Prefer `ensureHostService`
+ * (src/lib/host-service.ts), which also handles the notification permission and foreground timing.
  */
-export function startHostService(): void {
+export function startHostService(): boolean {
   try {
-    LoamHotspotModule?.startHostService();
+    return LoamHotspotModule?.startHostService() === true;
   } catch {
     // Best effort — the host still works while foregrounded even if the service can't start.
+    return false;
   }
 }
 

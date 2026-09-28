@@ -15,7 +15,7 @@ const ollama: OllamaConfig = {
   enabled: false,
   baseUrl: "http://localhost:11434",
   model: "llama3",
-  botId: "user.bot",
+  botId: "llm.bot",
   botDisplayName: "Assistant",
 };
 

@@ -8,10 +8,9 @@
 //
 // THE BUG THIS FIXES: `resolveDbEncryptionAndBoot` mutated `process.env` incrementally per attempt and never
 // cleared `LOAM_DB_KEY` / `LOAM_DB_KEY_MIGRATE_FROM`. In the SAME Node process, an encrypted attempt could
-// install `LOAM_DB_KEY`, then a retry resolve to `off` (or a driver-unavailable downgrade, or a
-// plaintext-permitted locked-error recovery) — and inherit that stale key. `db.ts` gives `encryptionKey`
-// precedence over the plaintext driver, so the supposedly-"off" retry would still open through SQLCipher:
-// posture reports "off" while an encrypted backend is used, and an "off" mode hint may be written before a
+// install `LOAM_DB_KEY`, then a retry resolve to `off` (or a plaintext-permitted locked-error recovery) — and
+// inherit that stale key. `db.ts` gives `encryptionKey` precedence over the plaintext driver, so the
+// supposedly-"off" retry would still open through SQLCipher: posture reports "off" while an encrypted backend is used, and an "off" mode hint may be written before a
 // later cold start tries to open that encrypted DB as plaintext.
 //
 // THE CONTRACT: this returns ONLY the env vars to SET for the selected branch. The caller deletes ALL of
@@ -24,6 +23,10 @@
 // The literal `requestDbKey` resolves to when RN couldn't report its mode/key at all (timeout / read error /
 // malformed) — NOT the same signal as a genuine `off`. Kept here and imported by main.js so the two agree.
 var DB_KEY_LOCKED_ERROR = 'locked-error';
+
+// Boot-error code for "an encrypted mode is selected but the SQLCipher driver won't load". A FATAL locked
+// state (never a notice); mirrors `DB_ENCRYPTION_DRIVER_MISSING_CODE` in apps/app/src/lib/db-encryption.ts.
+var DB_ENCRYPTION_DRIVER_MISSING_CODE = 'db_encryption_driver_missing';
 
 // Every per-attempt boot env var this decision owns. The caller DELETES all of these before applying the
 // returned `env`, so a stale value from an earlier attempt can never survive into a later one.
@@ -116,19 +119,36 @@ function computeDbBootEnv(result, ctx) {
   }
 
   if (!ctx.probeEncryptedDriver()) {
-    // The SQLCipher native module isn't in this build — the ONE case an encrypted mode still boots plaintext
-    // (a build seam, distinct from a missing KEY). Downgrade the driver AND the declared mode to match reality.
-    return {
-      outcome: 'proceed',
-      env: { LOAM_DB_ENCRYPTION_MODE: 'off', LOAM_DB_DRIVER: 'better-sqlite3' },
-      clearEphemeralMarker: true,
-      writeHint: 'off',
+    // The SQLCipher native module failed to load. FAIL CLOSED (pre-release review 2026-09-25): this used to
+    // boot plaintext under the operator's encrypted selection with only a dismissible notice — and wrote an
+    // 'off' hint, erasing the encrypted choice from the locked-error gate; left an ephemeral node's plaintext
+    // DB to survive restarts; and let "start fresh" on an unreadable encrypted DB create a plaintext one.
+    // Now EVERY encrypted selection locks with a dedicated recovery code. Plaintext happens only after the
+    // operator explicitly switches the mode to Off (a new `off` resolution on the unlock retry).
+    //
+    // The hint records the REAL encrypted selection (never 'off' from this branch), so a later transient
+    // key-request failure also locks. Ephemeral: whatever DB an earlier launch left is unreadable by
+    // definition (its RAM key is gone), so delete it here too — "nothing survives a reboot" holds even while
+    // locked, including a plaintext DB left by an older build's silent downgrade.
+    var lockedCfg = {
+      outcome: 'locked',
+      env: {},
+      writeHint: mode,
       bootError: {
         message:
-          "Encrypted storage needs the SQLCipher native module, which isn't in this build yet — starting UNENCRYPTED.",
-        code: 'db_encryption_unavailable',
+          'Encryption mode "' +
+          mode +
+          '" is selected, but the encrypted-storage (SQLCipher) module failed to load on this device — ' +
+          'refusing to start unencrypted. Retry, or switch encryption off to start WITHOUT encryption.',
+        code: DB_ENCRYPTION_DRIVER_MISSING_CODE,
       },
     };
+    if (mode === 'ephemeral') {
+      lockedCfg.deleteStaleEphemeralDb = true;
+    } else {
+      lockedCfg.clearEphemeralMarker = true;
+    }
+    return lockedCfg;
   }
 
   if (mode === 'ephemeral') {
@@ -180,6 +200,7 @@ function applyBootEnvTo(env, values) {
 
 module.exports = {
   DB_KEY_LOCKED_ERROR: DB_KEY_LOCKED_ERROR,
+  DB_ENCRYPTION_DRIVER_MISSING_CODE: DB_ENCRYPTION_DRIVER_MISSING_CODE,
   ENV_KEYS: ENV_KEYS,
   computeDbBootEnv: computeDbBootEnv,
   applyBootEnvTo: applyBootEnvTo,

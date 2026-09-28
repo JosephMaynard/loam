@@ -70,7 +70,8 @@ export function createKillSwitch(ctx: AppContext) {
       ctx.claimAttempts.clear();
       ctx.panicAttempts.clear();
       ctx.transportSessions.clear();
-      ctx.sync.peerTransportSessions.clear();
+      ctx.sync.forgetPeerState();
+      ctx.mesh.forget();
       ctx.broadcast({ type: "wipe" });
       for (const { socket } of ctx.sockets) {
         socket.close();
@@ -123,7 +124,8 @@ export function createKillSwitch(ctx: AppContext) {
         ctx.claimAttempts.clear();
         ctx.panicAttempts.clear();
         ctx.transportSessions.clear();
-        ctx.sync.peerTransportSessions.clear();
+        ctx.sync.forgetPeerState();
+        ctx.mesh.forget();
 
         // Notify still-connected clients to purge their local caches BEFORE closing their sockets —
         // closing first would leave the broadcast with no one left to reach.
@@ -301,6 +303,16 @@ export function createKillSwitch(ctx: AppContext) {
             "down (503); restart it to retry the wipe.",
         );
       }
+      // A preserve-recovery snapshot (`.loam-recovery-*`) holds an older DB set + plaintext media moved aside
+      // by a start-fresh — outside the live DB, so the delete above never touches it. Same fail-closed rule.
+      const snapshots = ctx.lifecycle.deleteAndVerifyRecoverySnapshots();
+      if (!snapshots.ok) {
+        const remaining = [...snapshots.survivors, ...snapshots.errors].join(", ");
+        return lockDownAndReportIncomplete(
+          `KILL SWITCH NOTICE: could not delete and VERIFY every recovery snapshot gone (${remaining}) — refusing ` +
+            "to reopen while recoverable data may remain. The node is locked down (503); restart it to retry the wipe.",
+        );
+      }
       if (ctx.lifecycle.ephemeralDbKey) {
         // Drop the old key by overwriting the reference; a fresh random key encrypts the new DB.
         // (Node strings can't be reliably zeroed in RAM — documented as a known limitation.)
@@ -337,6 +349,17 @@ export function createKillSwitch(ctx: AppContext) {
           );
         }
       }
+      // Preserve-recovery snapshots (`.loam-recovery-*`: an older DB set + plaintext media moved aside by a
+      // start-fresh) and their anchor must go too — best-effort like the rest of this logical wipe, but loud.
+      const snapshots = ctx.lifecycle.deleteAndVerifyRecoverySnapshots();
+      if (!snapshots.ok) {
+        ctx.server.log.warn(
+          `KILL SWITCH NOTICE: a recovery snapshot could not be deleted during the logical wipe (${[
+            ...snapshots.survivors,
+            ...snapshots.errors,
+          ].join(", ")}) — remove it manually.`,
+        );
+      }
     }
 
     await rm(ctx.avatarsDir, { recursive: true, force: true });
@@ -368,8 +391,9 @@ export function createKillSwitch(ctx: AppContext) {
     // captured session key survives the wipe (docs/08). loadData reloaded whatever was persisted
     // (the old key on an unencrypted wipe), so rotate explicitly to guarantee a fresh one on both paths.
     ctx.rotateTransportIdentity();
-    // Drop cached puller-side sessions to peers too — RAM hygiene during an emergency wipe (docs/08).
-    ctx.sync.peerTransportSessions.clear();
+    // Drop cached puller-side sessions to peers, and the per-peer refusal/downgrade memory (it names message
+    // ids) — RAM hygiene during an emergency wipe (docs/08).
+    ctx.sync.forgetPeerState();
 
     if (ctx.effectiveAdminBootstrap() === "setupCode") {
       ctx.adminSetupCode = makeAdminSetupCode();

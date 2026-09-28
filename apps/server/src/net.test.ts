@@ -4,7 +4,7 @@ vi.mock("node:os", () => ({ networkInterfaces: vi.fn() }));
 
 import { networkInterfaces } from "node:os";
 
-import { resolveLanIPv4 } from "./net.js";
+import { isLoopbackPeer, localInterfaceAddresses, remoteClientAddresses, resolveLanIPv4 } from "./net.js";
 
 type Iface = { address: string; family: "IPv4" | "IPv6"; internal: boolean };
 
@@ -63,5 +63,42 @@ describe("resolveLanIPv4 (F3)", () => {
       eth0: [ipv4("203.0.113.9")],
     });
     expect(resolveLanIPv4()).toBe("203.0.113.9");
+  });
+});
+
+describe("remoteClientAddresses (Android host: who is connected from off the phone)", () => {
+  it("drops the host's own loopback sockets in every spelling", () => {
+    expect(remoteClientAddresses(["127.0.0.1", "::1", "::ffff:127.0.0.1", "127.9.9.9"])).toEqual([]);
+  });
+
+  it("unmaps IPv4-mapped peers, de-duplicates and sorts", () => {
+    expect(remoteClientAddresses(["::ffff:10.80.217.5", "10.80.217.5", "10.80.217.12", undefined, ""])).toEqual([
+      "10.80.217.12",
+      "10.80.217.5",
+    ]);
+  });
+
+  it("keeps a plain IPv6 peer as-is", () => {
+    expect(remoteClientAddresses(["fe80::1"])).toEqual(["fe80::1"]);
+    expect(isLoopbackPeer("fe80::1")).toBe(false);
+  });
+
+  it("drops the host's own interface addresses (a browser on the host phone opening the hotspot URL)", () => {
+    expect(
+      remoteClientAddresses(["10.80.217.150", "::ffff:10.80.217.150", "10.80.217.5"], ["10.80.217.150", "192.168.86.23"]),
+    ).toEqual(["10.80.217.5"]);
+  });
+
+  it("localInterfaceAddresses lists every local address, unmapped, loopback included", () => {
+    mockInterfaces({
+      lo: [ipv4("127.0.0.1", true)],
+      swlan0: [ipv4("10.80.217.150")],
+      wlan0: [{ address: "::ffff:192.168.86.23", family: "IPv6", internal: false }],
+    });
+    expect([...localInterfaceAddresses()].sort()).toEqual(["10.80.217.150", "127.0.0.1", "192.168.86.23"]);
+    vi.mocked(networkInterfaces).mockImplementation(() => {
+      throw new Error("EPERM");
+    });
+    expect(localInterfaceAddresses()).toEqual(new Set());
   });
 });

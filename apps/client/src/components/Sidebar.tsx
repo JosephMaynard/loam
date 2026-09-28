@@ -18,12 +18,17 @@ interface SidebarProps {
   channels: Channel[];
   connection: "connecting" | "live" | "offline";
   currentUser: User;
+  /**
+   * What the invite QR may carry (see `inviteQrHostKey` in lib/transport): `key` is this client's own
+   * QR-verified host key (absent → the QR is the plain join URL); `suppressed` withholds the QR because the
+   * node's advertised key contradicts this client's pin. Never the unauthenticated advertised key.
+   */
+  inviteQr?: { key?: string; suppressed: boolean };
   joinUrl?: string;
   nodeName?: string;
   onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
   onlineUserIds: ReadonlySet<string>;
   showMesh: boolean;
-  transportPublicKey?: string;
   unreadByConversation: Map<string, number>;
   users: User[];
 }
@@ -45,20 +50,20 @@ export function Sidebar({
   channels,
   connection,
   currentUser,
+  inviteQr,
   joinUrl,
   nodeName,
   onCreateChannel,
   onlineUserIds,
   showMesh,
-  transportPublicKey,
   unreadByConversation,
   users,
 }: SidebarProps) {
   const peers = users.filter((user) => user.id !== currentUser.id);
   const showPeople = canModerate(currentUser) || canGreet(currentUser);
-  // Encode the host's transport public key into the invite QR (docs/08) so a scanner learns it
-  // out-of-band → MITM-resistant handshake; the displayed URL text (inside InviteControl) stays plain.
-  const inviteQrUrl = joinUrl ? joinQrUrl(joinUrl, transportPublicKey) : undefined;
+  // Encode this client's VERIFIED host key into the invite QR (docs/08) so a scanner learns it out-of-band
+  // → MITM-resistant handshake; the displayed URL text (inside InviteControl) stays plain.
+  const inviteQrUrl = joinUrl && !inviteQr?.suppressed ? joinQrUrl(joinUrl, inviteQr?.key) : undefined;
 
   return (
     <aside className="sidebar">
@@ -141,7 +146,9 @@ export function Sidebar({
           <span className="nav-glyph">⌕</span>
           {t("sidebar.searchMessages")}
         </NavLink>
-        {canGreet(currentUser) ? <InviteControl joinUrl={joinUrl} qrUrl={inviteQrUrl} /> : null}
+        {canGreet(currentUser) ? (
+          <InviteControl joinUrl={joinUrl} qrSuppressed={!!inviteQr?.suppressed} qrUrl={inviteQrUrl} />
+        ) : null}
         {showPeople ? (
           <NavLink active={false} href="/people">
             <span className="nav-glyph">☺</span>

@@ -19,6 +19,9 @@ export type SocketClient = {
 export type SocketSession = {
   socket: SocketClient;
   userId: string;
+  /** The socket peer's IP as Fastify saw it (`request.ip`; `trustProxy` is off, so never a forwarded header).
+   * Lets the Android launcher ask how many devices are connected from OFF the host (`GET /api/host/clients`). */
+  remoteAddress?: string;
   /** Transport session key (docs/08) when the client connected `/ws?enc=<sid>`; outbound frames are
    * then XChaCha20-Poly1305-sealed. Undefined = plaintext frames (transport off / no session). */
   transportKey?: string;
@@ -205,10 +208,20 @@ export type AppOptions = {
    * `effectiveAdminBootstrap` — so admin is claimable ONLY by presenting this token, never by being the
    * first LAN session; and (2) is REQUIRED (header `x-loam-host-token`) on the loopback mesh bridge
    * routes, since on Android loopback is reachable by every installed app, not just the launcher.
-   * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged.
+   * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged — and
+   * without it the mesh bridge does not exist at all (review 2026-09-25).
    */
   hostToken?: string;
+  /**
+   * Request Developer Mode (plaintext transport + verbose logs) directly instead of via `LOAM_DEV_MODE`.
+   * Still REFUSED when `NODE_ENV=production`, exactly like the env var, and still self-announcing
+   * (`networkConfig.devMode`). Neither the CLI nor the Android host passes it; it exists so tests can
+   * exercise the plaintext path now that `off` is not a configurable posture.
+   */
+  devMode?: boolean;
   logger?: boolean;
+  /** Where server logs go (default stdout). Tests pass a capturing sink to assert what is (not) logged. */
+  logStream?: { write(line: string): void };
 };
 
 export type LoamApp = {
@@ -235,6 +248,8 @@ export type LoamApp = {
   pruneExpiredRateLimiters(): void;
   /** Test/introspection hook: current entry counts of the per-IP rate-limit maps. */
   rateLimiterEntryCounts(): { claim: number; panic: number; identity: number };
+  /** Test/introspection hook: the admitted WebSocket sessions (what `GET /api/host/clients` counts). */
+  sockets: Set<SocketSession>;
   /** The host's static transport public key (docs/08) for building a keyed `#k=` join QR, or
    * `undefined` when the effective transport-encryption posture is `off` (Developer Mode). Lets
    * embedding hosts (the `loamnet` CLI, the Android launcher) print a MITM-resistant join QR

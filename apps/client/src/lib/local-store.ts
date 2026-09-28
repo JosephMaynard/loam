@@ -214,3 +214,24 @@ export async function destroyDatabase(): Promise<void> {
   // Only reached when deleteDatabase actually RESOLVED — the DB is gone, so the wipe is no longer pending.
   clearWipePending();
 }
+
+/**
+ * Empty every object store while leaving the database itself usable (no wipe latch). Used when the
+ * server-confirmed identity changed underneath this browser (pre-release review 2026-09-25): the cached
+ * channels/DMs/users/read markers belonged to the previous identity and must not be shown to — or merged
+ * into — the new one, but unlike a wipe the app carries straight on with the new identity.
+ */
+export async function clearAllRecords(): Promise<void> {
+  if (!hasIndexedDb() || wiped) {
+    return;
+  }
+
+  const database = await openDatabase();
+  const transaction = database.transaction(STORE_NAMES, "readwrite");
+
+  for (const storeName of STORE_NAMES) {
+    transaction.objectStore(storeName).clear();
+  }
+
+  await transactionDone(transaction);
+}

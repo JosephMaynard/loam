@@ -5,7 +5,7 @@
 // changes (the type-checker will tell you).
 import type { TransportIdentity } from "@loam/crypto";
 import type { AdminBootstrapStrategy, AvatarImageMimeType, Channel, ChannelCreateRequest, ChannelUpdateRequest, LoamConfig, LoamConfigUpdate, Message, MessageCreateRequest, NetworkConfig, StreamEvent, TransportEncryption, User, UserUpdateRequest } from "@loam/schema";
-import type { LoamStore } from "./db.js";
+import type { LoamStore, StoreQuarantine } from "./db.js";
 import type { KillSwitchResult } from "./kill-switch.js";
 import { createLlmLayer } from "./llm.js";
 import type { MeshLayer } from "./mesh.js";
@@ -72,6 +72,8 @@ export type AppContext = {
   adminSetupCode: string | undefined;
   data: AppData;
   store: LoamStore;
+  /** Ids of stored rows that no longer validate and couldn't be repaired (live: `store.quarantine()`). */
+  readonly quarantine: StoreQuarantine;
   currentJoinHost(): string;
   isInternalTunnelRequest(request: FastifyRequest): boolean;
   tunnelBoundUserId(request: FastifyRequest): string | undefined;
@@ -83,6 +85,7 @@ export type AppContext = {
   loadAppConfig(): Promise<void>;
   anyAdminExists(): boolean;
   consumeIdentityBudget(ip: string): boolean;
+  mintSessionUserId(): string;
   getSessionUserId(request: FastifyRequest, reply: FastifyReply): string;
   getSessionUserIdFromRequest(request: FastifyRequest): string | undefined;
   ensureUser(id: string, isAdmin?: boolean, pending?: boolean): User;
@@ -96,11 +99,13 @@ export type AppContext = {
   wsTransportSession(url: string): TransportSession | undefined;
   requiresTransportSession(request: FastifyRequest): boolean;
   applyUserUpdate(user: User, update: UserUpdateRequest): User;
+  clientAvatarUpdateError(user: User, avatar: UserUpdateRequest["avatar"]): string | undefined;
   canModerate(user: User): boolean;
   canGreet(user: User): boolean;
   isLocallyAuthoritative(userId: string): boolean;
   participationError(user: User): string | undefined;
   timeoutError(user: User): string | undefined;
+  dmBlockError(senderId: string, recipientId: string): string | undefined;
   applyUserModeration(
   user: User,
   changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending" | "timeoutUntil">>,

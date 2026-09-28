@@ -1,9 +1,11 @@
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import {
   ChannelSchema,
+  IdSchema,
+  LLM_MODEL_MAX_LENGTH,
   MessageSchema,
   ReportSchema,
   UserSchema,
@@ -13,6 +15,45 @@ import {
   type Report,
   type User,
 } from "@loam/schema";
+
+/**
+ * Ids of stored rows that no longer validate and could not be safely repaired (see `LoamStore.loadUsers`).
+ * They stay on disk untouched and are not loaded; while quarantined, no path may create or overwrite a
+ * row under one of these ids — a peer's public channel, a seeded default or a fresh local channel taking a
+ * quarantined private channel's id would otherwise inherit (and expose) its retained messages.
+ */
+export type StoreQuarantine = {
+  readonly users: ReadonlySet<string>;
+  readonly channels: ReadonlySet<string>;
+  readonly messages: ReadonlySet<string>;
+};
+
+/** What one table load did with rows that no longer validate as stored. */
+export type StoredRowReport = {
+  /** Rows loaded after a safe in-memory repair (the row on disk is unchanged). */
+  repaired: number;
+  /** Rows not loaded (quarantined), including `dependent` ones. */
+  quarantined: number;
+  /** Of `quarantined`: valid messages held back because their channel, parent or target is quarantined. */
+  dependent: number;
+};
+
+/** A quarantined message row's routing columns (see `LoamStore.loadQuarantinedMessageRows`). */
+export type QuarantinedMessageRow = {
+  id: string;
+  channelId: string | null;
+  parentId: string | null;
+  createdAt: number;
+};
+
+/** Thrown by a store write that would create or overwrite a quarantined row (see `StoreQuarantine`). */
+export class QuarantinedRowError extends Error {
+  constructor(table: keyof StoreQuarantine, id: string) {
+    // A legacy id can be arbitrarily long (that is often why it's quarantined): name only its prefix.
+    super(`Refusing to write ${table} row "${id.slice(0, 64)}": a stored row with that id is quarantined`);
+    this.name = "QuarantinedRowError";
+  }
+}
 
 export type SessionRecord = {
   token: string;
@@ -144,9 +185,31 @@ function openConnection(path: string, options: OpenStoreOptions): SqliteConnecti
  * the same surface without touching the server (see docs/01-sqlite-migration.md).
  */
 export interface LoamStore {
-  loadUsers(): User[];
-  loadChannels(): Channel[];
-  loadMessages(): Message[];
+  /**
+   * Load every stored row of a table. A row that no longer validates (e.g. one written by an older
+   * release before an id/length bound existed) doesn't fail the boot. When a provably safe repair exists
+   * (see `parseStoredChannel`/`parseStoredUser`/`parseStoredMessage`) the repaired record is loaded and
+   * the row on disk is left as it was. Otherwise the row is QUARANTINED: not loaded, left on disk
+   * untouched, and its id held in {@link quarantine} so nothing can claim that id (see
+   * {@link QuarantinedRowError}). `loadMessages` also quarantines every message under a quarantined
+   * channel, and every reply/reaction under a quarantined message. Non-zero counts go to `onReport`.
+   */
+  loadUsers(onReport?: (report: StoredRowReport) => void): User[];
+  loadChannels(onReport?: (report: StoredRowReport) => void): Channel[];
+  loadMessages(onReport?: (report: StoredRowReport) => void): Message[];
+  /**
+   * The ids of the quarantined user, channel and message rows, as of the last load of each table (live
+   * sets, rebuilt by every load; emptied by `wipeAll`). Writes that would create or overwrite one of these
+   * rows (`upsertUser`, `upsertChannel`, `insertMessage`, `updateMessage`) throw `QuarantinedRowError`.
+   */
+  quarantine(): StoreQuarantine;
+  /**
+   * The routing columns of every quarantined message row still on disk, for the retention reaper (a
+   * quarantined row is never loaded, so the in-memory sweep can't see it): `parentId` is a reaction's target
+   * or — read leniently from the stored JSON — a reply's parent. Deleting one with `deleteMessage` releases
+   * its id from the quarantine.
+   */
+  loadQuarantinedMessageRows(): QuarantinedMessageRow[];
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
   /** Delete a single user row by id. Used for the legacy demo-user cleanup (`user.1234`/`user.5678`);
@@ -185,6 +248,8 @@ export interface LoamStore {
    * private material; wiped with everything else by the kill switch.
    */
   upsertMeshIdentity(userId: string, data: string): void;
+  /** Delete a user's mesh keypair record (secret keys included). A no-op when there is none. */
+  deleteMeshIdentity(userId: string): void;
   loadMeshIdentities(): { userId: string; data: string }[];
   /**
    * Store (or replace) one entry in a local user's mesh address book (docs/16): the owner's user id,
@@ -223,10 +288,15 @@ export interface LoamStore {
    * the same call both files a new report and persists a resolution (status flips open → resolved).
    */
   upsertReport(report: Report): void;
-  /** A single report by id (for the resolve flow), or undefined. */
+  /** A single report by id (for the resolve flow), or undefined — also for a row that no longer validates. */
   getReport(id: string): Report | undefined;
-  /** All still-open reports, newest first — the moderator queue. */
-  loadOpenReports(): Report[];
+  /**
+   * All still-open reports, newest first — the moderator queue. A row that no longer validates (e.g. a v0.4
+   * report naming a peer message id past `ID_MAX_LENGTH`) is skipped and left on disk, like the quarantined
+   * rows of `loadUsers`; the count goes to `onReport`. Reports have no quarantine set: their ids are minted
+   * here (`rpt_<16 hex>`), so no other path can claim one.
+   */
+  loadOpenReports(onReport?: (report: StoredRowReport) => void): Report[];
   /**
    * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
    * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
@@ -263,6 +333,37 @@ export interface LoamStore {
   loadJoinRequests(channelId: string): string[];
   removeJoinRequest(channelId: string, userId: string): void;
   removeJoinRequestsForChannel(channelId: string): void;
+  /**
+   * Per-user block lists (Play UGC policy — docs/30 B3). A row means `blockerId` has blocked `blockedId`:
+   * the server refuses DMs (and DM reactions) between the two, and the blocker's client hides the blocked
+   * user's channel content. Private to the blocker — never broadcast, never exported by sync. Idempotent
+   * add/remove; rows for a user go when that user is deleted (`deleteUser`); wiped by the kill switch.
+   */
+  addUserBlock(blockerId: string, blockedId: string): void;
+  removeUserBlock(blockerId: string, blockedId: string): void;
+  /** The ids `blockerId` has blocked, oldest block first. */
+  loadUserBlocks(blockerId: string): string[];
+  isUserBlocked(blockerId: string, blockedId: string): boolean;
+  /**
+   * Durable memory of sealed mesh offers this node already fetched or received, whatever became of them
+   * (delivered, carried or dropped — docs/16 §9). Keyed by offer id ONLY: the sync puller skips a remembered
+   * id on EVERY digest list until `expiresAt`, which the caller derives from when the offer was taken in
+   * (never from the offer's advertised TTL, which a peer can rewrite), set so the record outlives any
+   * tombstone the offer could have produced. A repeat mark never extends a live row (like a tombstone, it
+   * keeps its first stamp) and only re-arms one already past its expiry. `source` (the sync peer URL, or the
+   * radio bridge) feeds the per-source quota. Wiped by the kill switch; expired rows are pruned by the reaper.
+   */
+  markSealedOfferSeen(offerId: string, expiresAt: number, source: string, nowMs: number, replayKey?: string): void;
+  isSealedOfferSeen(offerId: string, nowMs: number): boolean;
+  /**
+   * True when a live mark records `replayKey` (the offer's `sealed.<sha256>` replay key, set by the mark made
+   * when its body was taken in): the same mail was taken in before under SOME id. A repeat mark of a live row
+   * only fills a missing replay key; like the rest of the row it is re-armed only once the row has lapsed.
+   */
+  isSealedReplaySeen(replayKey: string, nowMs: number): boolean;
+  pruneSealedOffersSeen(nowMs: number): void;
+  /** Live (unexpired) rows — all of them, or only those taken in from `source`. */
+  countSealedOffersSeen(nowMs?: number, source?: string): number;
   /** Run `fn` inside a single transaction; rolls back if it throws. */
   transaction<T>(fn: () => T): T;
   /** True when no users, channels, messages, or sessions exist (config is ignored). */
@@ -315,6 +416,142 @@ function messageColumns(message: Message): [string, string, string | null, strin
   ];
 }
 
+/** A stored row as the loader parsed it: the record, and whether it needed an in-memory repair. */
+type ParsedRow<T> = { value: T; repaired: boolean };
+
+/**
+ * Parse a stored user row. Rows written before avatar image ids were constrained to `avt_<16 hex>` may
+ * carry an avatar naming some other path (the pre-fix `PATCH /api/users/me` hole); rather than drop the
+ * whole user, the unusable avatar is dropped (the user falls back to a generated one). Any other invalid
+ * row yields `undefined` (the loader quarantines it).
+ */
+function parseStoredUser(raw: unknown): ParsedRow<User> | undefined {
+  const parsed = UserSchema.safeParse(raw);
+
+  if (parsed.success) {
+    return { value: parsed.data, repaired: false };
+  }
+
+  const record = raw as { avatar?: { imageId?: unknown } } | null;
+
+  if (record && typeof record === "object" && record.avatar && typeof record.avatar === "object" && "imageId" in record.avatar) {
+    const { avatar: _unusable, ...rest } = record as Record<string, unknown>;
+    void _unusable;
+    const repaired = UserSchema.safeParse(rest);
+    return repaired.success ? { value: repaired.data, repaired: true } : undefined;
+  }
+
+  return undefined;
+}
+
+/**
+ * Parse a stored channel row. A roster written before `ID_MAX_LENGTH` existed can name a member id past
+ * it; no such id can be a local user (session ids are `user.<hex>`, far shorter), so the entry came from
+ * outside and names no one who can sign in here. Dropping it only narrows the roster, and the channel keeps
+ * its visibility and every other field, so a private channel stays private. Any other invalid row (an
+ * over-long channel id or owner id, unparseable JSON…) yields `undefined` (the loader quarantines it).
+ */
+function parseStoredChannel(raw: unknown): ParsedRow<Channel> | undefined {
+  const parsed = ChannelSchema.safeParse(raw);
+
+  if (parsed.success) {
+    return { value: parsed.data, repaired: false };
+  }
+
+  const record = raw as { memberUserIds?: unknown } | null;
+
+  if (record && typeof record === "object" && Array.isArray(record.memberUserIds)) {
+    const members = record.memberUserIds as unknown[];
+    const kept = members.filter((id) => IdSchema.safeParse(id).success);
+
+    if (kept.length !== members.length) {
+      const repaired = ChannelSchema.safeParse({ ...record, memberUserIds: kept });
+      return repaired.success ? { value: repaired.data, repaired: true } : undefined;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Parse a stored message row. An assistant message written before `meta.model` was bounded can carry a
+ * longer (cosmetic) model label; that label is truncated rather than the whole message dropped. Any other
+ * invalid row yields `undefined` (the loader quarantines it).
+ */
+function parseStoredMessage(raw: unknown): ParsedRow<Message> | undefined {
+  const parsed = MessageSchema.safeParse(raw);
+
+  if (parsed.success) {
+    return { value: parsed.data, repaired: false };
+  }
+
+  const record = raw as { meta?: { model?: unknown } } | null;
+
+  if (record && typeof record === "object" && record.meta && typeof record.meta === "object") {
+    const model = record.meta.model;
+
+    if (typeof model === "string" && model.length > LLM_MODEL_MAX_LENGTH) {
+      const repaired = MessageSchema.safeParse({ ...record, meta: { ...record.meta, model: model.slice(0, LLM_MODEL_MAX_LENGTH) } });
+      return repaired.success ? { value: repaired.data, repaired: true } : undefined;
+    }
+  }
+
+  return undefined;
+}
+
+/** Parse a stored report row. No repair exists: an invalid row yields `undefined` (the loader skips it). */
+function parseStoredReport(raw: unknown): ParsedRow<Report> | undefined {
+  const parsed = ReportSchema.safeParse(raw);
+  return parsed.success ? { value: parsed.data, repaired: false } : undefined;
+}
+
+/**
+ * Parse every stored row (`SELECT id, data …`) with `parse`. A row that is unparseable JSON or still fails
+ * its schema after `parse`'s safe repairs (written by an older release before a bound such as
+ * `ID_MAX_LENGTH` existed) doesn't throw — one legacy row must not stop an upgraded node from booting — but
+ * is QUARANTINED: left on disk, not loaded, and its id (from the `id` column, readable even when the JSON
+ * isn't) added to `quarantine`, which is rebuilt from scratch here. A row whose id column isn't a string is
+ * skipped on its own.
+ */
+function scanStoredRows<T>(
+  rows: readonly SqliteRow[],
+  parse: (raw: unknown) => ParsedRow<T> | undefined,
+  quarantine: Set<string>,
+): { loaded: T[]; report: StoredRowReport } {
+  const loaded: T[] = [];
+  const report: StoredRowReport = { repaired: 0, quarantined: 0, dependent: 0 };
+  quarantine.clear();
+
+  for (const row of rows) {
+    let parsed: ParsedRow<T> | undefined;
+
+    try {
+      parsed = parse(JSON.parse(row.data as string));
+    } catch {
+      parsed = undefined;
+    }
+
+    if (parsed === undefined) {
+      report.quarantined += 1;
+      if (typeof row.id === "string") {
+        quarantine.add(row.id);
+      }
+    } else {
+      report.repaired += parsed.repaired ? 1 : 0;
+      loaded.push(parsed.value);
+    }
+  }
+
+  return { loaded, report };
+}
+
+/** Hand a load's report to the caller when anything was repaired or quarantined. */
+function reportStoredRows(report: StoredRowReport, onReport?: (report: StoredRowReport) => void): void {
+  if (report.repaired > 0 || report.quarantined > 0) {
+    onReport?.(report);
+  }
+}
+
 /**
  * Open (creating if necessary) the SQLite-backed LOAM store.
  *
@@ -329,11 +566,91 @@ export function openStore(path: string, options: OpenStoreOptions = {}): LoamSto
     // Only an encrypted (SQLCipher) connection exposes `.pragma()` — threaded through separately so
     // `buildStore` can implement `rekey()` (P1-1, Sol round 5) without needing to know the driver.
     const pragma = options.encryptionKey ? (db as EncryptedDatabase).pragma.bind(db as EncryptedDatabase) : undefined;
-    return buildStore(db, pragma);
+    const store = buildStore(db, pragma);
+    if (pragma) {
+      // Prove the codec engaged (pre-release review 2026-09-25): a build of the driver without the cipher
+      // compiled in accepts `PRAGMA key` as a silent no-op and writes an ordinary plaintext database. Fold
+      // the schema writes from the WAL into the main file, then refuse the store if that file starts with
+      // the plaintext SQLite header. A real SQLCipher file is ciphertext from byte 0.
+      pragma("wal_checkpoint(PASSIVE)");
+      assertNotPlaintextSqliteFile(path);
+    }
+    return store;
   } catch (error) {
     // A wrong encryption key surfaces here (the first pragma/DDL fails); don't leak the handle.
     db.close();
     throw error;
+  }
+}
+
+/** The 16-byte header every PLAINTEXT SQLite database file starts with (sqlite.org/fileformat.html). */
+const PLAINTEXT_SQLITE_HEADER = Buffer.from("SQLite format 3\0", "latin1");
+
+/**
+ * Throw if the database file at `path` starts with the plaintext SQLite header — i.e. a store that was
+ * opened with an encryption key is not actually encrypted on disk. A missing or shorter-than-header file
+ * passes (nothing plaintext was written). Exported for tests; `openStore` runs it after every keyed open.
+ */
+export function assertNotPlaintextSqliteFile(path: string): void {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  try {
+    const header = Buffer.alloc(PLAINTEXT_SQLITE_HEADER.length);
+    const bytesRead = readSync(fd, header, 0, header.length, 0);
+    if (bytesRead === header.length && header.equals(PLAINTEXT_SQLITE_HEADER)) {
+      throw new Error(
+        "Refusing to use the database: it was opened with an encryption key but is PLAINTEXT on disk " +
+          "(the SQLCipher codec did not engage — check the better-sqlite3-multiple-ciphers build).",
+      );
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Whether the file at `path` exists and starts with the plaintext SQLite header. False for a missing,
+ * unreadable, or shorter-than-header file, and for SQLCipher ciphertext (random from byte 0).
+ */
+export function hasPlaintextSqliteHeader(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return false;
+  }
+  try {
+    const header = Buffer.alloc(PLAINTEXT_SQLITE_HEADER.length);
+    return readSync(fd, header, 0, header.length, 0) === header.length && header.equals(PLAINTEXT_SQLITE_HEADER);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Load the SQLCipher driver and open (then close) a throwaway in-memory database, the same check the
+ * Android launcher runs before an encrypted boot. `require` alone only loads the JS wrapper; the native
+ * addon is dlopen'd by the first `new Database()`, so a missing or wrong-ABI binary only shows up there.
+ *
+ * @returns undefined when the driver works, otherwise the load/open error
+ */
+export function probeEncryptedDriver(): Error | undefined {
+  try {
+    const requireNative = createRequire(import.meta.url);
+    const Database = requireNative("better-sqlite3-multiple-ciphers") as new (dbPath: string) => EncryptedDatabase;
+    new Database(":memory:").close();
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
   }
 }
 
@@ -383,6 +700,33 @@ function migrateMissingAttachmentsNextAttempt(db: SqliteConnection): void {
   if (!hasNextAttemptAt) {
     db.exec("ALTER TABLE missing_attachments ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0");
   }
+}
+
+/**
+ * The durable record of sealed mesh offers this node has already fetched or received (docs/16 §9): offer
+ * id → when the record lapses, plus the source it came from (for the per-source quota). Kept apart from the
+ * main schema block because it's owned by the mesh pull policy, not the core data model. `source` was added
+ * after the table first landed (pre-release), so an older table gains it here.
+ */
+function createSealedOffersSeenTable(db: SqliteConnection): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sealed_offers_seen (
+      offer_id TEXT PRIMARY KEY,
+      expires_at INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_sealed_offers_seen_expiry ON sealed_offers_seen (expires_at);
+  `);
+  const columns = db.prepare("PRAGMA table_info(sealed_offers_seen)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "source")) {
+    db.exec("ALTER TABLE sealed_offers_seen ADD COLUMN source TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sealed_offers_seen_source ON sealed_offers_seen (source, expires_at)");
+  // The replay key (docs/16 §9) came later still: an older row has none (NULL), which matches nothing.
+  if (!columns.some((column) => column.name === "replay_key")) {
+    db.exec("ALTER TABLE sealed_offers_seen ADD COLUMN replay_key TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sealed_offers_seen_replay ON sealed_offers_seen (replay_key)");
 }
 
 /**
@@ -477,10 +821,18 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       created_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (channel_id, user_id)
     );
+    CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_id TEXT NOT NULL,
+      blocked_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (blocker_id, blocked_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks (blocked_id);
   `);
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
   migrateMissingAttachmentsNextAttempt(db);
+  createSealedOffersSeenTable(db);
 
   const upsertUserStmt = db.prepare(
     "INSERT INTO users (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
@@ -499,6 +851,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
      WHERE id = ?`,
   );
   const deleteMessageStmt = db.prepare("DELETE FROM messages WHERE id = ?");
+  const quarantinedMessageRowStmt = db.prepare(
+    "SELECT id, channel_id, target_message_id, created_at, data FROM messages WHERE id = ?",
+  );
   const deleteUserStmt = db.prepare("DELETE FROM users WHERE id = ?");
   const putSessionStmt = db.prepare(
     "INSERT INTO sessions (token, user_id) VALUES (?, ?) ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id",
@@ -521,6 +876,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   const upsertMeshIdentityStmt = db.prepare(
     "INSERT INTO mesh_identities (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
   );
+  const deleteMeshIdentityStmt = db.prepare("DELETE FROM mesh_identities WHERE user_id = ?");
   const loadMeshIdentitiesStmt = db.prepare("SELECT user_id, data FROM mesh_identities");
   const upsertMeshContactStmt = db.prepare(
     `INSERT INTO mesh_contacts (owner_user_id, mesh_id, data) VALUES (?, ?, ?)
@@ -550,7 +906,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   );
   const getReportStmt = db.prepare("SELECT data FROM reports WHERE id = ?");
   const loadOpenReportsStmt = db.prepare(
-    "SELECT data FROM reports WHERE status = 'open' ORDER BY created_at DESC, rowid DESC",
+    "SELECT id, data FROM reports WHERE status = 'open' ORDER BY created_at DESC, rowid DESC",
   );
   const markChannelSyncedStmt = db.prepare(
     "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
@@ -576,6 +932,34 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     "DELETE FROM channel_join_requests WHERE channel_id = ? AND user_id = ?",
   );
   const removeJoinRequestsForChannelStmt = db.prepare("DELETE FROM channel_join_requests WHERE channel_id = ?");
+  const addUserBlockStmt = db.prepare(
+    "INSERT INTO user_blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?) ON CONFLICT(blocker_id, blocked_id) DO NOTHING",
+  );
+  const removeUserBlockStmt = db.prepare("DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?");
+  const loadUserBlocksStmt = db.prepare(
+    "SELECT blocked_id FROM user_blocks WHERE blocker_id = ? ORDER BY created_at ASC, rowid ASC",
+  );
+  const isUserBlockedStmt = db.prepare("SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?");
+  const deleteUserBlocksForUserStmt = db.prepare("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?");
+  // A live row keeps its first stamp (as `addTombstone` does) and only gains a replay key it lacked; a lapsed
+  // row is re-armed whole. (Every right-hand side of an UPDATE reads the row's OLD values.)
+  const markSealedOfferSeenStmt = db.prepare(
+    `INSERT INTO sealed_offers_seen (offer_id, expires_at, source, replay_key) VALUES (?, ?, ?, ?)
+     ON CONFLICT(offer_id) DO UPDATE SET
+       expires_at = CASE WHEN sealed_offers_seen.expires_at <= ? THEN excluded.expires_at ELSE sealed_offers_seen.expires_at END,
+       source = CASE WHEN sealed_offers_seen.expires_at <= ? THEN excluded.source ELSE sealed_offers_seen.source END,
+       replay_key = CASE WHEN sealed_offers_seen.expires_at <= ? THEN excluded.replay_key
+                         ELSE COALESCE(sealed_offers_seen.replay_key, excluded.replay_key) END`,
+  );
+  const isSealedOfferSeenStmt = db.prepare("SELECT 1 FROM sealed_offers_seen WHERE offer_id = ? AND expires_at > ?");
+  const isSealedReplaySeenStmt = db.prepare(
+    "SELECT 1 FROM sealed_offers_seen WHERE replay_key = ? AND expires_at > ? LIMIT 1",
+  );
+  const pruneSealedOffersSeenStmt = db.prepare("DELETE FROM sealed_offers_seen WHERE expires_at <= ?");
+  const countSealedOffersSeenStmt = db.prepare("SELECT COUNT(*) AS total FROM sealed_offers_seen WHERE expires_at > ?");
+  const countSealedOffersSeenBySourceStmt = db.prepare(
+    "SELECT COUNT(*) AS total FROM sealed_offers_seen WHERE source = ? AND expires_at > ?",
+  );
   const countStmt = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users)
           + (SELECT COUNT(*) FROM channels)
@@ -583,24 +967,119 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
           + (SELECT COUNT(*) FROM sessions) AS total`,
   );
 
+  // Ids of stored rows the loaders quarantined (see `LoamStore.quarantine`). Rebuilt by each table's load,
+  // emptied by `wipeAll`; a reopened store (the encrypted kill switch) starts empty.
+  const quarantinedUsers = new Set<string>();
+  const quarantinedChannels = new Set<string>();
+  const quarantinedMessages = new Set<string>();
+  const quarantine: StoreQuarantine = {
+    users: quarantinedUsers,
+    channels: quarantinedChannels,
+    messages: quarantinedMessages,
+  };
+
+  /** Fail closed: no write may create or overwrite a quarantined row, whichever path it comes from. */
+  function refuseQuarantined(table: keyof StoreQuarantine, id: string): void {
+    if (quarantine[table].has(id)) {
+      throw new QuarantinedRowError(table, id);
+    }
+  }
+
+  /** Load the channel table, rebuilding the channel quarantine. */
+  function scanChannels() {
+    return scanStoredRows(
+      db.prepare("SELECT id, data FROM channels ORDER BY rowid").all(),
+      parseStoredChannel,
+      quarantinedChannels,
+    );
+  }
+
+  /** Whether a (valid) message hangs off a quarantined record: its channel, reply parent or reaction target.
+   *  Loading it would expose it under whatever later claims that channel's audience, or orphan it. */
+  function dependsOnQuarantined(message: Message): boolean {
+    return (
+      ("channelId" in message && quarantinedChannels.has(message.channelId)) ||
+      (message.type === "channelReply" && quarantinedMessages.has(message.parentMessageId)) ||
+      (message.type === "reaction" && quarantinedMessages.has(message.targetMessageId))
+    );
+  }
+
   const store: LoamStore = {
-    loadUsers() {
-      return db
-        .prepare("SELECT data FROM users ORDER BY rowid")
-        .all()
-        .map((row) => UserSchema.parse(JSON.parse(row.data as string)));
+    loadUsers(onReport) {
+      const { loaded, report } = scanStoredRows(
+        db.prepare("SELECT id, data FROM users ORDER BY rowid").all(),
+        parseStoredUser,
+        quarantinedUsers,
+      );
+      reportStoredRows(report, onReport);
+      return loaded;
     },
-    loadChannels() {
-      return db
-        .prepare("SELECT data FROM channels ORDER BY rowid")
-        .all()
-        .map((row) => ChannelSchema.parse(JSON.parse(row.data as string)));
+    loadChannels(onReport) {
+      const { loaded, report } = scanChannels();
+      reportStoredRows(report, onReport);
+      return loaded;
     },
-    loadMessages() {
-      return db
-        .prepare("SELECT data FROM messages ORDER BY created_at, rowid")
-        .all()
-        .map((row) => MessageSchema.parse(JSON.parse(row.data as string)));
+    loadMessages(onReport) {
+      // Re-scan the channels first (cheap — there are few) so the cascade below never depends on the
+      // caller having loaded them, then hold back every message under a quarantined channel and — to a
+      // fixed point — every reply/reaction under a quarantined message.
+      scanChannels();
+      const { loaded, report } = scanStoredRows(
+        db.prepare("SELECT id, data FROM messages ORDER BY created_at, rowid").all(),
+        parseStoredMessage,
+        quarantinedMessages,
+      );
+      let kept = loaded;
+      let changed = true;
+
+      while (changed) {
+        changed = false;
+        const next: Message[] = [];
+
+        for (const message of kept) {
+          if (dependsOnQuarantined(message)) {
+            quarantinedMessages.add(message.id);
+            report.quarantined += 1;
+            report.dependent += 1;
+            changed = true;
+          } else {
+            next.push(message);
+          }
+        }
+
+        kept = next;
+      }
+
+      reportStoredRows(report, onReport);
+      return kept;
+    },
+    quarantine() {
+      return quarantine;
+    },
+    loadQuarantinedMessageRows() {
+      const rows: QuarantinedMessageRow[] = [];
+      for (const id of quarantinedMessages) {
+        const row = quarantinedMessageRowStmt.get(id);
+        if (!row) {
+          continue;
+        }
+        let parentId = typeof row.target_message_id === "string" ? row.target_message_id : null;
+        if (parentId === null) {
+          try {
+            const data = JSON.parse(row.data as string) as { parentMessageId?: unknown } | null;
+            parentId = typeof data?.parentMessageId === "string" ? data.parentMessageId : null;
+          } catch {
+            // unparseable JSON: no parent to follow
+          }
+        }
+        rows.push({
+          id,
+          channelId: typeof row.channel_id === "string" ? row.channel_id : null,
+          parentId,
+          createdAt: Number(row.created_at),
+        });
+      }
+      return rows;
     },
     loadSessions() {
       return db
@@ -628,26 +1107,33 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       deleteIdentityTokensForUserStmt.run(userId);
     },
     upsertUser(user) {
+      refuseQuarantined("users", user.id);
       upsertUserStmt.run(user.id, JSON.stringify(user));
     },
     deleteUser(userId) {
       deleteUserStmt.run(userId);
+      deleteUserBlocksForUserStmt.run(userId, userId);
     },
     upsertChannel(channel) {
+      refuseQuarantined("channels", channel.id);
       upsertChannelStmt.run(channel.id, JSON.stringify(channel));
     },
     deleteChannel(channelId) {
       deleteChannelStmt.run(channelId);
     },
     insertMessage(message) {
+      refuseQuarantined("messages", message.id);
       insertMessageStmt.run(message.id, ...messageColumns(message), JSON.stringify(message));
     },
     updateMessage(message) {
+      refuseQuarantined("messages", message.id);
       updateMessageStmt.run(...messageColumns(message), JSON.stringify(message), message.id);
     },
     deleteMessage(messageId) {
       deleteMessageStmt.run(messageId);
       unmarkMessageSyncedStmt.run(messageId);
+      // The row is gone, so there is nothing left to protect: the id leaves the quarantine (callers tombstone it).
+      quarantinedMessages.delete(messageId);
     },
     putSession(token, userId) {
       putSessionStmt.run(token, userId);
@@ -678,6 +1164,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     upsertMeshIdentity(userId, data) {
       upsertMeshIdentityStmt.run(userId, data);
+    },
+    deleteMeshIdentity(userId) {
+      deleteMeshIdentityStmt.run(userId);
     },
     loadMeshIdentities() {
       return loadMeshIdentitiesStmt.all().map((row) => ({ userId: row.user_id as string, data: row.data as string }));
@@ -746,12 +1235,20 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     },
     getReport(id) {
       const row = getReportStmt.get(id) as { data: string } | undefined;
-      return row ? ReportSchema.parse(JSON.parse(row.data)) : undefined;
+      if (!row) {
+        return undefined;
+      }
+      try {
+        return parseStoredReport(JSON.parse(row.data))?.value;
+      } catch {
+        return undefined;
+      }
     },
-    loadOpenReports() {
-      return loadOpenReportsStmt
-        .all()
-        .map((row) => ReportSchema.parse(JSON.parse((row as { data: string }).data)));
+    loadOpenReports(onReport) {
+      // Nothing may claim a report id (see the interface note), so the scan's quarantine set is throwaway.
+      const { loaded, report } = scanStoredRows(loadOpenReportsStmt.all(), parseStoredReport, new Set());
+      reportStoredRows(report, onReport);
+      return loaded;
     },
     markChannelSynced(channelId) {
       markChannelSyncedStmt.run(channelId);
@@ -786,6 +1283,36 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     removeJoinRequestsForChannel(channelId) {
       removeJoinRequestsForChannelStmt.run(channelId);
     },
+    addUserBlock(blockerId, blockedId) {
+      addUserBlockStmt.run(blockerId, blockedId, Date.now());
+    },
+    removeUserBlock(blockerId, blockedId) {
+      removeUserBlockStmt.run(blockerId, blockedId);
+    },
+    loadUserBlocks(blockerId) {
+      return loadUserBlocksStmt.all(blockerId).map((row) => (row as { blocked_id: string }).blocked_id);
+    },
+    isUserBlocked(blockerId, blockedId) {
+      return isUserBlockedStmt.get(blockerId, blockedId) !== undefined;
+    },
+    markSealedOfferSeen(offerId, expiresAt, source, nowMs, replayKey) {
+      markSealedOfferSeenStmt.run(offerId, expiresAt, source, replayKey ?? null, nowMs, nowMs, nowMs);
+    },
+    isSealedOfferSeen(offerId, nowMs) {
+      return isSealedOfferSeenStmt.get(offerId, nowMs) !== undefined;
+    },
+    isSealedReplaySeen(replayKey, nowMs) {
+      return isSealedReplaySeenStmt.get(replayKey, nowMs) !== undefined;
+    },
+    pruneSealedOffersSeen(nowMs) {
+      pruneSealedOffersSeenStmt.run(nowMs);
+    },
+    countSealedOffersSeen(nowMs = 0, source) {
+      const row = (source === undefined
+        ? countSealedOffersSeenStmt.get(nowMs)
+        : countSealedOffersSeenBySourceStmt.get(source, nowMs)) as { total: number } | undefined;
+      return Number(row?.total ?? 0);
+    },
     wipeAll() {
       store.transaction(() => {
         db.exec("DELETE FROM messages");
@@ -802,7 +1329,13 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
         db.exec("DELETE FROM synced_messages");
         db.exec("DELETE FROM synced_users");
         db.exec("DELETE FROM channel_join_requests");
+        db.exec("DELETE FROM user_blocks");
+        db.exec("DELETE FROM sealed_offers_seen");
       });
+      // Quarantined rows are ordinary rows: the DELETEs above removed them, so nothing is held any more.
+      quarantinedUsers.clear();
+      quarantinedChannels.clear();
+      quarantinedMessages.clear();
     },
     checkpoint() {
       if (!pragma) {

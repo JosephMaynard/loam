@@ -2,7 +2,9 @@
 // declares `removeListener(event, cb)`, which DOES NOT EXIST at runtime: the channel extends React
 // Native's vendored EventEmitter (react-native/Libraries/vendor/emitter/EventEmitter), which has no
 // `removeListener` — you remove via `removeAllListeners(event)` or the subscription returned by
-// `addListener`. Calling the phantom `removeListener` threw "undefined is not a function" inside every
+// `addListener` (an EventSubscription with `remove()`, even though the upstream type says `void` — the
+// request/response round trips use it via src/lib/bridge-listener.ts so overlapping calls don't cancel
+// each other). Calling the phantom `removeListener` threw "undefined is not a function" inside every
 // bridge `onResult` handler, which crashed the AI-Model activate flow and the DB-encryption change flow
 // (and left encryption unpersisted, since the write's promise never resolved). Our code now calls the
 // real `removeAllListeners`; this augmentation makes that type-check. (The bogus upstream `removeListener`

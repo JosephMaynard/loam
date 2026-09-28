@@ -138,7 +138,9 @@ node with **no local users of its own** — a pure mule (a spare phone) that onl
   switch + ephemeral retention), and the *ciphertext* bag it carries (not readable). This is the same
   posture as any relay node — the mule is a carrier, not a confidant.
 - **Downgrade / MITM between courier and node:** covered by #84 — a `required` node refuses plaintext;
-  a pinned key gives active-MITM resistance; TOFU-over-`/api/config` gives passive protection only.
+  a pinned key gives active-MITM resistance; unauthenticated key discovery over `/api/bootstrap` gives
+  passive protection only, and an unpinned `optional` node's first contact with a peer can still be
+  pushed onto a tokenless plaintext pull of public data (docs/08 residual).
 - **Residual, honest:** traffic-analysis metadata (tags/sizes/timing) on carried mail; a hostile courier
   can delay/drop (DoS, not disclosure); no anonymity of *who couriers for whom*.
 
