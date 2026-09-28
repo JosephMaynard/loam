@@ -234,6 +234,8 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
   useEffect(() => {
     let active = true;
     setLoaded(false);
+    // A reload starts clean: a failure shown from the previous load must not survive a successful refresh.
+    setError(undefined);
     fetchJson<unknown>("/api/moderation/reports")
       .then((payload) => {
         if (!active) {

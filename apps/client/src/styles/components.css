@@ -534,8 +534,14 @@
   outline: none;
 }
 
-.menu-item:focus-visible {
+/* The inset ring on ANY focus, then removed for pointer focus where :focus-visible exists: a browser
+   without :focus-visible drops only the second rule, so keyboard users there still see the ring. */
+.menu-item:focus {
   box-shadow: inset 0 0 0 2px var(--focus);
+}
+
+.menu-item:focus:not(:focus-visible) {
+  box-shadow: none;
 }
 
 .menu-item:disabled {

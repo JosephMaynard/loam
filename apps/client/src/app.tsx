@@ -969,8 +969,19 @@ function LoamApp() {
     // the wrong origin (docs/20 round-5 H1). The tombstone is NOT lifted here: `session/end` is unsealed and
     // forgeable, so it's no security confirmation (round-5 H2) — the tombstone stays until a VERIFIED rejoin.
     if (scope === "device" && !opts.remote) {
-      await wipeServerCredentials(REQUEST_TIMEOUT_MS);
-      localStorage.removeItem(SERVER_URL_KEY);
+      // Both steps are best-effort and independent: the revocation can fail (node unreachable, deadline
+      // hit) and the wiped screen is already up, so neither a rejection nor a skipped URL removal may
+      // escape from here — the stored server URL is dropped whether or not the node answered.
+      try {
+        await wipeServerCredentials(REQUEST_TIMEOUT_MS);
+      } catch {
+        // The node didn't confirm the revocation; the local copy is gone regardless (docs/20).
+      }
+      try {
+        localStorage.removeItem(SERVER_URL_KEY);
+      } catch {
+        // Storage unavailable: nothing durable to clear.
+      }
     }
   }, []);
 
