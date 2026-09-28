@@ -12,6 +12,13 @@ const wsTarget = `ws://localhost:${apiPort}`;
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [preact()],
+  // The floor DESIGN.md promises ("Browser floor": Android WebView ≈ Chrome 80): without an explicit target
+  // the minifier rewrites the physical top/right/bottom/left fallbacks into `inset`, drops the `100vh` line
+  // under `100dvh`, and leaves `??=` in the JS — all of which an old WebView can't parse.
+  build: {
+    target: ["chrome80", "safari14"],
+    cssTarget: ["chrome80", "safari14"],
+  },
   resolve: {
     alias: {
       "@loam/avatar": resolve(__dirname, "../../packages/avatar/src/index.ts"),

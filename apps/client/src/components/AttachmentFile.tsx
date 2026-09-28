@@ -3,6 +3,7 @@ import type { MessageAttachment } from "@loam/schema";
 import { t } from "../i18n";
 import { attachmentPath } from "../lib/attachments";
 import { useEncryptedImage } from "../lib/use-encrypted-image";
+import { IconAttach } from "./icons";
 
 /**
  * A non-image file attachment (P11), rendered as a download link. Reuses the tunnel-aware URL resolver
@@ -15,7 +16,10 @@ export function AttachmentFile({ attachment }: { attachment: MessageAttachment }
 
   return (
     <a className="attachment-file" download={attachment.name ?? "file"} href={href} rel="noreferrer">
-      📎 {attachment.name ?? t("message.attachedFile")}
+      <IconAttach size={18} />
+      <span className="attachment-file-name" dir="auto">
+        {attachment.name ?? t("message.attachedFile")}
+      </span>
     </a>
   );
 }

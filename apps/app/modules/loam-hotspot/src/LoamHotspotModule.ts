@@ -1,6 +1,11 @@
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 
-import type { HotspotAddressCandidate, HotspotCredentials, LoamHotspotEvents } from './LoamHotspot.types';
+import type {
+  HotspotAddressCandidate,
+  HotspotCredentials,
+  LoamHotspotEvents,
+  WifiStationInfo,
+} from './LoamHotspot.types';
 
 declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
   /**
@@ -17,6 +22,11 @@ declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
    * rejects — when enumeration fails.
    */
   hotspotAddressCandidates(): Promise<HotspotAddressCandidate[]>;
+  /**
+   * The Wi-Fi network the phone is a client of (`connected`, station `address`, `ssid`), for Wi-Fi hosting
+   * mode. Never requests a permission; resolves `{ connected: false }` — never rejects — on any failure.
+   */
+  wifiStationInfo(): Promise<WifiStationInfo>;
   /** Start a foreground service so the host survives screen-off / backgrounding. Best-effort; returns
    * false when the platform refused (e.g. API 31+ while the app is in the background). */
   startHostService(): boolean;

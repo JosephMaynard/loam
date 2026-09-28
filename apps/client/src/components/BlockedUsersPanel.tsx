@@ -4,6 +4,7 @@ import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { Avatar } from "./Avatar";
+import { CardHeader } from "./ScreenParts";
 
 interface BlockedUsersPanelProps {
   blockedUserIds: ReadonlySet<string>;
@@ -29,21 +30,24 @@ export function BlockedUsersPanel({ blockedUserIds, onSetBlocked, usersById }: B
   }
 
   return (
-    <section aria-labelledby="blocked-users-title" className="profile-panel blocked-users-panel">
-      <div>
-        <p className="eyebrow">{t("settings.privacyEyebrow")}</p>
-        <h2 id="blocked-users-title">{t("settings.blockedTitle")}</h2>
-      </div>
-      <p className="form-note">{t("settings.blockedNote")}</p>
+    <section aria-labelledby="blocked-users-title" className="card blocked-users-panel">
+      <CardHeader description={t("settings.blockedNote")} title={t("settings.blockedTitle")} titleId="blocked-users-title" />
       {blockedUserIds.size ? (
-        <ul className="blocked-users-list">
+        <ul className="list blocked-users-list">
           {[...blockedUserIds].map((userId) => {
             const user = usersById.get(userId);
             return (
-              <li key={userId}>
-                <Avatar avatar={user?.avatar} id={userId} />
-                <span className="blocked-users-name">{user?.displayName ?? generateDisplayName(userId)}</span>
-                <button disabled={busyId !== undefined} onClick={() => void unblock(userId)} type="button">
+              <li className="list-row" key={userId}>
+                <Avatar avatar={user?.avatar} id={userId} size="md" />
+                <span className="blocked-users-name" dir="auto">
+                  {user?.displayName ?? generateDisplayName(userId)}
+                </span>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  disabled={busyId !== undefined}
+                  onClick={() => void unblock(userId)}
+                  type="button"
+                >
                   {t("block.unblock")}
                 </button>
               </li>
@@ -51,7 +55,7 @@ export function BlockedUsersPanel({ blockedUserIds, onSetBlocked, usersById }: B
           })}
         </ul>
       ) : (
-        <p className="form-note">{t("settings.blockedEmpty")}</p>
+        <p className="empty-note">{t("settings.blockedEmpty")}</p>
       )}
     </section>
   );

@@ -1,0 +1,1296 @@
+/* Conversation: the pane, its header extras, the message list (groups, bubbles, reactions, the hover
+   toolbar and the touch sheet), the typing and "new messages" pills, the composer, the thread panel, and
+   the members and report dialogs. Built on tokens.css and the primitives in components.css (DESIGN.md).
+
+   Old-WebView notes: no flex `gap` where spacing matters (margins instead); logical margin/padding
+   longhands only; no `inset-inline-*` or logical border-radius (physical values with a [dir="rtl"]
+   override); `min()` only inside a width media query. */
+
+/* ---------- Pane ---------- */
+
+/* A flex column (see shell.css): the header and any banner are fixed rows, the list area is the one child
+   that grows, the composer sits at the bottom. The typing and "new messages" pills float inside the list
+   area, so nothing extra can ever push the composer off screen. */
+.conversation {
+  background: var(--bg-app);
+}
+
+.conversation > .message-list-wrap,
+.thread-panel > .thread-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.conversation > :not(.message-list-wrap),
+.thread-panel > :not(.thread-scroll) {
+  flex: none;
+}
+
+/* ---------- Header extras (the bar itself is ScreenHeader, shell.css) ---------- */
+
+.conversation-header {
+  --presence-ring: var(--bg-surface);
+}
+
+/* The # / lock tile in a channel header, the same size and rounding as a `md` avatar. */
+.channel-glyph {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 23.4%;
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+}
+
+.conversation-header .peer-id {
+  color: var(--fg-faint);
+}
+
+.conversation-header .presence-text + .peer-id::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--fg-faint);
+}
+
+.members-button .icon {
+  margin-inline-end: -2px;
+}
+
+.members-button-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Phones: icon + count only (the label stays for screen readers), and no outline, to keep the title wide. */
+@media (max-width: 719.98px) {
+  .members-button {
+    border-color: transparent;
+    background-color: transparent;
+    padding: 0 var(--space-2);
+  }
+
+  .members-button-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+.conversation-banner {
+  padding: var(--space-2) var(--space-3) 0;
+}
+
+.blocked-banner {
+  justify-content: space-between;
+  padding: var(--space-2);
+  padding-inline-start: var(--space-4);
+}
+
+.conversation-not-found {
+  display: grid;
+  flex: 1 1 auto;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  text-align: center;
+}
+
+.conversation-not-found h2 {
+  font-size: var(--text-xl);
+}
+
+/* ---------- Message list ---------- */
+
+.message-list-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.message-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+/* Room for the typing pill, so it never covers the newest message. */
+.message-list-wrap.is-typing .message-list {
+  padding-bottom: 48px;
+}
+
+.message-slot {
+  flex: none;
+}
+
+/* A short conversation sits at the bottom, next to the composer, like every chat app. (An auto margin,
+   not justify-content: flex-end, which would make the overflow unscrollable.) */
+.message-slot:first-child {
+  margin-top: auto;
+}
+
+.message-list-empty {
+  max-width: 320px;
+  margin: auto;
+  padding: var(--space-6) 0;
+  text-align: center;
+}
+
+.message-list .day-divider,
+.thread-scroll .day-divider {
+  margin: var(--space-5) 0 var(--space-1);
+}
+
+.message-slot:first-child .day-divider {
+  margin-top: var(--space-2);
+}
+
+/* ---------- One message: [avatar gutter] [author / bubble / reactions / thread] ---------- */
+
+/* A group of consecutive messages from one author sits 2px apart, groups 12px apart. Theirs get a 28px
+   avatar gutter so every bubble of a group lines up; mine sit at the inline end with no gutter. */
+.message {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "column";
+  margin-top: 2px;
+  border-radius: var(--radius);
+}
+
+.message.group-first {
+  margin-top: var(--space-3);
+}
+
+.message-slot:first-child .message {
+  margin-top: 0;
+}
+
+.message.theirs {
+  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-areas:
+    ". author"
+    "gutter column";
+  column-gap: var(--space-2);
+}
+
+.message-author {
+  grid-area: author;
+  overflow: hidden;
+  margin: 0 0 3px;
+  padding-inline-start: var(--space-3);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The avatar aligns to the top of the group's first bubble, not to anything below it. */
+.message-gutter {
+  grid-area: gutter;
+  align-self: start;
+  --presence-ring: var(--bg-app);
+}
+
+.message-column {
+  grid-area: column;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.message.mine .message-column {
+  align-items: flex-end;
+}
+
+/* The bubble's box: caps the width and anchors the hover toolbar. */
+.message-bubble-wrap {
+  position: relative;
+  display: flex;
+  max-width: 78%;
+  min-width: 0;
+}
+
+.message.mine .message-bubble-wrap {
+  justify-content: flex-end;
+}
+
+.message.is-editing .message-bubble-wrap {
+  width: 78%;
+}
+
+@media (min-width: 720px) {
+  .message-bubble-wrap {
+    max-width: min(78%, 640px);
+  }
+
+  .message.is-editing .message-bubble-wrap {
+    width: min(78%, 640px);
+  }
+}
+
+/* ---------- Bubble ---------- */
+
+.message-bubble {
+  position: relative;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--bubble-theirs-border);
+  border-radius: var(--radius-xl);
+  background: var(--bubble-theirs);
+  color: var(--bubble-theirs-fg);
+  padding: 6px 12px 7px;
+}
+
+.message.mine .message-bubble {
+  border-color: var(--bubble-mine);
+  background: var(--bubble-mine);
+  color: var(--bubble-mine-fg);
+}
+
+/* The tail: the last bubble of a group gets a flattened corner on the author's side. */
+.message.theirs.group-last .message-bubble {
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.message.mine.group-last .message-bubble {
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+[dir="rtl"] .message.theirs.group-last .message-bubble {
+  border-bottom-left-radius: var(--radius-xl);
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+[dir="rtl"] .message.mine.group-last .message-bubble {
+  border-bottom-right-radius: var(--radius-xl);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+/* On the author's side (physical, so a bubble's own text direction can't move it). */
+.message.mentions-you .message-bubble {
+  border-left: 3px solid var(--accent);
+}
+
+[dir="rtl"] .message.mentions-you .message-bubble {
+  border-left: 1px solid var(--bubble-theirs-border);
+  border-right: 3px solid var(--accent);
+}
+
+.message.streaming .markdown-body {
+  color: var(--fg-muted);
+}
+
+/* Jumbo emoji (1–3 emoji and nothing else): no bubble chrome at all. */
+.message.jumbo .message-bubble {
+  border: 0;
+  background: none;
+  padding: 0;
+}
+
+.message-jumbo-emoji {
+  font-size: 2.6rem;
+  line-height: 1.15;
+}
+
+.message-removed {
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  font-style: italic;
+  line-height: var(--leading);
+}
+
+.message-blocked .message-bubble {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+}
+
+.message-blocked .link-button {
+  font-style: normal;
+}
+
+/* Touch: the long-press opens the actions sheet, so the browser's own text selection and callout would
+   fight it. Copying lives in the sheet ("Copy text"). */
+@media (hover: none), (pointer: coarse) {
+  .message-bubble {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+/* Inline edit: the form replaces the bubble's content. */
+.message-edit {
+  display: grid;
+  gap: var(--space-2);
+  margin: 2px -4px;
+}
+
+.message-edit .textarea {
+  min-height: 72px;
+}
+
+.message-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.message-edit-actions .btn + .btn {
+  margin-inline-start: var(--space-2);
+}
+
+/* ---------- Time stamp (inside the bubble) ---------- */
+
+.message-stamp {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  text-align: end;
+  white-space: nowrap;
+}
+
+.message.mine .message-stamp {
+  color: var(--bubble-mine-fg);
+  opacity: 0.72;
+}
+
+/* Floated over the end of the last line of text. The ::after below reserves its width: markdown renders a
+   single paragraph as bare inline content, so the pseudo-element lands at the end of the last line (after a
+   trailing list or code block it takes a line of its own, which is fine). */
+.stamp-inline > .message-stamp {
+  position: absolute;
+  right: 12px;
+  bottom: 6px;
+  margin: 0;
+}
+
+/* Keyed on the bubble's own direction (MessageItem sets it from the text), because the reserved space sits
+   at the end of the text's last line: an English message in an Arabic UI ends on the right. */
+.stamp-inline[dir="rtl"] > .message-stamp {
+  right: auto;
+  left: 12px;
+}
+
+.stamp-inline > .markdown-body::after,
+.stamp-inline > .message-removed::after {
+  content: var(--stamp, "");
+  display: inline-block;
+  visibility: hidden;
+  padding-inline-start: 10px;
+  font-size: var(--text-xs);
+  font-style: normal;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.message-edited {
+  margin-inline-end: 4px;
+}
+
+/* The time is a button (it opens the actions sheet) that looks like plain text. */
+.message-time {
+  display: inline;
+  border: 0;
+  background: none;
+  color: inherit;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.message-time:hover {
+  text-decoration: underline;
+}
+
+/* A bigger hit area on touch, without moving the text. */
+@media (pointer: coarse) {
+  button.message-time {
+    position: relative;
+  }
+
+  button.message-time::before {
+    content: "";
+    position: absolute;
+    top: -12px;
+    right: -10px;
+    bottom: -8px;
+    left: -10px;
+  }
+}
+
+.message.jumbo .message-stamp {
+  margin-top: 0;
+}
+
+/* ---------- Markdown body ---------- */
+
+.markdown-body {
+  color: inherit;
+  font-size: var(--text-base);
+  line-height: var(--leading);
+  overflow-wrap: anywhere;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre {
+  margin: 6px 0 0;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-inline-start: var(--space-5);
+}
+
+.markdown-body blockquote {
+  border-inline-start: 3px solid var(--border-strong);
+  color: var(--fg-muted);
+  padding-inline-start: 10px;
+}
+
+.markdown-body code {
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.markdown-body pre {
+  overflow-x: auto;
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: var(--space-3);
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-body a {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ---------- Attachments & location (inside the bubble) ---------- */
+
+.message-bubble.has-attachments {
+  padding: 4px 4px 6px;
+}
+
+.message-bubble.has-attachments > .markdown-body,
+.message-bubble.has-attachments > .location-card {
+  margin-left: 8px;
+  margin-right: 8px;
+}
+
+.message-bubble.has-attachments > .message-stamp {
+  padding: 0 8px;
+}
+
+.message-bubble.has-attachments.stamp-inline > .message-stamp {
+  padding: 0;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  margin: -2px;
+}
+
+.message-attachments + .markdown-body {
+  margin-top: 6px;
+}
+
+.message-attachments > a {
+  display: block;
+  max-width: 100%;
+  margin: 2px;
+  border-radius: var(--radius-lg);
+}
+
+.message-attachment {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 240px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+}
+
+.attachment-file {
+  display: flex;
+  align-items: center;
+  max-width: 100%;
+  margin: 2px;
+  border-radius: var(--radius);
+  background: var(--bg-hover);
+  color: var(--link);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-md);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.attachment-file .icon {
+  margin-inline-end: var(--space-2);
+}
+
+.attachment-file-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.location-card {
+  display: flex;
+  align-items: flex-start;
+  max-width: 320px;
+  margin-top: 6px;
+  border-radius: var(--radius);
+  background: var(--bg-hover);
+  padding: var(--space-2) var(--space-3);
+}
+
+.message-bubble > .location-card:first-child {
+  margin-top: 0;
+}
+
+.location-pin {
+  flex: none;
+  margin-inline-end: var(--space-2);
+  padding-top: 2px;
+  color: var(--accent);
+}
+
+.location-details {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.location-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.location-coords {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.message.mine .location-coords {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.location-open-maps {
+  margin-top: 2px;
+  color: var(--link);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+/* ---------- Under the bubble: streaming, reactions, thread ---------- */
+
+.streaming-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-top: var(--space-1);
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  max-width: 78%;
+  margin-top: var(--space-1);
+}
+
+.message.mine .message-reactions {
+  justify-content: flex-end;
+}
+
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  margin: 0 0 var(--space-1);
+  margin-inline-end: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--fg);
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.message.mine .reaction-chip {
+  margin-inline-start: var(--space-1);
+  margin-inline-end: 0;
+}
+
+.reaction-count {
+  margin-inline-start: 4px;
+}
+
+.reaction-chip:hover:not(:disabled) {
+  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+}
+
+.reaction-chip.is-active {
+  border-color: var(--primary);
+  background-color: var(--primary-soft);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.reaction-chip:disabled {
+  cursor: default;
+}
+
+@media (pointer: coarse) {
+  .reaction-chip {
+    min-height: 32px;
+    padding: 0 10px;
+  }
+}
+
+.thread-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  margin-top: 2px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--link);
+  padding: 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.thread-button .icon {
+  margin-inline-start: 2px;
+}
+
+.thread-button:hover {
+  background: var(--bg-hover);
+}
+
+/* ---------- Actions: the hover toolbar (mouse) ---------- */
+
+/* Hidden on touch: long-press and the time button open the sheet there. With a mouse it appears on hover
+   or when the message (or anything in it) has keyboard focus, floating over the bubble's top-end corner.
+   Its box is at least as wide as the toolbar, so a short bubble never pushes it off the list's edge. */
+.message-toolbar {
+  display: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-bubble-wrap {
+    min-width: 176px;
+  }
+
+  .message.jumbo .message-bubble-wrap,
+  .message.is-editing .message-bubble-wrap {
+    min-width: 0;
+  }
+
+  .message-toolbar {
+    position: absolute;
+    z-index: 2;
+    /* Mostly above the bubble: it may cover the end of the message above (as Slack's does), but only the
+       bubble's top padding of its own, never its first line. */
+    top: -28px;
+    right: 4px;
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+    box-shadow: var(--shadow-1);
+    padding: 2px;
+    visibility: hidden;
+    opacity: 0;
+  }
+
+  [dir="rtl"] .message-toolbar {
+    right: auto;
+    left: 4px;
+  }
+
+  /* Two rules, not one list: a browser without a selector drops the whole rule, and hover must survive. */
+  .message:hover .message-toolbar {
+    visibility: visible;
+    opacity: 1;
+  }
+
+  /* Keyboard focus anywhere in the message: the time button is the tab stop that reveals the toolbar,
+     then Tab reaches its buttons (toolbar buttons don't take focus from a pointer click, see MessageItem). */
+  .message:focus-within .message-toolbar {
+    visibility: visible;
+    opacity: 1;
+  }
+
+  .message-toolbar .btn-icon {
+    font-size: var(--text-lg);
+    line-height: 1;
+  }
+
+  .message-toolbar .btn-icon + .btn-icon {
+    margin-inline-start: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .message-toolbar {
+    transition:
+      opacity var(--duration-fast) ease,
+      visibility var(--duration-fast);
+  }
+}
+
+/* ---------- Actions: the sheet (touch long-press, or the time button) ---------- */
+
+.message-sheet-reactions {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding: 0 var(--space-1) var(--space-4);
+}
+
+.sheet-reaction {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+  font-size: 26px;
+  line-height: 1;
+}
+
+.sheet-reaction:hover {
+  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+}
+
+.sheet-reaction.is-active {
+  background-color: var(--primary-soft);
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+@media (max-width: 359.98px) {
+  .sheet-reaction {
+    width: 42px;
+    height: 42px;
+    font-size: 22px;
+  }
+}
+
+/* ---------- Floating pills over the list: typing, new messages ---------- */
+
+.message-list-overlay {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  bottom: var(--space-2);
+  left: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--space-4);
+  pointer-events: none;
+}
+
+.typing-indicator {
+  position: absolute;
+  bottom: 0;
+  left: var(--space-4);
+  display: flex;
+  align-items: center;
+  max-width: calc(100% - 2 * var(--space-4));
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
+  color: var(--fg-muted);
+  padding: 0 var(--space-3);
+  padding-inline-start: 10px;
+  font-size: var(--text-sm);
+}
+
+[dir="rtl"] .typing-indicator {
+  right: var(--space-4);
+  left: auto;
+}
+
+/* Empty while nobody types, but kept in the page so the live region announces the next change. */
+.typing-indicator.is-idle {
+  min-height: 0;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+.typing-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typing-dots {
+  display: flex;
+  flex: none;
+  align-items: center;
+  margin-inline-end: var(--space-2);
+}
+
+.typing-dots span {
+  width: 5px;
+  height: 5px;
+  margin: 0 1.5px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .typing-dots span {
+    animation: typing-bounce 1.2s ease-in-out infinite;
+  }
+
+  .typing-dots span:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+
+  .typing-dots span:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+}
+
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.4;
+    transform: none;
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+.new-messages-pill {
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-2);
+  pointer-events: auto;
+}
+
+.new-messages-pill .icon {
+  margin-inline-end: -2px;
+}
+
+.message-list-wrap.is-typing .new-messages-pill {
+  margin-bottom: 38px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .new-messages-pill {
+    animation: toast-in var(--duration) var(--ease-out);
+  }
+}
+
+/* ---------- Composer ---------- */
+
+.composer {
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+  padding: var(--space-2);
+  padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+}
+
+/* One rounded well: [attach] [location] [textarea] [send]. Everything is 40px, so at one line the row is
+   centred; as the textarea grows the buttons stay at the bottom, next to the line being typed. */
+.composer-well {
+  display: flex;
+  align-items: flex-end;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--bg-elevated);
+  padding: 3px;
+}
+
+.composer-well:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.composer-well > .btn-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+}
+
+.composer-attach {
+  color: var(--fg-muted);
+}
+
+.composer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 40px;
+  min-height: 40px;
+  max-height: 150px;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  padding: 9px var(--space-2);
+  font-size: var(--text-lg);
+  line-height: 22px;
+  resize: none;
+}
+
+.composer-input:first-child {
+  padding-inline-start: var(--space-3);
+}
+
+.composer-input::placeholder {
+  color: var(--fg-faint);
+  opacity: 1;
+}
+
+/* The well shows focus, so the field itself doesn't draw a second ring. */
+.composer-input:focus,
+.composer-input:focus-visible {
+  outline: none;
+}
+
+.composer-send {
+  margin-inline-start: var(--space-1);
+}
+
+.composer-send:disabled {
+  opacity: 0.4;
+}
+
+/* Attachment chips, above the well. */
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-1);
+  padding: 0;
+  list-style: none;
+}
+
+.attachment-chip {
+  display: flex;
+  align-items: center;
+  max-width: 260px;
+  min-height: 44px;
+  margin: 0 0 var(--space-1);
+  margin-inline-end: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: 3px;
+  padding-inline-end: 0;
+}
+
+.attachment-chip.error {
+  border-color: var(--danger);
+}
+
+.attachment-chip-thumb,
+.attachment-chip-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+}
+
+.attachment-chip-thumb {
+  object-fit: cover;
+  background: var(--bg-sunken);
+}
+
+.attachment-chip-icon {
+  display: grid;
+  place-items: center;
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+}
+
+.attachment-chip.uploading .attachment-chip-thumb,
+.attachment-chip.uploading .attachment-chip-icon {
+  opacity: 0.55;
+}
+
+.attachment-chip-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  margin-inline-start: var(--space-2);
+}
+
+.attachment-chip-name,
+.attachment-chip-error {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip-name {
+  font-size: var(--text-sm);
+}
+
+.attachment-chip-error {
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+/* An indeterminate progress line while the upload runs. */
+.attachment-chip-progress {
+  display: block;
+  width: 48px;
+  height: 3px;
+  margin-top: 4px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .attachment-chip-progress {
+    animation: status-pulse 1s ease-in-out infinite;
+  }
+}
+
+.attachment-chip-remove {
+  flex: none;
+}
+
+/* The location draft, above the well. */
+.composer-location-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px 120px;
+  align-items: end;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.composer-location-form .field-label {
+  font-size: var(--text-sm);
+}
+
+.composer-location-field .field-hint {
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 719.98px) {
+  .composer-location-form {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .composer-location-field {
+    grid-column: 1 / -1;
+  }
+}
+
+/* A calm notice in place of the composer (archived channel, blocked DM, moderator timeout). */
+.composer-disabled-text {
+  margin: 0;
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-md);
+  line-height: var(--leading);
+  text-align: center;
+}
+
+/* ---------- Thread panel ---------- */
+
+.thread-panel {
+  border-inline-start: 1px solid var(--border);
+  background: var(--bg-app);
+}
+
+.thread-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Extra room on top so the parent message's hover toolbar (drawn 28px above its bubble) isn't clipped. */
+  padding: var(--space-8) var(--space-4) var(--space-4);
+}
+
+.thread-scroll > .message:first-child {
+  margin-top: 0;
+}
+
+.thread-divider {
+  display: flex;
+  align-items: center;
+  margin: var(--space-4) 0 var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.thread-divider::before,
+.thread-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+
+.thread-divider span {
+  padding: 0 var(--space-3);
+}
+
+/* Phones have the back chevron; wider, the thread closes with × (it sits beside or over the conversation). */
+@media (max-width: 719.98px) {
+  .thread-close {
+    display: none;
+  }
+
+  .thread-panel {
+    border-inline-start: 0;
+  }
+}
+
+/* ---------- Members dialog ---------- */
+
+.members-dialog {
+  max-width: 520px;
+}
+
+.members-panel {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.member-list .list-row {
+  min-height: 56px;
+}
+
+.member-name {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.member-name strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-name .badge {
+  margin-top: 2px;
+}
+
+.member-id {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.member-actions .btn + .btn {
+  margin-inline-start: var(--space-2);
+}
+
+.member-remove {
+  color: var(--danger);
+}
+
+.members-section-title {
+  margin-bottom: var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.member-invite-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-2);
+}
+
+/* ---------- Report dialog ---------- */
+
+.report-dialog-form {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.report-dialog-sent {
+  color: var(--fg);
+  line-height: var(--leading);
+}
+
+/* ---------- Phones ---------- */
+
+@media (max-width: 719.98px) {
+  .message-list,
+  .thread-scroll {
+    padding-right: var(--space-3);
+    padding-left: var(--space-3);
+  }
+
+  .typing-indicator {
+    left: var(--space-3);
+  }
+
+  [dir="rtl"] .typing-indicator {
+    right: var(--space-3);
+  }
+}

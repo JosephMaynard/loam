@@ -1,0 +1,993 @@
+/* Screens: settings, admin, people & moderation, search, mesh mail, and the dialogs they open.
+   Everything is a ScreenHeader over one scrolling .screen-body holding a centred 720px .screen-column of
+   .card sections (components.css). This file adds only the parts cards are built from: title rows, switch
+   rows, list-row text, and the few layouts specific to one screen. */
+
+/* ---------- Screen body & column ---------- */
+
+.settings-view {
+  background: var(--bg-app);
+}
+
+/* The one scrolling area under the header (the pane itself never scrolls; see DESIGN.md). */
+.screen-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.screen-column {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+  padding-bottom: calc(var(--space-8) + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 720px) {
+  .screen-column {
+    padding-inline: var(--space-6);
+  }
+
+  .screen-column .card {
+    padding: var(--space-5);
+  }
+}
+
+.empty-note {
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  line-height: var(--leading);
+}
+
+.screen-footnote {
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  text-align: center;
+}
+
+/* ---------- Stacks ----------
+   Most screen parts are a grid of children with a 12px (or 8px) gap; declared once here. */
+
+.card-form,
+.card-section,
+.admin-section,
+.admin-section-body,
+.danger-zone,
+.avatar-editor-controls,
+.node-link-control,
+.field-grid,
+.sync-peer-add {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.confirm-body,
+.mesh-compose,
+.sync-status,
+.admin-channel {
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* ---------- Card parts ---------- */
+
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.card-header-text {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.screen-column .card-title {
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+
+.card-description {
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  line-height: var(--leading);
+}
+
+/* A ghost Refresh in the title row sits on the card's padding edge, not inside it. */
+.card-header-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+  margin-block: -6px;
+  margin-inline-end: calc(-1 * var(--space-2));
+}
+
+.card-subtitle {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.card-subtitle-meta {
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+
+.card-section {
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.card-actions-start {
+  justify-content: flex-start;
+}
+
+.card-danger {
+  border-color: var(--danger);
+}
+
+.card-danger .card-title {
+  color: var(--danger);
+}
+
+.danger-zone {
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  color: var(--danger);
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-md);
+  line-height: var(--leading);
+}
+
+.confirm-body {
+  color: var(--fg-muted);
+  line-height: var(--leading);
+}
+
+/* ---------- Field extras ---------- */
+
+.field-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  align-items: end;
+}
+
+.inline-field {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.inline-field > .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.input-narrow {
+  max-width: 200px;
+}
+
+.mono-field {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.select-sm {
+  width: auto;
+  min-height: var(--control-h-sm);
+  padding-block: 4px;
+}
+
+.range {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+/* ---------- Switch rows (SwitchRow) ---------- */
+
+.switch-list {
+  display: grid;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 52px;
+  padding-block: var(--space-2);
+  cursor: pointer;
+}
+
+.switch-list > .switch-row + .switch-row {
+  border-top: 1px solid var(--border);
+}
+
+.switch-text {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+
+.switch-label {
+  font-size: var(--text-base);
+  line-height: var(--leading-tight);
+}
+
+.switch-description {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading);
+}
+
+.switch-row.is-disabled {
+  cursor: not-allowed;
+}
+
+.switch-row.is-disabled .switch-text,
+.toggle:disabled {
+  opacity: 0.55;
+}
+
+.toggle:disabled {
+  cursor: not-allowed;
+}
+
+/* ---------- Rows: text column, meta, actions ---------- */
+
+.row-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* A row without a leading avatar: the text takes the first two tracks of .list-row. */
+.list-row > .row-text-first {
+  grid-column: 1 / 3;
+}
+
+.row-title {
+  overflow: hidden;
+  font-size: var(--text-base);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-meta {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.row-meta-danger {
+  color: var(--danger);
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.list-row > .row-actions {
+  justify-content: flex-end;
+}
+
+/* Full-width content under a row: an inline error, the mesh compose box. */
+.list-row > .row-detail {
+  grid-column: 1 / -1;
+}
+
+/* Rows that aren't .list-row still get the hairline between them. */
+.person-row + .person-row,
+.report-row + .report-row,
+.admin-channel + .admin-channel {
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- Settings: identity ---------- */
+
+.identity-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.identity-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.identity-caption {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.identity-name {
+  font-size: var(--text-2xl);
+  line-height: var(--leading-tight);
+  overflow-wrap: break-word;
+}
+
+.identity-id {
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.avatar-style-field {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.avatar-style-field > legend {
+  margin-bottom: 6px;
+  padding: 0;
+}
+
+.choice-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+/* A radio as a tile: the input is visually hidden but focusable; the frame after it draws the state. */
+.choice-tile {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-2) 10px;
+  cursor: pointer;
+}
+
+.choice-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+}
+
+.choice-frame {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: inherit;
+  background: var(--bg-elevated);
+}
+
+.choice-tile:hover .choice-frame {
+  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+}
+
+.choice-input:checked + .choice-frame {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.choice-input:focus + .choice-frame {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.choice-input:focus:not(:focus-visible) + .choice-frame {
+  outline: none;
+}
+
+.choice-label {
+  position: relative;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.avatar-style-field:disabled .choice-tile {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* ---------- Settings: join, blocked ---------- */
+
+.join-card {
+  text-align: center;
+}
+
+.join-card .card-header {
+  text-align: start;
+}
+
+/* QR codes stay dark-on-white in both themes so every camera can read them. */
+.qr-tile {
+  display: grid;
+  justify-self: center;
+  place-items: center;
+  width: 100%;
+  max-width: 264px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: #ffffff;
+  padding: var(--space-4);
+}
+
+.qr-tile svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.join-url {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
+.transport-fingerprint {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.node-version {
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.blocked-users-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Avatar editor ---------- */
+
+.avatar-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 200px) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.avatar-crop-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(45deg, var(--bg-sunken) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--bg-sunken) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--bg-sunken) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--bg-sunken) 75%),
+    var(--bg-elevated);
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.avatar-crop-canvas:active {
+  cursor: grabbing;
+}
+
+.avatar-editor-controls {
+  min-width: 0;
+}
+
+.avatar-editor-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ---------- People: pending, reports, roster ---------- */
+
+.person-row,
+.report-row {
+  display: grid;
+  gap: 10px;
+  padding-block: var(--space-3);
+}
+
+.person-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.state-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+/* Controls line up under the name, past the 36px avatar and its 12px gap. */
+.person-controls,
+.person-note {
+  display: grid;
+  gap: var(--space-2);
+  padding-inline-start: 48px;
+}
+
+.role-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-5);
+}
+
+.role-toggles .check-row {
+  min-height: var(--control-h-sm);
+  font-size: var(--text-md);
+}
+
+.report-meta {
+  display: grid;
+  gap: 2px;
+}
+
+.report-note {
+  margin-top: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  padding: var(--space-2) 10px;
+  font-size: var(--text-md);
+  white-space: pre-wrap;
+}
+
+/* ---------- Search ---------- */
+
+.search-form {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.search-field {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.search-field-icon {
+  position: absolute;
+  top: 50%;
+  inset-inline-start: var(--space-3);
+  margin-top: -9px;
+  color: var(--fg-faint);
+  pointer-events: none;
+}
+
+.search-input {
+  padding-inline-start: 40px;
+}
+
+.search-results {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: 0;
+  list-style: none;
+}
+
+.search-result + .search-result {
+  border-top: 1px solid var(--border);
+}
+
+.search-result-button {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  min-height: 56px;
+  color: var(--fg);
+  padding: var(--space-3) var(--space-4);
+  text-align: start;
+}
+
+.search-result-button:hover {
+  background: var(--bg-hover);
+}
+
+/* The list clips overflow (rounded corners), so draw the focus ring inside the row. */
+.search-result-button:focus-visible {
+  outline-offset: -2px;
+}
+
+.search-result-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.search-result-author,
+.search-result-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result-author {
+  flex: 0 1 auto;
+  max-width: 55%;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.search-result-context {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.search-result-time {
+  flex: none;
+  margin-inline-start: auto;
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.search-result-body {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--text-base);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.search-result-blocked {
+  color: var(--fg-muted);
+  padding: var(--space-3) var(--space-4);
+}
+
+/* ---------- Mesh ---------- */
+
+.mesh-card-text {
+  min-height: 72px;
+  font-size: var(--text-md);
+  line-height: 1.4;
+}
+
+.mesh-compose {
+  padding-bottom: var(--space-2);
+}
+
+/* ---------- Admin: nav, sections, save bar ---------- */
+
+.admin-nav {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-app);
+}
+
+.admin-nav-inner {
+  display: flex;
+  gap: 6px;
+  max-width: 720px;
+  margin: 0 auto;
+  overflow-x: auto;
+  padding: 10px var(--space-4);
+  scrollbar-width: none;
+}
+
+.admin-nav-inner::-webkit-scrollbar {
+  display: none;
+}
+
+.admin-nav-link {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: var(--control-h-sm);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  padding: 0 var(--space-3);
+  font-size: var(--text-md);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .admin-nav-link {
+    min-height: 32px;
+    padding: 0 10px;
+  }
+}
+
+.admin-nav-link:hover {
+  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+}
+
+.admin-nav-link.is-danger {
+  color: var(--danger);
+}
+
+/* Wide enough to show every pill: wrap instead of scrolling sideways. */
+@media (min-width: 720px) {
+  .admin-nav-inner {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    padding-inline: var(--space-5);
+  }
+}
+
+.admin-section {
+  margin-top: var(--space-2);
+  /* Clear the sticky nav when a pill scrolls a section into view. */
+  scroll-margin-top: 72px;
+}
+
+.admin-section:focus {
+  outline: none;
+}
+
+.section-label {
+  color: var(--fg-muted);
+  padding-inline: var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+
+
+/* The admin column ends with the floating save bar, which carries the bottom spacing itself. */
+.admin-view .screen-column {
+  padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+}
+
+.save-bar {
+  position: sticky;
+  justify-self: end;
+  max-width: 100%;
+  bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+  padding: var(--space-2);
+}
+
+.save-bar-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-inline-start: var(--space-2);
+}
+
+/* Nothing to report yet: the bar is just its button, floating at the inline end. */
+.save-bar-status:empty {
+  display: none;
+}
+
+
+
+.getting-started-steps {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.getting-started-steps li {
+  position: relative;
+  min-height: 24px;
+  color: var(--fg-muted);
+  padding-inline-start: 36px;
+  font-size: var(--text-md);
+  line-height: var(--leading);
+  counter-increment: step;
+}
+
+.getting-started-steps li::before {
+  content: counter(step);
+  position: absolute;
+  top: 0;
+  inset-inline-start: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--link);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.getting-started-steps strong {
+  color: var(--fg);
+}
+
+/* ---------- Admin: channels ---------- */
+
+.admin-channel {
+  padding-block: 14px;
+}
+
+.admin-channel:first-child {
+  padding-top: var(--space-1);
+}
+
+.admin-channel-name {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.admin-channel-name > .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.admin-channel.archived .admin-channel-name > .input {
+  color: var(--fg-muted);
+}
+
+.admin-channel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.admin-channel-ttl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+}
+
+/* ---------- Admin: sync ---------- */
+
+.sync-peer-add {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.sync-peer-add > :first-child,
+.sync-peer-add-button {
+  grid-column: 1 / -1;
+}
+
+.sync-peer-add-button {
+  justify-self: end;
+}
+
+.sync-status {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.sync-status-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.node-link-control {
+  justify-items: start;
+}
+
+.invite-panel {
+  display: grid;
+  justify-self: stretch;
+  gap: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  padding: var(--space-4);
+  text-align: center;
+}
+
+.invite-panel .qr-tile {
+  max-width: 200px;
+}
+
+/* ---------- Phones ---------- */
+
+@media (max-width: 719.98px) {
+  /* Toasts drop in just under the 56px screen header rather than over it (components.css places them). */
+  .toast-stack {
+    top: calc(var(--header-h) + var(--space-2) + env(safe-area-inset-top, 0px));
+  }
+
+  /* The pill row scrolls away with the page: header + sticky nav + save bar is too much on a phone. */
+  .admin-nav {
+    position: static;
+  }
+
+  .admin-nav-link {
+    min-height: 40px;
+  }
+
+  .admin-section {
+    scroll-margin-top: var(--space-3);
+  }
+}
+
+@media (max-width: 479.98px) {
+  .identity-name {
+    font-size: var(--text-xl);
+  }
+
+  .avatar-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .avatar-crop-canvas {
+    max-width: 240px;
+    justify-self: center;
+  }
+
+  .person-controls,
+  .person-note {
+    padding-inline-start: 0;
+  }
+
+  .pending-row > .row-actions {
+    grid-column: 2 / -1;
+    justify-content: flex-start;
+  }
+
+  .sync-peer-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .search-form .btn {
+    padding-inline: var(--space-3);
+  }
+}

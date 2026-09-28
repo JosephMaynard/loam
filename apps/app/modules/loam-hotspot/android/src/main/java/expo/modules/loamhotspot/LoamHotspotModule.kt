@@ -73,6 +73,13 @@ class LoamHotspotModule : Module() {
       promise.resolve(hotspotAddressCandidates())
     }
 
+    // The Wi-Fi network the phone is a CLIENT of, for Wi-Fi hosting mode (docs/04 "Hosting modes"):
+    // `{ connected, address, ssid }`. Never requests a permission and never rejects — any failure resolves
+    // `{ connected: false }`, which JS shows as "connect this phone to a Wi-Fi network first".
+    AsyncFunction("wifiStationInfo") { promise: Promise ->
+      promise.resolve(wifiStationInfo())
+    }
+
     // Start/stop the foreground service that keeps the host alive while the screen is off (docs/04).
     // Best-effort: a failure is logged and leaves the app in its normal foreground-only state. Returns
     // whether the start call went through — API 31+ throws ForegroundServiceStartNotAllowedException when
@@ -429,6 +436,54 @@ class LoamHotspotModule : Module() {
       Log.w("LoamHotspot", "Station address lookup failed", error)
     }
     return out
+  }
+
+  /**
+   * The phone's Wi-Fi client (station) state for Wi-Fi hosting mode:
+   *  - `connected` true when any network the phone holds has `TRANSPORT_WIFI`, or WifiManager reports a
+   *    DHCP address. Deliberately not just the ACTIVE (default) network: on a router with no internet
+   *    uplink — a normal LOAM setup — Android keeps mobile data as the default network while Wi-Fi stays
+   *    connected, and that Wi-Fi is exactly where the joiners are.
+   *  - `address` the station's own IPv4 address (first of {@link stationAddresses}), or null.
+   *  - `ssid` the network name, or null. Android redacts it to `<unknown ssid>` unless location permission
+   *    was already granted (e.g. from an earlier hotspot start); this never asks for it, so null is normal.
+   * Needs only ACCESS_WIFI_STATE / ACCESS_NETWORK_STATE (install-time). Never throws.
+   */
+  private fun wifiStationInfo(): Map<String, Any?> {
+    try {
+      val context = appContext.reactContext?.applicationContext ?: return mapOf("connected" to false)
+      val address = stationAddresses().firstOrNull()
+      var onWifi = false
+      try {
+        val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivity != null) {
+          // Same one-shot enumeration as upstreamInterfaceNames (deprecated on 31+, still answers).
+          @Suppress("DEPRECATION")
+          val networks = connectivity.allNetworks
+          onWifi = networks.any { network ->
+            connectivity.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+          }
+        }
+      } catch (error: Throwable) {
+        Log.w("LoamHotspot", "Wi-Fi network check failed", error)
+      }
+      var ssid: String? = null
+      try {
+        val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        @Suppress("DEPRECATION")
+        val raw = unquote(wifi?.connectionInfo?.ssid)
+        // "<unknown ssid>" is WifiManager.UNKNOWN_SSID (a literal here: that constant is API 30+).
+        if (!raw.isNullOrEmpty() && raw != "<unknown ssid>") {
+          ssid = raw
+        }
+      } catch (error: Throwable) {
+        Log.w("LoamHotspot", "Wi-Fi SSID lookup failed", error)
+      }
+      return mapOf("connected" to (onWifi || address != null), "address" to address, "ssid" to ssid)
+    } catch (error: Throwable) {
+      Log.w("LoamHotspot", "wifiStationInfo failed", error)
+      return mapOf("connected" to false)
+    }
   }
 
   /** WifiManager hands IPv4 addresses as little-endian ints (first octet in the low byte). */

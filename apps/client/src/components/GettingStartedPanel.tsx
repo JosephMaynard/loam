@@ -1,4 +1,5 @@
 import { t } from "../i18n";
+import { CardHeader } from "./ScreenParts";
 
 /**
  * Static "getting started" checklist shown at the top of the admin config form. Purely
@@ -6,11 +7,8 @@ import { t } from "../i18n";
  */
 export function GettingStartedPanel() {
   return (
-    <div className="profile-panel getting-started">
-      <div>
-        <p className="eyebrow">{t("admin.gettingStartedEyebrow")}</p>
-        <h2>{t("admin.gettingStartedTitle")}</h2>
-      </div>
+    <div className="card getting-started">
+      <CardHeader title={t("admin.gettingStartedTitle")} />
       <ol className="getting-started-steps">
         <li><strong>{t("admin.step1Title")}</strong> — {t("admin.step1Body")}</li>
         <li><strong>{t("admin.step2Title")}</strong> — {t("admin.step2Body")}</li>

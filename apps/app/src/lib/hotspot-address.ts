@@ -32,6 +32,7 @@ const NEVER_HOTSPOT_PREFIXES = [
   'tailscale',
   'wg',
   'ppp',
+  'ipsec',
   'rmnet',
   'ccmni',
   'clat',
@@ -62,7 +63,10 @@ export function isPrivateIPv4(address: string): boolean {
   return address.startsWith('192.168.') || isPrivate10or172(address);
 }
 
-function isNeverHotspotName(name: string): boolean {
+/** Whether an interface name is one of {@link NEVER_HOTSPOT_PREFIXES} — a tunnel, cellular, USB/Bluetooth
+ * tether, Wi-Fi Direct or virtual device, never a network a nearby phone joins (also used by Wi-Fi mode,
+ * `host-mode.ts`, to keep a cellular address off the join QR). */
+export function isNeverHotspotName(name: string): boolean {
   const lower = name.toLowerCase();
   return NEVER_HOTSPOT_PREFIXES.some((prefix) => lower.startsWith(prefix));
 }

@@ -1,7 +1,9 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { safeQrSvg } from "../lib/qr";
+import { Dialog } from "./Dialog";
+import { IconWifi } from "./icons";
 
 /** The subset of the native host bridge this component talks to. Mirrors the `window.ReactNativeWebView`
  * shape used by the `loam-wipe` bridge message in `app.tsx` — it only ever exists inside LOAM's own
@@ -14,7 +16,7 @@ function reactNativeBridge(): ReactNativeBridge | undefined {
 }
 
 /**
- * Sidebar invite affordance for greeters/admins: a button that opens a big centered modal with the
+ * Sidebar invite affordance for greeters/admins: a row that opens a `Dialog` (a sheet on phones) with the
  * node's join URL as a QR (for someone already on the LAN) plus the URL text. Gated by the caller on
  * `canGreet`.
  *
@@ -40,33 +42,13 @@ export function InviteControl({
   qrUrl?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const qrSvg = useMemo(() => (qrSuppressed ? "" : safeQrSvg(qrUrl ?? joinUrl, "#16271f")), [joinUrl, qrSuppressed, qrUrl]);
-  const hasNativeBridge = typeof window !== "undefined" && !!reactNativeBridge();
+  // The row that opened the dialog: Dialog returns focus here on close (Safari never focuses a clicked button).
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    // Move focus into the dialog so keyboard/screen-reader users aren't stranded on background content,
-    // and restore it to the trigger when the modal closes (Escape, backdrop click, or the close button).
-    const trigger = triggerRef.current;
-    dialogRef.current?.focus();
-
-    function onKeyDown(event: KeyboardEvent): void {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    }
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      trigger?.focus();
-    };
-  }, [open]);
+  const qrSvg = useMemo(
+    () => (qrSuppressed ? "" : safeQrSvg(qrUrl ?? joinUrl, "#16271f")),
+    [joinUrl, qrSuppressed, qrUrl],
+  );
+  const hasNativeBridge = typeof window !== "undefined" && !!reactNativeBridge();
 
   if (!joinUrl) {
     return null;
@@ -84,57 +66,42 @@ export function InviteControl({
 
   return (
     <div className="invite-control">
-      <button className="new-channel-toggle" onClick={() => setOpen(true)} ref={triggerRef} type="button">
-        {t("invite.show")}
+      <button className="nav-link invite-trigger" onClick={() => setOpen(true)} ref={triggerRef} type="button">
+        <span className="nav-glyph">
+          <IconWifi size={18} />
+        </span>
+        <span className="nav-label">{t("invite.title")}</span>
       </button>
       {open ? (
-        <div
-          className="invite-modal-backdrop"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              setOpen(false);
-            }
-          }}
+        // Dialog owns focus: it moves into the panel on open and back to the trigger on close.
+        <Dialog
+          backdropClassName="invite-modal-backdrop"
+          className="invite-modal"
+          closeLabel={t("invite.close")}
+          onClose={() => setOpen(false)}
+          returnFocusTo={triggerRef}
+          title={t("invite.title")}
         >
-          <div
-            aria-labelledby="invite-modal-title"
-            aria-modal="true"
-            className="invite-modal"
-            ref={dialogRef}
-            role="dialog"
-            tabIndex={-1}
-          >
-            <div className="invite-modal-header">
-              <h2 id="invite-modal-title">{t("invite.title")}</h2>
-              <button
-                aria-label={t("invite.close")}
-                className="close-button"
-                onClick={() => setOpen(false)}
-                type="button"
-              >
-                ×
+          {/* The QR is a visual shortcut for the URL below it; hide it from assistive tech so screen
+              readers announce the actual join URL rather than raw SVG. */}
+          {qrSuppressed ? (
+            <p className="form-error" role="alert">
+              {t("invite.qrKeyMismatch")}
+            </p>
+          ) : (
+            <div aria-hidden="true" className="invite-modal-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+          )}
+          <p className="invite-modal-url">{joinUrl}</p>
+          {hasNativeBridge ? (
+            <div className="invite-modal-wifi">
+              <button className="btn btn-primary btn-block" onClick={openHostShare} type="button">
+                <IconWifi />
+                {t("invite.wifiButton")}
               </button>
+              <p>{t("invite.wifiHint")}</p>
             </div>
-            {/* The QR is a visual shortcut for the URL below it; hide it from assistive tech so screen
-                readers announce the actual join URL rather than raw SVG. */}
-            {qrSuppressed ? (
-              <p className="form-error" role="alert">
-                {t("invite.qrKeyMismatch")}
-              </p>
-            ) : (
-              <div aria-hidden="true" className="invite-modal-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-            )}
-            <p className="invite-modal-url">{joinUrl}</p>
-            {hasNativeBridge ? (
-              <div className="invite-modal-wifi">
-                <button onClick={openHostShare} type="button">
-                  {t("invite.wifiButton")}
-                </button>
-                <p>{t("invite.wifiHint")}</p>
-              </div>
-            ) : null}
-          </div>
-        </div>
+          ) : null}
+        </Dialog>
       ) : null}
     </div>
   );

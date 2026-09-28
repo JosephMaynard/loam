@@ -35,7 +35,7 @@ export function NodeLinkControl({ joinUrl }: { joinUrl?: string }) {
     <div className="node-link-control">
       <button
         aria-expanded={open}
-        className="new-channel-toggle"
+        className="btn btn-secondary btn-sm"
         onClick={() => setOpen((previous) => !previous)}
         type="button"
       >
@@ -45,12 +45,14 @@ export function NodeLinkControl({ joinUrl }: { joinUrl?: string }) {
         <div className="invite-panel">
           {/* The QR encodes the URL shown below; hide it from assistive tech so screen readers
               announce the address itself rather than raw SVG. */}
-          <div aria-hidden="true" className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-          <p className="invite-url">{joinUrl}</p>
+          <div aria-hidden="true" className="qr-tile invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+          <p className="join-url invite-url">{joinUrl}</p>
           <p className="form-note">{t("nodeLink.note")}</p>
-          <button className="ghost-button" onClick={() => void copy()} type="button">
-            {copied ? t("nodeLink.copied") : t("nodeLink.copy")}
-          </button>
+          <div className="card-actions">
+            <button className="btn btn-secondary btn-sm" onClick={() => void copy()} type="button">
+              {copied ? t("nodeLink.copied") : t("nodeLink.copy")}
+            </button>
+          </div>
         </div>
       ) : null}
     </div>

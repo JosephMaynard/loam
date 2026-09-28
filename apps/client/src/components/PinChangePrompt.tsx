@@ -37,7 +37,7 @@ export function PinChangePrompt({ current, next, matchesNode, onAccept, onReject
       aria-describedby="pin-change-body"
       aria-labelledby="pin-change-title"
       aria-modal="true"
-      className="invite-modal pin-change"
+      className="pin-change"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           onReject();
@@ -52,12 +52,12 @@ export function PinChangePrompt({ current, next, matchesNode, onAccept, onReject
       <p id="pin-change-body">{t(matchesNode ? "transport.pinChangeBody" : "transport.pinChangeMismatch")}</p>
       <p className="transport-fingerprint">{t("transport.pinChangeCurrent", { fingerprint: current })}</p>
       <p className="transport-fingerprint">{t("transport.pinChangeNew", { fingerprint: next })}</p>
-      <div className="report-dialog-actions">
-        <button onClick={onReject} ref={keepRef} type="button">
+      <div className="dialog-actions">
+        <button className="btn btn-secondary" onClick={onReject} ref={keepRef} type="button">
           {t("transport.pinChangeReject")}
         </button>
         {matchesNode ? (
-          <button className="danger-button" onClick={onAccept} type="button">
+          <button className="btn btn-danger" onClick={onAccept} type="button">
             {t("transport.pinChangeAccept")}
           </button>
         ) : null}

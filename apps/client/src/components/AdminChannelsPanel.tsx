@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { deleteChannelRequest, fetchJson, requestChannel } from "../lib/api";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { CardHeader, SwitchRow } from "./ScreenParts";
 
 /**
  * Admin-only channel management: create public channels; rename, archive/restore (read-only-but-
@@ -128,96 +130,73 @@ export function AdminChannelsPanel({
   }
 
   return (
-    <div className="settings-grid">
-      <div className="profile-panel">
-        <div>
-          <p className="eyebrow">{t("admin.channelsEyebrow")}</p>
-          <h2>{t("admin.createChannelHeading")}</h2>
+    <>
+      <form
+        className="card"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void create();
+        }}
+      >
+        <CardHeader level={3} title={t("admin.createChannelHeading")} />
+        <label className="field">
+          <span className="field-label">{t("admin.channelName")}</span>
+          <input
+            className="input"
+            disabled={creating}
+            maxLength={80}
+            onInput={(event) => setName(event.currentTarget.value)}
+            placeholder={t("admin.channelNamePlaceholder")}
+            value={name}
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">{t("admin.channelDescription")}</span>
+          <input
+            className="input"
+            disabled={creating}
+            maxLength={280}
+            onInput={(event) => setDescription(event.currentTarget.value)}
+            value={description}
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">{t("admin.whoCanPost")}</span>
+          <select
+            className="select"
+            disabled={creating}
+            onInput={(event) => setAllowPosting(event.currentTarget.value === "admins" ? "admins" : "everyone")}
+            value={allowPosting}
+          >
+            <option value="everyone">{t("admin.postEveryone")}</option>
+            <option value="admins">{t("admin.postAdmins")}</option>
+          </select>
+        </label>
+        <div className="switch-list">
+          <SwitchRow checked={allowReplies} disabled={creating} label={t("admin.allowReplies")} onChange={setAllowReplies} />
+          <SwitchRow checked={isPrivate} disabled={creating} label={t("admin.channelPrivate")} onChange={setIsPrivate} />
         </div>
-        <form
-          className="profile-panel-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void create();
-          }}
-        >
-          <label>
-            {t("admin.channelName")}
-            <input
-              disabled={creating}
-              maxLength={80}
-              onInput={(event) => setName(event.currentTarget.value)}
-              placeholder={t("admin.channelNamePlaceholder")}
-              value={name}
-            />
-          </label>
-          <label>
-            {t("admin.channelDescription")}
-            <input
-              disabled={creating}
-              maxLength={280}
-              onInput={(event) => setDescription(event.currentTarget.value)}
-              value={description}
-            />
-          </label>
-          <label>
-            {t("admin.whoCanPost")}
-            <select
-              disabled={creating}
-              onInput={(event) =>
-                setAllowPosting(event.currentTarget.value === "admins" ? "admins" : "everyone")
-              }
-              value={allowPosting}
-            >
-              <option value="everyone">{t("admin.postEveryone")}</option>
-              <option value="admins">{t("admin.postAdmins")}</option>
-            </select>
-          </label>
-          <label className="admin-toggle">
-            <input
-              checked={allowReplies}
-              disabled={creating}
-              onInput={(event) => setAllowReplies(event.currentTarget.checked)}
-              type="checkbox"
-            />
-            {t("admin.allowReplies")}
-          </label>
-          <label className="admin-toggle">
-            <input
-              checked={isPrivate}
-              disabled={creating}
-              onInput={(event) => setIsPrivate(event.currentTarget.checked)}
-              type="checkbox"
-            />
-            {t("admin.channelPrivate")}
-          </label>
-          <div className="profile-actions">
-            <button disabled={creating || !name.trim()} type="submit">
-              {creating ? t("admin.creating") : t("admin.createChannel")}
-            </button>
-          </div>
-          {createError ? <p className="form-error">{createError}</p> : null}
-        </form>
-      </div>
-      <div className="profile-panel">
-        <div>
-          <p className="eyebrow">{t("admin.channelsEyebrow")}</p>
-          <h2>{t("admin.existingChannels")}</h2>
+        {createError ? <p className="form-error">{createError}</p> : null}
+        <div className="card-actions">
+          <button className="btn btn-primary" disabled={creating || !name.trim()} type="submit">
+            {creating ? t("admin.creating") : t("admin.createChannel")}
+          </button>
         </div>
-        {listError ? <p className="form-error">{listError}</p> : null}
+      </form>
+      <div className="card">
+        <CardHeader level={3} title={t("admin.existingChannels")} />
+        {listError ? <p className="notice notice-danger">{listError}</p> : null}
         {!loaded && !listError ? <p className="form-note">{t("admin.channelsLoading")}</p> : null}
-        {loaded && adminChannels.length === 0 ? (
-          <p className="form-note">{t("admin.channelsEmpty")}</p>
-        ) : null}
+        {loaded && adminChannels.length === 0 ? <p className="empty-note">{t("admin.channelsEmpty")}</p> : null}
         {adminChannels.length > 0 ? (
-          <ul className="admin-channel-list">
+          <ul className="list admin-channel-list">
             {adminChannels.map((channel) => (
               <AdminChannelRow channel={channel} key={channel.id} onApply={applyChannel} onRemove={removeChannelRow} />
             ))}
           </ul>
         ) : null}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -237,6 +216,7 @@ function AdminChannelRow({
 }) {
   const [name, setName] = useState(channel.name);
   const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string>();
 
   const trimmedName = name.trim();
@@ -259,31 +239,35 @@ function AdminChannelRow({
 
   return (
     <li className={channel.archived ? "admin-channel archived" : "admin-channel"}>
-      <div className="admin-channel-main">
+      <div className="admin-channel-name">
         <input
           aria-label={t("admin.channelNameAria", { name: channel.name })}
+          className="input"
           disabled={busy}
           maxLength={80}
           onInput={(event) => setName(event.currentTarget.value)}
           value={name}
         />
-        <span className="admin-channel-meta">
-          {channel.allowPosting === "admins" ? t("admin.metaAdminsPost") : t("admin.metaOpenPosting")}
-          {channel.visibility === "private" ? ` · ${t("admin.metaPrivate")}` : ""}
-          {channel.pinned ? ` · ${t("admin.metaPinned")}` : ""}
-          {channel.archived ? ` · ${t("admin.metaArchived")}` : ""}
-        </span>
-      </div>
-      <div className="admin-channel-actions">
-        <button disabled={renameDisabled} onClick={() => void patch({ name: trimmedName })} type="button">
+        <button
+          className="btn btn-secondary"
+          disabled={renameDisabled}
+          onClick={() => void patch({ name: trimmedName })}
+          type="button"
+        >
           {t("admin.rename")}
         </button>
-        <button disabled={busy} onClick={() => void patch({ pinned: !channel.pinned })} type="button">
-          {channel.pinned ? t("admin.unpin") : t("admin.pin")}
-        </button>
+      </div>
+      <span className="row-meta admin-channel-meta">
+        {channel.allowPosting === "admins" ? t("admin.metaAdminsPost") : t("admin.metaOpenPosting")}
+        {channel.visibility === "private" ? ` · ${t("admin.metaPrivate")}` : ""}
+        {channel.pinned ? ` · ${t("admin.metaPinned")}` : ""}
+        {channel.archived ? ` · ${t("admin.metaArchived")}` : ""}
+      </span>
+      <div className="admin-channel-actions">
         <label className="admin-channel-ttl">
-          {t("admin.channelRetentionLabel")}
+          <span>{t("admin.channelRetentionLabel")}</span>
           <select
+            className="select select-sm"
             disabled={busy}
             onInput={(event) =>
               void patch({
@@ -298,34 +282,53 @@ function AdminChannelRow({
             <option value={604_800_000}>{t("admin.retention.7d")}</option>
           </select>
         </label>
-        <button
-          className={channel.archived ? undefined : "danger-button"}
-          disabled={busy}
-          onClick={() => void patch({ archived: !channel.archived })}
-          type="button"
-        >
-          {channel.archived ? t("admin.restore") : t("admin.archive")}
-        </button>
-        <button
-          aria-label={t("admin.deleteChannelAria", { name: channel.name })}
-          className="danger-button"
-          disabled={busy}
-          onClick={() => void remove()}
-          type="button"
-        >
-          {t("admin.deleteChannel")}
-        </button>
+        <div className="row-actions">
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={busy}
+            onClick={() => void patch({ pinned: !channel.pinned })}
+            type="button"
+          >
+            {channel.pinned ? t("admin.unpin") : t("admin.pin")}
+          </button>
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={busy}
+            onClick={() => void patch({ archived: !channel.archived })}
+            type="button"
+          >
+            {channel.archived ? t("admin.restore") : t("admin.archive")}
+          </button>
+          <button
+            aria-label={t("admin.deleteChannelAria", { name: channel.name })}
+            className="btn btn-danger btn-sm"
+            disabled={busy}
+            onClick={() => setConfirmingDelete(true)}
+            type="button"
+          >
+            {t("admin.deleteChannel")}
+          </button>
+        </div>
       </div>
       {error ? <p className="form-error">{error}</p> : null}
+      {confirmingDelete ? (
+        <ConfirmDialog
+          confirmLabel={t("admin.deleteChannel")}
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={() => {
+            setConfirmingDelete(false);
+            void remove();
+          }}
+          title={t("admin.deleteChannelAria", { name: channel.name })}
+        >
+          <p>{t("admin.deleteChannelConfirm", { name: channel.name })}</p>
+        </ConfirmDialog>
+      ) : null}
     </li>
   );
 
-  /** Permanently delete this channel after an explicit confirm — unlike archive, there is no undo. */
+  /** Permanently delete this channel (its alertdialog has been confirmed) — unlike archive, there is no undo. */
   async function remove(): Promise<void> {
-    if (!window.confirm(t("admin.deleteChannelConfirm", { name: channel.name }))) {
-      return;
-    }
-
     setBusy(true);
     setError(undefined);
 

@@ -1,45 +1,37 @@
 import {
   ChannelSchema,
-  MeshContactSchema,
-  MeshIdentityCardSchema,
   MessageAttachmentSchema,
   MessageSchema,
-  ReportSchema,
   UserSchema,
   type Channel,
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
-  type MeshContact,
-  type MeshIdentityCard,
   type NetworkConfig,
-  type Report,
-  type ReportResolution,
-  type Role,
   type StreamEvent,
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
+import type { ComponentChildren } from "preact";
 import { LocationProvider, useLocation } from "preact-iso";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
+import loamMark from "./assets/loam.svg";
 import { AdminView } from "./components/AdminView";
-import { Avatar } from "./components/Avatar";
-import { AvatarImageEditor } from "./components/AvatarImageEditor";
-import { BlockedUsersPanel } from "./components/BlockedUsersPanel";
 import { ConversationView } from "./components/ConversationView";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { MobileBackLink } from "./components/MobileBackLink";
-import { NavLink } from "./components/NavLink";
 import { PinChangePrompt } from "./components/PinChangePrompt";
-import { SearchResult } from "./components/SearchResult";
 import { Sidebar } from "./components/Sidebar";
-import { ApiError, fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
+import { ToastStack, type ToastItem } from "./components/ToastStack";
+import { MeshView } from "./views/MeshView";
+import { PeopleView } from "./views/PeopleView";
+import { SearchView } from "./views/SearchView";
+import { SettingsView } from "./views/SettingsView";
+import { ApiError, fetchJson, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
 import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
-import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "./lib/capabilities";
 import { confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity } from "./lib/identity";
 import {
   compareCreatedAt,
@@ -62,7 +54,6 @@ import {
   putRecords,
 } from "./lib/local-store";
 import { reconcileRoster, sortUsers } from "./lib/roster";
-import { useIsTimedOut } from "./lib/timeout";
 import { createLivenessWatchdog, type LivenessWatchdog } from "./lib/ws-liveness";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
 import {
@@ -72,7 +63,7 @@ import {
   listenForRemoteWipe,
   setWipeTombstone,
 } from "./lib/wipe";
-import { bodyFor, displayTime } from "./lib/message-format";
+import { bodyFor } from "./lib/message-format";
 import {
   acceptPendingHostKey,
   apiUrl,
@@ -81,14 +72,10 @@ import {
   clearStoredIdentityToken,
   encryptedFetch,
   ensureSession,
-  fingerprint,
-  getHostKeyMismatch,
   getPendingHostKeyChange,
   handleWsFrame,
   inviteQrHostKey,
-  isSessionQrVerified,
   isTunnelActive,
-  joinQrUrl,
   mayFallBackToPlaintext,
   reestablishSession,
   rejectPendingHostKey,
@@ -122,7 +109,6 @@ import {
   setActiveLocale,
   t,
 } from "./i18n";
-import { safeQrSvg } from "./lib/qr";
 
 type Config = {
   /** The node's build version, shown in the join/settings footer. Absent on very old nodes. */
@@ -152,15 +138,6 @@ type ConversationReads = {
   reads: Record<string, number>;
 };
 
-type ToastItem = {
-  id: string;
-  title: string;
-  body: string;
-  route: string;
-};
-const AVATAR_MODES = ["face", "initial", "pattern"] as const;
-/** LOAM's public privacy policy, linked from Settings (docs/30 B2). */
-const PRIVACY_POLICY_URL = "https://loamnet.com/privacy";
 
 /**
  * Generates a random client user identifier.
@@ -384,41 +361,6 @@ function notifyAndroidHostOfWipe(): void {
     bridge?.postMessage(JSON.stringify({ type: "loam-wipe" }));
   } catch {
     // Best effort only — absent/broken bridge is the common (non-Android-host) case.
-  }
-}
-
-/**
- * Issues a user-related admin/moderation/access request and returns the validated user the server
- * echoes back. Throws with the server's error message (or a status fallback) on failure. Mirrors
- * `requestChannel` for the user-management endpoints.
- *
- * @param method - HTTP method (`POST` for approve/deny, `PATCH` for roles/moderation).
- * @param path - The API path.
- * @param body - Optional JSON request body.
- * @returns The updated `User`.
- */
-async function requestUser(method: "POST" | "PATCH", path: string, body?: unknown): Promise<User> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await encryptedFetch(method, path, body, { signal: controller.signal });
-    const payload: unknown = await response.json().catch(() => undefined);
-
-    if (!response.ok) {
-      const message = errorText(payload, `Request failed: ${response.status}`);
-      throw new Error(message);
-    }
-
-    const parsed = UserSchema.safeParse(payload);
-
-    if (!parsed.success) {
-      throw new Error(t("app.userUnrecognised"));
-    }
-
-    return parsed.data;
-  } finally {
-    window.clearTimeout(timeout);
   }
 }
 
@@ -688,15 +630,21 @@ function LoamApp() {
             ? t("toast.locationFallback")
             : "");
       let title = authorName;
+      let place = authorName;
       let route = routeForConversation({ kind: "dm", id: message.authorId });
+      let direct = true;
 
       if (message.type === "channelPost" || message.type === "channelReply") {
         const channelName = channelsRef.current.find((channel) => channel.id === message.channelId)?.name ?? message.channelId;
         title = `${authorName} · #${channelName}`;
+        place = `#${channelName}`;
         route = routeForConversation({ kind: "channel", id: message.channelId });
+        direct = false;
       }
 
-      pushToast({ id: `${message.id}:${Date.now()}`, title, body, route });
+      // `place` + `author` let ToastStack coalesce a burst into "3 new messages in #general" (or, for a
+      // DM, "3 new messages from <person>").
+      pushToast({ id: `${message.id}:${Date.now()}`, title, body, route, place, author: authorName, direct });
     },
     [pushToast],
   );
@@ -1021,8 +969,19 @@ function LoamApp() {
     // the wrong origin (docs/20 round-5 H1). The tombstone is NOT lifted here: `session/end` is unsealed and
     // forgeable, so it's no security confirmation (round-5 H2) — the tombstone stays until a VERIFIED rejoin.
     if (scope === "device" && !opts.remote) {
-      await wipeServerCredentials(REQUEST_TIMEOUT_MS);
-      localStorage.removeItem(SERVER_URL_KEY);
+      // Both steps are best-effort and independent: the revocation can fail (node unreachable, deadline
+      // hit) and the wiped screen is already up, so neither a rejection nor a skipped URL removal may
+      // escape from here — the stored server URL is dropped whether or not the node answered.
+      try {
+        await wipeServerCredentials(REQUEST_TIMEOUT_MS);
+      } catch {
+        // The node didn't confirm the revocation; the local copy is gone regardless (docs/20).
+      }
+      try {
+        localStorage.removeItem(SERVER_URL_KEY);
+      } catch {
+        // Storage unavailable: nothing durable to clear.
+      }
     }
   }, []);
 
@@ -2056,28 +2015,25 @@ function LoamApp() {
 
   if (needsQr) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          {pinChange ? (
-            // The pinned key stopped working and a freshly opened join link carries another one (e.g. the
-            // node restarted with a new key and this is its new QR): only an explicit confirmation replaces
-            // the pin, and only when the link's key is the one the node reported.
-            <PinChangePrompt
-              current={pinChange.current}
-              matchesNode={pinChange.matchesNode}
-              next={pinChange.next}
-              onAccept={onAcceptPinChange}
-              onReject={onRejectPinChange}
-            />
-          ) : (
-            <>
-              <h1>{t("gate.needsQrTitle")}</h1>
-              <p>{t(needsQr === "changed" ? "gate.needsQrKeyChanged" : "gate.needsQrBody")}</p>
-            </>
-          )}
-        </div>
-      </main>
+      <GateScreen>
+        {pinChange ? (
+          // The pinned key stopped working and a freshly opened join link carries another one (e.g. the
+          // node restarted with a new key and this is its new QR): only an explicit confirmation replaces
+          // the pin, and only when the link's key is the one the node reported.
+          <PinChangePrompt
+            current={pinChange.current}
+            matchesNode={pinChange.matchesNode}
+            next={pinChange.next}
+            onAccept={onAcceptPinChange}
+            onReject={onRejectPinChange}
+          />
+        ) : (
+          <>
+            <h1>{t("gate.needsQrTitle")}</h1>
+            <p>{t(needsQr === "changed" ? "gate.needsQrKeyChanged" : "gate.needsQrBody")}</p>
+          </>
+        )}
+      </GateScreen>
     );
   }
 
@@ -2085,67 +2041,56 @@ function LoamApp() {
     // Local data is still being erased — show a TRUTHFUL "Wiping…" state, never the completed screen,
     // until local deletion has finished (docs/20).
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <h1>{t("settings.wiping")}</h1>
-        </div>
-      </main>
+      <GateScreen>
+        <h1>{t("settings.wiping")}</h1>
+      </GateScreen>
     );
   }
 
   if (wiped) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          {wipeScope === "device" ? (
-            <>
-              <h1>{t("gate.deviceWipedTitle")}</h1>
-              <p>{t("gate.deviceWipedBody")}</p>
-            </>
-          ) : (
-            <>
-              <h1>{t("gate.disconnectedTitle")}</h1>
-              <p>{t("gate.disconnectedBody")}</p>
-            </>
-          )}
-        </div>
-      </main>
+      <GateScreen>
+        {wipeScope === "device" ? (
+          <>
+            <h1>{t("gate.deviceWipedTitle")}</h1>
+            <p>{t("gate.deviceWipedBody")}</p>
+          </>
+        ) : (
+          <>
+            <h1>{t("gate.disconnectedTitle")}</h1>
+            <p>{t("gate.disconnectedBody")}</p>
+          </>
+        )}
+      </GateScreen>
     );
   }
 
   if (currentUser.banned) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <h1>{t("gate.bannedTitle")}</h1>
-          <p>{t("gate.bannedBody")}</p>
-        </div>
-      </main>
+      <GateScreen>
+        <h1>{t("gate.bannedTitle")}</h1>
+        <p>{t("gate.bannedBody")}</p>
+      </GateScreen>
     );
   }
 
   if (currentUser.pending) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <h1>{t("gate.pendingTitle")}</h1>
-          <p>{t("gate.pendingBody")}</p>
-          <p className="gate-status">
-            {t("gate.connection", {
-              status:
-                connection === "live"
-                  ? t("sidebar.statusLive")
-                  : connection === "offline"
-                    ? t("sidebar.statusOffline")
-                    : t("sidebar.statusConnecting"),
-            })}
-          </p>
-        </div>
-      </main>
+      <GateScreen>
+        <h1>{t("gate.pendingTitle")}</h1>
+        <p>{t("gate.pendingBody")}</p>
+        <p className={`gate-status status-pill status-${connection}`}>
+          <span aria-hidden="true" className="status-dot" />
+          {t("gate.connection", {
+            status:
+              connection === "live"
+                ? t("sidebar.statusLive")
+                : connection === "offline"
+                  ? t("sidebar.statusOffline")
+                  : t("sidebar.statusConnecting"),
+          })}
+        </p>
+      </GateScreen>
     );
   }
 
@@ -2154,17 +2099,20 @@ function LoamApp() {
     // hands back a different one, and the cache is purged first), the node proved unreachable, or the cap
     // passed — see IDENTITY_GATE_MAX_MS.
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <p className="gate-status">{t("sidebar.statusConnecting")}</p>
-        </div>
-      </main>
+      <GateScreen>
+        <p className="gate-status status-pill status-connecting">
+          <span aria-hidden="true" className="status-dot" />
+          {t("sidebar.statusConnecting")}
+        </p>
+      </GateScreen>
     );
   }
 
   return (
     <>
+    {/* The frame is fixed to the visible viewport (--vvh, see lib/viewport.ts): the document never
+        scrolls, so an open keyboard can't push the header off screen. */}
+    <div className="app-frame">
     {config?.networkConfig.devMode ? (
       <div className="dev-mode-banner" role="alert">
         {t("devMode.banner")}
@@ -2173,6 +2121,7 @@ function LoamApp() {
     <main className={shellClassName}>
       <Sidebar
         activeConversation={activeConversation}
+        activeScreen={routeState.screen === "channels" ? undefined : routeState.screen}
         canCreateChannel={currentUser.isAdmin || !!config?.networkConfig.enableUserChannels}
         canCreatePrivateChannel={!!config?.networkConfig.enablePrivateChannels}
         channels={channels}
@@ -2222,6 +2171,7 @@ function LoamApp() {
           conversation={activeConversation}
           currentUser={currentUser}
           notFound={!!activeKey && notFoundConversation === activeKey}
+          onlineUserIds={onlineUserIds}
           onTyping={() => {
             if (activeConversation) {
               sendTyping(activeConversation);
@@ -2284,1495 +2234,29 @@ function LoamApp() {
         />
       )}
     </main>
+    {/* Inside the frame (a fixed element is its own stacking context): an open dialog must paint above the
+        banner and the toasts, or a toast could cover a confirmation and navigate away from it. */}
     {error ? (
       <ErrorBanner key={error.id} message={error.text} onDismiss={dismissError} transient={!error.persistent} />
     ) : null}
     <ToastStack onDismiss={dismissToast} toasts={toasts} />
+    </div>
     </>
   );
 }
 
 /**
- * Fixed-position stack of auto-dismissing toasts announcing new messages in non-active
- * conversations. Tapping a toast opens the conversation and dismisses it.
+ * The full-screen card shown instead of the app while it can't (or mustn't) show content: the rescan gate,
+ * a wipe in progress or done, a ban, the approval queue, the identity check. Brand mark on top, then the
+ * caller's heading and copy.
  */
-function ToastStack({ onDismiss, toasts }: { onDismiss: (id: string) => void; toasts: ToastItem[] }) {
-  const location = useLocation();
-
-  if (!toasts.length) {
-    return null;
-  }
-
+function GateScreen({ children }: { children: ComponentChildren }) {
   return (
-    <div aria-live="polite" className="toast-stack" role="status">
-      {toasts.map((toast) => (
-        <button
-          className="toast"
-          key={toast.id}
-          onClick={() => {
-            location.route(toast.route);
-            onDismiss(toast.id);
-          }}
-          type="button"
-        >
-          <strong className="toast-title">{toast.title}</strong>
-          <span className="toast-body">{toast.body}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/**
- * Full-text message search over `GET /api/search`. The server scopes results strictly to what this
- * user may read (public channels, their private channels, their own DMs), so the client just
- * renders whatever comes back. Tapping a result jumps to its conversation (or thread).
- */
-function SearchView({
-  blockedUserIds,
-  channels,
-  currentUser,
-  usersById,
-}: {
-  blockedUserIds: ReadonlySet<string>;
-  channels: Channel[];
-  currentUser: User;
-  usersById: Map<string, User>;
-}) {
-  const location = useLocation();
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Message[]>();
-  const [searching, setSearching] = useState(false);
-  const [error, setError] = useState<string>();
-  const searchInputId = useId();
-
-  async function run(): Promise<void> {
-    const trimmed = query.trim();
-
-    if (!trimmed || searching) {
-      return;
-    }
-
-    setSearching(true);
-    setError(undefined);
-
-    try {
-      const payload = await fetchJson<unknown>(`/api/search?q=${encodeURIComponent(trimmed)}`);
-      const rawResults =
-        payload && typeof payload === "object" && "results" in payload && Array.isArray(payload.results)
-          ? (payload.results as unknown[])
-          : [];
-      setResults(
-        rawResults.flatMap((item) => {
-          const parsed = MessageSchema.safeParse(item);
-          return parsed.success ? [parsed.data] : [];
-        }),
-      );
-    } catch (searchError) {
-      setError(searchError instanceof Error ? searchError.message : t("search.error"));
-    } finally {
-      setSearching(false);
-    }
-  }
-
-  function contextLabel(message: Message): string {
-    if (message.type === "channelPost" || message.type === "channelReply") {
-      const channel = channels.find((entry) => entry.id === message.channelId);
-      return `${channel?.visibility === "private" ? "🔒" : "#"}${channel?.name ?? message.channelId}`;
-    }
-
-    if (message.type === "dm") {
-      const peerId = message.authorId === currentUser.id ? message.recipientUserId : message.authorId;
-      return t("search.dmWith", { name: usersById.get(peerId)?.displayName ?? generateDisplayName(peerId) });
-    }
-
-    return "";
-  }
-
-  function routeFor(message: Message): string | undefined {
-    if (message.type === "channelPost") {
-      return `/channel/${encodeURIComponent(message.channelId)}`;
-    }
-
-    if (message.type === "channelReply") {
-      return `/channel/${encodeURIComponent(message.channelId)}/thread/${encodeURIComponent(message.parentMessageId)}`;
-    }
-
-    if (message.type === "dm") {
-      const peerId = message.authorId === currentUser.id ? message.recipientUserId : message.authorId;
-      return `/dm/${encodeURIComponent(peerId)}`;
-    }
-
-    return undefined;
-  }
-
-  return (
-    <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("search.eyebrow")}</p>
-          <h1>{t("search.title")}</h1>
-        </div>
-      </header>
-      {/* One wrapper = one grid row: .settings-view is a strict header/content 2-row grid. */}
-      <div className="search-content">
-        <form
-          className="search-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void run();
-          }}
-        >
-          <label className="sr-only" for={searchInputId}>
-            {t("sidebar.searchMessages")}
-          </label>
-          <input
-            dir="auto"
-            disabled={searching}
-            id={searchInputId}
-            maxLength={200}
-            onInput={(event) => setQuery(event.currentTarget.value)}
-            placeholder={t("search.placeholder")}
-            type="search"
-            value={query}
-          />
-          <button disabled={searching || !query.trim()} type="submit">
-            {searching ? t("search.searching") : t("search.button")}
-          </button>
-        </form>
-        {error ? <p className="form-error">{error}</p> : null}
-        {results && !results.length ? <p className="form-note">{t("search.noResults")}</p> : null}
-        {results?.length ? (
-          <ul className="search-results">
-            {results.map((message) => {
-              const route = routeFor(message);
-              const author = usersById.get(message.authorId);
-              return (
-                <SearchResult
-                  authorName={author?.displayName ?? generateDisplayName(message.authorId)}
-                  body={bodyFor(message)}
-                  contextLabel={contextLabel(message)}
-                  hiddenAsBlocked={message.authorId !== currentUser.id && blockedUserIds.has(message.authorId)}
-                  key={message.id}
-                  onOpen={() => {
-                    if (route) {
-                      location.route(route);
-                    }
-                  }}
-                  time={displayTime(message.createdAt)}
-                />
-              );
-            })}
-          </ul>
-        ) : null}
+    <main className="gate-screen wiped-screen">
+      <div className="gate-card">
+        <img alt="LOAM" className="gate-mark" src={loamMark} />
+        {children}
       </div>
-    </section>
-  );
-}
-
-/**
- * Parse a `GET /api/mesh/contacts` payload into validated contacts, dropping any entries that fail
- * the schema (mirrors `parseUserList`).
- */
-function parseMeshContactList(payload: unknown): MeshContact[] {
-  return Array.isArray(payload)
-    ? payload.flatMap((item) => {
-        const parsed = MeshContactSchema.safeParse(item);
-        return parsed.success ? [parsed.data] : [];
-      })
-    : [];
-}
-
-/**
- * Mesh mail (opportunistic-mesh sealed mailbox — docs/16). Only rendered when
- * `networkConfig.enableMesh` is on. Three panels: this user's own shareable mesh identity card (QR +
- * copy, so someone else can add them as a contact), a paste-a-card form to add a contact, and the
- * contact list with a per-contact compose box for sending sealed mail (delivered to the recipient as
- * an ordinary DM once opened — there is no separate "inbox" here).
- */
-function MeshView() {
-  const [card, setCard] = useState<MeshIdentityCard>();
-  const [cardLoading, setCardLoading] = useState(true);
-  const [cardError, setCardError] = useState<string>();
-  const [copied, setCopied] = useState(false);
-
-  const [contacts, setContacts] = useState<MeshContact[]>();
-  const [contactsError, setContactsError] = useState<string>();
-  const [contactsReloadKey, setContactsReloadKey] = useState(0);
-
-  const [addValue, setAddValue] = useState("");
-  const [addBusy, setAddBusy] = useState(false);
-  const [addError, setAddError] = useState<string>();
-  const [addSuccess, setAddSuccess] = useState<string>();
-
-  const [selectedMeshId, setSelectedMeshId] = useState<string>();
-  const [composeBody, setComposeBody] = useState("");
-  const [composeBusy, setComposeBusy] = useState(false);
-  const [composeError, setComposeError] = useState<string>();
-  const [composeSuccess, setComposeSuccess] = useState<string>();
-
-  const addContactId = useId();
-
-  useEffect(() => {
-    let active = true;
-    setCardLoading(true);
-    setCardError(undefined);
-
-    fetchJson<unknown>("/api/mesh/identity")
-      .then((payload) => {
-        if (!active) {
-          return;
-        }
-
-        const parsed = MeshIdentityCardSchema.safeParse(payload);
-        if (!parsed.success) {
-          setCardError(t("mesh.myCardUnrecognised"));
-          return;
-        }
-
-        setCard(parsed.data);
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setCardError(error instanceof Error ? error.message : t("mesh.myCardLoadError"));
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setCardLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    setContactsError(undefined);
-
-    fetchJson<unknown>("/api/mesh/contacts")
-      .then((payload) => {
-        if (active) {
-          setContacts(parseMeshContactList(payload));
-        }
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setContactsError(error instanceof Error ? error.message : t("mesh.contactsLoadError"));
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [contactsReloadKey]);
-
-  const cardJson = useMemo(() => (card ? JSON.stringify(card) : undefined), [card]);
-  const qrSvg = useMemo(() => safeQrSvg(cardJson, "#16271f"), [cardJson]);
-
-  // Clear the "Copied" flash timer on unmount (the file's cleanup discipline; Preact tolerates a
-  // late setState but we match the surrounding effects).
-  const copyTimerRef = useRef<number>();
-  useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
-
-  async function copyCard(): Promise<void> {
-    if (!cardJson) {
-      return;
-    }
-
-    try {
-      await navigator.clipboard.writeText(cardJson);
-      setCopied(true);
-      copyTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard is unavailable on insecure-context browsers — which is the norm on LOAM's plain-HTTP
-      // LAN. The card is also rendered as a visible, selectable read-only field below, so the user can
-      // still copy it by hand; this button is a convenience only.
-    }
-  }
-
-  async function addContact(): Promise<void> {
-    let parsedBody: unknown;
-
-    try {
-      parsedBody = JSON.parse(addValue);
-    } catch {
-      setAddError(t("mesh.addContactInvalidJson"));
-      return;
-    }
-
-    setAddBusy(true);
-    setAddError(undefined);
-    setAddSuccess(undefined);
-
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    try {
-      const response = await encryptedFetch("POST", "/api/mesh/contacts", parsedBody, {
-        signal: controller.signal,
-      });
-      const payload: unknown = await response.json().catch(() => undefined);
-
-      if (!response.ok) {
-        throw new Error(errorText(payload, t("mesh.addContactError")));
-      }
-
-      setAddValue("");
-      setAddSuccess(t("mesh.addContactSuccess"));
-      setContactsReloadKey((key) => key + 1);
-    } catch (error) {
-      setAddError(error instanceof Error ? error.message : t("mesh.addContactError"));
-    } finally {
-      window.clearTimeout(timeout);
-      setAddBusy(false);
-    }
-  }
-
-  function selectContact(meshId: string): void {
-    setSelectedMeshId((current) => (current === meshId ? undefined : meshId));
-    setComposeBody("");
-    setComposeError(undefined);
-    setComposeSuccess(undefined);
-  }
-
-  async function sendMail(): Promise<void> {
-    const toMeshId = selectedMeshId;
-    const body = composeBody.trim();
-
-    if (!toMeshId || !body) {
-      return;
-    }
-
-    setComposeBusy(true);
-    setComposeError(undefined);
-    setComposeSuccess(undefined);
-
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    try {
-      const response = await encryptedFetch("POST", "/api/mesh/messages", { toMeshId, body }, {
-        signal: controller.signal,
-      });
-      const payload: unknown = await response.json().catch(() => undefined);
-
-      if (!response.ok) {
-        throw new Error(errorText(payload, t("mesh.composeError")));
-      }
-
-      setComposeBody("");
-      setComposeSuccess(t("mesh.composeSuccess"));
-    } catch (error) {
-      setComposeError(error instanceof Error ? error.message : t("mesh.composeError"));
-    } finally {
-      window.clearTimeout(timeout);
-      setComposeBusy(false);
-    }
-  }
-
-  return (
-    <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("mesh.eyebrow")}</p>
-          <h1>{t("mesh.title")}</h1>
-        </div>
-      </header>
-      <div className="settings-grid">
-        <div className="profile-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">{t("mesh.myCardEyebrow")}</p>
-              <h2>{t("mesh.myCardTitle")}</h2>
-            </div>
-          </div>
-          <p className="form-note">{t("mesh.myCardNote")}</p>
-          {cardLoading ? <p className="form-note">{t("mesh.myCardLoading")}</p> : null}
-          {cardError ? <p className="form-error">{cardError}</p> : null}
-          {card ? (
-            <>
-              {qrSvg ? (
-                <div aria-hidden="true" className="invite-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-              ) : (
-                <p className="form-note">{t("mesh.myCardQrTooLarge")}</p>
-              )}
-              {/* Visible, selectable copy of the card so a clipboard-less (insecure-context) browser —
-                  the norm on LOAM's plain-HTTP LAN — and screen readers (the QR is aria-hidden) can
-                  still get it out, mirroring the join-QR panel's URL fallback. */}
-              <textarea
-                aria-label={t("mesh.myCardTitle")}
-                className="mesh-card-text"
-                onFocus={(event) => event.currentTarget.select()}
-                readOnly
-                rows={3}
-                value={cardJson}
-              />
-              <div className="profile-actions">
-                <button onClick={() => void copyCard()} type="button">
-                  {copied ? t("mesh.copyCardCopied") : t("mesh.copyCard")}
-                </button>
-              </div>
-            </>
-          ) : null}
-        </div>
-
-        <div className="profile-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">{t("mesh.addContactEyebrow")}</p>
-              <h2>{t("mesh.addContactTitle")}</h2>
-            </div>
-          </div>
-          <label className="sr-only" for={addContactId}>
-            {t("mesh.addContactTitle")}
-          </label>
-          <textarea
-            dir="auto"
-            disabled={addBusy}
-            id={addContactId}
-            onInput={(event) => setAddValue(event.currentTarget.value)}
-            placeholder={t("mesh.addContactPlaceholder")}
-            rows={4}
-            value={addValue}
-          />
-          {addError ? <p className="form-error">{addError}</p> : null}
-          {addSuccess ? <p className="form-note">{addSuccess}</p> : null}
-          <div className="profile-actions">
-            <button disabled={addBusy || !addValue.trim()} onClick={() => void addContact()} type="button">
-              {addBusy ? t("mesh.addContactAdding") : t("mesh.addContactButton")}
-            </button>
-          </div>
-        </div>
-
-        <div className="profile-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">{t("mesh.contactsEyebrow")}</p>
-              <h2>{t("mesh.contactsTitle")}</h2>
-            </div>
-            <button className="ghost-button" onClick={() => setContactsReloadKey((key) => key + 1)} type="button">
-              {t("common.refresh")}
-            </button>
-          </div>
-          {contacts === undefined && !contactsError ? <p className="form-note">{t("mesh.contactsLoading")}</p> : null}
-          {contactsError ? <p className="form-error">{contactsError}</p> : null}
-          {contacts && contacts.length === 0 ? <p className="form-note">{t("mesh.contactsEmpty")}</p> : null}
-          {contacts?.length ? (
-            <ul className="moderation-list">
-              {contacts.map((contact) => (
-                <li className="moderation-row" key={contact.meshId}>
-                  <div className="moderation-identity">
-                    <div className="moderation-name">
-                      <strong>{contact.displayName ?? contact.meshId}</strong>
-                      {contact.displayName ? <span>{contact.meshId}</span> : null}
-                    </div>
-                  </div>
-                  <div className="moderation-actions">
-                    <button onClick={() => selectContact(contact.meshId)} type="button">
-                      {selectedMeshId === contact.meshId ? t("mesh.composeHide") : t("mesh.composeShow")}
-                    </button>
-                  </div>
-                  {selectedMeshId === contact.meshId ? (
-                    <div className="mesh-compose">
-                      <textarea
-                        dir="auto"
-                        disabled={composeBusy}
-                        onInput={(event) => setComposeBody(event.currentTarget.value)}
-                        placeholder={t("mesh.composePlaceholder")}
-                        rows={3}
-                        value={composeBody}
-                      />
-                      <p className="form-note">{t("mesh.composeReplyNote")}</p>
-                      {composeError ? <p className="form-error">{composeError}</p> : null}
-                      {composeSuccess ? <p className="form-note">{composeSuccess}</p> : null}
-                      <div className="profile-actions">
-                        <button
-                          disabled={composeBusy || !composeBody.trim()}
-                          onClick={() => void sendMail()}
-                          type="button"
-                        >
-                          {composeBusy ? t("mesh.composeSending") : t("mesh.composeSend")}
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/**
- * Renders the settings screen for the current user, including join QR, identity preview,
- * profile form (display name and generated avatar style), and an image crop upload editor.
- *
- * The UI respects node feature flags from `config.networkConfig`: it enables or disables
- * display name editing, avatar style editing, and image uploads accordingly. Saving the
- * profile will invoke `onUpdateCurrentUser` with any changed display name or generated
- * avatar settings. Image avatar uploads produced by the crop editor are forwarded to
- * `onUploadAvatarImage`.
- *
- * @param onUpdateCurrentUser - Called with a `UserUpdateRequest` when the user saves profile changes.
- * @param onUploadAvatarImage - Called with the cropped avatar `Blob` when the user uploads an image avatar.
- */
-function SettingsView({
-  blockedUserIds,
-  config,
-  currentUser,
-  onClaimAdmin,
-  onSetBlocked,
-  onUpdateCurrentUser,
-  onUploadAvatarImage,
-  onWipeDevice,
-  usersById,
-}: {
-  blockedUserIds: ReadonlySet<string>;
-  config?: Config;
-  currentUser: User;
-  onClaimAdmin: (secret: string) => Promise<void>;
-  onSetBlocked: (userId: string, blocked: boolean) => Promise<void>;
-  onUpdateCurrentUser: (request: UserUpdateRequest) => Promise<void>;
-  onUploadAvatarImage: (blob: Blob) => Promise<void>;
-  onWipeDevice: () => Promise<void>;
-  usersById: Map<string, User>;
-}) {
-  const [displayName, setDisplayName] = useState(currentUser.displayName);
-  const [avatarKind, setAvatarKind] = useState(currentUser.avatar?.kind === "image" ? "image" : "generated");
-  const [avatarSeed, setAvatarSeed] = useState(currentUser.avatar?.seed ?? currentUser.id);
-  const [avatarMode, setAvatarMode] = useState(currentUser.avatar?.mode ?? "face");
-  const [saving, setSaving] = useState(false);
-  const [profileError, setProfileError] = useState<string>();
-  const allowDisplayNameEdit = config?.networkConfig.allowUserDisplayNameEdit ?? false;
-  const allowAvatarEdit = config?.networkConfig.allowUserAvatarEdit ?? false;
-  const allowAvatarUpload = config?.networkConfig.allowUserAvatarUpload ?? false;
-  // Encode the host's transport public key into the join QR (docs/08) so a scanner learns it
-  // out-of-band → MITM-resistant handshake. The displayed URL text below stays plain. Only a key THIS
-  // client verified from its own scanned QR is vouched for — never the one the unauthenticated bootstrap
-  // advertised — and the QR is withheld when those two disagree (see `inviteQrHostKey`).
-  const inviteQr = config ? inviteQrHostKey() : undefined;
-  const qrSvg = useMemo(
-    () =>
-      config?.joinUrl && !inviteQr?.suppressed ? safeQrSvg(joinQrUrl(config.joinUrl, inviteQr?.key), "#203f34") : "",
-    [config?.joinUrl, inviteQr?.key, inviteQr?.suppressed],
-  );
-  const previewUser: User = {
-    ...currentUser,
-    displayName,
-    avatar:
-      avatarKind === "image"
-        ? currentUser.avatar
-        : {
-            kind: "generated",
-            seed: avatarSeed,
-            mode: avatarMode,
-          },
-  };
-
-  useEffect(() => {
-    setDisplayName(currentUser.displayName);
-    setAvatarKind(currentUser.avatar?.kind === "image" ? "image" : "generated");
-    setAvatarSeed(currentUser.avatar?.seed ?? currentUser.id);
-    setAvatarMode(currentUser.avatar?.mode ?? "face");
-  }, [
-    currentUser.avatar?.imageId,
-    currentUser.avatar?.kind,
-    currentUser.avatar?.mode,
-    currentUser.avatar?.seed,
-    currentUser.displayName,
-    currentUser.id,
-  ]);
-
-  async function saveProfile(): Promise<void> {
-    const update: UserUpdateRequest = {};
-
-    if (allowDisplayNameEdit) {
-      update.displayName = displayName.trim();
-    }
-
-    if (allowAvatarEdit && avatarKind !== "image") {
-      update.avatar = {
-        kind: "generated",
-        seed: avatarSeed.trim() || currentUser.id,
-        mode: avatarMode,
-      };
-    }
-
-    if (!update.displayName && !update.avatar) {
-      return;
-    }
-
-    setSaving(true);
-    setProfileError(undefined);
-
-    try {
-      await onUpdateCurrentUser(update);
-    } catch (error) {
-      setProfileError(error instanceof Error ? error.message : t("settings.profileError"));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function randomizeAvatar(): void {
-    const bytes = new Uint8Array(8);
-    crypto.getRandomValues(bytes);
-    setAvatarKind("generated");
-    setAvatarSeed(`avatar.${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`);
-  }
-
-  return (
-    <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("settings.joinEyebrow")}</p>
-          <h1>{t("settings.joinTitle")}</h1>
-        </div>
-      </header>
-      <div className="settings-grid">
-        <div className="join-panel">
-          {inviteQr?.suppressed ? (
-            <p className="form-error">{t("invite.qrKeyMismatch")}</p>
-          ) : (
-            <div className="qr-box" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-          )}
-          {inviteQr && !inviteQr.suppressed && !inviteQr.key && config?.networkConfig.transportPublicKey ? (
-            <p className="form-note">{t("invite.qrNoKeyNote")}</p>
-          ) : null}
-          <p>{config?.joinUrl ?? window.location.origin}</p>
-          {/* Product name + version — the node's build, not this browser's cache. Deliberately no
-              translatable label word so it stays i18n-neutral. */}
-          <p className="node-version">LOAM v{config?.version ?? "…"}</p>
-          {/* Play's user-data policy wants the privacy policy linked in-app. It's on the public web, so on
-              an offline LAN it simply won't load (and the Android host opens it in the system browser). */}
-          <p className="privacy-policy-link">
-            <a href={PRIVACY_POLICY_URL} rel="noreferrer" target="_blank">
-              {t("settings.privacyPolicy")}
-            </a>
-          </p>
-          {/* Transport encryption (docs/08): only shown once a session is actually live — `fingerprint()`
-              returns undefined off-mode or before the handshake completes. A QR-verified session (the
-              host key came from a scanned join QR, out-of-band) is MITM-resistant; a session keyed only
-              from the server's advertised config key is not — an attacker on the LAN could have supplied
-              that key — so the two are surfaced distinctly rather than both reading as "Encrypted". */}
-          {fingerprint() ? (
-            <p className="transport-fingerprint">
-              {isSessionQrVerified()
-                ? t("settings.transportVerifiedLine", { fingerprint: fingerprint() ?? "" })
-                : t("settings.transportUnverifiedLine", { fingerprint: fingerprint() ?? "" })}
-            </p>
-          ) : null}
-          {fingerprint() && !isSessionQrVerified() ? (
-            <p className="form-note">{t("settings.transportUnverifiedHint")}</p>
-          ) : null}
-          {getHostKeyMismatch() ? (
-            <p className="form-error">{t("settings.transportKeyMismatch")}</p>
-          ) : null}
-        </div>
-        <div className="identity-panel">
-          <Avatar avatar={previewUser.avatar} id={currentUser.id} />
-          <div>
-            <p className="eyebrow">{t("settings.thisBrowser")}</p>
-            <h2>{displayName}</h2>
-            <p>{currentUser.id}</p>
-          </div>
-        </div>
-        {/* Editing controls render only when the node actually allows them — a section that would be
-            entirely disabled is hidden rather than shown greyed-out (no FOMO). The read-only identity
-            panel above always stays, so a user still sees who they are. */}
-        {allowDisplayNameEdit || allowAvatarEdit ? (
-          <form
-            className="profile-panel"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void saveProfile();
-            }}
-          >
-            <div>
-              <p className="eyebrow">{t("settings.profileEyebrow")}</p>
-              <h2>{t("settings.profileTitle")}</h2>
-            </div>
-            {allowDisplayNameEdit ? (
-              <label>
-                {t("settings.displayName")}
-                <input
-                  disabled={saving}
-                  maxLength={80}
-                  onInput={(event) => setDisplayName(event.currentTarget.value)}
-                  value={displayName}
-                />
-              </label>
-            ) : null}
-            {allowAvatarEdit ? (
-              <label>
-                {t("settings.avatarStyle")}
-                <select
-                  disabled={saving || avatarKind === "image"}
-                  onInput={(event) => {
-                    setAvatarKind("generated");
-                    setAvatarMode(event.currentTarget.value as (typeof AVATAR_MODES)[number]);
-                  }}
-                  value={avatarMode}
-                >
-                  {AVATAR_MODES.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {mode}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-            <div className="profile-actions">
-              {allowAvatarEdit ? (
-                <button disabled={saving} onClick={randomizeAvatar} type="button">
-                  {t("settings.newAvatar")}
-                </button>
-              ) : null}
-              <button disabled={saving} type="submit">
-                {saving ? t("common.saving") : t("settings.saveProfile")}
-              </button>
-            </div>
-            {allowAvatarEdit && allowAvatarUpload ? (
-              <div className="avatar-upload-panel">
-                <div>
-                  <p className="eyebrow">{t("settings.imageAvatarEyebrow")}</p>
-                  <h2>{t("settings.cropUpload")}</h2>
-                </div>
-                <AvatarImageEditor disabled={saving} onUpload={onUploadAvatarImage} />
-              </div>
-            ) : null}
-            {profileError ? <p className="form-error">{profileError}</p> : null}
-          </form>
-        ) : null}
-        <BlockedUsersPanel blockedUserIds={blockedUserIds} onSetBlocked={onSetBlocked} usersById={usersById} />
-        <AdminAccessPanel
-          allowAdminClaim={config?.networkConfig.allowAdminClaim ?? false}
-          currentUser={currentUser}
-          onClaimAdmin={onClaimAdmin}
-        />
-        {config?.networkConfig.securityProfile === "hardened" ? (
-          <DeviceWipePanel onWipeDevice={onWipeDevice} />
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
-/**
- * Local ("wipe this device") kill switch, shown only under the hardened security profile. Erases
- * this browser's local copy after a typed confirmation; it does not touch the node or other devices
- * (that is the admin kill switch). Reuses the app's `purgeLocalData` flow.
- */
-function DeviceWipePanel({ onWipeDevice }: { onWipeDevice: () => Promise<void> }) {
-  const [confirmText, setConfirmText] = useState("");
-  const [wiping, setWiping] = useState(false);
-
-  async function wipe(): Promise<void> {
-    setWiping(true);
-
-    try {
-      await onWipeDevice();
-    } finally {
-      setWiping(false);
-    }
-  }
-
-  return (
-    <div className="profile-panel">
-      <div>
-        <p className="eyebrow">{t("settings.securityEyebrow")}</p>
-        <h2>{t("settings.wipeTitle")}</h2>
-      </div>
-      <div className="danger-zone">
-        <p className="form-note">{t("settings.wipeBody")}</p>
-        <label>
-          {t("settings.wipeConfirmBefore")} <strong>wipe</strong> {t("settings.wipeConfirmAfter")}
-          <input
-            autoComplete="off"
-            disabled={wiping}
-            onInput={(event) => setConfirmText(event.currentTarget.value)}
-            value={confirmText}
-          />
-        </label>
-        <div className="profile-actions">
-          <button
-            className="danger-button"
-            disabled={wiping || confirmText.trim() !== "wipe"}
-            onClick={() => void wipe()}
-            type="button"
-          >
-            {wiping ? t("settings.wiping") : t("settings.wipeTitle")}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Settings panel granting entry to the admin area: a link for admins, a secret claim form when the
- * node's bootstrap strategy allows claiming, or an explanatory note otherwise.
- */
-function AdminAccessPanel({
-  allowAdminClaim,
-  currentUser,
-  onClaimAdmin,
-}: {
-  allowAdminClaim: boolean;
-  currentUser: User;
-  onClaimAdmin: (secret: string) => Promise<void>;
-}) {
-  const [secret, setSecret] = useState("");
-  const [claiming, setClaiming] = useState(false);
-  const [claimError, setClaimError] = useState<string>();
-
-  async function claim(): Promise<void> {
-    setClaiming(true);
-    setClaimError(undefined);
-
-    try {
-      await onClaimAdmin(secret.trim());
-      setSecret("");
-    } catch (error) {
-      setClaimError(error instanceof Error ? error.message : t("settings.claimError"));
-    } finally {
-      setClaiming(false);
-    }
-  }
-
-  return (
-    <div className="profile-panel">
-      <div>
-        <p className="eyebrow">{t("settings.adminEyebrow")}</p>
-        <h2>{currentUser.isAdmin ? t("settings.adminTools") : t("settings.adminAccess")}</h2>
-      </div>
-      {currentUser.isAdmin ? (
-        <NavLink active={false} className="admin-open-link" href="/admin">
-          {t("settings.openAdmin")}
-        </NavLink>
-      ) : allowAdminClaim ? (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            void claim();
-          }}
-        >
-          <label>
-            {t("settings.claimLabel")}
-            <input
-              autoComplete="off"
-              disabled={claiming}
-              onInput={(event) => setSecret(event.currentTarget.value)}
-              type="password"
-              value={secret}
-            />
-          </label>
-          <div className="profile-actions">
-            <button disabled={claiming || !secret.trim()} type="submit">
-              {claiming ? t("settings.checking") : t("settings.unlockAdmin")}
-            </button>
-          </div>
-          {claimError ? <p className="form-error">{claimError}</p> : null}
-        </form>
-      ) : (
-        <p className="form-note">{t("settings.claimDisabled")}</p>
-      )}
-    </div>
-  );
-}
-
-/**
- * People & moderation surface for admins, moderators, and greeters. Greeters see the pending-join
- * queue; moderators (and admins) see the full roster with ban / shadow-ban controls; admins also get
- * role assignment. All gating here is cosmetic — the server enforces every capability.
- */
-function PeopleView({
-  currentUser,
-  onUsersChanged,
-}: {
-  currentUser: User;
-  onUsersChanged: (users: User[]) => void;
-}) {
-  const greeter = canGreet(currentUser);
-  const moderator = canModerate(currentUser);
-
-  if (!greeter && !moderator) {
-    return (
-      <section className="settings-view">
-        <header className="conversation-header">
-          <MobileBackLink />
-          <div>
-            <p className="eyebrow">{t("people.eyebrow")}</p>
-            <h1>{t("people.notAuthorizedTitle")}</h1>
-          </div>
-        </header>
-        <p className="form-note">{t("people.notAuthorizedNote")}</p>
-      </section>
-    );
-  }
-
-  return (
-    <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("people.eyebrow")}</p>
-          <h1>{t("people.title")}</h1>
-        </div>
-      </header>
-      <div className="settings-grid">
-        {greeter ? <PendingApprovalsPanel onUsersChanged={onUsersChanged} /> : null}
-        {moderator ? <ModerationPanel currentUser={currentUser} onUsersChanged={onUsersChanged} /> : null}
-      </div>
-    </section>
-  );
-}
-
-/**
- * Parse an array response into validated users, dropping any entries that fail the schema.
- */
-/**
- * Greeter queue: lists users awaiting approval (`GET /api/access/pending`) with Approve / Deny
- * actions. Pending users are hidden from the normal roster, so this panel fetches its own list and
- * offers a manual refresh.
- */
-function PendingApprovalsPanel({ onUsersChanged }: { onUsersChanged: (users: User[]) => void }) {
-  const [pending, setPending] = useState<User[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string>();
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    setLoaded(false);
-    setLoadError(undefined);
-
-    fetchJson<unknown>("/api/access/pending")
-      .then((payload) => {
-        if (!active) {
-          return;
-        }
-
-        setPending(parseUserList(payload));
-        setLoaded(true);
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setLoadError(error instanceof Error ? error.message : t("people.pendingLoadError"));
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [reloadKey]);
-
-  return (
-    <div className="profile-panel">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">{t("people.accessEyebrow")}</p>
-          <h2>{t("people.pendingTitle")}</h2>
-        </div>
-        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          {t("common.refresh")}
-        </button>
-      </div>
-      {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!loaded && !loadError ? <p className="form-note">{t("people.pendingLoading")}</p> : null}
-      {loaded && pending.length === 0 ? <p className="form-note">{t("people.pendingEmpty")}</p> : null}
-      {pending.length > 0 ? (
-        <ul className="moderation-list">
-          {pending.map((user) => (
-            <PendingRow
-              key={user.id}
-              onResolved={(resolved) => {
-                setPending((previous) => previous.filter((entry) => entry.id !== resolved.id));
-                onUsersChanged([resolved]);
-              }}
-              user={user}
-            />
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * One pending-join row: Approve lets the user in; Deny bans them. Holds its own busy/error state so
- * resolving one person never disturbs another.
- */
-function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; user: User }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-
-  async function decide(action: "approve" | "deny"): Promise<void> {
-    setBusy(true);
-    setError(undefined);
-
-    try {
-      const updated = await requestUser("POST", `/api/access/users/${encodeURIComponent(user.id)}/${action}`);
-      onResolved(updated);
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : t("moderation.updateError"));
-      setBusy(false);
-    }
-  }
-
-  return (
-    <li className="moderation-row">
-      <div className="moderation-identity">
-        <Avatar avatar={user.avatar} id={user.id} />
-        <div className="moderation-name">
-          <strong>{user.displayName}</strong>
-          <span>{user.id}</span>
-        </div>
-      </div>
-      <div className="moderation-actions">
-        <button disabled={busy} onClick={() => void decide("approve")} type="button">
-          {t("people.approve")}
-        </button>
-        <button className="danger-button" disabled={busy} onClick={() => void decide("deny")} type="button">
-          {t("people.deny")}
-        </button>
-      </div>
-      {error ? <p className="form-error">{error}</p> : null}
-    </li>
-  );
-}
-
-/**
- * Moderator roster: the full human user list including banned / shadow-banned people
- * (`GET /api/moderation/users`) so they can be unbanned. Each row exposes ban / shadow-ban toggles,
- * and (for admins) role assignment. Controls are hidden for admin targets and for yourself.
- */
-const TIMEOUT_DURATION_MS = 3_600_000; // a moderator "time out" lasts one hour
-
-/**
- * The moderator report queue (docs/26): open member reports with one-motion actions. A message report
- * offers Remove / Escalate / Dismiss; a user report offers Time-out / Ban / Escalate / Dismiss. Every
- * action resolves the report (it drops out of the queue). Names are resolved from the moderation roster.
- */
-function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (user: User) => void }) {
-  const [reports, setReports] = useState<Report[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<string>();
-  const [busyId, setBusyId] = useState<string>();
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    setLoaded(false);
-    fetchJson<unknown>("/api/moderation/reports")
-      .then((payload) => {
-        if (!active) {
-          return;
-        }
-        setReports(
-          Array.isArray(payload)
-            ? payload.flatMap((item) => {
-                const parsed = ReportSchema.safeParse(item);
-                return parsed.success ? [parsed.data] : [];
-              })
-            : [],
-        );
-        setLoaded(true);
-      })
-      .catch((loadError: unknown) => {
-        if (active) {
-          setError(loadError instanceof Error ? loadError.message : t("moderation.reports.loadError"));
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [reloadKey]);
-
-  const nameFor = (id: string): string => people.find((entry) => entry.id === id)?.displayName ?? generateDisplayName(id);
-
-  async function act(report: Report, enforce: () => Promise<unknown>, resolution: ReportResolution): Promise<void> {
-    setBusyId(report.id);
-    setError(undefined);
-    try {
-      await enforce();
-      await requestJson("POST", `/api/moderation/reports/${encodeURIComponent(report.id)}/resolve`, { resolution });
-      setReports((previous) => previous.filter((entry) => entry.id !== report.id));
-    } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : t("moderation.updateError"));
-    } finally {
-      setBusyId(undefined);
-    }
-  }
-
-  const removeMessage = (id: string): Promise<unknown> =>
-    requestJson("POST", `/api/moderation/messages/${encodeURIComponent(id)}/remove`, {});
-  const moderateUser = async (id: string, update: Record<string, unknown>): Promise<void> => {
-    const updated = await requestJson<unknown>("PATCH", `/api/moderation/users/${encodeURIComponent(id)}`, update);
-    const parsed = UserSchema.safeParse(updated);
-    if (parsed.success) {
-      onApplyUser(parsed.data);
-    }
-  };
-
-  return (
-    <div className="report-queue">
-      <div className="panel-heading">
-        <h3>{t("moderation.reports.title")}</h3>
-        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          {t("common.refresh")}
-        </button>
-      </div>
-      {error ? <p className="form-error">{error}</p> : null}
-      {loaded && reports.length === 0 ? <p className="form-note">{t("moderation.reports.empty")}</p> : null}
-      {reports.length > 0 ? (
-        <ul className="report-list">
-          {reports.map((report) => {
-            const busy = busyId === report.id;
-            return (
-              <li className="report-row" key={report.id}>
-                <div className="report-meta">
-                  <strong>
-                    {report.targetType === "message"
-                      ? t("moderation.reports.targetMessage")
-                      : `${t("moderation.reports.targetUser")}: ${nameFor(report.targetId)}`}
-                  </strong>
-                  <span>
-                    {t("moderation.reports.reasonLine", {
-                      reason: t(`report.reason.${report.reason}` as Parameters<typeof t>[0]),
-                    })}
-                  </span>
-                  <span>{t("moderation.reports.reporter", { name: nameFor(report.reporterUserId) })}</span>
-                  {report.note ? (
-                    <p className="report-note" dir="auto">
-                      {report.note}
-                    </p>
-                  ) : null}
-                </div>
-                <div className="report-actions">
-                  {report.targetType === "message" ? (
-                    <button
-                      disabled={busy}
-                      onClick={() => void act(report, () => removeMessage(report.targetId), "message_removed")}
-                      type="button"
-                    >
-                      {t("moderation.reports.removeMessage")}
-                    </button>
-                  ) : (
-                    <>
-                      <button
-                        disabled={busy}
-                        onClick={() =>
-                          void act(
-                            report,
-                            // A duration, not an absolute time: the server derives the expiry from its own clock.
-                            () => moderateUser(report.targetId, { timeoutMs: TIMEOUT_DURATION_MS }),
-                            "user_timed_out",
-                          )
-                        }
-                        type="button"
-                      >
-                        {t("moderation.reports.timeoutUser")}
-                      </button>
-                      <button
-                        disabled={busy}
-                        onClick={() => void act(report, () => moderateUser(report.targetId, { banned: true }), "user_banned")}
-                        type="button"
-                      >
-                        {t("moderation.reports.banUser")}
-                      </button>
-                    </>
-                  )}
-                  <button disabled={busy} onClick={() => void act(report, () => Promise.resolve(), "escalated")} type="button">
-                    {t("moderation.reports.escalate")}
-                  </button>
-                  <button disabled={busy} onClick={() => void act(report, () => Promise.resolve(), "dismissed")} type="button">
-                    {t("moderation.reports.dismiss")}
-                  </button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
-function ModerationPanel({
-  currentUser,
-  onUsersChanged,
-}: {
-  currentUser: User;
-  onUsersChanged: (users: User[]) => void;
-}) {
-  const [people, setPeople] = useState<User[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string>();
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    setLoaded(false);
-    setLoadError(undefined);
-
-    fetchJson<unknown>("/api/moderation/users")
-      .then((payload) => {
-        if (!active) {
-          return;
-        }
-
-        setPeople(parseUserList(payload));
-        setLoaded(true);
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setLoadError(error instanceof Error ? error.message : t("moderation.loadError"));
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [reloadKey]);
-
-  /** Merge an updated user into the roster (preserving order) and the app-wide roster in one step. */
-  const applyUser = useCallback(
-    (user: User) => {
-      setPeople((previous) => {
-        const next = new Map(previous.map((entry) => [entry.id, entry]));
-        next.set(user.id, user);
-        return Array.from(next.values());
-      });
-      onUsersChanged([user]);
-    },
-    [onUsersChanged],
-  );
-
-  return (
-    <div className="profile-panel">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">{t("moderation.eyebrow")}</p>
-          <h2>{t("moderation.heading")}</h2>
-        </div>
-        <button className="ghost-button" onClick={() => setReloadKey((key) => key + 1)} type="button">
-          {t("common.refresh")}
-        </button>
-      </div>
-      <ReportQueue onApplyUser={applyUser} people={people} />
-      {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!loaded && !loadError ? <p className="form-note">{t("moderation.loading")}</p> : null}
-      {loaded && people.length === 0 ? <p className="form-note">{t("moderation.empty")}</p> : null}
-      {people.length > 0 ? (
-        <ul className="moderation-list">
-          {people.map((user) => (
-            <ModerationUserRow currentUser={currentUser} key={user.id} onApply={applyUser} user={user} />
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * One roster row. Shows the person's identity and state badges; when the target is neither an admin
- * nor yourself, exposes role checkboxes (admins only) and ban / shadow-ban toggles.
- */
-function ModerationUserRow({
-  currentUser,
-  onApply,
-  user,
-}: {
-  currentUser: User;
-  onApply: (user: User) => void;
-  user: User;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const protectedTarget = isProtectedTarget(user, currentUser);
-  const roles = new Set<Role>(user.roles ?? []);
-  // Reactive so the timeout button flips to "time out" the moment the timeout expires (not on next render).
-  const timedOut = useIsTimedOut(user);
-
-  async function run(action: () => Promise<User>): Promise<void> {
-    setBusy(true);
-    setError(undefined);
-
-    try {
-      onApply(await action());
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : t("moderation.updateError"));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function setRole(role: Role, checked: boolean): void {
-    const next = new Set(roles);
-
-    if (checked) {
-      next.add(role);
-    } else {
-      next.delete(role);
-    }
-
-    void run(() =>
-      requestUser("PATCH", `/api/admin/users/${encodeURIComponent(user.id)}/roles`, {
-        roles: Array.from(next),
-      }),
-    );
-  }
-
-  function setModeration(update: {
-    banned?: boolean;
-    shadowBanned?: boolean;
-    timeoutMs?: number;
-    timeoutUntil?: null;
-  }): void {
-    void run(() => requestUser("PATCH", `/api/moderation/users/${encodeURIComponent(user.id)}`, update));
-  }
-
-  function promote(): void {
-    if (!window.confirm(t("moderation.promoteConfirm", { name: user.displayName }))) {
-      return;
-    }
-
-    void run(() => requestUser("POST", `/api/admin/users/${encodeURIComponent(user.id)}/promote`));
-  }
-
-  return (
-    <li className="moderation-row">
-      <div className="moderation-identity">
-        <Avatar avatar={user.avatar} id={user.id} />
-        <div className="moderation-name">
-          <strong>{user.displayName}</strong>
-          <span>{user.id}</span>
-        </div>
-        <UserStateBadges user={user} />
-      </div>
-      {protectedTarget ? (
-        <p className="moderation-note">{user.id === currentUser.id ? t("moderation.thatsYou") : t("moderation.adminsProtected")}</p>
-      ) : (
-        <div className="moderation-controls">
-          {canManageRoles(currentUser) ? (
-            <div className="role-toggles">
-              <label className="admin-toggle">
-                <input
-                  checked={roles.has("moderator")}
-                  disabled={busy}
-                  onInput={(event) => setRole("moderator", event.currentTarget.checked)}
-                  type="checkbox"
-                />
-                {t("moderation.roleModerator")}
-              </label>
-              <label className="admin-toggle">
-                <input
-                  checked={roles.has("greeter")}
-                  disabled={busy}
-                  onInput={(event) => setRole("greeter", event.currentTarget.checked)}
-                  type="checkbox"
-                />
-                {t("moderation.roleGreeter")}
-              </label>
-            </div>
-          ) : null}
-          <div className="moderation-actions">
-            <button
-              className={user.banned ? undefined : "danger-button"}
-              disabled={busy}
-              onClick={() => setModeration({ banned: !user.banned })}
-              type="button"
-            >
-              {user.banned ? t("moderation.unban") : t("moderation.ban")}
-            </button>
-            <button disabled={busy} onClick={() => setModeration({ shadowBanned: !user.shadowBanned })} type="button">
-              {user.shadowBanned ? t("moderation.unshadowban") : t("moderation.shadowban")}
-            </button>
-            {timedOut ? (
-              <button disabled={busy} onClick={() => setModeration({ timeoutUntil: null })} type="button">
-                {t("moderation.timeoutClear")}
-              </button>
-            ) : (
-              <button
-                disabled={busy}
-                onClick={() => setModeration({ timeoutMs: TIMEOUT_DURATION_MS })}
-                type="button"
-              >
-                {t("moderation.timeout")}
-              </button>
-            )}
-            {/* Promotion is admin-only and one-way (no demote — see the server route). Offered
-                only for a non-banned, non-pending member so the new admin is immediately usable. */}
-            {canManageRoles(currentUser) && !user.banned && !user.pending ? (
-              <button disabled={busy} onClick={promote} type="button">
-                {t("moderation.makeAdmin")}
-              </button>
-            ) : null}
-          </div>
-        </div>
-      )}
-      {error ? <p className="form-error">{error}</p> : null}
-    </li>
-  );
-}
-
-/**
- * Compact state badges (admin / roles / pending / banned / shadow-banned) for a roster row.
- */
-function UserStateBadges({ user }: { user: User }) {
-  const badges: { key: string; label: string; className: string }[] = [];
-  // Reactive so a "timed out" badge clears itself when the timeout expires.
-  const timedOut = useIsTimedOut(user);
-
-  if (user.isAdmin) {
-    badges.push({ key: "admin", label: t("moderation.badgeAdmin"), className: "badge-admin" });
-  }
-
-  for (const role of user.roles ?? []) {
-    badges.push({
-      key: `role-${role}`,
-      label: role === "moderator" ? t("moderation.roleModerator") : t("moderation.roleGreeter"),
-      className: "badge-role",
-    });
-  }
-
-  if (user.pending) {
-    badges.push({ key: "pending", label: t("moderation.badgePending"), className: "badge-pending" });
-  }
-
-  if (user.banned) {
-    badges.push({ key: "banned", label: t("moderation.badgeBanned"), className: "badge-banned" });
-  }
-
-  if (user.shadowBanned) {
-    badges.push({ key: "shadow", label: t("moderation.badgeShadow"), className: "badge-shadow" });
-  }
-
-  if (timedOut) {
-    badges.push({ key: "timeout", label: t("moderation.timedOutBadge"), className: "badge-shadow" });
-  }
-
-  if (!badges.length) {
-    return null;
-  }
-
-  return (
-    <div className="state-badges">
-      {badges.map((badge) => (
-        <span className={`state-badge ${badge.className}`} key={badge.key}>
-          {badge.label}
-        </span>
-      ))}
-    </div>
+    </main>
   );
 }

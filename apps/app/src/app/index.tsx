@@ -1,7 +1,20 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, BackHandler, Linking, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  AppState,
+  BackHandler,
+  KeyboardAvoidingView,
+  Linking,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View,
+} from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
@@ -34,7 +47,7 @@ import {
 import { confirmStartUnencrypted, retryKeyResolution, switchEncryptionOffAndRetry } from '@/lib/driver-missing-recovery';
 import { ensureHostService } from '@/lib/host-service';
 import { noteConnectedClients, noteLauncherInterfaces } from '@/hooks/use-hotspot';
-import { parseHostClients, parseHostInterfaces } from '@/lib/join-display';
+import { parseHostClients, parseHostInterfaces, type HostInterface } from '@/lib/join-display';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { startKiosk, stopKiosk } from '../../modules/loam-hotspot';
@@ -275,6 +288,9 @@ export default function HostScreen() {
   // Step-2 join QR for shared-WiFi hosting; the (interface, address) pairs and the connected joiners go
   // straight to the hotspot store (use-hotspot.ts), which folds them into the hotspot-address decision.
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
+  // The launcher's (interface, address) pairs — Wi-Fi hosting mode falls back to its `wlan<N>` entry when
+  // the native Wi-Fi station read comes back empty (src/lib/host-mode.ts).
+  const [hostInterfaces, setHostInterfaces] = useState<HostInterface[]>([]);
   // Peer addresses of the devices connected from off this phone — shown as "N phones connected".
   const [hostClients, setHostClients] = useState<string[]>([]);
   // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
@@ -532,7 +548,11 @@ export default function HostScreen() {
       if (Array.isArray(payload?.addresses)) {
         setHostAddresses(payload.addresses.filter((address): address is string => typeof address === 'string'));
       }
-      noteLauncherInterfaces(parseHostInterfaces(payload?.interfaces));
+      const interfaces = parseHostInterfaces(payload?.interfaces);
+      if (Array.isArray(payload?.interfaces)) {
+        setHostInterfaces(interfaces);
+      }
+      noteLauncherInterfaces(interfaces);
       const clients = parseHostClients(payload?.clients);
       if (clients) {
         setHostClients(clients);
@@ -720,9 +740,10 @@ export default function HostScreen() {
   // "start hosting" moment, so (re)start the foreground service then too (idempotent).
   useEffect(() => {
     if (shareOpen && status === 'ready') {
-      // No notification prompt here: the overlay is about to ask for the hotspot's location/nearby-Wi-Fi
-      // permissions, and two overlapping permission dialogs can auto-deny one. The overlay re-asserts
-      // (with the prompt) once the hotspot is running.
+      // No notification prompt here: in Hotspot mode the overlay is about to ask for the hotspot's
+      // location/nearby-Wi-Fi permissions, and two overlapping permission dialogs can auto-deny one. The
+      // overlay re-asserts (with the prompt) once the hotspot is running — or at once in Wi-Fi mode, which
+      // asks for nothing else.
       void ensureHostService({ prompt: false });
     }
     if (shareOpen) {
@@ -939,7 +960,8 @@ export default function HostScreen() {
 
   if (status === 'ready') {
     return (
-      <SafeAreaView style={styles.flex} edges={['top']}>
+      // The background fills the status-bar inset above the top bar with the bar's own colour.
+      <SafeAreaView style={[styles.flex, { backgroundColor: theme.backgroundElement }]} edges={['top']}>
         {/* Compact host bar above the WebView. Kept as a sibling *above* (not overlapping) the
             WebView: an Android WebView swallows touches on any native view layered over it, so a
             floating button on top wouldn't register — a top bar reliably does. */}
@@ -1058,6 +1080,20 @@ export default function HostScreen() {
             </ThemedView>
           </ThemedView>
         ) : null}
+        {/* Keyboard vs WebView (owner report: the IME pushed the web header off screen and left a blank gap
+            above the composer). The manifest keeps `adjustResize` (Expo's `softwareKeyboardLayoutMode`
+            default, `resize`), but with edge-to-edge (on by default since SDK 54, enforced from Android
+            15) the window no longer shrinks for the IME — the app must. RN's KeyboardAvoidingView does
+            that from the keyboard events: `padding` adds bottom padding equal to how far the keyboard
+            overlaps THIS view's frame (`frame.y + frame.height - keyboard.screenY`), so the WebView's
+            height shrinks and the page's own fixed-position shell stays on screen. Being relative, it is 0
+            whenever the window did resize, so it never double-compensates. The nav-bar strip below stays
+            OUTSIDE the avoiding view on purpose: the view's bottom edge already sits `insets.bottom` above
+            the screen edge, so its padding is (keyboard height − insets.bottom) and padding + strip is
+            exactly the keyboard height — the strip never adds to the keyboard's padding. The Expo keyboard
+            guide suggests `behavior={undefined}` on Android; that relies on the window resizing, which
+            edge-to-edge takes away, hence `padding`. Not yet verified on a device. */}
+        <KeyboardAvoidingView behavior="padding" style={styles.flex}>
         {webViewReady ? (
           <WebView
             key={webViewKey}
@@ -1146,6 +1182,7 @@ export default function HostScreen() {
             <ActivityIndicator size="large" style={styles.spinner} />
           </ThemedView>
         )}
+        </KeyboardAvoidingView>
         {/* Bottom system-nav-bar inset (Issue 1): Android renders edge-to-edge by default, so without
             this the WebView's content (composer, send button, sidebar footer) draws under the on-screen
             nav bar. A sibling AFTER the flexed WebView/loading area, so it reserves real layout space
@@ -1158,6 +1195,7 @@ export default function HostScreen() {
           onClose={() => setShareOpen(false)}
           transportKeyFragment={transportKeyFragment}
           addresses={hostAddresses}
+          interfaces={hostInterfaces}
           connectedClients={hostClients}
           keepAwake={keepAwake}
           onKeepAwakeChange={setKeepAwake}

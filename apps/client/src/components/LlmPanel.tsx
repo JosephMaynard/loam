@@ -1,6 +1,7 @@
 import type { LoamConfig } from "@loam/schema";
 
 import { t } from "../i18n";
+import { CardHeader, SwitchRow } from "./ScreenParts";
 
 type OllamaConfig = LoamConfig["llm"]["ollama"];
 type OnDeviceConfig = LoamConfig["llm"]["onDevice"];
@@ -25,73 +26,71 @@ export function LlmPanel({
   onOnDeviceChange: (update: Partial<OnDeviceConfig>) => void;
 }) {
   return (
-    <div className="profile-panel">
-      <div>
-        <p className="eyebrow">{t("admin.llmEyebrow")}</p>
-        <h2>{t("admin.llmHeading")}</h2>
-      </div>
-      <label className="admin-toggle">
+    <div className="card">
+      <CardHeader level={3} title={t("admin.llmHeading")} />
+      <SwitchRow
+        checked={ollama.enabled}
+        disabled={saving}
+        label={t("admin.llmEnable")}
+        onChange={(enabled) => onOllamaChange({ enabled })}
+      />
+      <label className="field">
+        <span className="field-label">{t("admin.llmBaseUrl")}</span>
         <input
-          checked={ollama.enabled}
-          disabled={saving}
-          onInput={(event) => onOllamaChange({ enabled: event.currentTarget.checked })}
-          type="checkbox"
-        />
-        {t("admin.llmEnable")}
-      </label>
-      <label>
-        {t("admin.llmBaseUrl")}
-        <input
+          className="input"
           disabled={saving}
           onInput={(event) => onOllamaChange({ baseUrl: event.currentTarget.value })}
           value={ollama.baseUrl}
         />
       </label>
-      <label>
-        {t("admin.llmModel")}
+      <label className="field">
+        <span className="field-label">{t("admin.llmModel")}</span>
         <input
+          className="input"
           disabled={saving}
           onInput={(event) => onOllamaChange({ model: event.currentTarget.value })}
           value={ollama.model}
         />
       </label>
-      <label>
-        {t("admin.llmBotName")}
+      <label className="field">
+        <span className="field-label">{t("admin.llmBotName")}</span>
         <input
+          className="input"
           disabled={saving}
           maxLength={80}
           onInput={(event) => onOllamaChange({ botDisplayName: event.currentTarget.value })}
           value={ollama.botDisplayName}
         />
       </label>
-      <label>
-        {t("admin.llmSystemPrompt")}
+      <label className="field">
+        <span className="field-label">{t("admin.llmSystemPrompt")}</span>
         <textarea
+          className="textarea"
           disabled={saving}
           onInput={(event) => onOllamaChange({ systemPrompt: event.currentTarget.value || undefined })}
           rows={3}
           value={ollama.systemPrompt ?? ""}
         />
       </label>
-      <label className="admin-toggle">
-        <input
+      <div className="card-section">
+        <SwitchRow
           checked={onDevice.enabled}
+          description={t("admin.llmOnDeviceNote")}
           disabled={saving}
-          onInput={(event) => onOnDeviceChange({ enabled: event.currentTarget.checked })}
-          type="checkbox"
+          label={t("admin.llmOnDeviceEnable")}
+          onChange={(enabled) => onOnDeviceChange({ enabled })}
         />
-        {t("admin.llmOnDeviceEnable")}
-      </label>
-      <label>
-        {t("admin.llmOnDeviceModel")}
-        <input
-          disabled={saving || !onDevice.enabled}
-          maxLength={120}
-          onInput={(event) => onOnDeviceChange({ model: event.currentTarget.value || undefined })}
-          value={onDevice.model ?? ""}
-        />
-      </label>
-      <p className="form-note">{t("admin.llmOnDeviceNote")}</p>
+        <label className="field">
+          <span className="field-label">{t("admin.llmOnDeviceModel")}</span>
+          <input
+            className="input"
+            disabled={saving || !onDevice.enabled}
+            maxLength={120}
+            onInput={(event) => onOnDeviceChange({ model: event.currentTarget.value || undefined })}
+            value={onDevice.model ?? ""}
+          />
+        </label>
+      </div>
     </div>
   );
 }

@@ -159,6 +159,61 @@ The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi
 - **Client isolation.** A few hotspot stacks isolate connected clients from the host; if every
   address fails despite a good WiFi connection, that's the likely cause (device-dependent).
 
+### Hosting modes: hotspot or the phone's Wi-Fi
+The Share · Host overlay opens with a two-option control, **Hotspot** / **Wi-Fi**, that picks how people
+join:
+
+- **Hotspot** (the default) is everything described above: the phone brings up its own
+  LocalOnlyHotspot, which needs no router and no internet. It is the default because LOAM is built for
+  places without infrastructure.
+- **Wi-Fi** hosts on the Wi-Fi network the phone has already joined (home, office, an event's router).
+  No hotspot starts, and anyone on the same network scans a single URL QR ("Join on this Wi-Fi"); there
+  is no Step 1.
+
+The choice is persisted in `expo-secure-store` under `loam.hostMode` (`src/hooks/use-host-mode.ts` over
+the pure, tested `src/lib/host-mode-store.ts`), beside the DB-encryption mode selection; a missing or
+unknown value means Hotspot. Switching is live: choosing Wi-Fi releases a running hotspot
+(`shutdownHotspot`), and choosing Hotspot starts one through the usual permission flow. Opening the
+overlay starts the hotspot **only** when the persisted mode is Hotspot, and not before the stored value
+has loaded, so a Wi-Fi host never flashes a hotspot or its permission prompt. The foreground host
+service (`ensureHostService`) runs in both modes: in Wi-Fi mode it is asserted as soon as the overlay
+opens or the mode switches, since there is no hotspot start to wait for.
+
+**No location permission in Wi-Fi mode.** Nothing in this mode asks for one. The overlay reads the
+phone's Wi-Fi state with a new native call, `wifiStationInfo()` → `{ connected, address, ssid }`
+(`LoamHotspotModule.kt`; `readWifiStationInfo()` in `modules/loam-hotspot/index.ts` resolves
+`{ connected: false }` on any failure and never rejects), on open and every 5 s while the overlay is
+showing. `connected` is true when *any* network the phone holds has `TRANSPORT_WIFI` (not only the default
+one: on a router with no uplink Android keeps mobile data as the default network while Wi-Fi stays up), or
+WifiManager reports a DHCP address. The network name is best effort: Android redacts it to
+`<unknown ssid>` unless location permission was already granted (say, by an earlier hotspot start), so
+the panel shows "Network: <name>" only when it can, and otherwise says "the Wi-Fi network this phone is
+on".
+
+**The advertised address** comes from `pickWifiAddress` (`src/lib/host-mode.ts`, unit-tested), in order:
+
+1. the native station address, the one the router's DHCP gave this phone (`WifiManager.dhcpInfo` /
+   `connectionInfo`, the same `stationAddresses()` the hotspot picker uses to rule the station out);
+2. else a launcher-reported `wlan<N>` interface with an RFC 1918 address (lowest N first), from
+   `loam-hostinfo`'s `interfaces`;
+3. else `preferredLanAddress` over the launcher's private addresses, skipping any on a cellular, tunnel or
+   tethering interface (carriers hand out 10.x addresses too, so "private" alone isn't enough).
+
+Steps 2 and 3 run only while Android reports a Wi-Fi network (or before the first native read): with Wi-Fi
+off — even with a VPN tunnel (`ipsec<N>`, `tun*`…), the phone's own tethering hotspot or a stale AP
+interface around — there is no URL and no QR: the card says "Connect this phone
+to a Wi-Fi network first", plus any other addresses as "also at". "N phones connected" works in both modes
+and remains the proof that the path works.
+
+**Client isolation.** Guest, hotel, café and campus networks often stop devices from reaching each other,
+so a joiner there gets a connection error even with a correct address. The Wi-Fi card says so in one
+line and points to Hotspot, which doesn't depend on the network's policy.
+
+**Verification status.** The Kotlin compiles (`:loam-hotspot:compileReleaseKotlin`), and the JS side's
+parsing, address choice, panel projection and persistence are covered by `host-mode.test.ts` and
+`host-mode-store.test.ts`. It has not yet been run on a physical phone: the station read, the SSID
+redaction behaviour and the no-internet-router case all need a device test.
+
 ### Native prebuild (SQLite drivers — plain + encrypted)
 `fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) places **both** SQLite native modules
 into the embedded project's `node_modules` (the DAL, `apps/server/src/db.ts`, lazy-`require`s whichever

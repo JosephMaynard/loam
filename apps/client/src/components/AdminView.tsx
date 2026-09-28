@@ -13,6 +13,7 @@ import {
   type SecurityProfile,
   type User,
 } from "@loam/schema";
+import type { ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
 
 import { LOCALE_LABELS, errorText, t } from "../i18n";
@@ -20,11 +21,13 @@ import { fetchJson, REQUEST_TIMEOUT_MS } from "../lib/api";
 import { encryptedFetch } from "../lib/transport";
 import { AddSyncPeerControl } from "./AddSyncPeerControl";
 import { AdminChannelsPanel } from "./AdminChannelsPanel";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { GettingStartedPanel } from "./GettingStartedPanel";
 import { LlmPanel } from "./LlmPanel";
 import { MeshPanel } from "./MeshPanel";
-import { MobileBackLink } from "./MobileBackLink";
 import { NodeLinkControl } from "./NodeLinkControl";
+import { CardHeader, SwitchRow } from "./ScreenParts";
+import { ScreenHeader } from "./ScreenHeader";
 import { SyncStatusPanel } from "./SyncStatusPanel";
 
 /** Feature-flag toggle labels, resolved against the active locale at render time. */
@@ -69,6 +72,87 @@ function securityProfileLabels(): Record<SecurityProfile, { title: string; summa
   };
 }
 
+/** The admin screen's sections, in page order: the in-page nav's anchors and each section's label. */
+function adminSections(): [string, string][] {
+  return [
+    ["network", t("admin.networkEyebrow")],
+    ["access", t("people.accessEyebrow")],
+    ["features", t("admin.featuresEyebrow")],
+    ["channels", t("admin.channelsEyebrow")],
+    ["security", t("settings.securityEyebrow")],
+    ["sync", t("admin.nav.sync")],
+    ["mesh", t("admin.nav.mesh")],
+    ["llm", t("admin.llmEyebrow")],
+    ["danger", t("admin.safetyEyebrow")],
+  ];
+}
+
+/** Scroll the admin body to a section (smoothly unless reduced motion is on) and move focus to it. */
+function jumpToSection(key: string): void {
+  const target = document.getElementById(`admin-${key}`);
+  if (!target) {
+    return;
+  }
+  const behavior = (window.matchMedia?.("(prefers-reduced-motion: no-preference)").matches ?? false) ? "smooth" : "auto";
+  // Focus first: moving focus during a smooth scroll cancels the scroll in Chrome.
+  target.focus({ preventScroll: true });
+  // Scroll ONLY the screen's own scroller. `scrollIntoView` walks every scrollable ancestor, and it will
+  // scroll the fixed `.app-frame` (overflow: hidden, still programmatically scrollable) if anything ever
+  // gives it overflow — which hid the header and Back button on a phone. The sticky nav is cleared with
+  // the section's `scroll-margin-top`, which a manual scroll has to honour by hand.
+  const scroller = target.closest<HTMLElement>(".screen-body");
+  if (!scroller) {
+    target.scrollIntoView({ behavior, block: "start" });
+    return;
+  }
+  const margin = parseFloat(getComputedStyle(target).scrollMarginTop) || 0;
+  const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - margin;
+  scroller.scrollTo({ top: Math.max(0, top), behavior });
+}
+
+/**
+ * One admin section: a small label heading and its cards. A section whose cards edit node config is a
+ * `<form>` (pass `onSubmit`), so Enter in any of its fields saves the configuration, as it always has.
+ */
+function AdminSection({
+  children,
+  id,
+  label,
+  onSubmit,
+}: {
+  children: ComponentChildren;
+  id: string;
+  label: string;
+  onSubmit?: () => void;
+}) {
+  const labelId = `admin-${id}-label`;
+  return (
+    <section aria-labelledby={labelId} className="admin-section" id={`admin-${id}`} tabIndex={-1}>
+      <h2 className="section-label" id={labelId}>
+        {label}
+      </h2>
+      {onSubmit ? (
+        <form
+          className="admin-section-body"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit();
+          }}
+        >
+          {children}
+          {/* Implicit submission (Enter in a field) is ignored by browsers when a form has more than one
+              text field and no submit button; the sticky "Save node config" bar sits outside every form.
+              `hidden` (display: none) rather than .sr-only: an absolutely positioned control here used the
+              fixed .app-frame as its containing block and gave it scrollable overflow. */}
+          <button hidden tabIndex={-1} type="submit" />
+        </form>
+      ) : (
+        <div className="admin-section-body">{children}</div>
+      )}
+    </section>
+  );
+}
+
 /**
  * Admin-only configuration area: edits node feature flags, identity permissions, LLM settings, and
  * the admin bootstrap strategy via the /api/admin/config endpoints. Client gating is cosmetic —
@@ -97,7 +181,7 @@ export function AdminView({
   const [saveError, setSaveError] = useState<string>();
   const [passphrase, setPassphrase] = useState("");
   const [panicToken, setPanicToken] = useState("");
-  const [wipeConfirmText, setWipeConfirmText] = useState("");
+  const [confirmingWipe, setConfirmingWipe] = useState(false);
   const [firing, setFiring] = useState(false);
   const [fireError, setFireError] = useState<string>();
 
@@ -264,7 +348,8 @@ export function AdminView({
     );
   }
 
-  async function fireKillSwitch(): Promise<void> {
+  /** Trigger the Emergency Reset once its alertdialog is confirmed, with whatever the admin typed there. */
+  async function fireKillSwitch(wipeConfirmText: string): Promise<void> {
     setFiring(true);
     setFireError(undefined);
 
@@ -301,431 +386,461 @@ export function AdminView({
   if (!currentUser.isAdmin) {
     return (
       <section className="settings-view">
-        <header className="conversation-header">
-          <MobileBackLink />
-          <div>
-            <p className="eyebrow">{t("admin.eyebrow")}</p>
-            <h1>{t("people.notAuthorizedTitle")}</h1>
+        <ScreenHeader title={t("people.notAuthorizedTitle")} />
+        <div className="screen-body">
+          <div className="screen-column">
+            <p className="empty-note">{t("admin.notAuthorizedNote")}</p>
           </div>
-        </header>
-        <p className="form-note">{t("admin.notAuthorizedNote")}</p>
+        </div>
       </section>
     );
   }
 
+  const submitConfig = () => void save();
+  const profileLocked = !!adminConfig && adminConfig.security.profile !== "custom";
+  const channelsSection = (
+    <AdminSection id="channels" label={t("admin.channelsEyebrow")}>
+      <AdminChannelsPanel currentUser={currentUser} onChannelRemoved={onChannelRemoved} onChannelUpsert={onChannelUpsert} />
+    </AdminSection>
+  );
+
   return (
-    <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("admin.eyebrow")}</p>
-          <h1>{t("admin.title")}</h1>
-        </div>
-      </header>
-      {loadError ? <p className="form-error">{loadError}</p> : null}
-      {!adminConfig && !loadError ? <p className="form-note">{t("admin.loading")}</p> : null}
-      {adminConfig ? (
-        <form
-          className="settings-grid"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void save();
-          }}
-        >
-          <GettingStartedPanel />
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
-              <h2>{t("admin.identityHeading")}</h2>
+    <section className="settings-view admin-view">
+      <ScreenHeader title={t("admin.title")} />
+      <div className="screen-body">
+        {adminConfig ? (
+          <nav aria-label={t("admin.nav.label")} className="admin-nav">
+            <div className="admin-nav-inner">
+              {adminSections().map(([key, label]) => (
+                <a
+                  className={key === "danger" ? "admin-nav-link is-danger" : "admin-nav-link"}
+                  href={`#admin-${key}`}
+                  key={key}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    jumpToSection(key);
+                  }}
+                >
+                  {label}
+                </a>
+              ))}
             </div>
-            <label>
-              {t("admin.networkName")}
-              <input
-                disabled={saving}
-                maxLength={80}
-                onInput={(event) =>
-                  setAdminConfig((previous) =>
-                    previous ? { ...previous, node: { ...previous.node, name: event.currentTarget.value } } : previous,
-                  )
-                }
-                value={adminConfig.node.name}
-              />
-            </label>
-            <p className="form-note">{t("admin.networkNameNote")}</p>
-            <label>
-              {t("admin.language")}
-              <select
-                disabled={saving}
-                onInput={(event) =>
-                  setAdminConfig((previous) =>
-                    previous
-                      ? { ...previous, node: { ...previous.node, locale: LocaleSchema.parse(event.currentTarget.value) } }
-                      : previous,
-                  )
-                }
-                value={adminConfig.node.locale}
-              >
-                {LocaleSchema.options.map((option) => (
-                  <option key={option} value={option}>
-                    {LOCALE_LABELS[option]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className="form-note">{t("admin.languageNote")}</p>
-          </div>
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("settings.securityEyebrow")}</p>
-              <h2>{t("admin.profileHeading")}</h2>
-            </div>
-            <label>
-              {t("admin.posture")}
-              <select
-                disabled={saving}
-                onInput={(event) =>
-                  setSecurityProfile(SecurityProfileSchema.parse(event.currentTarget.value))
-                }
-                value={adminConfig.security.profile}
-              >
-                {SecurityProfileSchema.options.map((profile) => (
-                  <option key={profile} value={profile}>
-                    {securityProfileLabels()[profile].title}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className="form-note">{securityProfileLabels()[adminConfig.security.profile].summary}</p>
-            <label>
-              {t("admin.whoCanJoin")}
-              <select
-                disabled={saving || adminConfig.security.profile !== "custom"}
-                onInput={(event) => setJoinPolicy(JoinPolicySchema.parse(event.currentTarget.value))}
-                value={adminConfig.access.joinPolicy}
-              >
-                <option value="open">{t("admin.joinOpen")}</option>
-                <option value="approval">{t("admin.joinApproval")}</option>
-              </select>
-            </label>
-            {adminConfig.security.profile !== "custom" ? (
-              <p className="form-note">
-                {t("admin.axesManaged", {
-                  profile: securityProfileLabels()[adminConfig.security.profile].title,
-                  custom: securityProfileLabels().custom.title,
-                })}
-              </p>
-            ) : null}
-          </div>
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.featuresEyebrow")}</p>
-              <h2>{t("admin.messagingHeading")}</h2>
-            </div>
-            {featureFlagLabels().map(([key, label]) => (
-              <label className="admin-toggle" key={key}>
-                <input
-                  checked={adminConfig.features[key]}
-                  disabled={saving}
-                  onInput={(event) => setFeature(key, event.currentTarget.checked)}
-                  type="checkbox"
-                />
-                {label}
-              </label>
-            ))}
-          </div>
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.identityEyebrow")}</p>
-              <h2>{t("admin.profilesHeading")}</h2>
-            </div>
-            {identityLabels().map(([key, label]) => (
-              <label className="admin-toggle" key={key}>
-                <input
-                  checked={adminConfig.identity[key]}
-                  disabled={saving}
-                  onInput={(event) => setIdentity(key, event.currentTarget.checked)}
-                  type="checkbox"
-                />
-                {label}
-              </label>
-            ))}
-          </div>
-          <LlmPanel
-            onDevice={adminConfig.llm.onDevice}
-            ollama={adminConfig.llm.ollama}
-            onOllamaChange={setOllama}
-            onOnDeviceChange={setOnDevice}
-            saving={saving}
-          />
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.privacyEyebrow")}</p>
-              <h2>{t("admin.retentionHeading")}</h2>
-            </div>
-            <label>
-              {t("admin.retentionLabel")}
-              <input
-                disabled={saving || adminConfig.security.profile !== "custom"}
-                min={1}
-                onInput={(event) => {
-                  const minutes = Number.parseInt(event.currentTarget.value, 10);
-                  setAdminConfig((previous) =>
-                    previous
-                      ? {
-                          ...previous,
-                          retention: {
-                            messageTtlMs:
-                              Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined,
-                          },
-                        }
-                      : previous,
-                  );
-                }}
-                type="number"
-                value={
-                  adminConfig.retention.messageTtlMs
-                    ? String(Math.round(adminConfig.retention.messageTtlMs / 60_000))
-                    : ""
-                }
-              />
-            </label>
-            <p className="form-note">{t("admin.retentionNote")}</p>
-          </div>
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.safetyEyebrow")}</p>
-              <h2>{t("admin.killSwitchHeading")}</h2>
-            </div>
-            <label className="admin-toggle">
-              <input
-                checked={adminConfig.killSwitch.enabled}
-                disabled={saving || adminConfig.security.profile !== "custom"}
-                onInput={(event) => setKillSwitch({ enabled: event.currentTarget.checked })}
-                type="checkbox"
-              />
-              {t("admin.killSwitchEnable")}
-            </label>
-            <label className="admin-toggle">
-              <input
-                checked={adminConfig.killSwitch.requireConfirmation}
-                disabled={saving || !adminConfig.killSwitch.enabled}
-                onInput={(event) => setKillSwitch({ requireConfirmation: event.currentTarget.checked })}
-                type="checkbox"
-              />
-              {t("admin.killSwitchRequireConfirm")}
-            </label>
-            <label>
-              {t("admin.panicToken")}
-              <input
-                autoComplete="off"
-                disabled={saving || !adminConfig.killSwitch.enabled}
-                maxLength={256}
-                onInput={(event) => setPanicToken(event.currentTarget.value)}
-                type="password"
-                value={panicToken}
-              />
-            </label>
-            {adminConfig.killSwitch.enabled ? (
-              <div className="danger-zone">
-                <p className="form-note">{t("admin.killSwitchWarning")}</p>
-                {adminConfig.killSwitch.requireConfirmation ? (
-                  <label>
-                    {t("admin.killSwitchConfirmBefore")} <strong>wipe</strong> {t("admin.killSwitchConfirmAfter")}
+          </nav>
+        ) : null}
+        <div className="screen-column">
+          {loadError ? <p className="notice notice-danger">{loadError}</p> : null}
+          {!adminConfig && !loadError ? <p className="form-note">{t("admin.loading")}</p> : null}
+          {adminConfig ? (
+            <>
+              <GettingStartedPanel />
+
+              <AdminSection id="network" label={t("admin.networkEyebrow")} onSubmit={submitConfig}>
+                <div className="card">
+                  <CardHeader level={3} title={t("admin.identityHeading")} />
+                  <label className="field">
+                    <span className="field-label">{t("admin.networkName")}</span>
                     <input
-                      autoComplete="off"
-                      disabled={firing}
-                      onInput={(event) => setWipeConfirmText(event.currentTarget.value)}
-                      value={wipeConfirmText}
+                      className="input"
+                      disabled={saving}
+                      maxLength={80}
+                      onInput={(event) =>
+                        setAdminConfig((previous) =>
+                          previous ? { ...previous, node: { ...previous.node, name: event.currentTarget.value } } : previous,
+                        )
+                      }
+                      value={adminConfig.node.name}
                     />
+                    <span className="field-hint">{t("admin.networkNameNote")}</span>
                   </label>
-                ) : null}
-                <div className="profile-actions">
-                  <button
-                    className="danger-button"
-                    disabled={
-                      firing ||
-                      (adminConfig.killSwitch.requireConfirmation && wipeConfirmText.trim() !== "wipe")
-                    }
-                    onClick={() => void fireKillSwitch()}
-                    type="button"
-                  >
-                    {firing ? t("settings.wiping") : t("admin.wipeNow")}
-                  </button>
+                  <label className="field">
+                    <span className="field-label">{t("admin.language")}</span>
+                    <select
+                      className="select"
+                      disabled={saving}
+                      onInput={(event) =>
+                        setAdminConfig((previous) =>
+                          previous
+                            ? { ...previous, node: { ...previous.node, locale: LocaleSchema.parse(event.currentTarget.value) } }
+                            : previous,
+                        )
+                      }
+                      value={adminConfig.node.locale}
+                    >
+                      {LocaleSchema.options.map((option) => (
+                        <option key={option} value={option}>
+                          {LOCALE_LABELS[option]}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="field-hint">{t("admin.languageNote")}</span>
+                  </label>
                 </div>
-                {fireError ? <p className="form-error">{fireError}</p> : null}
-              </div>
-            ) : null}
-          </div>
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.networkEyebrow")}</p>
-              <h2>{t("admin.syncHeading")}</h2>
-            </div>
-            <label className="admin-toggle">
-              <input
-                checked={adminConfig.sync.enabled}
-                disabled={saving}
-                onInput={(event) =>
-                  setAdminConfig((previous) =>
-                    previous
-                      ? { ...previous, sync: { ...previous.sync, enabled: event.currentTarget.checked } }
-                      : previous,
-                  )
-                }
-                type="checkbox"
-              />
-              {t("admin.syncEnable")}
-            </label>
-            <p className="form-note">{t("admin.syncNote")}</p>
-            {adminConfig.sync.enabled ? (
-              <label>
-                {t("admin.syncTokenLabel")}
-                <div className="sync-token-row">
-                  <input
-                    autoComplete="off"
+              </AdminSection>
+
+              <AdminSection id="access" label={t("people.accessEyebrow")} onSubmit={submitConfig}>
+                <div className="card">
+                  <CardHeader level={3} title={t("admin.bootstrapHeading")} />
+                  <label className="field">
+                    <span className="field-label">{t("admin.strategy")}</span>
+                    <select
+                      className="select"
+                      disabled={saving}
+                      onInput={(event) =>
+                        setAdminConfig((previous) =>
+                          previous
+                            ? {
+                                ...previous,
+                                admin: {
+                                  ...previous.admin,
+                                  bootstrap: AdminBootstrapStrategySchema.parse(event.currentTarget.value),
+                                },
+                              }
+                            : previous,
+                        )
+                      }
+                      value={adminConfig.admin.bootstrap}
+                    >
+                      {AdminBootstrapStrategySchema.options.map((strategy) => (
+                        <option key={strategy} value={strategy}>
+                          {strategy}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="field-hint">{t("admin.bootstrapNote")}</span>
+                  </label>
+                  {adminConfig.admin.bootstrap === "passphrase" ? (
+                    <label className="field">
+                      <span className="field-label">{t("admin.newPassphrase")}</span>
+                      <input
+                        autoComplete="off"
+                        className="input"
+                        disabled={saving}
+                        maxLength={256}
+                        onInput={(event) => setPassphrase(event.currentTarget.value)}
+                        type="password"
+                        value={passphrase}
+                      />
+                    </label>
+                  ) : null}
+                </div>
+              </AdminSection>
+
+              <AdminSection id="features" label={t("admin.featuresEyebrow")} onSubmit={submitConfig}>
+                <div className="card">
+                  <CardHeader level={3} title={t("admin.messagingHeading")} />
+                  <div className="switch-list">
+                    {featureFlagLabels().map(([key, label]) => (
+                      <SwitchRow
+                        checked={adminConfig.features[key]}
+                        disabled={saving}
+                        key={key}
+                        label={label}
+                        onChange={(checked) => setFeature(key, checked)}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div className="card">
+                  <CardHeader level={3} title={t("admin.profilesHeading")} />
+                  <div className="switch-list">
+                    {identityLabels().map(([key, label]) => (
+                      <SwitchRow
+                        checked={adminConfig.identity[key]}
+                        disabled={saving}
+                        key={key}
+                        label={label}
+                        onChange={(checked) => setIdentity(key, checked)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </AdminSection>
+
+              {channelsSection}
+
+              <AdminSection id="security" label={t("settings.securityEyebrow")} onSubmit={submitConfig}>
+                <div className="card">
+                  <CardHeader level={3} title={t("admin.profileHeading")} />
+                  <label className="field">
+                    <span className="field-label">{t("admin.posture")}</span>
+                    <select
+                      className="select"
+                      disabled={saving}
+                      onInput={(event) => setSecurityProfile(SecurityProfileSchema.parse(event.currentTarget.value))}
+                      value={adminConfig.security.profile}
+                    >
+                      {SecurityProfileSchema.options.map((profile) => (
+                        <option key={profile} value={profile}>
+                          {securityProfileLabels()[profile].title}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="field-hint">{securityProfileLabels()[adminConfig.security.profile].summary}</span>
+                  </label>
+                  <label className="field">
+                    <span className="field-label">{t("admin.whoCanJoin")}</span>
+                    <select
+                      className="select"
+                      disabled={saving || profileLocked}
+                      onInput={(event) => setJoinPolicy(JoinPolicySchema.parse(event.currentTarget.value))}
+                      value={adminConfig.access.joinPolicy}
+                    >
+                      <option value="open">{t("admin.joinOpen")}</option>
+                      <option value="approval">{t("admin.joinApproval")}</option>
+                    </select>
+                  </label>
+                  {profileLocked ? (
+                    <p className="notice">
+                      {t("admin.axesManaged", {
+                        profile: securityProfileLabels()[adminConfig.security.profile].title,
+                        custom: securityProfileLabels().custom.title,
+                      })}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="card">
+                  <CardHeader level={3} title={t("admin.retentionHeading")} />
+                  <label className="field">
+                    <span className="field-label">{t("admin.retentionLabel")}</span>
+                    <input
+                      className="input input-narrow"
+                      disabled={saving || profileLocked}
+                      inputMode="numeric"
+                      min={1}
+                      onInput={(event) => {
+                        const minutes = Number.parseInt(event.currentTarget.value, 10);
+                        setAdminConfig((previous) =>
+                          previous
+                            ? {
+                                ...previous,
+                                retention: {
+                                  messageTtlMs:
+                                    Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined,
+                                },
+                              }
+                            : previous,
+                        );
+                      }}
+                      type="number"
+                      value={
+                        adminConfig.retention.messageTtlMs
+                          ? String(Math.round(adminConfig.retention.messageTtlMs / 60_000))
+                          : ""
+                      }
+                    />
+                    <span className="field-hint">{t("admin.retentionNote")}</span>
+                  </label>
+                </div>
+              </AdminSection>
+
+              <AdminSection id="sync" label={t("admin.nav.sync")} onSubmit={submitConfig}>
+                <div className="card">
+                  <CardHeader level={3} title={t("admin.syncHeading")} />
+                  <SwitchRow
+                    checked={adminConfig.sync.enabled}
+                    description={t("admin.syncNote")}
                     disabled={saving}
-                    maxLength={256}
-                    onInput={(event) =>
+                    label={t("admin.syncEnable")}
+                    onChange={(checked) =>
                       setAdminConfig((previous) =>
-                        // Keep the raw value, including "" — an empty string is the explicit "clear the
-                        // token" signal the server understands. Mapping "" → undefined would be dropped
-                        // by JSON.stringify, so a cleared field would never reach the server and the old
-                        // token would silently persist.
-                        previous
-                          ? { ...previous, sync: { ...previous.sync, token: event.currentTarget.value } }
+                        previous ? { ...previous, sync: { ...previous.sync, enabled: checked } } : previous,
+                      )
+                    }
+                  />
+                  {adminConfig.sync.enabled ? (
+                    <div className="field">
+                      <label className="field-label" for="admin-sync-token">
+                        {t("admin.syncTokenLabel")}
+                      </label>
+                      <div className="inline-field">
+                        <input
+                          autoComplete="off"
+                          className="input mono-field"
+                          disabled={saving}
+                          id="admin-sync-token"
+                          maxLength={256}
+                          onInput={(event) =>
+                            setAdminConfig((previous) =>
+                              // Keep the raw value, including "" — an empty string is the explicit "clear the
+                              // token" signal the server understands. Mapping "" → undefined would be dropped
+                              // by JSON.stringify, so a cleared field would never reach the server and the old
+                              // token would silently persist.
+                              previous
+                                ? { ...previous, sync: { ...previous.sync, token: event.currentTarget.value } }
+                                : previous,
+                            )
+                          }
+                          placeholder={t("admin.syncTokenPlaceholder")}
+                          type="text"
+                          value={adminConfig.sync.token ?? ""}
+                        />
+                        <button
+                          className="btn btn-secondary"
+                          disabled={saving}
+                          onClick={() => {
+                            const bytes = crypto.getRandomValues(new Uint8Array(16));
+                            const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+                            setAdminConfig((previous) =>
+                              previous ? { ...previous, sync: { ...previous.sync, token } } : previous,
+                            );
+                          }}
+                          type="button"
+                        >
+                          {t("admin.syncTokenGenerate")}
+                        </button>
+                      </div>
+                      <span className="field-hint">{t("admin.syncTokenNote")}</span>
+                    </div>
+                  ) : null}
+                  {adminConfig.sync.enabled ? <NodeLinkControl joinUrl={joinUrl} /> : null}
+                  {adminConfig.sync.peers.length ? (
+                    <ul className="list">
+                      {adminConfig.sync.peers.map((peer) => (
+                        <li className="list-row sync-peer" key={peer.url}>
+                          <div className="row-text row-text-first">
+                            <strong className="row-title">{peer.label ?? peer.url}</strong>
+                            {peer.label ? <span className="row-meta">{peer.url}</span> : null}
+                            {peer.transportKey ? (
+                              <span className="row-meta peer-key-pinned">🔒 {t("admin.peerKeyPinned")}</span>
+                            ) : null}
+                          </div>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={saving}
+                            onClick={() =>
+                              setAdminConfig((previous) =>
+                                previous
+                                  ? {
+                                      ...previous,
+                                      sync: {
+                                        ...previous.sync,
+                                        peers: previous.sync.peers.filter((entry) => entry.url !== peer.url),
+                                      },
+                                    }
+                                  : previous,
+                              )
+                            }
+                            type="button"
+                          >
+                            {t("common.remove")}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="empty-note">{t("admin.noPeers")}</p>
+                  )}
+                  <AddSyncPeerControl
+                    disabled={saving || adminConfig.sync.peers.length >= 16}
+                    onAdd={(peer) =>
+                      setAdminConfig((previous) =>
+                        previous && !previous.sync.peers.some((entry) => entry.url === peer.url)
+                          ? { ...previous, sync: { ...previous.sync, peers: [...previous.sync.peers, peer] } }
                           : previous,
                       )
                     }
-                    placeholder={t("admin.syncTokenPlaceholder")}
-                    type="text"
-                    value={adminConfig.sync.token ?? ""}
                   />
-                  <button
-                    className="ghost-button"
-                    disabled={saving}
-                    onClick={() => {
-                      const bytes = crypto.getRandomValues(new Uint8Array(16));
-                      const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-                      setAdminConfig((previous) =>
-                        previous ? { ...previous, sync: { ...previous.sync, token } } : previous,
-                      );
-                    }}
-                    type="button"
-                  >
-                    {t("admin.syncTokenGenerate")}
-                  </button>
+                  <p className="form-note">{t("admin.peerChangesNote")}</p>
+                  <SyncStatusPanel />
                 </div>
-              </label>
-            ) : null}
-            {adminConfig.sync.enabled ? <p className="form-note">{t("admin.syncTokenNote")}</p> : null}
-            {adminConfig.sync.enabled ? <NodeLinkControl joinUrl={joinUrl} /> : null}
-            {adminConfig.sync.peers.length ? (
-              <ul className="moderation-list">
-                {adminConfig.sync.peers.map((peer) => (
-                  <li className="moderation-row sync-peer" key={peer.url}>
-                    <div className="moderation-name">
-                      <strong>{peer.label ?? peer.url}</strong>
-                      {peer.label ? <span>{peer.url}</span> : null}
-                      {peer.transportKey ? <span className="peer-key-pinned">🔒 {t("admin.peerKeyPinned")}</span> : null}
-                    </div>
-                    <div className="moderation-actions">
-                      <button
-                        className="danger-button"
-                        disabled={saving}
-                        onClick={() =>
-                          setAdminConfig((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  sync: {
-                                    ...previous.sync,
-                                    peers: previous.sync.peers.filter((entry) => entry.url !== peer.url),
-                                  },
-                                }
-                              : previous,
-                          )
-                        }
-                        type="button"
-                      >
-                        {t("common.remove")}
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="form-note">{t("admin.noPeers")}</p>
-            )}
-            <AddSyncPeerControl
-              disabled={saving || adminConfig.sync.peers.length >= 16}
-              onAdd={(peer) =>
-                setAdminConfig((previous) =>
-                  previous && !previous.sync.peers.some((entry) => entry.url === peer.url)
-                    ? { ...previous, sync: { ...previous.sync, peers: [...previous.sync.peers, peer] } }
-                    : previous,
-                )
-              }
-            />
-            <p className="form-note">{t("admin.peerChangesNote")}</p>
-            <SyncStatusPanel />
-          </div>
-          <MeshPanel mesh={adminConfig.mesh} onChange={setMesh} saving={saving} />
-          <div className="profile-panel">
-            <div>
-              <p className="eyebrow">{t("admin.bootstrapEyebrow")}</p>
-              <h2>{t("admin.bootstrapHeading")}</h2>
-            </div>
-            <label>
-              {t("admin.strategy")}
-              <select
-                disabled={saving}
-                onInput={(event) =>
-                  setAdminConfig((previous) =>
-                    previous
-                      ? {
-                          ...previous,
-                          admin: {
-                            ...previous.admin,
-                            bootstrap: AdminBootstrapStrategySchema.parse(event.currentTarget.value),
-                          },
-                        }
-                      : previous,
-                  )
-                }
-                value={adminConfig.admin.bootstrap}
-              >
-                {AdminBootstrapStrategySchema.options.map((strategy) => (
-                  <option key={strategy} value={strategy}>
-                    {strategy}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {adminConfig.admin.bootstrap === "passphrase" ? (
-              <label>
-                {t("admin.newPassphrase")}
-                <input
-                  autoComplete="off"
-                  disabled={saving}
-                  maxLength={256}
-                  onInput={(event) => setPassphrase(event.currentTarget.value)}
-                  type="password"
-                  value={passphrase}
+              </AdminSection>
+
+              <AdminSection id="mesh" label={t("admin.nav.mesh")} onSubmit={submitConfig}>
+                <MeshPanel mesh={adminConfig.mesh} onChange={setMesh} saving={saving} />
+              </AdminSection>
+
+              <AdminSection id="llm" label={t("admin.llmEyebrow")} onSubmit={submitConfig}>
+                <LlmPanel
+                  onDevice={adminConfig.llm.onDevice}
+                  ollama={adminConfig.llm.ollama}
+                  onOllamaChange={setOllama}
+                  onOnDeviceChange={setOnDevice}
+                  saving={saving}
                 />
-              </label>
-            ) : null}
-            <p className="form-note">{t("admin.bootstrapNote")}</p>
-            <div className="profile-actions">
-              <button disabled={saving} type="submit">
-                {saving ? t("common.saving") : t("admin.saveConfig")}
-              </button>
-            </div>
-            {saved ? <p className="form-note">{t("admin.saved")}</p> : null}
-            {saveError ? <p className="form-error">{saveError}</p> : null}
-          </div>
-        </form>
+              </AdminSection>
+
+              <AdminSection id="danger" label={t("admin.safetyEyebrow")} onSubmit={submitConfig}>
+                <div className="card card-danger">
+                  <CardHeader level={3} title={t("admin.killSwitchHeading")} />
+                  <div className="switch-list">
+                    <SwitchRow
+                      checked={adminConfig.killSwitch.enabled}
+                      disabled={saving || profileLocked}
+                      label={t("admin.killSwitchEnable")}
+                      onChange={(checked) => setKillSwitch({ enabled: checked })}
+                    />
+                    <SwitchRow
+                      checked={adminConfig.killSwitch.requireConfirmation}
+                      disabled={saving || !adminConfig.killSwitch.enabled}
+                      label={t("admin.killSwitchRequireConfirm")}
+                      onChange={(checked) => setKillSwitch({ requireConfirmation: checked })}
+                    />
+                  </div>
+                  <label className="field">
+                    <span className="field-label">{t("admin.panicToken")}</span>
+                    <input
+                      autoComplete="off"
+                      className="input"
+                      disabled={saving || !adminConfig.killSwitch.enabled}
+                      maxLength={256}
+                      onInput={(event) => setPanicToken(event.currentTarget.value)}
+                      type="password"
+                      value={panicToken}
+                    />
+                  </label>
+                  {adminConfig.killSwitch.enabled ? (
+                    <div className="danger-zone">
+                      <p>{t("admin.killSwitchWarning")}</p>
+                      <div className="card-actions">
+                        <button
+                          className="btn btn-danger"
+                          disabled={firing}
+                          onClick={() => {
+                            setFireError(undefined);
+                            setConfirmingWipe(true);
+                          }}
+                          type="button"
+                        >
+                          {firing ? t("settings.wiping") : t("admin.wipeNow")}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </AdminSection>
+
+              {/* One Save for every config section above (the channels section acts immediately). Sticky
+                  so it stays in reach on a long page; its status line reports the last save. */}
+              <div className="save-bar">
+                <p aria-live="polite" className={saveError ? "save-bar-status form-error" : "save-bar-status form-note"}>
+                  {saveError ?? (saved ? t("admin.saved") : "")}
+                </p>
+                <button className="btn btn-primary" disabled={saving} onClick={submitConfig} type="button">
+                  {saving ? t("common.saving") : t("admin.saveConfig")}
+                </button>
+              </div>
+            </>
+          ) : (
+            channelsSection
+          )}
+        </div>
+      </div>
+      {confirmingWipe && adminConfig ? (
+        <ConfirmDialog
+          busy={firing}
+          busyLabel={t("settings.wiping")}
+          confirmLabel={t("admin.wipeNow")}
+          confirmWord={adminConfig.killSwitch.requireConfirmation ? "wipe" : undefined}
+          confirmWordAfter={t("admin.killSwitchConfirmAfter")}
+          confirmWordBefore={t("admin.killSwitchConfirmBefore")}
+          error={fireError}
+          onCancel={() => setConfirmingWipe(false)}
+          onConfirm={(typed) => void fireKillSwitch(typed)}
+          title={t("admin.killSwitchHeading")}
+        >
+          <p>{t("admin.killSwitchWarning")}</p>
+        </ConfirmDialog>
       ) : null}
-      <AdminChannelsPanel currentUser={currentUser} onChannelRemoved={onChannelRemoved} onChannelUpsert={onChannelUpsert} />
     </section>
   );
 }

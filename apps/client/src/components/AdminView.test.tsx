@@ -99,23 +99,76 @@ describe("AdminView", () => {
       <AdminView currentUser={member} onChannelUpsert={() => {}} onWiped={async () => {}} />,
     );
 
-    expect(host.querySelector("form.settings-grid")).toBeNull();
-    expect(host.querySelector(".form-note")).not.toBeNull();
+    expect(host.querySelector(".admin-section")).toBeNull();
+    expect(host.querySelector(".empty-note")).not.toBeNull();
   });
 
-  it("loads and renders the config form for an admin", async () => {
+  it("loads and renders the config sections for an admin", async () => {
     const host = mount(
       <AdminView currentUser={admin} joinUrl="http://192.168.0.10:3000" onChannelUpsert={() => {}} onWiped={async () => {}} />,
     );
     await flush();
 
-    const form = host.querySelector("form.settings-grid");
-    expect(form).not.toBeNull();
     // The network-name field is seeded from the fetched config.
-    const nameInput = form?.querySelector("input") as HTMLInputElement;
+    const nameInput = host.querySelector("#admin-network form input") as HTMLInputElement;
     expect(nameInput.value).toBe("Test Node");
-    // The getting-started panel and the embedded channels panel are both present.
+    // One nav pill per section, each pointing at a section that exists.
+    const pills = Array.from(host.querySelectorAll<HTMLAnchorElement>(".admin-nav a"));
+    expect(pills.length).toBe(9);
+    for (const pill of pills) {
+      expect(host.querySelector(pill.getAttribute("href")!)).not.toBeNull();
+    }
+    // The getting-started panel, the embedded channels panel and the save bar are all present.
     expect(host.querySelector(".getting-started")).not.toBeNull();
-    expect(host.querySelector(".admin-channel-list, .form-note")).not.toBeNull();
+    expect(host.querySelector("#admin-channels .admin-channel-list, #admin-channels .empty-note")).not.toBeNull();
+    expect(host.querySelector(".save-bar button")?.textContent).toBe("Save node config");
+    // Feature flags are switches (real checkboxes styled by CSS).
+    expect(host.querySelectorAll("#admin-features input.toggle").length).toBeGreaterThan(0);
+  });
+
+  it("confirms the Emergency Reset in an alertdialog that needs the typed word", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/admin/channels")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.includes("/api/admin/kill-switch")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      void init;
+      return new Response(JSON.stringify({ ...config, killSwitch: { enabled: true, requireConfirmation: true } }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onWiped = vi.fn(async () => {});
+    const host = mount(<AdminView currentUser={admin} onChannelUpsert={() => {}} onWiped={onWiped} />);
+    await flush();
+
+    const wipeButton = Array.from(host.querySelectorAll<HTMLButtonElement>("#admin-danger button")).find(
+      (button) => button.textContent === "Wipe this node now",
+    )!;
+    wipeButton.click();
+    await flush();
+
+    const dialog = host.querySelector('[role="alertdialog"]')!;
+    expect(dialog).not.toBeNull();
+    const confirm = Array.from(dialog.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "Wipe this node now",
+    )!;
+    // Locked until the word is typed; nothing has been sent.
+    expect(confirm.disabled).toBe(true);
+    const field = dialog.querySelector("input") as HTMLInputElement;
+    field.value = "wipe";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    expect(confirm.disabled).toBe(false);
+
+    confirm.click();
+    await flush();
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes("/api/admin/kill-switch"));
+    expect(call).not.toBeUndefined();
+    expect(String((call?.[1] as RequestInit | undefined)?.body)).toContain('"confirm":"wipe"');
+    expect(onWiped).toHaveBeenCalledTimes(1);
   });
 });

@@ -389,38 +389,52 @@ export function AvatarImageEditor({ disabled, onUpload }: AvatarImageEditorProps
         type="file"
       />
       <div className="avatar-editor-controls">
-        <button disabled={disabled || uploading} onClick={() => fileInputRef.current?.click()} type="button">
-          {t("avatarEditor.chooseImage")}
-        </button>
-        <button disabled={disabled || uploading || !hasImage} onClick={() => void upload()} type="button">
-          {uploading ? t("avatarEditor.uploading") : t("avatarEditor.useCropped")}
-        </button>
+        <div className="avatar-editor-buttons">
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={disabled || uploading}
+            onClick={() => fileInputRef.current?.click()}
+            type="button"
+          >
+            {t("avatarEditor.chooseImage")}
+          </button>
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={disabled || uploading || !hasImage}
+            onClick={() => void upload()}
+            type="button"
+          >
+            {uploading ? t("avatarEditor.uploading") : t("avatarEditor.useCropped")}
+          </button>
+        </div>
+        <label className="field">
+          <span className="field-label">{t("avatarEditor.zoom")}</span>
+          <input
+            className="range"
+            disabled={disabled || uploading || !hasImage}
+            max="3"
+            min="1"
+            onInput={(event) => setCrop((previous) => ({ ...previous, zoom: Number(event.currentTarget.value) }))}
+            step="0.01"
+            type="range"
+            value={crop.zoom}
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">{t("avatarEditor.rotate")}</span>
+          <input
+            className="range"
+            disabled={disabled || uploading || !hasImage}
+            max="180"
+            min="-180"
+            onInput={(event) => setCrop((previous) => ({ ...previous, rotation: Number(event.currentTarget.value) }))}
+            step="1"
+            type="range"
+            value={crop.rotation}
+          />
+        </label>
+        {error ? <p className="form-error">{error}</p> : null}
       </div>
-      <label>
-        {t("avatarEditor.zoom")}
-        <input
-          disabled={disabled || uploading || !hasImage}
-          max="3"
-          min="1"
-          onInput={(event) => setCrop((previous) => ({ ...previous, zoom: Number(event.currentTarget.value) }))}
-          step="0.01"
-          type="range"
-          value={crop.zoom}
-        />
-      </label>
-      <label>
-        {t("avatarEditor.rotate")}
-        <input
-          disabled={disabled || uploading || !hasImage}
-          max="180"
-          min="-180"
-          onInput={(event) => setCrop((previous) => ({ ...previous, rotation: Number(event.currentTarget.value) }))}
-          step="1"
-          type="range"
-          value={crop.rotation}
-        />
-      </label>
-      {error ? <p className="form-error">{error}</p> : null}
     </div>
   );
 }

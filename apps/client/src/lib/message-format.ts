@@ -19,7 +19,7 @@ const timeFormatters = new Map<string, Intl.DateTimeFormat>();
  * Format a numeric timestamp into a localized hours-and-minutes time string.
  *
  * @param timestamp - Milliseconds since the UNIX epoch
- * @returns The time formatted as hours and minutes according to the current locale (e.g., "09:05")
+ * @returns The time as hours and minutes in the current locale, without a padded hour (e.g. "9:05 AM", "19:05"), so the stamp inside a bubble stays short
  */
 export function displayTime(timestamp: number): string {
   // Node UI locale (via icuLocale), so times read in the same language as the rest of the chrome.
@@ -27,7 +27,7 @@ export function displayTime(timestamp: number): string {
   let formatter = timeFormatters.get(locale);
 
   if (!formatter) {
-    formatter = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
+    formatter = new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" });
     timeFormatters.set(locale, formatter);
   }
 

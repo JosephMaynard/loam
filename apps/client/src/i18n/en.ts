@@ -30,13 +30,9 @@ export const en = {
   "common.requestFailed": "Request failed: {status}",
 
   // Conversation view (channel / DM shell + empty state).
-  "conversation.emptyEyebrow": "Local node ready",
-  "conversation.emptyTitle": "Choose a channel or direct message.",
-  "conversation.emptyBody":
-    "Messages, replies and reactions persist locally and sync through the laptop or Raspberry Pi server while it is running.",
+  "conversation.emptyTitle": "Pick a channel or a person",
+  "conversation.emptyBody": "Messages live on this local node, not on the internet.",
   "conversation.members": "Members",
-  "conversation.kindChannel": "Channel",
-  "conversation.kindDm": "Direct message",
   "conversation.composerLabel": "Message {name}",
   "conversation.composerPlaceholderChannel": "Post an update",
   "conversation.composerPlaceholderDm": "Send a direct message",
@@ -45,22 +41,19 @@ export const en = {
   "messageList.empty": "No messages yet. Start with the practical detail everyone needs.",
 
   // A single message (meta, edit form, reactions, thread/edit/delete controls).
-  "message.editedTag": "(edited)",
+  "message.editedTag": "edited",
   "message.editAriaLabel": "Edit message",
   "message.attachedImageAlt": "Attached image",
   "message.attachedFile": "Attached file",
   "message.streaming": "Streaming",
-  "message.reply": "Reply",
   "message.replyCount": { one: "{n} reply", other: "{n} replies" },
   "message.edit": "Edit",
-  "message.deleteOwnTitle": "Delete your message",
   "message.deleteAdminTitle": "Delete this message (admin)",
 
   // Message composer (attachments, send).
   "composer.uploadFailed": "Upload failed.",
   "composer.removeAttachment": "Remove {name}",
   "composer.attachImage": "Attach an image",
-  "composer.attachImageHint": "Attach an image (resized on this device before upload)",
   "composer.send": "Send",
 
   // Message composer — share a location (docs/10; no map, no GPS — a named label or coordinates).
@@ -102,14 +95,12 @@ export const en = {
 
   // Thread side panel.
   "thread.eyebrow": "Thread",
-  "thread.heading": "Replies",
   "thread.close": "Close thread",
   "thread.noReplies": "No replies yet",
   "thread.replyLabel": "Reply in thread",
 
   // Settings view (join panel, profile, avatar, device wipe, admin access).
   "settings.profileError": "Unable to update profile.",
-  "settings.joinEyebrow": "Local access",
   "settings.joinTitle": "Join this LOAM node",
   "settings.thisBrowser": "This browser",
   // Transport encryption (docs/08): fingerprint of the live session's host key, distinguishing a
@@ -120,16 +111,12 @@ export const en = {
   "settings.transportUnverifiedLine": "🔒 Encrypted (unverified) · {fingerprint}",
   "settings.transportUnverifiedHint": "Scan this node's join QR to confirm its identity.",
   "settings.transportKeyMismatch": "The QR you scanned doesn't match this node's key.",
-  "settings.profileEyebrow": "Profile",
   "settings.profileTitle": "Local identity",
   "settings.displayName": "Display name",
   "settings.avatarStyle": "Avatar style",
   "settings.newAvatar": "New avatar",
   "settings.saveProfile": "Save profile",
-  "settings.imageAvatarEyebrow": "Image avatar",
   "settings.cropUpload": "Crop upload",
-  "settings.avatarUploadDisabled": "Image avatar uploads are disabled on this LOAM node.",
-  "settings.profileEditingDisabled": "Profile editing is disabled on this LOAM node.",
   "settings.securityEyebrow": "Security",
   "settings.wipeTitle": "Wipe this device",
   "settings.wipeBody":
@@ -137,7 +124,6 @@ export const en = {
   "settings.wipeConfirmBefore": "Type",
   "settings.wipeConfirmAfter": "to confirm",
   "settings.wiping": "Wiping…",
-  "settings.adminEyebrow": "Administration",
   "settings.adminTools": "Admin tools",
   "settings.adminAccess": "Admin access",
   "settings.openAdmin": "Open the admin area →",
@@ -150,7 +136,6 @@ export const en = {
   "common.refresh": "Refresh",
 
   // People view + greeter pending-approvals panel.
-  "people.eyebrow": "People",
   "people.notAuthorizedTitle": "Not authorized",
   "people.notAuthorizedNote": "This area is for greeters, moderators, and admins.",
   "people.title": "People and moderation",
@@ -165,7 +150,6 @@ export const en = {
   // Moderation panel + roster rows + state badges.
   "moderation.updateError": "Unable to update this person.",
   "moderation.loadError": "Unable to load people.",
-  "moderation.eyebrow": "Moderation",
   "moderation.heading": "People",
   "moderation.loading": "Loading people…",
   "moderation.empty": "No people to show yet.",
@@ -228,7 +212,6 @@ export const en = {
   "admin.title": "Node configuration",
   "admin.loading": "Loading node config…",
   // Admin view — getting-started panel.
-  "admin.gettingStartedEyebrow": "Getting started",
   "admin.gettingStartedTitle": "Run your network in five steps",
   "admin.step1Title": "Name it",
   "admin.step1Body": "set a Network name below so joiners recognise where they are.",
@@ -264,7 +247,6 @@ export const en = {
   // Admin view — features + identity panels.
   "admin.featuresEyebrow": "Features",
   "admin.messagingHeading": "Messaging",
-  "admin.identityEyebrow": "Identity",
   "admin.profilesHeading": "Profiles",
   // Admin view — LLM panel.
   "admin.llmEyebrow": "LLM",
@@ -278,7 +260,6 @@ export const en = {
   "admin.llmOnDeviceModel": "On-device model name",
   "admin.llmOnDeviceNote": "Runs a small model on the phone itself instead of a laptop's Ollama. Works only on the Android host with a compatible model file added on-device (never shipped); a no-op elsewhere. Off by default.",
   // Admin view — retention panel.
-  "admin.privacyEyebrow": "Privacy",
   "admin.retentionHeading": "Message retention",
   "admin.retentionLabel": "Delete messages after (minutes; blank = keep forever)",
   "admin.retentionNote":
@@ -319,7 +300,6 @@ export const en = {
   "admin.meshMaxCarriedLabel": "Max carried messages",
   "admin.meshMaxContactsLabel": "Max contacts",
   // Admin view — bootstrap panel.
-  "admin.bootstrapEyebrow": "Admin access",
   "admin.bootstrapHeading": "Bootstrap",
   "admin.strategy": "Strategy",
   "admin.newPassphrase": "New admin passphrase (min 8 chars; leave blank to keep the current one)",
@@ -389,7 +369,7 @@ export const en = {
   "sidebar.statusOffline": "offline",
 
   // New-channel control (sidebar).
-  "newChannel.new": "+ New channel",
+  "newChannel.new": "New channel",
   "newChannel.nameAria": "New channel name",
   "newChannel.namePlaceholder": "Channel name",
   "newChannel.private": "Private (invite-only)",
@@ -398,7 +378,6 @@ export const en = {
   // Search view.
   "search.error": "Unable to search messages.",
   "search.dmWith": "DM with {name}",
-  "search.eyebrow": "Search",
   "search.title": "Find messages",
   "search.placeholder": "Search channel messages and your DMs",
   "search.searching": "Searching…",
@@ -406,9 +385,7 @@ export const en = {
   "search.noResults": "No messages matched.",
 
   // Mesh mail view (opportunistic-mesh sealed mailbox — docs/16).
-  "mesh.eyebrow": "Mesh mail",
   "mesh.title": "Mesh mail",
-  "mesh.myCardEyebrow": "Your address",
   "mesh.myCardTitle": "Your mesh card",
   "mesh.myCardNote": "Share this with someone you want to receive sealed mail from — scan the code or copy it and send it however you like.",
   "mesh.myCardLoading": "Loading your mesh card…",
@@ -417,7 +394,6 @@ export const en = {
   "mesh.myCardQrTooLarge": "This card is too long for a QR code here — copy it instead.",
   "mesh.copyCard": "Copy card",
   "mesh.copyCardCopied": "Copied",
-  "mesh.addContactEyebrow": "Add a contact",
   "mesh.addContactTitle": "Add a contact's card",
   "mesh.addContactPlaceholder": "Paste a mesh card someone shared with you",
   "mesh.addContactButton": "Add contact",
@@ -425,7 +401,6 @@ export const en = {
   "mesh.addContactSuccess": "Contact added.",
   "mesh.addContactError": "Unable to add this contact.",
   "mesh.addContactInvalidJson": "That doesn't look like a valid mesh card.",
-  "mesh.contactsEyebrow": "Contacts",
   "mesh.contactsTitle": "Your mesh contacts",
   "mesh.contactsLoading": "Loading contacts…",
   "mesh.contactsLoadError": "Unable to load your contacts.",
@@ -440,12 +415,10 @@ export const en = {
   "mesh.composeError": "Unable to send this message.",
 
   // Invite control (sidebar).
-  "invite.hide": "× Hide invite",
-  "invite.show": "⧉ Invite someone",
   "invite.title": "Invite someone",
   "invite.close": "Close invite",
-  "invite.wifiButton": "Show Wi-Fi hotspot QR",
-  "invite.wifiHint": "Opens the host's Wi-Fi QR so people can join the network first.",
+  "invite.wifiButton": "Open the host's share screen",
+  "invite.wifiHint": "Shows the hotspot or Wi-Fi join QR from the host app.",
 
   // Node-link control (admin sync panel).
   "nodeLink.hide": "× Hide link",
@@ -685,7 +658,6 @@ export const en = {
   "block.hiddenMessage": "Message from a blocked user",
   "block.show": "Show",
   "block.error": "Couldn't update your block list.",
-  "settings.privacyEyebrow": "Privacy",
   "settings.blockedTitle": "Blocked people",
   "settings.blockedNote": "People you block can't send you direct messages, and their channel messages are hidden from you. LOAM doesn't notify them.",
   "settings.blockedEmpty": "You haven't blocked anyone.",
@@ -694,6 +666,25 @@ export const en = {
   "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
   "error.channel_member_unavailable": "This person isn't available for this channel",
   "error.block_not_allowed": "This user can't be blocked",
+  "toast.newMessagesFrom": { one: "{n} new message from {place}", other: "{n} new messages from {place}" },
+  "conversation.moreActions": "Conversation options",
+  "message.actionsTitle": "Message actions",
+  "message.actionsAt": "Message actions, sent {time}",
+  "message.reactWith": "React with {emoji}",
+  "message.moreActions": "More actions",
+  "message.copyText": "Copy text",
+  "messageList.newMessages": "New messages",
+  "thread.inChannel": "in #{name}",
+  "report.done": "Done",
+  "settings.title": "Settings",
+  "settings.avatarFace": "Face",
+  "settings.avatarInitial": "Initial",
+  "settings.avatarPattern": "Pattern",
+  "admin.nav.label": "Sections",
+  "admin.nav.sync": "Sync",
+  "admin.nav.mesh": "Mesh",
+  "moderation.banConfirm": "Ban {name}? They lose access to this network until a moderator unbans them.",
+  "toast.newMessages": { one: "{n} new message in {place}", other: "{n} new messages in {place}" },
 };
 
 /**

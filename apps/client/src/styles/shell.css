@@ -1,0 +1,528 @@
+/* The app shell: the fixed frame, the pane grid and its breakpoints, the sidebar (Home on phones), the
+   screen header, the gate screens, and the Developer Mode banner.
+
+   Breakpoints (see DESIGN.md):  phone < 720px  ·  tablet 720–1023px  ·  desktop ≥ 1024px.
+   Phones show one pane at a time, driven by the classes app.tsx sets on .app-shell:
+   has-conversation / no-conversation / settings-open / thread-open. */
+
+/* ---------- Frame ---------- */
+
+/* Fixed to the visible viewport. --vvh / --vv-top come from src/lib/viewport.ts; without them (first
+   paint, no JS yet) the var() is invalid, `height` falls back to auto and top/bottom: 0 size the frame. */
+.app-frame {
+  position: fixed;
+  top: 0;
+  top: var(--vv-top, 0px);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 100vh;
+  height: 100dvh;
+  height: var(--vvh, 100dvh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-surface);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+/* Developer Mode: an unmissable warning that traffic is plaintext, above every screen. */
+.dev-mode-banner {
+  flex: none;
+  background: var(--danger-solid);
+  color: #ffffff;
+  padding: 6px var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.app-shell {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  background: var(--bg-app);
+}
+
+.app-shell.thread-open {
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--thread-w);
+}
+
+/* Every pane is a flex column that fills its cell; inner areas scroll, never the pane or the page. */
+.sidebar,
+.conversation,
+.thread-panel,
+.settings-view {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------- Screen header ---------- */
+
+.screen-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--header-h);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  padding: 0 var(--space-2);
+}
+
+.screen-header-leading {
+  display: flex;
+  flex: none;
+  align-items: center;
+  margin-inline-start: var(--space-2);
+}
+
+.screen-header-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 var(--space-2);
+}
+
+.screen-title {
+  overflow: hidden;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-subtitle {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-header-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+/* The back control (a link from MobileBackLink or a button): a round icon button, phones only. */
+.mobile-back {
+  display: none;
+  flex: none;
+  place-items: center;
+  width: var(--control-h);
+  height: var(--control-h);
+  border-radius: var(--radius-full);
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.mobile-back:hover {
+  background: var(--bg-hover);
+}
+
+.show-back .mobile-back {
+  display: grid;
+}
+
+/* ---------- Sidebar / Home ---------- */
+
+.sidebar {
+  border-inline-end: 1px solid var(--border);
+  background: var(--bg-surface);
+  --presence-ring: var(--bg-surface);
+}
+
+.sidebar-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--header-h);
+  padding-inline-start: var(--space-4);
+  padding-inline-end: var(--space-2);
+}
+
+.brand-mark {
+  flex: none;
+  width: 28px;
+  height: 28px;
+}
+
+.sidebar-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.brand-title {
+  overflow: hidden;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-header-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-2) var(--space-3);
+}
+
+.nav-section {
+  padding-top: var(--space-3);
+}
+
+.nav-section nav {
+  display: grid;
+  gap: 1px;
+}
+
+.nav-heading {
+  padding: var(--space-1) var(--space-3) 6px;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.nav-tools {
+  display: grid;
+  gap: 1px;
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+}
+
+.nav-link {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 44px;
+  border-radius: var(--radius);
+  color: var(--fg);
+  padding-inline-start: var(--space-2);
+  padding-inline-end: var(--space-3);
+  font-size: var(--text-base);
+  text-align: start;
+  text-decoration: none;
+  user-select: none;
+}
+
+.nav-link:hover {
+  background: var(--bg-hover);
+}
+
+.nav-link.active {
+  background: var(--bg-active);
+}
+
+/* The active row's accent bar on the inline-start edge. */
+.nav-link.active::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  inset-inline-start: 0;
+  width: 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+
+.nav-link.active .nav-label,
+.nav-link.has-unread .nav-label {
+  font-weight: 600;
+}
+
+.nav-glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: var(--fg-muted);
+}
+
+.nav-link.active .nav-glyph,
+.nav-link.has-unread .nav-glyph {
+  color: var(--fg);
+}
+
+.nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-label.archived-channel {
+  color: var(--fg-muted);
+}
+
+.archived-tag {
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.new-channel-toggle {
+  color: var(--fg-muted);
+}
+
+.new-channel-form {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: 0 var(--space-1);
+}
+
+.new-channel-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.sidebar-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  /* 12 + 36 + 12 + border = the composer's height, so the two bottom bars line up on desktop. */
+  padding-block: var(--space-3);
+  padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  padding-inline-start: var(--space-4);
+  padding-inline-end: var(--space-2);
+}
+
+.current-user {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.current-user-text {
+  min-width: 0;
+}
+
+.current-user strong,
+.current-user span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.current-user strong {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.current-user span {
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+}
+
+/* Invite dialog (InviteControl) */
+.invite-modal-qr {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: #ffffff;
+  padding: var(--space-4);
+}
+
+.invite-modal-qr svg {
+  width: 100%;
+  max-width: 280px;
+  height: auto;
+}
+
+.invite-modal-url {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.invite-modal-wifi {
+  display: grid;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+.invite-modal-wifi p {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+/* ---------- The no-conversation pane (tablet/desktop) ---------- */
+
+.conversation.empty-state {
+  display: grid;
+  background: var(--bg-app);
+}
+
+/* ---------- Gate screens (rescan, wiping, wiped, banned, pending, identity check, crash) ---------- */
+
+.gate-screen {
+  position: fixed;
+  top: 0;
+  top: var(--vv-top, 0px);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 100%;
+  height: var(--vvh, 100%);
+  bottom: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  background: var(--bg-app);
+  padding: var(--space-6) var(--space-4);
+  padding-top: calc(var(--space-6) + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(var(--space-6) + env(safe-area-inset-bottom, 0px));
+}
+
+.gate-card {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: 420px;
+  margin: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-1);
+  padding: var(--space-8) var(--space-6);
+  text-align: center;
+}
+
+.gate-mark {
+  width: 56px;
+  height: 56px;
+  margin-bottom: var(--space-1);
+}
+
+.gate-card h1 {
+  font-size: var(--text-2xl);
+}
+
+.gate-card p {
+  color: var(--fg-muted);
+}
+
+.gate-card .dialog-actions {
+  justify-content: center;
+}
+
+.gate-status {
+  margin-top: var(--space-1);
+}
+
+/* PinChangePrompt, rendered inside the rescan gate's card. */
+.pin-change {
+  display: grid;
+  gap: var(--space-3);
+  width: 100%;
+  text-align: start;
+}
+
+.pin-change .transport-fingerprint {
+  color: var(--fg);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
+.pin-change .dialog-actions {
+  margin-top: var(--space-2);
+}
+
+/* ---------- Breakpoints ---------- */
+
+/* Tablet: narrower sidebar; the thread panel only fits beside the conversation from 900px. */
+@media (min-width: 720px) and (max-width: 1023.98px) {
+  .app-shell {
+    --sidebar-w: 260px;
+    --thread-w: 320px;
+  }
+}
+
+@media (min-width: 720px) and (max-width: 899.98px) {
+  .app-shell.thread-open {
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  }
+
+  .app-shell.thread-open .conversation {
+    display: none;
+  }
+}
+
+@media (min-width: 720px) {
+  .only-mobile {
+    display: none;
+  }
+}
+
+/* Phone: one pane at a time. Home is the sidebar; opening anything else replaces it. */
+@media (max-width: 719.98px) {
+  .app-shell,
+  .app-shell.thread-open {
+    display: block;
+  }
+
+  .app-shell.has-conversation .sidebar,
+  .app-shell.settings-open .sidebar,
+  .app-shell.no-conversation .conversation,
+  .app-shell.thread-open .conversation {
+    display: none;
+  }
+
+  .sidebar {
+    border-inline-end: 0;
+  }
+
+  .mobile-back {
+    display: grid;
+  }
+
+  .brand-title {
+    font-size: var(--text-xl);
+  }
+
+  .nav-link {
+    min-height: 52px;
+  }
+
+  /* The Home app bar already has the settings gear. */
+  .only-desktop {
+    display: none;
+  }
+}

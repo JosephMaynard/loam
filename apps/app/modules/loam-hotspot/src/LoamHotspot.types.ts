@@ -34,6 +34,19 @@ export type HotspotAddressCandidate = {
   preexisting?: boolean | null;
 };
 
+/**
+ * The Wi-Fi network the phone is a CLIENT of (station mode), as `wifiStationInfo` reports it — what Wi-Fi
+ * hosting mode advertises (docs/04 "Hosting modes"). Read without any permission prompt.
+ */
+export type WifiStationInfo = {
+  /** True when the phone holds a Wi-Fi network (any, not only the default one) or a Wi-Fi DHCP address. */
+  connected: boolean;
+  /** The station's own IPv4 address per WifiManager (DHCP / connection info); null/absent when none. */
+  address?: string | null;
+  /** The network name, or null/absent — Android redacts it unless location permission was already granted. */
+  ssid?: string | null;
+};
+
 /** Native → JS events. `onHotspotStopped` fires when the SYSTEM tears the hotspot down (tethering
  * enabled, Wi-Fi toggled, OEM power policy) — never for our own `stopHotspot()`. */
 export type LoamHotspotEvents = {

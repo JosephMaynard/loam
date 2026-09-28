@@ -26,18 +26,22 @@ export function AddSyncPeerControl({
 
   return (
     <div className="sync-peer-add">
-      <label>
-        {t("admin.peerUrl")}
+      <label className="field">
+        <span className="field-label">{t("admin.peerUrl")}</span>
         <input
+          className="input"
+          dir="ltr"
           disabled={disabled}
+          inputMode="url"
           onInput={(event) => setUrl(event.currentTarget.value)}
           placeholder="http://192.168.0.10:3000"
           value={url}
         />
       </label>
-      <label>
-        {t("admin.peerLabel")}
+      <label className="field">
+        <span className="field-label">{t("admin.peerLabel")}</span>
         <input
+          className="input"
           disabled={disabled}
           maxLength={80}
           onInput={(event) => setLabel(event.currentTarget.value)}
@@ -45,9 +49,11 @@ export function AddSyncPeerControl({
           value={label}
         />
       </label>
-      <label>
-        {t("admin.peerKey")}
+      <label className="field">
+        <span className="field-label">{t("admin.peerKey")}</span>
         <input
+          className="input mono-field"
+          dir="ltr"
           disabled={disabled}
           onInput={(event) => setTransportKey(event.currentTarget.value)}
           placeholder={t("admin.peerKeyPlaceholder")}
@@ -55,6 +61,7 @@ export function AddSyncPeerControl({
         />
       </label>
       <button
+        className="btn btn-secondary sync-peer-add-button"
         disabled={disabled || !candidate.success}
         onClick={() => {
           if (!candidate.success) {

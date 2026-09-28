@@ -8,9 +8,9 @@
 import { Platform } from 'react-native';
 
 import LoamHotspotModule from './src/LoamHotspotModule';
-import type { HotspotAddressCandidate, HotspotCredentials } from './src/LoamHotspot.types';
+import type { HotspotAddressCandidate, HotspotCredentials, WifiStationInfo } from './src/LoamHotspot.types';
 
-export type { HotspotAddressCandidate, HotspotCredentials } from './src/LoamHotspot.types';
+export type { HotspotAddressCandidate, HotspotCredentials, WifiStationInfo } from './src/LoamHotspot.types';
 
 /** True when the native hotspot module is present (Android with the module linked). */
 export function isHotspotSupported(): boolean {
@@ -59,6 +59,31 @@ export async function readHotspotAddressCandidates(): Promise<HotspotAddressCand
     return Array.isArray(candidates) ? candidates : [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * The phone's Wi-Fi client state for Wi-Fi hosting mode (docs/04 "Hosting modes"). Resolves
+ * `{ connected: false }` when unsupported, when the native read fails, or when it answers with something
+ * malformed — never rejects — so the share screen shows "connect to a Wi-Fi network first", not an error.
+ * Never asks for a permission.
+ */
+export async function readWifiStationInfo(): Promise<WifiStationInfo> {
+  if (!LoamHotspotModule) {
+    return { connected: false };
+  }
+  try {
+    const info = (await LoamHotspotModule.wifiStationInfo()) as Partial<WifiStationInfo> | null | undefined;
+    if (!info || typeof info !== 'object') {
+      return { connected: false };
+    }
+    return {
+      connected: info.connected === true,
+      address: typeof info.address === 'string' && info.address.length > 0 ? info.address : null,
+      ssid: typeof info.ssid === 'string' && info.ssid.length > 0 ? info.ssid : null,
+    };
+  } catch {
+    return { connected: false };
   }
 }
 

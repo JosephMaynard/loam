@@ -67,7 +67,7 @@ describe('toHostPanelState', () => {
 
   it('reports "searching" then "unknown" while running without a URL, and neither once one exists', () => {
     const display = { ...base, serverUrl: undefined };
-    expect(toHostPanelState(running(), display)).toMatchObject({ status: 'running', hotspotAddress: 'searching' });
+    expect(toHostPanelState(running(), display)).toMatchObject({ mode: 'hotspot', status: 'running', hotspotAddress: 'searching' });
     expect(toHostPanelState(running({ addressSearch: 'settled' }), display)).toMatchObject({
       status: 'running',
       hotspotAddress: 'unknown',
@@ -82,6 +82,7 @@ describe('toHostPanelState', () => {
   it('keeps Step 2 (the LAN URL) when the hotspot failed, and shows starting otherwise', () => {
     const display = { ...base, serverUrl: 'http://192.168.86.23:3000', addresses: homeWifi, detected: [] };
     expect(toHostPanelState({ phase: 'error', error: 'denied' }, display)).toEqual({
+      mode: 'hotspot',
       status: 'stopped',
       hotspotError: 'denied',
       serverUrl: 'http://192.168.86.23:3000',
@@ -89,6 +90,7 @@ describe('toHostPanelState', () => {
       connectedClients: 0,
     });
     expect(toHostPanelState({ phase: 'starting' }, display)).toEqual({
+      mode: 'hotspot',
       status: 'starting',
       serverUrl: 'http://192.168.86.23:3000',
       addresses: homeWifi,
