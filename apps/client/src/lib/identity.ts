@@ -8,8 +8,11 @@ export const CONFIRMED_USER_KEY = "loam.confirmedUserId";
 
 /**
  * Record `userId` as the server-confirmed identity. Returns `true` when a DIFFERENT identity had been
- * confirmed before — the caller must purge cached content before using the new identity. The first-ever
- * confirmation (nothing stored) is not a change. Storage failures read as "no change".
+ * confirmed before. The first-ever confirmation (nothing stored) is not a change. Storage failures read as
+ * "no change". The boot flow compares with {@link readConfirmedIdentity} FIRST, purges the cached content,
+ * and records only afterwards — the record is what tells sibling tabs to reload (`listenForIdentityChange`),
+ * so it must land on an already-cleared cache, and a crash mid-purge must leave the old identity in place
+ * so the next boot purges again.
  */
 export function recordConfirmedIdentity(userId: string): boolean {
   let previous: string | null = null;

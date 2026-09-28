@@ -727,7 +727,13 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       const removeStrayNewDb = () => {
         if (!dbExistedBeforeOpen) {
           for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
-            rmSync(path, { force: true });
+            // Best-effort: `force` only forgives a missing file. An EACCES/EBUSY here must not replace the
+            // typed boot error below (which the launcher's recovery screen keys on) with a raw fs error.
+            try {
+              rmSync(path, { force: true });
+            } catch (error) {
+              log.warn(error, `Could not remove ${path} left by the failed encrypted open`);
+            }
           }
         }
       };

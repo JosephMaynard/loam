@@ -1433,13 +1433,19 @@ function LoamApp() {
         // The node handed back a DIFFERENT identity than the one this browser last confirmed — its session was
         // reset (an Emergency Reset whose `wipe` event this backgrounded device missed, an expired cookie, a
         // revoked token). Everything cached belongs to the previous identity: purge it before carrying on as
-        // the new one, rather than merging a stranger's DMs and private channels into this session.
-        if (recordConfirmedIdentity(nextConfig.currentUser.id)) {
+        // the new one, rather than merging a stranger's DMs and private channels into this session. The new
+        // identity is recorded only AFTER the purge (CodeRabbit, PR #130): a tab killed mid-purge would
+        // otherwise boot next time with the new identity already confirmed and the old content still cached,
+        // and a sibling tab (reloaded by the `storage` event the record fires) could hydrate the not-yet-
+        // cleared cache. Recorded last, a crash before the record simply re-purges on the next pass.
+        const previousIdentity = readConfirmedIdentity();
+        if (previousIdentity !== undefined && previousIdentity !== nextConfig.currentUser.id) {
           await purgeCachedContent();
           if (!active) {
             return;
           }
         }
+        recordConfirmedIdentity(nextConfig.currentUser.id);
         tabIdentityRef.current = nextConfig.currentUser.id;
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
