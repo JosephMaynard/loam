@@ -210,7 +210,9 @@ export function pickHotspotAddress(
   const eligible = eligibleHotspotCandidates(candidates);
   const ranked = eligible
     .map((candidate, index) => {
-      const confirmed = clients.some((client) => subnetContains(candidate, client));
+      // The server already drops the host's own addresses; guard again here so a self-connection can never
+      // confirm anything even if that changes.
+      const confirmed = clients.some((client) => client !== candidate.address && subnetContains(candidate, client));
       return { candidate, confirmed, score: scoreHotspotCandidate(candidate) + (confirmed ? CLIENT_CONFIRMED_BONUS : 0), index };
     })
     .sort((a, b) => b.score - a.score || a.index - b.index);

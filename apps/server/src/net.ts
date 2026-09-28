@@ -58,19 +58,46 @@ export function isLoopbackPeer(address: string): boolean {
   return plain === "::1" || plain.startsWith("127.");
 }
 
+/** Every address on every local interface right now (all families, loopback included), unmapped. A peer
+ * that connects from one of these IS this host — e.g. a browser on the host phone opening the hotspot URL
+ * arrives with the hotspot's own address as its peer, not loopback. */
+export function localInterfaceAddresses(): Set<string> {
+  const own = new Set<string>();
+  try {
+    for (const addresses of Object.values(networkInterfaces())) {
+      for (const info of addresses ?? []) {
+        own.add(unmapIPv4(info.address));
+      }
+    }
+  } catch {
+    // An enumeration failure only loses the self-exclusion for this call; loopback is still dropped below.
+  }
+  return own;
+}
+
 /**
  * The distinct peer addresses among `peers` that are NOT this host itself: loopback dropped (the Android
- * host's own WebView, a same-host proxy), IPv4-mapped IPv6 unmapped so a joiner shows up once in its
- * dotted form, sorted for a stable answer. This is what the Android share screen turns into "1 phone
- * connected" and uses to confirm which interface the hotspot is on (a joiner's address lies in its subnet).
+ * host's own WebView, a same-host proxy), any of the host's `ownAddresses` dropped (the host phone's own
+ * browser on the hotspot URL), IPv4-mapped IPv6 unmapped so a joiner shows up once in its dotted form,
+ * sorted for a stable answer. This is what the Android share screen turns into "1 phone connected" and
+ * uses to confirm which interface the hotspot is on (a joiner's address lies in its subnet) — so a
+ * self-connection must never count as evidence.
  */
-export function remoteClientAddresses(peers: Iterable<string | undefined>): string[] {
+export function remoteClientAddresses(peers: Iterable<string | undefined>, ownAddresses: Iterable<string> = []): string[] {
+  const own = new Set<string>();
+  for (const address of ownAddresses) {
+    own.add(unmapIPv4(address));
+  }
   const distinct = new Set<string>();
   for (const peer of peers) {
     if (typeof peer !== "string" || peer.length === 0 || isLoopbackPeer(peer)) {
       continue;
     }
-    distinct.add(unmapIPv4(peer));
+    const plain = unmapIPv4(peer);
+    if (own.has(plain)) {
+      continue;
+    }
+    distinct.add(plain);
   }
   return [...distinct].sort();
 }

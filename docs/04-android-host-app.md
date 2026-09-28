@@ -140,8 +140,10 @@ The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi
   (the embedded Node *can* see the AP interface; the older note that it couldn't was wrong) — merged in with
   its own pre-start snapshot (`mergeHotspotCandidates`); (3) a **connected joiner confirms** the interface:
   the launcher polls `GET /api/host/clients` (launcher-only: loopback + host token, like the mesh bridge,
-  but not gated on mesh) for the distinct non-loopback peer addresses of admitted WebSockets, and a
-  candidate whose subnet contains one wins outright — proof, not inference (only among *eligible*
+  but not gated on mesh, and exempt from the `required`-mode session gate like the bridge) for the distinct
+  peer addresses of admitted WebSockets that are neither loopback nor one of the host's own interface
+  addresses (a browser on the host phone opening the hotspot URL is not a joiner), and a candidate whose
+  subnet contains one wins outright — proof, not inference (only among *eligible*
   candidates: a laptop on the host's home Wi-Fi never promotes that upstream interface); Step 2 then shows
   **"N phones connected"**, the one signal that the whole path works; (4) when the native check positively
   ruled the phone's own networks out and exactly one private, not-pre-existing candidate is left, it is

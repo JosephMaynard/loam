@@ -47,6 +47,19 @@ export function connectedLabel(count: number): string {
   return `${count} ${count === 1 ? 'phone' : 'phones'} connected`;
 }
 
+/**
+ * The line under the status pill: the live count whenever anyone is connected (shared-WiFi joiners count
+ * even while the hotspot is down), a "none yet" while the host is running so the operator knows the count
+ * is live, nothing before the host is up.
+ */
+export function connectedLine(state: Pick<HostState, 'status' | 'connectedClients'>): string | undefined {
+  const count = state.connectedClients ?? 0;
+  if (count > 0) {
+    return connectedLabel(count);
+  }
+  return state.status === 'running' ? 'No phones connected yet' : undefined;
+}
+
 const STATUS_LABEL: Record<HostState['status'], string> = {
   starting: 'Starting host…',
   running: 'Host running',
@@ -73,6 +86,11 @@ export function HostPanel({ state }: { state: HostState }) {
         style={styles.statusPill}>
         <ThemedText type="small">{STATUS_LABEL[state.status]}</ThemedText>
       </ThemedView>
+      {connectedLine(state) ? (
+        <ThemedText type="smallBold" style={styles.connected}>
+          {connectedLine(state)}
+        </ThemedText>
+      ) : null}
 
       <ThemedText type="small" themeColor="textSecondary" style={styles.rationale}>
         Android requires location permission to create a WiFi hotspot. LOAM never uses, requests, or
@@ -120,11 +138,6 @@ export function HostPanel({ state }: { state: HostState }) {
                 If that doesn&apos;t load, this host is also at: {state.addresses.join(', ')}
               </ThemedText>
             ) : null}
-            {state.connectedClients ? (
-              <ThemedText type="smallBold" style={styles.manual}>
-                {connectedLabel(state.connectedClients)}
-              </ThemedText>
-            ) : null}
           </>
         ) : state.hotspotAddress === 'searching' ? (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
@@ -170,6 +183,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.one,
     borderRadius: Spacing.four,
+  },
+  connected: {
+    textAlign: 'center',
   },
   step: {
     alignSelf: 'stretch',

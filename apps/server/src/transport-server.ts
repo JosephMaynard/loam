@@ -387,7 +387,8 @@ export function createTransportServer(ctx: AppContext) {
    * from the transport-session requirement ONLY for an authorized bridge caller (loopback AND the launcher's
    * per-boot host token — `meshBridgeCallerAuthorized`), so the exemption can never widen LAN exposure.
    */
-  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound"]);
+  // `/api/host/clients` (the share screen's "N phones connected") rides the same launcher-only channel.
+  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients"]);
 
   /**
    * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches (Sol P2-6).

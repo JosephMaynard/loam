@@ -196,7 +196,15 @@ function lanInterfaces() {
  * — the share screen's "N phones connected" and its proof of which interface the hotspot is on. `null`
  * when the server couldn't be asked this tick (not yet listening): the screen keeps its last answer. */
 function postHostInfo() {
-  const interfaces = lanInterfaces();
+  // Runs from a timer and a bridge listener: nothing here may throw, or the whole embedded runtime goes
+  // down with it. An enumeration failure (os.networkInterfaces() can throw on an odd ROM) just reports no
+  // addresses this tick — native discovery on the RN side still has its own enumeration.
+  let interfaces = [];
+  try {
+    interfaces = lanInterfaces();
+  } catch (err) {
+    console.error('Failed to enumerate network interfaces', err);
+  }
   const info = {
     port: PORT,
     addresses: interfaces.map(function (entry) {
@@ -205,16 +213,24 @@ function postHostInfo() {
     interfaces: interfaces,
     clients: null,
   };
-  meshRequest('GET', '/api/host/clients', undefined, function (err, status, json) {
-    if (!err && status === 200 && json && Array.isArray(json.clients)) {
-      info.clients = json.clients;
-    }
+  const post = function () {
     try {
       rnBridge.channel.post('loam-hostinfo', info);
     } catch (postErr) {
       console.error('Failed to post host info', postErr);
     }
-  });
+  };
+  try {
+    meshRequest('GET', '/api/host/clients', undefined, function (err, status, json) {
+      if (!err && status === 200 && json && Array.isArray(json.clients)) {
+        info.clients = json.clients;
+      }
+      post();
+    });
+  } catch (err) {
+    console.error('Failed to ask the server who is connected', err);
+    post();
+  }
 }
 
 // Answer on-demand requests (the Share overlay asks when it opens) and refresh on an interval so the

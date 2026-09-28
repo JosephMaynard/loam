@@ -7,7 +7,7 @@ import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, M
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { attachmentFileName, parseAttachmentFileName } from "./media.js";
-import { remoteClientAddresses } from "./net.js";
+import { localInterfaceAddresses, remoteClientAddresses } from "./net.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 /** Register the node-to-node sync endpoints and the opportunistic-mesh endpoints (cards, contacts, send, bridge, admin sync). */
@@ -347,7 +347,13 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
       if (!ctx.meshBridgeCallerAuthorized(request)) {
         return reply.code(404).send(errorBody("Not found"));
       }
-      return { clients: remoteClientAddresses([...ctx.sockets].map((session) => session.remoteAddress)) };
+      return {
+        clients: remoteClientAddresses(
+          [...ctx.sockets].map((session) => session.remoteAddress),
+          // The host's own addresses: a browser on the host phone opening the hotspot URL is not a joiner.
+          localInterfaceAddresses(),
+        ),
+      };
     },
   );
 

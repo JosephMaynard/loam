@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createMeshIdentity, currentEpoch, mailboxTag, sealMailbox } from "@loam/crypto";
@@ -528,9 +528,29 @@ describe("opportunistic mesh: transport bridge", () => {
       app.sockets.add({ socket: fakeSocket, userId: "user.a", remoteAddress: "::ffff:10.80.217.5" });
       app.sockets.add({ socket: fakeSocket, userId: "user.a", remoteAddress: "10.80.217.5" });
       app.sockets.add({ socket: fakeSocket, userId: "user.b", remoteAddress: "10.80.217.12" });
+      // A browser on the host itself, opening the node's own LAN address, arrives with that address as its
+      // peer — not loopback — and must not count as a phone.
+      const ownLanAddress = Object.values(networkInterfaces())
+        .flat()
+        .find((info) => info && info.family === "IPv4" && !info.internal)?.address;
+      if (ownLanAddress) {
+        app.sockets.add({ socket: fakeSocket, userId: "user.self", remoteAddress: ownLanAddress });
+      }
       expect((await clients({ "x-loam-host-token": HOST_TOKEN })).json()).toEqual({
         clients: ["10.80.217.12", "10.80.217.5"],
       });
+    });
+
+    it("GET /api/host/clients answers the launcher under REQUIRED transport mode too (the exemption the bridge gets)", async () => {
+      const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+      expect((await app.server.inject({ method: "GET", url: "/api/host/clients", headers: { "x-loam-host-token": HOST_TOKEN } })).json()).toEqual({
+        clients: [],
+      });
+      // Wrong token from loopback: no exemption, so the plaintext request is refused as any other would be
+      // (`asCourier` adds the real token only when the test sets none itself).
+      expect(
+        (await app.server.inject({ method: "GET", url: "/api/host/clients", headers: { "x-loam-host-token": "wrong" } })).statusCode,
+      ).toBe(401);
     });
   });
 });

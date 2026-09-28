@@ -163,6 +163,11 @@ describe('pickHotspotAddress — client confirmation', () => {
     expect(pick?.confirmed).toBe(false);
   });
 
+  it('ignores a "joiner" that is the candidate address itself (the host phone opening its own URL)', () => {
+    const only: HotspotAddressCandidate = { name: 'wlan0', address: '192.168.4.20', prefixLength: 24 };
+    expect(pickHotspotAddress([only], { clientAddresses: ['192.168.4.20'] })).toBeUndefined();
+  });
+
   it('accepts a low-scoring candidate once a joiner has come through it', () => {
     const only: HotspotAddressCandidate = { name: 'wlan0', address: '192.168.4.20', prefixLength: 24 };
     expect(pickHotspotAddress([only])).toBeUndefined();
