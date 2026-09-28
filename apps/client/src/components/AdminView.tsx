@@ -93,10 +93,21 @@ function jumpToSection(key: string): void {
   if (!target) {
     return;
   }
-  const smooth = window.matchMedia?.("(prefers-reduced-motion: no-preference)").matches ?? false;
+  const behavior = (window.matchMedia?.("(prefers-reduced-motion: no-preference)").matches ?? false) ? "smooth" : "auto";
   // Focus first: moving focus during a smooth scroll cancels the scroll in Chrome.
   target.focus({ preventScroll: true });
-  target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+  // Scroll ONLY the screen's own scroller. `scrollIntoView` walks every scrollable ancestor, and it will
+  // scroll the fixed `.app-frame` (overflow: hidden, still programmatically scrollable) if anything ever
+  // gives it overflow — which hid the header and Back button on a phone. The sticky nav is cleared with
+  // the section's `scroll-margin-top`, which a manual scroll has to honour by hand.
+  const scroller = target.closest<HTMLElement>(".screen-body");
+  if (!scroller) {
+    target.scrollIntoView({ behavior, block: "start" });
+    return;
+  }
+  const margin = parseFloat(getComputedStyle(target).scrollMarginTop) || 0;
+  const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - margin;
+  scroller.scrollTo({ top: Math.max(0, top), behavior });
 }
 
 /**
@@ -130,8 +141,10 @@ function AdminSection({
         >
           {children}
           {/* Implicit submission (Enter in a field) is ignored by browsers when a form has more than one
-              text field and no submit button; the sticky "Save node config" bar sits outside every form. */}
-          <button aria-hidden="true" className="sr-only" tabIndex={-1} type="submit" />
+              text field and no submit button; the sticky "Save node config" bar sits outside every form.
+              `hidden` (display: none) rather than .sr-only: an absolutely positioned control here used the
+              fixed .app-frame as its containing block and gave it scrollable overflow. */}
+          <button hidden tabIndex={-1} type="submit" />
         </form>
       ) : (
         <div className="admin-section-body">{children}</div>
