@@ -84,6 +84,19 @@ describe("confirmIdentity (CodeRabbit, PR #130: record only after a successful p
     expect(localStorage.getItem(CONFIRMED_USER_KEY)).toBe("user.b");
   });
 
+  it("purges when the stored identity can't be READ (a storage failure is not 'nothing recorded')", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("SecurityError");
+    });
+    try {
+      const purge = vi.fn(async () => undefined);
+      expect(await confirmIdentity("user.b", purge)).toBe("purged");
+      expect(purge).toHaveBeenCalledTimes(1);
+    } finally {
+      getItem.mockRestore();
+    }
+  });
+
   it("leaves the OLD identity recorded when the purge keeps failing, so the next boot purges again", async () => {
     recordConfirmedIdentity("user.a");
     const purge = vi.fn(async () => {

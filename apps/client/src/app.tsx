@@ -136,6 +136,12 @@ type Config = {
 const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
 const LAST_CONVERSATION_KEY = "loam.lastConversation";
+// How long the boot keeps hydrated (cached) content OFF screen while the node is asked to confirm this
+// browser's identity (CodeRabbit, PR #130). A node that reset the identity hands back a different one and the
+// cache is purged before anything renders; online, the answer arrives well inside this. Offline, the fetch
+// would only fail at its 10 s timeout, so the cap lifts the gate first — the offline-first cache still shows
+// after a short splash rather than never.
+const IDENTITY_GATE_MAX_MS = 1_500;
 const TOAST_DISMISS_MS = 4_000;
 // Single `sync`-store record holding the per-conversation last-read timestamps (ms). One row keeps
 // the write cheap; the map is `conversationKey` → last-read time.
@@ -507,6 +513,9 @@ function LoamApp() {
   // Set when this node requires transport encryption (docs/08) but no host public key is available
   // from a scanned join QR — there is no safe way to talk to it, so the app renders a gate instead.
   const [needsQr, setNeedsQr] = useState<false | "missing" | "changed">(false);
+  // True until the node confirmed this browser's identity (or couldn't be reached, or IDENTITY_GATE_MAX_MS
+  // passed): the shell renders a splash instead of hydrated content that might belong to a previous identity.
+  const [identityGate, setIdentityGate] = useState(true);
   // Guards the Android host's one-at-a-time admin claim (see the boot effect).
   const hostClaimInFlightRef = useRef(false);
   // Bumped to force a full server re-sync: on WebSocket reconnect (missed events don't replay) and
@@ -1358,6 +1367,13 @@ function LoamApp() {
     document.documentElement.lang = locale;
   }, [locale]);
 
+  // The identity gate's cap (see IDENTITY_GATE_MAX_MS): whatever the network does, cached content shows
+  // after this — the offline-first promise.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setIdentityGate(false), IDENTITY_GATE_MAX_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   useEffect(() => {
     // BOOT GATE (docs/20 round-4 H2): an outstanding wipe tombstone (shown via `wiped`) must block the
     // normal boot — no hydration, no config fetch, no auto-reconnect — until the user explicitly rejoins.
@@ -1456,6 +1472,8 @@ function LoamApp() {
         if (identity === "purge_failed") {
           console.warn("LOAM: could not clear the previous identity's cached content; it will be retried on the next start.");
         }
+        // Confirmed (and purged if it had to be): what is in memory now is this identity's — show it.
+        setIdentityGate(false);
         tabIdentityRef.current = nextConfig.currentUser.id;
         setConfig(nextConfig);
         rememberCurrentUser(nextConfig.currentUser);
@@ -1540,6 +1558,9 @@ function LoamApp() {
           return;
         }
 
+        // The node couldn't confirm anything (unreachable, or a QR gate takes over below): the cache is all
+        // there is, and it is this browser's own — show it rather than nothing.
+        setIdentityGate(false);
         setPinChange(getPendingHostKeyChange());
 
         if (nextError instanceof TransportNeedsQrError) {
@@ -2123,6 +2144,20 @@ function LoamApp() {
                     : t("sidebar.statusConnecting"),
             })}
           </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (identityGate) {
+    // Hydrated content stays off screen until the node has confirmed this browser's identity (a reset node
+    // hands back a different one, and the cache is purged first), the node proved unreachable, or the cap
+    // passed — see IDENTITY_GATE_MAX_MS.
+    return (
+      <main className="wiped-screen">
+        <div>
+          <p className="brand-title">LOAM</p>
+          <p className="gate-status">{t("sidebar.statusConnecting")}</p>
         </div>
       </main>
     );

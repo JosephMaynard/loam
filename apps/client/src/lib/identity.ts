@@ -25,7 +25,12 @@ export function recordConfirmedIdentity(userId: string): boolean {
   return previous !== null && previous !== userId;
 }
 
-/** The identity the server last confirmed for this browser, if any (storage failures read as none). */
+/**
+ * The identity the server last confirmed for this browser, if any. Storage failures read as none — right
+ * for the callers that only tag or filter by it (the tab identity, the cached block list). The purge
+ * decision must NOT use this: `confirmIdentity` reads storage itself and treats a failure as "unknown",
+ * which purges (CodeRabbit, PR #130) — never as "unrecorded", which would skip the purge.
+ */
 export function readConfirmedIdentity(): string | undefined {
   try {
     return localStorage.getItem(CONFIRMED_USER_KEY) ?? undefined;
@@ -80,7 +85,14 @@ export async function confirmIdentity(
   purge: () => Promise<void>,
   options: { retryDelayMs?: number } = {},
 ): Promise<ConfirmIdentityOutcome> {
-  const previous = readConfirmedIdentity();
+  // A storage failure is NOT "nothing recorded": the cache may well belong to another identity and there is
+  // no way to tell, so it is purged — a refetch is the price of not knowing, never a leak.
+  let previous: string | null | undefined;
+  try {
+    previous = localStorage.getItem(CONFIRMED_USER_KEY) ?? undefined;
+  } catch {
+    previous = null;
+  }
   if (previous === undefined || previous === userId) {
     recordConfirmedIdentity(userId);
     return "unchanged";

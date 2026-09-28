@@ -487,7 +487,11 @@ kill switch. See `docs/09-security-profiles.md`.
   re-check it and skip the backoff.
 - **Identity & roster reconcile**: `lib/identity.ts` stores the server-confirmed user id
   (`loam.confirmedUserId`); when it changes (e.g. an Emergency Reset the client missed) the local cache is
-  purged, and other open tabs (a `storage` event on that key) drop their in-memory content and reload. `lib/roster.ts` `reconcileRoster` drops users the full `/api/users` list no longer returns.
+  purged, and other open tabs (a `storage` event on that key) drop their in-memory content and reload.
+  `confirmIdentity` compares → purges → records LAST (a failed/killed purge leaves the old id so the next
+  boot purges again; an unreadable store purges), and the shell shows a splash until the node confirms the
+  identity, proves unreachable, or 1.5 s passes (`IDENTITY_GATE_MAX_MS`) — so hydrated content never flashes
+  under a reset identity while staying offline-first. `lib/roster.ts` `reconcileRoster` drops users the full `/api/users` list no longer returns.
 - **Conversations**: `components/ConversationView.tsx` (header, `MessageList`, `ThreadPanel`) is keyed by
   conversation (`kind:id`; the thread panel by parent id), so drafts, pending attachments, report dialogs
   and scroll state never follow the user into another conversation. A `LiveChangeJournal`
