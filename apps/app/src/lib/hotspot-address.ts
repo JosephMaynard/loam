@@ -32,6 +32,7 @@ const NEVER_HOTSPOT_PREFIXES = [
   'tailscale',
   'wg',
   'ppp',
+  'ipsec',
   'rmnet',
   'ccmni',
   'clat',

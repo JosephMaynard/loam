@@ -2223,11 +2223,13 @@ function LoamApp() {
         />
       )}
     </main>
-    </div>
+    {/* Inside the frame (a fixed element is its own stacking context): an open dialog must paint above the
+        banner and the toasts, or a toast could cover a confirmation and navigate away from it. */}
     {error ? (
       <ErrorBanner key={error.id} message={error.text} onDismiss={dismissError} transient={!error.persistent} />
     ) : null}
     <ToastStack onDismiss={dismissToast} toasts={toasts} />
+    </div>
     </>
   );
 }

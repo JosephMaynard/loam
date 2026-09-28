@@ -150,7 +150,7 @@ global.__loamReportDbKeyMigrated = function (requestId) {
 // (`rmnet` — the cellular radio interfaces; `dummy`/`docker`/`veth` — container/virtual networking some
 // ROMs or apps set up). `bridge*` is deliberately kept: some ROMs bridge the hotspot onto `bridge0`
 // (docs/25 HW1), and the hotspot-address picker needs to see it. Matched case-insensitively.
-const TUNNEL_INTERFACE_PREFIXES = ['tun', 'utun', 'tailscale', 'wg', 'ppp', 'rmnet', 'dummy', 'docker', 'veth'];
+const TUNNEL_INTERFACE_PREFIXES = ['tun', 'utun', 'tailscale', 'wg', 'ppp', 'ipsec', 'rmnet', 'dummy', 'docker', 'veth'];
 
 function isTunnelInterfaceName(name) {
   const lower = name.toLowerCase();

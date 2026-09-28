@@ -58,8 +58,9 @@ function lanAddresses(interfaces: HostInterface[], addresses: string[]): string[
  * share screen asks the operator to connect first — no QR to a guess). In order:
  *   1. the native station address — WifiManager's DHCP / connection info, the address the router gave
  *      this phone, the most direct answer there is;
- *   2. else a launcher-reported `wlan<N>` interface with a private address (lowest N first) — the embedded
- *      Node's own enumeration, for a ROM where the WifiManager read comes back empty;
+ *   2. else — only while Android reports a Wi-Fi network, or before the first native read — a
+ *      launcher-reported `wlan<N>` interface with a private address (lowest N first): the embedded Node's
+ *      own enumeration, for a ROM where the WifiManager read comes back empty;
  *   3. else {@link preferredLanAddress} over the launcher's private, non-cellular addresses.
  */
 export function pickWifiAddress(opts: {
@@ -70,6 +71,11 @@ export function pickWifiAddress(opts: {
   const { station, interfaces, addresses } = opts;
   if (station && isUsableIpv4(station.address)) {
     return station.address;
+  }
+  // Android says the phone is on no Wi-Fi network: nothing below can be a Wi-Fi address (a VPN tunnel, the
+  // phone's own tethering hotspot, a dead LocalOnlyHotspot interface the launcher hasn't dropped yet).
+  if (station && !station.connected) {
+    return undefined;
   }
   const wlan = interfaces
     .map((entry, index) => ({ entry, index, unit: WLAN_NAME.exec(entry.name)?.[1] }))

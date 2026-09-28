@@ -199,7 +199,9 @@ on".
 3. else `preferredLanAddress` over the launcher's private addresses, skipping any on a cellular, tunnel or
    tethering interface (carriers hand out 10.x addresses too, so "private" alone isn't enough).
 
-With no address (Wi-Fi off, or not connected) there is no URL and no QR: the card says "Connect this phone
+Steps 2 and 3 run only while Android reports a Wi-Fi network (or before the first native read): with Wi-Fi
+off — even with a VPN tunnel (`ipsec<N>`, `tun*`…), the phone's own tethering hotspot or a stale AP
+interface around — there is no URL and no QR: the card says "Connect this phone
 to a Wi-Fi network first", plus any other addresses as "also at". "N phones connected" works in both modes
 and remains the proof that the path works.
 

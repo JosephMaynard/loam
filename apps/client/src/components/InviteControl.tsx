@@ -1,4 +1,4 @@
-import { useMemo, useState } from "preact/hooks";
+import { useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { safeQrSvg } from "../lib/qr";
@@ -42,6 +42,8 @@ export function InviteControl({
   qrUrl?: string;
 }) {
   const [open, setOpen] = useState(false);
+  // The row that opened the dialog: Dialog returns focus here on close (Safari never focuses a clicked button).
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const qrSvg = useMemo(
     () => (qrSuppressed ? "" : safeQrSvg(qrUrl ?? joinUrl, "#16271f")),
     [joinUrl, qrSuppressed, qrUrl],
@@ -64,7 +66,7 @@ export function InviteControl({
 
   return (
     <div className="invite-control">
-      <button className="nav-link invite-trigger" onClick={() => setOpen(true)} type="button">
+      <button className="nav-link invite-trigger" onClick={() => setOpen(true)} ref={triggerRef} type="button">
         <span className="nav-glyph">
           <IconWifi size={18} />
         </span>
@@ -77,6 +79,7 @@ export function InviteControl({
           className="invite-modal"
           closeLabel={t("invite.close")}
           onClose={() => setOpen(false)}
+          returnFocusTo={triggerRef}
           title={t("invite.title")}
         >
           {/* The QR is a visual shortcut for the URL below it; hide it from assistive tech so screen

@@ -49,7 +49,9 @@
   --danger-solid: #c9302c;
   --danger-solid-hover: #b12824;
   --online: #33c27a;
-  --focus: var(--accent);
+  /* Focus rings: the brand orange is only 2.9:1 on the light surfaces (WCAG 1.4.11 wants 3:1), so light
+     mode uses a deeper ember; dark mode's orange is 5.7:1 and keeps the accent. */
+  --focus: #c2410c;
 
   /* Depth */
   --shadow-1: 0 1px 2px rgba(29, 38, 34, 0.08);
@@ -134,6 +136,7 @@
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
     --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.55);
     --avatar-ring: rgba(233, 235, 230, 0.1);
+    --focus: var(--accent);
   }
 }
 
@@ -166,6 +169,7 @@
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
   --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.55);
   --avatar-ring: rgba(233, 235, 230, 0.1);
+  --focus: var(--accent);
 }
 
 :root[data-theme="light"] {

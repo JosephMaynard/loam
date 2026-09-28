@@ -319,7 +319,8 @@
   height: 20px;
   border-radius: var(--radius-full);
   background: var(--accent);
-  color: var(--accent-fg);
+  /* Ink, not white: white on the orange is 3.05:1, below AA for 12px text; ink is 5.1:1. */
+  color: #1d2622;
   padding: 0 6px;
   font-size: var(--text-xs);
   font-weight: 700;
@@ -577,12 +578,20 @@
 
 /* ---------- Dialog & sheet ---------- */
 
+/* Sized like .app-frame, to the VISIBLE viewport (--vvh / --vv-top from lib/viewport.ts): on iOS the
+   keyboard shrinks only the visual viewport, and a sheet pinned to the layout bottom would put its inputs
+   under the keys. Physical edges first, so an old WebView that ignores the custom properties still covers
+   the screen. */
 .dialog-backdrop {
   position: fixed;
   top: 0;
+  top: var(--vv-top, 0px);
   right: 0;
   bottom: 0;
   left: 0;
+  height: 100%;
+  height: var(--vvh, 100%);
+  bottom: auto;
   z-index: var(--z-dialog);
   display: flex;
   align-items: center;

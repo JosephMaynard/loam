@@ -152,7 +152,7 @@ ranked within each group. Each entry names the file and the concrete change.
 21. ~~**`app.tsx` is ~5,400 lines.**~~ **LARGELY RESOLVED**: `AvatarImageEditor`, `MessageItem`,
     `MessageComposer`, `ChannelMembersPanel`, `Sidebar`, `AdminView` + its panels, and
     `ConversationView` (with `MessageList`/`ThreadPanel`) now live in `src/components/`, most with a
-    `.test.tsx`; `app.tsx` is ~3.6k lines (state, boot, WebSocket, routing).
+    `.test.tsx`; `app.tsx` is ~2.2k lines (state, boot, WebSocket, routing; the screens live in `src/views/`).
 22. **Dead code.** The `SERVER_URL_KEY` custom-server branch is read but never written (unreachable);
     `notifyIfHidden` never fires because `Notification.requestPermission()` is never called. Remove or
     wire each. Extract the duplicated base64-encode loop in `uploadAttachment`/`uploadAvatarImage`

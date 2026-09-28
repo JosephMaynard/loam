@@ -259,6 +259,41 @@ describe("MessageItem", () => {
     );
     expect(host.querySelector(".quick-reaction")).toBeNull();
     expect(host.querySelector(".message-reply-button")).toBeNull();
+    // The ⋮ menu is still there (Copy stays useful), but Edit is gone with it.
+    expect(host.querySelector(".message-more")).not.toBeNull();
+  });
+
+  it("offers no edit in a read-only channel even through the ⋮ menu", async () => {
+    const host = mount(
+      <MessageItem
+        currentUser={currentUser}
+        message={post({ authorId: currentUser.id })}
+        reactions={[]}
+        readOnly
+        usersById={new Map([[currentUser.id, currentUser]])}
+        {...noop}
+      />,
+    );
+    expect(await menuLabels(host)).toEqual(["Copy text"]);
+  });
+
+  it("offers nothing to react to, reply to, copy or edit on a moderator-removed message", async () => {
+    const host = mount(
+      <MessageItem
+        currentUser={currentUser}
+        message={post({ authorId: currentUser.id, meta: { removedByModerator: true } })}
+        onOpenThread={() => {}}
+        onReport={() => {}}
+        reactions={[]}
+        usersById={new Map([[currentUser.id, currentUser]])}
+        {...noop}
+      />,
+    );
+    expect(host.querySelector(".message-removed")).not.toBeNull();
+    expect(host.querySelector(".quick-reaction")).toBeNull();
+    expect(host.querySelector(".message-reply-button")).toBeNull();
+    expect(host.querySelector(".message-more")).toBeNull();
+    expect(host.querySelector(".message-toolbar")).toBeNull();
   });
 
   it("fires onReact when a quick reaction is clicked", async () => {

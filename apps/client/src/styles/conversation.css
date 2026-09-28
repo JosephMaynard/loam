@@ -750,11 +750,15 @@
     left: 4px;
   }
 
-  /* Keyboard focus on the message (not a mouse click on it, which would pin the toolbar open), or focus
-     anywhere in the toolbar itself (its buttons, its open menu). */
-  .message:hover .message-toolbar,
-  .message:focus-visible .message-toolbar,
-  .message-toolbar:focus-within {
+  /* Two rules, not one list: a browser without a selector drops the whole rule, and hover must survive. */
+  .message:hover .message-toolbar {
+    visibility: visible;
+    opacity: 1;
+  }
+
+  /* Keyboard focus anywhere in the message: the time button is the tab stop that reveals the toolbar,
+     then Tab reaches its buttons (toolbar buttons don't take focus from a pointer click, see MessageItem). */
+  .message:focus-within .message-toolbar {
     visibility: visible;
     opacity: 1;
   }
@@ -1149,7 +1153,8 @@
 .thread-scroll {
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: var(--space-4) var(--space-4) var(--space-4);
+  /* Extra room on top so the parent message's hover toolbar (drawn 28px above its bubble) isn't clipped. */
+  padding: var(--space-8) var(--space-4) var(--space-4);
 }
 
 .thread-scroll > .message:first-child {

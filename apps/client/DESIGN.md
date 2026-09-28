@@ -24,8 +24,9 @@ fonts, no icon fonts, no `backdrop-filter`, no heavy shadows.
 | `src/components/Dialog.tsx`, `Menu.tsx`, `ScreenHeader.tsx`, `Avatar.tsx` | The component primitives. |
 | `src/lib/viewport.ts` | Keyboard-aware viewport sync (`--vvh`) and `onViewportResize`. |
 
-Built CSS is about 56 KB minified (11 KB gzip) after the conversation and screens rewrites. Keep it under
-60 KB; when adding a component, delete or merge a rule for it.
+Built CSS is about 62 KB minified (11 KB gzip): the conversation and screens rewrites plus the fallback
+duplication that `build.cssTarget: chrome80` keeps (see `vite.config.ts`). Keep it under 64 KB; when adding a
+component, delete or merge a rule for it.
 
 ## Browser floor
 
@@ -126,8 +127,8 @@ document to reveal the textarea: header gone, gap above the composer. Now:
    fallback), ignores a pinch-zoomed viewport, and calls `scrollTo(0, 0)` if the document scrolled anyway.
    This covers browsers that shrink only the visual viewport (iOS Safari, older WebViews).
 4. `onViewportResize((height) => …)` returns an unsubscribe function. It fires after `--vvh` changes.
-   **Wave 2:** the message list subscribes to it and re-pins to the bottom when it was at the bottom before
-   the keyboard opened.
+   The message list subscribes to it and re-pins to the bottom when it was at the bottom before the
+   keyboard opened.
 
 Only inner areas scroll: `.message-list`, `.thread-scroll`, `.sidebar-scroll`, a screen's body, a dialog's
 body. Give each `overscroll-behavior: contain`.
@@ -211,7 +212,7 @@ to 96px. A 1px `--avatar-ring` is drawn on top via `::after`. `presence="online"
 
 Use sizes, not context selectors: rows `sm`, headers and message authors `sm`/`md`, the sidebar footer
 `md`, settings identity `xl`. Legacy context rules (`.message > .avatar` etc.) still size avatars that have
-no `size` prop; wave 2 removes them as it adds sizes.
+no `size` prop.
 
 ## Dialog (`components/Dialog.tsx`)
 

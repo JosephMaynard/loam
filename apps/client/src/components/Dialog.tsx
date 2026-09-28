@@ -52,6 +52,12 @@ export interface DialogProps {
   role?: "dialog" | "alertdialog";
   /** Id for the heading, when a caller needs to reference it; generated otherwise. */
   titleId?: string;
+  /**
+   * Where focus goes on close, when the caller knows better than `document.activeElement` at open time —
+   * Safari doesn't focus a clicked button, so without this a dialog opened by a click would return focus
+   * to the body. Falls back to whatever had focus before the dialog opened.
+   */
+  returnFocusTo?: { current: HTMLElement | null };
   children: ComponentChildren;
 }
 
@@ -71,6 +77,7 @@ export function Dialog({
   closeLabel,
   hideTitle = false,
   onClose,
+  returnFocusTo,
   role = "dialog",
   showClose = true,
   title,
@@ -120,8 +127,9 @@ export function Dialog({
         openStack.splice(index, 1);
       }
       // Hand focus back to the trigger, unless it has left the page meanwhile.
-      if (previouslyFocused?.isConnected) {
-        previouslyFocused.focus();
+      const target = returnFocusTo?.current ?? previouslyFocused;
+      if (target?.isConnected) {
+        target.focus();
       }
     };
   }, []);

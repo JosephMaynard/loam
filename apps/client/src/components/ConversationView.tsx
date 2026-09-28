@@ -200,7 +200,13 @@ function ConversationPane({
     conversation.kind === "dm" ? (
       <Avatar avatar={dmPeer?.avatar} id={conversation.id} presence={peerOnline ? "online" : undefined} size="md" />
     ) : (
-      <span aria-hidden="true" className="channel-glyph">
+      // A private channel's lock is information, not decoration: announce it (the title alone can't).
+      <span
+        aria-hidden={isPrivateChannel ? undefined : "true"}
+        aria-label={isPrivateChannel ? t("members.eyebrow") : undefined}
+        className="channel-glyph"
+        role={isPrivateChannel ? "img" : undefined}
+      >
         {isPrivateChannel ? <IconLock size={18} /> : <IconHash size={18} />}
       </span>
     );
@@ -412,6 +418,7 @@ function useBottomPin(
 ) {
   const pinnedRef = useRef(true);
   const lastIdRef = useRef<string | null | undefined>(undefined);
+  const lastCreatedAtRef = useRef<number>(0);
   const [unseen, setUnseen] = useState(0);
 
   function scrollToBottom(): void {
@@ -445,7 +452,9 @@ function useBottomPin(
   useLayoutEffect(() => {
     const last = items[items.length - 1];
     const previousLastId = lastIdRef.current;
+    const previousLastCreatedAt = lastCreatedAtRef.current;
     lastIdRef.current = last?.id ?? null;
+    lastCreatedAtRef.current = last?.createdAt ?? previousLastCreatedAt;
 
     if (previousLastId === undefined) {
       scrollToBottom(); // Opening a conversation shows its newest messages.
@@ -467,6 +476,9 @@ function useBottomPin(
     }
 
     const previousIndex = previousLastId === null ? -1 : items.findIndex((item) => item.id === previousLastId);
+    if (previousIndex < 0 && last.createdAt <= previousLastCreatedAt) {
+      return; // The newest message was deleted; what's last now is older content, not something unseen.
+    }
     const added = previousIndex >= 0 ? items.length - 1 - previousIndex : 1;
     setUnseen((count) => count + added);
   }, [items, extra]);

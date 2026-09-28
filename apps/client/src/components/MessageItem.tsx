@@ -68,6 +68,8 @@ async function copyText(text: string): Promise<void> {
   area.style.opacity = "0";
   document.body.appendChild(area);
   area.select();
+  // iOS Safari selects nothing in a readonly textarea from `select()` alone.
+  area.setSelectionRange(0, area.value.length);
   try {
     document.execCommand("copy");
   } finally {
@@ -172,7 +174,7 @@ export function MessageItem({
   const canReport = !!onReport && !isMine && !removed && !streaming && message.type !== "reaction";
   // The server refuses new reactions on an archived channel's messages and on a moderator-removed one.
   const canReact = !readOnly && !removed && !streaming && message.type !== "reaction";
-  const canReply = !!onOpenThread && !readOnly && !streaming;
+  const canReply = !!onOpenThread && !readOnly && !removed && !streaming;
   const canCopy = !removed && !streaming && message.type !== "reaction" && bodyText.trim() !== "";
 
   function startEditing(): void {
@@ -272,7 +274,7 @@ export function MessageItem({
   const showName = !isMine && showAuthor && groupFirst;
 
   return (
-    <article className={messageClassName} tabIndex={0}>
+    <article className={messageClassName}>
       {showName ? (
         <p className="message-author" dir="auto">
           {author.displayName}

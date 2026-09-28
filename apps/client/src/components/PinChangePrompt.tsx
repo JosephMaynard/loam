@@ -37,7 +37,7 @@ export function PinChangePrompt({ current, next, matchesNode, onAccept, onReject
       aria-describedby="pin-change-body"
       aria-labelledby="pin-change-title"
       aria-modal="true"
-      className="gate-card pin-change"
+      className="pin-change"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           onReject();

@@ -393,9 +393,13 @@
 .gate-screen {
   position: fixed;
   top: 0;
+  top: var(--vv-top, 0px);
   right: 0;
   bottom: 0;
   left: 0;
+  height: 100%;
+  height: var(--vvh, 100%);
+  bottom: auto;
   display: flex;
   align-items: center;
   justify-content: center;

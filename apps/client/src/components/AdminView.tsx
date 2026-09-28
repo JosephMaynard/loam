@@ -129,6 +129,9 @@ function AdminSection({
           }}
         >
           {children}
+          {/* Implicit submission (Enter in a field) is ignored by browsers when a form has more than one
+              text field and no submit button; the sticky "Save node config" bar sits outside every form. */}
+          <button aria-hidden="true" className="sr-only" tabIndex={-1} type="submit" />
         </form>
       ) : (
         <div className="admin-section-body">{children}</div>

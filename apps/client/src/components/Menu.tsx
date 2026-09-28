@@ -95,7 +95,14 @@ export function Menu({ items, label, presentation = "auto", trigger, triggerClas
       </button>
       {open === "sheet" ? (
         // The Dialog restores focus to the trigger itself when it unmounts.
-        <Dialog className="menu-sheet" hideTitle onClose={() => setOpen(false)} title={label} variant="sheet">
+        <Dialog
+          className="menu-sheet"
+          hideTitle
+          onClose={() => setOpen(false)}
+          returnFocusTo={triggerRef}
+          title={label}
+          variant="sheet"
+        >
           <MenuList id={menuId} items={items} label={label} onClose={() => setOpen(false)} onSelect={select} />
         </Dialog>
       ) : open === "popover" ? (

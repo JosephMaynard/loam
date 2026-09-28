@@ -63,7 +63,8 @@ describe('pickWifiAddress', () => {
   it('then takes the preferred private LAN address, never one on a cellular interface', () => {
     expect(
       pickWifiAddress({
-        station: { connected: false },
+        // Connected per Android, but the DHCP read came back empty (some ROMs): fall through to the launcher.
+        station: { connected: true },
         interfaces: [
           { name: 'rmnet_data0', address: '10.44.1.9' },
           { name: 'eth0', address: '172.20.0.4' },
@@ -71,6 +72,30 @@ describe('pickWifiAddress', () => {
         addresses: ['10.44.1.9', '172.20.0.4'],
       }),
     ).toBe('172.20.0.4');
+  });
+
+  it('advertises nothing when Android says Wi-Fi is off, whatever else the phone holds (VPN, tether, stale AP)', () => {
+    expect(
+      pickWifiAddress({
+        station: { connected: false },
+        interfaces: [
+          { name: 'ipsec1', address: '10.8.0.2' },
+          { name: 'wlan1', address: '192.168.43.1' },
+          { name: 'eth0', address: '172.20.0.4' },
+        ],
+        addresses: ['10.8.0.2', '192.168.43.1', '172.20.0.4'],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('never advertises the platform IKEv2 VPN tunnel (ipsec<N>) even before the native read', () => {
+    expect(
+      pickWifiAddress({
+        station: undefined,
+        interfaces: [{ name: 'ipsec0', address: '10.8.0.2' }],
+        addresses: ['10.8.0.2'],
+      }),
+    ).toBeUndefined();
   });
 
   it('returns nothing on mobile data alone (Wi-Fi off), including carrier-grade NAT addresses', () => {
