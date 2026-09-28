@@ -82,11 +82,13 @@ export function deriveJoinDisplay(opts: {
   };
 }
 
-/** Project the hotspot lifecycle + Step-2 display onto the presentational HostPanel state (docs/04). */
+/** Project the hotspot lifecycle + Step-2 display onto the presentational HostPanel state (docs/04). Hotspot
+ * mode only; Wi-Fi mode's projection is `toWifiPanelState` in host-mode.ts. */
 export function toHostPanelState(hotspot: HotspotState, display: JoinDisplay): HostState {
   const { serverUrl, addresses, detected, connectedClients, fragment } = display;
   if (hotspot.phase === 'running' && hotspot.credentials) {
     return {
+      mode: 'hotspot',
       status: 'running',
       hotspot: hotspot.credentials,
       serverUrl,
@@ -102,7 +104,7 @@ export function toHostPanelState(hotspot: HotspotState, display: JoinDisplay): H
   if (hotspot.phase === 'error') {
     // Hotspot couldn't start — surface the reason in Step 1 but keep Step 2's URL QR so LOAM stays
     // reachable to anyone already on this network (the graceful-degradation path the emulator hits).
-    return { status: 'stopped', hotspotError: hotspot.error, serverUrl, addresses, connectedClients };
+    return { mode: 'hotspot', status: 'stopped', hotspotError: hotspot.error, serverUrl, addresses, connectedClients };
   }
-  return { status: 'starting', serverUrl, addresses, connectedClients };
+  return { mode: 'hotspot', status: 'starting', serverUrl, addresses, connectedClients };
 }

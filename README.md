@@ -116,9 +116,10 @@ file with the web client. See [docs/14-distribution.md](docs/14-distribution.md)
 
 ### Host it from an Android phone
 
-`apps/app` is an Expo/React-Native host that runs the LOAM server **embedded on the phone**, brings
-up a local-only WiFi hotspot, and shows the join QR, turning a single phone into a complete,
-internet-free LOAM node.
+`apps/app` is an Expo/React-Native host that runs the LOAM server **embedded on the phone** and shows
+the join QR, turning a single phone into a complete, internet-free LOAM node. People join through a
+local-only Wi-Fi hotspot the phone brings up (the default), or through the Wi-Fi network the phone is
+already on, with no hotspot and no location permission.
 
 **Download the APK (easiest).** Every tagged release ships a prebuilt host APK. Grab the latest from
 [Releases](https://github.com/JosephMaynard/loam/releases/latest) (`loam-host.apk`) and
@@ -156,8 +157,9 @@ A debug-signed APK can't update a release-signed install.
    adb install -r apps/app/loam-host.apk
    ```
    If both a phone and an emulator are connected, target the phone: `adb -s <serial> install -r apps/app/loam-host.apk`.
-4. Launch **LOAM** on the phone. First cold start takes ~1 minute; tap **Share · Host** to bring up
-   the hotspot and join QRs.
+4. Launch **LOAM** on the phone. First cold start takes ~1 minute; tap **Share · Host** and pick
+   **Hotspot** (the phone makes its own network; joiners scan a Wi-Fi QR, then the LOAM QR) or **Wi-Fi**
+   (everyone on the phone's current network scans one QR). The choice is remembered.
 
 See **[docs/04-android-host-app.md](docs/04-android-host-app.md)** for the manual step-by-step, the
 two-step join flow, and troubleshooting.
