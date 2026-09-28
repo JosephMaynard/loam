@@ -51,6 +51,10 @@ const HOTSPOT_PERMISSIONS = [
   "android.permission.NEARBY_WIFI_DEVICES",
   "android.permission.CHANGE_WIFI_STATE",
   "android.permission.ACCESS_WIFI_STATE",
+  // The hotspot's address is assigned at random per start, so the module finds it by telling the phone's
+  // own networks (ConnectivityManager: home Wi-Fi, mobile data, VPN) apart from the SoftAP interface.
+  // Normal-level, no runtime prompt.
+  "android.permission.ACCESS_NETWORK_STATE",
   // Foreground service keeps the host alive while the screen is off (LoamHostService). WAKE_LOCK
   // holds the CPU; POST_NOTIFICATIONS (API 33+) lets its required notification show; the
   // CONNECTED_DEVICE type permission is mandatory to run a `connectedDevice` FGS on API 34+.

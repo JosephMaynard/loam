@@ -97,6 +97,13 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   corrected.
 
 ### Fixed
+- **The hotspot join QR pointed at an address no joiner could reach.** Android gives a local-only hotspot
+  a *random* address on every start (in 192.168.0.0/16, 172.16.0.0/12 or 10.0.0.0/8 — never the
+  `192.168.49.1` the QR assumed, which is a Wi-Fi Direct address), so scanning Step 2 on a joining phone
+  gave `ERR_ADDRESS_UNREACHABLE`. The Android host now discovers the hotspot's own address (the interface
+  that appeared with the hotspot and isn't one of the phone's own networks) and puts that in the QR. Until
+  it is found, Step 2 says so instead of showing a guess; if it can't be found, Step 2 explains how to read
+  the address from the joining phone's Wi-Fi details (Gateway) and lists the host's addresses.
 - **Dead connections are noticed.** The server sends a heartbeat on every WebSocket; a client that stops
   hearing it reconnects, and re-checks when the device comes back online or the page becomes visible. A
   check that runs late because the page was frozen waits briefly for queued frames instead of dropping a

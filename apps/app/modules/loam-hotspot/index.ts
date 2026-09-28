@@ -8,9 +8,9 @@
 import { Platform } from 'react-native';
 
 import LoamHotspotModule from './src/LoamHotspotModule';
-import type { HotspotCredentials } from './src/LoamHotspot.types';
+import type { HotspotAddressCandidate, HotspotCredentials } from './src/LoamHotspot.types';
 
-export type { HotspotCredentials } from './src/LoamHotspot.types';
+export type { HotspotAddressCandidate, HotspotCredentials } from './src/LoamHotspot.types';
 
 /** True when the native hotspot module is present (Android with the module linked). */
 export function isHotspotSupported(): boolean {
@@ -42,6 +42,23 @@ export function addHotspotStoppedListener(handler: () => void): () => void {
     return () => subscription.remove();
   } catch {
     return () => undefined;
+  }
+}
+
+/**
+ * The host's current IPv4 addresses, annotated for the hotspot-address picker (`src/lib/hotspot-address.ts`).
+ * Resolves with `[]` when unsupported or when the native enumeration fails — never rejects — so the share
+ * screen degrades to its "couldn't detect the address" hint rather than an error.
+ */
+export async function readHotspotAddressCandidates(): Promise<HotspotAddressCandidate[]> {
+  if (!LoamHotspotModule) {
+    return [];
+  }
+  try {
+    const candidates = await LoamHotspotModule.hotspotAddressCandidates();
+    return Array.isArray(candidates) ? candidates : [];
+  } catch {
+    return [];
   }
 }
 

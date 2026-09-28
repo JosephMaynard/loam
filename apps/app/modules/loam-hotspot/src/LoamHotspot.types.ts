@@ -6,6 +6,33 @@ export type HotspotCredentials = {
   password: string;
 };
 
+/**
+ * One (interface, IPv4 address) pair the host device holds, as enumerated natively by
+ * `hotspotAddressCandidates` (loopback and link-local excluded). Android gives the local-only hotspot a
+ * RANDOM address per start, so the hotspot's own address has to be found among these — see
+ * `src/lib/hotspot-address.ts` for the scoring that picks it.
+ */
+export type HotspotAddressCandidate = {
+  /** OS interface name: `wlan0` (usually the Wi-Fi client), `swlan0`/`ap0`/`wlan1` (usually the hotspot). */
+  name: string;
+  /** Dotted IPv4 address. */
+  address: string;
+  /** IPv4 prefix length of the interface (e.g. 24). Absent when the source didn't report one. */
+  prefixLength?: number;
+  /**
+   * True when the interface belongs to a network the phone is a client of with internet capability (home
+   * Wi-Fi, mobile data, VPN) — never the hotspot the phone serves. Absent when unknown (e.g. the address
+   * came from the embedded Node's enumeration instead of the native module).
+   */
+  upstream?: boolean;
+  /**
+   * Whether the address already existed just before the hotspot was last started; the hotspot's own
+   * address is the one that is NOT pre-existing. `null`/absent when no start happened in this process or
+   * the source can't tell.
+   */
+  preexisting?: boolean | null;
+};
+
 /** Native → JS events. `onHotspotStopped` fires when the SYSTEM tears the hotspot down (tethering
  * enabled, Wi-Fi toggled, OEM power policy) — never for our own `stopHotspot()`. */
 export type LoamHotspotEvents = {

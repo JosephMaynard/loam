@@ -147,9 +147,10 @@ global.__loamReportDbKeyMigrated = function (requestId) {
 // (P2-3): an address on one of these is never reachable by a nearby device scanning the join QR, so
 // picking one would silently break joining. Mirrors the exclusions in apps/server/src/net.ts's
 // `resolveLanIPv4` (`tun`/`utun`/`tailscale`/`wg`/`ppp`), plus a few more that only show up on Android
-// (`rmnet` — the cellular radio interfaces; `dummy`/`docker`/`veth`/`bridge` — container/virtual
-// networking some ROMs or apps set up). Matched case-insensitively against the OS-reported name.
-const TUNNEL_INTERFACE_PREFIXES = ['tun', 'utun', 'tailscale', 'wg', 'ppp', 'rmnet', 'dummy', 'docker', 'veth', 'bridge'];
+// (`rmnet` — the cellular radio interfaces; `dummy`/`docker`/`veth` — container/virtual networking some
+// ROMs or apps set up). `bridge*` is deliberately kept: some ROMs bridge the hotspot onto `bridge0`
+// (docs/25 HW1), and the hotspot-address picker needs to see it. Matched case-insensitively.
+const TUNNEL_INTERFACE_PREFIXES = ['tun', 'utun', 'tailscale', 'wg', 'ppp', 'rmnet', 'dummy', 'docker', 'veth'];
 
 function isTunnelInterfaceName(name) {
   const lower = name.toLowerCase();
@@ -159,15 +160,17 @@ function isTunnelInterfaceName(name) {
 }
 
 /**
- * The host's non-internal IPv4 addresses, excluding VPN/tunnel/virtual interfaces (P2-3) — the native
- * Share QR (`joinUrl` in apps/app/src/lib/join-url.ts) uses this FLAT list for the shared-WiFi / Pi
- * case, so filtering happens here rather than trusting the picker to know which addresses are real.
- * When the LocalOnlyHotspot is running, the QR instead targets the fixed gateway (192.168.49.1) — the
- * AP interface never appears in os.networkInterfaces() anyway. We still re-post these periodically so
+ * The host's non-internal IPv4 addresses with their interface names, excluding VPN/tunnel/virtual
+ * interfaces (P2-3). The native Share QR (`joinUrl` in apps/app/src/lib/join-url.ts) uses the flat
+ * address list for the shared-WiFi / Pi case, so filtering happens here rather than trusting the picker
+ * to know which addresses are real. When the LocalOnlyHotspot is running, the QR targets the hotspot's
+ * OWN address — Android assigns it at random per start (there is no fixed gateway; 192.168.49.1 is
+ * Wi-Fi Direct's) — which the native module discovers (`hotspotAddressCandidates`); this list, with names,
+ * is the host screen's second source for that and for its diagnostics line. Re-posted periodically so
  * the shared-WiFi Step-2 QR reflects the real address rather than a guess.
  */
-function lanAddresses() {
-  const addresses = [];
+function lanInterfaces() {
+  const entries = [];
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
     if (isTunnelInterfaceName(name)) {
@@ -175,17 +178,25 @@ function lanAddresses() {
     }
     for (const info of interfaces[name] || []) {
       if (info && info.family === 'IPv4' && !info.internal) {
-        addresses.push(info.address);
+        entries.push({ name: name, address: info.address });
       }
     }
   }
-  return addresses;
+  return entries;
 }
 
-/** Report the current network addresses to the host screen (for the Step-2 join QR + diagnostics). */
+/** Report the current network addresses to the host screen (for the Step-2 join QR + diagnostics).
+ * `addresses` is the flat list older host screens read; `interfaces` pairs each with its interface. */
 function postHostInfo() {
   try {
-    rnBridge.channel.post('loam-hostinfo', { port: PORT, addresses: lanAddresses() });
+    const interfaces = lanInterfaces();
+    rnBridge.channel.post('loam-hostinfo', {
+      port: PORT,
+      addresses: interfaces.map(function (entry) {
+        return entry.address;
+      }),
+      interfaces: interfaces,
+    });
   } catch (err) {
     console.error('Failed to post host info', err);
   }

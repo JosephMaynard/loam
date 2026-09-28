@@ -33,12 +33,13 @@ import {
 } from '@/lib/db-encryption';
 import { confirmStartUnencrypted, retryKeyResolution, switchEncryptionOffAndRetry } from '@/lib/driver-missing-recovery';
 import { ensureHostService } from '@/lib/host-service';
+import { parseHostInterfaces, type HostInterface } from '@/lib/join-display';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
-// WebView loads it over loopback. Remote joiners use the hotspot IP (below).
+// WebView loads it over loopback. Remote joiners use the hotspot's own (discovered) address or the LAN one.
 const LOAM_URL = `http://localhost:${SERVER_PORT}`;
 // Cold start is ~80s (docs/04); give it comfortably more before declaring the runtime hung.
 const STARTUP_TIMEOUT_MS = 150_000;
@@ -200,7 +201,7 @@ type HostStatus = 'starting' | 'ready' | 'error';
 // it only ever updates the separate `notice` state below, so it can never regress a 'ready' host back
 // to a spinner/error screen, and — unlike 'error' before this fix — is never cleared by a later 'ready'.
 type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string; hostToken?: string };
-type HostInfoPayload = { port?: number; addresses?: string[] };
+type HostInfoPayload = { port?: number; addresses?: string[]; interfaces?: unknown };
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
 // and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
@@ -269,9 +270,11 @@ export default function HostScreen() {
   // Measured height of the top bar (via onLayout), used to anchor the menu dropdown just below it —
   // more robust than a hardcoded guess across devices/font scales.
   const [topBarHeight, setTopBarHeight] = useState(0);
-  // The host's real network addresses, reported by the launcher (loam-hostinfo). Used to build the
-  // Step-2 join QR from the actual hotspot IP instead of a hardcoded guess.
+  // The host's real network addresses, reported by the launcher (loam-hostinfo): the flat list builds the
+  // Step-2 join QR for shared-WiFi hosting; the (interface, address) pairs back up the native hotspot-
+  // address discovery and its diagnostics line (src/lib/join-display.ts).
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
+  const [hostInterfaces, setHostInterfaces] = useState<HostInterface[]>([]);
   // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
   // ready. Empty when transport encryption is off (or the fetch hasn't resolved yet) — plain URLs,
   // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
@@ -527,6 +530,7 @@ export default function HostScreen() {
       if (Array.isArray(payload?.addresses)) {
         setHostAddresses(payload.addresses.filter((address): address is string => typeof address === 'string'));
       }
+      setHostInterfaces(parseHostInterfaces(payload?.interfaces));
     };
 
     // P1-2 (Sol round 3/4): the server's kill switch posts this when a `persistent`/`passphrase`-
@@ -1147,6 +1151,7 @@ export default function HostScreen() {
           onClose={() => setShareOpen(false)}
           transportKeyFragment={transportKeyFragment}
           addresses={hostAddresses}
+          interfaces={hostInterfaces}
           keepAwake={keepAwake}
           onKeepAwakeChange={setKeepAwake}
           kiosk={kiosk}

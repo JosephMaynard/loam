@@ -3,39 +3,29 @@ import { useEffect } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Switch } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import { HostPanel, type HostState } from '@/components/host-panel';
+import { HostPanel } from '@/components/host-panel';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
-import { ensureHotspot, useHotspot, type HotspotState } from '@/hooks/use-hotspot';
+import { ensureHotspot, useHotspot } from '@/hooks/use-hotspot';
 import { ensureHostService, hostingNotificationDenied } from '@/lib/host-service';
-import { hostJoinDisplay } from '@/lib/join-url';
-
-/** Project the hotspot lifecycle onto the presentational HostPanel state (docs/04 two-step flow). */
-function toHostState(hotspot: HotspotState, serverUrl: string, addresses: string[]): HostState {
-  if (hotspot.phase === 'running' && hotspot.credentials) {
-    return { status: 'running', hotspot: hotspot.credentials, serverUrl, addresses };
-  }
-  if (hotspot.phase === 'error') {
-    // Hotspot couldn't start — surface the reason in Step 1 but keep Step 2's URL QR so LOAM stays
-    // reachable to anyone already on this network (the graceful-degradation path the emulator hits).
-    return { status: 'stopped', hotspotError: hotspot.error, serverUrl, addresses };
-  }
-  return { status: 'starting', serverUrl, addresses };
-}
+import { deriveJoinDisplay, toHostPanelState, type HostInterface } from '@/lib/join-display';
 
 type HostShareOverlayProps = {
   visible: boolean;
   onClose: () => void;
   /**
    * The transport `#k=` key fragment to append to the join URL (empty when transport encryption is off).
-   * The join URL host itself is chosen here from the live hotspot phase (see {@link joinUrl}), so a
-   * joiner on the hotspot always gets the reachable gateway rather than a home-WiFi address the host
-   * happens to be on under STA+AP concurrency.
+   * The join URL host itself is chosen here from the live hotspot state (see `deriveJoinDisplay`): the
+   * hotspot's own discovered address while it runs, so a joiner on the hotspot never gets a home-WiFi
+   * address the host happens to be on under STA+AP concurrency, nor a guessed gateway.
    */
   transportKeyFragment: string;
   /** All of the host's detected IPv4 addresses, shown under Step 2 so a joiner can try alternatives. */
   addresses: string[];
+  /** The same addresses with their interface names — the launcher's view, used as a second source for the
+   * hotspot-address picker and the manual-fallback list when the native enumeration comes back empty. */
+  interfaces: HostInterface[];
   /** Whether to keep the screen on while hosting (for a host left on display). */
   keepAwake: boolean;
   onKeepAwakeChange: (value: boolean) => void;
@@ -55,6 +45,7 @@ export function HostShareOverlay({
   onClose,
   transportKeyFragment,
   addresses,
+  interfaces,
   keepAwake,
   onKeepAwakeChange,
   kiosk,
@@ -80,16 +71,12 @@ export function HostShareOverlay({
     }
   }, [hotspot.phase]);
 
-  // When the hotspot is up, joiners are on it — target the gateway, and drop the host's other
-  // (unreachable-from-the-hotspot) LAN addresses from the "also at" list so we don't send a joiner to
-  // an address on the wrong network. Off the hotspot (shared-WiFi / Pi / laptop), the real addresses
+  // When the hotspot is up, joiners are on it — target its own discovered address, and drop the host's
+  // other (unreachable-from-the-hotspot) LAN addresses from the "also at" list so we don't send a joiner
+  // to an address on the wrong network. Off the hotspot (shared-WiFi / Pi / laptop), the real addresses
   // are correct.
-  const { serverUrl, addresses: shownAddresses } = hostJoinDisplay({
-    addresses,
-    hotspotRunning: hotspot.phase === 'running',
-    fragment: transportKeyFragment,
-  });
-  const state = toHostState(hotspot, serverUrl, shownAddresses);
+  const display = deriveJoinDisplay({ hotspot, addresses, interfaces, fragment: transportKeyFragment });
+  const state = toHostPanelState(hotspot, display);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>

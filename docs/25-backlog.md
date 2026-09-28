@@ -149,10 +149,13 @@ shared-tag race, desktop Enter-to-send, shadow-ban attachment defense-in-depth).
   the stored schema stays uncapped so long local LLM replies round-trip. Tested (docs/11).
 
 **Android host — device-specific, needs on-ROM testing (don't change the working join flow blind):**
-- **HW1 (MED)** `lanAddresses()` excludes any `bridge*`/`dummy*`/`veth*` interface, but some ROMs bridge
-  tethering onto `bridge0` → the join QR silently falls back to the `192.168.49.1` guess and nobody can join.
-  Fix = prefer the known `192.168.49.0/24` hotspot subnet, or stop excluding `bridge`. `main.js:137`. **Test
-  across ROMs before changing** — it touches the core join path.
+- ~~**HW1 (MED)** `lanAddresses()` excludes any `bridge*`/`dummy*`/`veth*` interface, but some ROMs bridge
+  tethering onto `bridge0` → the join QR silently falls back to the `192.168.49.1` guess and nobody can join.~~
+  **DONE (2026-09-28)** — and the premise was worse than HW1 said: Android assigns the hotspot a *random*
+  address per start, `192.168.49.1` is Wi-Fi Direct's, so the "guess" never worked on any phone. The host now
+  discovers the hotspot's address natively (docs/04 "The Step-2 address"); `bridge*` is no longer excluded
+  anywhere. **Confirmed on the Galaxy S25 Ultra** (2026-09-28: Step 2 resolved to `10.80.217.150`, a second
+  phone joined). A Pixel (`wlan1`/`ap0` naming) is still untested.
 
 **Mesh Phase 3 (native, documented-unverified — for the 2-phone device-test session):**
 - **PH1 (HIGH, deterministic)** BLE legacy advertisement overflows the 31-byte cap (128-bit service UUID +

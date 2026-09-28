@@ -4,26 +4,41 @@ import { PermissionsAndroid, Platform } from 'react-native';
 import {
   addHotspotStoppedListener,
   isHotspotSupported,
+  readHotspotAddressCandidates,
   startHotspot,
   stopHotspot,
+  type HotspotAddressCandidate,
   type HotspotCredentials,
 } from '../../modules/loam-hotspot';
+import { eligibleHotspotCandidates, pickHotspotAddress } from '@/lib/hotspot-address';
 
 /**
  * Lifecycle of the local-only hotspot:
  * - `idle`       — not started yet.
  * - `requesting` — asking for the runtime location/nearby-WiFi permission.
  * - `starting`   — permission granted, waiting on `WifiManager.LocalOnlyHotspot`.
- * - `running`    — up; `credentials` holds the generated SSID + password.
+ * - `running`    — up; `credentials` holds the generated SSID + password, and the address fields below
+ *                  fill in as the hotspot's (randomly assigned) address is found.
  * - `error`      — couldn't start (permission denied, no WiFi hardware, driver failure); `error`
  *                  holds a human-readable reason. LOAM's Step-2 URL QR is still shown (docs/04).
  */
 export type HotspotPhase = 'idle' | 'requesting' | 'starting' | 'running' | 'error';
 
+/** `searching` during the burst of probes right after the hotspot comes up; `settled` once that burst is
+ * over (found or not — a slow re-check keeps running while the hotspot is up). */
+export type HotspotAddressSearch = 'searching' | 'settled';
+
 export type HotspotState = {
   phase: HotspotPhase;
   credentials?: HotspotCredentials;
   error?: string;
+  /** The hotspot's own address once found (`running` only) — what the Step-2 join URL must use. */
+  address?: string;
+  /** The interface `address` sits on (diagnostics). */
+  addressInterface?: string;
+  /** Every address the host holds that could be the hotspot's, for the manual fallback when none is sure. */
+  candidates?: HotspotAddressCandidate[];
+  addressSearch?: HotspotAddressSearch;
 };
 
 // Android permits exactly one LocalOnlyHotspot per process, and the host overlay mounts/unmounts as
@@ -147,7 +162,8 @@ export async function ensureHotspot(): Promise<void> {
       stopHotspot();
       return;
     }
-    publish({ phase: 'running', credentials });
+    publish({ phase: 'running', credentials, addressSearch: 'searching' });
+    void trackHotspotAddress(myGen);
   } catch (error) {
     if (myGen === generation) {
       publish({
@@ -161,6 +177,74 @@ export async function ensureHotspot(): Promise<void> {
       inFlight = false;
     }
   }
+}
+
+// When to probe for the hotspot's address after it reports `running`, in ms since then. The SoftAP
+// interface gets its (random) address from the tethering service a moment AFTER onStarted, so the first
+// probes usually miss; the burst covers a slow OEM stack without the operator staring at a blank Step 2.
+const ADDRESS_PROBE_AT_MS = [0, 500, 1000, 2000, 3000, 5000, 8000, 12000];
+// After the burst, re-check at this cadence for as long as the hotspot runs: cheap, and it catches an
+// address the stack reassigns without stopping the hotspot (or one that only turned up late).
+const ADDRESS_RECHECK_INTERVAL_MS = 15_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Find (and keep finding) the hotspot's own address for the start identified by `myGen`: probe the
+ * native candidate list on the burst schedule, then slowly, publishing `address`/`candidates` into the
+ * running state whenever they change. Exits as soon as the start is superseded (a shutdown, a newer
+ * start, a system stop that moved the phase off `running`). Never throws — the native read resolves
+ * `[]` on failure, which surfaces as "couldn't detect" rather than an error.
+ */
+async function trackHotspotAddress(myGen: number): Promise<void> {
+  let probe = 0;
+  let elapsed = 0;
+  for (;;) {
+    const inBurst = probe < ADDRESS_PROBE_AT_MS.length;
+    const dueAt = inBurst ? ADDRESS_PROBE_AT_MS[probe] : elapsed + ADDRESS_RECHECK_INTERVAL_MS;
+    if (dueAt > elapsed) {
+      await sleep(dueAt - elapsed);
+      elapsed = dueAt;
+    }
+    if (myGen !== generation || sharedState.phase !== 'running') {
+      return;
+    }
+    const raw = await readHotspotAddressCandidates();
+    if (myGen !== generation || sharedState.phase !== 'running') {
+      return;
+    }
+    probe += 1;
+    const pick = pickHotspotAddress(raw);
+    if (pick) {
+      // Found: the burst is over whatever probe this was; only the slow re-check continues.
+      probe = ADDRESS_PROBE_AT_MS.length;
+    }
+    publishAddress({
+      address: pick?.candidate.address,
+      addressInterface: pick?.candidate.name,
+      candidates: eligibleHotspotCandidates(raw),
+      addressSearch: probe >= ADDRESS_PROBE_AT_MS.length ? 'settled' : 'searching',
+    });
+  }
+}
+
+/** Merge address findings into the running state, publishing only on a real change (re-renders cost). */
+function publishAddress(next: Pick<HotspotState, 'address' | 'addressInterface' | 'candidates' | 'addressSearch'>): void {
+  const current = sharedState;
+  if (current.phase !== 'running') {
+    return;
+  }
+  const unchanged =
+    current.address === next.address &&
+    current.addressInterface === next.addressInterface &&
+    current.addressSearch === next.addressSearch &&
+    JSON.stringify(current.candidates ?? []) === JSON.stringify(next.candidates ?? []);
+  if (unchanged) {
+    return;
+  }
+  publish({ ...current, ...next });
 }
 
 // Whether the native "the system stopped the hotspot" listener is installed (once per process — the

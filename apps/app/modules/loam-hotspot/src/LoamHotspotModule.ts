@@ -1,6 +1,6 @@
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 
-import type { HotspotCredentials, LoamHotspotEvents } from './LoamHotspot.types';
+import type { HotspotAddressCandidate, HotspotCredentials, LoamHotspotEvents } from './LoamHotspot.types';
 
 declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
   /**
@@ -11,6 +11,12 @@ declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
   startHotspot(): Promise<HotspotCredentials>;
   /** Closes the hotspot reservation. Safe to call when no hotspot is running. */
   stopHotspot(): void;
+  /**
+   * Every IPv4 address the device holds right now, annotated so JS can tell the hotspot's own interface
+   * from the phone's other networks (see `HotspotAddressCandidate`). Resolves with an empty list — never
+   * rejects — when enumeration fails.
+   */
+  hotspotAddressCandidates(): Promise<HotspotAddressCandidate[]>;
   /** Start a foreground service so the host survives screen-off / backgrounding. Best-effort; returns
    * false when the platform refused (e.g. API 31+ while the app is in the background). */
   startHostService(): boolean;

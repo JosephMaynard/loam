@@ -13,7 +13,8 @@
 > tapping it prompts for `ACCESS_FINE_LOCATION` then `NEARBY_WIFI_DEVICES`, and `startHotspot()` runs.
 > This emulator's virtual WiFi actually supported LocalOnlyHotspot, so the **happy path** rendered —
 > "Host running", Step 1 with a real SSID/password (`AndroidShare_1065` / a generated passphrase) +
-> WiFi QR, and Step 2's LOAM-URL QR (`http://192.168.49.1:3000`); Done closes back to the WebView.
+> WiFi QR, and Step 2's LOAM-URL QR (at the time a fixed `192.168.49.1` — wrong, see **The Step-2
+> address** below); Done closes back to the WebView.
 > Graceful degradation (permission denied / no SoftAP / a callback that never fires) is code-complete
 > — `requireOptionalNativeModule` for unlinked runtimes, a native reject on `onFailed`/`SecurityException`,
 > a 20s JS start-timeout, and an error message in Step 1 while Step 2's QR stays — but wasn't the path
@@ -122,11 +123,24 @@ The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi
   once, while the app is in the foreground and before the first start; denying it only hides the
   notification (the overlay says so) and never blocks hosting. Screen-on + app-open is still the most
   reliable state; the FGS path is not yet device-verified.
-- **The Step-2 address.** LocalOnlyHotspot puts the host at `192.168.49.1` on **stock** Android, but
-  this isn't guaranteed. The launcher (`main.js`) reports the host's real IPv4 addresses over the
-  `loam-hostinfo` channel and the host screen builds the Step-2 QR from the `192.168.49.x` one when
-  present, listing the others underneath. **If Step 2 won't load, try one of the listed addresses**
-  (`http://<addr>:3000`) — and tell us which one worked so we can harden the picker.
+- **The Step-2 address.** Android assigns a LocalOnlyHotspot a **random** IPv4 address on every start —
+  a /24 in 192.168.0.0/16, 172.16.0.0/12 or 10.0.0.0/8 (the /8 ~94% of the time since Android 16), host
+  part never .0/.1/.255 (`packages/modules/Connectivity`, `PrivateAddressCoordinator`). There is no fixed
+  gateway: `192.168.49.1`, which 0.4.0–0.5.0 hardcoded, is reserved for **Wi-Fi Direct** group owners, so a
+  joiner got `ERR_ADDRESS_UNREACHABLE` (Galaxy S25 Ultra, 2026-09-28). No API hands an app the hotspot's
+  address, so the native module **discovers** it: `hotspotAddressCandidates()` enumerates every
+  (interface, IPv4) pair with two hints — `upstream` (the interface belongs to a network the phone is a
+  *client* of, per `ConnectivityManager`, i.e. home Wi-Fi / mobile data / VPN, never the SoftAP) and
+  `preexisting` (the address already existed just before `startLocalOnlyHotspot`) — and
+  `src/lib/hotspot-address.ts` scores them (new-since-start +4, SoftAP-like name `swlan0`/`ap0`/`wlan1` +3,
+  pre-existing −4, private ±1; ≥3 wins). `use-hotspot.ts` probes on a burst (0 s … 12 s, the AP gets its
+  address a moment after `onStarted`) then every 15 s while running. Step 2 shows **"Finding the hotspot's
+  address…"** until a confident pick exists, and if none does, the manual route: on the joining phone, the
+  hotspot's Wi-Fi details → **Gateway**/Router address (the hotspot's DHCP advertises the host as the
+  router) → `http://<gateway>:3000`, plus a "this host's addresses" line (`interface address`). The
+  launcher's `loam-hostinfo` now also carries `interfaces: [{name,address}]` as a second source. The
+  embedded Node *can* see the AP interface (same `getifaddrs` as the native side) — the older note that it
+  couldn't was wrong; what it can't do is tell the AP from the home Wi-Fi without `ConnectivityManager`.
 - **Client isolation.** A few hotspot stacks isolate connected clients from the host; if every
   address fails despite a good WiFi connection, that's the likely cause (device-dependent).
 
@@ -333,14 +347,13 @@ The permissions are declared in the manifest by the config plugin (`with-loam-ho
 Host"** button (a top bar, not a floating overlay — an Android WebView swallows touches on any native
 view layered over it, so an on-top button wouldn't register). It opens `HostShareOverlay` (a
 full-screen modal). The overlay starts the hotspot on open and feeds
-`{ssid,password}` + the fixed gateway `serverUrl` into the presentational `HostPanel`, which shows
-**Step 1** (WiFi-join QR + SSID/password text) and **Step 2** (LOAM-URL QR + address text). The LOAM
-access URL for joiners is the LocalOnlyHotspot **gateway `http://192.168.49.1:3000`** (the AOSP
-default for local-only hotspots, hardcoded in Android's tethering config), known before the hotspot
-starts — so **Step 2 always renders**, and when the hotspot can't start, `HostPanel` shows the error
-in Step 1 while keeping Step 2 (graceful degradation). A rare OEM could assign a different gateway;
-detecting the AP interface address at runtime is a fragile, hard-to-test follow-up, so we ship the
-AOSP-standard address (correct on the overwhelming majority of devices).
+`{ssid,password}` + the derived Step-2 display (`src/lib/join-display.ts`) into the presentational
+`HostPanel`, which shows **Step 1** (WiFi-join QR + SSID/password text) and **Step 2** (LOAM-URL QR +
+address text). While the hotspot runs, the join URL is the hotspot's **own discovered address** (see "The
+Step-2 address" above — Android assigns it at random per start, so there is nothing to show until it is
+found; Step 2 says "Finding the hotspot's address…" meanwhile, and gives the manual Gateway route if it
+never is). When the hotspot can't start, `HostPanel` shows the error in Step 1 while keeping Step 2 with
+the launcher-reported LAN address (graceful degradation).
 
 **Left-on-display controls** (both optional, both in the overlay): **Keep screen on** holds an
 `expo-keep-awake` lock while enabled — for a host taped to a wall showing the join QRs. **Kiosk mode**
@@ -422,7 +435,7 @@ workspace install (Expo/RN toolchain); gating its install remains an open nicety
    emulator-verified end to end (the API-35 emulator's virtual WiFi returned a real SSID/passphrase).
    Physical-device SoftAP behaviour may differ, so the two-phone join below remains the owner's test.
 5. WebView loading the served client over the hotspot, with cookies + WebSocket working end to end —
-   **needs a physical device** (a second phone joins the hotspot and opens `http://192.168.49.1:3000`).
+   **needs a physical device** (a second phone joins the hotspot and opens the Step-2 URL).
 
 Only after those pass is the QR/host UI mostly glue over `packages/qr`.
 
@@ -432,7 +445,9 @@ The emulator can't create a real hotspot (no WiFi radio), so the end-to-end join
    prompt(s) — location always, plus a nearby-WiFi-devices prompt on Android 13+ (API 33+).
 2. Confirm **Step 1** shows a real SSID + password. On a second phone, scan the Step-1 WiFi QR (or type
    the creds) to join the hotspot.
-3. Once connected, scan the **Step-2** QR (`http://192.168.49.1:3000`) → LOAM opens over the hotspot.
+3. Wait for Step 2 to show a QR (it reads "Finding the hotspot's address…" for a few seconds), then
+   scan it → LOAM opens over the hotspot. If Step 2 instead says the address couldn't be worked out, note
+   the "this host's addresses" line and the joining phone's Wi-Fi **Gateway** — that's the bug report.
 4. Post a message from the second phone; confirm it appears on the host (proves the WS/LAN path).
 
 ## Open questions

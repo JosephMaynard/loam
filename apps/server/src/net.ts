@@ -16,11 +16,12 @@ function isTunnelInterface(name: string): boolean {
 }
 
 // Preference tiers over the private-LAN (RFC1918) ranges, to pick "the address a nearby joiner can
-// actually reach" on the desktop/Pi host (where the server enumerates its own interfaces): the stock
-// LocalOnlyHotspot gateway first, then any 192.168.*, then 10.*/172.16-31.*. NOTE: the Android host no
-// longer shares this exact heuristic — it selects the hotspot gateway from the live hotspot phase in
-// `joinUrl` (apps/app/src/lib/join-url.ts), because the embedded Node can't enumerate the SoftAP
-// interface at all. This module's own logic (server.ts / app.ts join-host resolution) is unchanged.
+// actually reach" on the desktop/Pi host (where the server enumerates its own interfaces): a
+// `192.168.49.*` address first (the Wi-Fi Direct group-owner subnet — a laptop sharing over Wi-Fi Direct
+// is reached there), then any 192.168.*, then 10.*/172.16-31.*. NOTE: the Android host does NOT use this
+// heuristic — Android assigns its LocalOnlyHotspot a random address per start, so the host app discovers
+// it natively (apps/app/modules/loam-hotspot `hotspotAddressCandidates` + apps/app/src/lib/hotspot-address.ts)
+// and `joinUrl` (apps/app/src/lib/join-url.ts) advertises only that while the hotspot runs.
 const isHotspotGateway = (address: string): boolean => address.startsWith("192.168.49.");
 const isPrivate192 = (address: string): boolean => address.startsWith("192.168.");
 const isPrivate10or172 = (address: string): boolean =>

@@ -27,6 +27,15 @@ export type HostState = {
   serverUrl?: string;
   /** All detected host IPv4 addresses, listed under Step 2 so a joiner can try another if needed. */
   addresses?: string[];
+  /**
+   * Why Step 2 has no URL while the hotspot is up: its (randomly assigned) address is still being looked
+   * for, or couldn't be told apart from the phone's other networks — then Step 2 shows the manual route
+   * (the joiner's Wi-Fi "Gateway" address) instead of a QR to a guess.
+   */
+  hotspotAddress?: 'searching' | 'unknown';
+  /** Every address the host currently holds that could be the hotspot's, `interface address` each, for
+   * the manual fallback. */
+  detected?: string[];
 };
 
 const STATUS_LABEL: Record<HostState['status'], string> = {
@@ -100,6 +109,23 @@ export function HostPanel({ state }: { state: HostState }) {
             {state.addresses && state.addresses.length > 0 ? (
               <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
                 If that doesn&apos;t load, this host is also at: {state.addresses.join(', ')}
+              </ThemedText>
+            ) : null}
+          </>
+        ) : state.hotspotAddress === 'searching' ? (
+          <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
+            Finding the hotspot&apos;s address…
+          </ThemedText>
+        ) : state.hotspotAddress === 'unknown' ? (
+          <>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
+              Couldn&apos;t work out which address the hotspot is using. On the joining phone, open the
+              Wi-Fi details for {state.hotspot?.ssid ?? 'this hotspot'}, find the Gateway (or Router)
+              address, and open http://that-address:3000 in the browser.
+            </ThemedText>
+            {state.detected && state.detected.length > 0 ? (
+              <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
+                This host&apos;s addresses: {state.detected.join(' · ')}
               </ThemedText>
             ) : null}
           </>

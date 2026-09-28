@@ -6,15 +6,6 @@
 /** The embedded LOAM host server's port (mirrors SERVER_PORT in the host screen and the launcher). */
 export const SERVER_PORT = 3000;
 
-/**
- * Stock-Android LocalOnlyHotspot gateway. The SoftAP interface is NOT visible to the embedded Node's
- * `os.networkInterfaces()` (it lives in a different network namespace), so the launcher can never
- * enumerate it — but LocalOnlyHotspot and Wi-Fi tethering use 192.168.49.1 as the gateway on stock
- * Android. Not guaranteed on every OEM, but the de-facto default; a device that differs would need the
- * native module to report its actual AP address (future work).
- */
-export const HOTSPOT_GATEWAY = '192.168.49.1';
-
 /** RFC-1918 10.0.0.0/8 or 172.16.0.0/12 (192.168.* is handled separately by the caller). */
 export function isPrivate10or172(address: string): boolean {
   return address.startsWith('10.') || /^172\.(1[6-9]|2\d|3[01])\./.test(address);
@@ -33,34 +24,47 @@ export function preferredLanAddress(addresses: string[]): string | undefined {
   );
 }
 
+export type JoinUrlOptions = {
+  /** The host's IPv4 addresses as the launcher enumerates them (the shared-WiFi / Pi / laptop case). */
+  addresses: string[];
+  /** Whether the LocalOnlyHotspot is up — then every joiner is on it and only its address is reachable. */
+  hotspotRunning: boolean;
+  /**
+   * The hotspot's own address once discovered (`src/lib/hotspot-address.ts`). Android assigns it at
+   * random per start; there is no fixed gateway to fall back to, so while this is unknown no URL is built.
+   */
+  hotspotAddress?: string;
+  /** The optional transport `#k=` fragment. */
+  fragment?: string;
+};
+
 /**
- * The full URL (with the optional transport `#k=` fragment) a joiner should open.
+ * The full URL (with the optional transport `#k=` fragment) a joiner should open, or `undefined` when no
+ * reachable address is known yet — the share screen then says so instead of showing a QR to a guess.
  *
- * `hotspotRunning` is the crux, and the fix for the STA+AP dual-connection bug: when the LocalOnlyHotspot
- * is up, EVERY joiner reached us over that hotspot, whose gateway is {@link HOTSPOT_GATEWAY}. The host's
- * other interfaces — e.g. the home WiFi it is simultaneously connected to under STA+AP concurrency
- * (Pixel and other modern flagships) — are NOT reachable from the hotspot, and the embedded Node can't
- * even see the AP interface, so advertising an enumerated LAN address (e.g. `192.168.86.x`) strands the
- * joiner on the wrong network. When the hotspot is NOT running (shared-WiFi / Pi / laptop hosting, or a
- * hotspot that failed to start), the real reported LAN address is exactly what a same-network joiner
- * needs, so we use it.
+ * `hotspotRunning` is the crux: when the LocalOnlyHotspot is up, EVERY joiner reached us over it, and only
+ * its own (randomly assigned) address is reachable from there. The host's other interfaces — e.g. the home
+ * WiFi it is simultaneously a client of under STA+AP concurrency — are NOT reachable from the hotspot, so
+ * advertising an enumerated LAN address (e.g. `192.168.86.x`) strands the joiner on the wrong network (the
+ * 0.4.0 bug), and advertising a fixed `192.168.49.1` strands them on a Wi-Fi Direct address no hotspot
+ * ever uses (the 0.5.0 bug). When the hotspot is NOT running (shared-WiFi / Pi / laptop hosting, or a
+ * hotspot that failed to start), the real reported LAN address is exactly what a same-network joiner needs.
  */
-export function joinUrl(opts: { addresses: string[]; hotspotRunning: boolean; fragment?: string }): string {
-  const { addresses, hotspotRunning, fragment = '' } = opts;
-  const host = hotspotRunning ? HOTSPOT_GATEWAY : (preferredLanAddress(addresses) ?? HOTSPOT_GATEWAY);
-  return `http://${host}:${SERVER_PORT}${fragment}`;
+export function joinUrl(opts: JoinUrlOptions): string | undefined {
+  const { addresses, hotspotRunning, hotspotAddress, fragment = '' } = opts;
+  const host = hotspotRunning ? hotspotAddress : preferredLanAddress(addresses);
+  return host ? `http://${host}:${SERVER_PORT}${fragment}` : undefined;
 }
 
 /**
- * The Step-2 display for the host Share overlay: the join URL plus the addresses to list as "also at"
- * fallbacks. When the hotspot is running, joiners are on it, so we target the gateway (see {@link
- * joinUrl}) AND drop the host's other LAN addresses — they're on the wrong network, and listing them
- * sends a joiner to a dead address (the STA+AP bug this fixes). Off the hotspot, the real addresses are
- * the fallbacks a same-network joiner needs. Kept as a pure function so the overlay's derivation is
- * testable without the RN render tree.
+ * The Step-2 display for the host Share overlay: the join URL (if any) plus the addresses to list as
+ * "also at" fallbacks. When the hotspot is running, joiners are on it, so the host's other LAN addresses
+ * are dropped — they're on the wrong network, and listing them sends a joiner to a dead address. Off the
+ * hotspot, the real addresses are the fallbacks a same-network joiner needs. Kept as a pure function so
+ * the overlay's derivation is testable without the RN render tree.
  */
-export function hostJoinDisplay(opts: { addresses: string[]; hotspotRunning: boolean; fragment?: string }): {
-  serverUrl: string;
+export function hostJoinDisplay(opts: JoinUrlOptions): {
+  serverUrl: string | undefined;
   addresses: string[];
 } {
   return {
