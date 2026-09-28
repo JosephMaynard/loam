@@ -2382,6 +2382,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       panic: panicAttempts.size,
       identity: identityMintCounters.size,
     }),
+    sockets,
     getTransportPublicKey: () =>
       effectiveTransportEncryption() === "off" ? undefined : ensureTransportIdentity().publicKey,
     async close() {

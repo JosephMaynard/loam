@@ -10,7 +10,12 @@ import {
   type HotspotAddressCandidate,
   type HotspotCredentials,
 } from '../../modules/loam-hotspot';
-import { eligibleHotspotCandidates, pickHotspotAddress } from '@/lib/hotspot-address';
+import {
+  eligibleHotspotCandidates,
+  mergeHotspotCandidates,
+  pickHotspotAddress,
+  type HostInterface,
+} from '@/lib/hotspot-address';
 
 /**
  * Lifecycle of the local-only hotspot:
@@ -39,7 +44,44 @@ export type HotspotState = {
   /** Every address the host holds that could be the hotspot's, for the manual fallback when none is sure. */
   candidates?: HotspotAddressCandidate[];
   addressSearch?: HotspotAddressSearch;
+  /** True once a connected joiner's address proved `address` is the interface serving the hotspot. */
+  addressConfirmed?: boolean;
 };
+
+// --- Second source + proof, fed by the host screen (index.tsx) from the launcher's `loam-hostinfo` ------
+// The launcher's own interface enumeration (a different code path to the same kernel data) and the peer
+// addresses of the devices currently connected to the server. Module-scoped like the hotspot state, so a
+// remount never loses them.
+let latestLauncherInterfaces: HostInterface[] = [];
+let launcherInterfacesReceived = false;
+// The launcher's list as it stood just before the CURRENT hotspot start — the launcher-side twin of the
+// native module's pre-start snapshot. `undefined` when no list had arrived by then (then a launcher-only
+// candidate can't be called "new", so it never gets that score).
+let launcherSnapshot: string[] | undefined;
+let latestClients: string[] = [];
+// The native module's last candidate list, so a launcher/client update can re-run the pick at once.
+let lastNativeCandidates: HotspotAddressCandidate[] = [];
+
+/** The launcher reported its interfaces (every ~5 s and on request). Re-picks immediately while running. */
+export function noteLauncherInterfaces(interfaces: HostInterface[]): void {
+  latestLauncherInterfaces = interfaces;
+  launcherInterfacesReceived = true;
+  repickAddress();
+}
+
+/** The launcher reported who is connected from off this phone. Re-picks immediately while running. */
+export function noteConnectedClients(clients: string[]): void {
+  latestClients = clients;
+  repickAddress();
+}
+
+/** Re-run the address decision over everything known now, without touching the probe schedule. */
+function repickAddress(): void {
+  if (sharedState.phase !== 'running') {
+    return;
+  }
+  decideAddress(sharedState.addressSearch === 'settled');
+}
 
 // Android permits exactly one LocalOnlyHotspot per process, and the host overlay mounts/unmounts as
 // it opens and closes. So the hotspot state lives at module scope (survives remounts) and the hook
@@ -155,6 +197,8 @@ export async function ensureHotspot(): Promise<void> {
     }
 
     publish({ phase: 'starting' });
+    // Twin of the native pre-start snapshot: what the launcher saw before the hotspot existed.
+    launcherSnapshot = launcherInterfacesReceived ? latestLauncherInterfaces.map((entry) => entry.address) : undefined;
     const credentials = await startWithTimeout();
     if (myGen !== generation) {
       // A shutdown (or newer start) landed while we were starting: release the hotspot we just
@@ -182,9 +226,12 @@ export async function ensureHotspot(): Promise<void> {
 // When to probe for the hotspot's address after it reports `running`, in ms since then. The SoftAP
 // interface gets its (random) address from the tethering service a moment AFTER onStarted, so the first
 // probes usually miss; the burst covers a slow OEM stack without the operator staring at a blank Step 2.
-const ADDRESS_PROBE_AT_MS = [0, 500, 1000, 2000, 3000, 5000, 8000, 12000];
-// After the burst, re-check at this cadence for as long as the hotspot runs: cheap, and it catches an
-// address the stack reassigns without stopping the hotspot (or one that only turned up late).
+const ADDRESS_PROBE_AT_MS = [0, 500, 1000, 2000, 3000, 5000, 8000, 12000, 16000, 20000];
+// After the burst, keep re-checking for as long as the hotspot runs — briskly for the first minute (an
+// address that only turned up late), then slowly (an address the stack reassigns without stopping the
+// hotspot). Cheap: one interface enumeration per tick.
+const ADDRESS_RECHECK_EARLY_MS = 5_000;
+const ADDRESS_RECHECK_EARLY_UNTIL_MS = 60_000;
 const ADDRESS_RECHECK_INTERVAL_MS = 15_000;
 
 function sleep(ms: number): Promise<void> {
@@ -201,9 +248,12 @@ function sleep(ms: number): Promise<void> {
 async function trackHotspotAddress(myGen: number): Promise<void> {
   let probe = 0;
   let elapsed = 0;
+  lastNativeCandidates = [];
   for (;;) {
     const inBurst = probe < ADDRESS_PROBE_AT_MS.length;
-    const dueAt = inBurst ? ADDRESS_PROBE_AT_MS[probe] : elapsed + ADDRESS_RECHECK_INTERVAL_MS;
+    const dueAt = inBurst
+      ? ADDRESS_PROBE_AT_MS[probe]
+      : elapsed + (elapsed < ADDRESS_RECHECK_EARLY_UNTIL_MS ? ADDRESS_RECHECK_EARLY_MS : ADDRESS_RECHECK_INTERVAL_MS);
     if (dueAt > elapsed) {
       await sleep(dueAt - elapsed);
       elapsed = dueAt;
@@ -215,23 +265,37 @@ async function trackHotspotAddress(myGen: number): Promise<void> {
     if (myGen !== generation || sharedState.phase !== 'running') {
       return;
     }
+    lastNativeCandidates = raw;
     probe += 1;
-    const pick = pickHotspotAddress(raw);
-    if (pick) {
-      // Found: the burst is over whatever probe this was; only the slow re-check continues.
+    if (decideAddress(probe >= ADDRESS_PROBE_AT_MS.length)) {
+      // Found: the burst is over whatever probe this was; only the re-check continues.
       probe = ADDRESS_PROBE_AT_MS.length;
     }
-    publishAddress({
-      address: pick?.candidate.address,
-      addressInterface: pick?.candidate.name,
-      candidates: eligibleHotspotCandidates(raw),
-      addressSearch: probe >= ADDRESS_PROBE_AT_MS.length ? 'settled' : 'searching',
-    });
   }
 }
 
+/**
+ * The address decision over everything known now — the native candidates, the launcher's list (with its
+ * own pre-start snapshot) and the connected joiners — published into the running state. Returns whether
+ * an address was chosen.
+ */
+function decideAddress(settled: boolean): boolean {
+  const merged = mergeHotspotCandidates(lastNativeCandidates, latestLauncherInterfaces, launcherSnapshot);
+  const pick = pickHotspotAddress(merged, { clientAddresses: latestClients });
+  publishAddress({
+    address: pick?.candidate.address,
+    addressInterface: pick?.candidate.name,
+    candidates: eligibleHotspotCandidates(merged),
+    addressSearch: settled || pick ? 'settled' : 'searching',
+    addressConfirmed: pick?.confirmed ?? false,
+  });
+  return pick !== undefined;
+}
+
 /** Merge address findings into the running state, publishing only on a real change (re-renders cost). */
-function publishAddress(next: Pick<HotspotState, 'address' | 'addressInterface' | 'candidates' | 'addressSearch'>): void {
+function publishAddress(
+  next: Pick<HotspotState, 'address' | 'addressInterface' | 'candidates' | 'addressSearch' | 'addressConfirmed'>,
+): void {
   const current = sharedState;
   if (current.phase !== 'running') {
     return;
@@ -240,9 +304,19 @@ function publishAddress(next: Pick<HotspotState, 'address' | 'addressInterface' 
     current.address === next.address &&
     current.addressInterface === next.addressInterface &&
     current.addressSearch === next.addressSearch &&
+    current.addressConfirmed === next.addressConfirmed &&
     JSON.stringify(current.candidates ?? []) === JSON.stringify(next.candidates ?? []);
   if (unchanged) {
     return;
+  }
+  if (current.address !== next.address || current.addressConfirmed !== next.addressConfirmed) {
+    // One line in logcat (ReactNativeJS) per decision change — the evidence a bug report from another
+    // phone needs. Addresses are the host's own; nothing about joiners is logged.
+    console.log(
+      `[loam-hotspot] address ${next.address ?? 'unknown'} on ${next.addressInterface ?? '-'}` +
+        `${next.addressConfirmed ? ' (confirmed by a joiner)' : ''}; candidates: ` +
+        (next.candidates ?? []).map((candidate) => `${candidate.name} ${candidate.address}`).join(', '),
+    );
   }
   publish({ ...current, ...next });
 }

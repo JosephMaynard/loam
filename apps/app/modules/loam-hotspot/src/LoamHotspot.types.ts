@@ -21,10 +21,11 @@ export type HotspotAddressCandidate = {
   prefixLength?: number;
   /**
    * True when the interface belongs to a network the phone is a client of with internet capability (home
-   * Wi-Fi, mobile data, VPN) — never the hotspot the phone serves. Absent when unknown (e.g. the address
-   * came from the embedded Node's enumeration instead of the native module).
+   * Wi-Fi, mobile data, VPN), or the address is the Wi-Fi client's own per WifiManager — never the hotspot
+   * the phone serves. False when the native check ran and cleared it. `null`/absent when unknown: the
+   * check failed, or the address came from the embedded Node's enumeration instead of the native module.
    */
-  upstream?: boolean;
+  upstream?: boolean | null;
   /**
    * Whether the address already existed just before the hotspot was last started; the hotspot's own
    * address is the one that is NOT pre-existing. `null`/absent when no start happened in this process or

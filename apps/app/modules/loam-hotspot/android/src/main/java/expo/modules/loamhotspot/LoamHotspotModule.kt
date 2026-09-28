@@ -296,7 +296,10 @@ class LoamHotspotModule : Module() {
    *  - `prefixLength` the interface's IPv4 prefix length;
    *  - `upstream`     true when the interface is one of the phone's own networks with internet capability
    *                   (the home Wi-Fi it is a client of, mobile data, a VPN) — never a hotspot the phone
-   *                   serves, which the framework registers as a local-only network at most;
+   *                   serves, which the framework registers as a local-only network at most — or when the
+   *                   address is the Wi-Fi CLIENT's own (WifiManager's DHCP/connection info, an independent
+   *                   second check); false when the network check ran and cleared it; null when the check
+   *                   itself failed, so JS never mistakes "couldn't tell" for "cleared";
    *  - `preexisting`  whether the address already existed before the last hotspot start (null when no
    *                   start was attempted in this process).
    * JS scores these (`pickHotspotAddress`); an address that appeared with the hotspot and is not an
@@ -305,6 +308,7 @@ class LoamHotspotModule : Module() {
    */
   private fun hotspotAddressCandidates(): List<Map<String, Any?>> {
     val upstream = upstreamInterfaceNames()
+    val station = stationAddresses()
     val before = addressesBeforeStart
     val out = ArrayList<Map<String, Any?>>()
     val interfaces =
@@ -329,12 +333,14 @@ class LoamHotspotModule : Module() {
         val inet = ifAddress.address as? Inet4Address ?: continue
         if (inet.isLoopbackAddress || inet.isLinkLocalAddress || inet.isAnyLocalAddress) continue
         val address = inet.hostAddress ?: continue
+        val isUpstream: Boolean? =
+          if (station.contains(address)) true else upstream?.contains(name)
         out.add(
           mapOf(
             "name" to name,
             "address" to address,
             "prefixLength" to ifAddress.networkPrefixLength.toInt(),
-            "upstream" to upstream.contains(name),
+            "upstream" to isUpstream,
             "preexisting" to before?.contains(address),
           ),
         )
@@ -374,14 +380,15 @@ class LoamHotspotModule : Module() {
    * internet capability (Wi-Fi station, cellular, VPN; capability, not validation, so a home Wi-Fi with no
    * uplink still counts). A hotspot the phone serves is never among them: local-only hotspots register no
    * network for apps, and a tethering downstream that does is a local network without the capability.
-   * Needs ACCESS_NETWORK_STATE (a normal, install-time permission); anything failing yields an empty set,
-   * which only weakens the JS scoring rather than breaking it.
+   * Needs ACCESS_NETWORK_STATE (a normal, install-time permission). Returns null when the check itself
+   * failed (no context, no service, an exception), so JS can tell "cleared" from "couldn't tell"; an
+   * empty set is a genuine answer (the phone is on no network at all).
    */
-  private fun upstreamInterfaceNames(): Set<String> {
+  private fun upstreamInterfaceNames(): Set<String>? {
     val names = HashSet<String>()
-    val context = appContext.reactContext?.applicationContext ?: return names
+    val context = appContext.reactContext?.applicationContext ?: return null
     val connectivity =
-      context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return names
+      context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
     try {
       // Deprecated on API 31+ in favour of callbacks, but still the one-shot enumeration this needs.
       @Suppress("DEPRECATION")
@@ -394,9 +401,39 @@ class LoamHotspotModule : Module() {
       }
     } catch (error: Throwable) {
       Log.w("LoamHotspot", "Upstream network enumeration failed", error)
+      return null
     }
     return names
   }
+
+  /**
+   * The Wi-Fi CLIENT's own IPv4 address(es) per WifiManager — the address the phone got from the network it
+   * JOINED (home Wi-Fi), never the hotspot it serves. An independent second way to rule the station
+   * interface out, for the ROMs where ConnectivityManager misreports it; both APIs are deprecated on 31+ but
+   * still answer, and ACCESS_WIFI_STATE (already held for the hotspot) is all they need. Best-effort: empty
+   * on any failure.
+   */
+  private fun stationAddresses(): Set<String> {
+    val out = HashSet<String>()
+    val context = appContext.reactContext?.applicationContext ?: return out
+    val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return out
+    try {
+      @Suppress("DEPRECATION")
+      val fromDhcp = wifi.dhcpInfo?.ipAddress ?: 0
+      @Suppress("DEPRECATION")
+      val fromConnection = wifi.connectionInfo?.ipAddress ?: 0
+      for (raw in intArrayOf(fromDhcp, fromConnection)) {
+        if (raw != 0) out.add(littleEndianIpv4(raw))
+      }
+    } catch (error: Throwable) {
+      Log.w("LoamHotspot", "Station address lookup failed", error)
+    }
+    return out
+  }
+
+  /** WifiManager hands IPv4 addresses as little-endian ints (first octet in the low byte). */
+  private fun littleEndianIpv4(raw: Int): String =
+    "${raw and 0xff}.${(raw shr 8) and 0xff}.${(raw shr 16) and 0xff}.${(raw ushr 24) and 0xff}"
 
   private fun reasonToMessage(reason: Int): String = when (reason) {
     WifiManager.LocalOnlyHotspotCallback.ERROR_NO_CHANNEL -> "no available channel"

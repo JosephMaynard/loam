@@ -133,14 +133,27 @@ The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi
   *client* of, per `ConnectivityManager`, i.e. home Wi-Fi / mobile data / VPN, never the SoftAP) and
   `preexisting` (the address already existed just before `startLocalOnlyHotspot`) — and
   `src/lib/hotspot-address.ts` scores them (new-since-start +4, SoftAP-like name `swlan0`/`ap0`/`wlan1` +3,
-  pre-existing −4, private ±1; ≥3 wins). `use-hotspot.ts` probes on a burst (0 s … 12 s, the AP gets its
-  address a moment after `onStarted`) then every 15 s while running. Step 2 shows **"Finding the hotspot's
-  address…"** until a confident pick exists, and if none does, the manual route: on the joining phone, the
+  pre-existing −4, private ±1; ≥3 wins). Belt and braces, all automatic: (1) the Wi-Fi *client's* own
+  address per `WifiManager` (DHCP/connection info) is ruled out independently of `ConnectivityManager`, and
+  a failed native check reports `upstream: null`, never "cleared"; (2) the launcher's `loam-hostinfo`
+  carries `interfaces: [{name,address,prefixLength}]` — a second enumeration path to the same kernel data
+  (the embedded Node *can* see the AP interface; the older note that it couldn't was wrong) — merged in with
+  its own pre-start snapshot (`mergeHotspotCandidates`); (3) a **connected joiner confirms** the interface:
+  the launcher polls `GET /api/host/clients` (launcher-only: loopback + host token, like the mesh bridge,
+  but not gated on mesh) for the distinct non-loopback peer addresses of admitted WebSockets, and a
+  candidate whose subnet contains one wins outright — proof, not inference (only among *eligible*
+  candidates: a laptop on the host's home Wi-Fi never promotes that upstream interface); Step 2 then shows
+  **"N phones connected"**, the one signal that the whole path works; (4) when the native check positively
+  ruled the phone's own networks out and exactly one private, not-pre-existing candidate is left, it is
+  taken even under an unfamiliar interface name. Anything the launcher can't tell (`rndis`/`usb`/`ncm`
+  USB tethering, `bt-pan`, `p2p*` Wi-Fi Direct, tunnels, cellular) is never a candidate. `use-hotspot.ts`
+  probes on a burst (0 s … 20 s, the AP gets its address a moment after `onStarted`), then every 5 s for
+  the first minute, then every 15 s, and re-decides at once when the launcher reports new interfaces or
+  joiners; each decision change is one `[loam-hotspot]` line in logcat. Step 2 shows **"Finding the
+  hotspot's address…"** until a pick exists, and if none does, the manual route: on the joining phone, the
   hotspot's Wi-Fi details → **Gateway**/Router address (the hotspot's DHCP advertises the host as the
-  router) → `http://<gateway>:3000`, plus a "this host's addresses" line (`interface address`). The
-  launcher's `loam-hostinfo` now also carries `interfaces: [{name,address}]` as a second source. The
-  embedded Node *can* see the AP interface (same `getifaddrs` as the native side) — the older note that it
-  couldn't was wrong; what it can't do is tell the AP from the home Wi-Fi without `ConnectivityManager`.
+  router) → `http://<gateway>:3000#k=…` (the key fragment is shown), plus a "this host's addresses" line
+  (`interface address`).
 - **Client isolation.** A few hotspot stacks isolate connected clients from the host; if every
   address fails despite a good WiFi connection, that's the likely cause (device-dependent).
 

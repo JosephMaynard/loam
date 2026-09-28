@@ -178,7 +178,12 @@ function lanInterfaces() {
     }
     for (const info of interfaces[name] || []) {
       if (info && info.family === 'IPv4' && !info.internal) {
-        entries.push({ name: name, address: info.address });
+        // `cidr` is "10.80.217.150/24"; the prefix lets the host screen match a joiner's address to the
+        // interface that serves it.
+        const prefix = typeof info.cidr === 'string' ? Number(info.cidr.split('/')[1]) : NaN;
+        entries.push(
+          Number.isInteger(prefix) ? { name: name, address: info.address, prefixLength: prefix } : { name: name, address: info.address },
+        );
       }
     }
   }
@@ -186,20 +191,30 @@ function lanInterfaces() {
 }
 
 /** Report the current network addresses to the host screen (for the Step-2 join QR + diagnostics).
- * `addresses` is the flat list older host screens read; `interfaces` pairs each with its interface. */
+ * `addresses` is the flat list older host screens read; `interfaces` pairs each with its interface;
+ * `clients` is who is connected to the server from OFF this phone (`GET /api/host/clients`, launcher-only)
+ * — the share screen's "N phones connected" and its proof of which interface the hotspot is on. `null`
+ * when the server couldn't be asked this tick (not yet listening): the screen keeps its last answer. */
 function postHostInfo() {
-  try {
-    const interfaces = lanInterfaces();
-    rnBridge.channel.post('loam-hostinfo', {
-      port: PORT,
-      addresses: interfaces.map(function (entry) {
-        return entry.address;
-      }),
-      interfaces: interfaces,
-    });
-  } catch (err) {
-    console.error('Failed to post host info', err);
-  }
+  const interfaces = lanInterfaces();
+  const info = {
+    port: PORT,
+    addresses: interfaces.map(function (entry) {
+      return entry.address;
+    }),
+    interfaces: interfaces,
+    clients: null,
+  };
+  meshRequest('GET', '/api/host/clients', undefined, function (err, status, json) {
+    if (!err && status === 200 && json && Array.isArray(json.clients)) {
+      info.clients = json.clients;
+    }
+    try {
+      rnBridge.channel.post('loam-hostinfo', info);
+    } catch (postErr) {
+      console.error('Failed to post host info', postErr);
+    }
+  });
 }
 
 // Answer on-demand requests (the Share overlay asks when it opens) and refresh on an interval so the

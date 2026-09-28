@@ -46,6 +46,35 @@ const isPrivate10or172 = (address: string): boolean =>
  *
  * Falls back to `"localhost"` when no such interface exists (e.g. local dev with networking off).
  */
+/** `::ffff:10.8.0.2` (an IPv4 peer on a dual-stack listener) → `10.8.0.2`; anything else unchanged. */
+function unmapIPv4(address: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
+  return mapped ? mapped[1]! : address;
+}
+
+/** Loopback in any spelling: `127.0.0.0/8`, `::1`, or the IPv4-mapped form. */
+export function isLoopbackPeer(address: string): boolean {
+  const plain = unmapIPv4(address);
+  return plain === "::1" || plain.startsWith("127.");
+}
+
+/**
+ * The distinct peer addresses among `peers` that are NOT this host itself: loopback dropped (the Android
+ * host's own WebView, a same-host proxy), IPv4-mapped IPv6 unmapped so a joiner shows up once in its
+ * dotted form, sorted for a stable answer. This is what the Android share screen turns into "1 phone
+ * connected" and uses to confirm which interface the hotspot is on (a joiner's address lies in its subnet).
+ */
+export function remoteClientAddresses(peers: Iterable<string | undefined>): string[] {
+  const distinct = new Set<string>();
+  for (const peer of peers) {
+    if (typeof peer !== "string" || peer.length === 0 || isLoopbackPeer(peer)) {
+      continue;
+    }
+    distinct.add(unmapIPv4(peer));
+  }
+  return [...distinct].sort();
+}
+
 export function resolveLanIPv4(): string {
   const candidates: string[] = [];
 

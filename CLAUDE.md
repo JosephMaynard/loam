@@ -423,7 +423,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   clamped too), `GET /api/access/pending` +
   `POST /api/access/users/:userId/approve|deny` (admin/greeter join approval),
   `PATCH /api/admin/users/:userId/roles` + `POST /api/admin/users/:userId/promote` (admin),
-  `POST /api/attachments` + `GET /api/attachments/:fileName`, `POST /api/admin/claim`,
+  `POST /api/attachments` + `GET /api/attachments/:fileName`, `GET /api/host/clients` (launcher-only: loopback + host token; the
+  distinct non-loopback peer addresses of admitted sockets, for the share screen's "N phones connected" and
+  hotspot-interface confirmation), `POST /api/admin/claim`,
   `GET/PATCH /api/admin/config` (admin),
   `GET /api/admin/channels` (admin), `POST /api/admin/kill-switch`
   (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless

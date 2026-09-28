@@ -5,8 +5,10 @@ import {
   describeHotspotCandidate,
   eligibleHotspotCandidates,
   isPrivateIPv4,
+  mergeHotspotCandidates,
   pickHotspotAddress,
   scoreHotspotCandidate,
+  subnetContains,
   type HotspotAddressCandidate,
 } from './hotspot-address';
 
@@ -139,5 +141,113 @@ describe('isPrivateIPv4', () => {
 describe('describeHotspotCandidate', () => {
   it('formats interface then address', () => {
     expect(describeHotspotCandidate(samsungAp)).toBe('swlan0 10.71.3.140');
+  });
+});
+
+describe('pickHotspotAddress — client confirmation', () => {
+  it('a connected joiner inside a candidate subnet confirms it, even over a higher-scoring rival', () => {
+    const pick = pickHotspotAddress(
+      [
+        { name: 'wlan1', address: '10.9.8.7', prefixLength: 24, upstream: false, preexisting: false },
+        { name: 'bridge0', address: '192.168.50.3', prefixLength: 24, upstream: false, preexisting: true },
+      ],
+      { clientAddresses: ['192.168.50.77'] },
+    );
+    expect(pick?.candidate.name).toBe('bridge0');
+    expect(pick?.confirmed).toBe(true);
+  });
+
+  it('confirmation never promotes an upstream interface (a laptop on the home Wi-Fi is not a hotspot joiner)', () => {
+    const pick = pickHotspotAddress([homeWifi, samsungAp], { clientAddresses: ['192.168.86.42'] });
+    expect(pick?.candidate).toBe(samsungAp);
+    expect(pick?.confirmed).toBe(false);
+  });
+
+  it('accepts a low-scoring candidate once a joiner has come through it', () => {
+    const only: HotspotAddressCandidate = { name: 'wlan0', address: '192.168.4.20', prefixLength: 24 };
+    expect(pickHotspotAddress([only])).toBeUndefined();
+    expect(pickHotspotAddress([only], { clientAddresses: ['192.168.4.21'] })?.confirmed).toBe(true);
+    expect(pickHotspotAddress([only], { clientAddresses: ['192.168.5.21'] })).toBeUndefined();
+  });
+});
+
+describe('pickHotspotAddress — sole hinted leftover', () => {
+  it('takes the one private candidate left after the phone’s own networks were positively ruled out', () => {
+    // Odd OEM name, snapshot unavailable, but the native upstream check ran and cleared it.
+    const pick = pickHotspotAddress([homeWifi, { name: 'wifi0_ap9', address: '172.30.1.9', upstream: false }]);
+    expect(pick?.candidate.address).toBe('172.30.1.9');
+  });
+
+  it('does not apply without the native upstream hint, nor to a pre-existing or non-private address', () => {
+    expect(pickHotspotAddress([{ name: 'wifi0_ap9', address: '172.30.1.9' }])).toBeUndefined();
+    expect(pickHotspotAddress([{ name: 'wifi0_ap9', address: '172.30.1.9', upstream: false, preexisting: true }])).toBeUndefined();
+    expect(pickHotspotAddress([{ name: 'wifi0_ap9', address: '100.64.1.9', upstream: false }])).toBeUndefined();
+  });
+
+  it('does not apply when more than one eligible candidate is left', () => {
+    expect(
+      pickHotspotAddress([
+        { name: 'wifi0_ap9', address: '172.30.1.9', upstream: false },
+        { name: 'eth0', address: '10.4.4.4', upstream: false },
+      ]),
+    ).toBeUndefined();
+  });
+});
+
+describe('eligibleHotspotCandidates — other sharing paths are never the hotspot', () => {
+  it('drops USB tethering, Bluetooth tethering and Wi-Fi Direct interfaces', () => {
+    expect(
+      eligibleHotspotCandidates([
+        { name: 'rndis0', address: '192.168.42.129', upstream: false, preexisting: false },
+        { name: 'usb0', address: '192.168.42.130', upstream: false, preexisting: false },
+        { name: 'ncm0', address: '192.168.42.131', upstream: false, preexisting: false },
+        { name: 'bt-pan', address: '192.168.44.1', upstream: false, preexisting: false },
+        { name: 'p2p-wlan0-0', address: '192.168.49.1', upstream: false, preexisting: false },
+        samsungAp,
+      ]),
+    ).toEqual([samsungAp]);
+  });
+});
+
+describe('mergeHotspotCandidates', () => {
+  it('keeps native hints, adds launcher-only pairs judged against the launcher snapshot', () => {
+    const merged = mergeHotspotCandidates(
+      [samsungAp],
+      [
+        { name: 'wlan0', address: '192.168.86.23', prefixLength: 24 },
+        { name: 'swlan0', address: '10.71.3.140', prefixLength: 24 },
+      ],
+      ['192.168.86.23'],
+    );
+    expect(merged).toEqual([
+      samsungAp,
+      { name: 'wlan0', address: '192.168.86.23', prefixLength: 24, preexisting: true },
+    ]);
+  });
+
+  it('fills a missing native pre-existing hint from the snapshot, and a missing prefix from the launcher', () => {
+    const merged = mergeHotspotCandidates(
+      [{ name: 'swlan0', address: '10.71.3.140', upstream: false, preexisting: null }],
+      [{ name: 'swlan0', address: '10.71.3.140', prefixLength: 24 }],
+      ['192.168.86.23'],
+    );
+    expect(merged).toEqual([{ name: 'swlan0', address: '10.71.3.140', upstream: false, preexisting: false, prefixLength: 24 }]);
+  });
+
+  it('leaves pre-existing unknown when no launcher snapshot was taken (never fakes "new")', () => {
+    const merged = mergeHotspotCandidates([], [{ name: 'wlan0', address: '192.168.86.23' }], undefined);
+    expect(merged).toEqual([{ name: 'wlan0', address: '192.168.86.23', preexisting: null }]);
+    expect(pickHotspotAddress(merged)).toBeUndefined();
+  });
+});
+
+describe('subnetContains', () => {
+  it('uses the candidate prefix, defaulting to /24', () => {
+    const c: HotspotAddressCandidate = { name: 'swlan0', address: '10.80.217.150' };
+    expect(subnetContains(c, '10.80.217.5')).toBe(true);
+    expect(subnetContains(c, '10.80.218.5')).toBe(false);
+    expect(subnetContains({ ...c, prefixLength: 16 }, '10.80.218.5')).toBe(true);
+    expect(subnetContains(c, 'fe80::1')).toBe(false);
+    expect(subnetContains({ ...c, prefixLength: 0 }, '10.80.217.5')).toBe(false);
   });
 });

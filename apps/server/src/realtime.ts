@@ -347,7 +347,7 @@ export function createRealtime(ctx: AppContext) {
       // A plaintext socket (transport off, or an anonymous optional session with no key) is admitted
       // directly — there is no session key to confirm. Its frames go out in the clear (documented).
       if (!transportKey) {
-        const socketSession: SocketSession = { socket: connection, userId };
+        const socketSession: SocketSession = { socket: connection, userId, remoteAddress: request.ip };
         sockets.add(socketSession);
         broadcastPresence();
         const stopHeartbeat = startHeartbeat(socketSession);
@@ -395,6 +395,7 @@ export function createRealtime(ctx: AppContext) {
       const socketSession: SocketSession = {
         socket: connection,
         userId,
+        remoteAddress: ip,
         transportKey,
         connectionId,
         frameSeq: 0,

@@ -9,7 +9,7 @@ import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { ensureHotspot, useHotspot } from '@/hooks/use-hotspot';
 import { ensureHostService, hostingNotificationDenied } from '@/lib/host-service';
-import { deriveJoinDisplay, toHostPanelState, type HostInterface } from '@/lib/join-display';
+import { deriveJoinDisplay, toHostPanelState } from '@/lib/join-display';
 
 type HostShareOverlayProps = {
   visible: boolean;
@@ -23,9 +23,8 @@ type HostShareOverlayProps = {
   transportKeyFragment: string;
   /** All of the host's detected IPv4 addresses, shown under Step 2 so a joiner can try alternatives. */
   addresses: string[];
-  /** The same addresses with their interface names — the launcher's view, used as a second source for the
-   * hotspot-address picker and the manual-fallback list when the native enumeration comes back empty. */
-  interfaces: HostInterface[];
+  /** Peer addresses of the devices connected to LOAM from off this phone (launcher-reported). */
+  connectedClients: string[];
   /** Whether to keep the screen on while hosting (for a host left on display). */
   keepAwake: boolean;
   onKeepAwakeChange: (value: boolean) => void;
@@ -45,7 +44,7 @@ export function HostShareOverlay({
   onClose,
   transportKeyFragment,
   addresses,
-  interfaces,
+  connectedClients,
   keepAwake,
   onKeepAwakeChange,
   kiosk,
@@ -75,7 +74,7 @@ export function HostShareOverlay({
   // other (unreachable-from-the-hotspot) LAN addresses from the "also at" list so we don't send a joiner
   // to an address on the wrong network. Off the hotspot (shared-WiFi / Pi / laptop), the real addresses
   // are correct.
-  const display = deriveJoinDisplay({ hotspot, addresses, interfaces, fragment: transportKeyFragment });
+  const display = deriveJoinDisplay({ hotspot, addresses, connectedClients, fragment: transportKeyFragment });
   const state = toHostPanelState(hotspot, display);
 
   return (

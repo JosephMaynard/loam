@@ -19,6 +19,9 @@ export type SocketClient = {
 export type SocketSession = {
   socket: SocketClient;
   userId: string;
+  /** The socket peer's IP as Fastify saw it (`request.ip`; `trustProxy` is off, so never a forwarded header).
+   * Lets the Android launcher ask how many devices are connected from OFF the host (`GET /api/host/clients`). */
+  remoteAddress?: string;
   /** Transport session key (docs/08) when the client connected `/ws?enc=<sid>`; outbound frames are
    * then XChaCha20-Poly1305-sealed. Undefined = plaintext frames (transport off / no session). */
   transportKey?: string;
@@ -245,6 +248,8 @@ export type LoamApp = {
   pruneExpiredRateLimiters(): void;
   /** Test/introspection hook: current entry counts of the per-IP rate-limit maps. */
   rateLimiterEntryCounts(): { claim: number; panic: number; identity: number };
+  /** Test/introspection hook: the admitted WebSocket sessions (what `GET /api/host/clients` counts). */
+  sockets: Set<SocketSession>;
   /** The host's static transport public key (docs/08) for building a keyed `#k=` join QR, or
    * `undefined` when the effective transport-encryption posture is `off` (Developer Mode). Lets
    * embedding hosts (the `loamnet` CLI, the Android launcher) print a MITM-resistant join QR

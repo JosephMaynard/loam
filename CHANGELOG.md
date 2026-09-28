@@ -103,7 +103,10 @@ external one (2026-08-15), the server split, per-user blocking, and Play Store g
   gave `ERR_ADDRESS_UNREACHABLE`. The Android host now discovers the hotspot's own address (the interface
   that appeared with the hotspot and isn't one of the phone's own networks) and puts that in the QR. Until
   it is found, Step 2 says so instead of showing a guess; if it can't be found, Step 2 explains how to read
-  the address from the joining phone's Wi-Fi details (Gateway) and lists the host's addresses.
+  the address from the joining phone's Wi-Fi details (Gateway) and lists the host's addresses. The
+  discovery cross-checks the phone's own Wi-Fi address, merges the launcher's view of the interfaces, and
+  once a phone has actually connected, the interface it came in on is confirmed and Step 2 shows
+  "N phones connected" — the proof that the whole join path works.
 - **Dead connections are noticed.** The server sends a heartbeat on every WebSocket; a client that stops
   hearing it reconnects, and re-checks when the device comes back online or the page becomes visible. A
   check that runs late because the page was frozen waits briefly for queued frames instead of dropping a

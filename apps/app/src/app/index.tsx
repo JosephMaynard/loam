@@ -33,7 +33,8 @@ import {
 } from '@/lib/db-encryption';
 import { confirmStartUnencrypted, retryKeyResolution, switchEncryptionOffAndRetry } from '@/lib/driver-missing-recovery';
 import { ensureHostService } from '@/lib/host-service';
-import { parseHostInterfaces, type HostInterface } from '@/lib/join-display';
+import { noteConnectedClients, noteLauncherInterfaces } from '@/hooks/use-hotspot';
+import { parseHostClients, parseHostInterfaces } from '@/lib/join-display';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { startKiosk, stopKiosk } from '../../modules/loam-hotspot';
@@ -201,7 +202,7 @@ type HostStatus = 'starting' | 'ready' | 'error';
 // it only ever updates the separate `notice` state below, so it can never regress a 'ready' host back
 // to a spinner/error screen, and — unlike 'error' before this fix — is never cleared by a later 'ready'.
 type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string; hostToken?: string };
-type HostInfoPayload = { port?: number; addresses?: string[]; interfaces?: unknown };
+type HostInfoPayload = { port?: number; addresses?: string[]; interfaces?: unknown; clients?: unknown };
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
 // and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
@@ -271,10 +272,11 @@ export default function HostScreen() {
   // more robust than a hardcoded guess across devices/font scales.
   const [topBarHeight, setTopBarHeight] = useState(0);
   // The host's real network addresses, reported by the launcher (loam-hostinfo): the flat list builds the
-  // Step-2 join QR for shared-WiFi hosting; the (interface, address) pairs back up the native hotspot-
-  // address discovery and its diagnostics line (src/lib/join-display.ts).
+  // Step-2 join QR for shared-WiFi hosting; the (interface, address) pairs and the connected joiners go
+  // straight to the hotspot store (use-hotspot.ts), which folds them into the hotspot-address decision.
   const [hostAddresses, setHostAddresses] = useState<string[]>([]);
-  const [hostInterfaces, setHostInterfaces] = useState<HostInterface[]>([]);
+  // Peer addresses of the devices connected from off this phone — shown as "N phones connected".
+  const [hostClients, setHostClients] = useState<string[]>([]);
   // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
   // ready. Empty when transport encryption is off (or the fetch hasn't resolved yet) — plain URLs,
   // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
@@ -530,7 +532,12 @@ export default function HostScreen() {
       if (Array.isArray(payload?.addresses)) {
         setHostAddresses(payload.addresses.filter((address): address is string => typeof address === 'string'));
       }
-      setHostInterfaces(parseHostInterfaces(payload?.interfaces));
+      noteLauncherInterfaces(parseHostInterfaces(payload?.interfaces));
+      const clients = parseHostClients(payload?.clients);
+      if (clients) {
+        setHostClients(clients);
+        noteConnectedClients(clients);
+      }
     };
 
     // P1-2 (Sol round 3/4): the server's kill switch posts this when a `persistent`/`passphrase`-
@@ -1151,7 +1158,7 @@ export default function HostScreen() {
           onClose={() => setShareOpen(false)}
           transportKeyFragment={transportKeyFragment}
           addresses={hostAddresses}
-          interfaces={hostInterfaces}
+          connectedClients={hostClients}
           keepAwake={keepAwake}
           onKeepAwakeChange={setKeepAwake}
           kiosk={kiosk}

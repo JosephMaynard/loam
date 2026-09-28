@@ -36,7 +36,16 @@ export type HostState = {
   /** Every address the host currently holds that could be the hotspot's, `interface address` each, for
    * the manual fallback. */
   detected?: string[];
+  /** Devices connected to LOAM from off this phone right now — the proof the join path works. */
+  connectedClients?: number;
+  /** The transport `#k=` fragment, appended to the manual-route URL so a hardened node still admits it. */
+  manualFragment?: string;
 };
+
+/** "1 phone connected" / "3 phones connected". */
+export function connectedLabel(count: number): string {
+  return `${count} ${count === 1 ? 'phone' : 'phones'} connected`;
+}
 
 const STATUS_LABEL: Record<HostState['status'], string> = {
   starting: 'Starting host…',
@@ -111,6 +120,11 @@ export function HostPanel({ state }: { state: HostState }) {
                 If that doesn&apos;t load, this host is also at: {state.addresses.join(', ')}
               </ThemedText>
             ) : null}
+            {state.connectedClients ? (
+              <ThemedText type="smallBold" style={styles.manual}>
+                {connectedLabel(state.connectedClients)}
+              </ThemedText>
+            ) : null}
           </>
         ) : state.hotspotAddress === 'searching' ? (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
@@ -121,7 +135,7 @@ export function HostPanel({ state }: { state: HostState }) {
             <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
               Couldn&apos;t work out which address the hotspot is using. On the joining phone, open the
               Wi-Fi details for {state.hotspot?.ssid ?? 'this hotspot'}, find the Gateway (or Router)
-              address, and open http://that-address:3000 in the browser.
+              address, and open http://that-address:3000{state.manualFragment ?? ''} in the browser.
             </ThemedText>
             {state.detected && state.detected.length > 0 ? (
               <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>

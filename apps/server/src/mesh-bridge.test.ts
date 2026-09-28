@@ -30,7 +30,7 @@ type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
 /** The per-boot token the Android launcher mints (`LOAM_HOST_TOKEN`) — the courier presents it. */
 const HOST_TOKEN = "bridge-test-host-token-0123456789abcdef";
 const MESH = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000, maxContacts: 1000 };
-const BRIDGE_PATHS = new Set(["/api/mesh/outbound", "/api/mesh/inbound"]);
+const BRIDGE_PATHS = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients"]);
 
 /** Make `inject` behave like the launcher's courier: bridge requests carry the host token unless the test
  * sets `x-loam-host-token` itself (so authorization tests still control it explicitly). */
@@ -487,6 +487,7 @@ describe("opportunistic mesh: transport bridge", () => {
       const app = await makeApp({ mesh: MESH }, { hostToken: undefined });
       for (const headers of [{}, { "x-loam-host-token": "" }, { "x-loam-host-token": HOST_TOKEN }]) {
         expect((await app.server.inject({ method: "GET", url: "/api/mesh/outbound", headers })).statusCode).toBe(404);
+        expect((await app.server.inject({ method: "GET", url: "/api/host/clients", headers })).statusCode).toBe(404);
         expect(
           (await app.server.inject({ method: "POST", url: "/api/mesh/inbound", headers, payload: { messages: [] } })).statusCode,
         ).toBe(404);
@@ -509,6 +510,27 @@ describe("opportunistic mesh: transport bridge", () => {
       expect((await outbound({ "x-loam-host-token": HOST_TOKEN })).statusCode).toBe(200);
       expect((await outbound({ "x-loam-host-token": "wrong" })).statusCode).toBe(404);
       expect((await outbound({ "x-loam-host-token": HOST_TOKEN }, "192.168.4.7")).statusCode).toBe(404);
+    });
+
+    it("GET /api/host/clients follows the same caller rule, works with mesh OFF, and never counts the host itself", async () => {
+      // Mesh disabled: this endpoint is about hosting, not mail, so it must still answer the launcher.
+      const app = await makeApp({ mesh: { ...MESH, enabled: false } });
+      const clients = (headers: Record<string, string>, remoteAddress?: string) =>
+        app.server.inject({ method: "GET", url: "/api/host/clients", headers, ...(remoteAddress ? { remoteAddress } : {}) });
+      expect((await clients({ "x-loam-host-token": "wrong" })).statusCode).toBe(404);
+      expect((await clients({ "x-loam-host-token": HOST_TOKEN }, "192.168.4.7")).statusCode).toBe(404);
+      expect((await clients({ "x-loam-host-token": HOST_TOKEN })).json()).toEqual({ clients: [] });
+
+      // Admitted sockets are what count, by their peer address: the host's own WebView (loopback) is never a
+      // "connected phone"; two sockets from one joiner are one phone; an IPv4-mapped peer is unmapped.
+      const fakeSocket = { OPEN: 1, readyState: 1, send: () => undefined, close: () => undefined, on: () => undefined };
+      app.sockets.add({ socket: fakeSocket, userId: "user.host", remoteAddress: "127.0.0.1" });
+      app.sockets.add({ socket: fakeSocket, userId: "user.a", remoteAddress: "::ffff:10.80.217.5" });
+      app.sockets.add({ socket: fakeSocket, userId: "user.a", remoteAddress: "10.80.217.5" });
+      app.sockets.add({ socket: fakeSocket, userId: "user.b", remoteAddress: "10.80.217.12" });
+      expect((await clients({ "x-loam-host-token": HOST_TOKEN })).json()).toEqual({
+        clients: ["10.80.217.12", "10.80.217.5"],
+      });
     });
   });
 });

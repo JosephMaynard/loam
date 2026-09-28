@@ -7,6 +7,7 @@ import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, M
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { attachmentFileName, parseAttachmentFileName } from "./media.js";
+import { remoteClientAddresses } from "./net.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 /** Register the node-to-node sync endpoints and the opportunistic-mesh endpoints (cards, contacts, send, bridge, admin sync). */
@@ -331,6 +332,24 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
   // absent) unless `mesh.enabled`, and both refuse any caller that isn't loopback AND presenting the
   // launcher's per-boot host token (`meshBridgeCallerAuthorized`) — so a host with no launcher (desktop/Pi)
   // has no bridge at all. Public-data sync is completely untouched.
+
+  // Who is connected from OFF this host, for the Android share screen (docs/04 "The Step-2 address"): the
+  // distinct non-loopback peer addresses of the admitted WebSockets. The launcher polls it beside its
+  // host-info tick and the share screen shows "1 phone connected" — the only proof that the whole hotspot
+  // path works — and uses a joiner's address to confirm which interface the hotspot is on. Same caller rule
+  // as the mesh bridge (loopback + the launcher's per-boot token; a desktop/Pi has no launcher and 404s),
+  // but NOT gated on mesh — it is about hosting, not mail. Addresses never leave the host: the launcher
+  // hands them to the host's own screen only.
+  ctx.server.get(
+    "/api/host/clients",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute", allowList: () => false } } },
+    async (request, reply) => {
+      if (!ctx.meshBridgeCallerAuthorized(request)) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+      return { clients: remoteClientAddresses([...ctx.sockets].map((session) => session.remoteAddress)) };
+    },
+  );
 
   ctx.server.get(
     "/api/mesh/outbound",
