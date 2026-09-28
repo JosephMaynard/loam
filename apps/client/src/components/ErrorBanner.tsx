@@ -1,6 +1,7 @@
 import { useEffect } from "preact/hooks";
 
 import { t } from "../i18n";
+import { IconClose } from "./icons";
 
 /** How long a transient (action) error stays up before dismissing itself. */
 export const ERROR_BANNER_AUTO_DISMISS_MS = 8_000;
@@ -35,8 +36,13 @@ export function ErrorBanner({ message, transient, onDismiss }: ErrorBannerProps)
   return (
     <div className="connection-error" role="alert">
       <p>{message}</p>
-      <button aria-label={t("common.dismiss")} className="close-button" onClick={onDismiss} type="button">
-        ×
+      <button
+        aria-label={t("common.dismiss")}
+        className="btn btn-icon btn-sm banner-close"
+        onClick={onDismiss}
+        type="button"
+      >
+        <IconClose size={18} />
       </button>
     </div>
   );

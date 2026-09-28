@@ -631,4 +631,6 @@ export const ru: Translation = {
   "error.dm_blocked_by_you": "Вы заблокировали этого человека. Разблокируйте его, чтобы отправить сообщение",
   "error.channel_member_unavailable": "Этот человек недоступен для этого канала",
   "error.block_not_allowed": "Этого пользователя нельзя заблокировать",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

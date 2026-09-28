@@ -1,5 +1,6 @@
 import { Component, type ComponentChildren } from "preact";
 
+import loamMark from "../assets/loam.svg";
 import { t } from "../i18n";
 
 interface ErrorBoundaryState {
@@ -35,16 +36,16 @@ export class ErrorBoundary extends Component<{ children: ComponentChildren }, Er
     }
 
     return (
-      <main className="wiped-screen" role="alert">
-        <div>
-          <p className="brand-title">LOAM</p>
+      <main className="gate-screen wiped-screen" role="alert">
+        <div className="gate-card">
+          <img alt="LOAM" className="gate-mark" src={loamMark} />
           <h1>{t("app.crashTitle")}</h1>
           <p>{t("app.crashBody")}</p>
-          <div className="profile-actions crash-actions">
-            <button onClick={this.goHome} type="button">
+          <div className="dialog-actions crash-actions">
+            <button className="btn btn-primary" onClick={this.goHome} type="button">
               {t("app.crashHome")}
             </button>
-            <button className="ghost-button" onClick={() => window.location.reload()} type="button">
+            <button className="btn btn-secondary" onClick={() => window.location.reload()} type="button">
               {t("app.crashReload")}
             </button>
           </div>

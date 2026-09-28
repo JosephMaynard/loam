@@ -1,0 +1,644 @@
+/* Screens: settings, admin, people & moderation, search, mesh mail, report queue, avatar editor.
+   WAVE 1: the pre-redesign rules moved onto the new tokens so the app stays coherent. WAVE 2 REWRITES THIS
+   FILE onto the card/list/field primitives — see the checklist in DESIGN.md. */
+
+/* ---------- Screen body ---------- */
+
+.settings-view {
+  background: var(--bg-app);
+}
+
+.settings-view > .screen-header,
+.settings-view > .conversation-header {
+  flex: none;
+}
+
+/* Everything under the header scrolls as one area. */
+.settings-view > :not(.screen-header):not(.conversation-header) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.settings-view > .form-note {
+  padding: var(--space-4);
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+  align-content: start;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+}
+
+/* ---------- Panels (become .card in wave 2) ---------- */
+
+.join-panel,
+.identity-panel,
+.profile-panel {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: var(--space-4);
+}
+
+.join-panel,
+.profile-panel,
+.profile-panel-form {
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+}
+
+.profile-panel {
+  grid-column: 1 / -1;
+}
+
+.join-panel p,
+.identity-panel p {
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.identity-panel {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.identity-panel .avatar {
+  width: 72px;
+  height: 72px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.panel-heading h2,
+.profile-panel h2,
+.join-panel h2 {
+  font-size: var(--text-lg);
+}
+
+.profile-panel label {
+  display: grid;
+  gap: 6px;
+  color: var(--fg);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.profile-panel label.admin-toggle {
+  display: flex;
+  font-weight: 400;
+}
+
+.profile-panel input,
+.profile-panel select,
+.profile-panel textarea,
+.search-form input,
+.mesh-card-text {
+  width: 100%;
+  min-height: var(--control-h);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  padding: 10px var(--space-3);
+  font-weight: 400;
+}
+
+.profile-panel textarea {
+  resize: vertical;
+}
+
+.profile-panel input:focus,
+.profile-panel select:focus,
+.profile-panel textarea:focus,
+.search-form input:focus,
+.mesh-card-text:focus {
+  border-color: var(--focus);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.profile-panel input[type="range"] {
+  min-height: 28px;
+  border: 0;
+  padding: 0;
+  accent-color: var(--primary);
+}
+
+.profile-panel .admin-toggle input[type="checkbox"] {
+  width: 18px;
+  min-height: 0;
+  height: 18px;
+  padding: 0;
+}
+
+.node-version,
+.transport-fingerprint {
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.qr-box,
+.invite-qr {
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: var(--space-2);
+}
+
+.qr-box svg {
+  width: 100%;
+  max-width: 280px;
+  height: auto;
+}
+
+.invite-qr svg {
+  width: 100%;
+  max-width: 180px;
+  height: auto;
+}
+
+.invite-panel,
+.node-link-control {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.invite-panel {
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  padding: 10px;
+}
+
+.invite-url {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+/* A lone text link styled as the primary action. */
+.admin-open-link {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 6px;
+  min-height: 40px;
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: var(--primary-fg);
+  padding: 0 var(--space-4);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.admin-open-link:hover {
+  background: var(--primary-hover);
+}
+
+.danger-zone {
+  display: grid;
+  gap: var(--space-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  padding: var(--space-4);
+}
+
+/* ---------- Legacy button rows (wave 2: .btn classes) ---------- */
+
+.profile-actions,
+.admin-channel-actions,
+.moderation-actions,
+.avatar-editor-controls,
+.report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.profile-actions button,
+.admin-channel-actions button,
+.moderation-actions button,
+.avatar-editor-controls button,
+.report-actions button,
+.search-form button,
+.report-dialog-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background-color: var(--bg-elevated);
+  color: var(--fg);
+  padding: 0 14px;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+/* A row's submit (or the lone default button) is its primary action. */
+.profile-actions button:not([type="button"]),
+.search-form button,
+.report-dialog-actions button[type="submit"],
+.avatar-editor-controls button:last-child {
+  border-color: transparent;
+  background-color: var(--primary);
+  color: var(--primary-fg);
+}
+
+.profile-actions button.danger-button,
+.admin-channel-actions button.danger-button,
+.moderation-actions button.danger-button {
+  border-color: transparent;
+  background-color: var(--danger-solid);
+  color: #ffffff;
+}
+
+.profile-actions button:hover:not(:disabled),
+.admin-channel-actions button:hover:not(:disabled),
+.moderation-actions button:hover:not(:disabled),
+.avatar-editor-controls button:hover:not(:disabled),
+.report-actions button:hover:not(:disabled),
+.search-form button:hover:not(:disabled),
+.report-dialog-actions button:hover:not(:disabled) {
+  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+}
+
+.profile-actions button:disabled,
+.admin-channel-actions button:disabled,
+.moderation-actions button:disabled,
+.avatar-editor-controls button:disabled,
+.search-form button:disabled,
+.report-dialog-actions button:disabled {
+  opacity: 0.5;
+}
+
+.crash-actions {
+  justify-content: center;
+}
+
+/* ---------- Admin channels ---------- */
+
+.admin-channel-list,
+.moderation-list,
+.report-list,
+.blocked-users-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-channel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: var(--space-3);
+}
+
+.admin-channel-main {
+  display: grid;
+  flex: 1 1 200px;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.admin-channel.archived .admin-channel-main {
+  opacity: 0.6;
+}
+
+.admin-channel-meta {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.admin-channel .form-error {
+  flex-basis: 100%;
+}
+
+.admin-channel-ttl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-md);
+}
+
+/* ---------- Avatar editor ---------- */
+
+.avatar-upload-panel,
+.avatar-editor {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.avatar-upload-panel {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+.avatar-editor {
+  max-width: 380px;
+}
+
+.avatar-crop-canvas {
+  width: 256px;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background:
+    linear-gradient(45deg, var(--bg-sunken) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--bg-sunken) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--bg-sunken) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--bg-sunken) 75%),
+    var(--bg-elevated);
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.avatar-crop-canvas:active {
+  cursor: grabbing;
+}
+
+/* ---------- People, moderation, reports ---------- */
+
+.moderation-row,
+.report-row {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: var(--space-3);
+}
+
+.moderation-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.moderation-identity .avatar {
+  width: 36px;
+  height: 36px;
+}
+
+.moderation-name {
+  display: grid;
+  min-width: 0;
+}
+
+.moderation-name strong,
+.moderation-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.moderation-name span {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.sync-peer .moderation-name span {
+  overflow-wrap: anywhere;
+}
+
+.moderation-controls,
+.sync-status,
+.sync-peer-add,
+.mesh-compose,
+.report-queue {
+  display: grid;
+  gap: 10px;
+}
+
+.report-queue {
+  margin-block-end: var(--space-4);
+}
+
+.moderation-note {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.role-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) 18px;
+}
+
+.state-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  padding: 2px 9px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.badge-admin {
+  background: var(--primary-soft);
+  color: var(--link);
+}
+
+.badge-pending {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.badge-banned,
+.badge-shadow {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.report-meta {
+  display: grid;
+  gap: 2px;
+  font-size: var(--text-md);
+}
+
+.report-note {
+  margin-top: var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  padding: 6px var(--space-2);
+  white-space: pre-wrap;
+}
+
+.blocked-users-list li {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.blocked-users-list .avatar {
+  width: 36px;
+  height: 36px;
+}
+
+.blocked-users-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.privacy-policy-link {
+  margin-top: var(--space-1);
+  font-size: var(--text-md);
+}
+
+.getting-started {
+  grid-column: 1 / -1;
+}
+
+.getting-started-steps {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--fg-muted);
+  padding-inline-start: var(--space-5);
+  font-size: var(--text-md);
+}
+
+/* ---------- Sync & mesh ---------- */
+
+.sync-token-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sync-token-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.mesh-card-text {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  word-break: break-all;
+  resize: vertical;
+}
+
+/* ---------- Search ---------- */
+
+.search-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.search-content .form-error,
+.search-content .form-note {
+  padding: 0 var(--space-5);
+}
+
+.search-form {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5) 0;
+}
+
+.search-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-results {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3) var(--space-5) var(--space-5);
+  list-style: none;
+}
+
+.search-result-button,
+.search-result-blocked {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--fg);
+  padding: 10px var(--space-3);
+  text-align: start;
+}
+
+.search-result-button:hover {
+  background: var(--bg-elevated);
+}
+
+.search-result-blocked {
+  border-style: dashed;
+  color: var(--fg-muted);
+}
+
+.search-result-meta {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.search-result-meta strong {
+  color: var(--fg);
+}
+
+.search-result-body {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--text-md);
+  line-height: 1.4;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+@media (max-width: 719.98px) {
+  .settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-3);
+    padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  }
+
+  .search-form,
+  .search-results {
+    padding-inline: var(--space-3);
+  }
+}

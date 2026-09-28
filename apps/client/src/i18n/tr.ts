@@ -621,4 +621,6 @@ export const tr: Translation = {
   "error.dm_blocked_by_you": "Bu kişiyi engellediniz. Mesaj göndermek için engeli kaldırın",
   "error.channel_member_unavailable": "Bu kişi bu kanal için uygun değil",
   "error.block_not_allowed": "Bu kullanıcı engellenemez",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

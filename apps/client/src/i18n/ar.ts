@@ -635,4 +635,6 @@ export const ar: Translation = {
   "error.dm_blocked_by_you": "لقد حظرت هذا الشخص. ألغِ حظره لترسل إليه رسالة",
   "error.channel_member_unavailable": "هذا الشخص غير متاح لهذه القناة",
   "error.block_not_allowed": "لا يمكن حظر هذا المستخدم",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

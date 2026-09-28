@@ -3,30 +3,7 @@ import { useEffect, useId, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { ATTACHMENT_MAX_COUNT } from "../lib/attachments";
-
-/**
- * Paper-plane "send" glyph for the composer's submit button — same inline-SVG convention as
- * `BackArrowIcon`/the attach paperclip (fixed viewBox, `currentColor`, round strokes, `aria-hidden`
- * since the button itself carries the accessible label).
- */
-function SendIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      fill="none"
-      height="20"
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      stroke-width="2"
-      viewBox="0 0 24 24"
-      width="20"
-    >
-      <path d="M22 2L11 13" />
-      <path d="M22 2l-7 20-4-9-9-4 20-7z" />
-    </svg>
-  );
-}
+import { IconAttach, IconSend as SendIcon } from "./icons";
 
 interface MessageComposerProps {
   /** When true, the composer offers the "share location" toggle (docs/10; off by default). */
@@ -319,19 +296,7 @@ export function MessageComposer({ allowLocationSharing, disabledReason, label, o
                 title={t("composer.attachImageHint")}
                 type="button"
               >
-                <svg
-                  aria-hidden="true"
-                  fill="none"
-                  height="20"
-                  stroke="currentColor"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  viewBox="0 0 24 24"
-                  width="20"
-                >
-                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                </svg>
+                <IconAttach />
               </button>
             </>
           ) : null}

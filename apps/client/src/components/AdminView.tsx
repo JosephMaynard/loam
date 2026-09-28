@@ -23,8 +23,8 @@ import { AdminChannelsPanel } from "./AdminChannelsPanel";
 import { GettingStartedPanel } from "./GettingStartedPanel";
 import { LlmPanel } from "./LlmPanel";
 import { MeshPanel } from "./MeshPanel";
-import { MobileBackLink } from "./MobileBackLink";
 import { NodeLinkControl } from "./NodeLinkControl";
+import { ScreenHeader } from "./ScreenHeader";
 import { SyncStatusPanel } from "./SyncStatusPanel";
 
 /** Feature-flag toggle labels, resolved against the active locale at render time. */
@@ -301,13 +301,7 @@ export function AdminView({
   if (!currentUser.isAdmin) {
     return (
       <section className="settings-view">
-        <header className="conversation-header">
-          <MobileBackLink />
-          <div>
-            <p className="eyebrow">{t("admin.eyebrow")}</p>
-            <h1>{t("people.notAuthorizedTitle")}</h1>
-          </div>
-        </header>
+        <ScreenHeader title={t("people.notAuthorizedTitle")} />
         <p className="form-note">{t("admin.notAuthorizedNote")}</p>
       </section>
     );
@@ -315,13 +309,7 @@ export function AdminView({
 
   return (
     <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("admin.eyebrow")}</p>
-          <h1>{t("admin.title")}</h1>
-        </div>
-      </header>
+      <ScreenHeader title={t("admin.title")} />
       {loadError ? <p className="form-error">{loadError}</p> : null}
       {!adminConfig && !loadError ? <p className="form-note">{t("admin.loading")}</p> : null}
       {adminConfig ? (

@@ -389,7 +389,7 @@ export const en = {
   "sidebar.statusOffline": "offline",
 
   // New-channel control (sidebar).
-  "newChannel.new": "+ New channel",
+  "newChannel.new": "New channel",
   "newChannel.nameAria": "New channel name",
   "newChannel.namePlaceholder": "Channel name",
   "newChannel.private": "Private (invite-only)",
@@ -694,6 +694,8 @@ export const en = {
   "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
   "error.channel_member_unavailable": "This person isn't available for this channel",
   "error.block_not_allowed": "This user can't be blocked",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };
 
 /**

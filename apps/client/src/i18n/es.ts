@@ -621,4 +621,6 @@ export const es: Translation = {
   "error.dm_blocked_by_you": "Has bloqueado a esta persona. Desbloquéala para enviarle un mensaje",
   "error.channel_member_unavailable": "Esta persona no está disponible para este canal",
   "error.block_not_allowed": "No se puede bloquear a este usuario",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

@@ -621,4 +621,6 @@ export const sw: Translation = {
   "error.dm_blocked_by_you": "Umemzuia mtu huyu. Ondoa kizuizi ili kumtumia ujumbe",
   "error.channel_member_unavailable": "Mtu huyu hapatikani kwa kituo hiki",
   "error.block_not_allowed": "Mtumiaji huyu hawezi kuzuiwa",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

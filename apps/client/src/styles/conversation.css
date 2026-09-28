@@ -1,0 +1,762 @@
+/* Conversation: header, message list, bubbles, actions, composer, thread panel, members panel.
+   WAVE 1: the pre-redesign rules moved onto the new tokens (and the pane made a flex column) so the app
+   stays coherent. WAVE 2 REWRITES THIS FILE — see the checklist in DESIGN.md. */
+
+/* ---------- Pane ---------- */
+
+/* A flex column, not a fixed 3-row grid: the header block, the list (the only flexible child), then any
+   number of fixed rows (typing indicator, composer). A 4th child used to overflow the grid and push the
+   composer off screen. */
+.conversation {
+  background: var(--bg-app);
+}
+
+.conversation > .message-list,
+.thread-panel > .thread-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.conversation > :not(.message-list),
+.thread-panel > :not(.thread-scroll) {
+  flex: none;
+}
+
+.conversation-top {
+  min-height: 0;
+}
+
+.conversation-header,
+.thread-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--header-h);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  padding: var(--space-1) var(--space-2);
+}
+
+.conversation-heading,
+.thread-header > div {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 var(--space-2);
+}
+
+.conversation-header .eyebrow,
+.thread-header .eyebrow {
+  display: none;
+}
+
+.conversation-header h1,
+.thread-header h2 {
+  overflow: hidden;
+  font-size: var(--text-lg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-description {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-header-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.conversation-not-found {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-2);
+  text-align: center;
+}
+
+/* ---------- Message list ---------- */
+
+.message-list,
+.thread-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-3) var(--space-4);
+}
+
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.message-list > .empty-copy {
+  margin: auto;
+  text-align: center;
+}
+
+/* Own messages to the inline END, others to the inline START (auto margins, so RTL flips). */
+.message {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  /* Shrink to the bubble so auto margins can push own messages to the inline end. */
+  width: -moz-fit-content;
+  width: fit-content;
+  max-width: 78%;
+  margin-inline-end: auto;
+}
+
+.message.mine {
+  margin-inline-start: auto;
+  margin-inline-end: 0;
+}
+
+.message > .avatar {
+  width: 32px;
+  height: 32px;
+}
+
+.message-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--space-1);
+}
+
+.message-meta strong {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.message-meta span {
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+}
+
+.message.streaming .markdown-body {
+  color: var(--fg-muted);
+}
+
+/* ---------- Bubble ---------- */
+
+.message-bubble {
+  min-width: 0;
+  border: 1px solid var(--bubble-theirs-border);
+  border-radius: var(--radius-xl);
+  background: var(--bubble-theirs);
+  box-shadow: var(--shadow-1);
+  color: var(--bubble-theirs-fg);
+  padding: 7px 12px;
+}
+
+.message:not(.mine) .message-bubble {
+  border-end-start-radius: var(--radius-sm);
+}
+
+.message.mine .message-bubble {
+  border-color: var(--bubble-mine);
+  background: var(--bubble-mine);
+  color: var(--bubble-mine-fg);
+  border-end-end-radius: var(--radius-sm);
+}
+
+.message.mentions-you .message-bubble {
+  border-inline-start: 3px solid var(--accent);
+}
+
+/* Jumbo emoji (1–3 emoji and nothing else): no bubble chrome at all. */
+.message.jumbo .message-bubble {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  padding: 0;
+}
+
+.message-jumbo-emoji {
+  font-size: 2.6rem;
+  line-height: 1.15;
+}
+
+.markdown-body {
+  color: inherit;
+  font-size: var(--text-base);
+  line-height: var(--leading);
+  overflow-wrap: anywhere;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre {
+  margin: 6px 0 0;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-inline-start: var(--space-5);
+}
+
+.markdown-body blockquote {
+  border-inline-start: 3px solid var(--border-strong);
+  color: var(--fg-muted);
+  padding-inline-start: 10px;
+}
+
+.markdown-body code {
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  padding: 1px 5px;
+}
+
+.markdown-body pre {
+  overflow-x: auto;
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: var(--space-3);
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-body a {
+  color: var(--link);
+}
+
+.edited-tag {
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  font-style: italic;
+}
+
+.message-removed {
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  font-style: italic;
+}
+
+/* ---------- Message actions (reactions, thread, edit/delete/report) ---------- */
+
+.message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.reaction,
+.quick-reaction,
+.thread-button,
+.streaming-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--fg);
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.reaction.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.reaction:hover,
+.quick-reaction:hover,
+.thread-button:hover {
+  background-color: var(--bg-sunken);
+}
+
+.thread-button {
+  color: var(--link);
+  font-weight: 600;
+}
+
+.streaming-pill {
+  color: var(--fg-muted);
+}
+
+.quick-reaction {
+  opacity: 0;
+}
+
+.message:hover .quick-reaction,
+.quick-reaction:focus-visible {
+  opacity: 1;
+}
+
+.message-icon-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-inline-start: auto;
+}
+
+.message-delete,
+.message-edit-button,
+.message-report {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  color: var(--fg-muted);
+  opacity: 0;
+}
+
+.message:hover .message-delete,
+.message:hover .message-edit-button,
+.message:hover .message-report,
+.message-delete:focus-visible,
+.message-edit-button:focus-visible,
+.message-report:focus-visible {
+  opacity: 1;
+}
+
+.message-edit-button:hover,
+.message-report:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.message-delete:hover {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* Touch can't hover, so these stay visible there (wave 2 moves them behind long-press). */
+@media (hover: none) {
+  .message-delete,
+  .message-edit-button,
+  .message-report {
+    opacity: 1;
+  }
+}
+
+.message-edit {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.message-edit textarea {
+  width: 100%;
+  min-height: 64px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  padding: var(--space-2) 10px;
+  resize: vertical;
+}
+
+.message-edit textarea:focus {
+  border-color: var(--focus);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.message-edit-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.message-edit-actions button {
+  min-height: var(--control-h-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: var(--primary-fg);
+  padding: 0 var(--space-3);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.message-edit-actions button[type="button"] {
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+
+/* ---------- Attachments & location ---------- */
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: 6px;
+}
+
+.message-attachment {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-width: min(320px, 100%);
+  height: auto;
+  max-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--link);
+  padding: 6px 10px;
+  font-size: var(--text-md);
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.location-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  max-width: min(320px, 100%);
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  padding: var(--space-2) 10px;
+}
+
+.location-pin {
+  font-size: 1.1rem;
+  line-height: 1.4;
+}
+
+.location-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.location-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.location-coords {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.location-open-maps {
+  color: var(--link);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+/* ---------- Typing indicator ---------- */
+
+.typing-indicator {
+  min-height: 1.4em;
+  color: var(--fg-muted);
+  padding: 2px var(--space-4);
+  font-size: var(--text-sm);
+  font-style: italic;
+}
+
+/* ---------- Composer ---------- */
+
+.composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+  padding: var(--space-2) var(--space-3);
+  padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+}
+
+.composer.has-attach {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: var(--control-h);
+  max-height: 168px;
+  border: 1px solid var(--border-strong);
+  border-radius: 22px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  padding: 10px var(--space-4);
+  line-height: 1.4;
+  resize: none;
+}
+
+.composer textarea:focus {
+  border-color: var(--focus);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.composer-tools {
+  display: flex;
+  gap: 2px;
+}
+
+.composer .composer-attach {
+  display: grid;
+  place-items: center;
+  width: var(--control-h);
+  height: var(--control-h);
+  border-radius: var(--radius-full);
+  color: var(--fg-muted);
+  font-size: var(--text-xl);
+}
+
+.composer .composer-attach:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.composer-location-toggle[aria-pressed="true"] {
+  background: var(--primary-soft);
+  color: var(--fg);
+}
+
+.composer .composer-send {
+  display: grid;
+  place-items: center;
+  width: var(--control-h);
+  height: var(--control-h);
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.composer .composer-send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.composer button:disabled {
+  opacity: 0.45;
+}
+
+.composer-attachments,
+.composer-location-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  grid-column: 1 / -1;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  padding: 2px var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.attachment-chip.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.attachment-chip-name,
+.attachment-chip-error {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip-name {
+  max-width: 160px;
+}
+
+.attachment-chip-error {
+  max-width: 220px;
+}
+
+.attachment-chip button {
+  min-height: 0;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font-size: var(--text-md);
+  line-height: 1;
+}
+
+.composer-location-label {
+  flex: 1;
+  min-width: 140px;
+}
+
+.composer-location-coord {
+  width: 110px;
+}
+
+.composer-location-form input {
+  min-height: 40px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  padding: 6px 10px;
+}
+
+.composer-location-form input:focus {
+  border-color: var(--focus);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.composer-disabled {
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--fg-muted);
+  padding: var(--space-3) var(--space-4);
+  padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  font-size: var(--text-md);
+  text-align: center;
+}
+
+/* ---------- Thread panel ---------- */
+
+.thread-panel {
+  border-inline-start: 1px solid var(--border);
+  background: var(--bg-app);
+}
+
+.reply-divider {
+  margin: var(--space-3) 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+/* ---------- Blocked DM banner, members panel, report dialog ---------- */
+
+.blocked-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  padding: 10px var(--space-4);
+  font-size: var(--text-md);
+}
+
+.channel-members-panel {
+  display: grid;
+  gap: var(--space-3);
+  max-height: 45vh;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  padding: var(--space-3) var(--space-4);
+}
+
+.member-invite-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.member-invite-form label {
+  display: grid;
+  flex: 1;
+  gap: var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.member-invite-form select {
+  min-height: var(--control-h-sm);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  padding: 0 var(--space-2);
+}
+
+.report-dialog form {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.report-dialog label {
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.report-dialog select,
+.report-dialog textarea {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  padding: var(--space-2) 10px;
+  font-weight: 400;
+}
+
+.report-dialog select {
+  min-height: var(--control-h);
+}
+
+.report-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.report-dialog-sent {
+  margin: var(--space-2) 0 var(--space-4);
+}
+
+@media (max-width: 719.98px) {
+  .message-list,
+  .thread-scroll {
+    padding: var(--space-3);
+  }
+
+  .message {
+    max-width: 88%;
+  }
+}

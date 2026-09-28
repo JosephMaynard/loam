@@ -621,4 +621,6 @@ export const my: Translation = {
   "error.dm_blocked_by_you": "သင်သည် ဤသူကို ပိတ်ဆို့ထားသည်။ မက်ဆေ့ချ်ပို့ရန် ပိတ်ဆို့မှုကို ဖြုတ်ပါ",
   "error.channel_member_unavailable": "ဤသူသည် ဤ channel အတွက် မရနိုင်ပါ",
   "error.block_not_allowed": "ဤအသုံးပြုသူကို ပိတ်ဆို့၍ မရပါ",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

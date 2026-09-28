@@ -631,4 +631,6 @@ export const uk: Translation = {
   "error.dm_blocked_by_you": "Ви заблокували цю людину. Розблокуйте її, щоб надіслати повідомлення",
   "error.channel_member_unavailable": "Ця людина недоступна для цього каналу",
   "error.block_not_allowed": "Цього користувача не можна заблокувати",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

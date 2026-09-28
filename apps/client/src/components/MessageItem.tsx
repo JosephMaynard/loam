@@ -10,75 +10,10 @@ import { isJumboEmoji, type ReactionSummary } from "../lib/messages";
 import { AttachmentFile } from "./AttachmentFile";
 import { AttachmentImage } from "./AttachmentImage";
 import { Avatar } from "./Avatar";
+import { IconEdit as PencilIcon, IconFlag as FlagIcon, IconTrash as TrashIcon } from "./icons";
 import { LocationCard } from "./LocationCard";
 
 const QUICK_REACTIONS = ["👍", "❤️", "✅"];
-
-/**
- * Small pencil glyph for the "edit message" icon button — same inline-SVG convention as
- * `BackArrowIcon`/the composer's paperclip (fixed viewBox, `currentColor`, round strokes,
- * `aria-hidden` since the enclosing button carries the accessible label).
- */
-function PencilIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      fill="none"
-      height="16"
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      stroke-width="2"
-      viewBox="0 0 24 24"
-      width="16"
-    >
-      <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-    </svg>
-  );
-}
-
-/** Small flag glyph for the "report message" icon button — same convention as `PencilIcon`. */
-function FlagIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      fill="none"
-      height="16"
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      stroke-width="2"
-      viewBox="0 0 24 24"
-      width="16"
-    >
-      <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
-      <line x1="4" x2="4" y1="22" y2="15" />
-    </svg>
-  );
-}
-
-/** Small trash-can glyph for the "delete message" icon button — same convention as `PencilIcon`. */
-function TrashIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      fill="none"
-      height="16"
-      stroke="currentColor"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      stroke-width="2"
-      viewBox="0 0 24 24"
-      width="16"
-    >
-      <path d="M3 6h18" />
-      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-      <path d="M10 11v6" />
-      <path d="M14 11v6" />
-    </svg>
-  );
-}
 
 interface MessageItemProps {
   currentUser: User;
@@ -325,7 +260,7 @@ export function MessageItem({
                   title={t("message.edit")}
                   type="button"
                 >
-                  <PencilIcon />
+                  <PencilIcon size={16} />
                 </button>
               ) : null}
               {canDelete ? (
@@ -336,7 +271,7 @@ export function MessageItem({
                   title={isMine ? t("message.deleteOwnTitle") : t("message.deleteAdminTitle")}
                   type="button"
                 >
-                  <TrashIcon />
+                  <TrashIcon size={16} />
                 </button>
               ) : null}
               {canReport ? (
@@ -347,7 +282,7 @@ export function MessageItem({
                   title={t("message.report")}
                   type="button"
                 >
-                  <FlagIcon />
+                  <FlagIcon size={16} />
                 </button>
               ) : null}
             </div>

@@ -621,4 +621,6 @@ export const bn: Translation = {
   "error.dm_blocked_by_you": "আপনি এই ব্যক্তিকে ব্লক করেছেন। বার্তা পাঠাতে তাঁকে আনব্লক করুন",
   "error.channel_member_unavailable": "এই ব্যক্তি এই চ্যানেলের জন্য উপলব্ধ নন",
   "error.block_not_allowed": "এই ব্যবহারকারীকে ব্লক করা যায় না",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

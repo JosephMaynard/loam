@@ -21,9 +21,11 @@ import {
   type UserUpdateRequest,
 } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
+import type { ComponentChildren } from "preact";
 import { LocationProvider, useLocation } from "preact-iso";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 
+import loamMark from "./assets/loam.svg";
 import { AdminView } from "./components/AdminView";
 import { Avatar } from "./components/Avatar";
 import { AvatarImageEditor } from "./components/AvatarImageEditor";
@@ -31,9 +33,9 @@ import { BlockedUsersPanel } from "./components/BlockedUsersPanel";
 import { ConversationView } from "./components/ConversationView";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { MobileBackLink } from "./components/MobileBackLink";
 import { NavLink } from "./components/NavLink";
 import { PinChangePrompt } from "./components/PinChangePrompt";
+import { ScreenHeader } from "./components/ScreenHeader";
 import { SearchResult } from "./components/SearchResult";
 import { Sidebar } from "./components/Sidebar";
 import { ApiError, fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
@@ -2056,28 +2058,25 @@ function LoamApp() {
 
   if (needsQr) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          {pinChange ? (
-            // The pinned key stopped working and a freshly opened join link carries another one (e.g. the
-            // node restarted with a new key and this is its new QR): only an explicit confirmation replaces
-            // the pin, and only when the link's key is the one the node reported.
-            <PinChangePrompt
-              current={pinChange.current}
-              matchesNode={pinChange.matchesNode}
-              next={pinChange.next}
-              onAccept={onAcceptPinChange}
-              onReject={onRejectPinChange}
-            />
-          ) : (
-            <>
-              <h1>{t("gate.needsQrTitle")}</h1>
-              <p>{t(needsQr === "changed" ? "gate.needsQrKeyChanged" : "gate.needsQrBody")}</p>
-            </>
-          )}
-        </div>
-      </main>
+      <GateScreen>
+        {pinChange ? (
+          // The pinned key stopped working and a freshly opened join link carries another one (e.g. the
+          // node restarted with a new key and this is its new QR): only an explicit confirmation replaces
+          // the pin, and only when the link's key is the one the node reported.
+          <PinChangePrompt
+            current={pinChange.current}
+            matchesNode={pinChange.matchesNode}
+            next={pinChange.next}
+            onAccept={onAcceptPinChange}
+            onReject={onRejectPinChange}
+          />
+        ) : (
+          <>
+            <h1>{t("gate.needsQrTitle")}</h1>
+            <p>{t(needsQr === "changed" ? "gate.needsQrKeyChanged" : "gate.needsQrBody")}</p>
+          </>
+        )}
+      </GateScreen>
     );
   }
 
@@ -2085,67 +2084,56 @@ function LoamApp() {
     // Local data is still being erased — show a TRUTHFUL "Wiping…" state, never the completed screen,
     // until local deletion has finished (docs/20).
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <h1>{t("settings.wiping")}</h1>
-        </div>
-      </main>
+      <GateScreen>
+        <h1>{t("settings.wiping")}</h1>
+      </GateScreen>
     );
   }
 
   if (wiped) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          {wipeScope === "device" ? (
-            <>
-              <h1>{t("gate.deviceWipedTitle")}</h1>
-              <p>{t("gate.deviceWipedBody")}</p>
-            </>
-          ) : (
-            <>
-              <h1>{t("gate.disconnectedTitle")}</h1>
-              <p>{t("gate.disconnectedBody")}</p>
-            </>
-          )}
-        </div>
-      </main>
+      <GateScreen>
+        {wipeScope === "device" ? (
+          <>
+            <h1>{t("gate.deviceWipedTitle")}</h1>
+            <p>{t("gate.deviceWipedBody")}</p>
+          </>
+        ) : (
+          <>
+            <h1>{t("gate.disconnectedTitle")}</h1>
+            <p>{t("gate.disconnectedBody")}</p>
+          </>
+        )}
+      </GateScreen>
     );
   }
 
   if (currentUser.banned) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <h1>{t("gate.bannedTitle")}</h1>
-          <p>{t("gate.bannedBody")}</p>
-        </div>
-      </main>
+      <GateScreen>
+        <h1>{t("gate.bannedTitle")}</h1>
+        <p>{t("gate.bannedBody")}</p>
+      </GateScreen>
     );
   }
 
   if (currentUser.pending) {
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <h1>{t("gate.pendingTitle")}</h1>
-          <p>{t("gate.pendingBody")}</p>
-          <p className="gate-status">
-            {t("gate.connection", {
-              status:
-                connection === "live"
-                  ? t("sidebar.statusLive")
-                  : connection === "offline"
-                    ? t("sidebar.statusOffline")
-                    : t("sidebar.statusConnecting"),
-            })}
-          </p>
-        </div>
-      </main>
+      <GateScreen>
+        <h1>{t("gate.pendingTitle")}</h1>
+        <p>{t("gate.pendingBody")}</p>
+        <p className={`gate-status status-pill status-${connection}`}>
+          <span aria-hidden="true" className="status-dot" />
+          {t("gate.connection", {
+            status:
+              connection === "live"
+                ? t("sidebar.statusLive")
+                : connection === "offline"
+                  ? t("sidebar.statusOffline")
+                  : t("sidebar.statusConnecting"),
+          })}
+        </p>
+      </GateScreen>
     );
   }
 
@@ -2154,17 +2142,20 @@ function LoamApp() {
     // hands back a different one, and the cache is purged first), the node proved unreachable, or the cap
     // passed — see IDENTITY_GATE_MAX_MS.
     return (
-      <main className="wiped-screen">
-        <div>
-          <p className="brand-title">LOAM</p>
-          <p className="gate-status">{t("sidebar.statusConnecting")}</p>
-        </div>
-      </main>
+      <GateScreen>
+        <p className="gate-status status-pill status-connecting">
+          <span aria-hidden="true" className="status-dot" />
+          {t("sidebar.statusConnecting")}
+        </p>
+      </GateScreen>
     );
   }
 
   return (
     <>
+    {/* The frame is fixed to the visible viewport (--vvh, see lib/viewport.ts): the document never
+        scrolls, so an open keyboard can't push the header off screen. */}
+    <div className="app-frame">
     {config?.networkConfig.devMode ? (
       <div className="dev-mode-banner" role="alert">
         {t("devMode.banner")}
@@ -2173,6 +2164,7 @@ function LoamApp() {
     <main className={shellClassName}>
       <Sidebar
         activeConversation={activeConversation}
+        activeScreen={routeState.screen === "channels" ? undefined : routeState.screen}
         canCreateChannel={currentUser.isAdmin || !!config?.networkConfig.enableUserChannels}
         canCreatePrivateChannel={!!config?.networkConfig.enablePrivateChannels}
         channels={channels}
@@ -2284,11 +2276,28 @@ function LoamApp() {
         />
       )}
     </main>
+    </div>
     {error ? (
       <ErrorBanner key={error.id} message={error.text} onDismiss={dismissError} transient={!error.persistent} />
     ) : null}
     <ToastStack onDismiss={dismissToast} toasts={toasts} />
     </>
+  );
+}
+
+/**
+ * The full-screen card shown instead of the app while it can't (or mustn't) show content: the rescan gate,
+ * a wipe in progress or done, a ban, the approval queue, the identity check. Brand mark on top, then the
+ * caller's heading and copy.
+ */
+function GateScreen({ children }: { children: ComponentChildren }) {
+  return (
+    <main className="gate-screen wiped-screen">
+      <div className="gate-card">
+        <img alt="LOAM" className="gate-mark" src={loamMark} />
+        {children}
+      </div>
+    </main>
   );
 }
 
@@ -2408,13 +2417,7 @@ function SearchView({
 
   return (
     <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("search.eyebrow")}</p>
-          <h1>{t("search.title")}</h1>
-        </div>
-      </header>
+      <ScreenHeader title={t("search.title")} />
       {/* One wrapper = one grid row: .settings-view is a strict header/content 2-row grid. */}
       <div className="search-content">
         <form
@@ -2676,13 +2679,7 @@ function MeshView() {
 
   return (
     <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("mesh.eyebrow")}</p>
-          <h1>{t("mesh.title")}</h1>
-        </div>
-      </header>
+      <ScreenHeader title={t("mesh.title")} />
       <div className="settings-grid">
         <div className="profile-panel">
           <div className="panel-heading">
@@ -2931,13 +2928,7 @@ function SettingsView({
 
   return (
     <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("settings.joinEyebrow")}</p>
-          <h1>{t("settings.joinTitle")}</h1>
-        </div>
-      </header>
+      <ScreenHeader title={t("settings.joinTitle")} />
       <div className="settings-grid">
         <div className="join-panel">
           {inviteQr?.suppressed ? (
@@ -3208,13 +3199,7 @@ function PeopleView({
   if (!greeter && !moderator) {
     return (
       <section className="settings-view">
-        <header className="conversation-header">
-          <MobileBackLink />
-          <div>
-            <p className="eyebrow">{t("people.eyebrow")}</p>
-            <h1>{t("people.notAuthorizedTitle")}</h1>
-          </div>
-        </header>
+        <ScreenHeader title={t("people.notAuthorizedTitle")} />
         <p className="form-note">{t("people.notAuthorizedNote")}</p>
       </section>
     );
@@ -3222,13 +3207,7 @@ function PeopleView({
 
   return (
     <section className="settings-view">
-      <header className="conversation-header">
-        <MobileBackLink />
-        <div>
-          <p className="eyebrow">{t("people.eyebrow")}</p>
-          <h1>{t("people.title")}</h1>
-        </div>
-      </header>
+      <ScreenHeader title={t("people.title")} />
       <div className="settings-grid">
         {greeter ? <PendingApprovalsPanel onUsersChanged={onUsersChanged} /> : null}
         {moderator ? <ModerationPanel currentUser={currentUser} onUsersChanged={onUsersChanged} /> : null}

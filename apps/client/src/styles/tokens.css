@@ -1,0 +1,173 @@
+/* LOAM design tokens. Every colour, size and duration the UI uses comes from here (see DESIGN.md).
+   Light is the default; dark applies under prefers-color-scheme unless the page pins data-theme="light",
+   and data-theme="dark" forces it (handy for testing). Contrast notes live in DESIGN.md: every text pair
+   passes WCAG AA; --accent (orange) is for icons, badges, focus rings and bold/large text only. */
+
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces */
+  --bg-app: #f3f0e8;
+  --bg-surface: #faf9f5;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #ebe7dd;
+  --bg-hover: rgba(29, 38, 34, 0.06);
+  --bg-active: rgba(29, 38, 34, 0.11);
+  --overlay: rgba(17, 20, 18, 0.45);
+
+  /* Text */
+  --fg: #1d2622;
+  --fg-muted: #5b6862;
+  --fg-faint: #75817b;
+
+  /* Lines */
+  --border: #e1dcd1;
+  --border-strong: #c6bfb0;
+
+  /* Brand + actions */
+  --accent: #f26b1d;
+  --accent-hover: #e05d12;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(242, 107, 29, 0.14);
+  --primary: #2f5f4c;
+  --primary-hover: #264e3e;
+  --primary-fg: #ffffff;
+  --primary-soft: rgba(47, 95, 76, 0.12);
+  --link: #2f5f4c;
+
+  /* Chat bubbles */
+  --bubble-theirs: #ffffff;
+  --bubble-theirs-fg: var(--fg);
+  --bubble-theirs-border: var(--border);
+  --bubble-mine: #d9ecd8;
+  --bubble-mine-fg: #1d2622;
+
+  /* Status */
+  --success: #2f8f5b;
+  --danger: #c9302c;
+  --danger-bg: #fbeeed;
+  --danger-solid: #c9302c;
+  --danger-solid-hover: #b12824;
+  --online: #33c27a;
+  --focus: var(--accent);
+
+  /* Depth */
+  --shadow-1: 0 1px 2px rgba(29, 38, 34, 0.08);
+  --shadow-2: 0 8px 24px rgba(29, 38, 34, 0.14);
+  --avatar-ring: rgba(29, 38, 34, 0.1);
+
+  /* Code blocks stay dark in both themes. */
+  --code-bg: #16271f;
+  --code-fg: #dce8dd;
+
+  /* Type: the native stack only (no web fonts, by design — first paint on a slow LAN matters). */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-base: 15px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+  --leading: 1.45;
+  --leading-tight: 1.25;
+
+  /* Space (4px scale), radii, motion */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 999px;
+  --duration-fast: 120ms;
+  --duration: 160ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* Layout */
+  --header-h: 56px;
+  --control-h: 44px;
+  --control-h-sm: 36px;
+  --sidebar-w: 280px;
+  --thread-w: 360px;
+
+  /* Stacking */
+  --z-popover: 70;
+  --z-toast: 80;
+  --z-banner: 90;
+  --z-dialog: 100;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-app: #111412;
+    --bg-surface: #171b18;
+    --bg-elevated: #20251f;
+    --bg-sunken: #0c0e0d;
+    --bg-hover: rgba(233, 235, 230, 0.06);
+    --bg-active: rgba(233, 235, 230, 0.11);
+    --overlay: rgba(0, 0, 0, 0.6);
+    --fg: #e9ebe6;
+    --fg-muted: #a3aca6;
+    --fg-faint: #7a847e;
+    --border: #2a302c;
+    --border-strong: #3b433e;
+    --primary: #3a745b;
+    --primary-hover: #336a53;
+    --primary-soft: rgba(124, 183, 158, 0.16);
+    --link: #7cb79e;
+    --bubble-theirs: #232925;
+    --bubble-theirs-border: #232925;
+    --bubble-mine: #2e4c3b;
+    --bubble-mine-fg: #eef3ee;
+    --success: #6fcf97;
+    --danger: #ff8a80;
+    --danger-bg: #2a1715;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.55);
+    --avatar-ring: rgba(233, 235, 230, 0.1);
+  }
+}
+
+/* Same values as the media block above, forced on by data-theme="dark". Keep the two in sync. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-app: #111412;
+  --bg-surface: #171b18;
+  --bg-elevated: #20251f;
+  --bg-sunken: #0c0e0d;
+  --bg-hover: rgba(233, 235, 230, 0.06);
+  --bg-active: rgba(233, 235, 230, 0.11);
+  --overlay: rgba(0, 0, 0, 0.6);
+  --fg: #e9ebe6;
+  --fg-muted: #a3aca6;
+  --fg-faint: #7a847e;
+  --border: #2a302c;
+  --border-strong: #3b433e;
+  --primary: #3a745b;
+  --primary-hover: #336a53;
+  --primary-soft: rgba(124, 183, 158, 0.16);
+  --link: #7cb79e;
+  --bubble-theirs: #232925;
+  --bubble-theirs-border: #232925;
+  --bubble-mine: #2e4c3b;
+  --bubble-mine-fg: #eef3ee;
+  --success: #6fcf97;
+  --danger: #ff8a80;
+  --danger-bg: #2a1715;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.55);
+  --avatar-ring: rgba(233, 235, 230, 0.1);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}

@@ -36,12 +36,16 @@ describe("InviteControl", () => {
   });
 
   it("withholds the QR and says why when the node's advertised key contradicts ours (review 2026-09-25)", async () => {
-    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" qrSuppressed qrUrl="http://192.168.0.5:3000" />);
+    const root = mount(
+      <InviteControl joinUrl="http://192.168.0.5:3000" qrSuppressed qrUrl="http://192.168.0.5:3000" />,
+    );
     root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await tick();
 
     expect(root.querySelector(".invite-modal-qr")).toBeNull();
-    expect(root.querySelector(".invite-modal .form-error")?.textContent).toContain("doesn't match the key you joined with");
+    expect(root.querySelector(".invite-modal .form-error")?.textContent).toContain(
+      "doesn't match the key you joined with",
+    );
     // The plain URL is still shown so people can type it.
     expect(root.querySelector(".invite-modal-url")?.textContent).toBe("http://192.168.0.5:3000");
   });
@@ -103,7 +107,7 @@ describe("InviteControl", () => {
 
   it("moves focus into the dialog on open and restores it to the trigger on close", async () => {
     const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" />);
-    const toggle = root.querySelector<HTMLButtonElement>(".new-channel-toggle");
+    const toggle = root.querySelector<HTMLButtonElement>(".invite-trigger");
     toggle?.focus();
 
     toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));

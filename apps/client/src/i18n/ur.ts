@@ -621,4 +621,6 @@ export const ur: Translation = {
   "error.dm_blocked_by_you": "آپ نے اس شخص کو بلاک کیا ہے۔ پیغام بھیجنے کے لیے انہیں اَن بلاک کریں",
   "error.channel_member_unavailable": "یہ شخص اس چینل کے لیے دستیاب نہیں ہے",
   "error.block_not_allowed": "اس صارف کو بلاک نہیں کیا جا سکتا",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

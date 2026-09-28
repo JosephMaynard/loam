@@ -3,9 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#eef4ef" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#0f140e" media="(prefers-color-scheme: dark)" />
+    <!-- interactive-widget=resizes-content: the layout viewport shrinks with the on-screen keyboard (Chrome 108+),
+         so the fixed app shell fits above it instead of the document scrolling (see src/lib/viewport.ts). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#f3f0e8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#111412" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="LOAM" />
     <link rel="manifest" href="/manifest.webmanifest" />

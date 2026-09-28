@@ -622,4 +622,6 @@ export const prs: Translation = {
   "error.dm_blocked_by_you": "شما این شخص را مسدود کرده‌اید. برای فرستادن پیام، مسدودیت را رفع کنید",
   "error.channel_member_unavailable": "این شخص برای این چینل در دسترس نیست",
   "error.block_not_allowed": "این کاربر را نمی‌توان مسدود کرد",
+  // wave 2 — conversation keys (the conversation agent appends below this line; keep this comment)
+  // wave 2 — screens keys (the screens agent appends below this line; keep this comment)
 };

@@ -86,8 +86,10 @@ describe("Sidebar", () => {
 
     const channelLinks = Array.from(host.querySelectorAll('a[href^="/channel/"]'));
     expect(channelLinks.map((link) => link.querySelector(".nav-label")?.textContent)).toEqual(["general", "secret"]);
-    // The private channel shows the lock glyph.
-    expect(host.textContent).toContain("🔒");
+    // The private channel shows the (labelled) lock glyph; the public one a decorative hash.
+    const glyphs = channelLinks.map((link) => link.querySelector(".nav-glyph"));
+    expect(glyphs[0]?.getAttribute("aria-hidden")).toBe("true");
+    expect(glyphs[1]?.getAttribute("aria-label")).toBe("Private channel");
 
     const dmLinks = Array.from(host.querySelectorAll('a[href^="/dm/"]'));
     expect(dmLinks).toHaveLength(1);
@@ -125,7 +127,11 @@ describe("Sidebar", () => {
       ["channel:channel.general", 2],
     ]);
     const host = mount(
-      <Sidebar {...baseProps()} channels={[archivedChannel, generalChannel, privateChannel]} unreadByConversation={unread} />,
+      <Sidebar
+        {...baseProps()}
+        channels={[archivedChannel, generalChannel, privateChannel]}
+        unreadByConversation={unread}
+      />,
     );
 
     // Archived sinks below the active channels despite being first in the input order.

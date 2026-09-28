@@ -474,6 +474,7 @@ kill switch. See `docs/09-security-profiles.md`.
 
 ## Client architecture (`apps/client/src/`)
 
+- **Design system**: `apps/client/DESIGN.md` is the UI contract (tokens in `src/styles/`, the `Dialog`/`Menu`/`ScreenHeader`/`Avatar`/icon primitives, breakpoints, the fixed-shell keyboard fix in `src/lib/viewport.ts`); read it before adding UI.
 - Preact + `preact-iso` for routing (hash-free paths: `/channels`, `/channel/:id`,
   `/channel/:id/thread/:tid`, `/dm/:id`, `/settings`, `/admin`, `/people`, `/search`). `parseRoute`
   maps path → `RouteState`. The admin area (`AdminView`) and the claim form in settings appear per
