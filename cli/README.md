@@ -24,7 +24,8 @@ From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code it prints 
 ```
 loam [options]
 
-  --port <n>        Port to listen on (default 3000, or $PORT)
+  --port <n>        Port to listen on (default $PORT, else 3000 or the next
+                    free port after it)
   --data-dir <dir>  Where to store the SQLite database and avatars
                     (default $XDG_DATA_HOME/loam or ~/.loam)
   --encrypt         Encrypt the database at rest with SQLCipher. The passphrase

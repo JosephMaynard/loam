@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createLineBuffer } from "./line-buffer.js";
+import { findFreePort, isPortFree } from "./port.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
@@ -50,7 +51,8 @@ if (args.includes("--help") || args.includes("-h")) {
 Usage: loam [options]
 
 Options:
-  --port <n>        Port to listen on (default 3000, or $PORT)
+  --port <n>        Port to listen on (default $PORT, else 3000 or the next
+                    free port after it)
   --data-dir <dir>  Where to store the SQLite DB + avatars
                     (default $XDG_DATA_HOME/loam or ~/.loam)
   --encrypt         Encrypt the database at rest (SQLCipher). The passphrase comes
@@ -77,10 +79,43 @@ const defaultDataDir = process.env.XDG_DATA_HOME
 const dataDir = requiredValue("--data-dir") ?? process.env.LOAM_DATA_DIR ?? defaultDataDir;
 mkdirSync(dataDir, { recursive: true });
 
-const port = requiredValue("--port") ?? process.env.PORT ?? "3000";
-if (!/^\d+$/.test(String(port)) || Number(port) < 1 || Number(port) > 65535) {
-  console.error(`Invalid port "${port}": expected an integer between 1 and 65535.`);
+const requestedPort = requiredValue("--port") ?? process.env.PORT;
+if (
+  requestedPort !== undefined &&
+  (!/^\d+$/.test(String(requestedPort)) || Number(requestedPort) < 1 || Number(requestedPort) > 65535)
+) {
+  console.error(`Invalid port "${requestedPort}": expected an integer between 1 and 65535.`);
   process.exit(1);
+}
+
+/** Why the chosen port can't be used, and the fix. */
+function printPortInUse(taken) {
+  console.error(
+    `\nPort ${taken} is already in use by another program.\n` +
+      "Stop that program, or pick another port:  loam --port <n>",
+  );
+}
+
+// An explicitly chosen port (--port or $PORT) is used as-is: moving it silently would break a bookmark or
+// a printed QR. With no choice made, 3000 is only a preference — step past a port something else holds
+// (a dev server on 3000 is common) instead of crashing.
+const listenHost = process.env.HOST ?? "0.0.0.0";
+let port;
+if (requestedPort !== undefined) {
+  port = Number(requestedPort);
+  if (!(await isPortFree(port, listenHost))) {
+    printPortInUse(port);
+    process.exit(1);
+  }
+} else {
+  port = await findFreePort(3000, listenHost);
+  if (port === undefined) {
+    console.error("\nPorts 3000–3019 are all in use. Pick a free port:  loam --port <n>");
+    process.exit(1);
+  }
+  if (port !== 3000) {
+    console.log(`Port 3000 is in use by another program — using ${port} instead.`);
+  }
 }
 
 process.env.LOAM_DATA_DIR = dataDir;
@@ -304,6 +339,11 @@ try {
   // a bare `Cannot find module` match would misreport any unrelated missing dependency.
   if (process.env.LOAM_DB_KEY && String(error?.message ?? "").includes("better-sqlite3-multiple-ciphers")) {
     printDriverMissingHint();
+    process.exit(1);
+  }
+  // The port was free when probed above, but another program can take it before the server binds.
+  if (error?.code === "EADDRINUSE") {
+    printPortInUse(port);
     process.exit(1);
   }
   throw error;
