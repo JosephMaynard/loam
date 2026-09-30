@@ -344,7 +344,7 @@ HTTP server answering requests. Findings that bind future work:
 
 ### Phase-2 spike verdict (2026-07-01): the real server runs on-device ✅
 
-The actual `apps/server` (fastify 5.8.5 + @fastify/websocket + @fastify/static), esbuild-bundled to
+The actual `apps/server` (fastify 5 + @fastify/websocket; static files served by its own `static-files.ts`), esbuild-bundled to
 a single CJS file, booted inside the @comapeo fork's Node 18.20.4 on an arm64 API-35 emulator and
 passed a full protocol test via `adb forward`: `GET /api/config` (session cookie minted),
 `POST /api/messages` → 201, static client + SPA fallback served, and a `messageCreated` WebSocket

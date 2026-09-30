@@ -61,7 +61,7 @@ const result = await build({
   // - better-sqlite3 / better-sqlite3-multiple-ciphers: optional native deps, resolved at runtime
   //   from node_modules only when an alternate/encrypted driver is requested.
   external: ["node:sqlite", "better-sqlite3", "better-sqlite3-multiple-ciphers"],
-  // Some bundled deps are CommonJS and call `require(...)` / read `__dirname` (e.g. @fastify/static).
+  // Some bundled deps are CommonJS and call `require(...)` / read `__dirname` (e.g. @fastify/websocket, fastify itself).
   // ESM output has neither, so esbuild's `__require` shim throws on them. Recreate the CJS globals
   // from import.meta.url at the top of the bundle so those requires resolve normally.
   banner: {
