@@ -4,6 +4,35 @@ All notable changes to LOAM are recorded here. LOAM is a local-first, off-grid m
 `README.md` and `MISSION.md`). Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 the project is pre-1.0, so the surface can still change. Dates are UTC.
 
+## [Unreleased]
+
+### Security
+- **The panic route no longer gives itself away through rate-limit headers.** `/api/panic` answers every
+  failure with a 404 so a prober can't tell it exists, but the old rate limiter added
+  `x-ratelimit-limit` (and `retry-after` once tripped) to its responses and to no unknown path. The
+  server's own limiter sends no `x-ratelimit-*` headers.
+
+### Fixed
+- **`npx loamnet` no longer crashes when port 3000 is taken.** With no port chosen it moves to the next
+  free one (3000–3019) and says so; an explicit `--port` / `$PORT` that is taken exits with a short
+  message instead of a stack trace. A port counts as free only if loopback is free too, so
+  `http://localhost:<port>` can't open another program.
+- **No more `prebuild-install` deprecation warning on install.** The CLI's optional SQLCipher driver is
+  now v13, which ships its binaries in the package and runs no install script. Encrypted databases open
+  unchanged. **The CLI now needs Node 22.14+ (or 23.6+)**: the driver uses Node-API 10, and on an older
+  Node it crashed the process when loaded; `loam --encrypt` there now says to upgrade. The package is
+  ~9.5 MB larger, and 32-bit ARM (older Raspberry Pi OS) has no prebuilt binary, so `--encrypt` there
+  needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
+
+### Changed
+- **Fewer server dependencies.** Rate limiting (`rate-limit.ts`) and serving the web client
+  (`static-files.ts`) are now LOAM's own code, replacing `@fastify/rate-limit` and `@fastify/static` and
+  about ten transitive packages; the CLI bundle drops from 3.19 MB to 2.83 MB. Behaviour is unchanged
+  apart from no Range support for client files and never serving dotfiles.
+- **Android host: Expo SDK 57 patch updates** (expo 57.0.26, React Native 0.86.3). `pnpm audit --prod`
+  goes from 29 findings to 1: a moderate `decode-uri-component` advisory under expo-router with no reachable path in LOAM, whose fix is an ESM-only release expo-router can't load.
+- CI now installs the packed `loamnet` tarball and drives the installed CLI (`pnpm smoke:cli`).
+
 ## [0.5.0] - 2026-09-28
 
 The pre-release review release: fixes from two full-codebase reviews (2026-09-04, 2026-09-25) and an

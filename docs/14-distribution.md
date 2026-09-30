@@ -27,7 +27,7 @@ dependencies**: the default database driver is the built-in `node:sqlite` (Node 
 esbuild over `cli/cli-entry.ts`:
 
 - **`format: esm`, `target: node22`.** A banner recreates `require`/`__dirname`/`__filename` from
-  `import.meta.url` so the CommonJS deps that call `require(...)` (e.g. `@fastify/static`) work in the
+  `import.meta.url` so the CommonJS deps that call `require(...)` (e.g. `@fastify/websocket` and Fastify itself) work in the
   ESM output.
 - **`cli/cli-entry.ts`** is a thin library entry that re-exports `startEmbeddedServer` + `firstLanIPv4`
   from `apps/server/src/embedded.ts` and `encodeQR` + `renderQRToTerminal` from `@loam/qr`. Bundling a

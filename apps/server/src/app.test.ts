@@ -1133,6 +1133,22 @@ describe("panic endpoint", () => {
     expect(codes).not.toContain(429);
     expect(codes.every((code) => code === 404)).toBe(true);
   });
+
+  it("sends no rate-limit headers, before or past the limit, that an absent route wouldn't", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+
+    // A configured route used to answer with its own `x-ratelimit-limit` (and `retry-after` once
+    // tripped) while an unknown path sent none, which told a prober the panic route exists.
+    const absent = await app.server.inject({ method: "POST", url: "/api/not-a-route", payload: {} });
+    for (let attempt = 0; attempt < 13; attempt += 1) {
+      const response = await panic(app, `wrong-${attempt}`);
+      const names = Object.keys(response.headers);
+      expect(names.filter((name) => name.startsWith("x-ratelimit") || name === "retry-after")).toEqual([]);
+      expect(names.sort()).toEqual(Object.keys(absent.headers).sort());
+    }
+  });
 });
 
 describe("message retention (ephemeral messages)", () => {

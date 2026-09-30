@@ -4,7 +4,6 @@ import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 
-import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import {
   type TransportIdentity,
@@ -44,6 +43,7 @@ import { registerMessageRoutes } from "./routes-messages.js";
 import { registerSessionRoutes } from "./routes-session.js";
 import { registerSyncMeshRoutes } from "./routes-sync-mesh.js";
 import { registerUserRoutes } from "./routes-users.js";
+import { type ClientFiles, registerClientFiles } from "./static-files.js";
 import { createTransportServer, loamLogController, loamLoggerOptions, registerTransportHooks, registerTransportRoutes } from "./transport-server.js";
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
@@ -193,6 +193,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // in the gap between "wipe requested" and "process restarted".
   let awaitingWipeRestart = false;
   let staticFilesRegistered = false;
+  /** The web client's file server, once `registerStaticFiles` finds a client build. */
+  let clientFiles: ClientFiles | undefined;
   let appConfig: LoamConfig = defaultLoamConfig();
   let adminSetupCode: string | undefined;
 
@@ -2270,10 +2272,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    await server.register(fastifyStatic, {
-      root: options.clientDistDir,
-      prefix: "/",
-    });
+    clientFiles = registerClientFiles(server, options.clientDistDir);
     staticFilesRegistered = true;
   }
 
@@ -2353,8 +2352,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return;
     }
 
-    if (staticFilesRegistered) {
-      void reply.sendFile("index.html");
+    if (clientFiles) {
+      void clientFiles.sendIndex(request, reply);
       return;
     }
 

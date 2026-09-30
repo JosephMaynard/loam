@@ -17,14 +17,15 @@ npm install -g loamnet
 loam
 ```
 
-From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code it prints (or open the printed URL). That device joins the node instantly. Requires Node.js 22.13 or newer.
+From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code it prints (or open the printed URL). That device joins the node instantly. Requires Node.js 22.14 or newer (23.6 or newer on the 23 line).
 
 ## Options
 
 ```
 loam [options]
 
-  --port <n>        Port to listen on (default 3000, or $PORT)
+  --port <n>        Port to listen on (default $PORT, else 3000 or the next
+                    free port after it)
   --data-dir <dir>  Where to store the SQLite database and avatars
                     (default $XDG_DATA_HOME/loam or ~/.loam)
   --encrypt         Encrypt the database at rest with SQLCipher. The passphrase
@@ -40,7 +41,7 @@ loam [options]
   -h, --help        Show help
 ```
 
-For a persistent encrypted node, prefer `LOAM_DB_KEY='your passphrase' loam --encrypt`, or run bare `loam --encrypt` and type the passphrase at the prompt. Encryption needs the optional native driver, which installs with `loamnet` when it can build; if it isn't available, `loam` stops before starting. Reinstall `loamnet` (`npm install -g loamnet`) and check the install output for the native build error; installing the driver separately doesn't help, because `loam` loads it from its own package.
+For a persistent encrypted node, prefer `LOAM_DB_KEY='your passphrase' loam --encrypt`, or run bare `loam --encrypt` and type the passphrase at the prompt. Encryption needs the optional native driver, which installs with `loamnet` and ships prebuilt for 64-bit Linux, macOS and Windows, so nothing compiles during install. If it isn't available, `loam` stops before starting and prints the fix: on those platforms, reinstall `loamnet` (`npm install -g loamnet`); elsewhere (such as 32-bit Raspberry Pi OS), build the driver in place with `node-gyp`. Installing the driver separately doesn't help, because `loam` loads it from its own package.
 
 The default database driver is Node's built in `node:sqlite`, so a plain node needs no native build step. Encryption at rest (`--encrypt`) is the one feature that pulls in the optional native SQLCipher driver.
 
@@ -53,7 +54,7 @@ The default database driver is Node's built in `node:sqlite`, so a plain node ne
 
 ## Hosting from a phone
 
-`loamnet` runs the node on a laptop, a Raspberry Pi, or any machine with Node 22.13+. To host directly from an Android phone, including its own Wi-Fi hotspot, use the LOAM Android host app in the [project repository](https://github.com/JosephMaynard/loam).
+`loamnet` runs the node on a laptop, a Raspberry Pi, or any machine with Node 22.14+ (or 23.6+). To host directly from an Android phone, including its own Wi-Fi hotspot, use the LOAM Android host app in the [project repository](https://github.com/JosephMaynard/loam).
 
 ## Links
 

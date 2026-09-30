@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createLineBuffer } from "./line-buffer.js";
+import { findFreePort, isPortFree } from "./port.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
@@ -50,7 +51,8 @@ if (args.includes("--help") || args.includes("-h")) {
 Usage: loam [options]
 
 Options:
-  --port <n>        Port to listen on (default 3000, or $PORT)
+  --port <n>        Port to listen on (default $PORT, else 3000 or the next
+                    free port after it)
   --data-dir <dir>  Where to store the SQLite DB + avatars
                     (default $XDG_DATA_HOME/loam or ~/.loam)
   --encrypt         Encrypt the database at rest (SQLCipher). The passphrase comes
@@ -67,7 +69,7 @@ Options:
   -h, --help        Show this help
 
 Scan the printed QR (or open the printed URL) from another device on the same
-network to join. Node ≥22 required.`);
+network to join. Requires Node.js 22.14+ (or 23.6+).`);
   process.exit(0);
 }
 
@@ -77,10 +79,43 @@ const defaultDataDir = process.env.XDG_DATA_HOME
 const dataDir = requiredValue("--data-dir") ?? process.env.LOAM_DATA_DIR ?? defaultDataDir;
 mkdirSync(dataDir, { recursive: true });
 
-const port = requiredValue("--port") ?? process.env.PORT ?? "3000";
-if (!/^\d+$/.test(String(port)) || Number(port) < 1 || Number(port) > 65535) {
-  console.error(`Invalid port "${port}": expected an integer between 1 and 65535.`);
+const requestedPort = requiredValue("--port") ?? process.env.PORT;
+if (
+  requestedPort !== undefined &&
+  (!/^\d+$/.test(String(requestedPort)) || Number(requestedPort) < 1 || Number(requestedPort) > 65535)
+) {
+  console.error(`Invalid port "${requestedPort}": expected an integer between 1 and 65535.`);
   process.exit(1);
+}
+
+/** Why the chosen port can't be used, and the fix. */
+function printPortInUse(taken) {
+  console.error(
+    `\nPort ${taken} is already in use by another program.\n` +
+      "Stop that program, or pick another port:  loam --port <n>",
+  );
+}
+
+// An explicitly chosen port (--port or $PORT) is used as-is: moving it silently would break a bookmark or
+// a printed QR. With no choice made, 3000 is only a preference — step past a port something else holds
+// (a dev server on 3000 is common) instead of crashing.
+const listenHost = process.env.HOST ?? "0.0.0.0";
+let port;
+if (requestedPort !== undefined) {
+  port = Number(requestedPort);
+  if (!(await isPortFree(port, listenHost))) {
+    printPortInUse(port);
+    process.exit(1);
+  }
+} else {
+  port = await findFreePort(3000, listenHost);
+  if (port === undefined) {
+    console.error("\nPorts 3000–3019 are all in use. Pick a free port:  loam --port <n>");
+    process.exit(1);
+  }
+  if (port !== 3000) {
+    console.log(`Port 3000 is in use by another program — using ${port} instead.`);
+  }
 }
 
 process.env.LOAM_DATA_DIR = dataDir;
@@ -220,22 +255,42 @@ function encryptedDriverLoads() {
 
 /**
  * Why encryption can't start, and the fix. The driver is resolved from the loamnet package itself (its
- * optionalDependency, next to dist/), so a separate global install of the driver is never found — the fix
- * is reinstalling loamnet so that optional dependency builds.
+ * optionalDependency, next to dist/), so a separate global install of the driver is never found. It ships
+ * prebuilt binaries for 64-bit Linux (glibc and musl), macOS and Windows and builds nothing at install, so
+ * it is missing either because the install skipped it or because this platform has no prebuilt binary.
  */
 function printDriverMissingHint() {
   console.error(
     "\nEncryption requested but the native SQLCipher driver (better-sqlite3-multiple-ciphers) is unavailable.\n" +
       "It is loaded from the loamnet package itself, resolved from:\n" +
       `  ${dirname(bundlePath)}\n` +
-      "It's loamnet's optional dependency, so it is missing when its native build failed during install.\n" +
-      "Reinstall loamnet and check the install output for the build error (it needs a C/C++ toolchain and\n" +
-      "Python when no prebuilt binary fits your platform):  npm install -g loamnet\n" +
+      "It ships prebuilt for 64-bit Linux, macOS and Windows" +
+      ` (this machine: ${process.platform}-${process.arch}).\n` +
+      "On one of those, reinstall loamnet (npm install -g loamnet) and check the install output, since\n" +
+      "optional dependencies are skipped silently. Other platforms (such as 32-bit Raspberry Pi OS) have\n" +
+      "no prebuilt binary: build it in place with `npx node-gyp rebuild --release` inside\n" +
+      "loamnet's node_modules/better-sqlite3-multiple-ciphers (needs a C/C++ toolchain and Python).\n" +
       "Or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
   );
 }
 
+/**
+ * The SQLCipher driver is built against Node-API 10 (Node 22.14+ / 23.6+). On an older Node, loading it
+ * doesn't throw — the process segfaults — so this must be checked before `encryptedDriverLoads` ever runs.
+ */
+function nodeSupportsDriver() {
+  return Number(process.versions.napi) >= 10;
+}
+
 if (args.includes("--encrypt") || process.env.LOAM_DB_KEY) {
+  if (!nodeSupportsDriver()) {
+    console.error(
+      `\nEncryption needs Node.js 22.14+ (or 23.6+); this is ${process.version} (Node-API ${process.versions.napi}).\n` +
+        "Upgrade Node, then reinstall loamnet (npm install -g loamnet).\n" +
+        "Or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
+    );
+    process.exit(1);
+  }
   if (!encryptedDriverLoads()) {
     printDriverMissingHint();
     process.exit(1);
@@ -304,6 +359,11 @@ try {
   // a bare `Cannot find module` match would misreport any unrelated missing dependency.
   if (process.env.LOAM_DB_KEY && String(error?.message ?? "").includes("better-sqlite3-multiple-ciphers")) {
     printDriverMissingHint();
+    process.exit(1);
+  }
+  // The port was free when probed above, but another program can take it before the server binds.
+  if (error?.code === "EADDRINUSE") {
+    printPortInUse(port);
     process.exit(1);
   }
   throw error;
