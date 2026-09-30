@@ -88,7 +88,7 @@ There is **no lint script**. Type-checking happens as part of `build` (`tsc`), e
 which has a dedicated `typecheck` script (`pnpm --filter app typecheck`). A `.stylelintrc.json`
 exists but is not wired to any script. CI (`.github/workflows/ci.yml`) runs `node
 scripts/check-versions.mjs` (every workspace `package.json`, `cli/package.json` and `app.json`
-`expo.version` must agree), `pnpm build`, `pnpm test`, then the apps/app typecheck on push/PR to
+`expo.version` must agree), `pnpm build`, `pnpm test`, the apps/app typecheck, then `pnpm smoke:cli` (packs + installs `loamnet` and drives the installed `loam`: port fallback, taken `--port`, `--encrypt` + reopen) on push/PR to
 `master`. `build-apk.yml` (tag builds) pins every action to a commit SHA, runs `check-versions
 --release-tag vX.Y.Z[-rc.N|-beta.N]` (the tag's X.Y.Z == version, `versionCode` > every earlier release
 tag's; a suffixed tag is published as a GitHub pre-release; tests in `scripts/check-versions.test.mjs`, run

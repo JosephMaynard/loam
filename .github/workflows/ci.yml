@@ -51,3 +51,9 @@ jobs:
       # → `pnpm -r --if-present test`.
       - name: Android host typecheck
         run: pnpm --filter app typecheck
+
+      # The workspace suites never run the PUBLISHED CLI. Pack cli/, install the tarball as a user would
+      # (catches files missing from `files` and an optional SQLCipher driver that won't install), and
+      # drive the installed `loam`: default-port fallback, a taken --port, --encrypt + reopen.
+      - name: loamnet package smoke test
+        run: pnpm smoke:cli
