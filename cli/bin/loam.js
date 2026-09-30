@@ -255,17 +255,21 @@ function encryptedDriverLoads() {
 
 /**
  * Why encryption can't start, and the fix. The driver is resolved from the loamnet package itself (its
- * optionalDependency, next to dist/), so a separate global install of the driver is never found — the fix
- * is reinstalling loamnet so that optional dependency builds.
+ * optionalDependency, next to dist/), so a separate global install of the driver is never found. It ships
+ * prebuilt binaries for 64-bit Linux (glibc and musl), macOS and Windows and builds nothing at install, so
+ * it is missing either because the install skipped it or because this platform has no prebuilt binary.
  */
 function printDriverMissingHint() {
   console.error(
     "\nEncryption requested but the native SQLCipher driver (better-sqlite3-multiple-ciphers) is unavailable.\n" +
       "It is loaded from the loamnet package itself, resolved from:\n" +
       `  ${dirname(bundlePath)}\n` +
-      "It's loamnet's optional dependency, so it is missing when its native build failed during install.\n" +
-      "Reinstall loamnet and check the install output for the build error (it needs a C/C++ toolchain and\n" +
-      "Python when no prebuilt binary fits your platform):  npm install -g loamnet\n" +
+      "It ships prebuilt for 64-bit Linux, macOS and Windows" +
+      ` (this machine: ${process.platform}-${process.arch}).\n` +
+      "On one of those, reinstall loamnet (npm install -g loamnet) and check the install output, since\n" +
+      "optional dependencies are skipped silently. Other platforms (such as 32-bit Raspberry Pi OS) have\n" +
+      "no prebuilt binary: build it in place with `npx node-gyp rebuild --release` inside\n" +
+      "loamnet's node_modules/better-sqlite3-multiple-ciphers (needs a C/C++ toolchain and Python).\n" +
       "Or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
   );
 }
