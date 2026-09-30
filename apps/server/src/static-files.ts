@@ -77,8 +77,14 @@ function entityTag(stats: Stats): string {
 function notModified(request: FastifyRequest, etag: string, stats: Stats): boolean {
   const ifNoneMatch = request.headers["if-none-match"];
   if (ifNoneMatch !== undefined) {
-    const tags = ifNoneMatch.split(",").map((tag) => tag.trim().replace(/^W\//, ""));
-    return tags.includes("*") || tags.includes(etag.replace(/^W\//, ""));
+    // `*` / a list of entity tags. A tag's quoted value may itself contain commas (`"a,*,b"`), so match
+    // whole quoted tags rather than splitting on commas; `*` counts only as the entire header. Weak
+    // comparison: the W/ prefix is ignored.
+    if (ifNoneMatch.trim() === "*") {
+      return true;
+    }
+    const tags = [...ifNoneMatch.matchAll(/(?:W\/)?("[^"]*")/g)].map((match) => match[1]);
+    return tags.includes(etag.replace(/^W\//, ""));
   }
   const ifModifiedSince = request.headers["if-modified-since"];
   if (ifModifiedSince !== undefined) {

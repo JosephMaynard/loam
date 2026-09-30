@@ -56,17 +56,21 @@ const TIME_UNITS_MS: Record<string, number> = { second: 1000, minute: 60_000, ho
 
 /** Parse a window length; throws on anything else so a typo fails at route registration, not silently. */
 export function parseTimeWindow(value: number | string): number {
+  let ms = Number.NaN;
   if (typeof value === "number") {
-    if (Number.isFinite(value) && value > 0) {
-      return Math.trunc(value);
-    }
+    ms = Math.trunc(value);
   } else {
     const match = /^(\d+)\s*(second|minute|hour)s?$/.exec(value.trim());
     if (match) {
-      return Number(match[1]) * TIME_UNITS_MS[match[2]!]!;
+      ms = Number(match[1]) * TIME_UNITS_MS[match[2]!]!;
     }
   }
-  throw new Error(`Invalid rate-limit timeWindow: ${JSON.stringify(value)}`);
+  // Checked after conversion: 0.5 truncates to 0 and "0 seconds" is 0, and a zero-length window would
+  // make every request open a fresh window, i.e. never limit anything.
+  if (!Number.isSafeInteger(ms) || ms < 1) {
+    throw new Error(`Invalid rate-limit timeWindow: ${JSON.stringify(value)}`);
+  }
+  return ms;
 }
 
 /** The eight 16-bit groups of an IPv6 address (zone id stripped), or undefined if it doesn't parse. */

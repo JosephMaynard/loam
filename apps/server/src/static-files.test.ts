@@ -126,4 +126,31 @@ describe("serving the client build (buildApp)", () => {
     expect([byTag.statusCode, byDate.statusCode, stale.statusCode]).toEqual([304, 304, 200]);
     expect(byTag.body).toBe("");
   });
+
+  it("parses If-None-Match as quoted tags, with * only as the whole header", async () => {
+    const first = await app.server.inject({ method: "GET", url: "/manifest.webmanifest" });
+    const etag = String(first.headers.etag);
+    const status = async (ifNoneMatch: string) =>
+      (await app.server.inject({ method: "GET", url: "/manifest.webmanifest", headers: { "if-none-match": ifNoneMatch } }))
+        .statusCode;
+    // A single opaque tag whose value contains commas and a star is one non-matching tag.
+    expect(await status('"a,*,b"')).toBe(200);
+    expect(await status("*")).toBe(304);
+    // The current tag inside a list, strong or weak, still matches.
+    expect(await status(`"other", ${etag}`)).toBe(304);
+    expect(await status(`"other", ${etag.replace(/^W\//, "")}`)).toBe(304);
+  });
+
+  it("is rate-limited by the global limiter like every other route", async () => {
+    // CodeQL's missing-rate-limiting query can't see the limiter, which attaches in an onRoute hook
+    // (rate-limit.ts). The shell route counts against the global 300/min per-IP budget.
+    const statuses: number[] = [];
+    for (let index = 0; index < 305; index += 1) {
+      statuses.push(
+        (await app.server.inject({ method: "GET", url: "/assets/index-abc.js", remoteAddress: "10.9.9.9" })).statusCode,
+      );
+    }
+    expect(statuses.slice(0, 300).every((code) => code === 200)).toBe(true);
+    expect(statuses.slice(300)).toEqual([429, 429, 429, 429, 429]);
+  });
 });

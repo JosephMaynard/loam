@@ -42,6 +42,12 @@ describe("parseTimeWindow", () => {
     expect(() => parseTimeWindow(0)).toThrow(/timeWindow/);
     expect(() => parseTimeWindow(Number.NaN)).toThrow(/timeWindow/);
   });
+
+  it("rejects values that only become zero after conversion", () => {
+    expect(() => parseTimeWindow(0.5)).toThrow(/timeWindow/);
+    expect(() => parseTimeWindow("0 seconds")).toThrow(/timeWindow/);
+    expect(() => parseTimeWindow(Number.POSITIVE_INFINITY)).toThrow(/timeWindow/);
+  });
 });
 
 describe("FixedWindowCounter", () => {
