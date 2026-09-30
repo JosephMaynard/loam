@@ -251,10 +251,12 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   authoritative (the launcher's model activate/deactivate writes there), so an admin save can't freeze it;
   an admin PATCH that changes `llm.onDevice` is then written through to `config.json` (durably, other keys
   kept; a failed write refuses the save with a 500) so it survives a restart.
-- **Rate limiting**: `@fastify/rate-limit` runs globally (300/min/IP) with per-route caps on uploads,
-  sync, mesh, search, claim and panic; those per-route configs set `allowList: () => false` so tunnel
+- **Rate limiting**: our own fixed-window limiter (`src/rate-limit.ts`, which replaced `@fastify/rate-limit`)
+  runs globally (300/min/IP; IPv6 keyed by /64, IPv4-mapped folded to IPv4) with per-route caps on uploads,
+  sync, mesh, search, claim and panic via `config.rateLimit`; those per-route configs set `allowList: () => false` so tunnel
   re-dispatches (exempt from the global limiter) still count. Claim/panic add their own semantic attempt
-  limiters on top.
+  limiters on top. It sends no `x-ratelimit-*` headers (they fingerprinted the panic route); a default
+  refusal is a 429 with `retry-after`.
 - **Logging**: tunnel re-dispatches are never request-logged (`loamLogController`, keyed on the
   internal token — the inner URL is the path the tunnel hides), the `req` serializer strips query
   strings from every logged URL, a pino `logMethod` hook (`redactLogText`) drops the URL from Fastify's own

@@ -3,12 +3,12 @@
 // routes. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
-import { fastifyRateLimit } from "@fastify/rate-limit";
 import { type TransportIdentity, createTransportIdentity, openTransport, sealTransport, transportServerAccept, verifyTransportKeypair } from "@loam/crypto";
 import { TransportHandshakeRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { hashIdentityToken, makeIdentityToken } from "./identity.js";
+import { registerRateLimit } from "./rate-limit.js";
 import { type FastifyRequest, LogController } from "fastify";
 
 // Live transport sessions: sessionId → derived key + expiry + anti-replay window. In-memory only;
@@ -675,15 +675,14 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
 
   // Blanket per-IP throttle for every HTTP route; the abuse-sensitive endpoints (claim, panic,
   // avatar upload) add their own tighter semantic limits on top.
-  await ctx.server.register(fastifyRateLimit, {
-    global: true,
+  registerRateLimit(ctx.server, {
     max: 300,
     timeWindow: "1 minute",
     // Internal tunnel re-dispatches are exempt from the GLOBAL limiter only: the outer tunnel request
     // already counted once against it, so counting the inner dispatch would double-charge every
     // tunnelled call. The tighter per-route semantic caps below use `semanticRateLimit()`, which
     // deliberately does NOT inherit this exemption.
-    allowList: (request) => ctx.isInternalTunnelRequest(request as FastifyRequest),
+    allowList: (request) => ctx.isInternalTunnelRequest(request),
   });
 }
 
