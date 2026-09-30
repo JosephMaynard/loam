@@ -71,7 +71,7 @@ development on the same transport-agnostic layer.
 
 ### Install with npm (easiest)
 
-If you just want to **run** a node, install the published package (Node ≥22 required; the default
+If you just want to **run** a node, install the published package (Node 22.14+ or 23.6+ required; the default
 database uses the built-in `node:sqlite`, so there's **no native build / no node-gyp**):
 
 ```bash

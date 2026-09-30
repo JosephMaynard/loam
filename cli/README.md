@@ -17,7 +17,7 @@ npm install -g loamnet
 loam
 ```
 
-From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code it prints (or open the printed URL). That device joins the node instantly. Requires Node.js 22.13 or newer.
+From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code it prints (or open the printed URL). That device joins the node instantly. Requires Node.js 22.14 or newer (23.6 or newer on the 23 line).
 
 ## Options
 
@@ -54,7 +54,7 @@ The default database driver is Node's built in `node:sqlite`, so a plain node ne
 
 ## Hosting from a phone
 
-`loamnet` runs the node on a laptop, a Raspberry Pi, or any machine with Node 22.13+. To host directly from an Android phone, including its own Wi-Fi hotspot, use the LOAM Android host app in the [project repository](https://github.com/JosephMaynard/loam).
+`loamnet` runs the node on a laptop, a Raspberry Pi, or any machine with Node 22.14+ (or 23.6+). To host directly from an Android phone, including its own Wi-Fi hotspot, use the LOAM Android host app in the [project repository](https://github.com/JosephMaynard/loam).
 
 ## Links
 

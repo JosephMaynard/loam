@@ -18,10 +18,11 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   message instead of a stack trace. A port counts as free only if loopback is free too, so
   `http://localhost:<port>` can't open another program.
 - **No more `prebuild-install` deprecation warning on install.** The CLI's optional SQLCipher driver is
-  now v13, which ships its binaries in the package and runs no install script; one binary per platform
-  covers every Node from 22 up. Encrypted databases open unchanged. The package is ~9.5 MB larger, and
-  32-bit ARM (older Raspberry Pi OS) has no prebuilt binary, so `--encrypt` there needs a `node-gyp`
-  build (the error says how). Unencrypted nodes are unaffected.
+  now v13, which ships its binaries in the package and runs no install script. Encrypted databases open
+  unchanged. **The CLI now needs Node 22.14+ (or 23.6+)**: the driver uses Node-API 10, and on an older
+  Node it crashed the process when loaded; `loam --encrypt` there now says to upgrade. The package is
+  ~9.5 MB larger, and 32-bit ARM (older Raspberry Pi OS) has no prebuilt binary, so `--encrypt` there
+  needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
 - **Fewer server dependencies.** Rate limiting (`rate-limit.ts`) and serving the web client

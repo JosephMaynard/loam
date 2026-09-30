@@ -69,7 +69,7 @@ Options:
   -h, --help        Show this help
 
 Scan the printed QR (or open the printed URL) from another device on the same
-network to join. Node ≥22 required.`);
+network to join. Requires Node.js 22.14+ (or 23.6+).`);
   process.exit(0);
 }
 
@@ -274,7 +274,23 @@ function printDriverMissingHint() {
   );
 }
 
+/**
+ * The SQLCipher driver is built against Node-API 10 (Node 22.14+ / 23.6+). On an older Node, loading it
+ * doesn't throw — the process segfaults — so this must be checked before `encryptedDriverLoads` ever runs.
+ */
+function nodeSupportsDriver() {
+  return Number(process.versions.napi) >= 10;
+}
+
 if (args.includes("--encrypt") || process.env.LOAM_DB_KEY) {
+  if (!nodeSupportsDriver()) {
+    console.error(
+      `\nEncryption needs Node.js 22.14+ (or 23.6+); this is ${process.version} (Node-API ${process.versions.napi}).\n` +
+        "Upgrade Node, then reinstall loamnet (npm install -g loamnet).\n" +
+        "Or run without --encrypt (and without LOAM_DB_KEY) for an unencrypted local database.",
+    );
+    process.exit(1);
+  }
   if (!encryptedDriverLoads()) {
     printDriverMissingHint();
     process.exit(1);
