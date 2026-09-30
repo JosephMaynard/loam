@@ -141,9 +141,8 @@ describe("serving the client build (buildApp)", () => {
     expect(await status(`"other", ${etag.replace(/^W\//, "")}`)).toBe(304);
   });
 
-  it("is rate-limited by the global limiter like every other route", async () => {
-    // CodeQL's missing-rate-limiting query can't see the limiter, which attaches in an onRoute hook
-    // (rate-limit.ts). The shell route counts against the global 300/min per-IP budget.
+  it("caps file reads per IP with the route's own budget, separate from the API's", async () => {
+    // 300/min per IP on the client-file route (its own table, like avatars/attachments), then 429.
     const statuses: number[] = [];
     for (let index = 0; index < 305; index += 1) {
       statuses.push(
@@ -152,5 +151,8 @@ describe("serving the client build (buildApp)", () => {
     }
     expect(statuses.slice(0, 300).every((code) => code === 200)).toBe(true);
     expect(statuses.slice(300)).toEqual([429, 429, 429, 429, 429]);
+    // The API's global budget for that IP is untouched.
+    const api = await app.server.inject({ method: "GET", url: "/api/health", remoteAddress: "10.9.9.9" });
+    expect(api.statusCode).toBe(200);
   });
 });

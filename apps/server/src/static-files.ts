@@ -137,7 +137,10 @@ export interface ClientFiles {
 export function registerClientFiles(server: FastifyInstance, clientDistDir: string): ClientFiles {
   const root = resolve(clientDistDir);
 
-  server.get("/*", async (request, reply) => {
+  // Its own per-IP read cap, like the avatar/attachment routes, rather than the shared global budget:
+  // a cold load fetches the shell plus a dozen-odd assets, which shouldn't eat into the API's allowance.
+  // (Internal tunnel dispatches stay exempt via the inherited global allowList.)
+  server.get("/*", { config: { rateLimit: { max: 300, timeWindow: "1 minute" } } }, async (request, reply) => {
     const file = resolveClientPath(root, request.raw.url ?? "/");
     const found = file === undefined ? undefined : await servableFile(file);
     if (!found) {
