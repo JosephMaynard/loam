@@ -331,13 +331,6 @@
   overflow-wrap: break-word;
 }
 
-.identity-id {
-  color: var(--fg-faint);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  overflow-wrap: anywhere;
-}
-
 .avatar-style-field {
   display: block;
   min-width: 0;

@@ -171,7 +171,6 @@ export function SettingsView({
         <h2 className="identity-name" dir="auto">
           {withDotBreaks(displayName)}
         </h2>
-        <p className="identity-id">{currentUser.id}</p>
       </div>
     </div>
   );

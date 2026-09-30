@@ -8,6 +8,7 @@ import { isImageAttachment } from "../lib/attachments";
 import { trackBubbleFit } from "../lib/bubble-fit";
 import { copyText } from "../lib/clipboard";
 import { renderMarkdownCached } from "../lib/markdown";
+import { placeToolbar } from "../lib/toolbar-placement";
 import { bodyFor, displayTime } from "../lib/message-format";
 import { isJumboEmoji, type ReactionSummary } from "../lib/messages";
 import { useLongPress } from "../lib/use-long-press";
@@ -48,6 +49,16 @@ interface MessageItemProps {
   groupLast?: boolean;
   /** Show the author's name on a group's first bubble (channels). A DM never does: the header says who. */
   showAuthor?: boolean;
+}
+
+/** The box of an element's text itself (a block's full-width row would be far wider than the words). */
+function textBox(element: Element | null): DOMRect | undefined {
+  if (!element) {
+    return undefined;
+  }
+  const range = element.ownerDocument.createRange();
+  range.selectNodeContents(element);
+  return range.getBoundingClientRect();
 }
 
 /** Letters of the right-to-left scripts LOAM ships (Hebrew, Arabic, Persian/Dari/Pashto/Urdu, Syriac, Thaana…). */
@@ -212,6 +223,46 @@ export function MessageItem({
     return trackBubbleFit(bubble, column);
   }, [fitWidth, bodyText, message.editedAt, removed]);
 
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  /**
+   * Place the desktop hover toolbar just before it shows (hover or keyboard focus): beside the bubble when
+   * there's room, else over its corner, never on the author's name (lib/toolbar-placement.ts). Positions
+   * are measured, since how much room a bubble leaves depends on its width.
+   */
+  function positionToolbar(event: Event): void {
+    const toolbar = toolbarRef.current;
+    const bubble = bubbleRef.current;
+    const wrap = toolbar?.parentElement;
+    const article = event.currentTarget as HTMLElement;
+    const list = article.closest(".message-list, .thread-scroll");
+    if (!toolbar || !bubble || !wrap || !list) {
+      return;
+    }
+    const size = toolbar.getBoundingClientRect();
+    if (!size.width) {
+      return; // Hidden (touch layout): nothing to place.
+    }
+    const listBox = list.getBoundingClientRect();
+    const inset = 4;
+    const { left, top } = placeToolbar({
+      bubble: bubble.getBoundingClientRect(),
+      bounds: {
+        left: listBox.left + inset,
+        top: listBox.top,
+        right: listBox.right - inset,
+        bottom: listBox.bottom,
+      },
+      mine: isMine,
+      name: textBox(article.querySelector(".message-author")),
+      rtl: getComputedStyle(article).direction === "rtl",
+      toolbar: { width: size.width, height: size.height },
+    });
+    const origin = wrap.getBoundingClientRect();
+    toolbar.style.left = `${Math.round(left - origin.left)}px`;
+    toolbar.style.top = `${Math.round(top - origin.top)}px`;
+    toolbar.style.right = "auto";
+  }
+
   if (hiddenAsBlocked && !isMine && !revealed) {
     // No avatar, name, body, attachments or actions — just the fact that something is here.
     return (
@@ -260,7 +311,11 @@ export function MessageItem({
   const showName = !isMine && showAuthor && groupFirst;
 
   return (
-    <article className={messageClassName}>
+    <article
+      className={messageClassName}
+      onFocusIn={hasActions && !editing ? positionToolbar : undefined}
+      onPointerEnter={hasActions && !editing ? positionToolbar : undefined}
+    >
       {showName ? (
         <p className="message-author" dir="auto">
           {author.displayName}
@@ -386,6 +441,7 @@ export function MessageItem({
             <div
               aria-label={t("message.actionsTitle")}
               className="message-toolbar"
+              ref={toolbarRef}
               // A pointer click must not focus a toolbar button: the toolbar shows while it has focus (so
               // keyboard users can reach it), and a focused button would pin it open after the click while
               // the mouse has already moved on to the next message. Keyboard focus is unaffected.

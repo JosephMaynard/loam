@@ -358,8 +358,9 @@ Conversation agent (`ConversationView`, `MessageItem`, `MessageComposer`, `Repor
       be truncated by buttons again). Thread panel header → `ScreenHeader` with `onBack` + `headingLevel={2}`.
 - [x] Bubbles with the time inside (bottom inline-end corner, `--fg-faint`-ish on the bubble), not on a
       line above; author name only on the first bubble of a group.
-- [x] Group consecutive messages from the same author within a few minutes: one avatar (`sm`, aligned to
-      the group's last bubble, not floating below it), tighter gaps, tail only on the last bubble.
+- [x] Group consecutive messages from the same author within a few minutes: one avatar (`sm`, top-aligned
+      with the group's first bubble), tighter gaps, and the tail — a tighter corner — only on the first
+      bubble, at its top on the author's side, pointing at the avatar and name.
 - [x] Hover actions on desktop (a small floating toolbar: react, reply, ⋮), long-press / ⋮ on touch opening
       the `Menu` sheet with react, reply, edit, delete, report. No permanently visible per-message icon row.
       The invisible quick-reaction buttons currently take space and push "Reply" off to the side.
@@ -401,8 +402,10 @@ Screens agent (`app.tsx` SettingsView / PeopleView / SearchView / MeshView, `Adm
 - **Conversation column**: messages, day dividers and the composer well are capped at `--conversation-w`
   (820px) and centred, so a wide window keeps a readable column. Wrapped text bubbles are narrowed to their
   widest line by `lib/bubble-fit.ts` (CSS can't shrink-wrap wrapped text).
-- **Hover toolbar**: floats over the bubble's top-end corner by default; once the conversation is at least
-  1000px wide (`@container conversation`) it sits beside the bubble instead, so it never covers the name.
+- **Hover toolbar**: placed by measurement as it appears (`lib/toolbar-placement.ts`, called from
+  `MessageItem` on pointer-enter / focus-in): beside the bubble's top, away from the avatar, when it fits
+  inside the list; else over the bubble's top-end corner (only its top padding); and lifted above the
+  author's name rather than covering it. It never leaves the list.
 - **Composer**: the well's corner is concentric with its round 40px buttons (20px radius + 3px padding +
   1px border = 24px), a pill at one line. Keep that relationship if either size changes.
 

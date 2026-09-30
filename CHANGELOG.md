@@ -42,9 +42,11 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   inside the host app, which already keeps clear of them.
 - **Tidier conversations.** On wide screens the conversation keeps a centred reading column (your own
   messages no longer sit at the far edge); wrapped bubbles shrink to their text; the hover toolbar sits
-  beside the bubble instead of over the author's name; the composer's corners now follow its round send
+  beside the bubble when there's room and never covers the author's name; the bubble's tighter "tail"
+  corner is now at the top of a group, by the avatar; the composer's corners now follow its round send
   button.
-- **Less noise.** No raw user ids in the DM header or the sidebar footer; an empty DM says "Say hello";
+- **Less noise.** No raw user ids in the DM header, the sidebar footer, Settings or the join-approval list
+  (moderators still see them in the People list); an empty DM says "Say hello";
   desktop opens your last conversation (or the first channel) instead of an empty pane; the join-QR note in
   Settings is plain language.
 - **Avatar colours are more distinct.** Base colours come from ten well-separated hues (yellow stays

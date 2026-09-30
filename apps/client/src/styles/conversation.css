@@ -103,7 +103,6 @@
 }
 
 .message-list {
-  container: conversation / inline-size;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -258,23 +257,24 @@
   color: var(--bubble-mine-fg);
 }
 
-/* The tail: the last bubble of a group gets a flattened corner on the author's side. */
-.message.theirs.group-last .message-bubble {
-  border-bottom-left-radius: var(--radius-sm);
+/* The tail: the FIRST bubble of a group gets a flattened top corner on the author's side, pointing at
+   the avatar and name, which sit at the top of the group. */
+.message.theirs.group-first .message-bubble {
+  border-top-left-radius: var(--radius-sm);
 }
 
-.message.mine.group-last .message-bubble {
-  border-bottom-right-radius: var(--radius-sm);
+.message.mine.group-first .message-bubble {
+  border-top-right-radius: var(--radius-sm);
 }
 
-[dir="rtl"] .message.theirs.group-last .message-bubble {
-  border-bottom-left-radius: var(--radius-xl);
-  border-bottom-right-radius: var(--radius-sm);
+[dir="rtl"] .message.theirs.group-first .message-bubble {
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-sm);
 }
 
-[dir="rtl"] .message.mine.group-last .message-bubble {
-  border-bottom-right-radius: var(--radius-xl);
-  border-bottom-left-radius: var(--radius-sm);
+[dir="rtl"] .message.mine.group-first .message-bubble {
+  border-top-right-radius: var(--radius-xl);
+  border-top-left-radius: var(--radius-sm);
 }
 
 /* On the author's side (physical, so a bubble's own text direction can't move it). */
@@ -711,28 +711,17 @@
 /* ---------- Actions: the hover toolbar (mouse) ---------- */
 
 /* Hidden on touch: long-press and the time button open the sheet there. With a mouse it appears on hover
-   or when the message (or anything in it) has keyboard focus, floating over the bubble's top-end corner.
-   Its box is at least as wide as the toolbar, so a short bubble never pushes it off the list's edge. */
+   or when the message (or anything in it) has keyboard focus. MessageItem places it as it appears — beside
+   the bubble when there's room, else over the bubble's top-end corner, lifted above the author's name
+   rather than covering it (lib/toolbar-placement.ts); the position below is only the before-JS default. */
 .message-toolbar {
   display: none;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .message-bubble-wrap {
-    min-width: 176px;
-  }
-
-  .message.jumbo .message-bubble-wrap,
-  .message.is-editing .message-bubble-wrap {
-    min-width: 0;
-  }
-
   .message-toolbar {
     position: absolute;
     z-index: 2;
-    /* Mostly above the bubble: it may cover the end of the message above (as Slack's does), but only the
-       bubble's top padding of its own, never its first line. A wide conversation moves it beside the
-       bubble instead (the container query below). */
     top: -28px;
     right: 4px;
     display: flex;
@@ -771,35 +760,6 @@
 
   .message-toolbar .btn-icon + .btn-icon {
     margin-inline-start: 2px;
-  }
-}
-
-/* A conversation wide enough (the centred column plus room in its margins) to fit the toolbar beside even
-   a full-width bubble: put it there — right of someone else's message, left of your own — so it never
-   covers the author's name above a short bubble.
-   (The thread panel isn't a `conversation` container, so it keeps the placement above.) */
-@media (hover: hover) and (pointer: fine) {
-  @container conversation (min-width: 1000px) {
-    .message-bubble-wrap {
-      min-width: 0;
-    }
-
-    .message-toolbar {
-      top: 0;
-      right: auto;
-      left: calc(100% + var(--space-1));
-    }
-
-    .message.mine .message-toolbar,
-    [dir="rtl"] .message-toolbar {
-      right: calc(100% + var(--space-1));
-      left: auto;
-    }
-
-    [dir="rtl"] .message.mine .message-toolbar {
-      right: auto;
-      left: calc(100% + var(--space-1));
-    }
   }
 }
 
