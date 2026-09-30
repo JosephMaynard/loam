@@ -391,3 +391,18 @@ Screens agent (`app.tsx` SettingsView / PeopleView / SearchView / MeshView, `Adm
 - [x] Strings: `invite.wifiButton` → "Open the host's share screen"; `invite.wifiHint` → "Shows the
       hotspot or Wi-Fi join QR from the host app." (All 15 catalogs updated.)
 - [x] Delete the "Legacy button rows" section and the COMPAT rules this makes unused.
+
+## Safe areas, the conversation column, the composer
+
+- **Safe areas**: use `var(--safe-top|right|bottom|left)`, never `env(safe-area-inset-*)` directly. Inside the
+  Android host (`<html data-native-host>`, set by `lib/viewport.ts` when `window.ReactNativeWebView` exists)
+  they are zero, because the native layout already clears the status and navigation bars; padding for them
+  again left a blank band above the header and below the composer.
+- **Conversation column**: messages, day dividers and the composer well are capped at `--conversation-w`
+  (820px) and centred, so a wide window keeps a readable column. Wrapped text bubbles are narrowed to their
+  widest line by `lib/bubble-fit.ts` (CSS can't shrink-wrap wrapped text).
+- **Hover toolbar**: floats over the bubble's top-end corner by default; once the conversation is at least
+  1000px wide (`@container conversation`) it sits beside the bubble instead, so it never covers the name.
+- **Composer**: the well's corner is concentric with its round 40px buttons (20px radius + 3px padding +
+  1px border = 24px), a pill at one line. Keep that relationship if either size changes.
+

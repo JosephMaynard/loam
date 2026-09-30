@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { renderMarkdown, renderMarkdownCached } from "./markdown";
+import { markdownToPlainText, renderMarkdown, renderMarkdownCached } from "./markdown";
 
 describe("renderMarkdown", () => {
   it("renders basic markdown to HTML", () => {
@@ -180,5 +180,18 @@ describe("renderMarkdownCached", () => {
     // returning a stale entry — always matching a direct renderMarkdown(body) call.
     expect(renderMarkdownCached(id, body, 1000)).toBe(renderMarkdown(body));
     expect(renderMarkdownCached(id, body, 2000)).toBe(renderMarkdown(body));
+  });
+});
+
+describe("markdownToPlainText", () => {
+  it("keeps the text a message reads as, one line, without Markdown syntax", () => {
+    expect(markdownToPlainText("Lost property:\n\n- blue rucksack\n- keys on a **red lanyard**\n\nAt the desk.")).toBe(
+      "Lost property: • blue rucksack • keys on a red lanyard At the desk.",
+    );
+    expect(markdownToPlainText("**Welcome** to _the_ site")).toBe("Welcome to the site");
+  });
+
+  it("never lets markup through", () => {
+    expect(markdownToPlainText("<img src=x onerror=alert(1)> hi")).toBe("<img src=x onerror=alert(1)> hi");
   });
 });

@@ -6,6 +6,7 @@ import { CardHeader } from "../components/ScreenParts";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { errorText, t } from "../i18n";
 import { fetchJson, REQUEST_TIMEOUT_MS } from "../lib/api";
+import { copyText } from "../lib/clipboard";
 import { safeQrSvg } from "../lib/qr";
 import { encryptedFetch } from "../lib/transport";
 
@@ -121,14 +122,11 @@ export function MeshView() {
       return;
     }
 
-    try {
-      await navigator.clipboard.writeText(cardJson);
+    // Works on the plain-HTTP LAN too (lib/clipboard.ts). The card is also shown as a selectable
+    // read-only field below, so it can always be copied by hand.
+    if (await copyText(cardJson)) {
       setCopied(true);
       copyTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard is unavailable on insecure-context browsers — which is the norm on LOAM's plain-HTTP
-      // LAN. The card is also rendered as a visible, selectable read-only field below, so the user can
-      // still copy it by hand; this button is a convenience only.
     }
   }
 

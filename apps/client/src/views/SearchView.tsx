@@ -2,13 +2,14 @@ import type { Channel, Message, User } from "@loam/schema";
 import { MessageSchema } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import { useLocation } from "preact-iso";
-import { useId, useState } from "preact/hooks";
+import { useEffect, useId, useState } from "preact/hooks";
 
 import { IconSearch } from "../components/icons";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { SearchResult } from "../components/SearchResult";
 import { t } from "../i18n";
 import { fetchJson } from "../lib/api";
+import { markdownToPlainText } from "../lib/markdown";
 import { bodyFor, displayTime } from "../lib/message-format";
 
 /**
@@ -28,14 +29,18 @@ export function SearchView({
   usersById: Map<string, User>;
 }) {
   const location = useLocation();
-  const [query, setQuery] = useState("");
+  // `/search?q=…` opens with that search run (and each search updates the address, so reload/back work).
+  const initialQuery = typeof location.query.q === "string" ? location.query.q : "";
+  const [query, setQuery] = useState(initialQuery);
+  // The terms of the results on screen (what to highlight), not whatever is being typed now.
+  const [searchedFor, setSearchedFor] = useState("");
   const [results, setResults] = useState<Message[]>();
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string>();
   const searchInputId = useId();
 
-  async function run(): Promise<void> {
-    const trimmed = query.trim();
+  async function run(text = query): Promise<void> {
+    const trimmed = text.trim();
 
     if (!trimmed || searching) {
       return;
@@ -43,6 +48,9 @@ export function SearchView({
 
     setSearching(true);
     setError(undefined);
+    if (location.query.q !== trimmed) {
+      location.route(`/search?q=${encodeURIComponent(trimmed)}`, true);
+    }
 
     try {
       const payload = await fetchJson<unknown>(`/api/search?q=${encodeURIComponent(trimmed)}`);
@@ -50,6 +58,7 @@ export function SearchView({
         payload && typeof payload === "object" && "results" in payload && Array.isArray(payload.results)
           ? (payload.results as unknown[])
           : [];
+      setSearchedFor(trimmed);
       setResults(
         rawResults.flatMap((item) => {
           const parsed = MessageSchema.safeParse(item);
@@ -62,6 +71,15 @@ export function SearchView({
       setSearching(false);
     }
   }
+
+  // Opened as /search?q=…: run it once.
+  useEffect(() => {
+    if (initialQuery.trim()) {
+      void run(initialQuery);
+    }
+    // Only on arrival; later searches go through the form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function contextLabel(message: Message): string {
     if (message.type === "channelPost" || message.type === "channelReply") {
@@ -130,6 +148,7 @@ export function SearchView({
             </button>
           </form>
           {error ? <p className="notice notice-danger">{error}</p> : null}
+          {!results && !error && !searching ? <p className="empty-note">{t("search.hint")}</p> : null}
           {results && !results.length ? <p className="empty-note">{t("search.noResults")}</p> : null}
           {results?.length ? (
             <ul className="search-results">
@@ -139,7 +158,7 @@ export function SearchView({
                 return (
                   <SearchResult
                     authorName={author?.displayName ?? generateDisplayName(message.authorId)}
-                    body={bodyFor(message)}
+                    body={markdownToPlainText(bodyFor(message))}
                     contextLabel={contextLabel(message)}
                     hiddenAsBlocked={message.authorId !== currentUser.id && blockedUserIds.has(message.authorId)}
                     key={message.id}
@@ -148,6 +167,7 @@ export function SearchView({
                         location.route(route);
                       }
                     }}
+                    query={searchedFor}
                     time={displayTime(message.createdAt)}
                   />
                 );

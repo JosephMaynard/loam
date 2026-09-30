@@ -10,6 +10,7 @@ import { Avatar } from "./Avatar";
 import { IconHash, IconLock, IconMail, IconPlus, IconSearch, IconSettings, IconShield, IconUsers } from "./icons";
 import { InviteControl } from "./InviteControl";
 import { NavLink } from "./NavLink";
+import { NewMessageControl } from "./NewMessageControl";
 import { UnreadBadge } from "./UnreadBadge";
 
 interface SidebarProps {
@@ -30,6 +31,10 @@ interface SidebarProps {
   joinUrl?: string;
   nodeName?: string;
   onCreateChannel: (name: string, visibility?: "public" | "private") => Promise<boolean>;
+  /** The people listed under Direct Messages, in order (see `dmConversationPeers`). */
+  dmPeers: User[];
+  /** DM partners with something new that isn't loaded yet: a dot instead of a count. */
+  dmUnreadHints: ReadonlySet<string>;
   onlineUserIds: ReadonlySet<string>;
   showMesh: boolean;
   unreadByConversation: Map<string, number>;
@@ -62,7 +67,8 @@ function rowClass(active: boolean, unread: number): string {
  * @param channels - Channels to list (pinned first, archived last).
  * @param connection - Connection state shown by the status dot.
  * @param currentUser - The signed-in user (footer identity; gates the invite/people/admin rows).
- * @param users - All known users; everyone but the current user is listed under Direct Messages.
+ * @param dmPeers - Who is listed under Direct Messages (real conversations, newest first).
+ * @param users - All known users, offered by "New message".
  * @returns The sidebar element.
  */
 export function Sidebar({
@@ -73,6 +79,8 @@ export function Sidebar({
   channels,
   connection,
   currentUser,
+  dmPeers,
+  dmUnreadHints,
   inviteQr,
   joinUrl,
   nodeName,
@@ -174,7 +182,7 @@ export function Sidebar({
           <section className="nav-section">
             <h2 className="nav-heading">{t("sidebar.dms")}</h2>
             <nav aria-label={t("sidebar.dms")}>
-              {peers.map((user) => {
+              {dmPeers.map((user) => {
                 const active = activeConversation?.kind === "dm" && activeConversation.id === user.id;
                 const unread = unreadByConversation.get(`dm:${user.id}`) ?? 0;
                 return (
@@ -191,11 +199,12 @@ export function Sidebar({
                       size="sm"
                     />
                     <span className="nav-label">{user.displayName}</span>
-                    <UnreadBadge count={unread} />
+                    <UnreadBadge count={unread} dot={dmUnreadHints.has(user.id)} />
                   </NavLink>
                 );
               })}
             </nav>
+            <NewMessageControl onlineUserIds={onlineUserIds} people={peers} />
           </section>
         ) : null}
 
@@ -237,7 +246,6 @@ export function Sidebar({
           <Avatar avatar={currentUser.avatar} id={currentUser.id} size="md" />
           <div className="current-user-text">
             <strong>{currentUser.displayName}</strong>
-            <span>{currentUser.id}</span>
           </div>
         </div>
         <NavLink

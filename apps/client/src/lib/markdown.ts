@@ -131,3 +131,24 @@ export function renderMarkdownCached(id: string, body: string, editedAt?: number
 
   return html;
 }
+
+/** Block-level elements whose boundaries become a space when Markdown is flattened to one line. */
+const FLATTEN_BLOCKS = "p, li, br, h1, h2, h3, h4, h5, h6, blockquote, pre, ul, ol, hr, div";
+
+/**
+ * A message body as the plain text it reads as (for one-line previews such as search results): the
+ * Markdown is rendered and sanitised exactly as in a bubble, then only its text is kept — `**bold**` reads
+ * "bold", list items get a "•", and blocks are separated by spaces. The HTML is parsed into an inert
+ * `<template>`, never into the page.
+ */
+export function markdownToPlainText(markdown: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = renderMarkdown(markdown);
+  for (const item of Array.from(template.content.querySelectorAll("li"))) {
+    item.prepend("• ");
+  }
+  for (const block of Array.from(template.content.querySelectorAll(FLATTEN_BLOCKS))) {
+    block.after(" ");
+  }
+  return (template.content.textContent ?? "").replace(/\s+/g, " ").trim();
+}

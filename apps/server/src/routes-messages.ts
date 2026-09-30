@@ -1,11 +1,50 @@
 // Messages: DMs, search, create, edit, delete. Extracted verbatim from app.ts (2026-09-04 split) over the
 // shared AppContext.
-import { type Message, MessageCreateRequestSchema, MessageEditRequestSchema, MessageSchema, SearchQuerySchema } from "@loam/schema";
+import { type DmInbox, type Message, MessageCreateRequestSchema, MessageEditRequestSchema, MessageSchema, SearchQuerySchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 
 /** Register the message routes: DMs, search, create, edit, delete. */
 export function registerMessageRoutes(ctx: AppContext): void {
+  // The caller's DM inbox: one entry per person they've exchanged DMs with, newest first. Built with the
+  // same visibility as `/api/dms/:userId` below — shadow-banned authors' DMs count only for themselves, and
+  // people outside the caller's visible roster (banned, pending, deleted) are left out.
+  ctx.server.get("/api/dms", async (request, reply): Promise<DmInbox | undefined> => {
+    const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+    const accessError = ctx.participationError(currentUser);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
+    const visible = new Set(ctx.visibleUsers(currentUser).map((user) => user.id));
+    const mine = ctx.data.messages.filter(
+      (message) => message.type === "dm" && (message.authorId === currentUser.id || message.recipientUserId === currentUser.id),
+    );
+    // `order` breaks same-millisecond ties by arrival (data.messages is kept in arrival order).
+    const latest = new Map<string, { lastMessageAt: number; lastAuthorId: string; order: number }>();
+
+    for (const [order, message] of ctx.withoutShadowBanned(mine, currentUser.id).entries()) {
+      if (message.type !== "dm") {
+        continue;
+      }
+      const peerId = message.authorId === currentUser.id ? message.recipientUserId : message.authorId;
+      if (!visible.has(peerId)) {
+        continue;
+      }
+      const previous = latest.get(peerId);
+      if (!previous || message.createdAt >= previous.lastMessageAt) {
+        latest.set(peerId, { lastMessageAt: message.createdAt, lastAuthorId: message.authorId, order });
+      }
+    }
+
+    return {
+      conversations: [...latest]
+        .sort(([, a], [, b]) => b.lastMessageAt - a.lastMessageAt || b.order - a.order)
+        .map(([userId, { lastMessageAt, lastAuthorId }]) => ({ userId, lastMessageAt, lastAuthorId })),
+    };
+  });
+
   // CONTRACT: returns the FULL conversation. The client treats it as authoritative and prunes any cached
   // message absent from it (`reconcileConversationSnapshot`) — do not paginate/limit this without
   // changing that, or older cached history is silently deleted on open.

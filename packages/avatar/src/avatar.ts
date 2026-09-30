@@ -525,11 +525,35 @@ function deriveTertiary(seed: number, base: OKLCH): string {
   });
 }
 
+/**
+ * The base colours avatars choose from: OKLCH hues that read as clearly different at avatar lightness —
+ * red, orange, yellow, green, teal, sky, blue, violet, magenta, pink — each with the lightness band where it
+ * looks like itself. A uniform 0–360 hue looked far less varied than it sounds: at a fixed lightness a wide
+ * band of hues all read as green or cyan, and yellow turned olive, so several people often shared one
+ * colour. Picking a bucket (with a little jitter) spreads them evenly.
+ */
+const BASE_HUES: ReadonlyArray<{ h: number; l: [number, number] }> = [
+  { h: 25, l: [0.72, 0.82] },
+  { h: 55, l: [0.74, 0.84] },
+  // Yellow only stays yellow (not mustard or olive) near the top of the lightness range.
+  { h: 95, l: [0.86, 0.91] },
+  { h: 145, l: [0.74, 0.84] },
+  { h: 180, l: [0.74, 0.84] },
+  { h: 225, l: [0.74, 0.84] },
+  { h: 262, l: [0.7, 0.8] },
+  { h: 295, l: [0.72, 0.82] },
+  { h: 325, l: [0.72, 0.82] },
+  { h: 355, l: [0.74, 0.84] },
+];
+
 function createBaseColor(seed: number): OKLCH {
+  const bucket = BASE_HUES[pickIndex(mix32(seed ^ 0x13198a2e), BASE_HUES.length)]!;
+  const [lowL, highL] = bucket.l;
   return {
-    l: 0.72 + toUnitInterval(seed, 0x243f6a88) * 0.16,
-    c: 0.11 + toUnitInterval(seed, 0x85a308d3) * 0.13,
-    h: toUnitInterval(seed, 0x13198a2e) * 360,
+    l: lowL + toUnitInterval(seed, 0x243f6a88) * (highL - lowL),
+    // A higher floor than before: the palest (lowest-chroma) colours were the muddy, same-looking ones.
+    c: 0.14 + toUnitInterval(seed, 0x85a308d3) * 0.1,
+    h: bucket.h + (toUnitInterval(seed, 0x2b7e1516) - 0.5) * 12,
   };
 }
 

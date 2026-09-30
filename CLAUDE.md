@@ -416,7 +416,7 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `GET/POST /api/channels`, `PATCH /api/channels/:channelId` (owner or admin),
   `GET/POST /api/channels/:channelId/members`,
   `DELETE /api/channels/:channelId/members/:userId`, `GET /api/messages/:channelId`,
-  `GET /api/dms/:userId`, `POST /api/messages`, `PATCH/DELETE /api/messages/:messageId`,
+  `GET /api/dms` (the caller's DM inbox: partner, last message time and author, newest first — the sidebar lists only these), `GET /api/dms/:userId`, `POST /api/messages`, `PATCH/DELETE /api/messages/:messageId`,
   `GET /api/search` (400 on a malformed querystring), `GET /api/users/me/blocks` +
   `PUT/DELETE /api/users/me/blocks/:userId` (the caller's own block list; 30/min),
   `GET /api/moderation/users` +

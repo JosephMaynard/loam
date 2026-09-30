@@ -1,6 +1,17 @@
 import { z } from "zod";
 
 /**
+ * In a browser, validate without compiling. Zod probes `new Function("")` to see whether it may compile
+ * faster validators, and under the web client's strict CSP (`default-src 'self'`, no `unsafe-eval`) that
+ * probe is reported as a policy violation on every page load, even though Zod catches it. The flag is read
+ * as each object schema is created, so it must be set here, before the first schema below; the server
+ * (no DOM, no CSP) keeps the compiled path.
+ */
+if (typeof document !== "undefined") {
+  z.config({ jitless: true });
+}
+
+/**
  * Every record id on the wire (users, channels, messages, attachments, reports…). Bounded so a client or a
  * sync peer can't persist and broadcast megabyte ids. 128 comfortably covers every id format LOAM mints:
  * `user.<hex>`, `llm.…` bot ids (≤64), `mesh.<26 base32>`, `sealed.<sha256>`, channel slugs (≤47),
@@ -763,6 +774,23 @@ export const UserBlockListSchema = z.object({
   blockedUserIds: z.array(IdSchema),
 });
 export type UserBlockList = z.infer<typeof UserBlockListSchema>;
+
+/**
+ * `GET /api/dms`: the caller's direct-message conversations, newest first — who they've exchanged DMs with
+ * and when the latest one was sent, by whom. Lets a client list only real conversations and flag one as
+ * unread without loading every history. Same visibility as `GET /api/dms/:userId` (shadow-banned authors
+ * hidden from others; people the caller can't see are left out).
+ */
+export const DmInboxSchema = z.object({
+  conversations: z.array(
+    z.object({
+      userId: IdSchema,
+      lastMessageAt: z.number(),
+      lastAuthorId: IdSchema,
+    }),
+  ),
+});
+export type DmInbox = z.infer<typeof DmInboxSchema>;
 
 /**
  * `GET /api/search` querystring. Each field must be a single string — a repeated key (`?q=a&q=b`) parses

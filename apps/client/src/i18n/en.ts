@@ -648,7 +648,7 @@ export const en = {
   "invite.qrKeyMismatch":
     "The join QR is hidden: the key this node advertises doesn't match the key you joined with.",
   "invite.qrNoKeyNote":
-    "This QR doesn't include the node's security key, because your own connection wasn't verified by scanning a join QR.",
+    "Anyone can join with this QR. For extra protection against impostors, have people scan the QR on the host's screen instead.",
   // User blocking (docs/30 B3) and the in-app privacy policy link (docs/30 B2).
   "block.block": "Block",
   "block.unblock": "Unblock",
@@ -690,6 +690,17 @@ export const en = {
   "admin.nav.mesh": "Mesh",
   "moderation.banConfirm": "Ban {name}? They lose access to this network until a moderator unbans them.",
   "toast.newMessages": { one: "{n} new message in {place}", other: "{n} new messages in {place}" },
+  "unreadBadge.new": "New messages",
+  "newMessage.open": "New message",
+  "newMessage.title": "New message",
+  "newMessage.filter": "Search people",
+  "newMessage.noMatch": "No one by that name.",
+  "newMessage.nobody": "No one else has joined yet.",
+  "messageList.emptyDm": "No messages yet. Say hello.",
+  "search.hint": "Search the channels you are in and your direct messages.",
+  "invite.howTo": "People on the same Wi-Fi or hotspot scan this to join, or open the link.",
+  "invite.copyLink": "Copy link",
+  "invite.copied": "Copied",
 };
 
 /**
