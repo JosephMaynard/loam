@@ -6,6 +6,12 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **Choose light or dark.** Settings → Appearance offers System (follow the device, the default), Light or
+  Dark, as tiles that preview each palette. The choice applies at once, is remembered in that browser, and
+  follows across open tabs. The browser's top bar colour follows it, and inside the Android host the native
+  top bar and status bar switch to match.
+
 ### Security
 - **The panic route no longer gives itself away through rate-limit headers.** `/api/panic` answers every
   failure with a 404 so a prober can't tell it exists, but the old rate limiter added

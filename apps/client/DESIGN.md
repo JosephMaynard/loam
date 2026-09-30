@@ -38,7 +38,10 @@ where spacing really matters on old devices, use grid. Logical properties everyw
 ## Tokens
 
 All on `:root` in `tokens.css`. Dark values apply under `prefers-color-scheme: dark` unless the page sets
-`data-theme="light"`; `data-theme="dark"` forces dark (useful when testing; keep the two dark blocks in sync).
+`data-theme="light"`; `data-theme="dark"` forces dark (keep the two dark blocks in sync). The attribute is the
+user's Settings → Appearance choice (System / Light / Dark), applied by `lib/theme.ts` before the first render:
+it also re-points the `theme-color` metas and posts `loam-theme` so the Android host's native chrome matches.
+Anything that must look the same in both themes (QR tiles, the theme preview swatches) uses fixed colours.
 
 | Token | Light | Dark | Use |
 |---|---|---|---|

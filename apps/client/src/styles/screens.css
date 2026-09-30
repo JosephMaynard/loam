@@ -414,6 +414,84 @@
   font-weight: 600;
 }
 
+/* Appearance card: theme tiles, each previewing its palette. */
+.theme-field {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+/* A miniature conversation: page background with one bubble each side. The colours are the palettes'
+   own (tokens.css --bg-app / --bubble-theirs / --bubble-mine), fixed on purpose so every tile shows its
+   theme whatever the page is using; `system` splits diagonally between the two. */
+.theme-swatch {
+  position: relative;
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  width: 64px;
+  height: 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
+  overflow: hidden;
+}
+
+.theme-swatch-bubble {
+  display: block;
+  height: 9px;
+  border-radius: 5px;
+}
+
+.theme-swatch-theirs {
+  width: 62%;
+}
+
+.theme-swatch-mine {
+  width: 50%;
+  justify-self: end;
+}
+
+.theme-swatch-light {
+  background: #f3f0e8;
+}
+
+.theme-swatch-light .theme-swatch-theirs {
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px #e1dcd1;
+}
+
+.theme-swatch-light .theme-swatch-mine {
+  background: #d9ecd8;
+}
+
+.theme-swatch-dark {
+  background: #111412;
+}
+
+.theme-swatch-dark .theme-swatch-theirs {
+  background: #232925;
+}
+
+.theme-swatch-dark .theme-swatch-mine {
+  background: #2e4c3b;
+}
+
+.theme-swatch-system {
+  background: linear-gradient(135deg, #f3f0e8 50%, #111412 50%);
+}
+
+.theme-swatch-system .theme-swatch-theirs {
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px #e1dcd1;
+}
+
+.theme-swatch-system .theme-swatch-mine {
+  background: #2e4c3b;
+}
+
 .avatar-style-field:disabled .choice-tile {
   cursor: not-allowed;
   opacity: 0.55;

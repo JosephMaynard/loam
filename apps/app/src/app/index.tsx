@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Appearance,
   AppState,
   BackHandler,
   KeyboardAvoidingView,
@@ -27,6 +28,7 @@ import { ThemedView } from '@/components/themed-view';
 import { PRIVACY_POLICY_URL } from '@/constants/links';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { colorSchemeForClientMessage } from '@/lib/client-theme';
 import { SERVER_PORT } from '@/lib/join-url';
 import {
   clearStoredDbKeys,
@@ -925,6 +927,12 @@ export default function HostScreen() {
     // pinned to the LOAM origin, so this can't be triggered by arbitrary web content.
     try {
       const parsed = JSON.parse(raw) as { type?: unknown };
+      // The client's Settings → Appearance choice: match the native chrome to it (lib/client-theme.ts).
+      const scheme = colorSchemeForClientMessage(parsed);
+      if (scheme) {
+        Appearance.setColorScheme(scheme);
+        return;
+      }
       if (parsed && parsed.type === 'loam-open-share') {
         setShareOpen(true);
         return;

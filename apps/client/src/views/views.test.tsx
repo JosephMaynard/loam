@@ -112,7 +112,8 @@ describe("SettingsView", () => {
 
     expect(host.querySelector(".screen-header h1")?.textContent).toBe("Settings");
     expect(host.querySelector(".identity-card .avatar-xl")).not.toBeNull();
-    expect(host.querySelectorAll(".choice-tile input[type=radio]")).toHaveLength(3);
+    expect(host.querySelectorAll(".avatar-style-field .choice-tile input[type=radio]")).toHaveLength(3);
+    expect(host.querySelectorAll(".appearance-card .choice-tile input[type=radio]")).toHaveLength(3);
     expect(host.querySelector(".join-card .join-url")?.textContent).toBe("http://10.0.0.1:3000/");
     expect(host.querySelector(".node-version")?.textContent).toBe("LOAM v9.9.9");
   });
