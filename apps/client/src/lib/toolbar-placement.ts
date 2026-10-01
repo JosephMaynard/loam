@@ -6,6 +6,8 @@
  *     your own), if it fits inside the conversation.
  *  2. **Over** the bubble's top-end corner, as it used to, slid sideways to stay inside the conversation.
  *  3. If that would cover the author's name above the bubble, **lifted above the name** instead.
+ *  4. If the list's top edge leaves no room above (the toolbar would be clipped), **under** the bubble's
+ *     bottom-end corner; as a last resort, clamped inside the list.
  *
  * Rects are viewport rects (`getBoundingClientRect`); the answer is the toolbar's top-left corner in the
  * same coordinates. Pure, so it's testable without layout.
@@ -60,12 +62,26 @@ export function placeToolbar({
   // 2. Over the top-end corner (right in LTR, left in RTL), kept inside the bounds.
   const endLeft = rtl ? bubble.left + GAP : bubble.right - GAP - width;
   const left = clamp(endLeft, bounds.left, bounds.right - width);
-  const top = bubble.top - height + OVERLAP;
-  const over: Box = { left, top, right: left + width, bottom: top + height };
+  const fitsVertically = (top: number): boolean => top >= bounds.top && top + height <= bounds.bottom;
+  const overTop = bubble.top - height + OVERLAP;
+  const over: Box = { left, top: overTop, right: left + width, bottom: overTop + height };
+  const coversName = !!name && overlaps(over, name);
 
-  // 3. Not over the name: lift above it (a gap clear, so rounding can't leave them touching).
-  if (name && overlaps(over, name)) {
-    return { left, top: name.top - height - GAP };
+  if (!coversName && fitsVertically(overTop)) {
+    return { left, top: overTop };
   }
-  return { left, top };
+  // 3. Not over the name: lift above it (a gap clear, so rounding can't leave them touching)...
+  if (coversName) {
+    const liftedTop = name!.top - height - GAP;
+    if (fitsVertically(liftedTop)) {
+      return { left, top: liftedTop };
+    }
+  }
+  // 4. ...and when there's no room above (the list's top edge would clip it), under the bubble's
+  // bottom-end corner instead; failing even that, as close as the list allows.
+  const underTop = bubble.bottom - OVERLAP;
+  if (fitsVertically(underTop)) {
+    return { left, top: underTop };
+  }
+  return { left, top: clamp(overTop, bounds.top, bounds.bottom - height) };
 }

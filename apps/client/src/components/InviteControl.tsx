@@ -53,6 +53,9 @@ export function InviteControl({
   const [copied, setCopied] = useState(false);
 
   async function copyLink(): Promise<void> {
+    if (qrSuppressed) {
+      return;
+    }
     if (await copyText(qrUrl ?? joinUrl ?? "")) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
@@ -103,11 +106,14 @@ export function InviteControl({
           <p className="invite-modal-howto">{t("invite.howTo")}</p>
           <p className="invite-modal-url">{joinUrl}</p>
           {/* The link the QR carries (with this device's verified node key when it has one), so a pasted
-              link keeps the same protection as a scan. */}
-          <button className="btn btn-secondary btn-block" onClick={() => void copyLink()} type="button">
-            <IconCopy />
-            {copied ? t("invite.copied") : t("invite.copyLink")}
-          </button>
+              link keeps the same protection as a scan. Withheld with the QR when the node's key doesn't
+              match the one this device verified: copying would hand out the same suspect invite. */}
+          {qrSuppressed ? null : (
+            <button className="btn btn-secondary btn-block" onClick={() => void copyLink()} type="button">
+              <IconCopy />
+              {copied ? t("invite.copied") : t("invite.copyLink")}
+            </button>
+          )}
           {hasNativeBridge ? (
             <div className="invite-modal-wifi">
               <button className="btn btn-primary btn-block" onClick={openHostShare} type="button">

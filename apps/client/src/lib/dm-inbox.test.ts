@@ -1,7 +1,7 @@
 import type { Message, User } from "@loam/schema";
 import { describe, expect, it } from "vitest";
 
-import { dmConversationPeers, inboxUnreadPeers } from "./dm-inbox";
+import { dmConversationPeers, inboxUnreadPeers, reconcileInboxEntry } from "./dm-inbox";
 
 function user(id: string, type: User["type"] = "human"): User {
   return { id, displayName: id, type, isAdmin: false, createdAt: 1, ephemeral: true };
@@ -59,5 +59,29 @@ describe("inboxUnreadPeers", () => {
   it("leaves it to the real count once loaded, and skips blocked people", () => {
     expect([...inboxUnreadPeers(inbox, me.id, {}, new Map([[`dm:${ada.id}`, 2]]), new Set())]).toEqual([cy.id]);
     expect([...inboxUnreadPeers(inbox, me.id, {}, new Map(), new Set([ada.id, cy.id]))]).toEqual([]);
+  });
+});
+
+describe("reconcileInboxEntry", () => {
+  const inbox = [
+    { userId: ada.id, lastMessageAt: 100, lastAuthorId: ada.id },
+    { userId: bob.id, lastMessageAt: 50, lastAuthorId: bob.id },
+  ];
+
+  it("drops the entry when the conversation turns out empty (its DMs were deleted)", () => {
+    expect(reconcileInboxEntry(inbox, ada.id, [], me.id)).toEqual([inbox[1]]);
+    // ...so no unread dot survives for it.
+    expect([...inboxUnreadPeers(reconcileInboxEntry(inbox, ada.id, [], me.id), me.id, {}, new Map(), new Set())]).toEqual([
+      bob.id,
+    ]);
+  });
+
+  it("rebuilds the entry from the newest message left", () => {
+    const history = [dm("a", ada.id, me.id, 30), dm("b", me.id, ada.id, 40)];
+    expect(reconcileInboxEntry(inbox, ada.id, history, me.id)).toContainEqual({
+      userId: ada.id,
+      lastMessageAt: 40,
+      lastAuthorId: me.id,
+    });
   });
 });

@@ -45,7 +45,7 @@ import {
   reconcileConversationSnapshot,
   type LiveChanges,
 } from "./lib/messages";
-import { dmConversationPeers, inboxUnreadPeers, type DmInboxEntry } from "./lib/dm-inbox";
+import { dmConversationPeers, inboxUnreadPeers, reconcileInboxEntry, type DmInboxEntry } from "./lib/dm-inbox";
 import {
   clearAllRecords,
   deleteRecord,
@@ -1023,6 +1023,9 @@ function LoamApp() {
     setMessages([]);
     setChannels([]);
     setUsers([]);
+    // The previous identity's DM partners and unread state must not outlive it (the new identity's inbox
+    // is fetched fresh; until it lands the sidebar shows only what the new identity holds).
+    setDmInbox(undefined);
     lastReadRef.current = {};
     setLastReadByConversation({});
     setTyping({});
@@ -1650,6 +1653,13 @@ function LoamApp() {
         if (active) {
           setNotFoundConversation((previous) => (previous === key ? undefined : previous));
           reconcileConversationMessages(conversation, nextMessages, preFetchIds, liveChangesRef.current.since(liveMark));
+          // A DM's full history is the truth about its inbox entry: rebuild it (or drop it when nothing is
+          // left), so a deleted DM can't leave an unread dot that opening the conversation can't clear.
+          if (conversation.kind === "dm") {
+            setDmInbox((previous) =>
+              previous ? reconcileInboxEntry(previous, conversation.id, nextMessages, currentUser.id) : previous,
+            );
+          }
         }
       })
       .catch((nextError: unknown) => {
@@ -1889,6 +1899,12 @@ function LoamApp() {
         }
 
         if (payload.type === "messageDeleted") {
+          // A deleted DM — or a message this device never held, which may be a DM the inbox reported — can
+          // change who's in the inbox and what's unread: re-read it.
+          const deleted = messagesRef.current.find((message) => message.id === payload.messageId);
+          if (!deleted || deleted.type === "dm") {
+            scheduleInboxRefresh();
+          }
           removeMessage(payload.messageId);
           return;
         }
@@ -2025,6 +2041,19 @@ function LoamApp() {
     () => countUnreadByConversation(withoutBlockedAuthors(messages, blockedUserIds), lastReadByConversation, currentUser.id),
     [blockedUserIds, currentUser.id, lastReadByConversation, messages],
   );
+
+  // Re-read the DM inbox shortly after a deletion that may have touched it (a burst of deletes — a
+  // moderator clearing someone out — costs one request).
+  const inboxRefreshTimerRef = useRef<number>();
+  const scheduleInboxRefresh = useCallback(() => {
+    window.clearTimeout(inboxRefreshTimerRef.current);
+    inboxRefreshTimerRef.current = window.setTimeout(() => {
+      void fetchJson<unknown>("/api/dms")
+        .then((payload) => setDmInbox(DmInboxSchema.parse(payload).conversations))
+        .catch(() => undefined);
+    }, 400);
+  }, []);
+  useEffect(() => () => window.clearTimeout(inboxRefreshTimerRef.current), []);
 
   const dmPeers = useMemo(
     () =>

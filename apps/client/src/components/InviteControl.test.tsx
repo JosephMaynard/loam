@@ -48,6 +48,17 @@ describe("InviteControl", () => {
     );
     // The plain URL is still shown so people can type it.
     expect(root.querySelector(".invite-modal-url")?.textContent).toBe("http://192.168.0.5:3000");
+    // ...but there's no one-tap way to hand out the suspect invite (review 2026-10-01).
+    const buttons = Array.from(root.querySelectorAll(".invite-modal button")).map((button) => button.textContent);
+    expect(buttons.some((label) => label?.includes("Copy link"))).toBe(false);
+  });
+
+  it("offers Copy link for the QR's link when nothing is suppressed", async () => {
+    const root = mount(<InviteControl joinUrl="http://192.168.0.5:3000" qrUrl="http://192.168.0.5:3000#k=abc" />);
+    root.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tick();
+    const buttons = Array.from(root.querySelectorAll(".invite-modal button")).map((button) => button.textContent);
+    expect(buttons.some((label) => label?.includes("Copy link"))).toBe(true);
   });
 
   it("starts closed: a trigger button, no modal", () => {
