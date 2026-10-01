@@ -59,14 +59,14 @@ describe('joining another network', () => {
     expect(presetConfig('community', 'x', 'en').sync).toBeUndefined();
   });
 
-  it('remembers the peer with the rest of the answers', () => {
-    const record = {
+  it('never brings back a remembered peer (its link code is single-use)', () => {
+    const stored = {
       preset: 'community',
       nodeName: 'Hilltop',
       connection: 'join',
       peer: { url: 'http://10.0.0.5:3000', transportKey: 'abc', linkCode: 'ABCDEFGHIJKLMNOP' },
     };
-    expect(parseSetupRecord(JSON.stringify(record))).toEqual(record);
+    expect(parseSetupRecord(JSON.stringify(stored))).toEqual({ preset: 'community', nodeName: 'Hilltop', connection: 'join' });
   });
 });
 

@@ -271,10 +271,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   /**
    * Use a peer's link code (sync-links.ts), so the peer pulls from this node too. Only over a key pinned
    * from the scanned QR (the code must never travel readable), and only until it works: a refused code
-   * (expired or used) is not tried again, any other failure retries after {@link LINK_RETRY_MS}. Never
-   * throws.
+   * (expired or used) is not tried again, any other failure retries after {@link LINK_RETRY_MS}. An answer
+   * that arrives after an Emergency Reset (`generation` moved on) is dropped: it must not install a peer's
+   * token into the fresh network. Never throws.
    */
-  async function useLinkCode(peer: SyncPeer): Promise<void> {
+  async function useLinkCode(peer: SyncPeer, generation: number): Promise<void> {
     const code = peer.linkCode;
     if (!code || !peer.transportKey || refusedLinkCodes.has(code) || (linkRetryAt.get(peer.url) ?? 0) > Date.now()) {
       return;
@@ -285,6 +286,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     }
     try {
       const result = await fetchPeerJson(peer.url, "/api/sync/link", SyncLinkResponseSchema, { ...self, code });
+      if (rt.wipeGeneration !== generation || rt.wipeInProgress) {
+        return;
+      }
       linkRetryAt.delete(peer.url);
       link?.linked(peer.url, result);
     } catch (error) {
@@ -1711,8 +1715,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       await Promise.all(
         rt.appConfig.sync.peers.map(async (peer) => {
           // Link first (it never throws): the peer's sync may only be switched on by this very link, and the
-          // round's pull then reuses the transport session it set up.
-          await useLinkCode(peer);
+          // round's pull then reuses the transport session it set up. A reset while linking ends this peer's
+          // round: syncWithPeer only guards from its own start onwards.
+          const generation = rt.wipeGeneration;
+          await useLinkCode(peer, generation);
+          if (rt.wipeGeneration !== generation) {
+            return;
+          }
           await syncWithPeer(peer, sealedDeliveries);
         }),
       );

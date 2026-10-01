@@ -99,29 +99,33 @@ describe("peerUrlFor", () => {
 });
 
 describe("createLinkCodes", () => {
-  it("accepts each code once, until it expires", () => {
+  it("accepts each code once (and its own repeat), until it expires", () => {
     let now = 1_000;
     const codes = createLinkCodes(() => now);
     const first = codes.mint();
     expect(first.code).toMatch(/^[A-Za-z0-9_-]{16}$/);
     expect(first.expiresAt).toBe(1_000 + LINK_CODE_TTL_MS);
-    expect(codes.consume(first.code)).toBe(true);
-    expect(codes.consume(first.code)).toBe(false);
+    expect(codes.check(first.code, "node-a")).toBe("fresh");
+    codes.spend(first.code, "node-a");
+    // The same node again (its answer was lost) may repeat; anyone else is refused.
+    expect(codes.check(first.code, "node-a")).toBe("repeat");
+    expect(codes.check(first.code, "node-b")).toBe("invalid");
 
     const second = codes.mint();
     now += LINK_CODE_TTL_MS;
-    expect(codes.consume(second.code)).toBe(false);
+    expect(codes.check(second.code, "node-a")).toBe("invalid");
+    expect(codes.check(first.code, "node-a")).toBe("invalid");
   });
 
   it("keeps only the newest few, and refuses malformed or cleared codes", () => {
     const codes = createLinkCodes();
     const minted = Array.from({ length: MAX_LINK_CODES + 1 }, () => codes.mint().code);
-    expect(codes.consume(minted[0]!)).toBe(false);
+    expect(codes.check(minted[0]!, "node")).toBe("invalid");
     for (const bad of ["", "short", `${minted[1]}x`, "!".repeat(16)]) {
-      expect(codes.consume(bad)).toBe(false);
+      expect(codes.check(bad, "node")).toBe("invalid");
     }
     codes.clear();
-    expect(codes.consume(minted[1]!)).toBe(false);
+    expect(codes.check(minted[1]!, "node")).toBe("invalid");
   });
 });
 
@@ -174,7 +178,11 @@ describe("POST /api/sync/link", () => {
       expect.objectContaining({ url: `http://${LAN_ADDRESS}:3456`, label: "Hilltop", transportKey: "a".repeat(43) }),
     ]);
 
-    // The same code again (a photo of the QR) is refused.
+    // The same node asking again (its answer was lost) gets the same answer, and no second peer appears.
+    const repeat = await link(existing, { code, port: 3456, transportKey: "a".repeat(43), name: "Hilltop" });
+    expect(JSON.parse(repeat.text)).toEqual({ name: "Riverside", token: "mesh-secret-0123456789" });
+    expect((await syncReport(existing.app, cookie)).peers).toHaveLength(1);
+    // The same code from anyone else (a photo of the QR) is refused.
     expect((await link(existing, { code, port: 3457 })).status).toBe(403);
   });
 
@@ -240,6 +248,44 @@ describe("a new node using its link code", () => {
     ]);
     await save([{ url: "http://192.168.4.30:3000", linkCode: "D".repeat(16) }]);
     expect(await peers()).toEqual([{ url: "http://192.168.4.30:3000" }]);
+  });
+
+  it.skipIf(!LAN_ADDRESS)("drops a link answer that arrives after an Emergency Reset", async () => {
+    const existing = await lanNode({ sync: { enabled: false, peers: [], token: "mesh-secret-0123456789" } });
+    const code = await mintCode(existing.app, await sessionCookie(existing.app));
+    const joining = await lanNode({
+      sync: { enabled: true, peers: [{ url: existing.url, transportKey: existing.key, linkCode: code }] },
+    });
+    const cookie = await sessionCookie(joining.app);
+
+    // Hold the link answer until the reset has finished.
+    const realFetch = globalThis.fetch;
+    let arrived!: () => void;
+    const answerArrived = new Promise<void>((resolve) => (arrived = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const response = await realFetch(input, init);
+      if (String(input).endsWith("/api/sync/link")) {
+        arrived();
+        await released;
+      }
+      return response;
+    }) as typeof fetch;
+    cleanups.push(() => {
+      globalThis.fetch = realFetch;
+    });
+
+    const round = joining.app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
+    await answerArrived;
+    await joining.app.emergencyReset();
+    release();
+    await round;
+
+    const config = (
+      await joining.app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: await sessionCookie(joining.app) } })
+    ).json() as { sync: { token?: string } };
+    expect(config.sync.token).toBeUndefined();
   });
 
   it.skipIf(!LAN_ADDRESS)("reports a refused code and doesn't try it again", async () => {

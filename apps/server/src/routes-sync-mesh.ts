@@ -455,23 +455,30 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
         return reply.code(400).send(errorBody("Invalid link request"));
       }
 
-      const peers = ctx.appConfig.sync.peers.filter((peer) => peer.url !== url);
-      if (peers.length >= 16) {
-        return reply.code(409).send(errorBody("This node already syncs with the most peers it can"));
-      }
+      // A node is its address plus its key: a lost answer is retried by the same pair, never by another.
+      const binding = `${url} ${body.data.transportKey ?? ""}`;
+      const state = ctx.linkCodes.check(body.data.code, binding);
 
-      // Checked last, so a malformed or unplaceable request never uses up a code.
-      if (!ctx.linkCodes.consume(body.data.code)) {
+      if (state === "invalid") {
         return reply.code(403).send(errorBody("This link code has expired or was already used"));
       }
 
-      peers.push({
-        url,
-        ...(body.data.name ? { label: body.data.name } : {}),
-        ...(body.data.transportKey ? { transportKey: body.data.transportKey } : {}),
-      });
-      if (commitAdminConfig(ctx, mergeConfig(ctx.appConfig, { sync: { enabled: true, peers } })) === "failed") {
-        return reply.code(500).send(errorBody("Internal server error"));
+      if (state === "fresh") {
+        const peers = ctx.appConfig.sync.peers.filter((peer) => peer.url !== url);
+        if (peers.length >= 16) {
+          return reply.code(409).send(errorBody("This node already syncs with the most peers it can"));
+        }
+        peers.push({
+          url,
+          ...(body.data.name ? { label: body.data.name } : {}),
+          ...(body.data.transportKey ? { transportKey: body.data.transportKey } : {}),
+        });
+        if (commitAdminConfig(ctx, mergeConfig(ctx.appConfig, { sync: { enabled: true, peers } })) === "failed") {
+          // Nothing was saved, so the code stays unspent for a retry.
+          return reply.code(500).send(errorBody("Internal server error"));
+        }
+        // Spent only once the link is saved (all synchronous since the check, so no other request intervenes).
+        ctx.linkCodes.spend(body.data.code, binding);
       }
 
       const linked: SyncLinkResponse = {

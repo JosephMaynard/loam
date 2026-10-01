@@ -2,16 +2,39 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cryptoMock, resetCryptoMock, resetSecureStoreMock, secureStoreMock } from '@/test-utils/mocks';
 
-const files = new Set<string>();
+// A tiny file system: existing paths, their text, and paths whose reads or writes fail.
+const files = new Map<string, string>();
+const failing = new Set<string>();
 vi.mock('expo-secure-store', () => secureStoreMock);
 vi.mock('expo-crypto', () => cryptoMock);
 vi.mock('expo-file-system/legacy', () => ({
   documentDirectory: 'file:///data/files/',
-  getInfoAsync: async (uri: string) => ({ exists: files.has(uri) }),
+  getInfoAsync: async (uri: string) => {
+    if (failing.has(uri)) {
+      throw new Error('I/O error');
+    }
+    return { exists: files.has(uri) };
+  },
+  makeDirectoryAsync: async () => undefined,
+  writeAsStringAsync: async (uri: string, text: string) => {
+    if (failing.has(uri)) {
+      throw new Error('disk full');
+    }
+    files.set(uri, text);
+  },
+  readAsStringAsync: async (uri: string) => {
+    if (!files.has(uri)) {
+      throw new Error('ENOENT');
+    }
+    return files.get(uri)!;
+  },
 }));
 
+const HINT = 'file:///data/files/loam/.loam-db-mode-hint';
+
 const { detectPreviousNetwork, loadSetupRecord, prepareNewNetwork, saveSetupRecord } = await import('./new-network');
-const { getDbEncryptionMode, registerDbEncryption, resolveDbKey, setDbEncryptionMode } = await import('./db-encryption');
+const { getDbEncryptionMode, registerDbEncryption, resolveDbKey, setDbEncryptionMode, setPassphraseCandidate, setPendingNewNetwork } =
+  await import('./db-encryption');
 
 async function keyResponse(): Promise<Record<string, unknown>> {
   const posted: unknown[] = [];
@@ -29,6 +52,8 @@ async function keyResponse(): Promise<Record<string, unknown>> {
 
 beforeEach(() => {
   files.clear();
+  failing.clear();
+  setPendingNewNetwork(undefined);
   resetSecureStoreMock();
   resetCryptoMock();
 });
@@ -36,10 +61,21 @@ beforeEach(() => {
 describe('detectPreviousNetwork', () => {
   it('offers to continue a kept database, not a dead ephemeral one', async () => {
     expect(await detectPreviousNetwork()).toBe(false);
-    files.add('file:///data/files/loam/loam.db');
+    files.set('file:///data/files/loam/loam.db', '');
     expect(await detectPreviousNetwork()).toBe(true);
-    files.add('file:///data/files/loam/.loam-db-ephemeral');
+    files.set('file:///data/files/loam/.loam-db-ephemeral', '');
     expect(await detectPreviousNetwork()).toBe(false);
+  });
+});
+
+describe('detectPreviousNetwork when the folder is hard to read', () => {
+  it('never mistakes a kept database for an erased one', async () => {
+    files.set('file:///data/files/loam/loam.db', '');
+    failing.add('file:///data/files/loam/.loam-db-ephemeral');
+    expect(await detectPreviousNetwork()).toBe(true);
+    failing.clear();
+    failing.add('file:///data/files/loam/loam.db');
+    expect(await detectPreviousNetwork()).toBe(true);
   });
 });
 
@@ -63,13 +99,39 @@ describe('prepareNewNetwork', () => {
     expect((await resolveDbKey('persistent')).key).not.toBe(oldKey);
     const response = await keyResponse();
     expect(response.mode).toBe('ephemeral');
-    expect(response.newNetwork).toMatchObject({ node: { name: 'Camp', locale: 'es' }, security: { profile: 'hardened' } });
+    expect(response.newNetwork).toMatchObject({
+      config: { node: { name: 'Camp', locale: 'es' }, security: { profile: 'hardened' } },
+    });
+  });
+
+  it('records the chosen mode for the launcher before it starts, and stops if it cannot', async () => {
+    await prepareNewNetwork({ preset: 'community', nodeName: 'Camp', connection: 'wifi' }, 'en');
+    expect(files.get(HINT)).toBe('persistent');
+
+    setPendingNewNetwork(undefined);
+    failing.add(HINT);
+    const result = await prepareNewNetwork({ preset: 'private', nodeName: 'Camp', connection: 'wifi' }, 'en');
+    expect(result).toMatchObject({ ok: false });
+    expect((await keyResponse()).newNetwork).toBeUndefined();
+  });
+
+  it('gives a new passphrase network a new key, even with the same passphrase', async () => {
+    await setPassphraseCandidate('correct horse');
+    await setDbEncryptionMode('passphrase');
+    const before = (await resolveDbKey('passphrase')).key;
+    await prepareNewNetwork({ preset: 'custom', nodeName: 'Camp', connection: 'wifi' }, 'en');
+    expect(await getDbEncryptionMode()).toBe('passphrase');
+    await setPassphraseCandidate('correct horse');
+    const after = (await resolveDbKey('passphrase')).key;
+    expect(before).toBeTruthy();
+    expect(after).toBeTruthy();
+    expect(after).not.toBe(before);
   });
 
   it('keeps the current storage mode for Choose every setting myself', async () => {
     await setDbEncryptionMode('persistent');
     await prepareNewNetwork({ preset: 'custom', nodeName: '', connection: 'wifi' }, 'en');
     expect(await getDbEncryptionMode()).toBe('persistent');
-    expect((await keyResponse()).newNetwork).toEqual({ node: { name: 'LOAM', locale: 'en' } });
+    expect((await keyResponse()).newNetwork).toMatchObject({ config: { node: { name: 'LOAM', locale: 'en' } } });
   });
 });

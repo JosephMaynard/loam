@@ -123,8 +123,10 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
       setError(t('setup.failed', { error: prepared.error }));
       return;
     }
-    // A joining node serves people on the network it joined, so it hosts on that Wi-Fi.
-    await Promise.all([saveSetupRecord(record), setHostMode(record.connection === 'join' ? 'wifi' : record.connection)]);
+    // A joining node serves people on the network it joined, so it hosts on that Wi-Fi. The remembered
+    // answers leave the peer out: its link code is spent once used, so joining again means a fresh scan.
+    const { peer: _spent, ...remembered } = record;
+    await Promise.all([saveSetupRecord(remembered), setHostMode(record.connection === 'join' ? 'wifi' : record.connection)]);
     onDone({ record, newNetwork: true });
   }
 
@@ -193,7 +195,8 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
                 <PrimaryButton
                   label={busy ? t('setup.starting') : t('setup.again')}
                   disabled={busy}
-                  onPress={() => void startNew(remembered)}
+                  // A joining phone needs a fresh link code from the other network: same answers, new scan.
+                  onPress={() => (remembered.connection === 'join' ? setStep('scan') : void startNew(remembered))}
                 />
               ) : null}
               <SecondaryButton label={t('setup.changeSettings')} disabled={busy} onPress={() => setStep('type')} />

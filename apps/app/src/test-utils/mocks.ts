@@ -22,6 +22,7 @@
 // (`reset*`, `fail*`) that are NOT part of the real module — only ever import those from this file,
 // never through the mocked specifier.
 
+import { randomBytes as nodeRandomBytes } from 'node:crypto';
 import { createHash } from "node:crypto";
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,10 @@ let randomBytesSource: ((byteCount: number) => Uint8Array) | undefined;
 export const cryptoMock = {
   CryptoDigestAlgorithm,
   CryptoEncoding,
+  /** Synchronous random bytes (expo-crypto's `getRandomBytes`), for ids that aren't key material. */
+  getRandomBytes(byteCount: number): Uint8Array {
+    return new Uint8Array(nodeRandomBytes(byteCount));
+  },
   async getRandomBytesAsync(byteCount: number): Promise<Uint8Array> {
     if (randomBytesSource) {
       return randomBytesSource(byteCount);

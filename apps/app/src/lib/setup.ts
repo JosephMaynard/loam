@@ -28,7 +28,7 @@ export type SetupRecord = {
   preset: SetupPreset;
   nodeName: string;
   connection: SetupConnection;
-  /** Set when `connection` is 'join'. */
+  /** Set when `connection` is 'join', for the new network only: never remembered (its code is single-use). */
   peer?: SetupPeer;
 };
 
@@ -102,19 +102,10 @@ export function parseSetupRecord(value: string | null | undefined): SetupRecord 
       typeof raw.nodeName === 'string' &&
       (raw.connection === 'wifi' || raw.connection === 'hotspot' || raw.connection === 'join')
     ) {
-      // The remembered peer is only for display: the code in it is spent once the network has started.
-      const peer =
-        raw.peer &&
-        typeof raw.peer.url === 'string' &&
-        typeof raw.peer.transportKey === 'string' &&
-        typeof raw.peer.linkCode === 'string'
-          ? { url: raw.peer.url, transportKey: raw.peer.transportKey, linkCode: raw.peer.linkCode }
-          : undefined;
       return {
         preset: raw.preset as SetupPreset,
         nodeName: cleanNodeName(raw.nodeName),
         connection: raw.connection,
-        ...(peer ? { peer } : {}),
       };
     }
   } catch {

@@ -579,15 +579,23 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
  * Never logs `key`/`legacyKey`/the passphrase. Returns a cleanup that removes both listeners.
  */
 /**
- * A new network's starting configuration from the setup screens. It rides the next key response only
- * (then is forgotten): the launcher empties the data folder and writes it as config.json before booting
- * (main.js `startNewNetwork`). Sending it once matters, since a later key request (an unlock retry, a
- * wipe's restart) must never empty the folder of the network that is now running.
+ * A new network from the setup screens: an operation id and its starting configuration. It rides every key
+ * response until the launcher acknowledges it (`loam-new-network-applied` with the same id): the launcher
+ * empties the data folder and writes the configuration as config.json before booting (main.js
+ * `startNewNetwork`). A response the launcher never received (it timed out waiting) is simply sent again
+ * with the next request. The id makes a repeat harmless: once the launcher has created the network it
+ * records the id in the folder, and the same operation arriving again never empties it a second time.
  */
-let pendingNewNetwork: Record<string, unknown> | undefined;
+type NewNetworkOperation = { id: string; config: Record<string, unknown> };
+let pendingNewNetwork: NewNetworkOperation | undefined;
 
+/** Queue a new network for the next boot (a fresh operation id each time), or cancel one with undefined. */
 export function setPendingNewNetwork(config: Record<string, unknown> | undefined): void {
-  pendingNewNetwork = config;
+  pendingNewNetwork = config ? { id: newOperationId(), config } : undefined;
+}
+
+function newOperationId(): string {
+  return Crypto.getRandomBytes(12).reduce((text, byte) => text + byte.toString(16).padStart(2, '0'), '');
 }
 
 export function registerDbEncryption(channel: BridgeChannel): () => void {
@@ -630,13 +638,13 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
           key?: string;
           legacyKey?: string;
           requestId?: string;
-          newNetwork?: Record<string, unknown>;
+          newNetwork?: NewNetworkOperation;
         } = {
           mode: response.mode,
         };
+        // Kept (not cleared) until the launcher acknowledges it; never alongside a read error, which locks.
         if (pendingNewNetwork && response.mode !== DB_ENCRYPTION_MODE_READ_ERROR) {
           payload.newNetwork = pendingNewNetwork;
-          pendingNewNetwork = undefined;
         }
         if (requestId !== undefined) {
           payload.requestId = requestId;
@@ -662,11 +670,21 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
     void markPassphraseKeyMigrated(requestId);
   };
 
+  // The launcher created the new network: stop sending it (only that exact operation; a newer one stays).
+  const onNewNetworkApplied = (payload: unknown): void => {
+    const id = (payload as { id?: unknown } | undefined)?.id;
+    if (pendingNewNetwork && typeof id === 'string' && id === pendingNewNetwork.id) {
+      pendingNewNetwork = undefined;
+    }
+  };
+
   channel.addListener('loam-db-key-request', onRequest);
   channel.addListener('loam-db-key-migrated', onMigrated);
+  channel.addListener('loam-new-network-applied', onNewNetworkApplied);
   return () => {
     channel.removeAllListeners('loam-db-key-request');
     channel.removeAllListeners('loam-db-key-migrated');
+    channel.removeAllListeners('loam-new-network-applied');
   };
 }
 

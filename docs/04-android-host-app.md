@@ -253,12 +253,22 @@ to link both ways. The camera permission is only requested on this step; `RECORD
 camera hardware features are declared optional, so camera-less devices still install.
 
 **How a new network starts.** `prepareNewNetwork` (`src/lib/new-network.ts`) sets the storage mode,
-clears the stored DB keys (so anything of the old network left on flash stays unreadable), and queues
-the starting configuration. That rides the next `loam-db-key-response` exactly once, as `newNetwork`;
-main.js's `startNewNetwork` then empties the data folder and writes the configuration as `config.json`
-before the boot decision reads the folder. Sending it once matters: a later key request (an unlock retry,
-a wipe's restart) must never empty the running network's folder. If the delete leaves a database behind,
-the configuration isn't written and the normal boot path reports the leftover.
+clears the stored device keys (so anything of the old network left on flash stays unreadable, and a new
+passphrase network gets a new key even from the same passphrase), writes the chosen mode into the
+launcher's mode hint (`.loam-db-mode-hint`, read back to verify) and queues the starting configuration
+under a fresh operation id. The hint matters on a fresh install: if the key handoff then fails (a
+timeout, a Keystore error), the launcher sees an encrypted choice and locks instead of booting
+unencrypted with no hint and no database. The operation rides every `loam-db-key-response` as
+`newNetwork { id, config }` until the launcher acknowledges it (`loam-new-network-applied`), so a response
+the launcher timed out on is simply resent. main.js applies it through `new-network.js`
+`applyNewNetwork` before the boot decision reads the folder: empty the folder, durably write
+`config.json`, then record the id in `.loam-setup-applied`. The same id arriving again is a no-op, so a
+retry can never empty the network it already created. If the folder can't be fully emptied or the
+configuration isn't durably written, the launcher stays locked (Retry resends it) rather than booting
+under defaults. Detecting a previous network errs towards keeping it: an unreadable database counts as
+present and an unreadable ephemeral marker as absent. The remembered answers never keep a joining
+node's link code (it is single-use), so "start a new one like last time" for a joining phone goes back to
+the scan step.
 
 ### Native prebuild (SQLite drivers — plain + encrypted)
 `fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) places **both** SQLite native modules

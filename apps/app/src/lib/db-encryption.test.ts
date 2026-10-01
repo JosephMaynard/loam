@@ -305,28 +305,32 @@ describe("registerDbEncryption", () => {
     }
   });
 
-  it("sends a new network's configuration with the next key response only, never after a read error", async () => {
+  it("sends a new network with every key response until the launcher acknowledges it, never with a read error", async () => {
     const config = { node: { name: "Camp", locale: "en" } };
     setPendingNewNetwork(config);
     const channel = makeFakeChannel();
     const cleanup = registerDbEncryption(channel);
+    const ask = async (requestId: string) => {
+      channel.emit("loam-db-key-request", { requestId });
+      await flushMicrotasks();
+      return (channel.posted.at(-1)!.payload as { newNetwork?: { id: string; config: unknown } }).newNetwork;
+    };
     try {
       failSecureStoreItem("loam-db-encryption-mode", new Error("Keystore unavailable"));
-      channel.emit("loam-db-key-request", { requestId: "r1" });
-      await flushMicrotasks();
+      expect(await ask("r1")).toBeUndefined();
       clearSecureStoreFailure("loam-db-encryption-mode");
-      channel.emit("loam-db-key-request", { requestId: "r2" });
-      await flushMicrotasks();
-      // A later request (an unlock retry, a wipe's restart) must not empty the running network's folder.
-      channel.emit("loam-db-key-request", { requestId: "r3" });
-      await flushMicrotasks();
 
-      const payloads = channel.posted.map((entry) => entry.payload as { requestId: string; newNetwork?: unknown });
-      expect(payloads.map((payload) => [payload.requestId, payload.newNetwork])).toEqual([
-        ["r1", undefined],
-        ["r2", config],
-        ["r3", undefined],
-      ]);
+      // The launcher timed out on r2's answer and asks again: the same operation is resent.
+      const first = await ask("r2");
+      expect(first).toEqual({ id: expect.stringMatching(/^[0-9a-f]{24}$/), config });
+      expect(await ask("r3")).toEqual(first);
+
+      // An acknowledgement for some other operation changes nothing; the right one ends it.
+      channel.emit("loam-new-network-applied", { id: "someone-else" });
+      expect(await ask("r4")).toEqual(first);
+      channel.emit("loam-new-network-applied", { id: first!.id });
+      // Later requests (an unlock retry, a wipe's restart) never carry it again.
+      expect(await ask("r5")).toBeUndefined();
     } finally {
       cleanup();
       setPendingNewNetwork(undefined);
