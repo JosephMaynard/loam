@@ -394,6 +394,7 @@ export const my: Translation = {
   "gate.pendingTitle": "သင် စောင့်ဆိုင်းစာရင်းတွင် ရှိသည်",
   "gate.pendingBody":
     "ဤ node ရှိ တစ်စုံတစ်ဦးက သင့်ကို ဝင်ခွင့်ပေးရန် စောင့်နေသည်။ သင် အတည်ပြုခံရသည်နှင့် ဤစာမျက်နှာ ချက်ချင်း အပ်ဒိတ်ဖြစ်သည်။",
+  "gate.inviteRefused": "ဤဖိတ်ကြားကုဒ် သက်တမ်းကုန်သွားပြီ။ လက်ခံစက်၏ မျက်နှာပြင်ပေါ်ရှိ ကုဒ်ကို ထပ်မံ စကင်ဖတ်ပါ၊ သို့မဟုတ် ဝင်ခွင့်ပေးသည်အထိ ဤနေရာတွင် စောင့်ပါ။",
   "gate.connection": "ချိတ်ဆက်မှု- {status}",
   "gate.needsQrTitle": "လုံခြုံစွာ ချိတ်ဆက်ရန် join QR ကို စကင်ဖတ်ပါ",
   "gate.needsQrBody": "ဤနုဒ်နှင့် ချိတ်ဆက်ရန် သင့်စက်ပစ္စည်းဖြင့် join QR ကို စကင်ဖတ်ပါ. အခြားလုံခြုံသော နည်းလမ်း မရှိပါ။",
@@ -432,6 +433,9 @@ export const my: Translation = {
   "error.invalid_admin_claim": "မမှန်ကန်သော အက်ဒမင်ရယူမှု တောင်းဆိုချက်",
   "error.invalid_admin_secret": "မမှန်ကန်သော အက်ဒမင် လျှို့ဝှက်ချက်",
   "error.invalid_attachment_upload": "မမှန်ကန်သော ပူးတွဲတင်မှု တောင်းဆိုချက်",
+  "error.invalid_invite_redeem": "ဖိတ်ကြားချက် တောင်းဆိုမှု မမှန်ကန်ပါ",
+  "error.invite_invalid": "ဤဖိတ်ကြားကုဒ် သက်တမ်းကုန်သွားပြီ သို့မဟုတ် မမှန်ကန်ပါ",
+  "error.invite_not_allowed": "ဤအကောင့်သည် ဖိတ်ကြားချက်ကို မသုံးနိုင်ပါ",
   "error.invalid_avatar_upload": "မမှန်ကန်သော avatar ပုံတင်မှု တောင်းဆိုချက်",
   "error.invalid_channel_create": "မမှန်ကန်သော channel ဖန်တီးမှု တောင်းဆိုချက်",
   "error.invalid_channel_update": "မမှန်ကန်သော channel အပ်ဒိတ် တောင်းဆိုချက်",

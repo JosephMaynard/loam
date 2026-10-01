@@ -394,6 +394,7 @@ export const fr: Translation = {
   "gate.pendingTitle": "Vous êtes dans la file",
   "gate.pendingBody":
     "En attente que quelqu’un de ce nœud vous laisse entrer. Cet écran se met à jour dès que vous êtes approuvé.",
+  "gate.inviteRefused": "Ce code d'invitation a expiré. Scannez à nouveau le code sur l'écran de l'hôte, ou attendez ici qu'on vous laisse entrer.",
   "gate.connection": "Connexion : {status}",
   "gate.needsQrTitle": "Scannez le QR d'accès pour vous connecter en toute sécurité",
   "gate.needsQrBody": "Scannez le QR d'accès de ce nœud avec votre appareil pour vous connecter. Il n'y a pas d'autre moyen sûr de le faire.",
@@ -432,6 +433,9 @@ export const fr: Translation = {
   "error.invalid_admin_claim": "Demande d’obtention d’admin non valide",
   "error.invalid_admin_secret": "Secret admin non valide",
   "error.invalid_attachment_upload": "Demande d’envoi de pièce jointe non valide",
+  "error.invalid_invite_redeem": "Demande d'invitation non valide",
+  "error.invite_invalid": "Ce code d'invitation a expiré ou n'est pas valide",
+  "error.invite_not_allowed": "Ce compte ne peut pas utiliser d'invitation",
   "error.invalid_avatar_upload": "Demande d’envoi d’image d’avatar non valide",
   "error.invalid_channel_create": "Demande de création de canal non valide",
   "error.invalid_channel_update": "Demande de mise à jour de canal non valide",

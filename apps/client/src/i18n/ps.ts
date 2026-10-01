@@ -394,6 +394,7 @@ export const ps: Translation = {
   "gate.pendingTitle": "تاسو په کتار کې یاست",
   "gate.pendingBody":
     "منتظر یاست چې پر دې نوډ څوک تاسو دننه پرېږدي. ستاسو له تصویب سره سم دا پرده سمدلاسه تازه کیږي.",
+  "gate.inviteRefused": "د دې بلنې کوډ موده تېره شوې. د کوربه پر پرده کوډ بیا سکن کړئ، یا دلته انتظار وکړئ تر هغه چې دننه پرېښودل شئ.",
   "gate.connection": "اړیکه: {status}",
   "gate.needsQrTitle": "د خوندي نښلولو لپاره د یوځای کیدو QR سکین کړئ",
   "gate.needsQrBody": "د دې نوډ سره د خوندي نښلېدو لپاره، د خپل وسیلې سره د یوځای کیدو QR سکین کړئ. د نښلېدو بله خوندي لار نشته.",
@@ -432,6 +433,9 @@ export const ps: Translation = {
   "error.invalid_admin_claim": "د اډمین ترلاسه کولو ناسمه غوښتنه",
   "error.invalid_admin_secret": "ناسم د اډمین راز",
   "error.invalid_attachment_upload": "د ضمیمې پورته کولو ناسمه غوښتنه",
+  "error.invalid_invite_redeem": "د بلنې غوښتنه سمه نه ده",
+  "error.invite_invalid": "د دې بلنې کوډ موده تېره شوې یا سم نه دی",
+  "error.invite_not_allowed": "دا حساب بلنه نه شي کارولای",
   "error.invalid_avatar_upload": "د اواتار انځور پورته کولو ناسمه غوښتنه",
   "error.invalid_channel_create": "د چینل جوړولو ناسمه غوښتنه",
   "error.invalid_channel_update": "د چینل تازه کولو ناسمه غوښتنه",

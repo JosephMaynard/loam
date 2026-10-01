@@ -35,6 +35,7 @@ import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
 import { createStoreLifecycle } from "./store-lifecycle.js";
 import type { AppContext } from "./app-context.js";
+import { createInviteIssuer } from "./invites.js";
 import { createKillSwitch, type KillSwitchResult } from "./kill-switch.js";
 import { createRealtime, WS_MAX_INBOUND_FRAME_BYTES } from "./realtime.js";
 import { registerAdminRoutes } from "./routes-admin.js";
@@ -148,6 +149,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
+  const invites = createInviteIssuer();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
   // The host's static transport keypair (docs/08). Loaded/generated in loadData, persisted in the
   // config table (encrypted at rest when the DB is), rotated by the kill switch. Its public key goes
@@ -332,6 +334,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     LARGE_BODY_LIMIT,
     sessions,
     claimAttempts,
+    invites,
     panicAttempts,
     identityMintCounters,
     maxNewIdentitiesPerWindow,

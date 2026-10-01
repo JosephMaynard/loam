@@ -2,7 +2,7 @@
 // upload/serve. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { AttachmentUploadRequestSchema, AvatarImageUploadRequestSchema, MODERATION_TIMEOUT_MAX_MS, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
+import { AttachmentUploadRequestSchema, AvatarImageUploadRequestSchema, InviteRedeemRequestSchema, MODERATION_TIMEOUT_MAX_MS, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { newMessageId } from "./ids.js";
@@ -629,6 +629,35 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     return ctx.sanitizeUserFor(currentUser, ctx.applyUserModeration(user, { pending: false }));
   });
+
+  // Redeem an invite code from the host's screen (invites.ts): a pending newcomer is admitted at once. The
+  // code is the whole credential (it proves the person saw the host phone's screen in the last 10 to 20
+  // minutes), so it is checked in constant time and the route is rate-limited like the admin claim. A
+  // banned user can't use one: a ban stays a ban.
+  ctx.server.post(
+    "/api/access/redeem",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false } } },
+    async (request, reply) => {
+      const body = InviteRedeemRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid invite request"));
+      }
+
+      const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+
+      if (!ctx.invites.verify(body.data.code)) {
+        return reply.code(403).send(errorBody("This invite code has expired or is not valid"));
+      }
+
+      if (currentUser.banned) {
+        return reply.code(403).send(errorBody("This account can't use an invite"));
+      }
+
+      const admitted = currentUser.pending ? ctx.applyUserModeration(currentUser, { pending: false }) : currentUser;
+      return ctx.sanitizeUserFor(admitted, admitted);
+    },
+  );
 
   // Deny a pending user: bans them (clearing pending) and tears down their sessions. Admins and
   // greeters — but, like moderation, never usable against an admin or oneself.

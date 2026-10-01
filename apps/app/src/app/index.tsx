@@ -33,7 +33,7 @@ import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import { colorSchemeForClientMessage } from '@/lib/client-theme';
 import { t } from '@/lib/i18n';
-import { SERVER_PORT } from '@/lib/join-url';
+import { SERVER_PORT, withInviteCode } from '@/lib/join-url';
 import {
   clearStoredDbKeys,
   DB_ENCRYPTION_DRIVER_MISSING_CODE,
@@ -221,7 +221,7 @@ type HostStatus = 'starting' | 'ready' | 'error';
 // it only ever updates the separate `notice` state below, so it can never regress a 'ready' host back
 // to a spinner/error screen, and — unlike 'error' before this fix — is never cleared by a later 'ready'.
 type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string; hostToken?: string };
-type HostInfoPayload = { port?: number; addresses?: string[]; interfaces?: unknown; clients?: unknown };
+type HostInfoPayload = { port?: number; addresses?: string[]; interfaces?: unknown; clients?: unknown; invite?: unknown };
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
 // and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
@@ -329,6 +329,8 @@ function HostScreen() {
   const [hostInterfaces, setHostInterfaces] = useState<HostInterface[]>([]);
   // Peer addresses of the devices connected from off this phone — shown as "N phones connected".
   const [hostClients, setHostClients] = useState<string[]>([]);
+  // The invite code the join QR carries on an approval-only node, so a scan skips the queue (launcher-polled).
+  const [hostInvite, setHostInvite] = useState<string>();
   // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
   // ready. Empty when transport encryption is off (or the fetch hasn't resolved yet) — plain URLs,
   // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
@@ -589,6 +591,8 @@ function HostScreen() {
         setHostClients(clients);
         noteConnectedClients(clients);
       }
+      // Re-read every tick: it rotates, and becomes null when the node stops requiring approval.
+      setHostInvite(typeof payload?.invite === 'string' ? payload.invite : undefined);
     };
 
     // P1-2 (Sol round 3/4): the server's kill switch posts this when a `persistent`/`passphrase`-
@@ -1250,7 +1254,7 @@ function HostScreen() {
         <HostShareOverlay
           visible={shareOpen}
           onClose={() => setShareOpen(false)}
-          transportKeyFragment={transportKeyFragment}
+          transportKeyFragment={withInviteCode(transportKeyFragment, hostInvite)}
           addresses={hostAddresses}
           interfaces={hostInterfaces}
           connectedClients={hostClients}

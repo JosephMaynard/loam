@@ -404,6 +404,7 @@ export const uk: Translation = {
   "gate.pendingTitle": "Ви в черзі",
   "gate.pendingBody":
     "Очікуємо, поки хтось на цьому вузлі впустить вас. Цей екран оновиться щойно вас схвалять.",
+  "gate.inviteRefused": "Термін дії цього коду запрошення минув. Відскануйте код на екрані хоста ще раз або зачекайте тут, доки вас впустять.",
   "gate.connection": "З’єднання: {status}",
   "gate.needsQrTitle": "Відскануйте QR-код приєднання для безпечного підключення",
   "gate.needsQrBody": "Відскануйте QR-код приєднання цього вузла своїм пристроєм, щоб підключитися. Іншого безпечного способу немає.",
@@ -442,6 +443,9 @@ export const uk: Translation = {
   "error.invalid_admin_claim": "Недійсний запит на отримання адміністратора",
   "error.invalid_admin_secret": "Недійсний секрет адміністратора",
   "error.invalid_attachment_upload": "Недійсний запит завантаження вкладення",
+  "error.invalid_invite_redeem": "Недійсний запит запрошення",
+  "error.invite_invalid": "Термін дії цього коду запрошення минув, або він недійсний",
+  "error.invite_not_allowed": "Цей обліковий запис не може використати запрошення",
   "error.invalid_avatar_upload": "Недійсний запит завантаження зображення аватара",
   "error.invalid_channel_create": "Недійсний запит створення каналу",
   "error.invalid_channel_update": "Недійсний запит оновлення каналу",

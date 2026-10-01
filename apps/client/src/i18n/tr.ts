@@ -394,6 +394,7 @@ export const tr: Translation = {
   "gate.pendingTitle": "Sıradasınız",
   "gate.pendingBody":
     "Bu düğümdeki birinin sizi içeri almasını bekliyorsunuz. Onaylandığınız anda bu ekran güncellenir.",
+  "gate.inviteRefused": "Bu davet kodunun süresi doldu. Sunucunun ekranındaki kodu yeniden tarayın veya içeri alınmayı burada bekleyin.",
   "gate.connection": "Bağlantı: {status}",
   "gate.needsQrTitle": "Güvenli bağlanmak için katılım QR kodunu tarayın",
   "gate.needsQrBody": "Bağlanmak için bu düğümün katılım QR kodunu cihazınızla tarayın. Güvenli başka bir yol yok.",
@@ -432,6 +433,9 @@ export const tr: Translation = {
   "error.invalid_admin_claim": "Geçersiz yönetici alma isteği",
   "error.invalid_admin_secret": "Geçersiz yönetici sırrı",
   "error.invalid_attachment_upload": "Geçersiz ek yükleme isteği",
+  "error.invalid_invite_redeem": "Geçersiz davet isteği",
+  "error.invite_invalid": "Bu davet kodunun süresi doldu veya geçerli değil",
+  "error.invite_not_allowed": "Bu hesap davet kullanamaz",
   "error.invalid_avatar_upload": "Geçersiz avatar görseli yükleme isteği",
   "error.invalid_channel_create": "Geçersiz kanal oluşturma isteği",
   "error.invalid_channel_update": "Geçersiz kanal güncelleme isteği",

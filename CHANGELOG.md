@@ -7,6 +7,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Invite codes for approval-only networks.** The host phone's join QR (share screen and display mode)
+  carries a code that changes every 10 minutes. Someone who scans it is let straight in instead of waiting
+  in the queue; a photo of an old code stops working within 20 minutes, and an Emergency Reset retires
+  every code at once.
 - **Setup screens on the Android host.** The first launch asks for a language, the kind of network,
   its name and how people connect (Hotspot or Wi-Fi). The kinds are plain choices:
   - **Private and short-lived:** random names and pictures, messages gone after an hour, each joiner

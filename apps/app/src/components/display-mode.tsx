@@ -33,16 +33,18 @@ export function DisplayModeScreen({
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const wifi = state.mode === 'hotspot' && state.hotspot ? wifiPayload(state.hotspot.ssid, state.hotspot.password) : undefined;
+  // The address people could type: the fragment (key, invite code) only works scanned, so leave it off.
+  const typedUrl = state.serverUrl?.split('#')[0];
   const codes: Array<{ title: string; value: string; caption: string; ecLevel?: 'M' }> = [];
   if (state.mode === 'hotspot') {
     if (wifi && state.hotspot) {
       codes.push({ title: t('display.step1'), value: wifi, caption: `${state.hotspot.ssid} · ${state.hotspot.password}`, ecLevel: 'M' });
     }
     if (state.serverUrl) {
-      codes.push({ title: t('display.step2'), value: state.serverUrl, caption: state.serverUrl });
+      codes.push({ title: t('display.step2'), value: state.serverUrl, caption: typedUrl ?? state.serverUrl });
     }
   } else if (state.serverUrl) {
-    codes.push({ title: t('display.wifiTitle'), value: state.serverUrl, caption: state.serverUrl });
+    codes.push({ title: t('display.wifiTitle'), value: state.serverUrl, caption: typedUrl ?? state.serverUrl });
   }
   const { size, sideBySide } = displayCodeSize(
     codes.length === 2 ? 2 : 1,

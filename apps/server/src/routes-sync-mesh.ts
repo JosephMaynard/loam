@@ -357,6 +357,22 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
     },
   );
 
+  // The invite code for the host's own share screen and display mode (invites.ts). Launcher-only, like
+  // `/api/host/clients`. Null on a node that admits everyone anyway, so the host shows the plain URL.
+  ctx.server.get(
+    "/api/host/invite",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute", allowList: () => false } } },
+    async (request, reply) => {
+      if (!ctx.meshBridgeCallerAuthorized(request)) {
+        return reply.code(404).send(errorBody("Not found"));
+      }
+      if (ctx.appConfig.access.joinPolicy !== "approval") {
+        return { code: null, expiresAt: null };
+      }
+      return ctx.invites.current();
+    },
+  );
+
   ctx.server.get(
     "/api/mesh/outbound",
     // `allowList: () => false` so an internal tunnel re-dispatch can't inherit the global limiter's tunnel

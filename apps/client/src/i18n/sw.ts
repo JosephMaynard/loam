@@ -394,6 +394,7 @@ export const sw: Translation = {
   "gate.pendingTitle": "Uko kwenye foleni",
   "gate.pendingBody":
     "Unasubiri mtu kwenye nodi hii akuruhusu kuingia. Skrini hii inasasishwa mara tu unapoidhinishwa.",
+  "gate.inviteRefused": "Msimbo huo wa mwaliko umeisha muda. Changanua tena msimbo ulio kwenye skrini ya mwenyeji, au subiri hapa uruhusiwe kuingia.",
   "gate.connection": "Muunganisho: {status}",
   "gate.needsQrTitle": "Changanua QR ya kujiunga ili kuunganisha kwa usalama",
   "gate.needsQrBody": "Changanua QR ya kujiunga ya nodi hii kwa kifaa chako ili kuunganisha. Hakuna njia nyingine salama ya kuunganisha.",
@@ -432,6 +433,9 @@ export const sw: Translation = {
   "error.invalid_admin_claim": "Ombi batili la kupata msimamizi",
   "error.invalid_admin_secret": "Siri batili ya msimamizi",
   "error.invalid_attachment_upload": "Ombi batili la kupakia kiambatisho",
+  "error.invalid_invite_redeem": "Ombi la mwaliko si sahihi",
+  "error.invite_invalid": "Msimbo huu wa mwaliko umeisha muda au si sahihi",
+  "error.invite_not_allowed": "Akaunti hii haiwezi kutumia mwaliko",
   "error.invalid_avatar_upload": "Ombi batili la kupakia picha ya avatar",
   "error.invalid_channel_create": "Ombi batili la kuunda kituo",
   "error.invalid_channel_update": "Ombi batili la kusasisha kituo",

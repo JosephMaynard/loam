@@ -194,7 +194,8 @@ function lanInterfaces() {
  * `addresses` is the flat list older host screens read; `interfaces` pairs each with its interface;
  * `clients` is who is connected to the server from OFF this phone (`GET /api/host/clients`, launcher-only)
  * — the share screen's "N phones connected" and its proof of which interface the hotspot is on. `null`
- * when the server couldn't be asked this tick (not yet listening): the screen keeps its last answer. */
+ * when the server couldn't be asked this tick (not yet listening): the screen keeps its last answer.
+ * `invite` is the code the join QR carries on an approval-only node (`GET /api/host/invite`). */
 function postHostInfo() {
   // Runs from a timer and a bridge listener: nothing here may throw, or the whole embedded runtime goes
   // down with it. An enumeration failure (os.networkInterfaces() can throw on an odd ROM) just reports no
@@ -212,6 +213,9 @@ function postHostInfo() {
     }),
     interfaces: interfaces,
     clients: null,
+    // The invite code for the join QR (`GET /api/host/invite`): a string on an approval-only node, null
+    // when there is none (an open node, or the server didn't answer this tick).
+    invite: null,
   };
   const post = function () {
     try {
@@ -225,7 +229,16 @@ function postHostInfo() {
       if (!err && status === 200 && json && Array.isArray(json.clients)) {
         info.clients = json.clients;
       }
-      post();
+      try {
+        meshRequest('GET', '/api/host/invite', undefined, function (inviteErr, inviteStatus, inviteJson) {
+          if (!inviteErr && inviteStatus === 200 && inviteJson && typeof inviteJson.code === 'string') {
+            info.invite = inviteJson.code;
+          }
+          post();
+        });
+      } catch (inviteErr) {
+        post();
+      }
     });
   } catch (err) {
     console.error('Failed to ask the server who is connected', err);

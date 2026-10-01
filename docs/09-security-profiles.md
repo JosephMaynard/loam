@@ -7,7 +7,8 @@
 > admin UI has a profile selector that locks the managed axes unless `custom`. **Bundled today:**
 > `access.joinPolicy`, `retention.messageTtlMs`, `killSwitch.enabled`, and now
 > **`security.transportEncryption`** (docs/08). **Not built yet** (so still *not* bundled): E2EE (07),
-> rotating join QR, at-rest encryption toggle (env-driven via `LOAM_DB_KEY`, not profile-driven),
+> a configurable join-QR mode (the host's rotating invite code for approval-only nodes is built, docs/08),
+> at-rest encryption toggle (env-driven via `LOAM_DB_KEY`, not profile-driven),
 > identity mode (05). **Secure by default:** transport encryption is enforced and **every named profile
 > now encrypts** — `open` and `standard` both force `optional` (they differ only in intent for now; an
 > invite-token axis would split them), and `hardened` forces `required` (plus approval join, 1-hour TTL,

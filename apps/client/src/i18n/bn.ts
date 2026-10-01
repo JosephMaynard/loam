@@ -394,6 +394,7 @@ export const bn: Translation = {
   "gate.pendingTitle": "আপনি সারিতে আছেন",
   "gate.pendingBody":
     "এই নোডের কেউ আপনাকে ঢুকতে দেওয়ার অপেক্ষায়। অনুমোদিত হওয়া মাত্রই এই স্ক্রিন আপডেট হবে।",
+  "gate.inviteRefused": "এই আমন্ত্রণ কোডের মেয়াদ শেষ হয়ে গেছে। হোস্টের স্ক্রিনের কোডটি আবার স্ক্যান করুন, বা ভেতরে আসতে দেওয়া পর্যন্ত এখানে অপেক্ষা করুন।",
   "gate.connection": "সংযোগ: {status}",
   "gate.needsQrTitle": "নিরাপদে সংযোগ করতে যোগদান QR স্ক্যান করুন",
   "gate.needsQrBody": "এই নোডের সাথে সংযোগ করতে আপনার ডিভাইস দিয়ে যোগদান QR স্ক্যান করুন. নিরাপদে সংযোগের অন্য কোনো উপায় নেই।",
@@ -432,6 +433,9 @@ export const bn: Translation = {
   "error.invalid_admin_claim": "অবৈধ অ্যাডমিন দাবি অনুরোধ",
   "error.invalid_admin_secret": "অবৈধ অ্যাডমিন গোপন",
   "error.invalid_attachment_upload": "অবৈধ সংযুক্তি আপলোড অনুরোধ",
+  "error.invalid_invite_redeem": "আমন্ত্রণের অনুরোধ সঠিক নয়",
+  "error.invite_invalid": "এই আমন্ত্রণ কোডের মেয়াদ শেষ বা এটি সঠিক নয়",
+  "error.invite_not_allowed": "এই অ্যাকাউন্ট আমন্ত্রণ ব্যবহার করতে পারে না",
   "error.invalid_avatar_upload": "অবৈধ অ্যাভাটার ছবি আপলোড অনুরোধ",
   "error.invalid_channel_create": "অবৈধ চ্যানেল তৈরির অনুরোধ",
   "error.invalid_channel_update": "অবৈধ চ্যানেল আপডেট অনুরোধ",

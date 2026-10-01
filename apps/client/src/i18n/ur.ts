@@ -394,6 +394,7 @@ export const ur: Translation = {
   "gate.pendingTitle": "آپ قطار میں ہیں",
   "gate.pendingBody":
     "اِس نوڈ پر کسی کے آپ کو داخل کرنے کا انتظار ہے۔ منظوری ملتے ہی یہ اسکرین اپ ڈیٹ ہو جائے گی۔",
+  "gate.inviteRefused": "اس دعوتی کوڈ کی میعاد ختم ہو چکی ہے۔ میزبان کی اسکرین پر موجود کوڈ دوبارہ اسکین کریں، یا یہاں انتظار کریں جب تک آپ کو اندر آنے دیا جائے۔",
   "gate.connection": "کنکشن: {status}",
   "gate.needsQrTitle": "محفوظ طریقے سے جڑنے کے لیے جوائن QR اسکین کریں",
   "gate.needsQrBody": "اس نوڈ کا جوائن QR اپنے ڈیوائس سے اسکین کریں تاکہ محفوظ طریقے سے جڑ سکیں. جڑنے کا کوئی اور محفوظ طریقہ نہیں ہے۔",
@@ -432,6 +433,9 @@ export const ur: Translation = {
   "error.invalid_admin_claim": "منتظم حاصل کرنے کی غلط درخواست",
   "error.invalid_admin_secret": "غلط منتظم راز",
   "error.invalid_attachment_upload": "منسلکہ اپ لوڈ کی غلط درخواست",
+  "error.invalid_invite_redeem": "دعوت کی درخواست درست نہیں",
+  "error.invite_invalid": "اس دعوتی کوڈ کی میعاد ختم ہو چکی ہے یا یہ درست نہیں",
+  "error.invite_not_allowed": "یہ اکاؤنٹ دعوت استعمال نہیں کر سکتا",
   "error.invalid_avatar_upload": "اوتار تصویر اپ لوڈ کی غلط درخواست",
   "error.invalid_channel_create": "چینل بنانے کی غلط درخواست",
   "error.invalid_channel_update": "چینل اپ ڈیٹ کی غلط درخواست",

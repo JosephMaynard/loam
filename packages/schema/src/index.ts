@@ -646,6 +646,22 @@ export const AdminClaimRequestSchema = z.object({
 });
 export type AdminClaimRequest = z.infer<typeof AdminClaimRequestSchema>;
 
+/**
+ * Redeem a rotating invite code from the host's screen (`#…&i=<code>` in the join URL): on an
+ * approval-only node it admits the caller without waiting in the queue.
+ */
+export const InviteRedeemRequestSchema = z.object({
+  code: z.string().min(1).max(64),
+});
+export type InviteRedeemRequest = z.infer<typeof InviteRedeemRequestSchema>;
+
+/** The host app's current invite code (`GET /api/host/invite`); null when the node admits everyone anyway. */
+export const HostInviteResponseSchema = z.object({
+  code: z.string().nullable(),
+  expiresAt: z.number().int().nullable(),
+});
+export type HostInviteResponse = z.infer<typeof HostInviteResponseSchema>;
+
 export const PanicRequestSchema = z.object({
   token: z.string().min(1).max(256),
 });
@@ -1234,6 +1250,9 @@ export const SERVER_ERROR_CODES = [
   "greeter_required",
   "invalid_admin_claim",
   "invalid_admin_secret",
+  "invalid_invite_redeem",
+  "invite_invalid",
+  "invite_not_allowed",
   "invalid_attachment_upload",
   "invalid_avatar_upload",
   "invalid_channel_create",

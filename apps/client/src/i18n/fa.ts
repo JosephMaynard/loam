@@ -394,6 +394,7 @@ export const fa: Translation = {
   "gate.pendingTitle": "در صف هستید",
   "gate.pendingBody":
     "منتظرید کسی در این گره شما را راه دهد. این صفحه به‌محض تأیید شما به‌روز می‌شود.",
+  "gate.inviteRefused": "این کد دعوت منقضی شده است. کد روی صفحهٔ میزبان را دوباره اسکن کنید یا همین‌جا منتظر بمانید تا راهتان بدهند.",
   "gate.connection": "اتصال: {status}",
   "gate.needsQrTitle": "برای اتصال امن، کد QR پیوستن را اسکن کنید",
   "gate.needsQrBody": "با دستگاه خود کد QR پیوستن این گره را اسکن کنید. راه امن دیگری برای اتصال وجود ندارد.",
@@ -432,6 +433,9 @@ export const fa: Translation = {
   "error.invalid_admin_claim": "درخواست دریافت مدیر نامعتبر است",
   "error.invalid_admin_secret": "راز مدیر نامعتبر است",
   "error.invalid_attachment_upload": "درخواست بارگذاری پیوست نامعتبر است",
+  "error.invalid_invite_redeem": "درخواست دعوت نامعتبر است",
+  "error.invite_invalid": "این کد دعوت منقضی شده یا نامعتبر است",
+  "error.invite_not_allowed": "این حساب نمی‌تواند از دعوت استفاده کند",
   "error.invalid_avatar_upload": "درخواست بارگذاری تصویر آواتار نامعتبر است",
   "error.invalid_channel_create": "درخواست ساخت کانال نامعتبر است",
   "error.invalid_channel_update": "درخواست به‌روزرسانی کانال نامعتبر است",

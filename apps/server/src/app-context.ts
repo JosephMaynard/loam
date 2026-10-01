@@ -6,6 +6,7 @@
 import type { TransportIdentity } from "@loam/crypto";
 import type { AdminBootstrapStrategy, AvatarImageMimeType, Channel, ChannelCreateRequest, ChannelUpdateRequest, LoamConfig, LoamConfigUpdate, Message, MessageCreateRequest, NetworkConfig, StreamEvent, TransportEncryption, User, UserUpdateRequest } from "@loam/schema";
 import type { LoamStore, StoreQuarantine } from "./db.js";
+import type { InviteIssuer } from "./invites.js";
 import type { KillSwitchResult } from "./kill-switch.js";
 import { createLlmLayer } from "./llm.js";
 import type { MeshLayer } from "./mesh.js";
@@ -34,6 +35,8 @@ export type AppContext = {
   pendingSockets: Set<{ userId: string; close: () => void }>;
   sessions: Map<string, string>;
   claimAttempts: Map<string, { count: number; resetAt: number }>;
+  /** Rotating invite codes for the host's screen (invites.ts); rotated by the kill switch. */
+  invites: InviteIssuer;
   panicAttempts: Map<string, { count: number; resetAt: number }>;
   transportSessions: Map<string, TransportSession>;
   identityTokens: Map<string, string>;

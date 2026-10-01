@@ -408,6 +408,7 @@ export const ar: Translation = {
   "gate.pendingTitle": "أنت في قائمة الانتظار",
   "gate.pendingBody":
     "بانتظار أن يسمح لك أحد على هذه العقدة بالدخول. تتحدّث هذه الشاشة فور الموافقة عليك.",
+  "gate.inviteRefused": "انتهت صلاحية رمز الدعوة هذا. امسح الرمز على شاشة المضيف مرة أخرى، أو انتظر هنا حتى يُسمح لك بالدخول.",
   "gate.connection": "الاتصال: {status}",
   "gate.needsQrTitle": "امسح رمز الانضمام للاتصال بأمان",
   "gate.needsQrBody": "امسح رمز انضمام هذه العقدة بجهازك للاتصال. لا توجد طريقة آمنة أخرى للاتصال.",
@@ -446,6 +447,9 @@ export const ar: Translation = {
   "error.invalid_admin_claim": "طلب الحصول على المشرف غير صالح",
   "error.invalid_admin_secret": "سرّ المشرف غير صالح",
   "error.invalid_attachment_upload": "طلب رفع المرفق غير صالح",
+  "error.invalid_invite_redeem": "طلب دعوة غير صالح",
+  "error.invite_invalid": "انتهت صلاحية رمز الدعوة هذا أو أنه غير صالح",
+  "error.invite_not_allowed": "لا يمكن لهذا الحساب استخدام دعوة",
   "error.invalid_avatar_upload": "طلب رفع الصورة الرمزية غير صالح",
   "error.invalid_channel_create": "طلب إنشاء القناة غير صالح",
   "error.invalid_channel_update": "طلب تحديث القناة غير صالح",

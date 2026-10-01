@@ -394,6 +394,7 @@ export const es: Translation = {
   "gate.pendingTitle": "Estás en la cola",
   "gate.pendingBody":
     "Esperando a que alguien de este nodo te deje entrar. Esta pantalla se actualiza en cuanto te aprueben.",
+  "gate.inviteRefused": "Ese código de invitación ha caducado. Vuelve a escanear el código de la pantalla del anfitrión o espera aquí a que te dejen entrar.",
   "gate.connection": "Conexión: {status}",
   "gate.needsQrTitle": "Escanea el QR de acceso para conectarte de forma segura",
   "gate.needsQrBody": "Escanea el QR de acceso de este nodo con tu dispositivo para conectarte. No hay otra forma segura de hacerlo.",
@@ -432,6 +433,9 @@ export const es: Translation = {
   "error.invalid_admin_claim": "Solicitud de obtención de administrador no válida",
   "error.invalid_admin_secret": "Secreto de administrador no válido",
   "error.invalid_attachment_upload": "Solicitud de subida de adjunto no válida",
+  "error.invalid_invite_redeem": "Solicitud de invitación no válida",
+  "error.invite_invalid": "Este código de invitación ha caducado o no es válido",
+  "error.invite_not_allowed": "Esta cuenta no puede usar una invitación",
   "error.invalid_avatar_upload": "Solicitud de subida de imagen de avatar no válida",
   "error.invalid_channel_create": "Solicitud de creación de canal no válida",
   "error.invalid_channel_update": "Solicitud de actualización de canal no válida",

@@ -57,6 +57,8 @@ export function createKillSwitch(ctx: AppContext) {
   /** The actual kill-switch work, split out so {@link executeKillSwitch} can guarantee `wipeInProgress`
    *  is cleared via `finally` regardless of how this returns. */
   async function executeKillSwitchBody(): Promise<KillSwitchResult> {
+    // Retire every invite code already shown (on a screen, in a photo of one), whatever branch follows.
+    ctx.invites.rotate();
     /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
      *  tell clients to purge, close sockets, then report the distinct incomplete notice. Used by the
      *  no-hook fail-closed paths (a phase-write failure and a deletion failure) so nothing stale is served

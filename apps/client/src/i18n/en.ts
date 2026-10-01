@@ -464,6 +464,7 @@ export const en = {
   "gate.pendingTitle": "You're in the queue",
   "gate.pendingBody":
     "Waiting for someone on this node to let you in. This screen updates the moment you're approved.",
+  "gate.inviteRefused": "That invite code has expired. Scan the code on the host's screen again, or wait here to be let in.",
   "gate.connection": "Connection: {status}",
   // Shown when this node requires transport encryption (docs/08) but no host key was ever delivered
   // by a scanned join QR — there is no safe way to connect without one.
@@ -507,6 +508,9 @@ export const en = {
   "error.invalid_admin_claim": "Invalid admin claim request",
   "error.invalid_admin_secret": "Invalid admin secret",
   "error.invalid_attachment_upload": "Invalid attachment upload request",
+  "error.invalid_invite_redeem": "Invalid invite request",
+  "error.invite_invalid": "This invite code has expired or is not valid",
+  "error.invite_not_allowed": "This account can't use an invite",
   "error.invalid_avatar_upload": "Invalid avatar image upload request",
   "error.invalid_channel_create": "Invalid channel create request",
   "error.invalid_channel_update": "Invalid channel update request",

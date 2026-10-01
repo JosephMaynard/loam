@@ -394,6 +394,7 @@ export const pt: Translation = {
   "gate.pendingTitle": "Você está na fila",
   "gate.pendingBody":
     "Aguardando alguém deste nó deixar você entrar. Esta tela é atualizada assim que você for aprovado.",
+  "gate.inviteRefused": "Esse código de convite expirou. Leia novamente o código no ecrã do anfitrião ou espere aqui até o deixarem entrar.",
   "gate.connection": "Conexão: {status}",
   "gate.needsQrTitle": "Escaneie o QR de acesso para se conectar com segurança",
   "gate.needsQrBody": "Leia o QR de acesso deste nó com o seu dispositivo para se conectar. Não há outra forma segura de fazer isso.",
@@ -432,6 +433,9 @@ export const pt: Translation = {
   "error.invalid_admin_claim": "Solicitação de obtenção de administrador inválida",
   "error.invalid_admin_secret": "Segredo de administrador inválido",
   "error.invalid_attachment_upload": "Solicitação de envio de anexo inválida",
+  "error.invalid_invite_redeem": "Pedido de convite inválido",
+  "error.invite_invalid": "Este código de convite expirou ou não é válido",
+  "error.invite_not_allowed": "Esta conta não pode usar um convite",
   "error.invalid_avatar_upload": "Solicitação de envio de imagem de avatar inválida",
   "error.invalid_channel_create": "Solicitação de criação de canal inválida",
   "error.invalid_channel_update": "Solicitação de atualização de canal inválida",

@@ -395,6 +395,7 @@ export const prs: Translation = {
   "gate.pendingTitle": "در نوبت هستید",
   "gate.pendingBody":
     "منتظرید کسی در این گره شما را راه دهد. این صفحه به‌مجرد تأیید شما تازه می‌شود.",
+  "gate.inviteRefused": "این کد دعوت منقضی شده است. کد روی صفحهٔ میزبان را دوباره اسکن کنید یا همین‌جا منتظر بمانید تا اجازهٔ ورود بگیرید.",
   "gate.connection": "اتصال: {status}",
   "gate.needsQrTitle": "برای اتصال امن، کد QR پیوستن را سکن کنید",
   "gate.needsQrBody": "با دستگاه خود کد QR پیوستن این گره را سکن کنید. راه امن دیگری برای اتصال شدن وجود ندارد.",
@@ -433,6 +434,9 @@ export const prs: Translation = {
   "error.invalid_admin_claim": "درخواست به‌دست‌آوردن مدیر نامعتبر است",
   "error.invalid_admin_secret": "راز مدیر نامعتبر است",
   "error.invalid_attachment_upload": "درخواست بار کردن ضمیمه نامعتبر است",
+  "error.invalid_invite_redeem": "درخواست دعوت نامعتبر است",
+  "error.invite_invalid": "این کد دعوت منقضی شده یا نامعتبر است",
+  "error.invite_not_allowed": "این حساب نمی‌تواند از دعوت استفاده کند",
   "error.invalid_avatar_upload": "درخواست بار کردن تصویر آواتار نامعتبر است",
   "error.invalid_channel_create": "درخواست ساخت چینل نامعتبر است",
   "error.invalid_channel_update": "درخواست به‌روزرسانی چینل نامعتبر است",

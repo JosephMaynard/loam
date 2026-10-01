@@ -34,6 +34,7 @@ import { ApiError, fetchJson, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api"
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
 import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
 import { confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity } from "./lib/identity";
+import { takeInviteCode } from "./lib/invite";
 import {
   compareCreatedAt,
   conversationMessages,
@@ -476,6 +477,8 @@ function LoamApp() {
   // Set when this node requires transport encryption (docs/08) but no host public key is available
   // from a scanned join QR — there is no safe way to talk to it, so the app renders a gate instead.
   const [needsQr, setNeedsQr] = useState<false | "missing" | "changed">(false);
+  // An invite code from the host's screen was refused (usually expired): the queue still works, so say so.
+  const [inviteRefused, setInviteRefused] = useState(false);
   // True until the node confirmed this browser's identity (or couldn't be reached, or IDENTITY_GATE_MAX_MS
   // passed): the shell renders a splash instead of hydrated content that might belong to a previous identity.
   const [identityGate, setIdentityGate] = useState(true);
@@ -1172,6 +1175,35 @@ function LoamApp() {
     [upsertUsers],
   );
 
+  /**
+   * Redeem an invite code from the host's screen (lib/invite.ts): admits this session if it is waiting in
+   * the approval queue. Resolves to the admitted user, or undefined when the code was refused (expired, or
+   * the request failed); never throws, since the queue is still a working fallback.
+   */
+  const redeemInvite = useCallback(
+    async (code: string): Promise<User | undefined> => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await encryptedFetch("POST", "/api/access/redeem", { code }, { signal: controller.signal });
+        if (!response.ok) {
+          return undefined;
+        }
+        const user = UserSchema.parse(await response.json());
+        setCurrentUser(user);
+        upsertUsers([user]);
+        setConfig((previous) => (previous ? { ...previous, currentUser: user } : previous));
+        return user;
+      } catch {
+        return undefined;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
   const claimAdmin = useCallback(
     async (secret: string) => {
       const controller = new AbortController();
@@ -1518,6 +1550,22 @@ function LoamApp() {
           }
         }
 
+        // A newcomer who scanned the host's screen carries an invite code: redeem it instead of queueing.
+        if (nextConfig.currentUser.pending) {
+          const inviteCode = takeInviteCode();
+          if (inviteCode) {
+            const admitted = await redeemInvite(inviteCode);
+            if (!active) {
+              return;
+            }
+            if (admitted) {
+              nextConfig = { ...nextConfig, currentUser: admitted };
+            } else {
+              setInviteRefused(true);
+            }
+          }
+        }
+
         if (nextConfig.currentUser.banned || nextConfig.currentUser.pending) {
           // Gated sessions must not keep previously hydrated content around (a banned user's
           // cached history stays readable otherwise): clear memory and the IndexedDB caches. That includes
@@ -1621,6 +1669,7 @@ function LoamApp() {
     };
   }, [
     claimAdmin,
+    redeemInvite,
     currentUser.id,
     currentUser.banned,
     currentUser.pending,
@@ -2198,6 +2247,7 @@ function LoamApp() {
       <GateScreen>
         <h1>{t("gate.pendingTitle")}</h1>
         <p>{t("gate.pendingBody")}</p>
+        {inviteRefused ? <p>{t("gate.inviteRefused")}</p> : null}
         <p className={`gate-status status-pill status-${connection}`}>
           <span aria-hidden="true" className="status-dot" />
           {t("gate.connection", {
