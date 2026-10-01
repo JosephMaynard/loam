@@ -1213,10 +1213,45 @@ export const SyncPeerStatusSchema = z.object({
 });
 export type SyncPeerStatus = z.infer<typeof SyncPeerStatusSchema>;
 
+/**
+ * A node asking to be synced with (`POST /api/sync/link-request`, docs/11): the port it serves on (its
+ * address is the one the request came from), its transport key to pin, and its name for the admin.
+ */
+export const SyncLinkRequestSchema = z.object({
+  port: z.number().int().min(1).max(65_535),
+  transportKey: SyncPeerSchema.shape.transportKey,
+  name: z.string().trim().min(1).max(80).optional(),
+});
+export type SyncLinkRequest = z.infer<typeof SyncLinkRequestSchema>;
+
+/** "linked": the receiver already syncs with the asker. "pending": waiting for one of its admins. */
+export const SyncLinkResponseSchema = z.object({
+  status: z.enum(["linked", "pending"]),
+});
+export type SyncLinkResponse = z.infer<typeof SyncLinkResponseSchema>;
+
+/** A link request waiting for an admin, as the admin sync panel lists it. */
+export const SyncLinkRequestEntrySchema = z.object({
+  id: z.string().regex(/^[a-f0-9]{16}$/),
+  url: SyncPeerSchema.shape.url,
+  name: z.string().max(80).optional(),
+  transportKey: SyncPeerSchema.shape.transportKey,
+  requestedAt: TimestampSchema,
+});
+export type SyncLinkRequestEntry = z.infer<typeof SyncLinkRequestEntrySchema>;
+
 export const SyncStatusReportSchema = z.object({
   enabled: z.boolean(),
   intervalMs: z.number().int().positive(),
-  peers: z.array(SyncPeerSchema.extend({ status: SyncPeerStatusSchema.optional() })),
+  peers: z.array(
+    SyncPeerSchema.extend({
+      status: SyncPeerStatusSchema.optional(),
+      /** What the peer said when this node asked it to sync back, this boot. */
+      link: z.enum(["linked", "pending"]).optional(),
+    }),
+  ),
+  /** Other nodes asking this one to sync with them, waiting for an admin. */
+  linkRequests: z.array(SyncLinkRequestEntrySchema).optional(),
 });
 export type SyncStatusReport = z.infer<typeof SyncStatusReportSchema>;
 
@@ -1251,6 +1286,9 @@ export const SERVER_ERROR_CODES = [
   "invalid_admin_claim",
   "invalid_admin_secret",
   "invalid_invite_redeem",
+  "invalid_link_request",
+  "link_request_not_found",
+  "link_peer_limit",
   "invite_invalid",
   "invite_not_allowed",
   "invalid_attachment_upload",

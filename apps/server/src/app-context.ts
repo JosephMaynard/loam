@@ -11,6 +11,7 @@ import type { KillSwitchResult } from "./kill-switch.js";
 import { createLlmLayer } from "./llm.js";
 import type { MeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
+import type { LinkRequests } from "./sync-links.js";
 import { type DbKeyState, createStoreLifecycle } from "./store-lifecycle.js";
 import { createSyncEngine } from "./sync.js";
 import type { TransportSession } from "./transport-server.js";
@@ -37,6 +38,8 @@ export type AppContext = {
   claimAttempts: Map<string, { count: number; resetAt: number }>;
   /** Rotating invite codes for the host's screen (invites.ts); rotated by the kill switch. */
   invites: InviteIssuer;
+  /** Other nodes asking to be synced with, waiting for an admin (sync-links.ts); cleared by the kill switch. */
+  linkRequests: LinkRequests;
   panicAttempts: Map<string, { count: number; resetAt: number }>;
   transportSessions: Map<string, TransportSession>;
   identityTokens: Map<string, string>;

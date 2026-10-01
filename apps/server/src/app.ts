@@ -37,6 +37,7 @@ import { createStoreLifecycle } from "./store-lifecycle.js";
 import type { AppContext } from "./app-context.js";
 import { createInviteIssuer } from "./invites.js";
 import { createKillSwitch, type KillSwitchResult } from "./kill-switch.js";
+import { createLinkRequests } from "./sync-links.js";
 import { createRealtime, WS_MAX_INBOUND_FRAME_BYTES } from "./realtime.js";
 import { registerAdminRoutes } from "./routes-admin.js";
 import { registerChannelRoutes } from "./routes-channels.js";
@@ -150,6 +151,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const invites = createInviteIssuer();
+  const linkRequests = createLinkRequests();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
   // The host's static transport keypair (docs/08). Loaded/generated in loadData, persisted in the
   // config table (encrypted at rest when the DB is), rotated by the kill switch. Its public key goes
@@ -312,7 +314,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const { llmEnabled, ensureBotUser } = llm;
   const mesh = createMeshLayer(rt);
   const { meshIdentities, loadMeshIdentities, meshContacts, loadMeshContacts, ensureMeshIdentity, ensureAllMeshIdentities, reapExpiredSealed } = mesh;
-  const sync = createSyncEngine(rt, mesh);
+  // How this node describes itself when asking a peer to sync back (sync-links.ts): the port people join
+  // on, the transport key to pin (none in Developer Mode), and the network's name.
+  const sync = createSyncEngine(rt, mesh, () => {
+    const transportKey = effectiveTransportEncryption() === "off" ? undefined : transportIdentity?.publicKey;
+    return { port: clientPort, ...(transportKey ? { transportKey } : {}), name: appConfig.node.name };
+  });
 
   // ---- The composition seam (2026-09-04 split) -------------------------------------------------
   // Everything the extracted modules (transport, realtime, kill switch, routes) need, as ONE object:
@@ -335,6 +342,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     sessions,
     claimAttempts,
     invites,
+    linkRequests,
     panicAttempts,
     identityMintCounters,
     maxNewIdentitiesPerWindow,

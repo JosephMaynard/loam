@@ -3,9 +3,11 @@
 // from app.ts (2026-09-04 split) over the shared AppContext.
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, type MeshInboundResponse, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, SyncMessagesRequestSchema } from "@loam/schema";
+import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, type MeshInboundResponse, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, SyncLinkRequestSchema, type SyncLinkResponse, SyncMessagesRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
+import { mergeConfig } from "./config.js";
 import { errorBody } from "./errors.js";
+import { commitAdminConfig } from "./routes-admin.js";
 import { attachmentFileName, parseAttachmentFileName } from "./media.js";
 import { localInterfaceAddresses, remoteClientAddresses } from "./net.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -419,6 +421,36 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
     },
   );
 
+  // Another node asking this one to sync with it too (sync-links.ts). Open to any caller, like the sync
+  // endpoints themselves: it only parks a request that an admin decides on, and it works while sync is off
+  // (accepting is what turns it on). Its address is the one the request came from.
+  ctx.server.post(
+    "/api/sync/link-request",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false } } },
+    async (request, reply) => {
+      const body = SyncLinkRequestSchema.safeParse(request.body);
+
+      if (!body.success) {
+        return reply.code(400).send(errorBody("Invalid link request"));
+      }
+
+      const entry = ctx.linkRequests.add(request.ip, body.data);
+
+      if (!entry) {
+        return reply.code(400).send(errorBody("Invalid link request"));
+      }
+
+      const sync = ctx.appConfig.sync;
+      if (sync.enabled && sync.peers.some((peer) => peer.url === entry.url)) {
+        ctx.linkRequests.take(entry.id);
+        const linked: SyncLinkResponse = { status: "linked" };
+        return linked;
+      }
+      const pending: SyncLinkResponse = { status: "pending" };
+      return pending;
+    },
+  );
+
   ctx.server.get("/api/admin/sync", async (request, reply) => {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
 
@@ -426,7 +458,52 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody("Admin access required"));
     }
 
-    return ctx.sync.syncStatusReport();
+    return { ...ctx.sync.syncStatusReport(), linkRequests: ctx.linkRequests.list() };
+  });
+
+  // Accept a link request: the asking node becomes a sync peer (its key pinned) and sync is switched on, so
+  // both nodes now pull from each other. Applied exactly like an admin config save.
+  ctx.server.post<{ Params: { id: string } }>("/api/admin/sync/link-requests/:id/accept", async (request, reply) => {
+    const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send(errorBody("Admin access required"));
+    }
+
+    const entry = ctx.linkRequests.list().find((candidate) => candidate.id === request.params.id);
+
+    if (!entry) {
+      return reply.code(404).send(errorBody("That link request is no longer waiting"));
+    }
+
+    const peers = ctx.appConfig.sync.peers.filter((peer) => peer.url !== entry.url);
+    if (peers.length >= 16) {
+      return reply.code(409).send(errorBody("This node already syncs with the most peers it can"));
+    }
+    peers.push({
+      url: entry.url,
+      ...(entry.name ? { label: entry.name } : {}),
+      ...(entry.transportKey ? { transportKey: entry.transportKey } : {}),
+    });
+
+    if (commitAdminConfig(ctx, mergeConfig(ctx.appConfig, { sync: { enabled: true, peers } })) === "failed") {
+      return reply.code(500).send(errorBody("Internal server error"));
+    }
+    ctx.linkRequests.take(entry.id);
+    return { ...ctx.sync.syncStatusReport(), linkRequests: ctx.linkRequests.list() };
+  });
+
+  ctx.server.post<{ Params: { id: string } }>("/api/admin/sync/link-requests/:id/decline", async (request, reply) => {
+    const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+
+    if (!currentUser.isAdmin) {
+      return reply.code(403).send(errorBody("Admin access required"));
+    }
+
+    if (!ctx.linkRequests.take(request.params.id)) {
+      return reply.code(404).send(errorBody("That link request is no longer waiting"));
+    }
+    return { ...ctx.sync.syncStatusReport(), linkRequests: ctx.linkRequests.list() };
   });
 
   // Run a sync round right now (ignoring the interval) — the admin UI's "Sync now" button.
@@ -442,6 +519,6 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
     }
 
     await ctx.sync.runSyncLoop(true);
-    return ctx.sync.syncStatusReport();
+    return { ...ctx.sync.syncStatusReport(), linkRequests: ctx.linkRequests.list() };
   });
 }

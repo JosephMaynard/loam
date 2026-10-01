@@ -102,6 +102,20 @@ A peer's **join URL is its sync address** — the same thing its join QR encodes
 sync → add the URL (`http://192.168.0.10:3000`), save, Sync now. Two nodes that each list the other
 converge in both directions.
 
+**Link requests** (`apps/server/src/sync-links.ts`) make the second half of that automatic to ask for and
+a decision to grant. Once per boot, before its first pull from each peer, a node sends
+`POST /api/sync/link-request { port, transportKey, name }` over the same (sealed, key-pinned) transport as
+a pull. The receiver answers `linked` if it already lists the asker with sync on; otherwise it parks the
+request (in memory, at most 8, a day each, cleared by the kill switch) and answers `pending`. The asker's
+address is the one its request came from (the tunnel forwards the real caller address), plus the port it
+reports, so it never has to guess which of its own interfaces the other side can reach; loopback askers
+are refused. It works while the receiver's sync is off. Admins see waiting requests in the sync panel
+(`GET /api/admin/sync` → `linkRequests`) and accept (`POST /api/admin/sync/link-requests/:id/accept`:
+the asker becomes a peer with its key pinned and sync is switched on, applied like an admin config save)
+or decline. Any device on the network can ask, so nothing is automatic on the receiving side. The asker's
+own panel shows "waiting for them to accept" until the peer lists it. A receiver that uses `sync.token`
+still needs the operator to give the other node the same token; the accept panel says so.
+
 ## Transports — what actually works where
 
 The protocol is plain HTTP and doesn't care how the two nodes can reach each other. The realistic

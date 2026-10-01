@@ -4,14 +4,21 @@
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { verifyKxBinding } from "@loam/crypto";
-import { ChannelSchema, type Message, type MessageAttachment, MessageSchema, type SealedMessage, SyncAttachmentResponseSchema, type SyncDigest, SyncDigestSchema, SyncMessagesResponseSchema, type SyncPeer, type SyncStatusReport, type User, UserSchema } from "@loam/schema";
+import { ChannelSchema, type Message, type MessageAttachment, MessageSchema, type SealedMessage, SyncAttachmentResponseSchema, type SyncDigest, SyncDigestSchema, type SyncLinkRequest, SyncLinkResponseSchema, SyncMessagesResponseSchema, type SyncPeer, type SyncStatusReport, type User, UserSchema } from "@loam/schema";
 import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, isAcceptableAttachmentBytes, isImageAttachmentMime, missingAttachmentBackoffMs, missingAttachmentMaxAgeMs, missingAttachmentMaxRecordsPerPass } from "./media.js";
 import { type PeerTransportPosture, type PeerTransportSession, fetchPeerTransportPosture, handshakeWithPeer, sealedFetch } from "./sync-transport.js";
 import type { MeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
 
-/** Build the node-to-node sync engine over the runtime view and the mesh layer it hands sealed mail to. */
-export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
+/** How long to wait before asking a peer to link back again after the request itself failed. */
+const LINK_RETRY_MS = 10 * 60_000;
+
+/**
+ * Build the node-to-node sync engine over the runtime view and the mesh layer it hands sealed mail to.
+ * `linkSelf` describes this node for the link requests it sends its peers (sync-links.ts): its port, its
+ * transport key and its name; undefined when it can't be described yet (no transport identity).
+ */
+export function createSyncEngine(rt: Runtime, mesh: MeshLayer, linkSelf?: () => SyncLinkRequest | undefined) {
   // Per-peer sync bookkeeping for the admin UI (RAM-only).
   type PeerSyncStatus = {
     lastAttemptAt?: number;
@@ -31,6 +38,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
   >();
   const PEER_TRANSPORT_SESSION_TTL_MS = 11 * 3_600_000;
   const PEER_PLAINTEXT_RECHECK_MS = 5 * 60_000;
+  // Asking peers to sync back (sync-links.ts): each peer's answer this boot, and when a failed ask may retry.
+  const peerLinkStatus = new Map<string, "linked" | "pending">();
+  const linkRetryAt = new Map<string, number>();
   let syncRunning = false;
   let lastSyncLoopAt = 0;
 
@@ -245,6 +255,30 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
     refusedOffers.clear();
     peersSeenEncrypted.clear();
     peerBatchSizes.clear();
+    peerLinkStatus.clear();
+    linkRetryAt.clear();
+  }
+
+  /**
+   * Ask `peer` to sync with this node too, once per boot (sync-links.ts). Sent over the same transport as a
+   * pull, so a pinned peer key protects it. An answer of either kind ends the asking for this boot (a
+   * declined node isn't pestered); a failed request retries after {@link LINK_RETRY_MS}. Never throws.
+   */
+  async function requestLink(peer: SyncPeer): Promise<void> {
+    if (peerLinkStatus.has(peer.url) || (linkRetryAt.get(peer.url) ?? 0) > Date.now()) {
+      return;
+    }
+    const self = linkSelf?.();
+    if (!self) {
+      return;
+    }
+    try {
+      const answer = await fetchPeerJson(peer.url, "/api/sync/link-request", SyncLinkResponseSchema, self);
+      peerLinkStatus.set(peer.url, answer.status);
+      linkRetryAt.delete(peer.url);
+    } catch {
+      linkRetryAt.set(peer.url, Date.now() + LINK_RETRY_MS);
+    }
   }
 
   /** Errors that mean "this BATCH's content is unusable" (too big, not JSON, fails the schema) rather than
@@ -1659,7 +1693,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       // interleaved rounds can't double-insert.
       // Sealed mail from every peer is imported only after all of them are done (see syncWithPeer).
       const sealedDeliveries: (() => Promise<void>)[] = [];
-      await Promise.all(rt.appConfig.sync.peers.map((peer) => syncWithPeer(peer, sealedDeliveries)));
+      await Promise.all(
+        rt.appConfig.sync.peers.map(async (peer) => {
+          // Ask first (it never throws), so the round's pull reuses the transport session it set up.
+          await requestLink(peer);
+          await syncWithPeer(peer, sealedDeliveries);
+        }),
+      );
       for (const deliver of sealedDeliveries) {
         await deliver();
       }
@@ -1676,6 +1716,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer) {
       peers: rt.appConfig.sync.peers.map((peer) => ({
         ...peer,
         status: peerSyncStatus.get(peer.url),
+        link: peerLinkStatus.get(peer.url),
       })),
     };
   }

@@ -741,7 +741,25 @@ export function AdminView({
                     }
                   />
                   <p className="form-note">{t("admin.peerChangesNote")}</p>
-                  <SyncStatusPanel />
+                  <SyncStatusPanel
+                    hasToken={!!adminConfig.sync.token}
+                    onAccepted={(peer) =>
+                      // Accepting saved the peer and switched sync on; take both into the form too, so its next
+                      // save keeps them (other unsaved edits here stay as they are).
+                      setAdminConfig((previous) =>
+                        previous
+                          ? {
+                              ...previous,
+                              sync: {
+                                ...previous.sync,
+                                enabled: true,
+                                peers: [...previous.sync.peers.filter((entry) => entry.url !== peer.url), peer],
+                              },
+                            }
+                          : previous,
+                      )
+                    }
+                  />
                 </div>
               </AdminSection>
 

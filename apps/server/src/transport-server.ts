@@ -371,10 +371,12 @@ export function createTransportServer(ctx: AppContext) {
    * from encryption. Both carry public data only (DMs/private channels/shadow-banned authors never
    * export). See `sync-transport.ts` (the puller half).
    */
+  // `/api/sync/link-request` (sync-links.ts) is the same kind of node-to-node call, sent by the same client.
   const DIRECT_SEALED_SYNC_ROUTES = new Set([
     "/api/sync/digest",
     "/api/sync/messages",
     "/api/sync/attachment",
+    "/api/sync/link-request",
   ]);
 
   /**

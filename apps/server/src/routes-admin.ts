@@ -252,70 +252,83 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(400).send(errorBody("Invalid config values"));
     }
 
-    // Before anything is applied: a launcher-owned `llm.onDevice` edit that can't reach config.json would be
-    // reverted at the next boot, so refuse the whole save rather than half-apply it.
-    if (writeThroughLauncherOwnedOnDevice(ctx, ctx.appConfig, next) === "failed") {
+    if (commitAdminConfig(ctx, next) === "failed") {
       return reply.code(500).send(errorBody("Internal server error"));
     }
-
-    const switchedToSetupCode = next.admin.bootstrap === "setupCode" && ctx.appConfig.admin.bootstrap !== "setupCode";
-    const switchedAwayFromSetupCode =
-      ctx.appConfig.admin.bootstrap === "setupCode" && next.admin.bootstrap !== "setupCode";
-    ctx.appConfig = next;
-    // `appConfig` is always the operator's real intent (Developer Mode never mutates it — the plaintext
-    // override is a read-time projection via `effectiveTransportEncryption()`), so the persisted config can
-    // never carry a dev-forced `"off"` into a later non-dev run of this data dir.
-    ctx.store.setConfigValue("config", JSON.stringify(ctx.appConfig));
-    // Drop live sync-status for peers an admin just removed, so sync.peerSyncStatus can't accrete entries
-    // for peers that no longer exist (docs/15 #9).
-    const activePeerUrls = new Set(ctx.appConfig.sync.peers.map((peer) => peer.url));
-    for (const url of [...ctx.sync.peerSyncStatus.keys()]) {
-      if (!activePeerUrls.has(url)) {
-        ctx.sync.peerSyncStatus.delete(url);
-      }
-    }
-    // Same cleanup for queued missing-attachment retries (F2, docs/15 A6): a removed peer's work items
-    // would otherwise sit in the table until `sync.retryMissingAttachments`' own defensive check happened to
-    // run — drop them immediately so a peer the operator just removed is never contacted again.
-    for (const record of ctx.store.loadMissingAttachments()) {
-      if (!activePeerUrls.has(record.peerUrl)) {
-        ctx.store.clearMissingAttachment(record.messageId, record.attachmentId);
-      }
-    }
-    // Drop every cached puller-side transport session (docs/08): a peer's URL, pinned transportKey, or
-    // the sync token may have just changed, so an entry established under the old config could be stale
-    // or pinned to a now-wrong key. They re-handshake lazily on the next sync tick.
-    ctx.sync.peerTransportSessions.clear();
-    // Offers refused under the old config (replies or public channels off, a smaller body cap, relaying off…)
-    // may be acceptable now: fetch them again at the next round rather than after the refusal expires.
-    ctx.sync.forgetRefusedOffers();
-    // Switching INTO setupCode bootstrap at runtime must mint a code — otherwise the claim flow is
-    // enabled but no code was ever generated, so `allowAdminClaim` stays false and no one can claim
-    // (docs/15 #8). Only on the transition (not every PATCH while already in setupCode), so a code
-    // consumed by an earlier claim isn't silently re-minted. `/api/admin/claim` grants admin against
-    // a valid code regardless of existing admins, so this is the intended "let someone claim" lever.
-    if (ctx.effectiveAdminBootstrap() === "hostDevice" && next.admin.bootstrap !== "hostDevice") {
-      // This host device pins the effective strategy to `hostDevice` (its launcher's per-boot token — see
-      // `effectiveAdminBootstrap`). The PATCH is persisted as the operator's intent (it applies the moment
-      // this data dir runs without a host token), but minting/advertising a setup code or passphrase claim
-      // here would announce a claim path that can never succeed on this device (round-2 review).
-      ctx.server.log.warn(
-        `admin.bootstrap "${next.admin.bootstrap}" saved, but this host device enforces "hostDevice": the setting takes effect only where no host token is minted`,
-      );
-    } else if (switchedToSetupCode && ctx.adminSetupCode === undefined) {
-      ctx.adminSetupCode = makeAdminSetupCode();
-      ctx.server.log.info(`Admin setup code (single use): ${ctx.adminSetupCode}`);
-    } else if (switchedAwayFromSetupCode) {
-      // Leaving setupCode invalidates the outstanding code immediately, so a later switch back mints a
-      // fresh one (and a code minted for a now-abandoned mode can't be claimed later).
-      ctx.adminSetupCode = undefined;
-    }
-    ctx.llm.ensureBotUser();
-    // Enabling mesh mints + publishes identity keys for existing local users so they're reachable.
-    ctx.mesh.ensureAllMeshIdentities();
-    ctx.broadcast({ type: "configUpdated", networkConfig: ctx.currentNetworkConfig() });
-    // If presence was just enabled, connected clients need the current roster to light up.
-    ctx.broadcastPresence();
     return ctx.redactedConfig();
   });
+}
+
+/**
+ * Apply a validated admin config and everything that follows from it: persist, drop peer state a change
+ * may have invalidated, setup-code bookkeeping, the bot and mesh identities, and the `configUpdated`
+ * broadcast. Shared by `PATCH /api/admin/config` and accepting a sync link request. "failed" (nothing
+ * applied) when a launcher-owned `llm.onDevice` edit couldn't reach config.json.
+ */
+export function commitAdminConfig(ctx: AppContext, next: LoamConfig): "ok" | "failed" {
+  // Before anything is applied: a launcher-owned `llm.onDevice` edit that can't reach config.json would be
+  // reverted at the next boot, so refuse the whole save rather than half-apply it.
+  if (writeThroughLauncherOwnedOnDevice(ctx, ctx.appConfig, next) === "failed") {
+    return "failed";
+  }
+
+  const switchedToSetupCode = next.admin.bootstrap === "setupCode" && ctx.appConfig.admin.bootstrap !== "setupCode";
+  const switchedAwayFromSetupCode =
+    ctx.appConfig.admin.bootstrap === "setupCode" && next.admin.bootstrap !== "setupCode";
+  ctx.appConfig = next;
+  // `appConfig` is always the operator's real intent (Developer Mode never mutates it — the plaintext
+  // override is a read-time projection via `effectiveTransportEncryption()`), so the persisted config can
+  // never carry a dev-forced `"off"` into a later non-dev run of this data dir.
+  ctx.store.setConfigValue("config", JSON.stringify(ctx.appConfig));
+  // Drop live sync-status for peers an admin just removed, so sync.peerSyncStatus can't accrete entries
+  // for peers that no longer exist (docs/15 #9).
+  const activePeerUrls = new Set(ctx.appConfig.sync.peers.map((peer) => peer.url));
+  for (const url of [...ctx.sync.peerSyncStatus.keys()]) {
+    if (!activePeerUrls.has(url)) {
+      ctx.sync.peerSyncStatus.delete(url);
+    }
+  }
+  // Same cleanup for queued missing-attachment retries (F2, docs/15 A6): a removed peer's work items
+  // would otherwise sit in the table until `sync.retryMissingAttachments`' own defensive check happened to
+  // run — drop them immediately so a peer the operator just removed is never contacted again.
+  for (const record of ctx.store.loadMissingAttachments()) {
+    if (!activePeerUrls.has(record.peerUrl)) {
+      ctx.store.clearMissingAttachment(record.messageId, record.attachmentId);
+    }
+  }
+  // Drop every cached puller-side transport session (docs/08): a peer's URL, pinned transportKey, or
+  // the sync token may have just changed, so an entry established under the old config could be stale
+  // or pinned to a now-wrong key. They re-handshake lazily on the next sync tick.
+  ctx.sync.peerTransportSessions.clear();
+  // Offers refused under the old config (replies or public channels off, a smaller body cap, relaying off…)
+  // may be acceptable now: fetch them again at the next round rather than after the refusal expires.
+  ctx.sync.forgetRefusedOffers();
+  // Switching INTO setupCode bootstrap at runtime must mint a code — otherwise the claim flow is
+  // enabled but no code was ever generated, so `allowAdminClaim` stays false and no one can claim
+  // (docs/15 #8). Only on the transition (not every PATCH while already in setupCode), so a code
+  // consumed by an earlier claim isn't silently re-minted. `/api/admin/claim` grants admin against
+  // a valid code regardless of existing admins, so this is the intended "let someone claim" lever.
+  if (ctx.effectiveAdminBootstrap() === "hostDevice" && next.admin.bootstrap !== "hostDevice") {
+    // This host device pins the effective strategy to `hostDevice` (its launcher's per-boot token — see
+    // `effectiveAdminBootstrap`). The PATCH is persisted as the operator's intent (it applies the moment
+    // this data dir runs without a host token), but minting/advertising a setup code or passphrase claim
+    // here would announce a claim path that can never succeed on this device (round-2 review).
+    ctx.server.log.warn(
+      `admin.bootstrap "${next.admin.bootstrap}" saved, but this host device enforces "hostDevice": the setting takes effect only where no host token is minted`,
+    );
+  } else if (switchedToSetupCode && ctx.adminSetupCode === undefined) {
+    ctx.adminSetupCode = makeAdminSetupCode();
+    ctx.server.log.info(`Admin setup code (single use): ${ctx.adminSetupCode}`);
+  } else if (switchedAwayFromSetupCode) {
+    // Leaving setupCode invalidates the outstanding code immediately, so a later switch back mints a
+    // fresh one (and a code minted for a now-abandoned mode can't be claimed later).
+    ctx.adminSetupCode = undefined;
+  }
+  ctx.llm.ensureBotUser();
+  // Enabling mesh mints + publishes identity keys for existing local users so they're reachable.
+  ctx.mesh.ensureAllMeshIdentities();
+  ctx.broadcast({ type: "configUpdated", networkConfig: ctx.currentNetworkConfig() });
+  // If presence was just enabled, connected clients need the current roster to light up.
+  ctx.broadcastPresence();
+  return "ok";
 }

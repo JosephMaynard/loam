@@ -7,6 +7,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Linking networks both ways.** A node that adds another as a sync peer now asks it to sync back. The
+  other network's admins see the request in the admin sync panel and accept it (which switches sync on
+  there, with the asking node's key pinned) or decline it. Direct messages and private channels still
+  never leave either network.
 - **Invite codes for approval-only networks.** The host phone's join QR (share screen and display mode)
   carries a code that changes every 10 minutes. Someone who scans it is let straight in instead of waiting
   in the queue; a photo of an old code stops working within 20 minutes, and an Emergency Reset retires
