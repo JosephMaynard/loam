@@ -70,13 +70,15 @@ export function LinkNodeScreen({
       <SafeAreaProvider>
         <ThemedView style={styles.container}>
           <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+            {/* Close alone in the header row (like the share screen's Done): the title is long in most
+                languages, so it lives in the body where it can wrap. */}
             <ThemedView style={styles.header}>
-              <ThemedText type="subtitle">{t('link.title')}</ThemedText>
               <Pressable onPress={onClose} accessibilityRole="button" hitSlop={Spacing.two}>
                 <ThemedText type="link">{t('common.close')}</ThemedText>
               </Pressable>
             </ThemedView>
             <ScrollView contentContainerStyle={styles.body}>
+              <ThemedText type="subtitle">{t('link.title')}</ThemedText>
               <ThemedText>{t('link.body')}</ThemedText>
               {wifi && state.hotspot ? (
                 <View style={styles.code}>
@@ -129,7 +131,7 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
   },
