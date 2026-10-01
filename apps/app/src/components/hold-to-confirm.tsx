@@ -6,7 +6,7 @@ import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 /**
- * A destructive button that fires only after being held down for `holdMs`: a bar sweeps across while
+ * A button that fires only after being held down for `holdMs`: a bar sweeps across while
  * it's held, letting go early cancels. Quick enough to use under pressure, hard to trigger by accident in
  * a pocket or with a stray tap. (TalkBack users double-tap and hold, which is a long press.)
  */
@@ -16,7 +16,10 @@ export function HoldToConfirm({
   holdingLabel,
   label,
   onConfirm,
+  tone = 'danger',
 }: {
+  /** `danger` (red) for destructive actions; `neutral` (green) for ones that just need deliberate intent. */
+  tone?: 'danger' | 'neutral';
   disabled?: boolean;
   holdMs?: number;
   holdingLabel: string;
@@ -24,6 +27,7 @@ export function HoldToConfirm({
   onConfirm: () => void;
 }) {
   const theme = useTheme();
+  const color = tone === 'danger' ? theme.danger : theme.primary;
   const progress = useRef(new Animated.Value(0)).current;
   const animation = useRef<Animated.CompositeAnimation | null>(null);
   const [holding, setHolding] = useState(false);
@@ -66,10 +70,10 @@ export function HoldToConfirm({
       disabled={disabled}
       onPressIn={start}
       onPressOut={cancel}
-      style={[styles.button, { borderColor: theme.danger, opacity: disabled ? 0.5 : 1 }]}>
-      <Animated.View style={[styles.fill, { backgroundColor: theme.danger, width }]} />
+      style={[styles.button, { borderColor: color, opacity: disabled ? 0.5 : 1 }]}>
+      <Animated.View style={[styles.fill, { backgroundColor: color, width }]} />
       <View style={styles.labelWrap}>
-        <ThemedText type="smallBold" style={{ color: theme.danger }}>
+        <ThemedText type="smallBold" style={{ color }}>
           {holding ? holdingLabel : label}
         </ThemedText>
       </View>

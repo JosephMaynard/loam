@@ -2,17 +2,19 @@
  * The Android host's own interface language: one active locale, `t()` with `{token}` substitution, and an
  * observable store so screens re-render when the choice changes. English is the fallback for a missing
  * key or locale. Pure (no React, no storage): `src/hooks/use-app-locale.ts` persists the choice and wires
- * it to React. The same 15 languages as the web client (`LocaleSchema`).
+ * it to React. The same 15 languages as the web client.
  */
-import { LocaleSchema, type Locale } from '@loam/schema';
-
 import { en, type AppCatalog, type AppCatalogKey } from './en';
 
 export type { AppCatalogKey } from './en';
-export type AppLocale = Locale;
 
-/** Every language the app offers, in `LocaleSchema` order. */
-export const APP_LOCALES = LocaleSchema.options as readonly AppLocale[];
+/**
+ * Every language the app offers: the web client's `LocaleSchema` list, written out here because the app
+ * must not import `@loam/schema` (its zod graph breaks Metro's release bundle; see index.tsx). A test
+ * checks the two lists stay identical.
+ */
+export const APP_LOCALES = ['en', 'es', 'fr', 'ar', 'fa', 'pt', 'uk', 'ru', 'tr', 'my', 'ur', 'prs', 'ps', 'sw', 'bn'] as const;
+export type AppLocale = (typeof APP_LOCALES)[number];
 
 /** Languages written right to left. */
 export const RTL_LOCALES: ReadonlySet<AppLocale> = new Set<AppLocale>(['ar', 'fa', 'ur', 'prs', 'ps']);

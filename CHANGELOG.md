@@ -7,6 +7,13 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Display mode on the Android host** (replacing the separate "Keep screen on" and "Kiosk mode"
+  switches): one button on the share screen shows the join codes full screen, as large as the screen
+  allows with no scrolling (one code on Wi-Fi; two on a hotspot, side by side in landscape), keeps the
+  screen on and pins LOAM in front. Leaving it takes a press-and-hold. The network keeps running with the
+  screen off either way; the screen only stays on so the codes can be seen.
+- **The Android host's own screens are translated**: the share screen, join codes, display mode and
+  Emergency reset now follow the chosen language (all 15).
 - **Emergency reset from the Android host's menu.** The last item in the menu, in red, opens one screen
   that explains what will be erased and asks you to press and hold for three seconds: quick when it
   matters, hard to trigger by accident. It runs in the server on the phone itself (no admin login needed,

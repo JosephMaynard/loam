@@ -7,6 +7,7 @@ import { ThemedView } from './themed-view';
 
 import { Spacing } from '@/constants/theme';
 import type { HostMode } from '@/lib/host-mode';
+import { t, type AppCatalogKey } from '@/lib/i18n';
 
 /** Live host state, supplied by the embedded server + hotspot native module (initiative 4). */
 export type HotspotInfo = {
@@ -52,9 +53,9 @@ export type HostState = {
   wifiNetwork?: string;
 };
 
-/** "1 phone connected" / "3 phones connected". */
+/** "Phones connected: 3": a count after a label reads naturally in every language, with no plural rules. */
 export function connectedLabel(count: number): string {
-  return `${count} ${count === 1 ? 'phone' : 'phones'} connected`;
+  return t('host.connected', { n: count });
 }
 
 /**
@@ -67,19 +68,19 @@ export function connectedLine(state: Pick<HostState, 'status' | 'connectedClient
   if (count > 0) {
     return connectedLabel(count);
   }
-  return state.status === 'running' ? 'No phones connected yet' : undefined;
+  return state.status === 'running' ? t('host.noneConnected') : undefined;
 }
 
-const STATUS_LABEL: Record<HostMode, Record<HostState['status'], string>> = {
+const STATUS_LABEL: Record<HostMode, Record<HostState['status'], AppCatalogKey>> = {
   hotspot: {
-    starting: 'Starting host…',
-    running: 'Host running',
-    stopped: 'Host stopped',
+    starting: 'host.starting',
+    running: 'host.running',
+    stopped: 'host.stopped',
   },
   wifi: {
-    starting: 'Starting host…',
-    running: 'Hosting on Wi-Fi',
-    stopped: 'Not on Wi-Fi',
+    starting: 'host.starting',
+    running: 'host.runningWifi',
+    stopped: 'host.notOnWifi',
   },
 };
 
@@ -96,12 +97,12 @@ export function HostPanel({ state }: { state: HostState }) {
   return (
     <ThemedView style={styles.container}>
       <ThemedText type="title" style={styles.title}>
-        LOAM host
+        {t('host.title')}
       </ThemedText>
       <ThemedView
         type={state.status === 'running' ? 'backgroundSelected' : 'backgroundElement'}
         style={styles.statusPill}>
-        <ThemedText type="small">{STATUS_LABEL[state.mode][state.status]}</ThemedText>
+        <ThemedText type="small">{t(STATUS_LABEL[state.mode][state.status])}</ThemedText>
       </ThemedView>
       {line ? (
         <ThemedText type="smallBold" style={styles.connected}>
@@ -120,7 +121,7 @@ function AlsoAt({ addresses }: { addresses?: string[] }) {
   }
   return (
     <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
-      If that doesn&apos;t load, this host is also at: {addresses.join(', ')}
+      {t('host.alsoAt', { addresses: addresses.join(', ') })}
     </ThemedText>
   );
 }
@@ -130,17 +131,16 @@ function AlsoAt({ addresses }: { addresses?: string[] }) {
 function WifiJoin({ state }: { state: HostState }) {
   return (
     <ThemedView type="backgroundElement" style={styles.step}>
-      <ThemedText type="subtitle">Join on this Wi-Fi</ThemedText>
+      <ThemedText type="subtitle">{t('host.wifiTitle')}</ThemedText>
       {state.serverUrl ? (
         <>
           {state.wifiNetwork ? (
             <ThemedText type="smallBold" style={styles.manual}>
-              Network: {state.wifiNetwork}
+              {t('host.wifiNetwork', { name: state.wifiNetwork })}
             </ThemedText>
           ) : null}
           <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
-            Connect to {state.wifiNetwork ? 'that network' : 'the Wi-Fi network this phone is on'}, then scan
-            this to open LOAM (or type the address).
+            {state.wifiNetwork ? t('host.wifiScanNamed') : t('host.wifiScan')}
           </ThemedText>
           <QRCode value={state.serverUrl} />
           <ThemedText type="code" style={styles.manual}>
@@ -150,19 +150,18 @@ function WifiJoin({ state }: { state: HostState }) {
         </>
       ) : state.status === 'starting' ? (
         <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
-          Checking this phone&apos;s Wi-Fi connection…
+          {t('host.wifiChecking')}
         </ThemedText>
       ) : (
         <>
           <ThemedText type="small" themeColor="textSecondary" style={[styles.manual, styles.pending]}>
-            Connect this phone to a Wi-Fi network first. The join code appears here once it is connected.
+            {t('host.wifiNone')}
           </ThemedText>
           <AlsoAt addresses={state.addresses} />
         </>
       )}
       <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
-        Guest, hotel, café and campus Wi-Fi often keep devices from reaching each other. If nobody can
-        connect, switch to Hotspot.
+        {t('host.wifiGuestWarning')}
       </ThemedText>
     </ThemedView>
   );
@@ -175,15 +174,13 @@ function HotspotJoin({ state }: { state: HostState }) {
   return (
     <>
       <ThemedText type="small" themeColor="textSecondary" style={styles.rationale}>
-        Android requires location permission to create a WiFi hotspot. LOAM never uses, requests, or
-        stores your location: it only turns the hotspot on.
+        {t('host.locationRationale')}
       </ThemedText>
 
       <ThemedView type="backgroundElement" style={styles.step}>
-        <ThemedText type="subtitle">Step 1 · Join the WiFi</ThemedText>
+        <ThemedText type="subtitle">{t('host.step1Title')}</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          Scan with the phone camera to connect to this host&apos;s hotspot. Keep LOAM open, and
-          don&apos;t switch on your phone&apos;s own WiFi hotspot: it replaces this one.
+          {t('host.step1Body')}
         </ThemedText>
         {wifi ? (
           <>
@@ -199,15 +196,15 @@ function HotspotJoin({ state }: { state: HostState }) {
           </ThemedText>
         ) : (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
-            Waiting for the hotspot… (starts with the host)
+            {t('host.hotspotWaiting')}
           </ThemedText>
         )}
       </ThemedView>
 
       <ThemedView type="backgroundElement" style={styles.step}>
-        <ThemedText type="subtitle">Step 2 · Open LOAM</ThemedText>
+        <ThemedText type="subtitle">{t('host.step2Title')}</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          Once connected, scan this to open the app (or type the address).
+          {t('host.step2Body')}
         </ThemedText>
         {state.serverUrl ? (
           <>
@@ -219,24 +216,25 @@ function HotspotJoin({ state }: { state: HostState }) {
           </>
         ) : state.hotspotAddress === 'searching' ? (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
-            Finding the hotspot&apos;s address…
+            {t('host.findingAddress')}
           </ThemedText>
         ) : state.hotspotAddress === 'unknown' ? (
           <>
             <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
-              Couldn&apos;t work out which address the hotspot is using. On the joining phone, open the
-              Wi-Fi details for {state.hotspot?.ssid ?? 'this hotspot'}, find the Gateway (or Router)
-              address, and open http://that-address:3000{state.manualFragment ?? ''} in the browser.
+              {t('host.addressUnknown', {
+                network: state.hotspot?.ssid ?? t('host.thisHotspot'),
+                url: `http://that-address:3000${state.manualFragment ?? ''}`,
+              })}
             </ThemedText>
             {state.detected && state.detected.length > 0 ? (
               <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
-                This host&apos;s addresses: {state.detected.join(' · ')}
+                {t('host.addresses', { addresses: state.detected.join(' · ') })}
               </ThemedText>
             ) : null}
           </>
         ) : (
           <ThemedText type="small" themeColor="textSecondary" style={styles.pending}>
-            Waiting for the server address…
+            {t('host.serverWaiting')}
           </ThemedText>
         )}
       </ThemedView>

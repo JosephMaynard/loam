@@ -1,3 +1,4 @@
+import { LocaleSchema } from '@loam/schema';
 import { describe, expect, it, beforeEach } from 'vitest';
 
 import { CATALOGS } from './catalogs';
@@ -13,6 +14,10 @@ function tokensOf(text: string): string[] {
 beforeEach(() => setAppLocale('en'));
 
 describe('host app catalogs', () => {
+  it('offer exactly the web client\'s languages (written out, since the app can\'t import the schema)', () => {
+    expect([...APP_LOCALES]).toEqual([...LocaleSchema.options]);
+  });
+
   it('ship every language the web client has, each with its own name', () => {
     expect(Object.keys(CATALOGS).sort()).toEqual(APP_LOCALES.filter((locale) => locale !== 'en').sort());
     for (const locale of APP_LOCALES) {

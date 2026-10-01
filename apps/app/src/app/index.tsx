@@ -326,11 +326,13 @@ export default function HostScreen() {
   // bumps `bootstrapAttempt` to re-run the effect from scratch.
   const [bootstrapError, setBootstrapError] = useState(false);
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
-  // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
-  const [keepAwake, setKeepAwake] = useState(false);
-  // Optional kiosk mode — pin the app (Android screen pinning) so a passer-by can't wander off into
-  // other apps; exiting requires the device's own screen-lock PIN.
-  const [kiosk, setKiosk] = useState(false);
+  // Display mode (the share screen): the join codes full screen for a phone left out on display. While on,
+  // the screen stays awake and the app is pinned (Android screen pinning), so a passer-by can't wander off
+  // into other apps; leaving the pin needs the device's own screen-lock PIN. The network keeps running
+  // with the screen off either way (the foreground service), so awake only matters for showing codes.
+  const [displayMode, setDisplayMode] = useState(false);
+  // The network's name from /api/bootstrap, shown above the codes in display mode.
+  const [hostNodeName, setHostNodeName] = useState<string>();
   const webViewRef = useRef<WebView>(null);
   // Whether the WebView (the LOAM web client, which routes with preact-iso via the History API) has
   // in-app history to go back through. A ref, not state: the hardware-back listener reads it without
@@ -429,30 +431,22 @@ export default function HostScreen() {
     );
   };
 
+  // Display mode: keep the screen awake and pin the app while it's on. Both are best-effort no-ops when
+  // unsupported; on unmount we release both so the app is never left stuck in lock-task.
   useEffect(() => {
     const tag = 'loam-host';
-    if (keepAwake) {
+    if (displayMode) {
       void activateKeepAwakeAsync(tag).catch(() => undefined);
-    } else {
-      void deactivateKeepAwake(tag).catch(() => undefined);
-    }
-    return () => {
-      void deactivateKeepAwake(tag).catch(() => undefined);
-    };
-  }, [keepAwake]);
-
-  // Enter/leave Android screen pinning as the kiosk toggle flips. Both calls are best-effort no-ops
-  // when unsupported; on unmount we unpin so the app is never left stuck in lock-task.
-  useEffect(() => {
-    if (kiosk) {
       startKiosk();
     } else {
+      void deactivateKeepAwake(tag).catch(() => undefined);
       stopKiosk();
     }
     return () => {
+      void deactivateKeepAwake(tag).catch(() => undefined);
       stopKiosk();
     };
-  }, [kiosk]);
+  }, [displayMode]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -691,7 +685,12 @@ export default function HostScreen() {
           // A non-2xx from the just-booted loopback server — we couldn't learn the posture, so gate.
           return { gated: true } as const;
         }
-        return { gated: false, fragment: fragmentFor((await response.json()) as unknown) } as const;
+        const body = (await response.json()) as unknown;
+        const nodeName = (body as { networkConfig?: { nodeName?: unknown } } | null)?.networkConfig?.nodeName;
+        if (typeof nodeName === 'string' && nodeName && !cancelled) {
+          setHostNodeName(nodeName);
+        }
+        return { gated: false, fragment: fragmentFor(body) } as const;
       })
       .then((outcome) => {
         if (cancelled || settled) {
@@ -1225,10 +1224,9 @@ export default function HostScreen() {
           addresses={hostAddresses}
           interfaces={hostInterfaces}
           connectedClients={hostClients}
-          keepAwake={keepAwake}
-          onKeepAwakeChange={setKeepAwake}
-          kiosk={kiosk}
-          onKioskChange={setKiosk}
+          displayMode={displayMode}
+          onDisplayModeChange={setDisplayMode}
+          nodeName={hostNodeName}
         />
         <ModelManagerOverlay
           visible={modelManagerOpen}
