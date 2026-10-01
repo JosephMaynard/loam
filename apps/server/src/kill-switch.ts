@@ -59,8 +59,8 @@ export function createKillSwitch(ctx: AppContext) {
   async function executeKillSwitchBody(): Promise<KillSwitchResult> {
     // Retire every invite code already shown (on a screen, in a photo of one), whatever branch follows.
     ctx.invites.rotate();
-    // And forget which nodes asked to link: their addresses and names are network metadata.
-    ctx.linkRequests.clear();
+    // And every "Link a node" code shown: a photo of one must not link a node to the fresh network.
+    ctx.linkCodes.clear();
     /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
      *  tell clients to purge, close sockets, then report the distinct incomplete notice. Used by the
      *  no-hook fail-closed paths (a phase-write failure and a deletion failure) so nothing stale is served

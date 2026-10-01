@@ -14,7 +14,7 @@ import {
   type User,
 } from "@loam/schema";
 import type { ComponentChildren } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 
 import { LOCALE_LABELS, errorText, t } from "../i18n";
 import { fetchJson, REQUEST_TIMEOUT_MS } from "../lib/api";
@@ -184,6 +184,9 @@ export function AdminView({
   const [confirmingWipe, setConfirmingWipe] = useState(false);
   const [firing, setFiring] = useState(false);
   const [fireError, setFireError] = useState<string>();
+  // Peer URLs the server had when this form last loaded or saved. A node can link itself while the form is
+  // open (a "Link a node" code), and the form must take that peer in, or its next save would drop it.
+  const knownPeerUrls = useRef(new Set<string>());
 
   useEffect(() => {
     if (!currentUser.isAdmin) {
@@ -201,6 +204,7 @@ export function AdminView({
         const parsed = LoamConfigSchema.safeParse(payload);
 
         if (parsed.success) {
+          knownPeerUrls.current = new Set(parsed.data.sync.peers.map((peer) => peer.url));
           setAdminConfig(parsed.data);
         } else {
           setLoadError(t("admin.configInvalid"));
@@ -266,6 +270,7 @@ export function AdminView({
         throw new Error(t("admin.configUnrecognised"));
       }
 
+      knownPeerUrls.current = new Set(parsed.data.sync.peers.map((peer) => peer.url));
       setAdminConfig(parsed.data);
       setPassphrase("");
       setPanicToken("");
@@ -692,7 +697,7 @@ export function AdminView({
                       <span className="field-hint">{t("admin.syncTokenNote")}</span>
                     </div>
                   ) : null}
-                  {adminConfig.sync.enabled ? <NodeLinkControl joinUrl={joinUrl} /> : null}
+                  <NodeLinkControl joinUrl={joinUrl} />
                   {adminConfig.sync.peers.length ? (
                     <ul className="list">
                       {adminConfig.sync.peers.map((peer) => (
@@ -742,23 +747,38 @@ export function AdminView({
                   />
                   <p className="form-note">{t("admin.peerChangesNote")}</p>
                   <SyncStatusPanel
-                    hasToken={!!adminConfig.sync.token}
-                    onAccepted={(peer) =>
-                      // Accepting saved the peer and switched sync on; take both into the form too, so its next
-                      // save keeps them (other unsaved edits here stay as they are).
+                    onReport={(report) => {
+                      // Peers the server gained since this form loaded were linked with a code: take them in
+                      // (and the sync switch linking turned on), keeping every other unsaved edit.
+                      const linked = report.peers.filter((peer) => !knownPeerUrls.current.has(peer.url));
+                      if (!linked.length) {
+                        return;
+                      }
+                      for (const peer of linked) {
+                        knownPeerUrls.current.add(peer.url);
+                      }
                       setAdminConfig((previous) =>
                         previous
                           ? {
                               ...previous,
                               sync: {
                                 ...previous.sync,
-                                enabled: true,
-                                peers: [...previous.sync.peers.filter((entry) => entry.url !== peer.url), peer],
+                                enabled: previous.sync.enabled || report.enabled,
+                                peers: [
+                                  ...previous.sync.peers,
+                                  ...linked
+                                    .filter((peer) => !previous.sync.peers.some((entry) => entry.url === peer.url))
+                                    .map(({ url, label, transportKey }) => ({
+                                      url,
+                                      ...(label ? { label } : {}),
+                                      ...(transportKey ? { transportKey } : {}),
+                                    })),
+                                ],
                               },
                             }
                           : previous,
-                      )
-                    }
+                      );
+                    }}
                   />
                 </div>
               </AdminSection>

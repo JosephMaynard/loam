@@ -17,8 +17,11 @@ export const SETUP_PRESETS: readonly SetupPreset[] = ['private', 'community', 'c
 /** Where people connect: this phone's Wi-Fi network, its own hotspot, or another LOAM network as a node. */
 export type SetupConnection = 'wifi' | 'hotspot' | 'join';
 
-/** The node this one syncs with when it joined another network: its address and the key to pin. */
-export type SetupPeer = { url: string; transportKey?: string };
+/**
+ * The node this one links to when it joins another network, from its "Link a node" code: its address, the
+ * key to pin, and the single-use code (used on the first sync round, then removed from the config).
+ */
+export type SetupPeer = { url: string; transportKey: string; linkCode: string };
 
 /** What the app remembers about the network it set up (SecureStore `loam.setup`). */
 export type SetupRecord = {
@@ -52,10 +55,10 @@ export function presetConfig(
   peer?: SetupPeer,
 ): Record<string, unknown> {
   const node = { name: cleanNodeName(nodeName), locale };
-  // Joining another network: sync with that node from the first start, its key pinned (docs/11). The node
-  // then asks it to sync back, which its admin accepts.
+  // Joining another network: sync with that node from the first start, its key pinned, holding the link
+  // code the first sync round uses so that node syncs with this one too (docs/11).
   const sync = peer
-    ? { sync: { enabled: true, peers: [{ url: peer.url, ...(peer.transportKey ? { transportKey: peer.transportKey } : {}) }] } }
+    ? { sync: { enabled: true, peers: [{ url: peer.url, transportKey: peer.transportKey, linkCode: peer.linkCode }] } }
     : {};
   if (preset === 'private') {
     return {
@@ -99,12 +102,13 @@ export function parseSetupRecord(value: string | null | undefined): SetupRecord 
       typeof raw.nodeName === 'string' &&
       (raw.connection === 'wifi' || raw.connection === 'hotspot' || raw.connection === 'join')
     ) {
+      // The remembered peer is only for display: the code in it is spent once the network has started.
       const peer =
-        raw.peer && typeof raw.peer.url === 'string'
-          ? {
-              url: raw.peer.url,
-              ...(typeof raw.peer.transportKey === 'string' ? { transportKey: raw.peer.transportKey } : {}),
-            }
+        raw.peer &&
+        typeof raw.peer.url === 'string' &&
+        typeof raw.peer.transportKey === 'string' &&
+        typeof raw.peer.linkCode === 'string'
+          ? { url: raw.peer.url, transportKey: raw.peer.transportKey, linkCode: raw.peer.linkCode }
           : undefined;
       return {
         preset: raw.preset as SetupPreset,

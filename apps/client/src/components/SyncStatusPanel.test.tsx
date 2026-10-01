@@ -80,30 +80,22 @@ describe("SyncStatusPanel", () => {
     expect(host.textContent).toContain("connection refused");
   });
 
-  it("shows networks asking to sync even with no peers, and accepting hands the new peer to the form", async () => {
-    const request = { id: "0123456789abcdef", url: "http://192.168.4.20:3000", name: "Riverside", transportKey: "k", requestedAt: 1_700_000_000_000 };
-    report = { enabled: false, intervalMs: 60_000, peers: [], linkRequests: [request] };
-    const accepted = { enabled: true, intervalMs: 60_000, peers: [{ url: request.url, label: "Riverside", transportKey: "k" }], linkRequests: [] };
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
-      String(input).includes("/accept")
-        ? new Response(JSON.stringify(accepted), { status: 200 })
-        : new Response(JSON.stringify(report), { status: 200 }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const onAccepted = vi.fn();
+  it("shows each peer's link state and hands every report to the form", async () => {
+    report = {
+      enabled: true,
+      intervalMs: 60_000,
+      peers: [
+        { url: "http://192.168.4.20:3000", link: "linking" },
+        { url: "http://192.168.4.21:3000", link: "refused" },
+      ],
+    } as SyncStatusReport;
+    const onReport = vi.fn();
 
-    const host = mount(<SyncStatusPanel hasToken onAccepted={onAccepted} />);
+    const host = mount(<SyncStatusPanel onReport={onReport} />);
     await flush();
 
-    expect(host.textContent).toContain("Riverside");
-    expect(host.textContent).toContain("shared mesh token");
-    const accept = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "Accept")!;
-    accept.click();
-    await flush();
-
-    expect(String(fetchMock.mock.calls.at(-1)![0])).toContain(`/api/admin/sync/link-requests/${request.id}/accept`);
-    expect(onAccepted).toHaveBeenCalledWith({ url: request.url, label: "Riverside", transportKey: "k" });
-    expect(host.querySelector(".sync-link-request")).toBeNull();
-    expect(host.querySelectorAll(".sync-peer")).toHaveLength(1);
+    expect(host.textContent).toContain("linking…");
+    expect(host.textContent).toContain("link code was refused");
+    expect(onReport).toHaveBeenCalledWith(expect.objectContaining({ peers: report.peers }));
   });
 });

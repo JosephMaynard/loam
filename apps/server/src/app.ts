@@ -23,6 +23,7 @@ import {
   type Message,
   type MessageCreateRequest,
   type NetworkConfig,
+  type SyncLinkResponse,
   type TransportEncryption,
   type User,
   type UserUpdateRequest,
@@ -37,9 +38,9 @@ import { createStoreLifecycle } from "./store-lifecycle.js";
 import type { AppContext } from "./app-context.js";
 import { createInviteIssuer } from "./invites.js";
 import { createKillSwitch, type KillSwitchResult } from "./kill-switch.js";
-import { createLinkRequests } from "./sync-links.js";
+import { createLinkCodes } from "./sync-links.js";
 import { createRealtime, WS_MAX_INBOUND_FRAME_BYTES } from "./realtime.js";
-import { registerAdminRoutes } from "./routes-admin.js";
+import { commitAdminConfig, registerAdminRoutes } from "./routes-admin.js";
 import { registerChannelRoutes } from "./routes-channels.js";
 import { registerMessageRoutes } from "./routes-messages.js";
 import { registerSessionRoutes } from "./routes-session.js";
@@ -151,7 +152,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const sessions = new Map<string, string>();
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const invites = createInviteIssuer();
-  const linkRequests = createLinkRequests();
+  const linkCodes = createLinkCodes();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
   // The host's static transport keypair (docs/08). Loaded/generated in loadData, persisted in the
   // config table (encrypted at rest when the DB is), rotated by the kill switch. Its public key goes
@@ -316,9 +317,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const { meshIdentities, loadMeshIdentities, meshContacts, loadMeshContacts, ensureMeshIdentity, ensureAllMeshIdentities, reapExpiredSealed } = mesh;
   // How this node describes itself when asking a peer to sync back (sync-links.ts): the port people join
   // on, the transport key to pin (none in Developer Mode), and the network's name.
-  const sync = createSyncEngine(rt, mesh, () => {
-    const transportKey = effectiveTransportEncryption() === "off" ? undefined : transportIdentity?.publicKey;
-    return { port: clientPort, ...(transportKey ? { transportKey } : {}), name: appConfig.node.name };
+  const sync = createSyncEngine(rt, mesh, {
+    self: () => {
+      const transportKey = effectiveTransportEncryption() === "off" ? undefined : transportIdentity?.publicKey;
+      return { port: clientPort, ...(transportKey ? { transportKey } : {}), name: appConfig.node.name };
+    },
+    linked: (peerUrl, result) => applyPeerLinked(peerUrl, result),
   });
 
   // ---- The composition seam (2026-09-04 split) -------------------------------------------------
@@ -342,7 +346,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     sessions,
     claimAttempts,
     invites,
-    linkRequests,
+    linkCodes,
     panicAttempts,
     identityMintCounters,
     maxNewIdentitiesPerWindow,
@@ -489,6 +493,27 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const { sendEventToUsers, broadcastStreamEvent, sockets, pendingSockets, broadcast } = realtime;
   const killSwitch = createKillSwitch(ctx);
   Object.assign(ctx, killSwitch);
+
+  /**
+   * This node just used a peer's link code (sync-links.ts): the peer now pulls from it too. Forget the
+   * spent code, name the peer as it named itself (unless an admin already labelled it), and adopt its mesh
+   * token when this node has none, so both sides present and require the same one. Applied like an admin
+   * save. A node that already has a different token keeps its own (the operator has to reconcile them).
+   */
+  function applyPeerLinked(peerUrl: string, result: SyncLinkResponse): void {
+    const peers = appConfig.sync.peers.map((peer) => {
+      if (peer.url !== peerUrl) {
+        return peer;
+      }
+      const { linkCode: _spent, ...rest } = peer;
+      return { ...rest, ...(rest.label || !result.name ? {} : { label: result.name.slice(0, 80) }) };
+    });
+    const token = appConfig.sync.token ?? result.token;
+    if (result.token && appConfig.sync.token && appConfig.sync.token !== result.token) {
+      ctx.server.log.warn("Linked a peer that uses a different mesh token: set the same token on both nodes to sync");
+    }
+    commitAdminConfig(ctx, mergeConfig(appConfig, { sync: { peers, ...(token ? { token } : {}) } }));
+  }
 
   // Compile-time completeness check: every AppContext member is provided by one of the parts above.
   type MissingFromContext = Exclude<

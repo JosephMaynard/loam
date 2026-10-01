@@ -231,10 +231,20 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(400).send(errorBody("Invalid config update request"));
     }
 
+    // A link code (sync-links.ts) is written by setup and removed once used; a form an admin loaded
+    // earlier still holding it must not put a spent code back, nor can a save add one.
+    const update = body.data;
+    if (update.sync?.peers) {
+      update.sync.peers = update.sync.peers.map(({ linkCode, ...peer }) => {
+        const saved = ctx.appConfig.sync.peers.find((entry) => entry.url === peer.url);
+        return linkCode && saved?.linkCode === linkCode ? { ...peer, linkCode } : peer;
+      });
+    }
+
     let next: LoamConfig;
 
     try {
-      next = mergeConfig(ctx.appConfig, body.data);
+      next = mergeConfig(ctx.appConfig, update);
     } catch {
       return reply.code(400).send(errorBody("Invalid config values"));
     }

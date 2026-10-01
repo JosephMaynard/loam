@@ -324,13 +324,6 @@ export const en = {
   "admin.peerLastSyncedAt": "Last synced {time}",
   "admin.peerImported": { one: "{n} message imported", other: "{n} messages imported" },
   "admin.peerNotSynced": "Not synced yet",
-  "admin.linkRequestsTitle": "Networks asking to sync",
-  "admin.linkRequestsNote": "Another LOAM network asked to sync with this one. Accepting shares this network's public channels with it, and theirs with this one. Direct messages and private channels never leave either network.",
-  "admin.linkTokenNote": "This network uses a shared mesh token: enter the same token on the other network too, or it can't sync.",
-  "admin.linkRequestMeta": "{url} · asked {time}",
-  "admin.linkAccept": "Accept",
-  "admin.linkDecline": "Decline",
-  "admin.peerLinkPending": "waiting for them to accept",
   // Channel management.
   "admin.channelUnrecognised": "The server returned an unrecognised channel payload.",
   "admin.channelsLoadError": "Unable to load channels.",
@@ -430,10 +423,12 @@ export const en = {
   // Node-link control (admin sync panel).
   "nodeLink.hide": "× Hide link",
   "nodeLink.show": "⧉ Link another node",
-  "nodeLink.note":
-    "On the other node's admin screen, enable sync and add this address as a peer (scan the code or paste the URL).",
-  "nodeLink.copied": "Copied",
-  "nodeLink.copy": "Copy address",
+  "nodeLink.note": "Scan this from the other phone's setup screens, under \"Join another LOAM network\". Linked networks share their public channels both ways; direct messages and private channels never leave either one.",
+  "nodeLink.expires": "It works once, until {time}.",
+  "nodeLink.needsKey": "This device didn't join by scanning the network's QR code, so it can't vouch for the network's key. Show the link code from the host phone's share screen instead, or from a device that joined by scanning.",
+  "nodeLink.again": "New code",
+  "admin.peerLinking": "linking…",
+  "admin.peerLinkRefused": "Its link code was refused (expired or already used). Ask that network for a new one.",
 
   // Unread badge.
   "unreadBadge.label": "{n} unread",
@@ -519,7 +514,8 @@ export const en = {
   "error.invite_invalid": "This invite code has expired or is not valid",
   "error.invite_not_allowed": "This account can't use an invite",
   "error.invalid_link_request": "Invalid link request",
-  "error.link_request_not_found": "That link request is no longer waiting",
+  "error.link_code_invalid": "This link code has expired or was already used",
+  "error.link_unencrypted": "Linking needs an encrypted connection",
   "error.link_peer_limit": "This node already syncs with the most peers it can",
   "error.invalid_avatar_upload": "Invalid avatar image upload request",
   "error.invalid_channel_create": "Invalid channel create request",

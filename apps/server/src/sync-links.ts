@@ -1,32 +1,35 @@
-// Link requests between nodes (docs/11 "Onboarding"). A node that lists a peer asks that peer, once per
-// boot, to list it back (`POST /api/sync/link-request`, sealed like any sync request). The peer answers
-// "linked" when it already pulls from the asker, otherwise it parks the request for its admins, who accept
-// (the asker becomes a sync peer and sync is switched on) or decline it in the admin sync panel. Nothing is
-// automatic on the receiving side: any device on the network can ask, so a person decides.
+// Linking another node (docs/11 "Linking nodes"). An admin of this node chooses to show a "Link a node"
+// code: the join URL plus `#k=<transport key>&l=<link code>`. The new node scans it and presents the code
+// in a sealed `POST /api/sync/link` (sealed to the key it just scanned, so nobody on the network can read
+// or alter it). A valid code links both ways at once: this node adds the new one as a sync peer with its
+// key pinned and switches sync on, and answers with its name and its mesh token (if it has one), so the new
+// node can pull too. No request queue, nothing to judge from a self-chosen name: showing the code is the
+// approval, and the ordinary join QR (on a poster, in a photo) can never link a node.
 //
-// The asker's address is the one its request came from (the tunnel forwards the real caller's address),
-// plus the port it reports, so a node never has to work out which of its own interfaces the other side can
-// reach. Pending requests live in memory only (capped, expiring), and the kill switch clears them.
-import { randomBytes } from "node:crypto";
+// Codes are random, single-use, short-lived and held in memory only; a restart or the kill switch forgets
+// them. The new node's address is the one its request came from (the tunnel forwards the real caller's
+// address), plus the port it reports, so it never has to guess which interface the other side can reach.
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 
-import type { SyncLinkRequest, SyncLinkRequestEntry } from "@loam/schema";
+/** How long a shown code stays usable. */
+export const LINK_CODE_TTL_MS = 10 * 60_000;
+/** Codes outstanding at once; minting past this retires the oldest. */
+export const MAX_LINK_CODES = 4;
+/** 12 random bytes, base64url: 96 bits for a single-use, rate-limited, 10-minute code, short enough to keep
+ *  the link URL inside the QR encoder's size limit. */
+const LINK_CODE_BYTES = 12;
+export const LINK_CODE_PATTERN = /^[A-Za-z0-9_-]{16}$/;
 
-/** How many requests wait at once; the oldest is dropped past this. */
-export const MAX_LINK_REQUESTS = 8;
-/** A request no one answered is forgotten after a day (the asker asks again on its next start). */
-export const LINK_REQUEST_TTL_MS = 24 * 60 * 60_000;
-
-export type LinkRequests = {
-  /** Record (or refresh) a request from `address`. Returns the entry, or undefined for an unusable address. */
-  add(address: string, request: SyncLinkRequest): SyncLinkRequestEntry | undefined;
-  list(): SyncLinkRequestEntry[];
-  /** Remove and return a request by id. */
-  take(id: string): SyncLinkRequestEntry | undefined;
+export type LinkCodes = {
+  /** A new code, and the last moment it can be used. */
+  mint(): { code: string; expiresAt: number };
+  /** Use a code up: true once for a live code, false for anything else (constant time per candidate). */
+  consume(code: string): boolean;
   clear(): void;
 };
 
-/** `http://<address>:<port>` for a peer's request address, or undefined for loopback / unspecified. */
+/** `http://<address>:<port>` for a linking node's request address, or undefined for loopback / unspecified. */
 export function peerUrlFor(address: string, port: number): string | undefined {
   const plain = address.startsWith("::ffff:") && isIP(address.slice(7)) === 4 ? address.slice(7) : address;
   const family = isIP(plain);
@@ -36,54 +39,48 @@ export function peerUrlFor(address: string, port: number): string | undefined {
   return `http://${family === 6 ? `[${plain}]` : plain}:${port}`;
 }
 
-export function createLinkRequests(now: () => number = Date.now): LinkRequests {
-  const entries = new Map<string, SyncLinkRequestEntry>(); // keyed by url
+export function createLinkCodes(now: () => number = Date.now): LinkCodes {
+  let codes: { code: Buffer; expiresAt: number }[] = [];
 
   function prune(): void {
-    for (const [url, entry] of entries) {
-      if (now() - entry.requestedAt > LINK_REQUEST_TTL_MS) {
-        entries.delete(url);
-      }
-    }
+    codes = codes.filter((entry) => entry.expiresAt > now());
   }
 
   return {
-    add(address, request) {
-      const url = peerUrlFor(address, request.port);
-      if (!url) {
-        return undefined;
-      }
+    mint() {
       prune();
-      const entry: SyncLinkRequestEntry = {
-        // A repeat request from the same address keeps its id, so an admin's open panel stays valid.
-        id: entries.get(url)?.id ?? randomBytes(8).toString("hex"),
-        url,
-        ...(request.name ? { name: request.name } : {}),
-        ...(request.transportKey ? { transportKey: request.transportKey } : {}),
-        requestedAt: now(),
-      };
-      entries.delete(url);
-      entries.set(url, entry);
-      while (entries.size > MAX_LINK_REQUESTS) {
-        entries.delete(entries.keys().next().value!);
+      const code = randomBytes(LINK_CODE_BYTES);
+      const expiresAt = now() + LINK_CODE_TTL_MS;
+      codes.push({ code, expiresAt });
+      while (codes.length > MAX_LINK_CODES) {
+        codes.shift();
       }
-      return entry;
+      return { code: code.toString("base64url"), expiresAt };
     },
-    list() {
+    consume(code) {
       prune();
-      return [...entries.values()].reverse();
-    },
-    take(id) {
-      for (const [url, entry] of entries) {
-        if (entry.id === id) {
-          entries.delete(url);
-          return entry;
+      if (!LINK_CODE_PATTERN.test(code)) {
+        return false;
+      }
+      const presented = Buffer.from(code, "base64url");
+      if (presented.length !== LINK_CODE_BYTES) {
+        return false;
+      }
+      // Compare against every live code (so timing doesn't say which matched), then use up the match.
+      let match = -1;
+      codes.forEach((entry, index) => {
+        if (timingSafeEqual(presented, entry.code) && match === -1) {
+          match = index;
         }
+      });
+      if (match === -1) {
+        return false;
       }
-      return undefined;
+      codes.splice(match, 1);
+      return true;
     },
     clear() {
-      entries.clear();
+      codes = [];
     },
   };
 }

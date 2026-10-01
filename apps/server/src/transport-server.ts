@@ -371,12 +371,12 @@ export function createTransportServer(ctx: AppContext) {
    * from encryption. Both carry public data only (DMs/private channels/shadow-banned authors never
    * export). See `sync-transport.ts` (the puller half).
    */
-  // `/api/sync/link-request` (sync-links.ts) is the same kind of node-to-node call, sent by the same client.
+  // `/api/sync/link` (sync-links.ts) is the same kind of node-to-node call, sent by the same client.
   const DIRECT_SEALED_SYNC_ROUTES = new Set([
     "/api/sync/digest",
     "/api/sync/messages",
     "/api/sync/attachment",
-    "/api/sync/link-request",
+    "/api/sync/link",
   ]);
 
   /**
@@ -389,9 +389,9 @@ export function createTransportServer(ctx: AppContext) {
    * from the transport-session requirement ONLY for an authorized bridge caller (loopback AND the launcher's
    * per-boot host token — `meshBridgeCallerAuthorized`), so the exemption can never widen LAN exposure.
    */
-  // `/api/host/clients` (the share screen's "N phones connected") and `/api/host/invite` (its invite code)
-  // ride the same launcher-only channel.
-  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients", "/api/host/invite"]);
+  // `/api/host/clients` (the share screen's "N phones connected"), `/api/host/invite` (its invite code) and
+  // `/api/host/link-code` (its "Link a node" code) ride the same launcher-only channel.
+  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients", "/api/host/invite", "/api/host/link-code"]);
 
   /**
    * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches (Sol P2-6).

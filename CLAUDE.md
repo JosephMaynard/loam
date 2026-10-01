@@ -351,12 +351,15 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that
   negotiated encryption this boot is never silently downgraded. Admin: `GET /api/admin/sync`,
   `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's join URL is its sync address.
-  **Link requests** (`sync-links.ts`): once per boot a node asks each peer to list it back
-  (`POST /api/sync/link-request {port, transportKey, name}`, a direct sealed route; the asker's URL is the
-  request's source address + port, loopback refused); the peer parks it in memory (≤8, 24 h, kill switch
-  clears) until an admin accepts (`/api/admin/sync/link-requests/:id/accept`: peer added with its key
-  pinned, sync on, via the shared `commitAdminConfig`) or declines. The Android setup's "Join another LOAM
-  network" scans the other node's join QR (expo-camera) and starts the new node with it as a pinned peer.
+  **Linking nodes** (`sync-links.ts`): only through a single-use, 10-minute link code an admin
+  (`POST /api/admin/sync/link-code`, web admin "Link another node") or the host phone
+  (`POST /api/host/link-code`, launcher-only; share screen "Link another LOAM node") chooses to show, as a
+  QR `#k=<key>&l=<code>`. The new node (Android setup "Join another LOAM network", expo-camera; it accepts
+  nothing else) starts with that peer pinned and `linkCode` set, and presents the code in a **sealed**
+  `POST /api/sync/link {code, port, transportKey, name}`; a valid code adds the asker as a pinned peer
+  (source address + port, loopback refused), turns sync on (shared `commitAdminConfig`), and returns the
+  node's name + `sync.token`; the asker then drops the spent code. Codes are in memory, ≤4, cleared by the
+  kill switch; admin saves can't add or restore a `linkCode`.
 - **Security headers**: an `onSend` hook sets `X-Content-Type-Options: nosniff` on every response and
   a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
   (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session

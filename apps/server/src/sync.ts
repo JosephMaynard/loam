@@ -4,21 +4,29 @@
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { verifyKxBinding } from "@loam/crypto";
-import { ChannelSchema, type Message, type MessageAttachment, MessageSchema, type SealedMessage, SyncAttachmentResponseSchema, type SyncDigest, SyncDigestSchema, type SyncLinkRequest, SyncLinkResponseSchema, SyncMessagesResponseSchema, type SyncPeer, type SyncStatusReport, type User, UserSchema } from "@loam/schema";
+import { ChannelSchema, type Message, type MessageAttachment, MessageSchema, type SealedMessage, SyncAttachmentResponseSchema, type SyncDigest, SyncDigestSchema, type SyncLinkRequest, type SyncLinkResponse, SyncLinkResponseSchema, SyncMessagesResponseSchema, type SyncPeer, type SyncStatusReport, type User, UserSchema } from "@loam/schema";
 import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, isAcceptableAttachmentBytes, isImageAttachmentMime, missingAttachmentBackoffMs, missingAttachmentMaxAgeMs, missingAttachmentMaxRecordsPerPass } from "./media.js";
 import { type PeerTransportPosture, type PeerTransportSession, fetchPeerTransportPosture, handshakeWithPeer, sealedFetch } from "./sync-transport.js";
 import type { MeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
 
-/** How long to wait before asking a peer to link back again after the request itself failed. */
-const LINK_RETRY_MS = 10 * 60_000;
+/** How soon to try a link again after the request itself failed (unreachable, not yet a session). A code
+ *  lives 10 minutes, so retries are frequent; a refused code is never retried. */
+const LINK_RETRY_MS = 30_000;
+
+/** How a node describes itself when it links to a peer, and what it does once a link is made. */
+export type SyncLinkHooks = {
+  /** This node's port, transport key and name; undefined when it can't be described yet. */
+  self: () => Omit<SyncLinkRequest, "code"> | undefined;
+  /** A peer accepted this node's link code: drop the spent code and take in the peer's answer. */
+  linked: (peerUrl: string, result: SyncLinkResponse) => void;
+};
 
 /**
  * Build the node-to-node sync engine over the runtime view and the mesh layer it hands sealed mail to.
- * `linkSelf` describes this node for the link requests it sends its peers (sync-links.ts): its port, its
- * transport key and its name; undefined when it can't be described yet (no transport identity).
+ * `link` lets it use a peer's "Link a node" code (sync-links.ts) so that peer pulls from this node too.
  */
-export function createSyncEngine(rt: Runtime, mesh: MeshLayer, linkSelf?: () => SyncLinkRequest | undefined) {
+export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHooks) {
   // Per-peer sync bookkeeping for the admin UI (RAM-only).
   type PeerSyncStatus = {
     lastAttemptAt?: number;
@@ -38,8 +46,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, linkSelf?: () => 
   >();
   const PEER_TRANSPORT_SESSION_TTL_MS = 11 * 3_600_000;
   const PEER_PLAINTEXT_RECHECK_MS = 5 * 60_000;
-  // Asking peers to sync back (sync-links.ts): each peer's answer this boot, and when a failed ask may retry.
-  const peerLinkStatus = new Map<string, "linked" | "pending">();
+  // Link codes this node holds for its peers (sync-links.ts): which were refused, and when a failed attempt
+  // may retry.
+  const refusedLinkCodes = new Set<string>();
   const linkRetryAt = new Map<string, number>();
   let syncRunning = false;
   let lastSyncLoopAt = 0;
@@ -255,29 +264,35 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, linkSelf?: () => 
     refusedOffers.clear();
     peersSeenEncrypted.clear();
     peerBatchSizes.clear();
-    peerLinkStatus.clear();
+    refusedLinkCodes.clear();
     linkRetryAt.clear();
   }
 
   /**
-   * Ask `peer` to sync with this node too, once per boot (sync-links.ts). Sent over the same transport as a
-   * pull, so a pinned peer key protects it. An answer of either kind ends the asking for this boot (a
-   * declined node isn't pestered); a failed request retries after {@link LINK_RETRY_MS}. Never throws.
+   * Use a peer's link code (sync-links.ts), so the peer pulls from this node too. Only over a key pinned
+   * from the scanned QR (the code must never travel readable), and only until it works: a refused code
+   * (expired or used) is not tried again, any other failure retries after {@link LINK_RETRY_MS}. Never
+   * throws.
    */
-  async function requestLink(peer: SyncPeer): Promise<void> {
-    if (peerLinkStatus.has(peer.url) || (linkRetryAt.get(peer.url) ?? 0) > Date.now()) {
+  async function useLinkCode(peer: SyncPeer): Promise<void> {
+    const code = peer.linkCode;
+    if (!code || !peer.transportKey || refusedLinkCodes.has(code) || (linkRetryAt.get(peer.url) ?? 0) > Date.now()) {
       return;
     }
-    const self = linkSelf?.();
+    const self = link?.self();
     if (!self) {
       return;
     }
     try {
-      const answer = await fetchPeerJson(peer.url, "/api/sync/link-request", SyncLinkResponseSchema, self);
-      peerLinkStatus.set(peer.url, answer.status);
+      const result = await fetchPeerJson(peer.url, "/api/sync/link", SyncLinkResponseSchema, { ...self, code });
       linkRetryAt.delete(peer.url);
-    } catch {
-      linkRetryAt.set(peer.url, Date.now() + LINK_RETRY_MS);
+      link?.linked(peer.url, result);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Peer answered 403") {
+        refusedLinkCodes.add(code);
+      } else {
+        linkRetryAt.set(peer.url, Date.now() + LINK_RETRY_MS);
+      }
     }
   }
 
@@ -1695,8 +1710,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, linkSelf?: () => 
       const sealedDeliveries: (() => Promise<void>)[] = [];
       await Promise.all(
         rt.appConfig.sync.peers.map(async (peer) => {
-          // Ask first (it never throws), so the round's pull reuses the transport session it set up.
-          await requestLink(peer);
+          // Link first (it never throws): the peer's sync may only be switched on by this very link, and the
+          // round's pull then reuses the transport session it set up.
+          await useLinkCode(peer);
           await syncWithPeer(peer, sealedDeliveries);
         }),
       );
@@ -1713,10 +1729,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, linkSelf?: () => 
     return {
       enabled: rt.appConfig.sync.enabled,
       intervalMs: rt.appConfig.sync.intervalMs,
-      peers: rt.appConfig.sync.peers.map((peer) => ({
+      // The code itself stays out of the report: it's a credential until it's spent.
+      peers: rt.appConfig.sync.peers.map(({ linkCode, ...peer }) => ({
         ...peer,
         status: peerSyncStatus.get(peer.url),
-        link: peerLinkStatus.get(peer.url),
+        ...(linkCode ? { link: refusedLinkCodes.has(linkCode) ? ("refused" as const) : ("linking" as const) } : {}),
       })),
     };
   }

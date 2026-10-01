@@ -1261,6 +1261,7 @@ function HostScreen() {
           displayMode={displayMode}
           onDisplayModeChange={setDisplayMode}
           nodeName={hostNodeName}
+          channel={nodejs.channel}
         />
         <ModelManagerOverlay
           visible={modelManagerOpen}

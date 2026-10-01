@@ -1,19 +1,20 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type IncomingMessage } from "node:http";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildApp, type LoamApp } from "./app.js";
-import { createLinkRequests, LINK_REQUEST_TTL_MS, MAX_LINK_REQUESTS, peerUrlFor } from "./sync-links.js";
+import { buildApp, type AppOptions, type LoamApp } from "./app.js";
+import { createLinkCodes, LINK_CODE_TTL_MS, MAX_LINK_CODES, peerUrlFor } from "./sync-links.js";
+import { handshakeWithPeer, sealedFetch } from "./sync-transport.js";
 
 /**
- * Link requests (sync-links.ts): a node that lists a peer asks it to sync back; the peer's admin accepts
- * (the asker becomes a pinned sync peer and sync switches on) or declines.
+ * Linking nodes with a "Link a node" code (sync-links.ts): an admin shows a single-use code, the new node
+ * presents it sealed, and a valid one links both ways.
  */
 
 const cleanups: (() => Promise<void> | void)[] = [];
+const HOST_TOKEN = "link-test-host-token-0123456789abcdef";
 
 afterEach(async () => {
   while (cleanups.length) {
@@ -21,12 +22,25 @@ afterEach(async () => {
   }
 });
 
-async function makeApp(config?: unknown): Promise<LoamApp> {
+/** This machine's own LAN address: linking refuses loopback askers, so the round trips run over it. */
+const LAN_ADDRESS = Object.values(networkInterfaces())
+  .flat()
+  .find((info) => info && info.family === "IPv4" && !info.internal)?.address;
+
+async function freePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address() as { port: number };
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
+async function makeApp(config?: unknown, opts: Partial<AppOptions> = {}): Promise<LoamApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "loam-link-test-"));
   if (config !== undefined) {
     writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
   }
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
+  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(async () => {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -34,23 +48,39 @@ async function makeApp(config?: unknown): Promise<LoamApp> {
   return app;
 }
 
+/** A node listening on the LAN address at a known port (the port it reports when it links). */
+async function lanNode(config?: unknown): Promise<{ app: LoamApp; url: string; key: string }> {
+  const port = await freePort();
+  const app = await makeApp(config, { clientPort: port });
+  await app.server.listen({ port, host: LAN_ADDRESS });
+  const bootstrap = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as {
+    networkConfig: { transportPublicKey: string };
+  };
+  return { app, url: `http://${LAN_ADDRESS}:${port}`, key: bootstrap.networkConfig.transportPublicKey };
+}
+
 /** The first session on a `firstUser` node is its admin. */
-async function adminCookie(app: LoamApp): Promise<string> {
+async function sessionCookie(app: LoamApp): Promise<string> {
   const response = await app.server.inject({ method: "GET", url: "/api/config" });
   const setCookie = response.headers["set-cookie"];
   return (Array.isArray(setCookie) ? setCookie[0] : setCookie)!.split(";")[0]!;
 }
 
-const KEY = "a".repeat(43);
+async function mintCode(app: LoamApp, cookie: string): Promise<string> {
+  const response = await app.server.inject({ method: "POST", url: "/api/admin/sync/link-code", headers: { cookie } });
+  expect(response.statusCode).toBe(200);
+  return (response.json() as { code: string }).code;
+}
 
-function askToLink(app: LoamApp, remoteAddress: string, payload: unknown = { port: 3000, transportKey: KEY, name: "Riverside" }) {
-  return app.server.inject({ method: "POST", url: "/api/sync/link-request", remoteAddress, payload });
+/** Present a link code to `node` the way a new node does: sealed to the key from the QR. */
+async function link(node: { url: string; key: string }, body: Record<string, unknown>) {
+  const session = await handshakeWithPeer(node.url, { expectedHostKey: node.key });
+  return sealedFetch(session, node.url, "/api/sync/link", { body });
 }
 
 type SyncReport = {
   enabled: boolean;
-  peers: { url: string; label?: string; transportKey?: string; link?: string }[];
-  linkRequests?: { id: string; url: string; name?: string }[];
+  peers: { url: string; label?: string; transportKey?: string; link?: string; linkCode?: string }[];
 };
 
 async function syncReport(app: LoamApp, cookie: string): Promise<SyncReport> {
@@ -58,7 +88,7 @@ async function syncReport(app: LoamApp, cookie: string): Promise<SyncReport> {
 }
 
 describe("peerUrlFor", () => {
-  it("builds the asker's address, and refuses loopback or unspecified ones", () => {
+  it("builds the linking node's address, and refuses loopback or unspecified ones", () => {
     expect(peerUrlFor("192.168.4.20", 3000)).toBe("http://192.168.4.20:3000");
     expect(peerUrlFor("::ffff:10.0.0.7", 8080)).toBe("http://10.0.0.7:8080");
     expect(peerUrlFor("fe80::1", 3000)).toBe("http://[fe80::1]:3000");
@@ -68,123 +98,157 @@ describe("peerUrlFor", () => {
   });
 });
 
-describe("createLinkRequests", () => {
-  it("keeps one entry per address (same id on a repeat), caps the list, and expires entries", () => {
+describe("createLinkCodes", () => {
+  it("accepts each code once, until it expires", () => {
     let now = 1_000;
-    const requests = createLinkRequests(() => now);
-    const first = requests.add("10.0.0.1", { port: 3000 })!;
-    expect(requests.add("10.0.0.1", { port: 3000, name: "Again" })!.id).toBe(first.id);
-    expect(requests.list()).toHaveLength(1);
+    const codes = createLinkCodes(() => now);
+    const first = codes.mint();
+    expect(first.code).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    expect(first.expiresAt).toBe(1_000 + LINK_CODE_TTL_MS);
+    expect(codes.consume(first.code)).toBe(true);
+    expect(codes.consume(first.code)).toBe(false);
 
-    for (let index = 2; index <= MAX_LINK_REQUESTS + 2; index += 1) {
-      requests.add(`10.0.0.${index}`, { port: 3000 });
+    const second = codes.mint();
+    now += LINK_CODE_TTL_MS;
+    expect(codes.consume(second.code)).toBe(false);
+  });
+
+  it("keeps only the newest few, and refuses malformed or cleared codes", () => {
+    const codes = createLinkCodes();
+    const minted = Array.from({ length: MAX_LINK_CODES + 1 }, () => codes.mint().code);
+    expect(codes.consume(minted[0]!)).toBe(false);
+    for (const bad of ["", "short", `${minted[1]}x`, "!".repeat(16)]) {
+      expect(codes.consume(bad)).toBe(false);
     }
-    expect(requests.list()).toHaveLength(MAX_LINK_REQUESTS);
-    expect(requests.list().some((entry) => entry.url === "http://10.0.0.1:3000")).toBe(false);
-
-    now += LINK_REQUEST_TTL_MS + 1;
-    expect(requests.list()).toEqual([]);
+    codes.clear();
+    expect(codes.consume(minted[1]!)).toBe(false);
   });
 });
 
-describe("POST /api/sync/link-request", () => {
-  it("parks a request for the admin, even with sync off, and accepting links both ways", async () => {
-    const app = await makeApp();
-    const cookie = await adminCookie(app);
+describe("showing a link code", () => {
+  it("is for admins, or for the host phone's launcher", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const member = await sessionCookie(app); // hostDevice bootstrap: no session is admin without the token
+    const refused = await app.server.inject({ method: "POST", url: "/api/admin/sync/link-code", headers: { cookie: member } });
+    expect(refused.statusCode).toBe(403);
 
-    const asked = await askToLink(app, "192.168.4.20");
-    expect(asked.json()).toEqual({ status: "pending" });
-    const before = await syncReport(app, cookie);
-    expect(before.enabled).toBe(false);
-    expect(before.linkRequests).toMatchObject([{ url: "http://192.168.4.20:3000", name: "Riverside" }]);
-
-    const accepted = await app.server.inject({
+    const host = await app.server.inject({ method: "POST", url: "/api/host/link-code", headers: { "x-loam-host-token": HOST_TOKEN } });
+    expect(host.json()).toMatchObject({ code: expect.stringMatching(/^[A-Za-z0-9_-]{16}$/) });
+    const wrong = await app.server.inject({ method: "POST", url: "/api/host/link-code", headers: { "x-loam-host-token": "wrong" } });
+    expect(wrong.statusCode).toBe(404);
+    const remote = await app.server.inject({
       method: "POST",
-      url: `/api/admin/sync/link-requests/${before.linkRequests![0]!.id}/accept`,
-      headers: { cookie },
+      url: "/api/host/link-code",
+      headers: { "x-loam-host-token": HOST_TOKEN },
+      remoteAddress: "192.168.4.7",
     });
-    expect(accepted.statusCode).toBe(200);
-    const after = accepted.json() as SyncReport;
-    expect(after.enabled).toBe(true);
-    expect(after.peers).toMatchObject([{ url: "http://192.168.4.20:3000", label: "Riverside", transportKey: KEY }]);
-    expect(after.linkRequests).toEqual([]);
-
-    // Asking again now gets "linked", and parks nothing.
-    expect((await askToLink(app, "192.168.4.20")).json()).toEqual({ status: "linked" });
-    expect((await syncReport(app, cookie)).linkRequests).toEqual([]);
-  });
-
-  it("lets an admin decline, and only an admin decide", async () => {
-    const app = await makeApp();
-    const cookie = await adminCookie(app);
-    await askToLink(app, "192.168.4.21");
-    const { id } = (await syncReport(app, cookie)).linkRequests![0]!;
-
-    const member = await adminCookie(app); // the second session is an ordinary member
-    for (const action of ["accept", "decline"]) {
-      const response = await app.server.inject({
-        method: "POST",
-        url: `/api/admin/sync/link-requests/${id}/${action}`,
-        headers: { cookie: member },
-      });
-      expect(response.statusCode).toBe(403);
-    }
-
-    const declined = await app.server.inject({ method: "POST", url: `/api/admin/sync/link-requests/${id}/decline`, headers: { cookie } });
-    expect((declined.json() as SyncReport).linkRequests).toEqual([]);
-    expect((declined.json() as SyncReport).enabled).toBe(false);
-    const again = await app.server.inject({ method: "POST", url: `/api/admin/sync/link-requests/${id}/accept`, headers: { cookie } });
-    expect(again.statusCode).toBe(404);
-  });
-
-  it("refuses a malformed request and a loopback asker", async () => {
-    const app = await makeApp();
-    expect((await askToLink(app, "192.168.4.22", { port: 0 })).statusCode).toBe(400);
-    expect((await askToLink(app, "192.168.4.22", { port: 3000, transportKey: "not base64url!" })).statusCode).toBe(400);
-    expect((await askToLink(app, "127.0.0.1")).statusCode).toBe(400);
-  });
-
-  it("forgets waiting requests on an Emergency Reset", async () => {
-    const app = await makeApp();
-    await askToLink(app, "192.168.4.23");
-    await app.emergencyReset();
-    const cookie = await adminCookie(app);
-    expect((await syncReport(app, cookie)).linkRequests).toEqual([]);
+    expect(remote.statusCode).toBe(404);
   });
 });
 
-describe("asking peers to link back", () => {
-  it("asks each peer once per boot and reports its answer", async () => {
-    const received: { port: number; name?: string; transportKey?: string }[] = [];
-    const peer = createServer((request: IncomingMessage, response) => {
-      if (request.method === "POST" && request.url === "/api/sync/link-request") {
-        let raw = "";
-        request.on("data", (chunk) => (raw += chunk));
-        request.on("end", () => {
-          received.push(JSON.parse(raw) as { port: number; name?: string; transportKey?: string });
-          response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "pending" }));
-        });
-        return;
-      }
-      // No transport posture (an older or plaintext peer) and no sync content: the pull itself fails.
-      response.writeHead(404).end();
+describe("POST /api/sync/link", () => {
+  it("refuses a code sent unsealed", async () => {
+    const app = await makeApp();
+    const code = await mintCode(app, await sessionCookie(app));
+    const response = await app.server.inject({
+      method: "POST",
+      url: "/api/sync/link",
+      remoteAddress: "192.168.4.20",
+      payload: { code, port: 3000 },
     });
-    await new Promise<void>((resolve) => peer.listen(0, "127.0.0.1", resolve));
-    cleanups.push(() => new Promise<void>((resolve) => peer.close(() => resolve())));
-    const peerUrl = `http://127.0.0.1:${(peer.address() as AddressInfo).port}`;
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: "link_unencrypted" });
+  });
 
-    const app = await makeApp({ node: { name: "Hilltop" }, sync: { enabled: true, peers: [{ url: peerUrl }] } });
-    const cookie = await adminCookie(app);
-    for (let round = 0; round < 2; round += 1) {
-      await app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
-    }
+  it.skipIf(!LAN_ADDRESS)("links a node with a valid code, once, and hands over the mesh token", async () => {
+    const existing = await lanNode({ node: { name: "Riverside" }, sync: { enabled: false, peers: [], token: "mesh-secret-0123456789" } });
+    const cookie = await sessionCookie(existing.app);
+    const code = await mintCode(existing.app, cookie);
 
-    // It sends the key a joiner would pin from its QR, so the peer can pin it too.
-    const bootstrap = (await app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as {
+    const linked = await link(existing, { code, port: 3456, transportKey: "a".repeat(43), name: "Hilltop" });
+    expect(linked.status).toBe(200);
+    expect(JSON.parse(linked.text)).toEqual({ name: "Riverside", token: "mesh-secret-0123456789" });
+    const report = await syncReport(existing.app, cookie);
+    expect(report.enabled).toBe(true);
+    expect(report.peers).toEqual([
+      expect.objectContaining({ url: `http://${LAN_ADDRESS}:3456`, label: "Hilltop", transportKey: "a".repeat(43) }),
+    ]);
+
+    // The same code again (a photo of the QR) is refused.
+    expect((await link(existing, { code, port: 3457 })).status).toBe(403);
+  });
+
+  it.skipIf(!LAN_ADDRESS)("forgets every shown code on an Emergency Reset", async () => {
+    const existing = await lanNode();
+    const code = await mintCode(existing.app, await sessionCookie(existing.app));
+    await existing.app.emergencyReset();
+    // The reset rotates the node's key too: present the old code under the new one.
+    const bootstrap = (await existing.app.server.inject({ method: "GET", url: "/api/bootstrap" })).json() as {
       networkConfig: { transportPublicKey: string };
     };
-    expect(bootstrap.networkConfig.transportPublicKey).toBeTruthy();
-    expect(received).toEqual([{ port: 3000, name: "Hilltop", transportKey: bootstrap.networkConfig.transportPublicKey }]);
-    expect((await syncReport(app, cookie)).peers).toMatchObject([{ url: peerUrl, link: "pending" }]);
+    expect(bootstrap.networkConfig.transportPublicKey).not.toBe(existing.key);
+    expect((await link({ url: existing.url, key: bootstrap.networkConfig.transportPublicKey }, { code, port: 3456 })).status).toBe(403);
+  });
+});
+
+describe("a new node using its link code", () => {
+  it.skipIf(!LAN_ADDRESS)("links both ways on its first sync round, then forgets the code", async () => {
+    const existing = await lanNode({ node: { name: "Riverside" }, sync: { enabled: false, peers: [], token: "mesh-secret-0123456789" } });
+    const existingAdmin = await sessionCookie(existing.app);
+    const code = await mintCode(existing.app, existingAdmin);
+
+    // What the setup screens write for a joining phone: the scanned node as a pinned peer holding the code.
+    const joining = await lanNode({
+      node: { name: "Hilltop" },
+      sync: { enabled: true, peers: [{ url: existing.url, transportKey: existing.key, linkCode: code }] },
+    });
+    const joiningAdmin = await sessionCookie(joining.app);
+    expect((await syncReport(joining.app, joiningAdmin)).peers[0]).toMatchObject({ link: "linking" });
+
+    await joining.app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: joiningAdmin } });
+
+    // The existing node now lists the joining one, key pinned, with sync on.
+    expect((await syncReport(existing.app, existingAdmin)).peers).toEqual([
+      expect.objectContaining({ url: joining.url, label: "Hilltop", transportKey: joining.key }),
+    ]);
+    // The joining node dropped the spent code, named the peer, and adopted the mesh token.
+    const after = await syncReport(joining.app, joiningAdmin);
+    expect(after.peers[0]).toMatchObject({ url: existing.url, label: "Riverside" });
+    expect(after.peers[0]!.link).toBeUndefined();
+    expect(after.peers[0]!.linkCode).toBeUndefined();
+    const config = (
+      await joining.app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: joiningAdmin } })
+    ).json() as { sync: { token?: string; peers: { linkCode?: string }[] } };
+    expect(config.sync.token).toBe("mesh-secret-0123456789");
+    expect(config.sync.peers[0]!.linkCode).toBeUndefined();
+  });
+
+  it("never lets an admin save put back (or add) a link code", async () => {
+    const app = await makeApp({ sync: { enabled: true, peers: [{ url: "http://192.168.4.30:3000", linkCode: "B".repeat(16) }] } });
+    const cookie = await sessionCookie(app);
+    const save = (peers: unknown[]) =>
+      app.server.inject({ method: "PATCH", url: "/api/admin/config", headers: { cookie }, payload: { sync: { peers } } });
+    const peers = async () =>
+      ((await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie } })).json() as {
+        sync: { peers: { url: string; linkCode?: string }[] };
+      }).sync.peers;
+
+    await save([{ url: "http://192.168.4.30:3000", linkCode: "B".repeat(16) }, { url: "http://192.168.4.31:3000", linkCode: "C".repeat(16) }]);
+    expect(await peers()).toEqual([
+      { url: "http://192.168.4.30:3000", linkCode: "B".repeat(16) },
+      { url: "http://192.168.4.31:3000" },
+    ]);
+    await save([{ url: "http://192.168.4.30:3000", linkCode: "D".repeat(16) }]);
+    expect(await peers()).toEqual([{ url: "http://192.168.4.30:3000" }]);
+  });
+
+  it.skipIf(!LAN_ADDRESS)("reports a refused code and doesn't try it again", async () => {
+    const existing = await lanNode();
+    const joining = await lanNode({
+      sync: { enabled: true, peers: [{ url: existing.url, transportKey: existing.key, linkCode: "A".repeat(16) }] },
+    });
+    const cookie = await sessionCookie(joining.app);
+    await joining.app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
+    expect((await syncReport(joining.app, cookie)).peers[0]).toMatchObject({ link: "refused" });
   });
 });

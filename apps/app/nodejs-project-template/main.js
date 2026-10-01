@@ -1061,6 +1061,30 @@ var startFreshRebootInFlight = false;
 // has booted (embedded-main.ts); it runs the same wipe as the admin kill switch, in-process, so there's no
 // HTTP request, no session and nothing on the network involved. Encrypted fixed-key modes then hand back
 // to the launcher for the key-clear restart through the existing `loam-wipe-restart` protocol.
+// A "Link a node" code for the share screen (server sync-links.ts, `POST /api/host/link-code`): the host
+// phone shows it so another LOAM phone can link to this network. Launcher-only, like the other host routes.
+rnBridge.channel.on('loam-link-code', function (payload) {
+  var requestId = payload && payload.requestId;
+  function reply(result) {
+    try {
+      rnBridge.channel.post('loam-link-code-result', Object.assign({ requestId: requestId }, result));
+    } catch (postErr) {
+      // RN side isn't listening; nothing more to do.
+    }
+  }
+  try {
+    meshRequest('POST', '/api/host/link-code', undefined, function (err, status, json) {
+      if (!err && status === 200 && json && typeof json.code === 'string' && typeof json.expiresAt === 'number') {
+        reply({ ok: true, code: json.code, expiresAt: json.expiresAt });
+      } else {
+        reply({ ok: false, error: err ? err.message : 'The host answered ' + status });
+      }
+    });
+  } catch (err) {
+    reply({ ok: false, error: err && err.message ? err.message : String(err) });
+  }
+});
+
 rnBridge.channel.on('loam-emergency-reset', function (payload) {
   var requestId = payload && payload.requestId;
   function reply(result) {

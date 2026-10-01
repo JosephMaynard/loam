@@ -102,19 +102,23 @@ A peer's **join URL is its sync address** — the same thing its join QR encodes
 sync → add the URL (`http://192.168.0.10:3000`), save, Sync now. Two nodes that each list the other
 converge in both directions.
 
-**Link requests** (`apps/server/src/sync-links.ts`) make the second half of that automatic to ask for and
-a decision to grant. Once per boot, before its first pull from each peer, a node sends
-`POST /api/sync/link-request { port, transportKey, name }` over the same (sealed, key-pinned) transport as
-a pull. The receiver answers `linked` if it already lists the asker with sync on; otherwise it parks the
-request (in memory, at most 8, a day each, cleared by the kill switch) and answers `pending`. The asker's
-address is the one its request came from (the tunnel forwards the real caller address), plus the port it
-reports, so it never has to guess which of its own interfaces the other side can reach; loopback askers
-are refused. It works while the receiver's sync is off. Admins see waiting requests in the sync panel
-(`GET /api/admin/sync` → `linkRequests`) and accept (`POST /api/admin/sync/link-requests/:id/accept`:
-the asker becomes a peer with its key pinned and sync is switched on, applied like an admin config save)
-or decline. Any device on the network can ask, so nothing is automatic on the receiving side. The asker's
-own panel shows "waiting for them to accept" until the peer lists it. A receiver that uses `sync.token`
-still needs the operator to give the other node the same token; the accept panel says so.
+**Linking nodes** (`apps/server/src/sync-links.ts`) is how two nodes come to sync both ways, and it only
+happens through a code one of them chooses to show. An admin (web admin → sync → "Link another node") or
+the host phone (share screen → "Link another LOAM node", via the launcher-only `POST /api/host/link-code`)
+shows a **link code** QR: the join URL plus `#k=<transport key>&l=<code>`. The code is 12 random bytes,
+single-use, valid 10 minutes, at most 4 outstanding, held in memory, cleared by the kill switch, and never
+shown as text. The new node scans it (Android setup → "Join another LOAM network"; nothing else is
+accepted, and there is no typed fallback) and starts with that node as a peer, key pinned and the code in
+`linkCode`. On its first sync round it presents the code in `POST /api/sync/link { code, port,
+transportKey, name }`, which must arrive **sealed** (to the pinned key, so nobody on the network can read
+or alter it; an unsealed request is refused before the code is checked). A valid code adds the new node
+as a peer of this one (its address is the request's source address plus the reported port, loopback
+refused; its key pinned) and switches sync on, applied like an admin save; the answer carries this node's
+name and its `sync.token`, which the new node adopts if it has none. The new node then drops the spent
+code. A refused code (expired, used, or retired by a reset) is reported in its sync panel and not retried.
+Admin saves can neither add a link code nor put back a spent one. Why a code rather than a request
+queue: showing the code *is* the approval, so there is nothing to spam and nothing to judge from a
+self-chosen name, and the ordinary join QR (on a poster, in a photo) can never link a node.
 
 ## Transports — what actually works where
 

@@ -6,6 +6,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { readWifiStationInfo, type WifiStationInfo } from '../../modules/loam-hotspot';
 import { DisplayModeScreen } from '@/components/display-mode';
 import { HostPanel } from '@/components/host-panel';
+import { LinkNodeScreen } from '@/components/link-node';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
@@ -13,6 +14,7 @@ import { setHostMode, useHostMode } from '@/hooks/use-host-mode';
 import { ensureHotspot, shutdownHotspot, useHotspot } from '@/hooks/use-hotspot';
 import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
+import type { BridgeChannel } from '@/lib/db-encryption';
 import { deriveWifiJoinDisplay, toWifiPanelState, type HostMode } from '@/lib/host-mode';
 import { ensureHostService, hostingNotificationDenied } from '@/lib/host-service';
 import { t, type AppCatalogKey } from '@/lib/i18n';
@@ -52,6 +54,8 @@ type HostShareOverlayProps = {
   onDisplayModeChange: (value: boolean) => void;
   /** The network's name, shown above the codes in display mode. */
   nodeName?: string;
+  /** The launcher bridge, for a "Link a node" code (lib/link-code.ts). */
+  channel: BridgeChannel;
 };
 
 /**
@@ -73,11 +77,13 @@ export function HostShareOverlay({
   displayMode,
   onDisplayModeChange,
   nodeName,
+  channel,
 }: HostShareOverlayProps) {
   useAppLocale();
   const hotspot = useHotspot();
   const { mode, loaded } = useHostMode();
   const theme = useTheme();
+  const [linkOpen, setLinkOpen] = useState(false);
   const version = Constants.expoConfig?.version ?? '?';
   // The last Wi-Fi station read (Wi-Fi mode only); `undefined` until the first read after opening.
   const [station, setStation] = useState<WifiStationInfo | undefined>();
@@ -221,6 +227,24 @@ export function HostShareOverlay({
                 </ThemedView>
               </ThemedView>
 
+              {/* Linking another LOAM node: only ever through a code shown here on purpose (or from the admin
+                  sync settings), never from the ordinary join code above. */}
+              <ThemedView type="backgroundElement" style={styles.settingRow}>
+                <ThemedView style={styles.settingText}>
+                  <ThemedText type="smallBold">{t('link.title')}</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {t('link.summary')}
+                  </ThemedText>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={!loaded}
+                    onPress={() => setLinkOpen(true)}
+                    style={[styles.displayButton, styles.linkButton, { borderColor: theme.primary }]}>
+                    <ThemedText type="smallBold">{t('link.show')}</ThemedText>
+                  </Pressable>
+                </ThemedView>
+              </ThemedView>
+
               {hostingNotificationDenied() ? (
                 <ThemedText type="small" themeColor="textSecondary">
                   {t('share.notificationsOff')}
@@ -240,6 +264,9 @@ export function HostShareOverlay({
             state={state}
             visible={visible && displayMode}
           />
+        ) : null}
+        {loaded ? (
+          <LinkNodeScreen channel={channel} onClose={() => setLinkOpen(false)} state={state} visible={visible && linkOpen} />
         ) : null}
       </SafeAreaProvider>
     </Modal>
@@ -302,6 +329,9 @@ const styles = StyleSheet.create({
   version: {
     textAlign: 'center',
     paddingTop: Spacing.two,
+  },
+  linkButton: {
+    borderWidth: 1,
   },
   displayButton: {
     alignSelf: 'flex-start',
