@@ -2371,6 +2371,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // getAdminSetupCode() — a method survives the test wrapper's `{ ...app }` spread, a getter wouldn't.
     adminSetupCode,
     getAdminSetupCode: () => adminSetupCode,
+    emergencyReset: async () => ({ complete: (await killSwitch.executeKillSwitch()).complete }),
     reapExpiredMessages,
     reapOrphanedAttachments,
     reapOrphanedAvatars,

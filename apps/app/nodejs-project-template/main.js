@@ -1006,6 +1006,38 @@ function fsyncDir(dir) {
 // and killing the recovered server.
 var startFreshRebootInFlight = false;
 
+// Emergency Reset from the host menu (index.tsx). The server installs `global.__loamEmergencyReset` once it
+// has booted (embedded-main.ts); it runs the same wipe as the admin kill switch, in-process, so there's no
+// HTTP request, no session and nothing on the network involved. Encrypted fixed-key modes then hand back
+// to the launcher for the key-clear restart through the existing `loam-wipe-restart` protocol.
+rnBridge.channel.on('loam-emergency-reset', function (payload) {
+  var requestId = payload && payload.requestId;
+  function reply(result) {
+    try {
+      rnBridge.channel.post('loam-emergency-reset-result', Object.assign({ requestId: requestId }, result));
+    } catch (postErr) {
+      // RN side isn't listening; nothing more to do.
+    }
+  }
+  var reset = global.__loamEmergencyReset;
+  if (typeof reset !== 'function') {
+    reply({ ok: false, error: 'The host is not running yet, so there is nothing to reset.' });
+    return;
+  }
+  Promise.resolve()
+    .then(function () {
+      return reset();
+    })
+    .then(
+      function (result) {
+        reply({ ok: true, complete: !!(result && result.complete) });
+      },
+      function (err) {
+        reply({ ok: false, error: err && err.message ? err.message : String(err) });
+      },
+    );
+});
+
 rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   var requestId = payload && payload.requestId;
 

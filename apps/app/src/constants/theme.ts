@@ -20,6 +20,9 @@ export const Colors = {
     onAccent: '#1d2622',
     /** Moss green: borders and emphasis. */
     primary: '#2f5f4c',
+    /** Destructive actions (Emergency reset), with its legible ink. */
+    danger: '#b3261e',
+    onDanger: '#ffffff',
   },
   dark: {
     text: '#e9ebe6',
@@ -30,6 +33,8 @@ export const Colors = {
     accent: '#f26b1d',
     onAccent: '#1d2622',
     primary: '#3a745b',
+    danger: '#e5534b',
+    onDanger: '#1d2622',
   },
 } as const;
 

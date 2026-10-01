@@ -25,6 +25,8 @@ vi.mock('react-native', () => ({
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: () => null }));
 vi.mock('react-native-webview', () => ({ WebView: () => null }));
 vi.mock('@/components/db-encryption-settings', () => ({ DbEncryptionSettingsOverlay: () => null }));
+vi.mock('@/components/emergency-reset', () => ({ EmergencyResetOverlay: () => null }));
+vi.mock('@/hooks/use-app-locale', () => ({ useAppLocale: () => 'en' }));
 vi.mock('@/components/host-share-overlay', () => ({ HostShareOverlay: () => null }));
 vi.mock('@/components/model-manager', () => ({ ModelManagerOverlay: () => null }));
 vi.mock('@/components/themed-text', () => ({ ThemedText: () => null }));

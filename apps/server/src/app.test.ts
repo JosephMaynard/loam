@@ -1061,6 +1061,34 @@ describe("kill switch", () => {
   });
 });
 
+describe("emergency reset from the host device", () => {
+  it("wipes the node through the in-process hook, even with the remote kill switch disabled", async () => {
+    const app = await makeApp({ killSwitch: { enabled: false } });
+    const admin = await newSession(app);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "on the phone" },
+    });
+    expect(app.store.loadMessages().length).toBe(1);
+
+    // The remote route stays refused while the switch is off...
+    const remote = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(remote.statusCode).toBe(403);
+    expect(app.store.loadMessages().length).toBe(1);
+
+    // ...but the phone's owner can always wipe it from the host menu.
+    expect(await app.emergencyReset()).toEqual({ complete: true });
+    expect(app.store.loadMessages()).toEqual([]);
+  });
+});
+
 describe("panic endpoint", () => {
   async function panic(app: LoamApp, token: string) {
     return app.server.inject({ method: "POST", url: "/api/panic", payload: { token } });

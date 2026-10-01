@@ -21,14 +21,17 @@ import { WebView } from 'react-native-webview';
 
 
 import { DbEncryptionSettingsOverlay } from '@/components/db-encryption-settings';
+import { EmergencyResetOverlay } from '@/components/emergency-reset';
 import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { PRIVACY_POLICY_URL } from '@/constants/links';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import { colorSchemeForClientMessage } from '@/lib/client-theme';
+import { t } from '@/lib/i18n';
 import { SERVER_PORT } from '@/lib/join-url';
 import {
   clearStoredDbKeys,
@@ -275,6 +278,7 @@ export default function HostScreen() {
   const [wipeClearBusy, setWipeClearBusy] = useState(false);
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
   const [shareOpen, setShareOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
   // Whether the on-device LLM model manager overlay (docs/06) is open.
   const [modelManagerOpen, setModelManagerOpen] = useState(false);
   // Whether the on-device DB-encryption mode picker overlay (docs/01, docs/21) is open.
@@ -333,6 +337,7 @@ export default function HostScreen() {
   // needing to re-subscribe on every navigation, and there's no render that depends on it.
   const canGoBackRef = useRef(false);
   const theme = useTheme();
+  useAppLocale(); // re-render native text when the language changes
   // Bottom system-nav-bar inset (Android renders edge-to-edge by default): used both to hold a solid
   // strip below the WebView (so its content never draws under the on-screen nav bar) and, when needed,
   // to keep the boot/error screen's content clear of it too.
@@ -1047,6 +1052,21 @@ export default function HostScreen() {
                   style={styles.menuItem}>
                   <ThemedText type="smallBold">Privacy policy</ThemedText>
                 </Pressable>
+                {/* Emergency reset: last, set apart and in red, so it's easy to find in a hurry but not
+                    the item a thumb lands on by habit. Its own screen asks for a press-and-hold. */}
+                <View style={[styles.menuDivider, styles.menuDangerDivider]} />
+                <Pressable
+                  onPress={() => {
+                    setMenuOpen(false);
+                    setResetOpen(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('reset.menu')}
+                  style={styles.menuItem}>
+                  <ThemedText type="smallBold" style={{ color: theme.danger }}>
+                    {t('reset.menu')}
+                  </ThemedText>
+                </Pressable>
               </ThemedView>
             </View>
           </Pressable>
@@ -1220,6 +1240,7 @@ export default function HostScreen() {
           onClose={() => setDbEncryptionOpen(false)}
           channel={nodejs.channel}
         />
+        <EmergencyResetOverlay channel={nodejs.channel} onClose={() => setResetOpen(false)} visible={resetOpen} />
       </SafeAreaView>
     );
   }
@@ -1664,6 +1685,10 @@ const styles = StyleSheet.create({
   menuDivider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: 'rgba(128,128,128,0.3)',
+  },
+  // A wider gap above Emergency reset, so it reads as its own group.
+  menuDangerDivider: {
+    marginTop: Spacing.two,
   },
   // Bottom system-nav-bar inset strip (Issue 1) — a solid `backgroundElement`-coloured bar reserved
   // below the WebView, sized to `insets.bottom` at render time (see the inline style merge).

@@ -7,6 +7,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Emergency reset from the Android host's menu.** The last item in the menu, in red, opens one screen
+  that explains what will be erased and asks you to press and hold for three seconds: quick when it
+  matters, hard to trigger by accident. It runs in the server on the phone itself (no admin login needed,
+  and it works whether or not the remote kill switch is enabled), and connected phones clear their copy.
 - **Direct Messages lists your conversations, not everyone.** The sidebar shows only people you've
   actually messaged (newest first, plus the assistant if there is one), and **New message** opens a
   searchable picker of everyone on the node. A new `GET /api/dms` inbox tells each device about DMs that
