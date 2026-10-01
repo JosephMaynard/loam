@@ -87,6 +87,6 @@ export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale):
       return { ok: false, error: set.error ?? "Couldn't save the storage setting." };
     }
   }
-  setPendingNewNetwork(presetConfig(record.preset, record.nodeName, locale));
+  setPendingNewNetwork(presetConfig(record.preset, record.nodeName, locale, record.connection === 'join' ? record.peer : undefined));
   return { ok: true };
 }

@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { CodeScanner } from '@/components/code-scanner';
 import { HoldToConfirm } from '@/components/hold-to-confirm';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -21,12 +22,19 @@ import { loadHostMode, setHostMode } from '@/hooks/use-host-mode';
 import { useTheme } from '@/hooks/use-theme';
 import { APP_LOCALES, LOCALE_NAMES, t, type AppCatalogKey } from '@/lib/i18n';
 import { detectPreviousNetwork, loadSetupRecord, prepareNewNetwork, saveSetupRecord } from '@/lib/new-network';
-import { cleanNodeName, DEFAULT_NODE_NAME, type SetupConnection, type SetupPreset, type SetupRecord } from '@/lib/setup';
+import {
+  cleanNodeName,
+  DEFAULT_NODE_NAME,
+  type SetupConnection,
+  type SetupPeer,
+  type SetupPreset,
+  type SetupRecord,
+} from '@/lib/setup';
 
 /** How setup ended: which network to run, and whether it's a new one (the caller opens the next screen). */
 export type SetupOutcome = { record: SetupRecord; newNetwork: boolean };
 
-type Step = 'loading' | 'language' | 'home' | 'erase' | 'type' | 'name' | 'connect';
+type Step = 'loading' | 'language' | 'home' | 'erase' | 'type' | 'name' | 'connect' | 'scan';
 
 const PRESETS: { preset: SetupPreset; title: AppCatalogKey; body: AppCatalogKey; note?: AppCatalogKey }[] = [
   { preset: 'private', title: 'setup.privateTitle', body: 'setup.privateBody', note: 'setup.privateNote' },
@@ -37,6 +45,7 @@ const PRESETS: { preset: SetupPreset; title: AppCatalogKey; body: AppCatalogKey;
 const CONNECTIONS: { connection: SetupConnection; title: AppCatalogKey; body: AppCatalogKey }[] = [
   { connection: 'hotspot', title: 'share.hotspot', body: 'share.hotspotHelp' },
   { connection: 'wifi', title: 'share.wifi', body: 'share.wifiHelp' },
+  { connection: 'join', title: 'setup.joinTitle', body: 'setup.joinBody' },
 ];
 
 /**
@@ -54,6 +63,9 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
   const [preset, setPreset] = useState<SetupPreset>('private');
   const [nodeName, setNodeName] = useState('');
   const [connection, setConnection] = useState<SetupConnection>('hotspot');
+  // The node scanned when joining another network, and a counter that restarts the scanner.
+  const [peer, setPeer] = useState<SetupPeer>();
+  const [scanKey, setScanKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   // Where the language screen returns to (it's also reachable later from the home screen).
@@ -70,7 +82,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
         setRemembered(record);
         setPreset(record?.preset ?? 'private');
         setNodeName(record && record.nodeName !== DEFAULT_NODE_NAME ? record.nodeName : '');
-        setConnection(record?.connection === 'wifi' || record?.connection === 'hotspot' ? record.connection : hostMode);
+        setConnection(record?.connection ?? hostMode);
         const home: Step = previous || record ? 'home' : 'type';
         setAfterLanguage(home);
         setStep(storedLocale ? home : 'language');
@@ -86,6 +98,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     type: continuable || remembered ? 'home' : 'language',
     name: 'type',
     connect: 'name',
+    scan: 'connect',
   };
 
   useEffect(() => {
@@ -110,7 +123,8 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
       setError(t('setup.failed', { error: prepared.error }));
       return;
     }
-    await Promise.all([saveSetupRecord(record), record.connection === 'join' ? undefined : setHostMode(record.connection)]);
+    // A joining node serves people on the network it joined, so it hosts on that Wi-Fi.
+    await Promise.all([saveSetupRecord(record), setHostMode(record.connection === 'join' ? 'wifi' : record.connection)]);
     onDone({ record, newNetwork: true });
   }
 
@@ -269,11 +283,47 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
               body={t(option.body)}
             />
           ))}
-          <PrimaryButton
-            label={busy ? t('setup.starting') : t('setup.start')}
-            disabled={busy}
-            onPress={() => void startNew({ preset, nodeName: cleanNodeName(nodeName), connection })}
-          />
+          {connection === 'join' ? (
+            <PrimaryButton label={t('setup.next')} onPress={() => setStep('scan')} />
+          ) : (
+            <PrimaryButton
+              label={busy ? t('setup.starting') : t('setup.start')}
+              disabled={busy}
+              onPress={() => void startNew({ preset, nodeName: cleanNodeName(nodeName), connection })}
+            />
+          )}
+        </>
+      );
+      break;
+
+    case 'scan':
+      content = (
+        <>
+          <ThemedText type="subtitle">{t('setup.scanTitle')}</ThemedText>
+          <ThemedText themeColor="textSecondary">{t('setup.scanBody')}</ThemedText>
+          {peer ? (
+            <>
+              <ThemedText type="smallBold">{t('setup.scanFound', { url: peer.url })}</ThemedText>
+              <ThemedText type="small" themeColor="textSecondary">
+                {t('setup.joinNote')}
+              </ThemedText>
+              <PrimaryButton
+                label={busy ? t('setup.starting') : t('setup.start')}
+                disabled={busy}
+                onPress={() => void startNew({ preset, nodeName: cleanNodeName(nodeName), connection: 'join', peer })}
+              />
+              <SecondaryButton
+                label={t('setup.scanAgain')}
+                disabled={busy}
+                onPress={() => {
+                  setPeer(undefined);
+                  setScanKey((key) => key + 1);
+                }}
+              />
+            </>
+          ) : (
+            <CodeScanner key={scanKey} onFound={setPeer} />
+          )}
         </>
       );
       break;

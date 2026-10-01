@@ -240,6 +240,16 @@ presence flags no profile covers, and a storage mode (docs/01):
 After setup the host screen opens the share screen (the join codes), or the admin settings for the
 third choice.
 
+**Joining another network as a node.** The connection step's third choice, "Join another LOAM network",
+makes this phone another node of a running network (docs/11): connect to that network's Wi-Fi in the
+phone's settings, then scan its LOAM join code (`src/components/code-scanner.tsx`, expo-camera, QR only;
+`src/lib/join-code.ts` takes the origin and the `#k=` key and recognises a `WIFI:` code to say "join that
+Wi-Fi first"). A typed address works without a camera, unpinned. The new node's config gets
+`sync: { enabled: true, peers: [{ url, transportKey }] }`, it hosts in Wi-Fi mode on the joined network,
+and on its first sync round it sends the other node a link request, which that network's admin accepts in
+the web admin's sync panel. The camera permission is only requested on this step; `RECORD_AUDIO` is
+blocked and the camera hardware features are declared optional, so camera-less devices still install.
+
 **How a new network starts.** `prepareNewNetwork` (`src/lib/new-network.ts`) sets the storage mode,
 clears the stored DB keys (so anything of the old network left on flash stays unreadable), and queues
 the starting configuration. That rides the next `loam-db-key-response` exactly once, as `newNetwork`;

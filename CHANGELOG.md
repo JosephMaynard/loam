@@ -24,6 +24,9 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
   Later launches show one screen: continue the last network in one tap, or start a new one (erasing the
   old one takes a press-and-hold).
+- **Join another LOAM network from the setup screens.** Scan the other network's join code (or type its
+  address) and this phone becomes another node of it, syncing public channels both ways once that
+  network's admin accepts. The camera is asked for only on that step.
 - **Display mode on the Android host** (replacing the separate "Keep screen on" and "Kiosk mode"
   switches): one button on the share screen shows the join codes full screen, as large as the screen
   allows with no scrolling (one code on Wi-Fi; two on a hotspot, side by side in landscape), keeps the

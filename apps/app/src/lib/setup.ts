@@ -17,11 +17,16 @@ export const SETUP_PRESETS: readonly SetupPreset[] = ['private', 'community', 'c
 /** Where people connect: this phone's Wi-Fi network, its own hotspot, or another LOAM network as a node. */
 export type SetupConnection = 'wifi' | 'hotspot' | 'join';
 
+/** The node this one syncs with when it joined another network: its address and the key to pin. */
+export type SetupPeer = { url: string; transportKey?: string };
+
 /** What the app remembers about the network it set up (SecureStore `loam.setup`). */
 export type SetupRecord = {
   preset: SetupPreset;
   nodeName: string;
   connection: SetupConnection;
+  /** Set when `connection` is 'join'. */
+  peer?: SetupPeer;
 };
 
 export const SETUP_RECORD_ITEM = 'loam.setup';
@@ -40,10 +45,21 @@ export function cleanNodeName(name: string): string {
  * server's first boot on an empty data folder, so it's the node's starting configuration; admins can
  * change any of it later.
  */
-export function presetConfig(preset: SetupPreset, nodeName: string, locale: AppLocale): Record<string, unknown> {
+export function presetConfig(
+  preset: SetupPreset,
+  nodeName: string,
+  locale: AppLocale,
+  peer?: SetupPeer,
+): Record<string, unknown> {
   const node = { name: cleanNodeName(nodeName), locale };
+  // Joining another network: sync with that node from the first start, its key pinned (docs/11). The node
+  // then asks it to sync back, which its admin accepts.
+  const sync = peer
+    ? { sync: { enabled: true, peers: [{ url: peer.url, ...(peer.transportKey ? { transportKey: peer.transportKey } : {}) }] } }
+    : {};
   if (preset === 'private') {
     return {
+      ...sync,
       node,
       security: { profile: 'hardened' },
       identity: { allowUserDisplayNameEdit: false, allowUserAvatarEdit: false, allowUserAvatarUpload: false },
@@ -52,13 +68,14 @@ export function presetConfig(preset: SetupPreset, nodeName: string, locale: AppL
   }
   if (preset === 'community') {
     return {
+      ...sync,
       node,
       security: { profile: 'standard' },
       identity: { allowUserDisplayNameEdit: true, allowUserAvatarEdit: true, allowUserAvatarUpload: true },
       features: { enablePresence: true },
     };
   }
-  return { node };
+  return { ...sync, node };
 }
 
 /**
@@ -82,7 +99,19 @@ export function parseSetupRecord(value: string | null | undefined): SetupRecord 
       typeof raw.nodeName === 'string' &&
       (raw.connection === 'wifi' || raw.connection === 'hotspot' || raw.connection === 'join')
     ) {
-      return { preset: raw.preset as SetupPreset, nodeName: cleanNodeName(raw.nodeName), connection: raw.connection };
+      const peer =
+        raw.peer && typeof raw.peer.url === 'string'
+          ? {
+              url: raw.peer.url,
+              ...(typeof raw.peer.transportKey === 'string' ? { transportKey: raw.peer.transportKey } : {}),
+            }
+          : undefined;
+      return {
+        preset: raw.preset as SetupPreset,
+        nodeName: cleanNodeName(raw.nodeName),
+        connection: raw.connection,
+        ...(peer ? { peer } : {}),
+      };
     }
   } catch {
     // Not JSON: treat as no record.

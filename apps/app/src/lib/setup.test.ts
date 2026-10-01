@@ -48,6 +48,22 @@ describe('presetConfig', () => {
   });
 });
 
+describe('joining another network', () => {
+  it('adds the scanned node as an enabled, pinned sync peer, for any preset', () => {
+    for (const preset of ['private', 'community', 'custom'] as const) {
+      const config = presetConfig(preset, 'Hilltop', 'en', { url: 'http://10.0.0.5:3000', transportKey: 'abc' });
+      expect(LoamConfigUpdateSchema.safeParse(config).success, preset).toBe(true);
+      expect(config.sync).toEqual({ enabled: true, peers: [{ url: 'http://10.0.0.5:3000', transportKey: 'abc' }] });
+    }
+    expect(presetConfig('community', 'x', 'en').sync).toBeUndefined();
+  });
+
+  it('remembers the peer with the rest of the answers', () => {
+    const record = { preset: 'community', nodeName: 'Hilltop', connection: 'join', peer: { url: 'http://10.0.0.5:3000' } };
+    expect(parseSetupRecord(JSON.stringify(record))).toEqual(record);
+  });
+});
+
 describe('cleanNodeName', () => {
   it('trims, defaults a blank name, and caps the length', () => {
     expect(cleanNodeName('  Camp  ')).toBe('Camp');

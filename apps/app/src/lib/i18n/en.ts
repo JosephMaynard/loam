@@ -102,6 +102,19 @@ export const en = {
   "setup.start": "Start the network",
   "setup.starting": "Starting…",
   "setup.failed": "Couldn't start: {error}",
+  "setup.joinTitle": "Join another LOAM network",
+  "setup.joinBody": "This phone becomes another node of a network that's already running: it keeps its own copy of the public channels and syncs them both ways.",
+  "setup.scanTitle": "Scan the other network's code",
+  "setup.scanBody": "Connect this phone to the other network's Wi-Fi first, in your phone's Wi-Fi settings. Then scan the LOAM code on its share screen.",
+  "setup.scanWifi": "That's the Wi-Fi code for {network}. Join it in your phone's Wi-Fi settings, then scan the LOAM code.",
+  "setup.scanOther": "That isn't a LOAM join code.",
+  "setup.scanPermission": "LOAM needs the camera to scan the code. It isn't used for anything else.",
+  "setup.scanAllow": "Allow the camera",
+  "setup.scanDenied": "The camera is off for LOAM. Type the address instead, or allow the camera in your phone's settings.",
+  "setup.scanManual": "Or type its address",
+  "setup.scanFound": "Found: {url}",
+  "setup.scanAgain": "Scan again",
+  "setup.joinNote": "When this network starts, it asks the other one to sync back. Messages flow both ways once that network's admin accepts.",
 } as const;
 
 export type AppCatalog = { [K in keyof typeof en]: string };
