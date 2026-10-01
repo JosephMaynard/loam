@@ -1,5 +1,6 @@
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 
 import { Colors } from '@/constants/theme';
@@ -39,6 +40,9 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={navigationTheme(colorScheme === 'dark')}>
+      {/* Edge to edge, the status bar sits on our own paper/ink background: give it icons that contrast
+          with it (dark on light), or the clock and battery vanish in light mode. */}
+      <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
       <Stack screenOptions={{ headerShown: false }} />
     </ThemeProvider>
   );
