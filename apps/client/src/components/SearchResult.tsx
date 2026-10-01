@@ -9,28 +9,31 @@ const LEAD_CHARS = 40;
 /**
  * The body with every case-insensitive occurrence of `query` wrapped in `<mark>`. A long body whose first
  * match sits past the preview's reach starts shortly before it (with "…"), so the hit is actually visible
- * in the clamped preview.
+ * in the clamped preview. Matches are found in the original text (an escaped, case-insensitive regex), not
+ * a lowercased copy: lowercasing can change a string's length ("İ" becomes two code units), which would
+ * shift every offset after it.
  */
 export function highlightMatches(body: string, query: string | undefined): ComponentChildren {
-  const needle = query?.trim().toLowerCase();
+  const needle = query?.trim();
   if (!needle) {
     return body;
   }
+  const source = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   let text = body;
-  const first = text.toLowerCase().indexOf(needle);
+  const first = text.search(new RegExp(source, "iu"));
   if (first > LEAD_CHARS * 2) {
     const start = text.lastIndexOf(" ", first - LEAD_CHARS);
     text = `…${text.slice(start > 0 ? start : first - LEAD_CHARS)}`;
   }
   const parts: ComponentChildren[] = [];
-  const lower = text.toLowerCase();
   let from = 0;
-  for (let index = lower.indexOf(needle); index >= 0; index = lower.indexOf(needle, index + needle.length)) {
+  for (const match of text.matchAll(new RegExp(source, "giu"))) {
+    const index = match.index ?? 0;
     if (index > from) {
       parts.push(text.slice(from, index));
     }
-    parts.push(<mark key={index}>{text.slice(index, index + needle.length)}</mark>);
-    from = index + needle.length;
+    parts.push(<mark key={index}>{match[0]}</mark>);
+    from = index + match[0].length;
   }
   parts.push(text.slice(from));
   return parts;

@@ -419,6 +419,15 @@ function LoamApp() {
   // (the sidebar then shows the conversations this device already holds), null on a node too old to have
   // one (the sidebar then lists everyone, as before).
   const [dmInbox, setDmInbox] = useState<DmInboxEntry[] | null>();
+  // Every inbox write checks this epoch: a request answers for the epoch it started in, and is dropped if
+  // the epoch moved on meanwhile (an identity purge, a newer boot fetch), so a late answer for an older
+  // state — e.g. the previous identity's — can never land.
+  const inboxEpochRef = useRef(0);
+  const inboxRefreshTimerRef = useRef<number>();
+  const invalidateInboxRequests = useCallback(() => {
+    inboxEpochRef.current += 1;
+    window.clearTimeout(inboxRefreshTimerRef.current);
+  }, []);
   const [users, setUsers] = useState<User[]>([currentUser]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [config, setConfig] = useState<Config>();
@@ -1025,6 +1034,7 @@ function LoamApp() {
     setUsers([]);
     // The previous identity's DM partners and unread state must not outlive it (the new identity's inbox
     // is fetched fresh; until it lands the sidebar shows only what the new identity holds).
+    invalidateInboxRequests();
     setDmInbox(undefined);
     lastReadRef.current = {};
     setLastReadByConversation({});
@@ -1528,11 +1538,13 @@ function LoamApp() {
         const preFetchUserIds = new Set(usersRef.current.map((user) => user.id));
         // The DM inbox loads alongside but never holds up boot: it only decides which people the sidebar
         // lists. Best effort — an older node has no /api/dms, and the sidebar then lists everyone as before.
+        invalidateInboxRequests();
+        const inboxEpoch = inboxEpochRef.current;
         void fetchJson<unknown>("/api/dms")
           .then((payload) => DmInboxSchema.parse(payload).conversations)
           .catch(() => null)
           .then((nextInbox) => {
-            if (active) {
+            if (active && inboxEpoch === inboxEpochRef.current) {
               setDmInbox(nextInbox);
             }
           });
@@ -1647,6 +1659,8 @@ function LoamApp() {
     // Live deletes/edits after this point postdate the snapshot this request returns (see `LiveChangeJournal`).
     const liveMark = liveChangesRef.current.mark();
     const key = conversationKey(conversation);
+    // A DM history rebuilds that partner's inbox entry (below) — only for the inbox of the same epoch.
+    const inboxEpoch = inboxEpochRef.current;
 
     fetchJson<Message[]>(path)
       .then((nextMessages) => {
@@ -1655,7 +1669,7 @@ function LoamApp() {
           reconcileConversationMessages(conversation, nextMessages, preFetchIds, liveChangesRef.current.since(liveMark));
           // A DM's full history is the truth about its inbox entry: rebuild it (or drop it when nothing is
           // left), so a deleted DM can't leave an unread dot that opening the conversation can't clear.
-          if (conversation.kind === "dm") {
+          if (conversation.kind === "dm" && inboxEpoch === inboxEpochRef.current) {
             setDmInbox((previous) =>
               previous ? reconcileInboxEntry(previous, conversation.id, nextMessages, currentUser.id) : previous,
             );
@@ -2044,12 +2058,16 @@ function LoamApp() {
 
   // Re-read the DM inbox shortly after a deletion that may have touched it (a burst of deletes — a
   // moderator clearing someone out — costs one request).
-  const inboxRefreshTimerRef = useRef<number>();
   const scheduleInboxRefresh = useCallback(() => {
     window.clearTimeout(inboxRefreshTimerRef.current);
     inboxRefreshTimerRef.current = window.setTimeout(() => {
+      const epoch = inboxEpochRef.current;
       void fetchJson<unknown>("/api/dms")
-        .then((payload) => setDmInbox(DmInboxSchema.parse(payload).conversations))
+        .then((payload) => {
+          if (epoch === inboxEpochRef.current) {
+            setDmInbox(DmInboxSchema.parse(payload).conversations);
+          }
+        })
         .catch(() => undefined);
     }, 400);
   }, []);

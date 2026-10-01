@@ -116,3 +116,21 @@ describe("highlightMatches", () => {
     expect(out.length).toBeLessThan(body.length);
   });
 });
+
+describe("highlightMatches offsets", () => {
+  function html(children: ReturnType<typeof highlightMatches>): string {
+    const host = document.createElement("div");
+    render(<>{children}</>, host);
+    return host.innerHTML;
+  }
+
+  it("keeps offsets right when lowercasing would change the text's length", () => {
+    // "İ" lowercases to two code units ("i̇"); offsets from a lowercased copy would land one character late.
+    expect(html(highlightMatches("İstanbul info desk", "info"))).toBe("İstanbul <mark>info</mark> desk");
+  });
+
+  it("treats regex characters in the query literally", () => {
+    expect(html(highlightMatches("costs $5 (cash) or 5+ tokens", "(cash)"))).toBe("costs $5 <mark>(cash)</mark> or 5+ tokens");
+    expect(html(highlightMatches("a.b axb", "a.b"))).toBe("<mark>a.b</mark> axb");
+  });
+});
