@@ -38,7 +38,10 @@ where spacing really matters on old devices, use grid. Logical properties everyw
 ## Tokens
 
 All on `:root` in `tokens.css`. Dark values apply under `prefers-color-scheme: dark` unless the page sets
-`data-theme="light"`; `data-theme="dark"` forces dark (useful when testing; keep the two dark blocks in sync).
+`data-theme="light"`; `data-theme="dark"` forces dark (keep the two dark blocks in sync). The attribute is the
+user's Settings → Appearance choice (System / Light / Dark), applied by `lib/theme.ts` before the first render:
+it also re-points the `theme-color` metas and posts `loam-theme` so the Android host's native chrome matches.
+Anything that must look the same in both themes (QR tiles, the theme preview swatches) uses fixed colours.
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
@@ -355,8 +358,9 @@ Conversation agent (`ConversationView`, `MessageItem`, `MessageComposer`, `Repor
       be truncated by buttons again). Thread panel header → `ScreenHeader` with `onBack` + `headingLevel={2}`.
 - [x] Bubbles with the time inside (bottom inline-end corner, `--fg-faint`-ish on the bubble), not on a
       line above; author name only on the first bubble of a group.
-- [x] Group consecutive messages from the same author within a few minutes: one avatar (`sm`, aligned to
-      the group's last bubble, not floating below it), tighter gaps, tail only on the last bubble.
+- [x] Group consecutive messages from the same author within a few minutes: one avatar (`sm`, top-aligned
+      with the group's first bubble), tighter gaps, and the tail — a tighter corner — only on the first
+      bubble, at its top on the author's side, pointing at the avatar and name.
 - [x] Hover actions on desktop (a small floating toolbar: react, reply, ⋮), long-press / ⋮ on touch opening
       the `Menu` sheet with react, reply, edit, delete, report. No permanently visible per-message icon row.
       The invisible quick-reaction buttons currently take space and push "Reply" off to the side.
@@ -388,3 +392,20 @@ Screens agent (`app.tsx` SettingsView / PeopleView / SearchView / MeshView, `Adm
 - [x] Strings: `invite.wifiButton` → "Open the host's share screen"; `invite.wifiHint` → "Shows the
       hotspot or Wi-Fi join QR from the host app." (All 15 catalogs updated.)
 - [x] Delete the "Legacy button rows" section and the COMPAT rules this makes unused.
+
+## Safe areas, the conversation column, the composer
+
+- **Safe areas**: use `var(--safe-top|right|bottom|left)`, never `env(safe-area-inset-*)` directly. Inside the
+  Android host (`<html data-native-host>`, set by `lib/viewport.ts` when `window.ReactNativeWebView` exists)
+  they are zero, because the native layout already clears the status and navigation bars; padding for them
+  again left a blank band above the header and below the composer.
+- **Conversation column**: messages, day dividers and the composer well are capped at `--conversation-w`
+  (820px) and centred, so a wide window keeps a readable column. Wrapped text bubbles are narrowed to their
+  widest line by `lib/bubble-fit.ts` (CSS can't shrink-wrap wrapped text).
+- **Hover toolbar**: placed by measurement as it appears (`lib/toolbar-placement.ts`, called from
+  `MessageItem` on pointer-enter / focus-in): beside the bubble's top, away from the avatar, when it fits
+  inside the list; else over the bubble's top-end corner (only its top padding); and lifted above the
+  author's name rather than covering it. It never leaves the list.
+- **Composer**: the well's corner is concentric with its round 40px buttons (20px radius + 3px padding +
+  1px border = 24px), a pill at one line. Keep that relationship if either size changes.
+

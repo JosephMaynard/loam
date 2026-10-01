@@ -1,6 +1,7 @@
 import type { Channel, User } from "@loam/schema";
 import type { VNode } from "preact";
 import { render } from "preact";
+import { act } from "preact/test-utils";
 import { LocationProvider } from "preact-iso";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -72,6 +73,8 @@ function baseProps() {
     channels: [generalChannel, privateChannel],
     connection: "live" as const,
     currentUser,
+    dmPeers: [peer],
+    dmUnreadHints: new Set<string>(),
     onCreateChannel: async () => true,
     onlineUserIds: new Set<string>(),
     showMesh: false,
@@ -94,6 +97,31 @@ describe("Sidebar", () => {
     const dmLinks = Array.from(host.querySelectorAll('a[href^="/dm/"]'));
     expect(dmLinks).toHaveLength(1);
     expect(dmLinks[0]?.textContent).toContain("Ada");
+  });
+
+  it("lists only the DM peers it is given, with a dot for an unloaded unread DM, and a New message picker", () => {
+    const other: User = { ...peer, id: "user.other", displayName: "Grace" };
+    const host = mount(
+      <Sidebar {...baseProps()} dmPeers={[peer]} dmUnreadHints={new Set([peer.id])} users={[currentUser, peer, other]} />,
+    );
+
+    const dmLinks = Array.from(host.querySelectorAll('.nav-section a[href^="/dm/"]'));
+    expect(dmLinks.map((link) => link.querySelector(".nav-label")?.textContent)).toEqual(["Ada"]);
+    expect(dmLinks[0]?.querySelector(".unread-dot")?.getAttribute("aria-label")).toBe("New messages");
+
+    const toggle = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.includes("New message"))!;
+    act(() => toggle.click());
+    const picker = document.querySelector(".new-message-dialog")!;
+    const names = () => Array.from(picker.querySelectorAll('a[href^="/dm/"] .nav-label')).map((label) => label.textContent);
+    const people = names();
+    expect(people.sort()).toEqual(["Ada", "Grace"]);
+
+    const filter = picker.querySelector("input")!;
+    act(() => {
+      filter.value = "gra";
+      filter.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(names()).toEqual(["Grace"]);
   });
 
   it("shows the admin link only for admins", () => {

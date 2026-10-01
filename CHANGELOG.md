@@ -6,6 +6,19 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **Direct Messages lists your conversations, not everyone.** The sidebar shows only people you've
+  actually messaged (newest first, plus the assistant if there is one), and **New message** opens a
+  searchable picker of everyone on the node. A new `GET /api/dms` inbox tells each device about DMs that
+  arrived while it was away, which now show an unread dot instead of going unnoticed.
+- **Invite: Copy link**, and a line explaining how to join.
+- **Search** opens with `/search?q=…`, highlights the matched words, shows results as plain text (no
+  `**Markdown**`), starts a long result near the match, and explains itself before the first search.
+- **Choose light or dark.** Settings → Appearance offers System (follow the device, the default), Light or
+  Dark, as tiles that preview each palette. The choice applies at once, is remembered in that browser, and
+  follows across open tabs. The browser's top bar colour follows it, and inside the Android host the native
+  top bar and status bar switch to match.
+
 ### Security
 - **The panic route no longer gives itself away through rate-limit headers.** `/api/panic` answers every
   failure with a 404 so a prober can't tell it exists, but the old rate limiter added
@@ -25,6 +38,22 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **Android host: no more blank bands.** The page no longer pads for the status and navigation bars
+  inside the host app, which already keeps clear of them.
+- **Tidier conversations.** On wide screens the conversation keeps a centred reading column (your own
+  messages no longer sit at the far edge); wrapped bubbles shrink to their text; the hover toolbar sits
+  beside the bubble when there's room and never covers the author's name; the bubble's tighter "tail"
+  corner is now at the top of a group, by the avatar; the composer's corners now follow its round send
+  button.
+- **Less noise.** No raw user ids in the DM header, the sidebar footer, Settings or the join-approval list
+  (moderators still see them in the People list); an empty DM says "Say hello";
+  desktop opens your last conversation (or the first channel) instead of an empty pane; the join-QR note in
+  Settings is plain language.
+- **Avatar colours are more distinct.** Base colours come from ten well-separated hues (yellow stays
+  yellow instead of turning olive), so fewer people look alike.
+- **No console error on load**: the client no longer trips its own Content-Security-Policy.
+- **Copy buttons work over plain HTTP**: "Copy link" on the node link and the mesh contact card now use the
+  same fallback as "Copy text", which LOAM's usual LAN setup needs.
 - **Fewer server dependencies.** Rate limiting (`rate-limit.ts`) and serving the web client
   (`static-files.ts`) are now LOAM's own code, replacing `@fastify/rate-limit` and `@fastify/static` and
   about ten transitive packages; the CLI bundle drops from 3.19 MB to 2.83 MB. Behaviour is unchanged

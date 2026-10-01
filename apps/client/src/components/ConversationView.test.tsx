@@ -206,7 +206,8 @@ describe("the conversation header", () => {
     const host = mount(view({ conversation: DM, onSetBlocked: async () => {} }));
     const header = host.querySelector(".conversation .screen-header")!;
     expect(header.querySelector(".screen-title")?.textContent).toBe("Ada");
-    expect(header.querySelector(".screen-subtitle")?.textContent).toContain(peer.id);
+    // No raw user id under the name (it meant nothing to people); "Online" appears only while connected.
+    expect(header.textContent).not.toContain(peer.id);
     // Only the back link and the ⋮ trigger are buttons/links in the header.
     expect(header.querySelectorAll(".screen-header-actions button").length).toBe(1);
 

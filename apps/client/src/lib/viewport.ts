@@ -59,12 +59,26 @@ function sync(win: Window): void {
 }
 
 /**
+ * Inside the Android host (`apps/app`) the native layout already keeps the WebView clear of the status bar
+ * and the navigation bar, yet the WebView still reports those bars as `safe-area-inset-*` — padding for
+ * them again left a blank band above the header and below the composer. Mark `<html data-native-host>`
+ * so tokens.css zeroes the `--safe-*` insets there. `ReactNativeWebView` exists from document start, only
+ * inside that WebView.
+ */
+function markNativeHost(win: Window): void {
+  if ((win as unknown as { ReactNativeWebView?: unknown }).ReactNativeWebView) {
+    win.document.documentElement.setAttribute("data-native-host", "");
+  }
+}
+
+/**
  * Start mirroring the visible viewport into `--vvh` / `--vv-top`. Call once at boot (see `main.tsx`).
  *
  * @param win - The window to watch (injectable for tests).
  * @returns A function that stops watching.
  */
 export function installViewportSync(win: Window = window): () => void {
+  markNativeHost(win);
   const handler = (): void => sync(win);
   const visual = win.visualViewport;
   visual?.addEventListener("resize", handler);

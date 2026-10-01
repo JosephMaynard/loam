@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
+import { copyText } from "../lib/clipboard";
 import { safeQrSvg } from "../lib/qr";
 import { Dialog } from "./Dialog";
-import { IconWifi } from "./icons";
+import { IconCopy, IconWifi } from "./icons";
 
 /** The subset of the native host bridge this component talks to. Mirrors the `window.ReactNativeWebView`
  * shape used by the `loam-wipe` bridge message in `app.tsx` — it only ever exists inside LOAM's own
@@ -49,6 +50,17 @@ export function InviteControl({
     [joinUrl, qrSuppressed, qrUrl],
   );
   const hasNativeBridge = typeof window !== "undefined" && !!reactNativeBridge();
+  const [copied, setCopied] = useState(false);
+
+  async function copyLink(): Promise<void> {
+    if (qrSuppressed) {
+      return;
+    }
+    if (await copyText(qrUrl ?? joinUrl ?? "")) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    }
+  }
 
   if (!joinUrl) {
     return null;
@@ -91,7 +103,17 @@ export function InviteControl({
           ) : (
             <div aria-hidden="true" className="invite-modal-qr" dangerouslySetInnerHTML={{ __html: qrSvg }} />
           )}
+          <p className="invite-modal-howto">{t("invite.howTo")}</p>
           <p className="invite-modal-url">{joinUrl}</p>
+          {/* The link the QR carries (with this device's verified node key when it has one), so a pasted
+              link keeps the same protection as a scan. Withheld with the QR when the node's key doesn't
+              match the one this device verified: copying would hand out the same suspect invite. */}
+          {qrSuppressed ? null : (
+            <button className="btn btn-secondary btn-block" onClick={() => void copyLink()} type="button">
+              <IconCopy />
+              {copied ? t("invite.copied") : t("invite.copyLink")}
+            </button>
+          )}
           {hasNativeBridge ? (
             <div className="invite-modal-wifi">
               <button className="btn btn-primary btn-block" onClick={openHostShare} type="button">

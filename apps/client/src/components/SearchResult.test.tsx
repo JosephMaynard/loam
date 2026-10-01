@@ -2,7 +2,7 @@ import type { VNode } from "preact";
 import { render } from "preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SearchResult } from "./SearchResult";
+import { SearchResult, highlightMatches } from "./SearchResult";
 
 // Rendered-component tests: mount real Preact components into jsdom and assert on the resulting DOM.
 
@@ -88,5 +88,49 @@ describe("SearchResult", () => {
 
     host.querySelector("button")?.click();
     expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("highlightMatches", () => {
+  function html(children: ReturnType<typeof highlightMatches>): string {
+    const host = document.createElement("div");
+    render(<>{children}</>, host);
+    return host.innerHTML;
+  }
+
+  it("marks every case-insensitive occurrence", () => {
+    expect(html(highlightMatches("Info desk lends power banks. INFO!", "info"))).toBe(
+      "<mark>Info</mark> desk lends power banks. <mark>INFO</mark>!",
+    );
+  });
+
+  it("returns the body untouched without a query", () => {
+    expect(highlightMatches("hello", "  ")).toBe("hello");
+  });
+
+  it("starts a long body shortly before its first match", () => {
+    const body = `${"word ".repeat(40)}needle at the end`;
+    const out = html(highlightMatches(body, "needle"));
+    expect(out.startsWith("…")).toBe(true);
+    expect(out).toContain("<mark>needle</mark> at the end");
+    expect(out.length).toBeLessThan(body.length);
+  });
+});
+
+describe("highlightMatches offsets", () => {
+  function html(children: ReturnType<typeof highlightMatches>): string {
+    const host = document.createElement("div");
+    render(<>{children}</>, host);
+    return host.innerHTML;
+  }
+
+  it("keeps offsets right when lowercasing would change the text's length", () => {
+    // "İ" lowercases to two code units ("i̇"); offsets from a lowercased copy would land one character late.
+    expect(html(highlightMatches("İstanbul info desk", "info"))).toBe("İstanbul <mark>info</mark> desk");
+  });
+
+  it("treats regex characters in the query literally", () => {
+    expect(html(highlightMatches("costs $5 (cash) or 5+ tokens", "(cash)"))).toBe("costs $5 <mark>(cash)</mark> or 5+ tokens");
+    expect(html(highlightMatches("a.b axb", "a.b"))).toBe("<mark>a.b</mark> axb");
   });
 });

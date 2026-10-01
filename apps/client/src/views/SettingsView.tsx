@@ -3,6 +3,7 @@ import type { ComponentChildren } from "preact";
 import { useEffect, useId, useMemo, useState } from "preact/hooks";
 
 import { Avatar } from "../components/Avatar";
+import { AppearancePanel } from "../components/AppearancePanel";
 import { AvatarImageEditor } from "../components/AvatarImageEditor";
 import { BlockedUsersPanel } from "../components/BlockedUsersPanel";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -42,7 +43,7 @@ function withDotBreaks(name: string): ComponentChildren {
 
 /**
  * Renders the settings screen for the current user: identity (avatar preview, name, generated-avatar
- * style, image upload), the join QR, admin access, blocked people, the privacy link and — under the
+ * style, image upload), the colour theme, the join QR, admin access, blocked people, the privacy link and — under the
  * hardened profile — the device wipe. One centred column of cards.
  *
  * The UI respects node feature flags from `config.networkConfig`: it enables or disables
@@ -170,7 +171,6 @@ export function SettingsView({
         <h2 className="identity-name" dir="auto">
           {withDotBreaks(displayName)}
         </h2>
-        <p className="identity-id">{currentUser.id}</p>
       </div>
     </div>
   );
@@ -249,6 +249,8 @@ export function SettingsView({
           ) : (
             <div className="card identity-card">{identitySummary}</div>
           )}
+
+          <AppearancePanel />
 
           <div className="card join-card">
             <CardHeader title={t("settings.joinTitle")} />

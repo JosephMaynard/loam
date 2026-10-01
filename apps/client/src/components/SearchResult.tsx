@@ -1,9 +1,47 @@
+import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
 
+/** How much text to keep before the first match when a long body is trimmed to show it. */
+const LEAD_CHARS = 40;
+
 /**
- * One message-search hit: who wrote it, where it lives, when, and the matching body. Purely
+ * The body with every case-insensitive occurrence of `query` wrapped in `<mark>`. A long body whose first
+ * match sits past the preview's reach starts shortly before it (with "…"), so the hit is actually visible
+ * in the clamped preview. Matches are found in the original text (an escaped, case-insensitive regex), not
+ * a lowercased copy: lowercasing can change a string's length ("İ" becomes two code units), which would
+ * shift every offset after it.
+ */
+export function highlightMatches(body: string, query: string | undefined): ComponentChildren {
+  const needle = query?.trim();
+  if (!needle) {
+    return body;
+  }
+  const source = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let text = body;
+  const first = text.search(new RegExp(source, "iu"));
+  if (first > LEAD_CHARS * 2) {
+    const start = text.lastIndexOf(" ", first - LEAD_CHARS);
+    text = `…${text.slice(start > 0 ? start : first - LEAD_CHARS)}`;
+  }
+  const parts: ComponentChildren[] = [];
+  let from = 0;
+  for (const match of text.matchAll(new RegExp(source, "giu"))) {
+    const index = match.index ?? 0;
+    if (index > from) {
+      parts.push(text.slice(from, index));
+    }
+    parts.push(<mark key={index}>{match[0]}</mark>);
+    from = index + match[0].length;
+  }
+  parts.push(text.slice(from));
+  return parts;
+}
+
+/**
+ * One message-search hit: who wrote it, where it lives, when, and the matching body (plain text, the
+ * search terms highlighted). Purely
  * presentational — the caller resolves names/labels and handles navigation, so this stays
  * trivially testable.
  *
@@ -16,6 +54,7 @@ export function SearchResult({
   contextLabel,
   hiddenAsBlocked = false,
   onOpen,
+  query,
   time,
 }: {
   authorName: string;
@@ -23,6 +62,8 @@ export function SearchResult({
   contextLabel: string;
   hiddenAsBlocked?: boolean;
   onOpen: () => void;
+  /** The search terms, highlighted in the body. */
+  query?: string;
   time: string;
 }) {
   const [revealed, setRevealed] = useState(false);
@@ -53,7 +94,7 @@ export function SearchResult({
           <time className="search-result-time">{time}</time>
         </span>
         <span className="search-result-body" dir="auto">
-          {body}
+          {highlightMatches(body, query)}
         </span>
       </button>
     </li>

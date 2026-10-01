@@ -1,6 +1,7 @@
 import { useMemo, useState } from "preact/hooks";
 
 import { t } from "../i18n";
+import { copyText } from "../lib/clipboard";
 import { safeQrSvg } from "../lib/qr";
 
 /**
@@ -21,13 +22,10 @@ export function NodeLinkControl({ joinUrl }: { joinUrl?: string }) {
   }
 
   async function copy(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(joinUrl ?? "");
+    // Works on the plain-HTTP LAN too (lib/clipboard.ts); the URL is also on screen to copy by hand.
+    if (await copyText(joinUrl ?? "")) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard is unavailable on some insecure-context browsers — the URL is on screen to copy
-      // manually, so this is a best-effort convenience only.
     }
   }
 

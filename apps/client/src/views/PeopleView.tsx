@@ -195,7 +195,6 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
         <strong className="row-title" dir="auto">
           {user.displayName}
         </strong>
-        <span className="row-meta">{user.id}</span>
       </div>
       <div className="row-actions">
         <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void decide("approve")} type="button">
@@ -554,6 +553,7 @@ function ModerationUserRow({
           <strong className="row-title" dir="auto">
             {user.displayName}
           </strong>
+          {/* Moderators get the id: it tells apart two people who've given themselves the same name. */}
           <span className="row-meta">{user.id}</span>
           <UserStateBadges user={user} />
         </div>

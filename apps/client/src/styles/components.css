@@ -328,6 +328,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Something new whose count isn't known yet (see UnreadBadge). */
+.unread-dot {
+  min-width: 10px;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -668,7 +676,7 @@
   max-width: 640px;
   max-height: 92%;
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: var(--safe-bottom);
 }
 
 .is-sheet .dialog-handle {
@@ -703,7 +711,7 @@
     max-width: none;
     max-height: 92%;
     border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: var(--safe-bottom);
   }
 
   .is-auto .dialog-handle {
@@ -773,7 +781,7 @@
   position: fixed;
   z-index: var(--z-toast);
   inset-inline-end: var(--space-4);
-  bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--space-4) + var(--safe-bottom));
   display: grid;
   gap: var(--space-2);
   width: 340px;
@@ -783,7 +791,7 @@
 /* On phones the composer owns the bottom edge, so toasts drop in from the top. */
 @media (max-width: 719.98px) {
   .toast-stack {
-    top: calc(var(--space-2) + env(safe-area-inset-top, 0px));
+    top: calc(var(--space-2) + var(--safe-top));
     right: var(--space-3);
     bottom: auto;
     left: var(--space-3);
@@ -846,7 +854,7 @@
 .connection-error {
   position: fixed;
   z-index: var(--z-banner);
-  top: calc(var(--space-3) + env(safe-area-inset-top, 0px));
+  top: calc(var(--space-3) + var(--safe-top));
   right: var(--space-4);
   left: var(--space-4);
   display: flex;
@@ -991,4 +999,17 @@
 
 .list-row + .list-row {
   border-top: 1px solid var(--border);
+}
+
+/* "New message" picker (NewMessageControl): a filter field over a scrolling list of people. */
+.new-message-dialog .input {
+  margin-bottom: var(--space-3);
+}
+
+.new-message-list {
+  display: grid;
+  gap: 2px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  margin-inline: calc(-1 * var(--space-2));
 }

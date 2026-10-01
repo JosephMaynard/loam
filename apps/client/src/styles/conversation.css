@@ -43,16 +43,6 @@
   color: var(--fg-muted);
 }
 
-.conversation-header .peer-id {
-  color: var(--fg-faint);
-}
-
-.conversation-header .presence-text + .peer-id::before {
-  content: "·";
-  margin: 0 6px;
-  color: var(--fg-faint);
-}
-
 .members-button .icon {
   margin-inline-end: -2px;
 }
@@ -131,13 +121,22 @@
   flex: none;
 }
 
+/* On a wide screen the conversation keeps a readable column instead of spanning the whole window (your
+   own messages would otherwise sit at the far edge). Every direct child — messages, day dividers, the
+   empty state — shares it; the composer's well is capped to match. */
+.message-list > * {
+  width: 100%;
+  max-width: var(--conversation-w);
+  margin-inline: auto;
+}
+
 /* A short conversation sits at the bottom, next to the composer, like every chat app. (An auto margin,
    not justify-content: flex-end, which would make the overflow unscrollable.) */
 .message-slot:first-child {
   margin-top: auto;
 }
 
-.message-list-empty {
+.message-list > .message-list-empty {
   max-width: 320px;
   margin: auto;
   padding: var(--space-6) 0;
@@ -258,23 +257,24 @@
   color: var(--bubble-mine-fg);
 }
 
-/* The tail: the last bubble of a group gets a flattened corner on the author's side. */
-.message.theirs.group-last .message-bubble {
-  border-bottom-left-radius: var(--radius-sm);
+/* The tail: the FIRST bubble of a group gets a flattened top corner on the author's side, pointing at
+   the avatar and name, which sit at the top of the group. */
+.message.theirs.group-first .message-bubble {
+  border-top-left-radius: var(--radius-sm);
 }
 
-.message.mine.group-last .message-bubble {
-  border-bottom-right-radius: var(--radius-sm);
+.message.mine.group-first .message-bubble {
+  border-top-right-radius: var(--radius-sm);
 }
 
-[dir="rtl"] .message.theirs.group-last .message-bubble {
-  border-bottom-left-radius: var(--radius-xl);
-  border-bottom-right-radius: var(--radius-sm);
+[dir="rtl"] .message.theirs.group-first .message-bubble {
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-sm);
 }
 
-[dir="rtl"] .message.mine.group-last .message-bubble {
-  border-bottom-right-radius: var(--radius-xl);
-  border-bottom-left-radius: var(--radius-sm);
+[dir="rtl"] .message.mine.group-first .message-bubble {
+  border-top-right-radius: var(--radius-xl);
+  border-top-left-radius: var(--radius-sm);
 }
 
 /* On the author's side (physical, so a bubble's own text direction can't move it). */
@@ -711,27 +711,17 @@
 /* ---------- Actions: the hover toolbar (mouse) ---------- */
 
 /* Hidden on touch: long-press and the time button open the sheet there. With a mouse it appears on hover
-   or when the message (or anything in it) has keyboard focus, floating over the bubble's top-end corner.
-   Its box is at least as wide as the toolbar, so a short bubble never pushes it off the list's edge. */
+   or when the message (or anything in it) has keyboard focus. MessageItem places it as it appears — beside
+   the bubble when there's room, else over the bubble's top-end corner, lifted above the author's name
+   rather than covering it (lib/toolbar-placement.ts); the position below is only the before-JS default. */
 .message-toolbar {
   display: none;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .message-bubble-wrap {
-    min-width: 176px;
-  }
-
-  .message.jumbo .message-bubble-wrap,
-  .message.is-editing .message-bubble-wrap {
-    min-width: 0;
-  }
-
   .message-toolbar {
     position: absolute;
     z-index: 2;
-    /* Mostly above the bubble: it may cover the end of the message above (as Slack's does), but only the
-       bubble's top padding of its own, never its first line. */
     top: -28px;
     right: 4px;
     display: flex;
@@ -939,18 +929,25 @@
   border-top: 1px solid var(--border);
   background: var(--bg-surface);
   padding: var(--space-2);
-  padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--space-2) + var(--safe-bottom));
 }
 
 /* One rounded well: [attach] [location] [textarea] [send]. Everything is 40px, so at one line the row is
-   centred; as the textarea grows the buttons stay at the bottom, next to the line being typed. */
+   centred; as the textarea grows the buttons stay at the bottom, next to the line being typed.
+   The corner is concentric with the round buttons: their 20px radius + the 3px padding + the 1px border.
+   At one line that makes the well a pill hugging the send button; taller, the bottom corners still
+   follow the buttons' curve instead of cutting across it. */
 .composer-well {
+  --composer-pad: 3px;
+
   display: flex;
   align-items: flex-end;
   border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
+  border-radius: calc(20px + var(--composer-pad) + 1px);
+  max-width: var(--conversation-w);
+  margin-inline: auto;
   background: var(--bg-elevated);
-  padding: 3px;
+  padding: var(--composer-pad);
 }
 
 .composer-well:focus-within {
@@ -1011,7 +1008,8 @@
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;
-  margin: 0 0 var(--space-1);
+  max-width: var(--conversation-w);
+  margin: 0 auto var(--space-1);
   padding: 0;
   list-style: none;
 }
@@ -1110,7 +1108,8 @@
   grid-template-columns: minmax(0, 1fr) 120px 120px;
   align-items: end;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
+  max-width: var(--conversation-w);
+  margin: 0 auto var(--space-2);
 }
 
 .composer-location-form .field-label {

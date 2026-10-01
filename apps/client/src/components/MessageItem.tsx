@@ -1,11 +1,14 @@
 import type { Message, User } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import type { ComponentChildren } from "preact";
-import { useState } from "preact/hooks";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { isImageAttachment } from "../lib/attachments";
+import { trackBubbleFit } from "../lib/bubble-fit";
+import { copyText } from "../lib/clipboard";
 import { renderMarkdownCached } from "../lib/markdown";
+import { placeToolbar } from "../lib/toolbar-placement";
 import { bodyFor, displayTime } from "../lib/message-format";
 import { isJumboEmoji, type ReactionSummary } from "../lib/messages";
 import { useLongPress } from "../lib/use-long-press";
@@ -48,33 +51,14 @@ interface MessageItemProps {
   showAuthor?: boolean;
 }
 
-/**
- * Put text on the clipboard. `navigator.clipboard` exists only in a secure context, and a LOAM node is
- * usually plain HTTP on the LAN, so fall back to the old hidden-textarea + `execCommand("copy")` route.
- */
-async function copyText(text: string): Promise<void> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return;
-    }
-  } catch {
-    // Fall through to the legacy path.
+/** The box of an element's text itself (a block's full-width row would be far wider than the words). */
+function textBox(element: Element | null): DOMRect | undefined {
+  if (!element) {
+    return undefined;
   }
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.style.position = "fixed";
-  area.style.opacity = "0";
-  document.body.appendChild(area);
-  area.select();
-  // iOS Safari selects nothing in a readonly textarea from `select()` alone.
-  area.setSelectionRange(0, area.value.length);
-  try {
-    document.execCommand("copy");
-  } finally {
-    area.remove();
-  }
+  const range = element.ownerDocument.createRange();
+  range.selectNodeContents(element);
+  return range.getBoundingClientRect();
 }
 
 /** Letters of the right-to-left scripts LOAM ships (Hebrew, Arabic, Persian/Dari/Pashto/Urdu, Syriac, Thaana…). */
@@ -224,6 +208,61 @@ export function MessageItem({
   const sheetActions = replyAction ? [replyAction, ...menuActions] : menuActions;
   const hasActions = canReact || sheetActions.length > 0;
 
+  const hasLocation = !removed && "location" in message && !!message.location;
+  const stampInline = !editing && !jumbo && !hasLocation && (removed || bodyText.trim() !== "");
+  // A text-only bubble is narrowed to its widest line once it wraps (lib/bubble-fit.ts); one with
+  // attachments keeps the width they give it.
+  const fitWidth = stampInline && !hasAttachments;
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const bubble = bubbleRef.current;
+    const column = bubble?.parentElement?.parentElement;
+    if (!fitWidth || !bubble || !column) {
+      return;
+    }
+    return trackBubbleFit(bubble, column);
+  }, [fitWidth, bodyText, message.editedAt, removed]);
+
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  /**
+   * Place the desktop hover toolbar just before it shows (hover or keyboard focus): beside the bubble when
+   * there's room, else over its corner, never on the author's name (lib/toolbar-placement.ts). Positions
+   * are measured, since how much room a bubble leaves depends on its width.
+   */
+  function positionToolbar(event: Event): void {
+    const toolbar = toolbarRef.current;
+    const bubble = bubbleRef.current;
+    const wrap = toolbar?.parentElement;
+    const article = event.currentTarget as HTMLElement;
+    const list = article.closest(".message-list, .thread-scroll");
+    if (!toolbar || !bubble || !wrap || !list) {
+      return;
+    }
+    const size = toolbar.getBoundingClientRect();
+    if (!size.width) {
+      return; // Hidden (touch layout): nothing to place.
+    }
+    const listBox = list.getBoundingClientRect();
+    const inset = 4;
+    const { left, top } = placeToolbar({
+      bubble: bubble.getBoundingClientRect(),
+      bounds: {
+        left: listBox.left + inset,
+        top: listBox.top,
+        right: listBox.right - inset,
+        bottom: listBox.bottom,
+      },
+      mine: isMine,
+      name: textBox(article.querySelector(".message-author")),
+      rtl: getComputedStyle(article).direction === "rtl",
+      toolbar: { width: size.width, height: size.height },
+    });
+    const origin = wrap.getBoundingClientRect();
+    toolbar.style.left = `${Math.round(left - origin.left)}px`;
+    toolbar.style.top = `${Math.round(top - origin.top)}px`;
+    toolbar.style.right = "auto";
+  }
+
   if (hiddenAsBlocked && !isMine && !revealed) {
     // No avatar, name, body, attachments or actions — just the fact that something is here.
     return (
@@ -244,12 +283,10 @@ export function MessageItem({
 
   const time = displayTime(message.createdAt);
   const edited = !!message.editedAt && !removed;
-  const hasLocation = !removed && "location" in message && !!message.location;
   // The time sits inside the bubble at its bottom-end corner. When text is the last thing in the bubble,
   // the stamp floats over the end of the last line and an invisible copy of it (a `::after` on the body,
   // reading `--stamp`) reserves exactly its width there, WhatsApp-style: a short message stays
   // one line tall, a long one wraps the stamp onto its own line. Otherwise it sits on its own row.
-  const stampInline = !editing && !jumbo && !hasLocation && (removed || bodyText.trim() !== "");
   const stampText = `${edited ? `${t("message.editedTag")} ` : ""}${time}`.replace(/["\\]/g, "");
   const bubbleClassName = [
     "message-bubble",
@@ -274,7 +311,11 @@ export function MessageItem({
   const showName = !isMine && showAuthor && groupFirst;
 
   return (
-    <article className={messageClassName}>
+    <article
+      className={messageClassName}
+      onFocusIn={hasActions && !editing ? positionToolbar : undefined}
+      onPointerEnter={hasActions && !editing ? positionToolbar : undefined}
+    >
       {showName ? (
         <p className="message-author" dir="auto">
           {author.displayName}
@@ -292,6 +333,7 @@ export function MessageItem({
         <div className="message-bubble-wrap">
           <div
             className={bubbleClassName}
+            ref={bubbleRef}
             dir={stampInline ? textDirection(removed ? t("message.removedByModerator") : bodyText) : undefined}
             style={stampInline ? { "--stamp": `"${stampText}"` } : undefined}
             {...(hasActions && !editing ? longPress : {})}
@@ -399,6 +441,7 @@ export function MessageItem({
             <div
               aria-label={t("message.actionsTitle")}
               className="message-toolbar"
+              ref={toolbarRef}
               // A pointer click must not focus a toolbar button: the toolbar shows while it has focus (so
               // keyboard users can reach it), and a focused button would pin it open after the click while
               // the mouse has already moved on to the next message. Keyboard focus is unaffected.

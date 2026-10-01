@@ -210,14 +210,13 @@ function ConversationPane({
         {isPrivateChannel ? <IconLock size={18} /> : <IconHash size={18} />}
       </span>
     );
-  // A DM's subtitle is the peer's id (their identity; display names are only near-unique), led by
-  // "Online" while they're connected. A channel's is its topic.
+  // A DM's subtitle says "Online" while the peer is connected, and is otherwise empty (the raw user id it
+  // used to show meant nothing to people). A channel's is its topic.
   const subtitle =
     conversation.kind === "dm" ? (
-      <>
-        {peerOnline ? <span className="presence-text">{t("sidebar.online")}</span> : null}
-        <span className="peer-id">{conversation.id}</span>
-      </>
+      peerOnline ? (
+        <span className="presence-text">{t("sidebar.online")}</span>
+      ) : undefined
     ) : (
       activeChannel?.description
     );
@@ -585,7 +584,9 @@ function MessageList({
             </div>
           ))
         ) : (
-          <p className="empty-copy message-list-empty">{t("messageList.empty")}</p>
+          <p className="empty-copy message-list-empty">
+            {conversation.kind === "dm" ? t("messageList.emptyDm") : t("messageList.empty")}
+          </p>
         )}
       </div>
       <div className="message-list-overlay">

@@ -1,5 +1,6 @@
 import {
   ChannelSchema,
+  DmInboxSchema,
   MessageAttachmentSchema,
   MessageSchema,
   UserSchema,
@@ -44,6 +45,7 @@ import {
   reconcileConversationSnapshot,
   type LiveChanges,
 } from "./lib/messages";
+import { dmConversationPeers, inboxUnreadPeers, reconcileInboxEntry, type DmInboxEntry } from "./lib/dm-inbox";
 import {
   clearAllRecords,
   deleteRecord,
@@ -122,6 +124,12 @@ type Config = {
 const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
 const LAST_CONVERSATION_KEY = "loam.lastConversation";
+
+/** The conversation a path opens (a channel, thread or DM), or undefined for any other screen. */
+function conversationOfPath(path: string): Conversation | undefined {
+  const route = parseRoute(path);
+  return route.screen === "channels" ? route.conversation : undefined;
+}
 // How long the boot keeps hydrated (cached) content OFF screen while the node is asked to confirm this
 // browser's identity (CodeRabbit, PR #130). A node that reset the identity hands back a different one and the
 // cache is purged before anything renders; online, the answer arrives well inside this. Offline, the fetch
@@ -407,6 +415,19 @@ function LoamApp() {
     .filter(Boolean)
     .join(" ");
   const [channels, setChannels] = useState<Channel[]>([]);
+  // The server's DM inbox (`GET /api/dms`): who this user has conversations with. Undefined while loading
+  // (the sidebar then shows the conversations this device already holds), null on a node too old to have
+  // one (the sidebar then lists everyone, as before).
+  const [dmInbox, setDmInbox] = useState<DmInboxEntry[] | null>();
+  // Every inbox write checks this epoch: a request answers for the epoch it started in, and is dropped if
+  // the epoch moved on meanwhile (an identity purge, a newer boot fetch), so a late answer for an older
+  // state — e.g. the previous identity's — can never land.
+  const inboxEpochRef = useRef(0);
+  const inboxRefreshTimerRef = useRef<number>();
+  const invalidateInboxRequests = useCallback(() => {
+    inboxEpochRef.current += 1;
+    window.clearTimeout(inboxRefreshTimerRef.current);
+  }, []);
   const [users, setUsers] = useState<User[]>([currentUser]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [config, setConfig] = useState<Config>();
@@ -1011,6 +1032,10 @@ function LoamApp() {
     setMessages([]);
     setChannels([]);
     setUsers([]);
+    // The previous identity's DM partners and unread state must not outlive it (the new identity's inbox
+    // is fetched fresh; until it lands the sidebar shows only what the new identity holds).
+    invalidateInboxRequests();
+    setDmInbox(undefined);
     lastReadRef.current = {};
     setLastReadByConversation({});
     setTyping({});
@@ -1266,9 +1291,40 @@ function LoamApp() {
     }
   }, [location]);
 
+  // Remember the last conversation opened (only conversation paths), so a wide screen can reopen it.
   useEffect(() => {
-    localStorage.setItem(LAST_CONVERSATION_KEY, location.path);
+    if (conversationOfPath(location.path)) {
+      localStorage.setItem(LAST_CONVERSATION_KEY, location.path);
+    }
   }, [location.path]);
+
+  // From tablet width up the conversation list is a sidebar, so bare /channels would leave an empty pane:
+  // open the last conversation instead (if it's still here), else the first channel as the sidebar orders
+  // them. On a phone /channels IS the list screen, so it stays.
+  useEffect(() => {
+    if (routeState.screen !== "channels" || routeState.conversation || !channels.length) {
+      return;
+    }
+    if (typeof window.matchMedia !== "function" || !window.matchMedia("(min-width: 720px)").matches) {
+      return;
+    }
+    const remembered = localStorage.getItem(LAST_CONVERSATION_KEY);
+    const target = remembered ? conversationOfPath(remembered) : undefined;
+    const stillThere =
+      target &&
+      (target.kind === "channel"
+        ? channels.some((channel) => channel.id === target.id)
+        : users.some((user) => user.id === target.id));
+    if (remembered && stillThere) {
+      location.route(remembered, true);
+      return;
+    }
+    const first = [...channels]
+      .sort((a, b) => Number(!!a.archived) - Number(!!b.archived) || Number(!!b.pinned) - Number(!!a.pinned))[0];
+    if (first) {
+      location.route(`/channel/${encodeURIComponent(first.id)}`, true);
+    }
+  }, [channels, location, routeState, users]);
 
   // The browser tab carries the operator-chosen network name once known.
   useEffect(() => {
@@ -1480,6 +1536,18 @@ function LoamApp() {
         }
 
         const preFetchUserIds = new Set(usersRef.current.map((user) => user.id));
+        // The DM inbox loads alongside but never holds up boot: it only decides which people the sidebar
+        // lists. Best effort — an older node has no /api/dms, and the sidebar then lists everyone as before.
+        invalidateInboxRequests();
+        const inboxEpoch = inboxEpochRef.current;
+        void fetchJson<unknown>("/api/dms")
+          .then((payload) => DmInboxSchema.parse(payload).conversations)
+          .catch(() => null)
+          .then((nextInbox) => {
+            if (active && inboxEpoch === inboxEpochRef.current) {
+              setDmInbox(nextInbox);
+            }
+          });
         const [nextChannels, nextUsers, nextBlocks] = await Promise.all([
           fetchJson<Channel[]>("/api/channels"),
           fetchJson<User[]>("/api/users"),
@@ -1591,12 +1659,21 @@ function LoamApp() {
     // Live deletes/edits after this point postdate the snapshot this request returns (see `LiveChangeJournal`).
     const liveMark = liveChangesRef.current.mark();
     const key = conversationKey(conversation);
+    // A DM history rebuilds that partner's inbox entry (below) — only for the inbox of the same epoch.
+    const inboxEpoch = inboxEpochRef.current;
 
     fetchJson<Message[]>(path)
       .then((nextMessages) => {
         if (active) {
           setNotFoundConversation((previous) => (previous === key ? undefined : previous));
           reconcileConversationMessages(conversation, nextMessages, preFetchIds, liveChangesRef.current.since(liveMark));
+          // A DM's full history is the truth about its inbox entry: rebuild it (or drop it when nothing is
+          // left), so a deleted DM can't leave an unread dot that opening the conversation can't clear.
+          if (conversation.kind === "dm" && inboxEpoch === inboxEpochRef.current) {
+            setDmInbox((previous) =>
+              previous ? reconcileInboxEntry(previous, conversation.id, nextMessages, currentUser.id) : previous,
+            );
+          }
         }
       })
       .catch((nextError: unknown) => {
@@ -1836,6 +1913,12 @@ function LoamApp() {
         }
 
         if (payload.type === "messageDeleted") {
+          // A deleted DM — or a message this device never held, which may be a DM the inbox reported — can
+          // change who's in the inbox and what's unread: re-read it.
+          const deleted = messagesRef.current.find((message) => message.id === payload.messageId);
+          if (!deleted || deleted.type === "dm") {
+            scheduleInboxRefresh();
+          }
           removeMessage(payload.messageId);
           return;
         }
@@ -1971,6 +2054,39 @@ function LoamApp() {
   const unreadByConversation = useMemo(
     () => countUnreadByConversation(withoutBlockedAuthors(messages, blockedUserIds), lastReadByConversation, currentUser.id),
     [blockedUserIds, currentUser.id, lastReadByConversation, messages],
+  );
+
+  // Re-read the DM inbox shortly after a deletion that may have touched it (a burst of deletes — a
+  // moderator clearing someone out — costs one request).
+  const scheduleInboxRefresh = useCallback(() => {
+    window.clearTimeout(inboxRefreshTimerRef.current);
+    inboxRefreshTimerRef.current = window.setTimeout(() => {
+      const epoch = inboxEpochRef.current;
+      void fetchJson<unknown>("/api/dms")
+        .then((payload) => {
+          if (epoch === inboxEpochRef.current) {
+            setDmInbox(DmInboxSchema.parse(payload).conversations);
+          }
+        })
+        .catch(() => undefined);
+    }, 400);
+  }, []);
+  useEffect(() => () => window.clearTimeout(inboxRefreshTimerRef.current), []);
+
+  const dmPeers = useMemo(
+    () =>
+      dmConversationPeers(
+        users,
+        currentUser.id,
+        dmInbox === null ? undefined : (dmInbox ?? []),
+        messages,
+        activeConversation?.kind === "dm" ? activeConversation.id : undefined,
+      ),
+    [activeConversation, currentUser.id, dmInbox, messages, users],
+  );
+  const dmUnreadHints = useMemo(
+    () => inboxUnreadPeers(dmInbox ?? undefined, currentUser.id, lastReadByConversation, unreadByConversation, blockedUserIds),
+    [blockedUserIds, currentUser.id, dmInbox, lastReadByConversation, unreadByConversation],
   );
 
   /** Block or unblock someone; the server answers with the whole updated list, which replaces ours. */
@@ -2127,6 +2243,8 @@ function LoamApp() {
         channels={channels}
         connection={connection}
         currentUser={currentUser}
+        dmPeers={dmPeers}
+        dmUnreadHints={dmUnreadHints}
         inviteQr={config ? inviteQrHostKey() : undefined}
         joinUrl={config?.joinUrl}
         nodeName={config?.networkConfig.nodeName}

@@ -100,6 +100,15 @@
   --control-h-sm: 36px;
   --sidebar-w: 280px;
   --thread-w: 360px;
+  /* The conversation column's reading width on wide screens (messages and composer are centred in it). */
+  --conversation-w: 820px;
+
+  /* Device safe areas (notch, status bar, gesture bar). Always use these, never env() directly: inside
+     the Android host the native layout already clears the system bars, so they're zero there (below). */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 
   /* Stacking */
   --z-popover: 70;
@@ -174,4 +183,13 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
+}
+
+/* Inside the Android host's WebView (lib/viewport.ts sets the attribute) the native app pads for the
+   system bars itself, so the page must not pad for them again. */
+:root[data-native-host] {
+  --safe-top: 0px;
+  --safe-right: 0px;
+  --safe-bottom: 0px;
+  --safe-left: 0px;
 }
