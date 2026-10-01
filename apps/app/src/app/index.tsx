@@ -24,6 +24,7 @@ import { DbEncryptionSettingsOverlay } from '@/components/db-encryption-settings
 import { EmergencyResetOverlay } from '@/components/emergency-reset';
 import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
+import { SetupWizard, type SetupOutcome } from '@/components/setup-wizard';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { PRIVACY_POLICY_URL } from '@/constants/links';
@@ -236,13 +237,40 @@ let nodeHostToken: string | undefined;
 // once set it's never cleared by a status change, only by the operator dismissing it in this render.
 let nodeNotice: BootNotice | undefined;
 
+// The setup screens run once per process, before the runtime starts (it can't restart, so a remount after
+// that goes straight to the host screen). `afterSetup` is what setup asked the host screen to open first.
+let setupComplete = false;
+let afterSetup: { path: string; openShare: boolean } = { path: '', openShare: false };
+
+/**
+ * The app's root: the setup screens (language, kind of network, name, how people connect; or one tap to
+ * continue the last network), then the host screen, which starts the server.
+ */
+export default function HostRoot() {
+  const [ready, setReady] = useState(() => setupComplete || nodeStarted || Platform.OS !== 'android');
+  if (!ready) {
+    return (
+      <SetupWizard
+        onDone={(outcome: SetupOutcome) => {
+          setupComplete = true;
+          // "Choose every setting myself" lands on the admin settings; anything else shows how to join.
+          const custom = outcome.newNetwork && outcome.record.preset === 'custom';
+          afterSetup = { path: custom ? '/admin' : '', openShare: !custom };
+          setReady(true);
+        }}
+      />
+    );
+  }
+  return <HostScreen />;
+}
+
 /**
  * The LOAM Android host screen. Boots the embedded Node server on first mount, waits for its
  * readiness signal (posted by main.js once /api/config answers), then loads the served LOAM client
  * in a WebView with cookies + WebSocket enabled. Shows a "starting host…" state until then, since
  * cold start can take ~80s (docs/04).
  */
-export default function HostScreen() {
+function HostScreen() {
   // Initialise from the module-level status so a remount after the node is already ready/errored
   // doesn't get stuck showing "starting" (the runtime won't re-emit).
   const [status, setStatus] = useState<HostStatus>(() => nodeStatus);
@@ -277,7 +305,9 @@ export default function HostScreen() {
   const [wipeClearFailure, setWipeClearFailure] = useState<string | undefined>();
   const [wipeClearBusy, setWipeClearBusy] = useState(false);
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
-  const [shareOpen, setShareOpen] = useState(false);
+  // Opened straight after setup (the join codes, or the admin settings for a hand-configured network).
+  const [shareOpen, setShareOpen] = useState(() => afterSetup.openShare);
+  const [initialPath] = useState(() => afterSetup.path);
   const [resetOpen, setResetOpen] = useState(false);
   // Whether the on-device LLM model manager overlay (docs/06) is open.
   const [modelManagerOpen, setModelManagerOpen] = useState(false);
@@ -1125,7 +1155,7 @@ export default function HostScreen() {
           <WebView
             key={webViewKey}
             ref={webViewRef}
-            source={{ uri: `${LOAM_URL}${transportKeyFragment}` }}
+            source={{ uri: `${LOAM_URL}${initialPath}${transportKeyFragment}` }}
             style={styles.flex}
             // Hand the launcher's per-boot host token to the LOAM client running in THIS WebView (and only
             // here — a LAN joiner never sees it): the client claims admin with it on its first boot under the

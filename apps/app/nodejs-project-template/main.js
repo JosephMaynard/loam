@@ -789,7 +789,13 @@ function requestDbKey(timeoutMs) {
       // Return THIS request's id (Sol Fable-round-2 P1-B): the boot that follows threads it into the embedded
       // server as an IMMUTABLE per-boot value, so the migration ack the server later emits carries the id of
       // the attempt that actually opened the DB — never a mutable launcher global a later attempt overwrote.
-      finish({ mode: mode, key: key, legacyKey: legacyKey, requestId: requestId });
+      // A new network from the setup screens carries its starting configuration; the data folder is emptied
+      // and the configuration written before anything below reads the folder (startNewNetwork).
+      var newNetwork =
+        payload && payload.newNetwork && typeof payload.newNetwork === 'object' && !Array.isArray(payload.newNetwork)
+          ? payload.newNetwork
+          : undefined;
+      finish({ mode: mode, key: key, legacyKey: legacyKey, requestId: requestId, newNetwork: newNetwork });
     }
 
     var timer = setTimeout(function () {
@@ -901,6 +907,38 @@ function readDbModeHint() {
 // P1-b (Sol round 6): whether an on-disk DB file exists — the fail-closed input to the locked-error
 // plaintext decision below. `existsSync` throwing (unexpected) errs on the SAFE side: assume a DB may be
 // present, so a locked-error with an absent hint LOCKS rather than downgrades.
+/**
+ * A new network from the setup screens: empty the data folder (the previous network's database, media,
+ * configuration and mode hint) and write the chosen starting configuration as config.json, all before the
+ * boot decision reads the folder. RN sends this once, only after the person confirmed erasing any previous
+ * network, and has already cleared that network's stored keys, so an encrypted leftover the delete missed
+ * stays unreadable. A failed delete leaves a database behind, so the configuration isn't written and the
+ * normal boot path reports the leftover (the same recovery screens as any unreadable database).
+ */
+function startNewNetwork(config) {
+  try {
+    if (fs.existsSync(dataDir)) {
+      fs.readdirSync(dataDir).forEach(function (entry) {
+        fs.rmSync(path.join(dataDir, entry), { recursive: true, force: true });
+      });
+      fsyncDir(dataDir);
+    }
+  } catch (err) {
+    console.warn('LOAM-SETUP: could not empty the data folder: ' + (err && err.message));
+  }
+  if (dbFileExists()) {
+    console.warn('LOAM-SETUP: the previous database is still present; not writing the new configuration');
+    return;
+  }
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    var outcome = durableWriteConfig(fs, dataDir, configPath, JSON.stringify(config, null, 2));
+    console.warn('LOAM-SETUP: new network configuration: ' + outcome);
+  } catch (err) {
+    console.warn('LOAM-SETUP: could not write the new network configuration: ' + (err && err.message));
+  }
+}
+
 function dbFileExists() {
   try {
     return fs.existsSync(path.join(dataDir, 'loam.db'));
@@ -1418,6 +1456,9 @@ function resolveDbEncryptionAndBoot() {
       // request-id from an earlier (e.g. encrypted) attempt can never leak into an off/locked/downgrade retry
       // in the SAME process (db.ts gives encryptionKey precedence over the plaintext driver, so a leaked key
       // would silently keep an "off" retry on SQLCipher, mis-report posture, and mislead the mode hint).
+      if (result && result.newNetwork) {
+        startNewNetwork(result.newNetwork);
+      }
       var cfg = computeDbBootEnv(result, {
         hint: readDbModeHint(),
         dbExists: dbFileExists(),

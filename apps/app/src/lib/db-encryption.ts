@@ -578,6 +578,18 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
  *
  * Never logs `key`/`legacyKey`/the passphrase. Returns a cleanup that removes both listeners.
  */
+/**
+ * A new network's starting configuration from the setup screens. It rides the next key response only
+ * (then is forgotten): the launcher empties the data folder and writes it as config.json before booting
+ * (main.js `startNewNetwork`). Sending it once matters, since a later key request (an unlock retry, a
+ * wipe's restart) must never empty the folder of the network that is now running.
+ */
+let pendingNewNetwork: Record<string, unknown> | undefined;
+
+export function setPendingNewNetwork(config: Record<string, unknown> | undefined): void {
+  pendingNewNetwork = config;
+}
+
 export function registerDbEncryption(channel: BridgeChannel): () => void {
   const onRequest = (payload: unknown): void => {
     // Echo main.js's correlation id (Sol Fable-round P1-1) so a late answer to an already-timed-out
@@ -613,9 +625,19 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
         response = { mode: DB_ENCRYPTION_MODE_READ_ERROR };
       }
       try {
-        const payload: { mode: DbEncryptionModeOrError; key?: string; legacyKey?: string; requestId?: string } = {
+        const payload: {
+          mode: DbEncryptionModeOrError;
+          key?: string;
+          legacyKey?: string;
+          requestId?: string;
+          newNetwork?: Record<string, unknown>;
+        } = {
           mode: response.mode,
         };
+        if (pendingNewNetwork && response.mode !== DB_ENCRYPTION_MODE_READ_ERROR) {
+          payload.newNetwork = pendingNewNetwork;
+          pendingNewNetwork = undefined;
+        }
         if (requestId !== undefined) {
           payload.requestId = requestId;
         }

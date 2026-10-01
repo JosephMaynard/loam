@@ -214,6 +214,40 @@ parsing, address choice, panel projection and persistence are covered by `host-m
 `host-mode-store.test.ts`. It has not yet been run on a physical phone: the station read, the SSID
 redaction behaviour and the no-internet-router case all need a device test.
 
+### Setup screens
+
+The host app opens on its setup screens (`src/components/setup-wizard.tsx`) every launch, and the
+embedded runtime only starts once they finish, so a new network's settings exist before the server first
+reads its data folder.
+
+- **First launch:** language (the app's own catalogs, `src/lib/i18n`; also the new node's `node.locale`),
+  then the kind of network, its name, and Hotspot or Wi-Fi (the persisted host mode).
+- **Later launches:** one screen. If the data folder holds a database that wasn't ephemeral, it offers
+  **Continue** (one tap, nothing changes) or **Start a new network**, which takes a press-and-hold to
+  erase the old one. If the last network was ephemeral (already unreadable), it offers to start a new one
+  with the remembered answers, or to change them.
+
+The three kinds (`src/lib/setup.ts`) are a named security profile (docs/09) plus the identity and
+presence flags no profile covers, and a storage mode (docs/01):
+
+| | Private and short-lived | Community | Choose every setting myself |
+|---|---|---|---|
+| `security.profile` | `hardened` (approval, 1 h messages, kill switch, `required`) | `standard` (open, kept, `optional`) | unchanged defaults |
+| Names and photos | off | on | defaults |
+| Presence | hidden | shown | default |
+| DB encryption mode | `ephemeral` | `persistent` | unchanged |
+
+After setup the host screen opens the share screen (the join codes), or the admin settings for the
+third choice.
+
+**How a new network starts.** `prepareNewNetwork` (`src/lib/new-network.ts`) sets the storage mode,
+clears the stored DB keys (so anything of the old network left on flash stays unreadable), and queues
+the starting configuration. That rides the next `loam-db-key-response` exactly once, as `newNetwork`;
+main.js's `startNewNetwork` then empties the data folder and writes the configuration as `config.json`
+before the boot decision reads the folder. Sending it once matters: a later key request (an unlock retry,
+a wipe's restart) must never empty the running network's folder. If the delete leaves a database behind,
+the configuration isn't written and the normal boot path reports the leftover.
+
 ### Native prebuild (SQLite drivers — plain + encrypted)
 `fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) places **both** SQLite native modules
 into the embedded project's `node_modules` (the DAL, `apps/server/src/db.ts`, lazy-`require`s whichever

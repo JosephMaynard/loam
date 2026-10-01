@@ -37,6 +37,7 @@ const {
   setDbEncryptionMode,
   setDbModeHint,
   setPassphraseCandidate,
+  setPendingNewNetwork,
 } = await import("@/lib/db-encryption");
 type BridgeChannel = import("@/lib/db-encryption").BridgeChannel;
 type DbEncryptionMode = import("@/lib/db-encryption").DbEncryptionMode;
@@ -301,6 +302,34 @@ describe("registerDbEncryption", () => {
       expect(channel.posted).toEqual([{ name: "loam-db-key-response", payload: { mode: "error" } }]);
     } finally {
       cleanup();
+    }
+  });
+
+  it("sends a new network's configuration with the next key response only, never after a read error", async () => {
+    const config = { node: { name: "Camp", locale: "en" } };
+    setPendingNewNetwork(config);
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    try {
+      failSecureStoreItem("loam-db-encryption-mode", new Error("Keystore unavailable"));
+      channel.emit("loam-db-key-request", { requestId: "r1" });
+      await flushMicrotasks();
+      clearSecureStoreFailure("loam-db-encryption-mode");
+      channel.emit("loam-db-key-request", { requestId: "r2" });
+      await flushMicrotasks();
+      // A later request (an unlock retry, a wipe's restart) must not empty the running network's folder.
+      channel.emit("loam-db-key-request", { requestId: "r3" });
+      await flushMicrotasks();
+
+      const payloads = channel.posted.map((entry) => entry.payload as { requestId: string; newNetwork?: unknown });
+      expect(payloads.map((payload) => [payload.requestId, payload.newNetwork])).toEqual([
+        ["r1", undefined],
+        ["r2", config],
+        ["r3", undefined],
+      ]);
+    } finally {
+      cleanup();
+      setPendingNewNetwork(undefined);
     }
   });
 

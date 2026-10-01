@@ -7,6 +7,15 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Setup screens on the Android host.** The first launch asks for a language, the kind of network,
+  its name and how people connect (Hotspot or Wi-Fi). The kinds are plain choices:
+  - **Private and short-lived:** random names and pictures, messages gone after an hour, each joiner
+    approved, encrypted connections only, and nothing readable once the app closes.
+  - **Community:** names and photos, open to anyone nearby, and messages kept, stored encrypted.
+  - **Choose every setting myself:** opens the admin settings.
+
+  Later launches show one screen: continue the last network in one tap, or start a new one (erasing the
+  old one takes a press-and-hold).
 - **Display mode on the Android host** (replacing the separate "Keep screen on" and "Kiosk mode"
   switches): one button on the share screen shows the join codes full screen, as large as the screen
   allows with no scrolling (one code on Wi-Fi; two on a hotspot, side by side in landscape), keeps the
