@@ -8,6 +8,7 @@ import { ThemedView } from './themed-view';
 import { Spacing } from '@/constants/theme';
 import type { HostMode } from '@/lib/host-mode';
 import { t, type AppCatalogKey } from '@/lib/i18n';
+import { typedAddress } from '@/lib/join-url';
 
 /** Live host state, supplied by the embedded server + hotspot native module (initiative 4). */
 export type HotspotInfo = {
@@ -144,7 +145,7 @@ function WifiJoin({ state }: { state: HostState }) {
           </ThemedText>
           <QRCode value={state.serverUrl} />
           <ThemedText type="code" style={styles.manual}>
-            {state.serverUrl}
+            {typedAddress(state.serverUrl)}
           </ThemedText>
           <AlsoAt addresses={state.addresses} />
         </>
@@ -210,7 +211,7 @@ function HotspotJoin({ state }: { state: HostState }) {
           <>
             <QRCode value={state.serverUrl} />
             <ThemedText type="code" style={styles.manual}>
-              {state.serverUrl}
+              {typedAddress(state.serverUrl)}
             </ThemedText>
             <AlsoAt addresses={state.addresses} />
           </>

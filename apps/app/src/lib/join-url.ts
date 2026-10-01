@@ -84,3 +84,11 @@ export function withInviteCode(fragment: string, code: string | undefined): stri
   }
   return fragment ? `${fragment}&i=${code}` : `#i=${code}`;
 }
+
+/**
+ * The address to print beside a join QR: the URL without its fragment. The key and invite code (`#k=…&i=…`)
+ * only work scanned, and nobody can type them anyway.
+ */
+export function typedAddress(url: string): string {
+  return url.split('#')[0]!;
+}

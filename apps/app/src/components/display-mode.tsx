@@ -10,6 +10,7 @@ import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useAppLocale } from '@/hooks/use-app-locale';
 import { displayCodeSize, EXIT_HEIGHT, HEADING_HEIGHT } from '@/lib/display-layout';
+import { typedAddress } from '@/lib/join-url';
 import { t } from '@/lib/i18n';
 
 /**
@@ -33,8 +34,7 @@ export function DisplayModeScreen({
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const wifi = state.mode === 'hotspot' && state.hotspot ? wifiPayload(state.hotspot.ssid, state.hotspot.password) : undefined;
-  // The address people could type: the fragment (key, invite code) only works scanned, so leave it off.
-  const typedUrl = state.serverUrl?.split('#')[0];
+  const typedUrl = state.serverUrl ? typedAddress(state.serverUrl) : undefined;
   const codes: Array<{ title: string; value: string; caption: string; ecLevel?: 'M' }> = [];
   if (state.mode === 'hotspot') {
     if (wifi && state.hotspot) {
