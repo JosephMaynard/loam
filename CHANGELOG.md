@@ -70,6 +70,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **New website.** A redesigned loamnet.com with real screenshots of the web app (light and dark) and the
+  Android app, a quick start for Android and for `npx loamnet`, and new fonts (Bricolage Grotesque and
+  Inter, self-hosted). The footer's analytics note now matches the privacy policy: visits are counted
+  without cookies or profiles, and PostHog does see your IP address.
 - **Plainer punctuation everywhere.** Every em-dash is gone from the interface in all 16 languages, the
   Android host app, the server's user-facing messages, the `loam` CLI and the website, rewritten as full
   stops, colons or commas. A test keeps the translations dash-free.
