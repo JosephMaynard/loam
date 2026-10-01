@@ -87,7 +87,7 @@ export type ModelActionResult = {
 };
 
 const PERSIST_FAILED_MESSAGE =
-  "Couldn't save that change to the model list — it may not survive an app restart. Try again.";
+  "Couldn't save that change to the model list: it may not survive an app restart. Try again.";
 
 // ---------------------------------------------------------------------------
 // Global operation mutex — serializes the ENTIRE persist → bridge → rollback transaction.
@@ -161,7 +161,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
       return {
         kind: 'ambiguous',
         state: cleared.state,
-        message: `${model.displayName} is now the active model, but its pending record couldn't be cleared — it'll be reconciled next time you open the model manager. Restart the LOAM host app to load it.`,
+        message: `${model.displayName} is now the active model, but its pending record couldn't be cleared: it'll be reconciled next time you open the model manager. Restart the LOAM host app to load it.`,
       };
     }
     return {
@@ -177,8 +177,8 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
       pendingId: POINTER_PENDING_ID,
       failedMessage: (rolledBack) =>
         rolledBack
-          ? `Couldn't set ${model.displayName} active — the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't set ${model.displayName} active, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
+          ? `Couldn't set ${model.displayName} active: the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
+          : `Couldn't set ${model.displayName} active, and the rollback also failed to save: local state and the host app's config may now disagree. Restart the LOAM host app.`,
     });
     // Definite failure → rolled back to the PREVIOUS model. Synchronize the engine to the DISK-CONFIRMED
     // result (Sol P2#2): if B was still loaded/loading it is now released/abandoned; if the restored model is
@@ -234,7 +234,7 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
         kind: 'ambiguous',
         state: cleared.state,
         message:
-          "On-device model deactivated, but its pending record couldn't be cleared — it'll be reconciled next time you open the model manager. Restart the LOAM host app to apply it.",
+          "On-device model deactivated, but its pending record couldn't be cleared: it'll be reconciled next time you open the model manager. Restart the LOAM host app to apply it.",
       };
     }
     return {
@@ -250,8 +250,8 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
       pendingId: POINTER_PENDING_ID,
       failedMessage: (rolledBack) =>
         rolledBack
-          ? `Couldn't deactivate the on-device model — the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't deactivate the on-device model, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
+          ? `Couldn't deactivate the on-device model: the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
+          : `Couldn't deactivate the on-device model, and the rollback also failed to save: local state and the host app's config may now disagree. Restart the LOAM host app.`,
     });
     // Rolled back to the PREVIOUS model → synchronize the engine to that disk-confirmed target (target-aware:
     // if it was the loaded model all along, it is left untouched).
@@ -373,8 +373,8 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
         kind: 'rolled-back',
         state: rolled,
         message: rolledBack
-          ? `Couldn't delete ${model.displayName} — the host app's active-model config couldn't be cleared (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't delete ${model.displayName}, and the rollback also failed to save — local state and the host app's config may now disagree. Restart the LOAM host app.`,
+          ? `Couldn't delete ${model.displayName}: the host app's active-model config couldn't be cleared (${result.error ?? 'unknown error'}). No change was made.`
+          : `Couldn't delete ${model.displayName}, and the rollback also failed to save: local state and the host app's config may now disagree. Restart the LOAM host app.`,
       };
     }
     if (result.status === 'timeout') {
@@ -433,7 +433,7 @@ async function commitByteDeletion(
       state: writeAheadState,
       message:
         released === 'poisoned'
-          ? `Removed ${model.displayName} from the list, but the on-device engine needs a restart before its file can be safely deleted — it'll be cleared after you restart the LOAM host app.`
+          ? `Removed ${model.displayName} from the list, but the on-device engine needs a restart before its file can be safely deleted: it'll be cleared after you restart the LOAM host app.`
           : `Removed ${model.displayName} from the list; its file will be deleted once the on-device engine finishes releasing it (reconciled next time you open the model manager or restart the host).`,
     };
   }
@@ -443,7 +443,7 @@ async function commitByteDeletion(
     return {
       kind: 'ambiguous',
       state: writeAheadState,
-      message: `Removed ${model.displayName} from the list, but its file couldn't be deleted (${error instanceof Error ? error.message : String(error)}) — it'll be retried next time you open the model manager.`,
+      message: `Removed ${model.displayName} from the list, but its file couldn't be deleted (${error instanceof Error ? error.message : String(error)}): it'll be retried next time you open the model manager.`,
     };
   }
   const cleared = await clearPendingEntry(deps, `delete:${model.uri}`);
@@ -451,7 +451,7 @@ async function commitByteDeletion(
     return {
       kind: 'ambiguous',
       state: cleared.state,
-      message: `Deleted ${model.displayName}'s file, but its pending record couldn't be cleared — it'll be reconciled next time you open the model manager.`,
+      message: `Deleted ${model.displayName}'s file, but its pending record couldn't be cleared: it'll be reconciled next time you open the model manager.`,
     };
   }
   return { kind: 'ok', state: cleared.state, message: `${model.displayName} deleted.` };
@@ -680,7 +680,7 @@ export function reconcilePendingActions(deps: ModelActionDeps): Promise<Reconcil
       message:
         remaining.length === 0
           ? undefined
-          : `${remaining.length} change${remaining.length === 1 ? '' : 's'} still pending — the host app is unreachable. They'll retry the next time you open this.`,
+          : `${remaining.length} change${remaining.length === 1 ? '' : 's'} still pending: the host app is unreachable. They'll retry the next time you open this.`,
     };
   });
 }

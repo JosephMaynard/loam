@@ -550,7 +550,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     if (!currentUser.isAdmin && channelScoped.some((message) => message.authorId !== currentUser.id)) {
       return reply
         .code(403)
-        .send(errorBody("This channel has messages from other people — only an admin can delete it"));
+        .send(errorBody("This channel has messages from other people: only an admin can delete it"));
     }
 
     // Cascade: the channel's posts/replies plus every reaction targeting them. deleteMessages

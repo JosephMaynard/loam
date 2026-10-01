@@ -89,7 +89,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
         // (unknown, on this read) choice. Keep the last-known/default display and surface the failure
         // instead of silently overwriting it.
         if (currentMode === DB_ENCRYPTION_MODE_READ_ERROR) {
-          setStatusMessage("Couldn't read the current encryption setting (a device security-store error) — showing the last-known selection.");
+          setStatusMessage("Couldn't read the current encryption setting (a device security-store error): showing the last-known selection.");
         } else {
           setMode(currentMode);
         }
@@ -134,7 +134,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
         setMode(outcome.committedMode);
       }
       if (!outcome.applied) {
-        setStatusMessage(`Couldn't save — ${outcome.error ?? 'unknown error'}. The change was NOT applied; try again.`);
+        setStatusMessage(`Couldn't save: ${outcome.error ?? 'unknown error'}. The change was NOT applied; try again.`);
         return;
       }
       if (next === 'off') {
@@ -170,7 +170,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
           ' (No connection to the host to reset now; if an existing database blocks startup it will be handled from the boot Encryption-recovery screen on the next start.)';
       }
       setStatusMessage(
-        `${MODE_LABELS[next]} selected. Encryption applies to a fresh database — the existing database and any messages in it are permanently deleted when the host app is next restarted.${startFreshNote}`,
+        `${MODE_LABELS[next]} selected. Encryption applies to a fresh database: the existing database and any messages in it are permanently deleted when the host app is next restarted.${startFreshNote}`,
       );
     } finally {
       transitionInFlight.current = false;
@@ -216,13 +216,13 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
       // under the kept device secret — so the confirmation now honestly states permanent deletion in every case.
       next === 'ephemeral'
         ? 'Ephemeral mode starts a fresh on-device database on every app restart and holds the key only in ' +
-            'memory — nothing survives a reboot. The existing database and all messages in it are permanently ' +
+            'memory: nothing survives a reboot. The existing database and all messages in it are permanently ' +
             'deleted the next time the host app is restarted. This cannot be undone.'
         : mode === 'off'
-          ? 'Encryption can only apply to a fresh database — existing data cannot be converted in place. ' +
+          ? 'Encryption can only apply to a fresh database: existing data cannot be converted in place. ' +
               'Continuing permanently deletes the existing database and all messages in it, then starts a fresh ' +
               'encrypted database the next time the host app is restarted. This cannot be undone.'
-          : 'Encryption can only apply to a fresh database — an existing encrypted database cannot be reopened ' +
+          : 'Encryption can only apply to a fresh database: an existing encrypted database cannot be reopened ' +
               'with a new key. Continuing permanently deletes the existing database and all messages in it, then ' +
               'starts a fresh encrypted database the next time the host app is restarted. This cannot be undone.',
       [
@@ -255,7 +255,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     try {
       await setPassphraseCandidate(trimmed);
     } catch (err) {
-      setStatusMessage(`Couldn't save — ${err instanceof Error ? err.message : String(err)}. Try again.`);
+      setStatusMessage(`Couldn't save: ${err instanceof Error ? err.message : String(err)}. Try again.`);
       return;
     }
     setPassphraseInput('');
@@ -273,7 +273,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
   const forgetPassphrase = async () => {
     const result = await clearStoredPassphrase();
     if (!result.ok) {
-      setStatusMessage(`Couldn't forget the passphrase — ${result.error ?? 'unknown error'}. It is still set; try again.`);
+      setStatusMessage(`Couldn't forget the passphrase: ${result.error ?? 'unknown error'}. It is still set; try again.`);
       return;
     }
     setPassphrasePresence('absent');
@@ -288,7 +288,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     Alert.alert(
       'Forget the passphrase?',
       'The passphrase is never stored on this device, so this only clears the record that one is set and any ' +
-        'pending entry. The database is NOT deleted and still needs the same passphrase at the next start — if ' +
+        'pending entry. The database is NOT deleted and still needs the same passphrase at the next start: if ' +
         'you have forgotten it, the data can no longer be opened. Continue?',
       [
         { text: 'Cancel', style: 'cancel' },
@@ -328,9 +328,9 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
               <ThemedView type="backgroundElement" style={styles.noteCard}>
                 <ThemedText type="small" themeColor="textSecondary">
                   Encrypted modes (ephemeral/persistent/passphrase) need an app build that includes the
-                  SQLCipher native module — not every build has it yet. If it&apos;s missing, the host
+                  SQLCipher native module: not every build has it yet. If it&apos;s missing, the host
                   starts unencrypted and shows a clear warning rather than failing to boot. Encryption
-                  applies to a fresh database — there is no in-place conversion, so turning it on clears
+                  applies to a fresh database: there is no in-place conversion, so turning it on clears
                   any existing messages. Changes take effect the next time the host app is restarted.
                 </ThemedText>
               </ThemedView>
@@ -383,7 +383,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                         starts; it is never stored on this device. It can&apos;t be changed here: there is no
                         in-place passphrase rekey, so a different passphrase would make the existing encrypted
                         database permanently unreadable. To change it you must start fresh (from the boot
-                        Encryption recovery screen), which discards the existing encrypted data — this cannot
+                        Encryption recovery screen), which discards the existing encrypted data: this cannot
                         be undone. &quot;Forget&quot; only clears this record and any pending entry; the
                         database itself still needs the same passphrase at the next start.
                       </ThemedText>
@@ -438,7 +438,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                       <ThemedText type="small" themeColor="textSecondary">
                         {candidatePending
                           ? 'A passphrase has been entered for the NEXT start only: it is used once, confirmed if the database opens under it, and you will be asked for it again at every later start. Enter a different one to replace the pending entry.'
-                          : 'No passphrase entered yet — the host asks for one when it next starts (you can pre-enter it here for that one start). It is never stored on this device.'}
+                          : 'No passphrase entered yet: the host asks for one when it next starts (you can pre-enter it here for that one start). It is never stored on this device.'}
                       </ThemedText>
                       <TextInput
                         value={passphraseInput}

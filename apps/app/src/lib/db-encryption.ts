@@ -21,8 +21,8 @@ export const DB_ENCRYPTION_MODES: readonly DbEncryptionMode[] = ['off', 'ephemer
 
 /** One-line description shown next to each mode in the picker UI. */
 export const DB_ENCRYPTION_MODE_DESCRIPTIONS: Record<DbEncryptionMode, string> = {
-  off: 'The on-device database is stored in plain SQLite — the default.',
-  ephemeral: 'A random key generated at each launch, held only in memory. Wipes the database on every restart — nothing survives a reboot.',
+  off: 'The on-device database is stored in plain SQLite: the default.',
+  ephemeral: 'A random key generated at each launch, held only in memory. Wipes the database on every restart: nothing survives a reboot.',
   persistent: 'A random key generated once and stored in the device Keystore. Survives reboots; the database stays encrypted at rest.',
   passphrase:
     'A key derived from a passphrase you enter every time the host app starts, mixed with a device secret held in the Keystore. The passphrase itself is never stored on the device: the database survives reboots but stays locked until it is entered.',

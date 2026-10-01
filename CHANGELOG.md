@@ -38,6 +38,9 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **Plainer punctuation everywhere.** Every em-dash is gone from the interface in all 16 languages, the
+  Android host app, the server's user-facing messages, the `loam` CLI and the website, rewritten as full
+  stops, colons or commas. A test keeps the translations dash-free.
 - **Android host: no more blank bands.** The page no longer pads for the status and navigation bars
   inside the host app, which already keeps clear of them.
 - **Tidier conversations.** On wide screens the conversation keeps a centred reading column (your own

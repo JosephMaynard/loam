@@ -36,7 +36,7 @@ export const ps: Translation = {
   "composer.send": "لیږل",
 
   "composer.shareLocation": "د موقعیت شریکول",
-  "composer.shareLocationHint": "یو ځای شریک کړئ — لیبل حتی پرته له GPS هم کار کوي",
+  "composer.shareLocationHint": "یو ځای شریک کړئ: لیبل حتی پرته له GPS هم کار کوي",
   "composer.locationLabel": "د موقعیت لیبل",
   "composer.locationLabelPlaceholder": "لکه، شمالي دروازه",
   "composer.locationLat": "عرض البلد (-90 څخه تر 90)",
@@ -83,7 +83,7 @@ export const ps: Translation = {
   "settings.securityEyebrow": "خوندیتوب",
   "settings.wipeTitle": "دا وسیله پاکول",
   "settings.wipeBody":
-    "د دې براوزر محلي کاپي پاکوي — پیغامونه، ستاسو هویت او ذخیره‌شوي معلومات. نوډ یا د بل چا وسیله نه پاکوي.",
+    "د دې براوزر محلي کاپي پاکوي: پیغامونه، ستاسو هویت او ذخیره‌شوي معلومات. نوډ یا د بل چا وسیله نه پاکوي.",
   "settings.wipeConfirmBefore": "ولیکئ",
   "settings.wipeConfirmAfter": "د تایید لپاره",
   "settings.wiping": "پاکیږي…",
@@ -115,7 +115,7 @@ export const ps: Translation = {
   "moderation.loading": "خلک پورته کیږي…",
   "moderation.empty": "تر اوسه د ښودلو لپاره څوک نشته.",
   "moderation.promoteConfirm":
-    "{name} اډمین کړئ؟ د اډمین لاسرسی له دې ځایه نه شي بیرته اخیستل کیدی — یوازې د نوډ بیا تنظیمولو سره.",
+    "{name} اډمین کړئ؟ د اډمین لاسرسی له دې ځایه نه شي بیرته اخیستل کیدی, یوازې د نوډ بیا تنظیمولو سره.",
   "moderation.thatsYou": "دا ته یې.",
   "moderation.adminsProtected": "اډمینان نه شي څارل کیدی.",
   "moderation.roleModerator": "څارونکی",
@@ -138,7 +138,7 @@ export const ps: Translation = {
   "admin.flagReactions": "غبرګونونه",
   "admin.flagMarkdown": "د Markdown ښودنه",
   "admin.flagAttachments": "ضمیمه انځورونه",
-  "admin.flagPresence": "آنلاین شتون (ښیي چې څوک وصل دی — د محرمیت حساس چاپیریال کې یې بند کړئ)",
+  "admin.flagPresence": "آنلاین شتون (ښیي چې څوک وصل دی; د محرمیت حساس چاپیریال کې یې بند کړئ)",
   "admin.flagLocationSharing": "د موقعیت شریکول (اختیاري؛ خلکو ته اجازه ورکوي چې خپل موقعیت پیغامونو سره ضمیمه کړي)",
   "admin.identityDisplayName": "کاروونکي کولی شي خپل ښکاره نوم سم کړي",
   "admin.identityAvatarEdit": "کاروونکي کولی شي خپل اواتار سم کړي",
@@ -146,7 +146,7 @@ export const ps: Translation = {
   "admin.identityAdminEdit": "اډمینان کولی شي نور کاروونکي سم کړي",
   "admin.profileOpenTitle": "خلاص",
   "admin.profileOpenSummary":
-    "هر څوک سمدلاسه یوځای کیږي او لیکي. پیغامونه ساتل کیږي او بیړنی بیا تنظیم مړ دی — تر ټولو ډېر لاسرسی، د مرستې بڼې کارونې لپاره.",
+    "هر څوک سمدلاسه یوځای کیږي او لیکي. پیغامونه ساتل کیږي او بیړنی بیا تنظیم مړ دی: تر ټولو ډېر لاسرسی، د مرستې بڼې کارونې لپاره.",
   "admin.profileStandardTitle": "معیاري",
   "admin.profileStandardSummary":
     "هر څوک چې د یوځای کیدو لینک ولري ګډون کوي؛ پیغامونه ساتل کیږي او بیړنی بیا تنظیم مړ دی. (اوس مهال د خلاص په څېر ورته امستنې پلي کوي.)",
@@ -188,14 +188,14 @@ export const ps: Translation = {
   "admin.identityHeading": "هویت",
   "admin.networkName": "د شبکې نوم",
   "admin.networkNameNote":
-    "هر یوځای کیدونکي ته ښکاري — په څنګ پټه او د یوځای کیدو پاڼه کې. خپلې شبکې ته یو پېژندونکی نوم ورکړئ (لکه \"Riverside Relief\")۔",
+    "هر یوځای کیدونکي ته ښکاري, په څنګ پټه او د یوځای کیدو پاڼه کې. خپلې شبکې ته یو پېژندونکی نوم ورکړئ (لکه \"Riverside Relief\")۔",
   "admin.language": "د انټرفیس ژبه",
   "admin.languageNote": "پر دې نوډ د هر چا انټرفیس باندې پلي کیږي.",
   "admin.profileHeading": "پروفایل",
   "admin.posture": "بڼه",
   "admin.whoCanJoin": "څوک یوځای کیدی شي",
-  "admin.joinOpen": "خلاص — هر څوک چې لینک ولري یوځای کیږي",
-  "admin.joinApproval": "تصویب — هرکلی کوونکی یا اډمین خلک دننه پرېږدي",
+  "admin.joinOpen": "خلاص: هر څوک چې لینک ولري یوځای کیږي",
+  "admin.joinApproval": "تصویب: هرکلی کوونکی یا اډمین خلک دننه پرېږدي",
   "admin.axesManaged":
     "لاسرسی، ساتنه او بیړنی بیا تنظیم د {profile} پروفایل لخوا اداره کیږي. د جلا سمولو لپاره {custom} ته لاړ شئ.",
   "admin.featuresEyebrow": "ځانګړتیاوې",
@@ -323,11 +323,11 @@ export const ps: Translation = {
 
   "mesh.title": "د میش لیک",
   "mesh.myCardTitle": "ستاسو د میش کارت",
-  "mesh.myCardNote": "دا له هغه چا سره شریک کړئ چې غواړئ ترې مهر شوی لیک ترلاسه کړئ — کوډ سکن کړئ یا یې کاپي کړئ او هرچېرې چې غواړئ ولېږئ.",
+  "mesh.myCardNote": "دا له هغه چا سره شریک کړئ چې غواړئ ترې مهر شوی لیک ترلاسه کړئ. کوډ سکن کړئ یا یې کاپي کړئ او هرچېرې چې غواړئ ولېږئ.",
   "mesh.myCardLoading": "ستاسو د میش کارت پورته کیږي…",
   "mesh.myCardLoadError": "ستاسو د میش کارت پورته نشو.",
   "mesh.myCardUnrecognised": "سرور یو ناپیژندل شوی میش کارت راستون کړ.",
-  "mesh.myCardQrTooLarge": "دا کارت دلته د QR کوډ لپاره ډېر اوږد دی — پرځای یې کاپي یې کړئ.",
+  "mesh.myCardQrTooLarge": "دا کارت دلته د QR کوډ لپاره ډېر اوږد دی. پرځای یې کاپي یې کړئ.",
   "mesh.copyCard": "کارت کاپي کول",
   "mesh.copyCardCopied": "کاپي شو",
   "mesh.addContactTitle": "د اړیکې کارت زیاتول",
@@ -396,7 +396,7 @@ export const ps: Translation = {
     "منتظر یاست چې پر دې نوډ څوک تاسو دننه پرېږدي. ستاسو له تصویب سره سم دا پرده سمدلاسه تازه کیږي.",
   "gate.connection": "اړیکه: {status}",
   "gate.needsQrTitle": "د خوندي نښلولو لپاره د یوځای کیدو QR سکین کړئ",
-  "gate.needsQrBody": "د دې نوډ سره د خوندي نښلېدو لپاره، د خپل وسیلې سره د یوځای کیدو QR سکین کړئ — د نښلېدو بله خوندي لار نشته.",
+  "gate.needsQrBody": "د دې نوډ سره د خوندي نښلېدو لپاره، د خپل وسیلې سره د یوځای کیدو QR سکین کړئ. د نښلېدو بله خوندي لار نشته.",
 
   "confirm.deleteMessage": "دا پیغام ړنګ کړئ؟ دا بیرته نشي کیدی.",
 
@@ -474,7 +474,7 @@ export const ps: Translation = {
   "error.passphrase_required": "د پټ عبارت بوټ‌سټرپ ستراتیژي پټ عبارت ته اړتیا لري",
   "error.message_streaming": "دا پیغام لا هم لیکل کیږي",
   "error.session_invalid": "دا ناسته نور اعتبار نلري",
-  "error.thread_has_replies": "دې لړۍ کې د نورو خلکو ځوابونه شته — یوازې اډمین یې ړنګولی شي",
+  "error.thread_has_replies": "دې لړۍ کې د نورو خلکو ځوابونه شته. یوازې اډمین یې ړنګولی شي",
   "error.too_many_attempts": "ډیرې هڅې",
   "error.too_many_claim_attempts": "د ترلاسه کولو ډیرې هڅې؛ وروسته بیا هڅه وکړئ",
   "error.message_create_failed": "پیغام جوړ نشو",
@@ -500,9 +500,9 @@ export const ps: Translation = {
   "admin.deleteChannel": "ړنګول",
   "admin.deleteChannelAria": "چینل {name} د تل لپاره ړنګ کړئ",
   "admin.deleteChannelConfirm":
-    "«{name}» د تل لپاره ړنګ کړئ؟ په کې ټول پیغامونه او ضمیمې لرې کیږي او بیرته نشي راګرځېدی — د آرشیف کولو برخلاف، بیرته ګرځول نشته.",
+    "«{name}» د تل لپاره ړنګ کړئ؟ په کې ټول پیغامونه او ضمیمې لرې کیږي او بیرته نشي راګرځېدی. د آرشیف کولو برخلاف، بیرته ګرځول نشته.",
   "gate.needsQrKeyChanged":
-    "د دې نوډ کیلي نور له هغې کیلي سره سمون نه خوري چې تاسو سکین کړې وه — کېدای شي کوربه بیا پیل شوی وي یا یې بیا تنظیم کړې وي، یا دا شبکه هغه نه ده چې ادعا یې کوي. د بیا نښلولو لپاره د نوډ اوسنی د یوځای کیدو QR سکین کړئ.",
+    "د دې نوډ کیلي نور له هغې کیلي سره سمون نه خوري چې تاسو سکین کړې وه. کېدای شي کوربه بیا پیل شوی وي یا یې بیا تنظیم کړې وي، یا دا شبکه هغه نه ده چې ادعا یې کوي. د بیا نښلولو لپاره د نوډ اوسنی د یوځای کیدو QR سکین کړئ.",
   "message.report": "راپور",
   "message.removedByModerator": "د یو څارونکي لخوا لرې شو",
   "report.messageTitle": "د دې پیغام راپور ورکړئ",
@@ -522,7 +522,7 @@ export const ps: Translation = {
   "report.error": "راپور ونه لېږل شو",
   "report.cancel": "لغوه",
   "composer.timedOut": "یو څارونکي تاسو لنډمهاله بند کړي یاست او اوس نه شئ لیکلی.",
-  "composer.archived": "دا چینل آرشیف شوی دی — تاسو یې لوستلی شئ، خو نوی څه پکې نشي لیکل کیدی.",
+  "composer.archived": "دا چینل آرشیف شوی دی. تاسو یې لوستلی شئ، خو نوی څه پکې نشي لیکل کیدی.",
   "sidebar.archivedTag": "آرشیف شوی",
   "moderation.timeout": "لنډمهاله بندیز (۱ ساعت)",
   "moderation.timeoutClear": "لنډمهاله بندیز لرې کول",
@@ -556,7 +556,7 @@ export const ps: Translation = {
   "common.back": "شاته",
   "common.dismiss": "بندول",
   "devMode.banner":
-    "⚠️ د پراختیا کوونکي حالت — پیغامونه بې کوډه لېږل کیږي او په دې شبکه کې هر څوک یې لوستلی شي. د هېڅ خصوصي شي لپاره یې مه کاروئ.",
+    "⚠️ د پراختیا کوونکي حالت: پیغامونه بې کوډه لېږل کیږي او په دې شبکه کې هر څوک یې لوستلی شي. د هېڅ خصوصي شي لپاره یې مه کاروئ.",
   "composer.fileTooLarge": "{name} د لېږلو لپاره ډېر لوی دی (حد {limit}).",
   "conversation.notFoundTitle": "خبرې اترې شتون نلري",
   "conversation.notFoundBody": "دا چینل شتون نلري، لرې شوی، یا تاسو یې غړی نه یاست.",
@@ -566,7 +566,7 @@ export const ps: Translation = {
   "app.crashReload": "بیا پورته کول",
   "transport.pinChangeTitle": "دا لینک یوه بله امنیتي کیلي لري",
   "transport.pinChangeBody":
-    "تاسو له یوې بلې کیلي سره دې نوډ ته یوځای شوي یاست. نوې کیلي یوازې هغه وخت وکاروئ چې تاسو همدا اوس د نوډ اوسنی د یوځای کیدو QR په حضوري ډول سکین کړی وي — که نه، کېدای شي څوک ځان د هغه په نوم ښيي.",
+    "تاسو له یوې بلې کیلي سره دې نوډ ته یوځای شوي یاست. نوې کیلي یوازې هغه وخت وکاروئ چې تاسو همدا اوس د نوډ اوسنی د یوځای کیدو QR په حضوري ډول سکین کړی وي. که نه، کېدای شي څوک ځان د هغه په نوم ښيي.",
   "transport.pinChangeCurrent": "هغه کیلي چې ورسره یوځای شوئ: {fingerprint}",
   "transport.pinChangeNew": "په دې لینک کې کیلي: {fingerprint}",
   "transport.pinChangeAccept": "نوې کیلي کارول",

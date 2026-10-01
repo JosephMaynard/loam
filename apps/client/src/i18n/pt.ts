@@ -36,7 +36,7 @@ export const pt: Translation = {
   "composer.send": "Enviar",
 
   "composer.shareLocation": "Compartilhar localização",
-  "composer.shareLocationHint": "Compartilhe um local — uma etiqueta funciona mesmo sem GPS",
+  "composer.shareLocationHint": "Compartilhe um local: uma etiqueta funciona mesmo sem GPS",
   "composer.locationLabel": "Etiqueta de localização",
   "composer.locationLabelPlaceholder": "ex.: portão norte",
   "composer.locationLat": "Latitude (-90 a 90)",
@@ -83,7 +83,7 @@ export const pt: Translation = {
   "settings.securityEyebrow": "Segurança",
   "settings.wipeTitle": "Apagar este dispositivo",
   "settings.wipeBody":
-    "Apaga a cópia local deste navegador — mensagens, sua identidade e dados em cache. Não apaga o nó nem o dispositivo de outra pessoa.",
+    "Apaga a cópia local deste navegador: mensagens, sua identidade e dados em cache. Não apaga o nó nem o dispositivo de outra pessoa.",
   "settings.wipeConfirmBefore": "Digite",
   "settings.wipeConfirmAfter": "para confirmar",
   "settings.wiping": "Apagando…",
@@ -115,7 +115,7 @@ export const pt: Translation = {
   "moderation.loading": "Carregando pessoas…",
   "moderation.empty": "Ainda não há pessoas para mostrar.",
   "moderation.promoteConfirm":
-    "Tornar {name} administrador? O acesso de administrador não pode ser revogado aqui — apenas reconfigurando o nó.",
+    "Tornar {name} administrador? O acesso de administrador não pode ser revogado aqui, apenas reconfigurando o nó.",
   "moderation.thatsYou": "Esse é você.",
   "moderation.adminsProtected": "Administradores não podem ser moderados.",
   "moderation.roleModerator": "Moderador",
@@ -138,7 +138,7 @@ export const pt: Translation = {
   "admin.flagReactions": "Reações",
   "admin.flagMarkdown": "Renderização de Markdown",
   "admin.flagAttachments": "Imagens anexadas",
-  "admin.flagPresence": "Presença on-line (revela quem está conectado — desative em contextos sensíveis à privacidade)",
+  "admin.flagPresence": "Presença on-line (revela quem está conectado; desative em contextos sensíveis à privacidade)",
   "admin.flagLocationSharing": "Compartilhamento de localização (opcional; permite anexar a localização às mensagens)",
   "admin.identityDisplayName": "Usuários podem editar o nome de exibição",
   "admin.identityAvatarEdit": "Usuários podem editar o avatar",
@@ -146,7 +146,7 @@ export const pt: Translation = {
   "admin.identityAdminEdit": "Administradores podem editar outros usuários",
   "admin.profileOpenTitle": "Aberto",
   "admin.profileOpenSummary":
-    "Qualquer um entra e publica imediatamente. As mensagens são mantidas e a Redefinição de emergência está desligada — acesso máximo, para uso tipo ajuda humanitária.",
+    "Qualquer um entra e publica imediatamente. As mensagens são mantidas e a Redefinição de emergência está desligada: acesso máximo, para uso tipo ajuda humanitária.",
   "admin.profileStandardTitle": "Padrão",
   "admin.profileStandardSummary":
     "Qualquer um com o link participa; as mensagens são mantidas e a Redefinição de emergência está desligada. (Por enquanto aplica as mesmas configurações que Aberto.)",
@@ -188,14 +188,14 @@ export const pt: Translation = {
   "admin.identityHeading": "Identidade",
   "admin.networkName": "Nome da rede",
   "admin.networkNameNote":
-    "Visível para todos que entram — na barra lateral e na tela de acesso. Dê à sua rede um nome reconhecível (ex.: \"Ajuda Ribeirinha\").",
+    "Visível para todos que entram, na barra lateral e na tela de acesso. Dê à sua rede um nome reconhecível (ex.: \"Ajuda Ribeirinha\").",
   "admin.language": "Idioma da interface",
   "admin.languageNote": "Aplica-se à interface de todos neste nó.",
   "admin.profileHeading": "Perfil",
   "admin.posture": "Postura",
   "admin.whoCanJoin": "Quem pode entrar",
-  "admin.joinOpen": "Aberto — qualquer um com o link entra",
-  "admin.joinApproval": "Aprovação — um recepcionista ou administrador deixa entrar",
+  "admin.joinOpen": "Aberto: qualquer um com o link entra",
+  "admin.joinApproval": "Aprovação: um recepcionista ou administrador deixa entrar",
   "admin.axesManaged":
     "O acesso, a retenção e a Redefinição de emergência são gerenciados pelo perfil {profile}. Mude para {custom} para editá-los individualmente.",
   "admin.featuresEyebrow": "Recursos",
@@ -323,11 +323,11 @@ export const pt: Translation = {
 
   "mesh.title": "Correio em malha",
   "mesh.myCardTitle": "Seu cartão de malha",
-  "mesh.myCardNote": "Compartilhe com alguém de quem você queira receber correio selado — escaneie o código ou copie-o e envie do jeito que preferir.",
+  "mesh.myCardNote": "Compartilhe com alguém de quem você queira receber correio selado. Escaneie o código ou copie-o e envie do jeito que preferir.",
   "mesh.myCardLoading": "Carregando seu cartão de malha…",
   "mesh.myCardLoadError": "Não foi possível carregar seu cartão de malha.",
   "mesh.myCardUnrecognised": "O servidor retornou um cartão de malha não reconhecido.",
-  "mesh.myCardQrTooLarge": "Este cartão é longo demais para um código QR aqui — copie-o em vez disso.",
+  "mesh.myCardQrTooLarge": "Este cartão é longo demais para um código QR aqui. Copie-o em vez disso.",
   "mesh.copyCard": "Copiar cartão",
   "mesh.copyCardCopied": "Copiado",
   "mesh.addContactTitle": "Adicionar o cartão de um contato",
@@ -396,7 +396,7 @@ export const pt: Translation = {
     "Aguardando alguém deste nó deixar você entrar. Esta tela é atualizada assim que você for aprovado.",
   "gate.connection": "Conexão: {status}",
   "gate.needsQrTitle": "Escaneie o QR de acesso para se conectar com segurança",
-  "gate.needsQrBody": "Leia o QR de acesso deste nó com o seu dispositivo para se conectar — não há outra forma segura de fazer isso.",
+  "gate.needsQrBody": "Leia o QR de acesso deste nó com o seu dispositivo para se conectar. Não há outra forma segura de fazer isso.",
 
   "confirm.deleteMessage": "Excluir esta mensagem? Isto não pode ser desfeito.",
 
@@ -474,7 +474,7 @@ export const pt: Translation = {
   "error.passphrase_required": "A estratégia de inicialização por frase secreta requer uma frase secreta",
   "error.message_streaming": "Esta mensagem ainda está sendo escrita",
   "error.session_invalid": "Esta sessão não é mais válida",
-  "error.thread_has_replies": "Este tópico tem respostas de outras pessoas — somente um administrador pode excluí-lo",
+  "error.thread_has_replies": "Este tópico tem respostas de outras pessoas. Somente um administrador pode excluí-lo",
   "error.too_many_attempts": "Tentativas em excesso",
   "error.too_many_claim_attempts": "Tentativas de obtenção em excesso; tente novamente mais tarde",
   "error.message_create_failed": "Não foi possível criar a mensagem",
@@ -500,9 +500,9 @@ export const pt: Translation = {
   "admin.deleteChannel": "Excluir",
   "admin.deleteChannelAria": "Excluir permanentemente o canal {name}",
   "admin.deleteChannelConfirm":
-    "Excluir permanentemente “{name}”? Todas as mensagens e anexos dele serão removidos e não poderão ser restaurados — ao contrário do arquivamento, não há como desfazer.",
+    "Excluir permanentemente “{name}”? Todas as mensagens e anexos dele serão removidos e não poderão ser restaurados. Ao contrário do arquivamento, não há como desfazer.",
   "gate.needsQrKeyChanged":
-    "A chave deste nó não corresponde mais à que você escaneou — o anfitrião pode ter reiniciado ou tê-la redefinido, ou esta rede não é o que diz ser. Escaneie o QR de acesso atual do nó para reconectar.",
+    "A chave deste nó não corresponde mais à que você escaneou. O anfitrião pode ter reiniciado ou tê-la redefinido, ou esta rede não é o que diz ser. Escaneie o QR de acesso atual do nó para reconectar.",
   "message.report": "Denunciar",
   "message.removedByModerator": "Removido por um moderador",
   "report.messageTitle": "Denunciar esta mensagem",
@@ -522,7 +522,7 @@ export const pt: Translation = {
   "report.error": "Não foi possível enviar a denúncia",
   "report.cancel": "Cancelar",
   "composer.timedOut": "Um moderador suspendeu você temporariamente e você não pode publicar agora.",
-  "composer.archived": "Este canal está arquivado — você pode lê-lo, mas nada novo pode ser publicado.",
+  "composer.archived": "Este canal está arquivado. Você pode lê-lo, mas nada novo pode ser publicado.",
   "sidebar.archivedTag": "arquivado",
   "moderation.timeout": "Suspender (1 h)",
   "moderation.timeoutClear": "Remover suspensão",
@@ -556,7 +556,7 @@ export const pt: Translation = {
   "common.back": "Voltar",
   "common.dismiss": "Fechar",
   "devMode.banner":
-    "⚠️ Modo de desenvolvedor — as mensagens são enviadas sem criptografia e podem ser lidas por qualquer pessoa nesta rede. Não use para nada privado.",
+    "⚠️ Modo de desenvolvedor: as mensagens são enviadas sem criptografia e podem ser lidas por qualquer pessoa nesta rede. Não use para nada privado.",
   "composer.fileTooLarge": "{name} é grande demais para enviar (limite {limit}).",
   "conversation.notFoundTitle": "Conversa indisponível",
   "conversation.notFoundBody": "Este canal não existe, foi removido ou você não é membro dele.",
@@ -566,7 +566,7 @@ export const pt: Translation = {
   "app.crashReload": "Recarregar",
   "transport.pinChangeTitle": "Este link traz uma chave de segurança diferente",
   "transport.pinChangeBody":
-    "Você entrou neste nó com outra chave. Só use a nova chave se você acabou de escanear pessoalmente o QR de acesso atual do nó — caso contrário, alguém pode estar se passando por ele.",
+    "Você entrou neste nó com outra chave. Só use a nova chave se você acabou de escanear pessoalmente o QR de acesso atual do nó. Caso contrário, alguém pode estar se passando por ele.",
   "transport.pinChangeCurrent": "Chave com que você entrou: {fingerprint}",
   "transport.pinChangeNew": "Chave neste link: {fingerprint}",
   "transport.pinChangeAccept": "Usar a nova chave",

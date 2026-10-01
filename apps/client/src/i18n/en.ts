@@ -58,7 +58,7 @@ export const en = {
 
   // Message composer — share a location (docs/10; no map, no GPS — a named label or coordinates).
   "composer.shareLocation": "Share location",
-  "composer.shareLocationHint": "Share a place — a label works even without GPS",
+  "composer.shareLocationHint": "Share a place: a label works even without GPS",
   "composer.locationLabel": "Location label",
   "composer.locationLabelPlaceholder": "e.g. north gate",
   "composer.locationLat": "Latitude (-90 to 90)",
@@ -120,7 +120,7 @@ export const en = {
   "settings.securityEyebrow": "Security",
   "settings.wipeTitle": "Wipe this device",
   "settings.wipeBody":
-    "Erases this browser's local copy — messages, your identity, and cached data. It does not wipe the node or anyone else's device.",
+    "Erases this browser's local copy: messages, your identity, and cached data. It does not wipe the node or anyone else's device.",
   "settings.wipeConfirmBefore": "Type",
   "settings.wipeConfirmAfter": "to confirm",
   "settings.wiping": "Wiping…",
@@ -154,7 +154,7 @@ export const en = {
   "moderation.loading": "Loading people…",
   "moderation.empty": "No people to show yet.",
   "moderation.promoteConfirm":
-    "Make {name} an admin? Admin access can't be revoked from here — only by re-setting up the node.",
+    "Make {name} an admin? Admin access can't be revoked from here, only by setting up the node again.",
   "moderation.thatsYou": "That's you.",
   "moderation.adminsProtected": "Admins can't be moderated.",
   "moderation.roleModerator": "Moderator",
@@ -178,7 +178,7 @@ export const en = {
   "admin.flagReactions": "Reactions",
   "admin.flagMarkdown": "Markdown rendering",
   "admin.flagAttachments": "Image attachments",
-  "admin.flagPresence": "Online presence (reveals who is connected — off for privacy-sensitive settings)",
+  "admin.flagPresence": "Online presence (reveals who is connected; off for privacy-sensitive settings)",
   "admin.flagLocationSharing": "Location sharing (opt-in; lets people attach their location to messages)",
   // Admin view — identity-permission labels.
   "admin.identityDisplayName": "Users can edit their display name",
@@ -188,7 +188,7 @@ export const en = {
   // Admin view — security profile titles + summaries.
   "admin.profileOpenTitle": "Open",
   "admin.profileOpenSummary":
-    "Anyone joins and posts immediately. Messages are kept and Emergency Reset is off — maximum access, for disaster-relief style use.",
+    "Anyone joins and posts immediately. Messages are kept and Emergency Reset is off: maximum access, for disaster-relief style use.",
   "admin.profileStandardTitle": "Standard",
   "admin.profileStandardSummary":
     "Anyone with the join link participates; messages are kept and Emergency Reset is off. (Currently enforces the same settings as Open.)",
@@ -233,15 +233,15 @@ export const en = {
   "admin.identityHeading": "Identity",
   "admin.networkName": "Network name",
   "admin.networkNameNote":
-    "Shown to everyone who joins — in the sidebar and on the join screen. Give your network a name people will recognise (e.g. \"Riverside Relief\").",
+    "Shown to everyone who joins, in the sidebar and on the join screen. Give your network a name people will recognise (e.g. \"Riverside Relief\").",
   "admin.language": "Interface language",
   "admin.languageNote": "Applies to everyone's interface on this node.",
   // Admin view — security profile panel.
   "admin.profileHeading": "Profile",
   "admin.posture": "Posture",
   "admin.whoCanJoin": "Who can join",
-  "admin.joinOpen": "Open — anyone with the link joins",
-  "admin.joinApproval": "Approval — a greeter or admin lets people in",
+  "admin.joinOpen": "Open: anyone with the link joins",
+  "admin.joinApproval": "Approval: a greeter or admin lets people in",
   "admin.axesManaged":
     "Access, retention, and Emergency Reset are managed by the {profile} profile. Switch to {custom} to edit them individually.",
   // Admin view — features + identity panels.
@@ -355,7 +355,7 @@ export const en = {
   "admin.deleteChannel": "Delete",
   "admin.deleteChannelAria": "Permanently delete the channel {name}",
   "admin.deleteChannelConfirm":
-    "Permanently delete “{name}”? Every message and attachment in it is removed and cannot be restored — unlike archiving, there is no undo.",
+    "Permanently delete “{name}”? Every message and attachment in it is removed and cannot be restored. Unlike archiving, there is no undo.",
 
   // Sidebar.
   "sidebar.channels": "Channels",
@@ -387,11 +387,11 @@ export const en = {
   // Mesh mail view (opportunistic-mesh sealed mailbox — docs/16).
   "mesh.title": "Mesh mail",
   "mesh.myCardTitle": "Your mesh card",
-  "mesh.myCardNote": "Share this with someone you want to receive sealed mail from — scan the code or copy it and send it however you like.",
+  "mesh.myCardNote": "Share this with someone you want to receive sealed mail from. Scan the code or copy it and send it however you like.",
   "mesh.myCardLoading": "Loading your mesh card…",
   "mesh.myCardLoadError": "Unable to load your mesh card.",
   "mesh.myCardUnrecognised": "The server returned an unrecognised mesh card.",
-  "mesh.myCardQrTooLarge": "This card is too long for a QR code here — copy it instead.",
+  "mesh.myCardQrTooLarge": "This card is too long for a QR code here. Copy it instead.",
   "mesh.copyCard": "Copy card",
   "mesh.copyCardCopied": "Copied",
   "mesh.addContactTitle": "Add a contact's card",
@@ -468,8 +468,8 @@ export const en = {
   // Shown when this node requires transport encryption (docs/08) but no host key was ever delivered
   // by a scanned join QR — there is no safe way to connect without one.
   "gate.needsQrTitle": "Scan the join QR to connect securely",
-  "gate.needsQrBody": "Scan this node's join QR code with your device to connect — there's no other way to connect securely.",
-  "gate.needsQrKeyChanged": "This node's key no longer matches the one you scanned — the host may have restarted or reset it, or this network is not what it claims to be. Scan the node's current join QR code to reconnect.",
+  "gate.needsQrBody": "Scan this node's join QR code with your device to connect. There's no other way to connect securely.",
+  "gate.needsQrKeyChanged": "This node's key no longer matches the one you scanned. The host may have restarted or reset it, or this network is not what it claims to be. Scan the node's current join QR code to reconnect.",
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",
@@ -549,7 +549,7 @@ export const en = {
   "error.passphrase_required": "The passphrase bootstrap strategy requires a passphrase",
   "error.message_streaming": "This message is still being written",
   "error.session_invalid": "This session is no longer valid",
-  "error.thread_has_replies": "This thread has replies from other people — only an admin can delete it",
+  "error.thread_has_replies": "This thread has replies from other people. Only an admin can delete it",
   "error.too_many_attempts": "Too many attempts",
   "error.too_many_claim_attempts": "Too many claim attempts; try again later",
   "error.message_create_failed": "Unable to create message",
@@ -584,7 +584,7 @@ export const en = {
   "report.error": "Could not send the report",
   "report.cancel": "Cancel",
   "composer.timedOut": "You're timed out by a moderator and can't post right now.",
-  "composer.archived": "This channel is archived — you can read it, but nothing new can be posted.",
+  "composer.archived": "This channel is archived. You can read it, but nothing new can be posted.",
   "sidebar.archivedTag": "archived",
   "moderation.timeout": "Time out (1h)",
   "moderation.timeoutClear": "Clear timeout",
@@ -623,7 +623,7 @@ export const en = {
   "common.dismiss": "Dismiss",
   // Developer Mode banner: shown on every screen while the node runs with transport encryption off.
   "devMode.banner":
-    "⚠️ Developer Mode — messages are sent unencrypted and can be read by anyone on this network. Do not use for anything private.",
+    "⚠️ Developer Mode: messages are sent unencrypted and can be read by anyone on this network. Do not use for anything private.",
   // A picked attachment exceeds the node's upload limit ({limit} is e.g. "1 MB").
   "composer.fileTooLarge": "{name} is too large to send (limit {limit}).",
   // A channel/DM the server says doesn't exist for this user (unknown, removed, or not a member).
@@ -637,7 +637,7 @@ export const en = {
   // A join link carrying a security key different from the one this browser already trusts for the node.
   "transport.pinChangeTitle": "This link carries a different security key",
   "transport.pinChangeBody":
-    "You joined this node with a different key. Only use the new key if you just scanned the node's current join QR code in person — otherwise someone may be impersonating it.",
+    "You joined this node with a different key. Only use the new key if you just scanned the node's current join QR code in person. Otherwise someone may be impersonating it.",
   "transport.pinChangeCurrent": "Key you joined with: {fingerprint}",
   "transport.pinChangeNew": "Key in this link: {fingerprint}",
   "transport.pinChangeAccept": "Use the new key",

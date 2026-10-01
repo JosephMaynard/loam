@@ -417,7 +417,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       if (persisted) {
         setManagerState(state);
       } else {
-        setStatusMessage("Couldn't save that change to the model list — it may not survive an app restart. Try again.");
+        setStatusMessage("Couldn't save that change to the model list: it may not survive an app restart. Try again.");
       }
     }
     return persisted;
@@ -515,7 +515,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         } catch (err) {
           // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
           // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
-          setStatusMessageIfMounted(`Model download failed — ${err instanceof Error ? err.message : String(err)}`);
+          setStatusMessageIfMounted(`Model download failed: ${err instanceof Error ? err.message : String(err)}`);
         } finally {
           clearModelProgress(id);
           setBusy(id, false);
@@ -568,7 +568,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         maxBytes,
       );
       if (!outcome.ok) {
-        setStatusMessageIfMounted(`${entry.displayName}: download failed — ${outcome.error}`);
+        setStatusMessageIfMounted(`${entry.displayName}: download failed: ${outcome.error}`);
         return;
       }
       const model: DownloadedModel = {
@@ -596,7 +596,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       const discard = await discardUnregisteredDownload(outcome.uri);
       setStatusMessageIfMounted(
         discard.removed
-          ? `${entry.displayName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`
+          ? `${entry.displayName} downloaded but couldn't be saved to the model list: the file was removed. Try again.`
           : `${entry.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${discard.error}). It'll be cleared on your next attempt, or restart the app to clear it.`,
       );
     });
@@ -635,7 +635,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         maxBytes,
       );
       if (!outcome.ok) {
-        setStatusMessageIfMounted(`Custom model download failed — ${outcome.error}`);
+        setStatusMessageIfMounted(`Custom model download failed: ${outcome.error}`);
         return;
       }
       const model: DownloadedModel = {
@@ -665,7 +665,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       const discard = await discardUnregisteredDownload(outcome.uri);
       setStatusMessageIfMounted(
         discard.removed
-          ? `${prepared.displayName} downloaded but couldn't be saved to the model list — the file was removed. Try again.`
+          ? `${prepared.displayName} downloaded but couldn't be saved to the model list: the file was removed. Try again.`
           : `${prepared.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${discard.error}). It'll be cleared on your next attempt, or restart the app to clear it.`,
       );
     });
@@ -781,7 +781,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary">
                 Models are large downloads ({formatBytes(Math.min(...MODEL_CATALOG.map((e) => e.sizeBytes)))}–
-                {formatBytes(Math.max(...MODEL_CATALOG.map((e) => e.sizeBytes)))}). Use Wi-Fi — on mobile data
+                {formatBytes(Math.max(...MODEL_CATALOG.map((e) => e.sizeBytes)))}). Use Wi-Fi: on mobile data
                 they can use much of your allowance.
               </ThemedText>
               {!sweepReady ? (
@@ -812,7 +812,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                 Add a model by URL
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary">
-                Unverified model — may not download, load, or run correctly. Use a direct link to a
+                Unverified model: may not download, load, or run correctly. Use a direct link to a
                 `.gguf` file.
               </ThemedText>
               <TextInput
@@ -919,7 +919,7 @@ function CatalogRow({
       ) : null}
       {ramVerdict === 'insufficient' ? (
         <ThemedText type="small" themeColor="textSecondary">
-          Needs at least {formatBytes(entry.minRamBytes)} of RAM — this device likely doesn&apos;t
+          Needs at least {formatBytes(entry.minRamBytes)} of RAM: this device likely doesn&apos;t
           have enough.
         </ThemedText>
       ) : null}

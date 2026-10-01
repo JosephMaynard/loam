@@ -22,7 +22,7 @@ export type DeviceCapabilities = {
 
 export const ACCELERATOR_NOTE =
   'GPU/NPU acceleration is best-effort and device-dependent. Android has no public API LOAM can use ' +
-  'to confirm a given phone has one, so this is not shown as a capability check — inference may fall ' +
+  'to confirm a given phone has one, so this is not shown as a capability check: inference may fall ' +
   'back to CPU-only on any device.';
 
 /** Probe RAM + free storage. Never throws — a failed sub-probe just yields `null` for that field. */

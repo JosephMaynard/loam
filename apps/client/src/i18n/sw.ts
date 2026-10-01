@@ -36,7 +36,7 @@ export const sw: Translation = {
   "composer.send": "Tuma",
 
   "composer.shareLocation": "Shiriki mahali",
-  "composer.shareLocationHint": "Shiriki mahali — lebo hufanya kazi hata bila GPS",
+  "composer.shareLocationHint": "Shiriki mahali: lebo hufanya kazi hata bila GPS",
   "composer.locationLabel": "Lebo ya mahali",
   "composer.locationLabelPlaceholder": "mf. lango la kaskazini",
   "composer.locationLat": "Latitudo (-90 hadi 90)",
@@ -83,7 +83,7 @@ export const sw: Translation = {
   "settings.securityEyebrow": "Usalama",
   "settings.wipeTitle": "Futa kifaa hiki",
   "settings.wipeBody":
-    "Hufuta nakala ya ndani ya kivinjari hiki — ujumbe, utambulisho wako na data iliyohifadhiwa. Haifuti nodi wala kifaa cha mtu mwingine.",
+    "Hufuta nakala ya ndani ya kivinjari hiki: ujumbe, utambulisho wako na data iliyohifadhiwa. Haifuti nodi wala kifaa cha mtu mwingine.",
   "settings.wipeConfirmBefore": "Andika",
   "settings.wipeConfirmAfter": "kuthibitisha",
   "settings.wiping": "Inafuta…",
@@ -115,7 +115,7 @@ export const sw: Translation = {
   "moderation.loading": "Inapakia watu…",
   "moderation.empty": "Bado hakuna watu wa kuonyesha.",
   "moderation.promoteConfirm":
-    "Umfanye {name} kuwa msimamizi? Ufikiaji wa msimamizi hauwezi kuondolewa hapa — ni kwa kusanidi upya nodi tu.",
+    "Umfanye {name} kuwa msimamizi? Ufikiaji wa msimamizi hauwezi kuondolewa hapa, ni kwa kusanidi upya nodi tu.",
   "moderation.thatsYou": "Huyo ni wewe.",
   "moderation.adminsProtected": "Wasimamizi hawawezi kudhibitiwa.",
   "moderation.roleModerator": "Msimamizi",
@@ -138,7 +138,7 @@ export const sw: Translation = {
   "admin.flagReactions": "Miitikio",
   "admin.flagMarkdown": "Uonyeshaji wa Markdown",
   "admin.flagAttachments": "Picha zilizoambatishwa",
-  "admin.flagPresence": "Uwepo mtandaoni (huonyesha ni nani ameunganishwa — zima kwa mazingira nyeti kwa faragha)",
+  "admin.flagPresence": "Uwepo mtandaoni (huonyesha ni nani ameunganishwa; zima kwa mazingira nyeti kwa faragha)",
   "admin.flagLocationSharing": "Kushiriki mahali (hiari; huruhusu watu kuambatanisha mahali walipo kwenye ujumbe)",
   "admin.identityDisplayName": "Watumiaji wanaweza kuhariri jina la kuonyesha",
   "admin.identityAvatarEdit": "Watumiaji wanaweza kuhariri avatar yao",
@@ -146,7 +146,7 @@ export const sw: Translation = {
   "admin.identityAdminEdit": "Wasimamizi wanaweza kuhariri watumiaji wengine",
   "admin.profileOpenTitle": "Wazi",
   "admin.profileOpenSummary":
-    "Yeyote hujiunga na kuchapisha mara moja. Ujumbe huhifadhiwa na Uwekaji upya wa dharura umezimwa — ufikiaji wa juu, kwa matumizi ya aina ya msaada wa maafa.",
+    "Yeyote hujiunga na kuchapisha mara moja. Ujumbe huhifadhiwa na Uwekaji upya wa dharura umezimwa: ufikiaji wa juu, kwa matumizi ya aina ya msaada wa maafa.",
   "admin.profileStandardTitle": "Kawaida",
   "admin.profileStandardSummary":
     "Yeyote mwenye kiungo cha kujiunga hushiriki; ujumbe huhifadhiwa na Uwekaji upya wa dharura umezimwa. (Kwa sasa hutumia mipangilio ile ile kama Wazi.)",
@@ -188,14 +188,14 @@ export const sw: Translation = {
   "admin.identityHeading": "Utambulisho",
   "admin.networkName": "Jina la mtandao",
   "admin.networkNameNote":
-    "Huonekana kwa kila anayejiunga — pembezoni na kwenye skrini ya kujiunga. Ipe mtandao wako jina litakalotambulika (mf. \"Msaada wa Ukingoni\").",
+    "Huonekana kwa kila anayejiunga, pembezoni na kwenye skrini ya kujiunga. Ipe mtandao wako jina litakalotambulika (mf. \"Msaada wa Ukingoni\").",
   "admin.language": "Lugha ya kiolesura",
   "admin.languageNote": "Hutumika kwa kiolesura cha kila mtu kwenye nodi hii.",
   "admin.profileHeading": "Wasifu",
   "admin.posture": "Mkao",
   "admin.whoCanJoin": "Nani anaweza kujiunga",
-  "admin.joinOpen": "Wazi — yeyote mwenye kiungo hujiunga",
-  "admin.joinApproval": "Idhini — mpokezi au msimamizi huwaruhusu watu",
+  "admin.joinOpen": "Wazi: yeyote mwenye kiungo hujiunga",
+  "admin.joinApproval": "Idhini: mpokezi au msimamizi huwaruhusu watu",
   "admin.axesManaged":
     "Ufikiaji, uhifadhi, na Uwekaji upya wa dharura vinasimamiwa na wasifu wa {profile}. Badilisha hadi {custom} kuvihariri kila kimoja peke yake.",
   "admin.featuresEyebrow": "Vipengele",
@@ -323,11 +323,11 @@ export const sw: Translation = {
 
   "mesh.title": "Barua ya wavu",
   "mesh.myCardTitle": "Kadi yako ya wavu",
-  "mesh.myCardNote": "Ishiriki hii na mtu ambaye ungependa kupokea barua iliyotiwa muhuri kutoka kwake — skani msimbo au inakili na uitume kwa njia yoyote upendayo.",
+  "mesh.myCardNote": "Ishiriki hii na mtu ambaye ungependa kupokea barua iliyotiwa muhuri kutoka kwake. Skani msimbo au inakili na uitume kwa njia yoyote upendayo.",
   "mesh.myCardLoading": "Inapakia kadi yako ya wavu…",
   "mesh.myCardLoadError": "Imeshindikana kupakia kadi yako ya wavu.",
   "mesh.myCardUnrecognised": "Seva imerudisha kadi ya wavu isiyotambulika.",
-  "mesh.myCardQrTooLarge": "Kadi hii ni ndefu mno kwa msimbo wa QR hapa — inakili badala yake.",
+  "mesh.myCardQrTooLarge": "Kadi hii ni ndefu mno kwa msimbo wa QR hapa. Inakili badala yake.",
   "mesh.copyCard": "Nakili kadi",
   "mesh.copyCardCopied": "Imenakiliwa",
   "mesh.addContactTitle": "Ongeza kadi ya anwani",
@@ -396,7 +396,7 @@ export const sw: Translation = {
     "Unasubiri mtu kwenye nodi hii akuruhusu kuingia. Skrini hii inasasishwa mara tu unapoidhinishwa.",
   "gate.connection": "Muunganisho: {status}",
   "gate.needsQrTitle": "Changanua QR ya kujiunga ili kuunganisha kwa usalama",
-  "gate.needsQrBody": "Changanua QR ya kujiunga ya nodi hii kwa kifaa chako ili kuunganisha — hakuna njia nyingine salama ya kuunganisha.",
+  "gate.needsQrBody": "Changanua QR ya kujiunga ya nodi hii kwa kifaa chako ili kuunganisha. Hakuna njia nyingine salama ya kuunganisha.",
 
   "confirm.deleteMessage": "Futa ujumbe huu? Hili haliwezi kutenduliwa.",
 
@@ -474,7 +474,7 @@ export const sw: Translation = {
   "error.passphrase_required": "Mkakati wa kuanzisha kwa kaulisiri unahitaji kaulisiri",
   "error.message_streaming": "Ujumbe huu bado unaandikwa",
   "error.session_invalid": "Kipindi hiki hakina uhalali tena",
-  "error.thread_has_replies": "Uzi huu una majibu kutoka kwa watu wengine — msimamizi pekee anaweza kuufuta",
+  "error.thread_has_replies": "Uzi huu una majibu kutoka kwa watu wengine. Msimamizi pekee anaweza kuufuta",
   "error.too_many_attempts": "Majaribio mengi mno",
   "error.too_many_claim_attempts": "Majaribio mengi mno ya kupata; jaribu tena baadaye",
   "error.message_create_failed": "Imeshindwa kuunda ujumbe",
@@ -500,9 +500,9 @@ export const sw: Translation = {
   "admin.deleteChannel": "Futa",
   "admin.deleteChannelAria": "Futa kabisa kituo {name}",
   "admin.deleteChannelConfirm":
-    "Futa “{name}” kabisa? Kila ujumbe na kiambatisho ndani yake kitaondolewa na hakiwezi kurejeshwa — tofauti na kuhifadhi kwenye kumbukumbu, hakuna kutendua.",
+    "Futa “{name}” kabisa? Kila ujumbe na kiambatisho ndani yake kitaondolewa na hakiwezi kurejeshwa. Tofauti na kuhifadhi kwenye kumbukumbu, hakuna kutendua.",
   "gate.needsQrKeyChanged":
-    "Ufunguo wa nodi hii haulingani tena na ule uliouchanganua — huenda mwenyeji amewashwa upya au ameuweka upya, au mtandao huu si ule unaodai kuwa. Changanua msimbo wa QR wa kujiunga wa sasa wa nodi ili kuunganisha tena.",
+    "Ufunguo wa nodi hii haulingani tena na ule uliouchanganua. Huenda mwenyeji amewashwa upya au ameuweka upya, au mtandao huu si ule unaodai kuwa. Changanua msimbo wa QR wa kujiunga wa sasa wa nodi ili kuunganisha tena.",
   "message.report": "Ripoti",
   "message.removedByModerator": "Imeondolewa na msimamizi",
   "report.messageTitle": "Ripoti ujumbe huu",
@@ -522,7 +522,7 @@ export const sw: Translation = {
   "report.error": "Imeshindwa kutuma ripoti",
   "report.cancel": "Ghairi",
   "composer.timedOut": "Umesimamishwa kwa muda na msimamizi na huwezi kuchapisha sasa hivi.",
-  "composer.archived": "Kituo hiki kimehifadhiwa — unaweza kukisoma, lakini hakuna kipya kinachoweza kuchapishwa.",
+  "composer.archived": "Kituo hiki kimehifadhiwa. Unaweza kukisoma, lakini hakuna kipya kinachoweza kuchapishwa.",
   "sidebar.archivedTag": "kimehifadhiwa",
   "moderation.timeout": "Simamisha kwa muda (saa 1)",
   "moderation.timeoutClear": "Ondoa usimamishaji",
@@ -556,7 +556,7 @@ export const sw: Translation = {
   "common.back": "Rudi",
   "common.dismiss": "Funga",
   "devMode.banner":
-    "⚠️ Hali ya Msanidi — ujumbe unatumwa bila kusimbwa na unaweza kusomwa na mtu yeyote kwenye mtandao huu. Usitumie kwa jambo lolote la faragha.",
+    "⚠️ Hali ya Msanidi: ujumbe unatumwa bila kusimbwa na unaweza kusomwa na mtu yeyote kwenye mtandao huu. Usitumie kwa jambo lolote la faragha.",
   "composer.fileTooLarge": "{name} ni kubwa mno kutumwa (kikomo {limit}).",
   "conversation.notFoundTitle": "Mazungumzo hayapatikani",
   "conversation.notFoundBody": "Kituo hiki hakipo, kimeondolewa, au wewe si mwanachama wake.",
@@ -566,7 +566,7 @@ export const sw: Translation = {
   "app.crashReload": "Pakia upya",
   "transport.pinChangeTitle": "Kiungo hiki kina ufunguo tofauti wa usalama",
   "transport.pinChangeBody":
-    "Ulijiunga na nodi hii kwa ufunguo tofauti. Tumia ufunguo mpya tu ikiwa umechanganua sasa hivi, ana kwa ana, msimbo wa QR wa kujiunga wa sasa wa nodi — vinginevyo huenda mtu anaiga nodi hii.",
+    "Ulijiunga na nodi hii kwa ufunguo tofauti. Tumia ufunguo mpya tu ikiwa umechanganua sasa hivi, ana kwa ana, msimbo wa QR wa kujiunga wa sasa wa nodi. Vinginevyo huenda mtu anaiga nodi hii.",
   "transport.pinChangeCurrent": "Ufunguo uliojiunga nao: {fingerprint}",
   "transport.pinChangeNew": "Ufunguo ulio kwenye kiungo hiki: {fingerprint}",
   "transport.pinChangeAccept": "Tumia ufunguo mpya",

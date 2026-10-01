@@ -25,7 +25,7 @@ export function startUnencryptedConfirmation(lockedMode: DbEncryptionMode | unde
     'Encrypted storage is unavailable on this device. Switching encryption off stores the database ' +
     'UNENCRYPTED from now on.';
   const keptOnDisk =
-    'An existing encrypted database stays on disk but cannot be opened without encryption — you will be ' +
+    'An existing encrypted database stays on disk but cannot be opened without encryption: you will be ' +
     'offered to preserve it and start a fresh one.';
   const ephemeralGone =
     'Ephemeral mode keeps nothing across restarts, so the previous database is already gone and the host ' +
@@ -36,7 +36,7 @@ export function startUnencryptedConfirmation(lockedMode: DbEncryptionMode | unde
   } else if (lockedMode === undefined) {
     detail =
       'If this host used ephemeral encryption, its previous database is already gone. Otherwise the existing ' +
-      'encrypted database stays on disk but cannot be opened without encryption — you will be offered to ' +
+      'encrypted database stays on disk but cannot be opened without encryption: you will be offered to ' +
       'preserve it and start a fresh one.';
   } else {
     detail = keptOnDisk;

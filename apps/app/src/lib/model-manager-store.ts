@@ -135,7 +135,7 @@ export async function loadModelManagerState(): Promise<ModelManagerState> {
 /** Recovery copy surfaced when the manager can't read its state (P1-4). No destructive action is taken,
  * so the message reassures the operator their model files are left untouched. */
 export const MODEL_LIST_UNREADABLE_MESSAGE =
-  "Couldn't read the model list — not touching your files. Reopen the model manager to try again.";
+  "Couldn't read the model list: not touching your files. Reopen the model manager to try again.";
 
 /**
  * What the manager's open-effect should do given a load result (P1-4): the state to adopt, whether the

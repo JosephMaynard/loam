@@ -176,14 +176,14 @@ function HotspotJoin({ state }: { state: HostState }) {
     <>
       <ThemedText type="small" themeColor="textSecondary" style={styles.rationale}>
         Android requires location permission to create a WiFi hotspot. LOAM never uses, requests, or
-        stores your location — it only turns the hotspot on.
+        stores your location: it only turns the hotspot on.
       </ThemedText>
 
       <ThemedView type="backgroundElement" style={styles.step}>
         <ThemedText type="subtitle">Step 1 · Join the WiFi</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
           Scan with the phone camera to connect to this host&apos;s hotspot. Keep LOAM open, and
-          don&apos;t switch on your phone&apos;s own WiFi hotspot — it replaces this one.
+          don&apos;t switch on your phone&apos;s own WiFi hotspot: it replaces this one.
         </ThemedText>
         {wifi ? (
           <>

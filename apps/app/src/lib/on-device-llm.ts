@@ -70,15 +70,15 @@ const NO_MODEL_MESSAGE = 'No on-device model is selected. Download and activate 
  * abandoned load's native disposal is still in flight). Transient — a moment later it settles and the engine
  * is usable again; the restart hint covers the rare case where a native call is pathologically slow. */
 const ENGINE_RECOVERING_MESSAGE =
-  'The on-device model engine is still recovering — try again in a moment, or restart the LOAM host app if this persists.';
+  'The on-device model engine is still recovering: try again in a moment, or restart the LOAM host app if this persists.';
 /** Shown once the engine is `poisoned` (a native `release()` REJECTED). We refuse to build another context
  * this process, so only an app restart can recover — say so plainly rather than implying a retry will help. */
 const ENGINE_POISONED_MESSAGE =
-  'The on-device model engine needs a restart — close and reopen the LOAM host app to use on-device AI again.';
+  'The on-device model engine needs a restart: close and reopen the LOAM host app to use on-device AI again.';
 /** Shown when `initLlama` (the model load) exceeds `MODEL_LOAD_TIMEOUT_MS`. The load is abandoned so it
  * can't wedge the queue; a later request retries once the native load settles and is disposed. */
 const ENGINE_LOAD_TIMEOUT_MESSAGE =
-  'Loading the on-device model timed out — try again in a moment, or restart the LOAM host app if it persists.';
+  'Loading the on-device model timed out: try again in a moment, or restart the LOAM host app if it persists.';
 
 /** Bounded ceiling on a single `initLlama` load. A multi-GB model on a slow phone can legitimately take a
  * while, so this is generous — but a native load that NEVER settles must not wedge the queue forever. On
@@ -219,7 +219,7 @@ function startRelease(ctx: LlamaContext, path: string): void {
         if (inFlightOp === op) {
           inFlightOp = null;
         }
-        console.warn('LOAM on-device LLM: native context release() rejected — engine poisoned until app restart', error);
+        console.warn('LOAM on-device LLM: native context release() rejected: engine poisoned until app restart', error);
       },
     );
   inFlightOp = op;
@@ -338,7 +338,7 @@ function onLoadResolved(ctx: LlamaContext, myEpoch: number, target: string, op: 
     try {
       lastAccelerationInfo = { gpu: ctx.gpu, reasonNoGPU: ctx.reasonNoGPU, devices: ctx.devices };
       console.log(
-        'LOAM on-device LLM: model loaded — gpu=%s reasonNoGPU=%s devices=%s',
+        'LOAM on-device LLM: model loaded: gpu=%s reasonNoGPU=%s devices=%s',
         ctx.gpu,
         ctx.reasonNoGPU,
         JSON.stringify(ctx.devices),

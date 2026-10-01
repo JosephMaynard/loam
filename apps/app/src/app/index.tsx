@@ -793,7 +793,7 @@ export default function HostScreen() {
       // was cancelled). Either way re-tapping just re-writes a same-intent, idempotent marker, so we let the
       // operator retry — but we show the launcher's exact wording rather than a blanket "failed".
       setStartFreshBusy(false);
-      setStartFreshMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}.`);
+      setStartFreshMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}.`);
       return;
     }
     // RF2: main.js's `loam-db-start-fresh` listener retries boot immediately after this ack. Leave
@@ -804,8 +804,8 @@ export default function HostScreen() {
     // both now also guard against that directly, but the UI should never even offer the chance.
     setStartFreshMessage(
       intent === 'delete'
-        ? 'Confirmed — the existing data will be deleted and a fresh encrypted database is starting now…'
-        : 'Confirmed — the old database is preserved on disk and a fresh one is starting now…',
+        ? 'Confirmed: the existing data will be deleted and a fresh encrypted database is starting now…'
+        : 'Confirmed: the old database is preserved on disk and a fresh one is starting now…',
     );
   };
 
@@ -832,7 +832,7 @@ export default function HostScreen() {
       await setPassphraseCandidate(trimmed);
     } catch (error) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't save the passphrase — ${error instanceof Error ? error.message : 'unknown error'}. You can try again.`);
+      setUnlockMessage(`Couldn't save the passphrase: ${error instanceof Error ? error.message : 'unknown error'}. You can try again.`);
       return;
     }
     // P1-b (Sol round 6): transactionally record the mode-name hint so a later transient key-request
@@ -843,7 +843,7 @@ export default function HostScreen() {
     const result = await requestDbUnlock(nodejs.channel);
     if (!result.ok) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      setUnlockMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}. You can try again.`);
       return;
     }
     // The retry's OUTCOME (ready / still locked / a different boot error) arrives the normal way, via
@@ -866,7 +866,7 @@ export default function HostScreen() {
     });
     if (!result.ok) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      setUnlockMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}. You can try again.`);
       return;
     }
     setUnlockMessage('Retrying…');
@@ -892,8 +892,8 @@ export default function HostScreen() {
       setRevertBusy(false);
       setRevertMessage(
         outcome.failed === 'mode'
-          ? `Couldn't switch encryption off — ${outcome.error}. You can try again.`
-          : `Couldn't retry — ${outcome.error}. You can try again.`,
+          ? `Couldn't switch encryption off: ${outcome.error}. You can try again.`
+          : `Couldn't retry: ${outcome.error}. You can try again.`,
       );
       return;
     }
@@ -1399,11 +1399,11 @@ export default function HostScreen() {
           <ThemedText type="smallBold">Encryption is on, but the existing database is unencrypted.</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {errorMessage ??
-              'The selected encrypted mode can only apply to a fresh database — an existing plaintext database cannot be converted in place.'}
+              'The selected encrypted mode can only apply to a fresh database: an existing plaintext database cannot be converted in place.'}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             Delete the existing data and start a fresh encrypted database, or switch encryption back off to
-            keep the existing (unencrypted) data. In-place conversion is a future enhancement — not yet
+            keep the existing (unencrypted) data. In-place conversion is a future enhancement: not yet
             available.
           </ThemedText>
           <ThemedView style={styles.noticeBannerActions}>
@@ -1437,7 +1437,7 @@ export default function HostScreen() {
           is the only way to plaintext, behind a confirmation. A subsequent `ready` clears this (onStatus). */}
       {dbDriverMissing ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">Encrypted storage is unavailable — the host did not start.</ThemedText>
+          <ThemedText type="smallBold">Encrypted storage is unavailable: the host did not start.</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {errorMessage ?? 'The encrypted-storage module failed to load on this device.'}
           </ThemedText>

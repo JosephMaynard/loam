@@ -158,7 +158,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
     if (!result.complete) {
       return reply
         .code(503)
-        .send(errorBody("The emergency wipe could not be completed; the node is locked down — reopen it to retry."));
+        .send(errorBody("The emergency wipe could not be completed; the node is locked down. Reopen it to retry."));
     }
     return { ok: true };
   });
@@ -213,7 +213,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
     if (!result.complete) {
       return reply
         .code(503)
-        .send(errorBody("The emergency wipe could not be completed; the node is locked down — reopen it to retry."));
+        .send(errorBody("The emergency wipe could not be completed; the node is locked down. Reopen it to retry."));
     }
     return { ok: true };
   });
@@ -300,7 +300,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       // this data dir runs without a host token), but minting/advertising a setup code or passphrase claim
       // here would announce a claim path that can never succeed on this device (round-2 review).
       ctx.server.log.warn(
-        `admin.bootstrap "${next.admin.bootstrap}" saved, but this host device enforces "hostDevice" — the setting takes effect only where no host token is minted`,
+        `admin.bootstrap "${next.admin.bootstrap}" saved, but this host device enforces "hostDevice": the setting takes effect only where no host token is minted`,
       );
     } else if (switchedToSetupCode && ctx.adminSetupCode === undefined) {
       ctx.adminSetupCode = makeAdminSetupCode();

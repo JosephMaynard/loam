@@ -632,7 +632,7 @@ export function mayFallBackToPlaintext(advertisedMode: TransportEncryption): boo
 /** Thrown by the fetch/WebSocket entry points when the effective mode is `required` but no session exists
  * (the QR gate is showing, or a pin was broken mid-session): plaintext is never an option there. */
 function requiredSessionMissing(): Error {
-  return new Error("This node requires an encrypted session and none is established — scan its join QR to reconnect.");
+  return new Error("This node requires an encrypted session and none is established. Scan its join QR to reconnect.");
 }
 
 /** A single in-flight re-handshake, shared by all concurrent callers (docs/20 §5.6/§9). Without this, a

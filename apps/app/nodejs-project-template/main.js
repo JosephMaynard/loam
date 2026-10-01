@@ -1060,9 +1060,9 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
     // 'indeterminate' must NOT claim the reset was cancelled/unscheduled.
     var error =
       outcome === 'indeterminate'
-        ? 'The reset could NOT be confirmed and MAY still take effect on the next app restart — do NOT ' +
+        ? 'The reset could NOT be confirmed and MAY still take effect on the next app restart: do NOT ' +
           'assume it was cancelled. Restart the app to let it complete, or check the database state before retrying.'
-        : 'The reset was not scheduled — nothing was written to disk. It is safe to try again.';
+        : 'The reset was not scheduled: nothing was written to disk. It is safe to try again.';
     try {
       rnBridge.channel.post('loam-db-start-fresh-result', {
         requestId: requestId,
@@ -1303,7 +1303,7 @@ var WIPE_RESUME_TIMEOUT_MS = 20000;
 function deleteStaleEphemeralDb() {
   if (!hasEphemeralMarker()) {
     console.warn(
-      'Booting in ephemeral DB-encryption mode, but the previous boot was not marked ephemeral — ' +
+      'Booting in ephemeral DB-encryption mode, but the previous boot was not marked ephemeral: ' +
         'this deletion may be destroying data from a different (non-ephemeral) mode.',
     );
   }
@@ -1424,7 +1424,7 @@ function resolveDbEncryptionAndBoot() {
       applyBootEnv({});
       console.error('Unexpected error resolving DB encryption for boot', err);
       global.__loamReportBootError(
-        'An unexpected error occurred while preparing on-device encryption — refusing to start. Retry once the app is responsive.',
+        'An unexpected error occurred while preparing on-device encryption: refusing to start. Retry once the app is responsive.',
         'db_encryption_locked',
       );
       return 'locked';
@@ -1549,7 +1549,7 @@ function bootWithWipeResume() {
       if (clearWipePhase() !== true) {
         notify('error', {
           message:
-            'The security reset cleared the encryption key, but a cleanup step is still pending — reopen ' +
+            'The security reset cleared the encryption key, but a cleanup step is still pending: reopen ' +
             'the app to finish it. The database was not reopened.',
           code: 'db_encryption_locked',
         });
@@ -1571,7 +1571,7 @@ function bootWithWipeResume() {
       // in the `finally` below.
       notify('error', {
         message:
-          'A security reset is still finishing on this device — reopen the app to complete it. The database was not reopened.',
+          'A security reset is still finishing on this device: reopen the app to complete it. The database was not reopened.',
         code: 'db_encryption_locked',
       });
       resolve('locked');
@@ -1587,7 +1587,7 @@ function bootWithWipeResume() {
       rnBridge.channel.removeListener('loam-wipe-complete', proceed);
       console.error('Failed to post loam-wipe-restart for a resumed wipe handoff', err);
       notify('error', {
-        message: 'A security reset could not be completed on this device — reopen the app to retry.',
+        message: 'A security reset could not be completed on this device: reopen the app to retry.',
         code: 'db_encryption_locked',
       });
       resolve('locked');

@@ -153,7 +153,7 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "The passphrase bootstrap strategy requires a passphrase": "passphrase_required",
   "This message is still being written": "message_streaming",
   "This session is no longer valid": "session_invalid",
-  "This thread has replies from other people — only an admin can delete it": "thread_has_replies",
+  "This thread has replies from other people: only an admin can delete it": "thread_has_replies",
   "Too many attempts": "too_many_attempts",
   "Too many claim attempts; try again later": "too_many_claim_attempts",
   "Unable to create message": "message_create_failed",

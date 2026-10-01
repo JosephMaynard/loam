@@ -342,7 +342,7 @@ export function MessageItem({
               <p className="message-removed" dir="auto">
                 <em>{t("message.removedByModerator")}</em>
                 {message.meta?.removalReason ? (
-                  <span className="message-removed-reason"> — {message.meta.removalReason}</span>
+                  <span className="message-removed-reason">: {message.meta.removalReason}</span>
                 ) : null}
               </p>
             ) : editing ? (

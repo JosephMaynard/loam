@@ -1339,7 +1339,7 @@ function LoamApp() {
       console.warn(
         "%cLOAM DEVELOPER MODE",
         "font-weight:bold;color:#b91c1c",
-        "— transport encryption is OFF. Traffic is plaintext and readable by anyone on this LAN. Never use for real messaging.",
+        "Transport encryption is OFF. Traffic is plaintext and readable by anyone on this LAN. Never use for real messaging.",
       );
     }
   }, [config?.networkConfig.devMode]);

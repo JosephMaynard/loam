@@ -222,7 +222,7 @@ export async function downloadModel(
       ok: false,
       error:
         `Downloaded file size (${sizeBytes} bytes) doesn't match the expected ${expectedSizeBytes} ` +
-        'bytes — the download may be truncated, or the upstream file changed.',
+        'bytes: the download may be truncated, or the upstream file changed.',
     };
   }
 
@@ -244,8 +244,8 @@ export async function downloadModel(
         ok: false,
         error:
           signal?.aborted
-            ? 'Verification was cancelled — the partial file was deleted.'
-            : 'SHA-256 checksum did not match (or could not be verified) — the file was deleted.',
+            ? 'Verification was cancelled: the partial file was deleted.'
+            : 'SHA-256 checksum did not match (or could not be verified): the file was deleted.',
       };
     }
   }
@@ -365,7 +365,7 @@ export async function deleteModelFileChecked(uri: string): Promise<void> {
   await FileSystem.deleteAsync(uri, { idempotent: true });
   const info = await FileSystem.getInfoAsync(uri);
   if (info.exists) {
-    throw new Error(`Failed to delete model file — ${uri} still exists after deletion.`);
+    throw new Error(`Failed to delete model file: ${uri} still exists after deletion.`);
   }
 }
 
@@ -540,7 +540,7 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
   if (parsed.username || parsed.password) {
     return {
       ok: false,
-      error: 'Remove the username/password from the link — credentials embedded in a URL are not allowed.',
+      error: 'Remove the username/password from the link: credentials embedded in a URL are not allowed.',
     };
   }
   if (!isAllowedCustomDownloadHost(parsed.hostname)) {
@@ -559,10 +559,10 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
     const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
     guessedName = sanitizeModelFileName(decodedName);
   } catch {
-    return { ok: false, error: "That URL's file name isn't valid — try a direct link with a plain file name." };
+    return { ok: false, error: "That URL's file name isn't valid: try a direct link with a plain file name." };
   }
   if (!guessedName) {
-    return { ok: false, error: "That URL's file name isn't safe to use — try a direct link with a plain file name." };
+    return { ok: false, error: "That URL's file name isn't safe to use: try a direct link with a plain file name." };
   }
 
   return {
