@@ -563,8 +563,8 @@ kill switch. See `docs/09-security-profiles.md`.
   search would fall out of the RAG embeddings (docs/06) if that lands.
 - `security.profile` is wired (see the feature-flag note). Transport encryption is enforced, so now
   **every named profile encrypts**: `open` and `standard` both force `optional`, `hardened` forces
-  `required`. `open`/`standard` therefore differ only in intent for now (invite tokens — docs/08 — would
-  be the axis to split them, still unbuilt). Plaintext (`off`) is no longer any profile's posture.
+  `required`. `open`/`standard` therefore differ only in intent for now. Rotating invite codes (docs/08,
+  `invites.ts`) are built but apply to any approval-only node rather than being a profile axis. Plaintext (`off`) is no longer any profile's posture.
 - On-device SQLCipher (encrypted Android DB) now SHIPS: the multiple-ciphers ABI-108 android-arm64
   prebuild is cross-compiled + vendored (`apps/app/native-prebuilds/multiple-ciphers/`, sha256-pinned
   tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the plain
