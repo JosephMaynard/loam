@@ -1520,9 +1520,12 @@ function LoamApp() {
 
         if (nextConfig.currentUser.banned || nextConfig.currentUser.pending) {
           // Gated sessions must not keep previously hydrated content around (a banned user's
-          // cached history stays readable otherwise): clear memory and the IndexedDB caches.
+          // cached history stays readable otherwise): clear memory and the IndexedDB caches. That includes
+          // the DM inbox: its partners and unread dots, and any inbox request still in flight.
           setChannels([]);
           setMessages([]);
+          invalidateInboxRequests();
+          setDmInbox(undefined);
 
           for (const storeName of ["channels", "messages"] as const) {
             const cachedRecords = await getAllRecords<{ id: string }>(storeName).catch(() => []);
