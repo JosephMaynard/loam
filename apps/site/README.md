@@ -19,15 +19,21 @@ pins the build command, output directory, and a few security headers. Set the pr
 
 ## Structure
 
-- `index.html` — the landing page (semantic sections, accessible).
-- `privacy.html` — the privacy policy at `/privacy` (a second Vite entry; Vercel `cleanUrls` drops the
+- `index.html`: the landing page (semantic sections, accessible).
+- `privacy.html`: the privacy policy at `/privacy` (a second Vite entry; Vercel `cleanUrls` drops the
   `.html`). Play requires a public policy URL; keep it in step with what the app actually does.
-- `src/styles.css` — the design system (earthy LOAM palette, responsive, light + dark).
-- `src/main.js` — nav toggle, scroll reveal (skipped under `prefers-reduced-motion`), footer year, and
-  cookieless PostHog analytics (EU host, memory-only persistence, pageviews + download/GitHub link
-  clicks; a no-op when `VITE_POSTHOG_KEY` isn't set at build time). The CSP in `vercel.json` allows only
-  the EU ingest host.
-- `public/` — the LOAM mark and icon.
+- `src/styles.css`: the design system. Warm paper and deep moss with an ember accent, light and dark,
+  Bricolage Grotesque for headings, Inter for text and JetBrains Mono for code. The fonts are
+  self-hosted from `@fontsource-variable` packages (the CSP allows no font host), split by script, so a
+  visitor downloads only the subsets their language needs.
+- `src/main.js`: nav toggle, header hairline on scroll, copy buttons, scroll reveal (skipped under
+  `prefers-reduced-motion`), footer year, and cookieless PostHog analytics (EU host, memory-only
+  persistence, pageviews plus download, GitHub and copy-command clicks; a no-op when `VITE_POSTHOG_KEY`
+  isn't set at build time). The CSP in `vercel.json` allows only the EU ingest host.
+- `public/shots/`: the screenshots, all real (see `scripts/android-shots.md` to retake them).
+- `public/og-image.png`: the 1200×630 share image (`scripts/og-image.mjs`).
+- `public/contours.svg`: the hero's contour-line texture.
+- `scripts/`: the screenshot tooling (dev-only; `playwright-core` drives the installed Chrome).
 
-Content is intentionally framed to protect ordinary people, not to advertise concealment — mirroring
+Content is intentionally framed to protect ordinary people, not to advertise concealment, mirroring
 the project's stance (see the root README and `docs/`).
