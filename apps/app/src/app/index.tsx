@@ -32,7 +32,7 @@ import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import { colorSchemeForClientMessage } from '@/lib/client-theme';
 import { t } from '@/lib/i18n';
-import { SERVER_PORT, withHostToken, withInviteCode } from '@/lib/join-url';
+import { SERVER_PORT, withInviteCode } from '@/lib/join-url';
 import {
   clearStoredDbKeys,
   DB_ENCRYPTION_DRIVER_MISSING_CODE,
@@ -1166,16 +1166,14 @@ function HostScreen() {
           <WebView
             key={webViewKey}
             ref={webViewRef}
-            source={{ uri: `${LOAM_URL}${initialPath}${withHostToken(transportKeyFragment, hostAdminToken)}` }}
+            source={{ uri: `${LOAM_URL}${initialPath}${transportKeyFragment}` }}
             style={styles.flex}
             // Hand the launcher's per-boot host token to the LOAM client running in THIS WebView (and only
             // here — a LAN joiner never sees it): the client claims admin with it under the `hostDevice`
-            // bootstrap (review 2026-09-04). It rides the start URL's fragment (`&h=`, never sent to the
-            // server; the client takes it out at start-up, apps/client/src/lib/host-token.ts), because Android
-            // doesn't reliably run the injected script below before the first page load: without it the host
-            // was an ordinary member of its own network, or queued on an approval-only one. The injection
-            // stays as a second route. `originWhitelist` + `onShouldStartLoadWithRequest` below pin this
-            // frame to the loopback origin, so neither can reach another page.
+            // bootstrap (review 2026-09-04). Only by injection, never in the URL: the client trusts these
+            // globals (the key below overrides a pin), and a URL is something anyone can craft (review
+            // 2026-10-03 #1). `originWhitelist` + `onShouldStartLoadWithRequest` below pin this frame to the
+            // loopback origin, so the injected globals can't reach another page.
             // Also hand over the host's transport key (read from the loopback bootstrap above) as
             // `__loamHostTransportKey`: the client trusts it over a stale pin, since a node with an ephemeral
             // DB key mints a new transport key every boot and would otherwise break the host's own pin
@@ -1288,7 +1286,14 @@ function HostScreen() {
             setResetOpen(true);
           }}
         />
-        <EmergencyResetOverlay channel={nodejs.channel} onClose={() => setResetOpen(false)} visible={resetOpen} />
+        <EmergencyResetOverlay
+          channel={nodejs.channel}
+          onClose={() => setResetOpen(false)}
+          visible={resetOpen}
+          keyClearError={wipeClearFailure}
+          keyClearBusy={wipeClearBusy}
+          onRetryKeyClear={() => void attemptWipeKeyClear()}
+        />
       </SafeAreaView>
     );
   }

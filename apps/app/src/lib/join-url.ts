@@ -92,14 +92,3 @@ export function withInviteCode(fragment: string, code: string | undefined): stri
 export function typedAddress(url: string): string {
   return url.split('#')[0]!;
 }
-
-/**
- * Add the launcher's host token to the host's OWN WebView start URL: `#k=<key>&h=<token>`, or `#h=<token>`
- * with no key. Only for that WebView (a join QR never carries it); the client takes it out at start-up.
- */
-export function withHostToken(fragment: string, token: string | undefined): string {
-  if (!token || !/^[A-Za-z0-9_-]+$/.test(token)) {
-    return fragment;
-  }
-  return fragment ? `${fragment}&h=${token}` : `#h=${token}`;
-}

@@ -288,6 +288,51 @@ describe("a new node using its link code", () => {
     expect(config.sync.token).toBeUndefined();
   });
 
+  it.skipIf(!LAN_ADDRESS)("drops a link answer that arrives after an admin removed the peer", async () => {
+    // Review 2026-10-03 #4: the answer used to install the removed peer's token into the saved config.
+    const existing = await lanNode({ sync: { enabled: false, peers: [], token: "mesh-secret-0123456789" } });
+    const code = await mintCode(existing.app, await sessionCookie(existing.app));
+    const joining = await lanNode({
+      sync: { enabled: true, peers: [{ url: existing.url, transportKey: existing.key, linkCode: code }] },
+    });
+    const cookie = await sessionCookie(joining.app);
+
+    const realFetch = globalThis.fetch;
+    let arrived!: () => void;
+    const answerArrived = new Promise<void>((resolve) => (arrived = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const response = await realFetch(input, init);
+      if (String(input).endsWith("/api/sync/link")) {
+        arrived();
+        await released;
+      }
+      return response;
+    }) as typeof fetch;
+    cleanups.push(() => {
+      globalThis.fetch = realFetch;
+    });
+
+    const round = joining.app.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie } });
+    await answerArrived;
+    const save = await joining.app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie },
+      payload: { sync: { enabled: false, peers: [] } },
+    });
+    expect(save.statusCode).toBe(200);
+    release();
+    await round;
+
+    const config = (
+      await joining.app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie } })
+    ).json() as { sync: { enabled: boolean; peers: unknown[]; token?: string } };
+    expect(config.sync).toMatchObject({ enabled: false, peers: [] });
+    expect(config.sync.token).toBeUndefined();
+  });
+
   it.skipIf(!LAN_ADDRESS)("reports a refused code and doesn't try it again", async () => {
     const existing = await lanNode();
     const joining = await lanNode({

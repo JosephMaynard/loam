@@ -73,7 +73,7 @@ export const fr: Partial<AppCatalog> = {
   "setup.typeTitle": "Quel type de réseau ?",
   "setup.typeBody": "Ce choix décide qui peut rejoindre, ce que chacun voit des autres et combien de temps tout est conservé.",
   "setup.privateTitle": "Privé et éphémère",
-  "setup.privateBody": "Chacun reçoit un nom et une image au hasard, les messages disparaissent au bout d'une heure et vous approuvez chaque personne qui rejoint. Rien sur ce téléphone n'est lisible une fois LOAM fermé.",
+  "setup.privateBody": "Chacun reçoit un nom et une image au hasard, les messages disparaissent au bout d'une heure et vous approuvez chaque personne qui rejoint. Les messages sont chiffrés avec une clé qui n'existe que tant que LOAM tourne ; les images et les fichiers sont effacés au prochain démarrage.",
   "setup.privateNote": "Si LOAM se ferme ou si le téléphone redémarre, le réseau et ses messages disparaissent définitivement.",
   "setup.communityTitle": "Communauté",
   "setup.communityBody": "Chacun peut choisir un nom et une photo, toute personne à proximité peut rejoindre, et les messages sont conservés, chiffrés sur ce téléphone.",
@@ -115,4 +115,8 @@ export const fr: Partial<AppCatalog> = {
   "reset.settingsBody": "Efface tout ce réseau d'un coup, sur ce téléphone et sur chaque téléphone connecté, puis ferme LOAM.",
   "reset.open": "Réinitialisation d'urgence",
   "menu.privacy": "Politique de confidentialité",
+  "reset.incomplete": "Tout n'a pas encore pu être effacé. Le réseau est verrouillé : fermez LOAM et rouvrez-le pour terminer l'effacement.",
+  "reset.closeApp": "Fermer LOAM",
+  "reset.keyClearFailed": "Tout a été effacé, mais la clé de chiffrement de ce téléphone n'a pas pu être supprimée : {error}",
+  "reset.retry": "Réessayer",
 };

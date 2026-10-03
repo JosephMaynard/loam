@@ -24,6 +24,7 @@ import {
   type MessageCreateRequest,
   type NetworkConfig,
   type SyncLinkResponse,
+  type SyncPeer,
   type TransportEncryption,
   type User,
   type UserUpdateRequest,
@@ -322,7 +323,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       const transportKey = effectiveTransportEncryption() === "off" ? undefined : transportIdentity?.publicKey;
       return { port: clientPort, ...(transportKey ? { transportKey } : {}), name: appConfig.node.name };
     },
-    linked: (peerUrl, result) => applyPeerLinked(peerUrl, result),
+    linked: (peer, result) => applyPeerLinked(peer, result),
   });
 
   // ---- The composition seam (2026-09-04 split) -------------------------------------------------
@@ -499,10 +500,24 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * spent code, name the peer as it named itself (unless an admin already labelled it), and adopt its mesh
    * token when this node has none, so both sides present and require the same one. Applied like an admin
    * save. A node that already has a different token keeps its own (the operator has to reconcile them).
+   * An answer that comes back after an admin turned sync off, removed or replaced the peer, or changed its
+   * pinned key or code is dropped (review 2026-10-03 #4): it must not bring back a token for a peer the
+   * operator has just let go of.
    */
-  function applyPeerLinked(peerUrl: string, result: SyncLinkResponse): void {
+  function applyPeerLinked(used: SyncPeer, result: SyncLinkResponse): void {
+    const current = appConfig.sync.peers.find((peer) => peer.url === used.url);
+    if (
+      !appConfig.sync.enabled ||
+      !current ||
+      !current.linkCode ||
+      current.linkCode !== used.linkCode ||
+      current.transportKey !== used.transportKey
+    ) {
+      ctx.server.log.info("A link answer arrived for a peer that is no longer configured as it was: ignored");
+      return;
+    }
     const peers = appConfig.sync.peers.map((peer) => {
-      if (peer.url !== peerUrl) {
+      if (peer.url !== used.url) {
         return peer;
       }
       const { linkCode: _spent, ...rest } = peer;
@@ -2407,7 +2422,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // getAdminSetupCode() — a method survives the test wrapper's `{ ...app }` spread, a getter wouldn't.
     adminSetupCode,
     getAdminSetupCode: () => adminSetupCode,
-    emergencyReset: async () => ({ complete: (await killSwitch.executeKillSwitch()).complete }),
+    emergencyReset: async () => {
+      const result = await killSwitch.executeKillSwitch();
+      return { complete: result.complete, keyClearRequested: result.keyClearRequested === true };
+    },
     reapExpiredMessages,
     reapOrphanedAttachments,
     reapOrphanedAvatars,

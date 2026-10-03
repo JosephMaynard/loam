@@ -36,7 +36,7 @@ type DbEncryptionSettingsOverlayProps = {
 
 const MODE_LABELS: Record<DbEncryptionMode, string> = {
   persistent: 'Encrypted (recommended)',
-  ephemeral: 'Encrypted, erased when LOAM closes',
+  ephemeral: 'Encrypted, new key every start',
   passphrase: 'Encrypted with a passphrase',
   off: 'No encryption (for testing)',
 };

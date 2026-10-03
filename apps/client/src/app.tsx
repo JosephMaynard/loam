@@ -1532,9 +1532,9 @@ function LoamApp() {
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
 
-        // The Android host's own WebView (never a LAN joiner) carries the launcher's per-boot host token
-        // (lib/host-token.ts): claim admin with it (`hostDevice` bootstrap, review 2026-09-04). It is kept for
-        // the life of the page: a failed claim (a rate limit, a blip) retries on the next boot pass, and a new
+        // The Android host's own WebView (never a LAN joiner) is injected with the launcher's per-boot host
+        // token: claim admin with it (`hostDevice` bootstrap, review 2026-09-04). It is kept for the life of
+        // the page: a failed claim (a rate limit, a blip) retries on the next boot pass, and a new
         // identity (after a wipe) claims again, since with `hostDevice` there is no other way for this node to
         // gain an admin. One claim at a time; the server treats a claim by an existing admin as a no-op. Boot
         // then carries on as the claimed admin: the snapshot it started from still says pending on an

@@ -14,9 +14,11 @@ import type { WipePhase } from "./store-lifecycle.js";
  * The result of a kill-switch run (P1-1, Sol round 8) — so the `/api/admin/kill-switch` and `/api/panic`
  * endpoints never report success on an INCOMPLETE wipe. `complete` is false when the wipe could not be
  * finished this run (deletion incomplete/unverifiable → 503-locked, retried on the next boot); `phase`
- * carries the durable wipe phase for a fixed-key launcher handoff.
+ * carries the durable wipe phase for a fixed-key launcher handoff. `keyClearRequested` is true when the launcher
+ * was asked to clear the device key and restart (`loam-wipe-restart`): the wipe isn't over until it has, so
+ * the host app must not close itself before that clear is verified.
  */
-export type KillSwitchResult = { complete: boolean; phase?: WipePhase };
+export type KillSwitchResult = { complete: boolean; phase?: WipePhase; keyClearRequested?: boolean };
 
 /** Build the kill-switch layer over the app context: `executeKillSwitch` (single-flight) and its body. */
 export function createKillSwitch(ctx: AppContext) {
@@ -209,7 +211,7 @@ export function createKillSwitch(ctx: AppContext) {
               "persisted; a device-key-clear-and-restart was REQUESTED from the launcher (durable `key-clear-ready` " +
               "journal written) — the key rotation is only confirmed once the launcher acknowledges it cleared the key.",
           );
-          return { complete: true, phase: "key-clear-ready" };
+          return { complete: true, phase: "key-clear-ready", keyClearRequested: true };
         }
 
         // Data is unrecoverable, config.json is current, and the launcher was signaled, but the `key-clear-ready`
@@ -221,7 +223,7 @@ export function createKillSwitch(ctx: AppContext) {
           "key-clear is interrupted, reopen the node to finish clearing the (now-unused) device key.";
         ctx.server.log.warn(noMarkerMessage);
         reportBootNotice(noMarkerMessage, "kill_switch_wipe_no_marker");
-        return { complete: true, phase: "delete-pending" };
+        return { complete: true, phase: "delete-pending", keyClearRequested: true };
       }
 
       // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a NEW key

@@ -73,7 +73,7 @@ export const pt: Partial<AppCatalog> = {
   "setup.typeTitle": "Que tipo de rede?",
   "setup.typeBody": "Isto decide quem pode entrar, o que cada pessoa vê das outras e durante quanto tempo tudo é guardado.",
   "setup.privateTitle": "Privada e de curta duração",
-  "setup.privateBody": "Cada pessoa recebe um nome e uma imagem ao acaso, as mensagens desaparecem ao fim de uma hora e é você quem aprova cada pessoa que entra. Nada neste telemóvel pode ser lido depois de o LOAM fechar.",
+  "setup.privateBody": "Cada pessoa recebe um nome e uma imagem ao acaso, as mensagens desaparecem ao fim de uma hora e é você quem aprova cada pessoa que entra. As mensagens ficam cifradas com uma chave que só existe enquanto o LOAM está aberto; as imagens e os ficheiros são apagados no próximo arranque.",
   "setup.privateNote": "Se o LOAM fechar ou o telemóvel reiniciar, a rede e as mensagens desaparecem para sempre.",
   "setup.communityTitle": "Comunidade",
   "setup.communityBody": "Cada pessoa pode escolher um nome e uma foto, qualquer pessoa por perto pode entrar e as mensagens são guardadas, cifradas neste telemóvel.",
@@ -115,4 +115,8 @@ export const pt: Partial<AppCatalog> = {
   "reset.settingsBody": "Apaga tudo desta rede de uma vez, neste telemóvel e em todos os telemóveis ligados, e depois fecha o LOAM.",
   "reset.open": "Reposição de emergência",
   "menu.privacy": "Política de privacidade",
+  "reset.incomplete": "Ainda não foi possível apagar tudo. A rede está bloqueada: feche o LOAM e abra-o de novo para terminar de apagar.",
+  "reset.closeApp": "Fechar o LOAM",
+  "reset.keyClearFailed": "Tudo foi apagado, mas não foi possível eliminar a chave de cifra deste telemóvel: {error}",
+  "reset.retry": "Tentar de novo",
 };

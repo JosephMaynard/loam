@@ -78,7 +78,7 @@ export const en = {
   "setup.typeTitle": "What kind of network?",
   "setup.typeBody": "This decides who can join, what people can see about each other, and how long anything is kept.",
   "setup.privateTitle": "Private and short-lived",
-  "setup.privateBody": "Everyone gets a random name and picture, messages disappear after an hour, and you approve each person who joins. Nothing on this phone can be read once LOAM closes.",
+  "setup.privateBody": "Everyone gets a random name and picture, messages disappear after an hour, and you approve each person who joins. Messages are locked with a key that exists only while LOAM runs; pictures and files are deleted the next time it starts.",
   "setup.privateNote": "If LOAM closes or the phone restarts, the network and its messages are gone for good.",
   "setup.communityTitle": "Community",
   "setup.communityBody": "People can choose a name and photo, anyone nearby can join, and messages are kept, stored encrypted on this phone.",
@@ -120,6 +120,10 @@ export const en = {
   "reset.settingsBody": "Erases everything on this network at once, on this phone and on every phone connected to it, then closes LOAM.",
   "reset.open": "Emergency reset",
   "menu.privacy": "Privacy policy",
+  "reset.incomplete": "Not everything could be erased yet. The network is locked: close LOAM and open it again to finish erasing.",
+  "reset.closeApp": "Close LOAM",
+  "reset.keyClearFailed": "Everything was erased, but this phone's encryption key couldn't be cleared: {error}",
+  "reset.retry": "Try again",
 } as const;
 
 export type AppCatalog = { [K in keyof typeof en]: string };

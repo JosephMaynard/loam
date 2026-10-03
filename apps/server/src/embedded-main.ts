@@ -193,7 +193,7 @@ async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
     const app = await start();
     // The host menu's Emergency Reset (main.js `loam-emergency-reset`) wipes through this in-process hook:
     // no HTTP, so no session or admin claim, and nothing on the network can reach it.
-    (globalThis as { __loamEmergencyReset?: () => Promise<{ complete: boolean }> }).__loamEmergencyReset = () =>
+    (globalThis as { __loamEmergencyReset?: () => Promise<{ complete: boolean; keyClearRequested: boolean }> }).__loamEmergencyReset = () =>
       app.emergencyReset();
     bootState = "ready";
     // P2 (Sol round 4): tell RN directly, independent of main.js's own `/api/health` readiness poll

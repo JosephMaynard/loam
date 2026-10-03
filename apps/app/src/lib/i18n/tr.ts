@@ -73,7 +73,7 @@ export const tr: Partial<AppCatalog> = {
   "setup.typeTitle": "Nasıl bir ağ?",
   "setup.typeBody": "Bu seçim kimin katılabileceğini, insanların birbiri hakkında ne görebileceğini ve her şeyin ne kadar süre saklanacağını belirler.",
   "setup.privateTitle": "Gizli ve kısa ömürlü",
-  "setup.privateBody": "Herkes rastgele bir ad ve resim alır, mesajlar bir saat sonra kaybolur ve katılan her kişiyi siz onaylarsınız. LOAM kapandıktan sonra bu telefondaki hiçbir şey okunamaz.",
+  "setup.privateBody": "Herkes rastgele bir ad ve resim alır, mesajlar bir saat sonra kaybolur ve katılan her kişiyi siz onaylarsınız. Mesajlar yalnızca LOAM çalışırken var olan bir anahtarla şifrelenir; resimler ve dosyalar bir sonraki açılışta silinir.",
   "setup.privateNote": "LOAM kapanırsa veya telefon yeniden başlarsa ağ ve mesajları kalıcı olarak gider.",
   "setup.communityTitle": "Topluluk",
   "setup.communityBody": "Herkes bir ad ve fotoğraf seçebilir, yakındaki herkes katılabilir ve mesajlar bu telefonda şifreli olarak saklanır.",
@@ -115,4 +115,8 @@ export const tr: Partial<AppCatalog> = {
   "reset.settingsBody": "Bu ağdaki her şeyi tek seferde, bu telefonda ve bağlı tüm telefonlarda siler, ardından LOAM'u kapatır.",
   "reset.open": "Acil sıfırlama",
   "menu.privacy": "Gizlilik politikası",
+  "reset.incomplete": "Henüz her şey silinemedi. Ağ kilitlendi: silmeyi bitirmek için LOAM'u kapatıp yeniden açın.",
+  "reset.closeApp": "LOAM'u kapat",
+  "reset.keyClearFailed": "Her şey silindi ancak bu telefonun şifreleme anahtarı temizlenemedi: {error}",
+  "reset.retry": "Tekrar dene",
 };

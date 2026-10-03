@@ -73,7 +73,7 @@ export const es: Partial<AppCatalog> = {
   "setup.typeTitle": "¿Qué tipo de red?",
   "setup.typeBody": "Esto decide quién puede unirse, qué puede ver cada persona de las demás y cuánto tiempo se guarda todo.",
   "setup.privateTitle": "Privada y de corta duración",
-  "setup.privateBody": "Cada persona recibe un nombre y una imagen al azar, los mensajes desaparecen al cabo de una hora y tú apruebas a cada persona que se une. Nada en este teléfono se puede leer una vez que LOAM se cierra.",
+  "setup.privateBody": "Cada persona recibe un nombre y una imagen al azar, los mensajes desaparecen al cabo de una hora y tú apruebas a cada persona que se une. Los mensajes se guardan cifrados con una clave que solo existe mientras LOAM está abierto; las imágenes y los archivos se borran la próxima vez que se inicia.",
   "setup.privateNote": "Si LOAM se cierra o el teléfono se reinicia, la red y sus mensajes desaparecen para siempre.",
   "setup.communityTitle": "Comunidad",
   "setup.communityBody": "Cada persona puede elegir un nombre y una foto, cualquiera que esté cerca puede unirse y los mensajes se guardan cifrados en este teléfono.",
@@ -115,4 +115,8 @@ export const es: Partial<AppCatalog> = {
   "reset.settingsBody": "Borra todo lo de esta red de una vez, en este teléfono y en todos los teléfonos conectados, y después cierra LOAM.",
   "reset.open": "Restablecimiento de emergencia",
   "menu.privacy": "Política de privacidad",
+  "reset.incomplete": "Todavía no se ha podido borrar todo. La red está bloqueada: cierra LOAM y vuelve a abrirlo para terminar de borrar.",
+  "reset.closeApp": "Cerrar LOAM",
+  "reset.keyClearFailed": "Se borró todo, pero no se pudo eliminar la clave de cifrado de este teléfono: {error}",
+  "reset.retry": "Reintentar",
 };

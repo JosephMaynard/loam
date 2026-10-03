@@ -1084,7 +1084,7 @@ describe("emergency reset from the host device", () => {
     expect(app.store.loadMessages().length).toBe(1);
 
     // ...but the phone's owner can always wipe it from the host menu.
-    expect(await app.emergencyReset()).toEqual({ complete: true });
+    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: false });
     expect(app.store.loadMessages()).toEqual([]);
   });
 });
@@ -1922,6 +1922,13 @@ describe("encryption at rest + key-discard kill switch", () => {
     // recorder, not a real launcher).
     expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
     expect(readJournalPhase(dataDir)).toBe("key-clear-ready");
+  });
+
+  it("the host menu's Emergency reset reports a handed-off device-key clear, so the app waits for it before closing", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app } = await makeEncryptedApp({ dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" });
+    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: true });
+    expect(hook.calls).toBe(1);
   });
 
   it("P1-2(a): a concurrent request during the slow file-deletion await already sees the lockdown (503), never stale in-memory data", async () => {

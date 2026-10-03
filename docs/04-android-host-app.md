@@ -261,11 +261,15 @@ timeout, a Keystore error), the launcher sees an encrypted choice and locks inst
 unencrypted with no hint and no database. The operation rides every `loam-db-key-response` as
 `newNetwork { id, config }` until the launcher acknowledges it (`loam-new-network-applied`), so a response
 the launcher timed out on is simply resent. main.js applies it through `new-network.js`
-`applyNewNetwork` before the boot decision reads the folder: empty the folder, durably write
-`config.json`, then record the id in `.loam-setup-applied`. The same id arriving again is a no-op, so a
-retry can never empty the network it already created. If the folder can't be fully emptied or the
-configuration isn't durably written, the launcher stays locked (Retry resends it) rather than booting
-under defaults. Detecting a previous network errs towards keeping it: an unreadable database counts as
+`applyNewNetwork` before the boot decision reads the folder: durably write a `.loam-setup-pending` marker
+naming the operation, empty the folder (keeping the marker and the mode hint, which already holds the
+new network's mode), durably write `config.json`, then record the id in `.loam-setup-applied` and drop
+the marker. The same id arriving again is a no-op, so a retry can never empty the network it already
+created. If the folder can't be fully emptied or the configuration isn't durably written, the launcher
+stays locked (Retry resends it) rather than booting under defaults, and while the marker names an
+operation the folder doesn't record (`setupUnfinished`) every boot locks, even one whose key response
+didn't bring the operation back: a half-erased folder must never read as a fresh install, which may
+start unencrypted (review 2026-10-03 #2). Detecting a previous network errs towards keeping it: an unreadable database counts as
 present and an unreadable ephemeral marker as absent. The remembered answers never keep a joining
 node's link code (it is single-use), so "start a new one like last time" for a joining phone goes back to
 the scan step.
@@ -525,13 +529,19 @@ support it); avoid Android-only Easy Connect for v1.
 - The client already supports a configurable server origin (`loam.serverUrl` in localStorage) and uses
   `credentials: "include"` — but same-origin (WebView → localhost) is simplest; prefer that.
 - **Emergency reset from the host app** (in the host menu on a private, `hardened` network; at the bottom
-  of Encryption settings on every network) closes the app once the reset has run: the native
+  of Encryption settings on every network) closes the app once everything is erased: the native
   `closeApp()` (loam-hotspot module) stops the host service, finishes the task and kills the process. A
   nodejs-mobile runtime can't be started twice in one process, and reattaching to the wiped server left the
   launcher stuck ("Couldn't finish starting LOAM"), so the next launch is a fresh process that opens on the
-  setup screens. Setup never mentions the erased network, and doesn't highlight the last choice.
-- **The host token travels in the start URL**: the WebView loads `/#k=<key>&h=<token>`, and the client
-  reads and strips `h=` before render (`lib/host-token.ts`); the injected globals stay as a second route.
+  setup screens. Setup never mentions the erased network, and doesn't highlight the last choice. Only then,
+  though (`resetOutcome`, `src/lib/emergency-reset.ts`): an erase the server couldn't verify complete
+  (`complete: false`, the node stays 503-locked) stays on screen saying so, with a Close button (reopening
+  retries the erase); and on a fixed-key node the screen waits for the device-key clear the server handed
+  off (`keyClearRequested`), which `attemptWipeKeyClear` closes the app after, or shows the failure of
+  with a retry.
+- **The host token and key reach the WebView only by injection** (`injectedJavaScriptBeforeContentLoaded`),
+  never in the start URL: the client trusts those globals over a pin, and a URL is something anyone can
+  craft (review 2026-10-03 #1).
 - **After an Emergency Reset** the node rotates its transport key. The host screen re-fetches
   `/api/bootstrap` for the new `#k=` and remounts the WebView when the client reports the `wipe` event
   (which also clears its old pin). The WebView is also handed the node's key directly: alongside the

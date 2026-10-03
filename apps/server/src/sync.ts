@@ -18,8 +18,11 @@ const LINK_RETRY_MS = 30_000;
 export type SyncLinkHooks = {
   /** This node's port, transport key and name; undefined when it can't be described yet. */
   self: () => Omit<SyncLinkRequest, "code"> | undefined;
-  /** A peer accepted this node's link code: drop the spent code and take in the peer's answer. */
-  linked: (peerUrl: string, result: SyncLinkResponse) => void;
+  /**
+   * A peer accepted this node's link code: drop the spent code and take in the peer's answer. `peer` is the
+   * entry as it was when the code was sent; the answer is applied only if that entry is still configured.
+   */
+  linked: (peer: SyncPeer, result: SyncLinkResponse) => void;
 };
 
 /**
@@ -290,7 +293,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         return;
       }
       linkRetryAt.delete(peer.url);
-      link?.linked(peer.url, result);
+      link?.linked(peer, result);
     } catch (error) {
       if (error instanceof Error && error.message === "Peer answered 403") {
         refusedLinkCodes.add(code);

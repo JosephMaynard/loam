@@ -67,11 +67,11 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   back into it. Asking the node "who am I?" again on an already-encrypted connection answered with the
   person as they were when the connection was set up, so an admin claim or an approval made since was
   undone on the next refresh (and the host's page retried its claim until it was rate-limited). The node
-  now answers with the person as they are. The host's admin token also travels in the page address now
-  (never sent anywhere), so it can't miss the page.
+  now answers with the person as they are.
 - **After an Emergency reset the host app could get stuck** ("Couldn't finish starting LOAM", recoverable
   only by clearing the app's data) or quietly restart an empty network. LOAM now closes completely once
-  the reset has run, and opens on the setup screens next time.
+  everything is erased, and opens on the setup screens next time. If something couldn't be erased, the
+  reset screen says so and stays open instead.
 - **`npx loamnet` no longer crashes when port 3000 is taken.** With no port chosen it moves to the next
   free one (3000–3019) and says so; an explicit `--port` / `$PORT` that is taken exits with a short
   message instead of a stack trace. A port counts as free only if loopback is free too, so

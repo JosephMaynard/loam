@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { requestEmergencyReset } from './emergency-reset';
+import { requestEmergencyReset, resetOutcome } from './emergency-reset';
 
 /** A bridge double: records posts, lets the test answer like main.js would. */
 function fakeChannel() {
@@ -37,15 +37,15 @@ describe('requestEmergencyReset', () => {
     const { requestId } = bridge.posts[0]!.payload;
     expect(bridge.posts[0]!.name).toBe('loam-emergency-reset');
     bridge.answer({ requestId: 'someone-else', ok: false, error: 'not mine' });
-    bridge.answer({ requestId, ok: true, complete: true });
-    await expect(pending).resolves.toEqual({ ok: true, complete: true });
+    bridge.answer({ requestId, ok: true, complete: true, keyClear: true });
+    await expect(pending).resolves.toEqual({ ok: true, complete: true, keyClear: true });
   });
 
   it('reports an incomplete wipe and a failure as such', async () => {
     const bridge = fakeChannel();
     const incomplete = requestEmergencyReset(bridge.channel);
     bridge.answer({ requestId: bridge.posts[0]!.payload.requestId, ok: true, complete: false });
-    await expect(incomplete).resolves.toEqual({ ok: true, complete: false });
+    await expect(incomplete).resolves.toEqual({ ok: true, complete: false, keyClear: false });
 
     const failed = requestEmergencyReset(bridge.channel);
     bridge.answer({ requestId: bridge.posts[1]!.payload.requestId, ok: false, error: 'not running' });
@@ -59,5 +59,14 @@ describe('requestEmergencyReset', () => {
     vi.advanceTimersByTime(1000);
     await expect(pending).resolves.toEqual({ ok: false, error: 'The host did not answer in time.' });
     vi.useRealTimers();
+  });
+
+  it('closes LOAM only once everything is erased, and never on an incomplete erase', () => {
+    // Review 2026-10-03 #3: the screen used to close the app on any `ok`, including `complete: false`.
+    expect(resetOutcome({ ok: true, complete: true, keyClear: false })).toBe('close');
+    expect(resetOutcome({ ok: true, complete: true, keyClear: true })).toBe('key-clear');
+    expect(resetOutcome({ ok: true, complete: false, keyClear: false })).toBe('incomplete');
+    expect(resetOutcome({ ok: true, complete: false, keyClear: true })).toBe('incomplete');
+    expect(resetOutcome({ ok: false, error: 'not running' })).toBe('failed');
   });
 });

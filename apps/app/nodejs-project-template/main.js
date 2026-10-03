@@ -25,7 +25,7 @@ const { installStartFreshMarker } = require('./start-fresh-marker');
 // Sol Fable-round P1-4: the three-outcome durable config.json write (durable / failed / indeterminate),
 // split out for the same unit-testability reason (injected `fs` — see config-write.js's doc comment).
 const { durableWriteConfig } = require('./config-write');
-const { applyNewNetwork } = require('./new-network');
+const { applyNewNetwork, setupUnfinished } = require('./new-network');
 // Sol Fable-round-3 P1: the pure per-attempt boot-env decision (clear-all-then-set-branch), split out so the
 // "every attempt is a FRESH boot configuration — no stale LOAM_DB_KEY leaks across in-process retries" rule
 // is unit-testable (see boot-config.js's doc comment).
@@ -1096,7 +1096,12 @@ rnBridge.channel.on('loam-emergency-reset', function (payload) {
     })
     .then(
       function (result) {
-        reply({ ok: true, complete: !!(result && result.complete) });
+        reply({
+          ok: true,
+          complete: !!(result && result.complete),
+          // The device-key clear was handed to RN (`loam-wipe-restart`): RN closes the app once it's verified.
+          keyClear: !!(result && result.keyClearRequested),
+        });
       },
       function (err) {
         reply({ ok: false, error: err && err.message ? err.message : String(err) });
@@ -1488,6 +1493,17 @@ function resolveDbEncryptionAndBoot() {
         applyBootEnv({});
         global.__loamReportBootError(
           "Couldn't set up the new network's storage on this phone: refusing to start it with default settings. Retry.",
+          'db_encryption_locked',
+        );
+        return 'locked';
+      }
+      // A setup that erased the previous network but never finished (and this response didn't bring the
+      // operation back, e.g. a key-request timeout): the folder is neither the old network nor the new one.
+      // Booting it could start unencrypted under defaults; stay locked until Retry resends the operation.
+      if (setupUnfinished(fs, path, dataDir)) {
+        applyBootEnv({});
+        global.__loamReportBootError(
+          "Setting up the new network didn't finish: refusing to start it with default settings. Retry.",
           'db_encryption_locked',
         );
         return 'locked';

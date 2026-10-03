@@ -73,7 +73,7 @@ export const sw: Partial<AppCatalog> = {
   "setup.typeTitle": "Mtandao wa aina gani?",
   "setup.typeBody": "Hili huamua nani anaweza kujiunga, watu wanaona nini kuhusu wenzao, na kila kitu kinahifadhiwa kwa muda gani.",
   "setup.privateTitle": "Wa faragha na wa muda mfupi",
-  "setup.privateBody": "Kila mtu hupata jina na picha ya nasibu, jumbe hupotea baada ya saa moja, na wewe unamkubali kila mtu anayejiunga. Hakuna kitu kwenye simu hii kinachoweza kusomwa LOAM ikishafungwa.",
+  "setup.privateBody": "Kila mtu hupata jina na picha ya nasibu, jumbe hupotea baada ya saa moja, na wewe unamkubali kila mtu anayejiunga. Jumbe hufungwa kwa ufunguo unaokuwepo tu wakati LOAM inafanya kazi; picha na faili hufutwa LOAM inapoanzishwa tena.",
   "setup.privateNote": "LOAM ikifungwa au simu ikiwashwa upya, mtandao na jumbe zake hupotea kabisa.",
   "setup.communityTitle": "Jumuiya",
   "setup.communityBody": "Watu wanaweza kuchagua jina na picha, yeyote aliye karibu anaweza kujiunga, na jumbe huhifadhiwa zikiwa zimesimbwa kwenye simu hii.",
@@ -115,4 +115,8 @@ export const sw: Partial<AppCatalog> = {
   "reset.settingsBody": "Inafuta kila kitu kwenye mtandao huu kwa mara moja, katika simu hii na kila simu iliyounganishwa, kisha inafunga LOAM.",
   "reset.open": "Uwekaji upya wa dharura",
   "menu.privacy": "Sera ya faragha",
+  "reset.incomplete": "Bado haikuwezekana kufuta kila kitu. Mtandao umefungwa: funga LOAM kisha uifungue tena ili kumaliza kufuta.",
+  "reset.closeApp": "Funga LOAM",
+  "reset.keyClearFailed": "Kila kitu kimefutwa, lakini ufunguo wa usimbaji wa simu hii haukuweza kufutwa: {error}",
+  "reset.retry": "Jaribu tena",
 };

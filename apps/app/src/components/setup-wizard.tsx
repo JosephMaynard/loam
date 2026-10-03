@@ -219,7 +219,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
         <>
           <ThemedText type="subtitle">{t('setup.typeTitle')}</ThemedText>
           <ThemedText themeColor="textSecondary">{t('setup.typeBody')}</ThemedText>
-          {/* Each kind is a button: choosing one moves straight on (the last choice is highlighted). */}
+          {/* Each kind is a button: choosing one moves straight on. */}
           {PRESETS.map((option) => (
             <Choice
               key={option.preset}
