@@ -27,13 +27,12 @@ import { ModelManagerOverlay } from '@/components/model-manager';
 import { SetupWizard, type SetupOutcome } from '@/components/setup-wizard';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { PRIVACY_POLICY_URL } from '@/constants/links';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import { colorSchemeForClientMessage } from '@/lib/client-theme';
 import { t } from '@/lib/i18n';
-import { SERVER_PORT, withInviteCode } from '@/lib/join-url';
+import { SERVER_PORT, withHostToken, withInviteCode } from '@/lib/join-url';
 import {
   clearStoredDbKeys,
   DB_ENCRYPTION_DRIVER_MISSING_CODE,
@@ -56,7 +55,7 @@ import { noteConnectedClients, noteLauncherInterfaces } from '@/hooks/use-hotspo
 import { parseHostClients, parseHostInterfaces, type HostInterface } from '@/lib/join-display';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
-import { startKiosk, stopKiosk } from '../../modules/loam-hotspot';
+import { closeApp, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot's own (discovered) address or the LAN one.
@@ -365,6 +364,9 @@ function HostScreen() {
   const [displayMode, setDisplayMode] = useState(false);
   // The network's name from /api/bootstrap, shown above the codes in display mode.
   const [hostNodeName, setHostNodeName] = useState<string>();
+  // A private network (the hardened profile): Emergency reset sits in the main menu, to hand in a hurry.
+  // On any other network it lives in Encryption settings, out of the way.
+  const [privateNetwork, setPrivateNetwork] = useState(false);
   const webViewRef = useRef<WebView>(null);
   // Whether the WebView (the LOAM web client, which routes with preact-iso via the History API) has
   // in-app history to go back through. A ref, not state: the hardware-back listener reads it without
@@ -451,16 +453,10 @@ function HostScreen() {
     }
 
     setWipeClearFailure(undefined);
-    try {
-      nodejs.start('main.js', { redirectOutputToLogcat: true });
-    } catch {
-      // Expected on today's nodejs-mobile (one runtime per process) — see the comment on the
-      // `loam-wipe-restart` listener below. The restart prompt is the real recovery path either way.
-    }
-    Alert.alert(
-      'Restart LOAM',
-      'The database encryption key was cleared for the emergency reset. Close and reopen the app now to finish starting a fresh database.',
-    );
+    // The wiped runtime can't restart in this process (nodejs-mobile starts once per process), and a
+    // reopened activity would only reattach to it, stuck. Close LOAM completely instead: the next launch is
+    // a clean start on the setup screens.
+    closeApp();
   };
 
   // Display mode: keep the screen awake and pin the app while it's on. Both are best-effort no-ops when
@@ -720,9 +716,13 @@ function HostScreen() {
           return { gated: true } as const;
         }
         const body = (await response.json()) as unknown;
-        const nodeName = (body as { networkConfig?: { nodeName?: unknown } } | null)?.networkConfig?.nodeName;
-        if (typeof nodeName === 'string' && nodeName && !cancelled) {
-          setHostNodeName(nodeName);
+        const networkConfig = (body as { networkConfig?: { nodeName?: unknown; securityProfile?: unknown } } | null)
+          ?.networkConfig;
+        if (typeof networkConfig?.nodeName === 'string' && networkConfig.nodeName && !cancelled) {
+          setHostNodeName(networkConfig.nodeName);
+        }
+        if (!cancelled) {
+          setPrivateNetwork(networkConfig?.securityProfile === 'hardened');
         }
         return { gated: false, fragment: fragmentFor(body) } as const;
       })
@@ -1073,33 +1073,40 @@ function HostScreen() {
                   <ThemedText type="smallBold">Share · Host</ThemedText>
                 </Pressable>
                 <View style={styles.menuDivider} />
-                {/* Play's user-data policy wants the privacy policy reachable in-app. It opens in the
-                    system browser; with no internet (the usual hosting case) it just won't load yet. */}
+                {/* The privacy policy is served by this node (the web client's /privacy page): it opens in
+                    this WebView, with no internet and no other website involved. */}
                 <Pressable
                   onPress={() => {
                     setMenuOpen(false);
-                    void Linking.openURL(PRIVACY_POLICY_URL).catch(() => undefined);
+                    webViewRef.current?.injectJavaScript(
+                      "history.pushState(null, '', '/privacy'); dispatchEvent(new PopStateEvent('popstate')); true;",
+                    );
                   }}
                   accessibilityRole="link"
-                  accessibilityLabel="Open the LOAM privacy policy in your browser"
+                  accessibilityLabel={t('menu.privacy')}
                   style={styles.menuItem}>
-                  <ThemedText type="smallBold">Privacy policy</ThemedText>
+                  <ThemedText type="smallBold">{t('menu.privacy')}</ThemedText>
                 </Pressable>
-                {/* Emergency reset: last, set apart and in red, so it's easy to find in a hurry but not
-                    the item a thumb lands on by habit. Its own screen asks for a press-and-hold. */}
-                <View style={[styles.menuDivider, styles.menuDangerDivider]} />
-                <Pressable
-                  onPress={() => {
-                    setMenuOpen(false);
-                    setResetOpen(true);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={t('reset.menu')}
-                  style={styles.menuItem}>
-                  <ThemedText type="smallBold" style={{ color: theme.danger }}>
-                    {t('reset.menu')}
-                  </ThemedText>
-                </Pressable>
+                {/* Emergency reset, on a private network only: last, set apart and in red, so it's easy to
+                    find in a hurry but not the item a thumb lands on by habit. Its own screen asks for a
+                    press-and-hold. Elsewhere it's at the bottom of Encryption settings. */}
+                {privateNetwork ? (
+                  <>
+                    <View style={[styles.menuDivider, styles.menuDangerDivider]} />
+                    <Pressable
+                      onPress={() => {
+                        setMenuOpen(false);
+                        setResetOpen(true);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={t('reset.menu')}
+                      style={styles.menuItem}>
+                      <ThemedText type="smallBold" style={{ color: theme.danger }}>
+                        {t('reset.menu')}
+                      </ThemedText>
+                    </Pressable>
+                  </>
+                ) : null}
               </ThemedView>
             </View>
           </Pressable>
@@ -1159,12 +1166,16 @@ function HostScreen() {
           <WebView
             key={webViewKey}
             ref={webViewRef}
-            source={{ uri: `${LOAM_URL}${initialPath}${transportKeyFragment}` }}
+            source={{ uri: `${LOAM_URL}${initialPath}${withHostToken(transportKeyFragment, hostAdminToken)}` }}
             style={styles.flex}
             // Hand the launcher's per-boot host token to the LOAM client running in THIS WebView (and only
-            // here — a LAN joiner never sees it): the client claims admin with it on its first boot under the
-            // `hostDevice` bootstrap (review 2026-09-04). `originWhitelist` + `onShouldStartLoadWithRequest`
-            // below pin this frame to the loopback origin, so the injected global can't reach another page.
+            // here — a LAN joiner never sees it): the client claims admin with it under the `hostDevice`
+            // bootstrap (review 2026-09-04). It rides the start URL's fragment (`&h=`, never sent to the
+            // server; the client takes it out at start-up, apps/client/src/lib/host-token.ts), because Android
+            // doesn't reliably run the injected script below before the first page load: without it the host
+            // was an ordinary member of its own network, or queued on an approval-only one. The injection
+            // stays as a second route. `originWhitelist` + `onShouldStartLoadWithRequest` below pin this
+            // frame to the loopback origin, so neither can reach another page.
             // Also hand over the host's transport key (read from the loopback bootstrap above) as
             // `__loamHostTransportKey`: the client trusts it over a stale pin, since a node with an ephemeral
             // DB key mints a new transport key every boot and would otherwise break the host's own pin
@@ -1272,6 +1283,10 @@ function HostScreen() {
           visible={dbEncryptionOpen}
           onClose={() => setDbEncryptionOpen(false)}
           channel={nodejs.channel}
+          onEmergencyReset={() => {
+            setDbEncryptionOpen(false);
+            setResetOpen(true);
+          }}
         />
         <EmergencyResetOverlay channel={nodejs.channel} onClose={() => setResetOpen(false)} visible={resetOpen} />
       </SafeAreaView>

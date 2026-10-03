@@ -40,6 +40,7 @@ vi.mock('@/hooks/use-theme', () => ({ useTheme: () => ({}) }));
 vi.mock('@/lib/on-device-llm', () => ({ registerOnDeviceLlm: () => () => undefined }));
 vi.mock('@/mesh/mesh-courier', () => ({ registerMeshCourier: () => () => undefined }));
 vi.mock('../../modules/loam-hotspot', () => ({
+  closeApp: vi.fn(),
   startHostService: vi.fn(),
   startKiosk: vi.fn(),
   stopKiosk: vi.fn(),

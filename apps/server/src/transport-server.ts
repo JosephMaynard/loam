@@ -773,11 +773,19 @@ export function registerTransportRoutes(ctx: AppContext): void {
     // second mint, never a rebind to a different identity. Re-stamp the response's bound sequence `s` to
     // THIS request's sequence (docs/20 §9) so a retrying client's response-binding check passes — the
     // user + token are identical, only the sequence it answers differs. `m`/`p` are constant.
+    // The user is read live, never from the cached result: the identity was bound with whatever the record
+    // said then, and an admin claim or a join approval since would otherwise be undone on the client's next
+    // boot pass (the host's own WebView looped back into the queue that way).
     if (activeSession.authMode === "bound") {
       if (!activeSession.resumeResult) {
         return reply.code(409).send(errorBody("Session already bound"));
       }
-      return { ...activeSession.resumeResult, s: ctx.transportRequestSeq.get(request) };
+      const liveUser = ctx.data.users.find((user) => user.id === activeSession.userId);
+      return {
+        ...activeSession.resumeResult,
+        ...(liveUser ? { currentUser: ctx.rolesVisibleUser(liveUser) } : {}),
+        s: ctx.transportRequestSeq.get(request),
+      };
     }
 
     const body = request.body as { token?: unknown } | undefined;

@@ -6,8 +6,8 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { t } from '@/lib/i18n';
 import {
-  DB_ENCRYPTION_MODES,
   DB_ENCRYPTION_MODE_DESCRIPTIONS,
   DB_ENCRYPTION_MODE_READ_ERROR,
   applyDbModeChange,
@@ -30,14 +30,19 @@ type DbEncryptionSettingsOverlayProps = {
   // The nodejs-mobile bridge channel (from index.tsx). Used only to write the mode-NAME hint
   // transactionally with a selection (P1-b) — optional so the overlay still renders without it.
   channel?: BridgeChannel;
+  /** Opens Emergency reset (the network must be running); the section is hidden without it. */
+  onEmergencyReset?: () => void;
 };
 
 const MODE_LABELS: Record<DbEncryptionMode, string> = {
-  off: 'Off (plaintext)',
-  ephemeral: 'Ephemeral',
-  persistent: 'Persistent',
-  passphrase: 'Passphrase',
+  persistent: 'Encrypted (recommended)',
+  ephemeral: 'Encrypted, erased when LOAM closes',
+  passphrase: 'Encrypted with a passphrase',
+  off: 'No encryption (for testing)',
 };
+
+/** The order the picker lists the modes in: encrypted first, plaintext last (an opt-in for testing). */
+const MODE_ORDER: readonly DbEncryptionMode[] = ['persistent', 'ephemeral', 'passphrase', 'off'];
 
 /**
  * The on-device DB-encryption mode picker (PR B — docs/01, docs/21): off / ephemeral / persistent /
@@ -49,7 +54,7 @@ const MODE_LABELS: Record<DbEncryptionMode, string> = {
  * (nodejs-project-template/main.js's request/response handoff) and nodejs-mobile can't restart its
  * runtime in-process.
  */
-export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEncryptionSettingsOverlayProps) {
+export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmergencyReset }: DbEncryptionSettingsOverlayProps) {
   const theme = useTheme();
   const [mode, setMode] = useState<DbEncryptionMode>('off');
   // P1-3 (Sol round 7): TRI-STATE presence of a committed passphrase — `'error'` (a SecureStore read
@@ -192,7 +197,16 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
       return;
     }
     if (!dbModeSelectionIsDestructive(next)) {
-      void applyModeChange(next);
+      // Plaintext is an opt-in for testing, never a quiet default: say what it means first.
+      Alert.alert(
+        'Store messages without encryption?',
+        "Messages on this phone would be stored as plain files that anyone with access to the phone's storage " +
+          'could read. Use this only for testing or to see how LOAM works. It takes effect the next time LOAM starts.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Turn encryption off', style: 'destructive', onPress: () => void applyModeChange(next) },
+        ],
+      );
       return;
     }
     // Hold the guard from the moment the confirmation opens so a second tap can't stack another dialog.
@@ -322,16 +336,15 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
             </ThemedView>
             <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
               <ThemedText type="small" themeColor="textSecondary">
-                Choose how the on-device message database is protected at rest. Off by default.
+                Choose how the messages stored on this phone are protected. Changes take effect the next time
+                LOAM starts.
               </ThemedText>
 
               <ThemedView type="backgroundElement" style={styles.noteCard}>
                 <ThemedText type="small" themeColor="textSecondary">
-                  Encrypted modes (ephemeral/persistent/passphrase) need an app build that includes the
-                  SQLCipher native module: not every build has it yet. If it&apos;s missing, the host
-                  starts unencrypted and shows a clear warning rather than failing to boot. Encryption
-                  applies to a fresh database: there is no in-place conversion, so turning it on clears
-                  any existing messages. Changes take effect the next time the host app is restarted.
+                  Encryption applies to a new database: there is no converting the one you have, so switching
+                  between modes erases the messages on this phone. If this phone can&apos;t load the encryption
+                  module, LOAM won&apos;t start rather than silently store messages unencrypted.
                 </ThemedText>
               </ThemedView>
 
@@ -342,7 +355,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
               ) : null}
 
               {loaded
-                ? DB_ENCRYPTION_MODES.map((entry) => (
+                ? MODE_ORDER.map((entry) => (
                     <Pressable
                       key={entry}
                       onPress={() => handleSelect(entry)}
@@ -465,6 +478,23 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                   )}
                 </ThemedView>
               ) : null}
+              {/* Emergency reset lives here on every network (on a private one it's in the main menu too). */}
+              {onEmergencyReset ? (
+                <ThemedView type="backgroundElement" style={styles.noteCard}>
+                  <ThemedText type="smallBold">{t('reset.title')}</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {t('reset.settingsBody')}
+                  </ThemedText>
+                  <Pressable
+                    onPress={onEmergencyReset}
+                    accessibilityRole="button"
+                    style={[styles.resetButton, { borderColor: theme.danger }]}>
+                    <ThemedText type="smallBold" style={{ color: theme.danger }}>
+                      {t('reset.open')}
+                    </ThemedText>
+                  </Pressable>
+                </ThemedView>
+              ) : null}
             </ScrollView>
           </SafeAreaView>
         </ThemedView>
@@ -474,6 +504,14 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
 }
 
 const styles = StyleSheet.create({
+  resetButton: {
+    alignSelf: 'flex-start',
+    marginTop: Spacing.two,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    borderRadius: Spacing.four,
+    borderWidth: 1,
+  },
   container: {
     flex: 1,
   },

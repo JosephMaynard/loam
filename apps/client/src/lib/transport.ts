@@ -514,6 +514,31 @@ async function observeNodeHostKey(): Promise<void> {
  * WebView is pinned to the loopback origin — and a page on another origin can't set a global on this one. A
  * non-string value (DOM clobbering) is ignored.
  */
+/**
+ * This load's `#k=` key, read at start-up by {@link captureJoinKey} (before routing can rewrite the URL)
+ * and taken once by the first {@link ensureSession}.
+ */
+let startupHashKey: string | undefined;
+
+/** Adopt the Android launcher's key, if this is the host's own WebView (see `ensureSession`). */
+function adoptLauncherKey(): void {
+  const launcherKey = launcherHostKey();
+  if (launcherKey !== undefined && (getCachedHostPublicKey() !== launcherKey || isHostKeyPinBroken())) {
+    adoptHostKey(launcherKey);
+  }
+}
+
+/**
+ * Read (and pin) the join QR's `#k=` key at start-up, before anything else touches the URL. The router
+ * replaces `/` with `/channels` on first render, which drops the fragment: read any later, a scanned QR's
+ * key was simply gone, so a `required` node showed "Scan the join QR" to someone who just had, and an
+ * `optional` one connected without the pin the QR is there to give. Call once, before rendering.
+ */
+export function captureJoinKey(): void {
+  adoptLauncherKey();
+  startupHashKey = consumeHashKey();
+}
+
 function launcherHostKey(): string | undefined {
   const value: unknown = (window as { __loamHostTransportKey?: unknown }).__loamHostTransportKey;
   return typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value) ? value : undefined;
@@ -540,11 +565,9 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   // Inside the Android host's own WebView the launcher-provided key is trusted directly (`launcherHostKey`):
   // adopt it before the `#k=` is read, so the launcher's own fragment is a quiet confirmation rather than a
   // "different key" prompt on every boot of an ephemeral-key node.
-  const launcherKey = launcherHostKey();
-  if (launcherKey !== undefined && (getCachedHostPublicKey() !== launcherKey || isHostKeyPinBroken())) {
-    adoptHostKey(launcherKey);
-  }
-  const hashKey = consumeHashKey();
+  adoptLauncherKey();
+  const hashKey = consumeHashKey() ?? startupHashKey;
+  startupHashKey = undefined;
   const qrKey = hashKey ?? getCachedHostPublicKey();
 
   // A QR key pins this join to an encrypted, MITM-authenticated session. `/api/config` is

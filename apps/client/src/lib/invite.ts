@@ -11,18 +11,21 @@ const CODE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 let memoryCode: string | undefined;
 
-/** Split `i=<code>` out of a fragment, keeping its other parameters in order. Pure. */
-export function splitInviteFragment(hash: string): { hash: string; code?: string } {
+/**
+ * Split `<name>=<value>` out of a fragment, keeping its other parameters in order; a value that doesn't
+ * match `pattern` is dropped all the same. Pure.
+ */
+export function splitFragmentParam(hash: string, name: string, pattern: RegExp): { hash: string; value?: string } {
   if (!hash.startsWith("#") || hash.length < 2) {
     return { hash };
   }
-  let code: string | undefined;
+  let value: string | undefined;
   const kept: string[] = [];
   for (const part of hash.slice(1).split("&")) {
-    if (part.startsWith("i=")) {
-      const value = part.slice(2);
-      if (CODE_PATTERN.test(value)) {
-        code = value;
+    if (part.startsWith(`${name}=`)) {
+      const candidate = part.slice(name.length + 1);
+      if (pattern.test(candidate)) {
+        value = candidate;
       }
       continue;
     }
@@ -30,7 +33,13 @@ export function splitInviteFragment(hash: string): { hash: string; code?: string
       kept.push(part);
     }
   }
-  return { hash: kept.length ? `#${kept.join("&")}` : "", code };
+  return { hash: kept.length ? `#${kept.join("&")}` : "", value };
+}
+
+/** Split `i=<code>` out of a fragment, keeping its other parameters in order. Pure. */
+export function splitInviteFragment(hash: string): { hash: string; code?: string } {
+  const { hash: rest, value } = splitFragmentParam(hash, "i", CODE_PATTERN);
+  return { hash: rest, code: value };
 }
 
 /**

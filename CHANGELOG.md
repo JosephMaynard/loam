@@ -58,6 +58,20 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **Joining by QR code lost the network's key.** The web app's first redirect (`/` to `/channels`) dropped
+  the `#k=` part of the link before it was read. On a network that only accepts encrypted connections,
+  everyone who scanned the code was told to scan it; elsewhere they connected without the protection the
+  code is meant to give. The key is now read before anything touches the address. This had been the case
+  since transport encryption arrived.
+- **The host phone could land in the queue of its own new network**, and an approved newcomer could fall
+  back into it. Asking the node "who am I?" again on an already-encrypted connection answered with the
+  person as they were when the connection was set up, so an admin claim or an approval made since was
+  undone on the next refresh (and the host's page retried its claim until it was rate-limited). The node
+  now answers with the person as they are. The host's admin token also travels in the page address now
+  (never sent anywhere), so it can't miss the page.
+- **After an Emergency reset the host app could get stuck** ("Couldn't finish starting LOAM", recoverable
+  only by clearing the app's data) or quietly restart an empty network. LOAM now closes completely once
+  the reset has run, and opens on the setup screens next time.
 - **`npx loamnet` no longer crashes when port 3000 is taken.** With no port chosen it moves to the next
   free one (3000–3019) and says so; an explicit `--port` / `$PORT` that is taken exits with a short
   message instead of a stack trace. A port counts as free only if loopback is free too, so
@@ -70,6 +84,14 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **Setup:** "Community" comes first, each kind of network has an icon, and choosing one moves straight on.
+  The screen saying a private network "was erased" is gone: setup just starts again.
+- **Emergency reset** is in the host menu on private networks, and at the bottom of Encryption settings on
+  every network.
+- **The privacy policy is served by the network itself** (`/privacy`), so it reads offline and the app
+  never sends anyone to a website for it.
+- **Storage encryption:** unencrypted storage is now the last option, labelled as for testing, and asks
+  for confirmation. A network set up with "Choose every setting myself" is encrypted by default.
 - **Plainer punctuation everywhere.** Every em-dash is gone from the interface in all 16 languages, the
   Android host app, the server's user-facing messages, the `loam` CLI and the website, rewritten as full
   stops, colons or commas. A test keeps the translations dash-free.

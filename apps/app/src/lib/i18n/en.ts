@@ -11,14 +11,9 @@ export const en = {
 
   'reset.menu': 'Emergency reset',
   'reset.title': 'Emergency reset',
-  'reset.body':
-    "Erases every message, person, picture and file on this network, on this phone, right away. Phones connected to it clear their copy too. Your settings are kept. This can't be undone.",
   'reset.hold': 'Press and hold to erase',
   'reset.holding': 'Keep holding…',
   'reset.working': 'Erasing…',
-  'reset.done': 'Erased. The network has started again, empty.',
-  'reset.incomplete':
-    "The erase didn't fully finish, so the network is locked until it does. Close and reopen the app to finish it.",
   'reset.failed': "Couldn't erase: {error}",
 
   "host.title": "LOAM host",
@@ -75,9 +70,6 @@ export const en = {
   "setup.continuePlain": "Continue your network",
   "setup.continueHelp": "Opens the network as you left it, with the same messages and people.",
   "setup.startNew": "Start a new network",
-  "setup.goneBody": "Your last network ({name}) was private, so it was erased when LOAM closed.",
-  "setup.again": "Start a new one like last time",
-  "setup.changeSettings": "Change settings",
   "setup.eraseTitle": "Erase the old network?",
   "setup.eraseBody": "Starting a new network permanently erases {name}: every message, photo and person on it. This can't be undone.",
   "setup.eraseBodyPlain": "Starting a new network permanently erases the one on this phone: every message, photo and person on it. This can't be undone.",
@@ -93,7 +85,6 @@ export const en = {
   "setup.communityNote": "The network carries on after a restart, with its messages, until you erase it.",
   "setup.customTitle": "Choose every setting myself",
   "setup.customBody": "Starts with the standard settings and opens the admin settings so you can set everything.",
-  "setup.resetNote": "Whatever you choose, Emergency reset in the menu erases everything at once.",
   "setup.nameTitle": "Name your network",
   "setup.nameBody": "People see this name when they join. Leave it blank to use LOAM.",
   "setup.connectTitle": "How will people connect?",
@@ -125,6 +116,10 @@ export const en = {
   "link.failed": "Couldn't make a link code: {error}",
   "link.noAddress": "Waiting for this phone's address…",
   "link.again": "New code",
+  "reset.body": "Erases every message, person, picture and file on this network, on this phone, right away, then closes LOAM. Phones connected to it clear their copy too. This can't be undone.",
+  "reset.settingsBody": "Erases everything on this network at once, on this phone and on every phone connected to it, then closes LOAM.",
+  "reset.open": "Emergency reset",
+  "menu.privacy": "Privacy policy",
 } as const;
 
 export type AppCatalog = { [K in keyof typeof en]: string };

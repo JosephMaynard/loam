@@ -524,6 +524,14 @@ support it); avoid Android-only Easy Connect for v1.
   network-security-config, since there's no TLS on a local hotspot).
 - The client already supports a configurable server origin (`loam.serverUrl` in localStorage) and uses
   `credentials: "include"` — but same-origin (WebView → localhost) is simplest; prefer that.
+- **Emergency reset from the host app** (in the host menu on a private, `hardened` network; at the bottom
+  of Encryption settings on every network) closes the app once the reset has run: the native
+  `closeApp()` (loam-hotspot module) stops the host service, finishes the task and kills the process. A
+  nodejs-mobile runtime can't be started twice in one process, and reattaching to the wiped server left the
+  launcher stuck ("Couldn't finish starting LOAM"), so the next launch is a fresh process that opens on the
+  setup screens. Setup never mentions the erased network, and doesn't highlight the last choice.
+- **The host token travels in the start URL**: the WebView loads `/#k=<key>&h=<token>`, and the client
+  reads and strips `h=` before render (`lib/host-token.ts`); the injected globals stay as a second route.
 - **After an Emergency Reset** the node rotates its transport key. The host screen re-fetches
   `/api/bootstrap` for the new `#k=` and remounts the WebView when the client reports the `wipe` event
   (which also clears its old pin). The WebView is also handed the node's key directly: alongside the

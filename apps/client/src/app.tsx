@@ -28,6 +28,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ToastStack, type ToastItem } from "./components/ToastStack";
 import { MeshView } from "./views/MeshView";
 import { PeopleView } from "./views/PeopleView";
+import { PrivacyView } from "./views/PrivacyView";
 import { SearchView } from "./views/SearchView";
 import { SettingsView } from "./views/SettingsView";
 import { ApiError, fetchJson, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
@@ -409,7 +410,8 @@ function LoamApp() {
     routeState.screen === "people" ||
     routeState.screen === "admin" ||
     routeState.screen === "search" ||
-    routeState.screen === "mesh"
+    routeState.screen === "mesh" ||
+    routeState.screen === "privacy"
       ? "settings-open"
       : undefined,
   ]
@@ -1224,6 +1226,7 @@ function LoamApp() {
         setCurrentUser(user);
         upsertUsers([user]);
         setConfig((previous) => (previous ? { ...previous, currentUser: user } : previous));
+        return user;
       } finally {
         window.clearTimeout(timeout);
       }
@@ -1529,17 +1532,19 @@ function LoamApp() {
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
 
-        // The Android host's own WebView (never a LAN joiner) carries the launcher's per-boot host token:
-        // claim admin with it (`hostDevice` bootstrap, review 2026-09-04). The token is consumed only on
-        // SUCCESS — a transient failure (a rate-limited claim, a blip) keeps it for the next boot pass, since
-        // with `hostDevice` there is no other way for this node to gain an admin (round-2 review). One claim
-        // at a time; the server treats a claim by an existing admin as a no-op anyway.
+        // The Android host's own WebView (never a LAN joiner) carries the launcher's per-boot host token
+        // (lib/host-token.ts): claim admin with it (`hostDevice` bootstrap, review 2026-09-04). It is kept for
+        // the life of the page: a failed claim (a rate limit, a blip) retries on the next boot pass, and a new
+        // identity (after a wipe) claims again, since with `hostDevice` there is no other way for this node to
+        // gain an admin. One claim at a time; the server treats a claim by an existing admin as a no-op. Boot
+        // then carries on as the claimed admin: the snapshot it started from still says pending on an
+        // approval-only network, and acting on that would skip loading the channels.
         const hostToken = window.__loamHostDeviceToken;
         if (typeof hostToken === "string" && hostToken.length > 0 && !nextConfig.currentUser.isAdmin && !hostClaimInFlightRef.current) {
           hostClaimInFlightRef.current = true;
           try {
-            await claimAdmin(hostToken);
-            window.__loamHostDeviceToken = undefined;
+            const claimed = await claimAdmin(hostToken);
+            nextConfig = { ...nextConfig, currentUser: claimed };
           } catch {
             // Keep the token; retried on the next resync (WS reconnect / boot retry).
           } finally {
@@ -2321,6 +2326,8 @@ function LoamApp() {
         <SearchView blockedUserIds={blockedUserIds} channels={channels} currentUser={currentUser} usersById={usersById} />
       ) : routeState.screen === "mesh" && config?.networkConfig.enableMesh ? (
         <MeshView />
+      ) : routeState.screen === "privacy" ? (
+        <PrivacyView />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           blockedUserIds={blockedUserIds}
@@ -2328,7 +2335,9 @@ function LoamApp() {
           currentUser={currentUser}
           onSetBlocked={setBlocked}
           usersById={usersById}
-          onClaimAdmin={claimAdmin}
+          onClaimAdmin={async (secret) => {
+            await claimAdmin(secret);
+          }}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
           onWipeDevice={() => purgeLocalData("device")}

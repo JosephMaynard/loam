@@ -133,6 +133,18 @@ export function startKiosk(): void {
   }
 }
 
+/**
+ * Close LOAM completely (hotspot, host service, screen pinning, task and process), so the next launch is a
+ * clean start on the setup screens. Used after an Emergency reset. A no-op when unsupported; never throws.
+ */
+export function closeApp(): void {
+  try {
+    LoamHotspotModule?.closeApp();
+  } catch {
+    // Best effort.
+  }
+}
+
 /** Leave kiosk mode (unpin the app). A no-op when unsupported; never throws. */
 export function stopKiosk(): void {
   try {

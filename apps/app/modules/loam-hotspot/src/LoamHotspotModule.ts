@@ -36,6 +36,7 @@ declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
   startKiosk(): void;
   /** Unpin the app (leave lock-task mode). */
   stopKiosk(): void;
+  closeApp(): void;
 }
 
 // Android-only native module: `requireOptionalNativeModule` returns `null` on iOS/web (and any

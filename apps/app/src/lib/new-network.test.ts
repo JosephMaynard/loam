@@ -128,6 +128,11 @@ describe('prepareNewNetwork', () => {
     expect(after).not.toBe(before);
   });
 
+  it('encrypts a Choose-every-setting network unless the phone already has an encrypted mode', async () => {
+    await prepareNewNetwork({ preset: 'custom', nodeName: '', connection: 'wifi' }, 'en');
+    expect(await getDbEncryptionMode()).toBe('persistent');
+  });
+
   it('keeps the current storage mode for Choose every setting myself', async () => {
     await setDbEncryptionMode('persistent');
     await prepareNewNetwork({ preset: 'custom', nodeName: '', connection: 'wifi' }, 'en');

@@ -94,10 +94,13 @@ export type PrepareResult = { ok: true } | { ok: false; error: string };
  */
 export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale): Promise<PrepareResult> {
   const current = await getDbEncryptionMode();
-  const target = presetDbMode(record.preset) ?? (current === DB_ENCRYPTION_MODE_READ_ERROR ? undefined : current);
-  if (!target) {
+  if (current === DB_ENCRYPTION_MODE_READ_ERROR) {
     return { ok: false, error: "Couldn't read this phone's storage settings." };
   }
+  // "Choose every setting myself" keeps an encrypted mode already chosen, and otherwise encrypts like
+  // Community: an unset mode reads as 'off' (that's how installs from before encryption read), and a new
+  // network must never be unencrypted by default. Plaintext stays a later opt-in, in Encryption settings.
+  const target = presetDbMode(record.preset) ?? (current === 'off' ? 'persistent' : current);
   const cleared = await clearStoredDbKeys();
   if (!cleared.ok) {
     return { ok: false, error: cleared.error ?? "Couldn't clear the previous network's keys." };

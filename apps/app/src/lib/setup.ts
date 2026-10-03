@@ -84,7 +84,8 @@ export function presetConfig(
 /**
  * How the phone stores a new network's data: Private keeps it only as long as the app runs (an ephemeral
  * key, so nothing is readable once the app stops); Community encrypts it with a key kept in the phone's
- * keystore, so it survives restarts. Custom leaves the current choice (the Encryption menu) alone.
+ * keystore, so it survives restarts. Custom keeps an encrypted choice made in Encryption settings, and
+ * otherwise encrypts like Community (see `prepareNewNetwork`).
  */
 export function presetDbMode(preset: SetupPreset): DbEncryptionMode | undefined {
   return preset === 'private' ? 'ephemeral' : preset === 'community' ? 'persistent' : undefined;

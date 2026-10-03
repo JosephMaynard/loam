@@ -1,7 +1,9 @@
 import { render } from "preact";
 import "./global.css";
 import { App } from "./app.tsx";
+import { captureHostToken } from "./lib/host-token.ts";
 import { captureInviteCode } from "./lib/invite.ts";
+import { captureJoinKey } from "./lib/transport.ts";
 import { recoverPendingWipe } from "./lib/local-store.ts";
 import { installTheme } from "./lib/theme.ts";
 import { installViewportSync } from "./lib/viewport.ts";
@@ -11,8 +13,11 @@ import { installViewportSync } from "./lib/viewport.ts";
 // stays un-hydratable meanwhile, so no wiped data is loaded even if this retry is still deferred.
 void recoverPendingWipe();
 
-// Take a host-screen invite code out of the join link before the transport reads the `#k=` fragment.
+// Read the join link before anything rewrites the URL: the host app's token, an invite code, then the
+// `#k=` key (the router's first redirect drops the fragment).
+captureHostToken();
 captureInviteCode();
+captureJoinKey();
 
 // Pin the saved colour theme (System / Light / Dark, set in Settings) before anything renders.
 installTheme();

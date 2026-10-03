@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { SymbolView, type AndroidSymbol, type SFSymbol } from 'expo-symbols';
 
 import { CodeScanner } from '@/components/code-scanner';
 import { HoldToConfirm } from '@/components/hold-to-confirm';
@@ -36,16 +37,18 @@ export type SetupOutcome = { record: SetupRecord; newNetwork: boolean };
 
 type Step = 'loading' | 'language' | 'home' | 'erase' | 'type' | 'name' | 'connect' | 'scan';
 
-const PRESETS: { preset: SetupPreset; title: AppCatalogKey; body: AppCatalogKey; note?: AppCatalogKey }[] = [
-  { preset: 'private', title: 'setup.privateTitle', body: 'setup.privateBody', note: 'setup.privateNote' },
-  { preset: 'community', title: 'setup.communityTitle', body: 'setup.communityBody', note: 'setup.communityNote' },
-  { preset: 'custom', title: 'setup.customTitle', body: 'setup.customBody' },
+type Icon = { android: AndroidSymbol; ios: SFSymbol };
+
+const PRESETS: { preset: SetupPreset; icon: Icon; title: AppCatalogKey; body: AppCatalogKey; note?: AppCatalogKey }[] = [
+  { preset: 'community', icon: { android: 'groups', ios: 'person.3' }, title: 'setup.communityTitle', body: 'setup.communityBody', note: 'setup.communityNote' },
+  { preset: 'private', icon: { android: 'shield_lock', ios: 'lock.shield' }, title: 'setup.privateTitle', body: 'setup.privateBody', note: 'setup.privateNote' },
+  { preset: 'custom', icon: { android: 'tune', ios: 'slider.horizontal.3' }, title: 'setup.customTitle', body: 'setup.customBody' },
 ];
 
-const CONNECTIONS: { connection: SetupConnection; title: AppCatalogKey; body: AppCatalogKey }[] = [
-  { connection: 'hotspot', title: 'share.hotspot', body: 'share.hotspotHelp' },
-  { connection: 'wifi', title: 'share.wifi', body: 'share.wifiHelp' },
-  { connection: 'join', title: 'setup.joinTitle', body: 'setup.joinBody' },
+const CONNECTIONS: { connection: SetupConnection; icon: Icon; title: AppCatalogKey; body: AppCatalogKey }[] = [
+  { connection: 'hotspot', icon: { android: 'wifi_tethering', ios: 'personalhotspot' }, title: 'share.hotspot', body: 'share.hotspotHelp' },
+  { connection: 'wifi', icon: { android: 'wifi', ios: 'wifi' }, title: 'share.wifi', body: 'share.wifiHelp' },
+  { connection: 'join', icon: { android: 'hub', ios: 'point.3.connected.trianglepath.dotted' }, title: 'setup.joinTitle', body: 'setup.joinBody' },
 ];
 
 /**
@@ -60,7 +63,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
   const [step, setStep] = useState<Step>('loading');
   const [continuable, setContinuable] = useState(false);
   const [remembered, setRemembered] = useState<SetupRecord>();
-  const [preset, setPreset] = useState<SetupPreset>('private');
+  const [preset, setPreset] = useState<SetupPreset>('community');
   const [nodeName, setNodeName] = useState('');
   const [connection, setConnection] = useState<SetupConnection>('hotspot');
   // The node scanned when joining another network, and a counter that restarts the scanner.
@@ -80,10 +83,12 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
         }
         setContinuable(previous);
         setRemembered(record);
-        setPreset(record?.preset ?? 'private');
+        setPreset(record?.preset ?? 'community');
         setNodeName(record && record.nodeName !== DEFAULT_NODE_NAME ? record.nodeName : '');
         setConnection(record?.connection ?? hostMode);
-        const home: Step = previous || record ? 'home' : 'type';
+        // Only a network that can be continued gets the "Welcome back" screen. A private network that was
+        // erased isn't mentioned at all: setup just starts again, with the last answers filled in.
+        const home: Step = previous ? 'home' : 'type';
         setAfterLanguage(home);
         setStep(storedLocale ? home : 'language');
       },
@@ -95,7 +100,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
 
   const previousStep: Partial<Record<Step, Step>> = {
     erase: 'home',
-    type: continuable || remembered ? 'home' : 'language',
+    type: continuable ? 'home' : 'language',
     name: 'type',
     connect: 'name',
     scan: 'connect',
@@ -177,31 +182,12 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
       content = (
         <>
           <ThemedText type="subtitle">{t('setup.backTitle')}</ThemedText>
-          {continuable ? (
-            <>
-              <ThemedText themeColor="textSecondary">{t('setup.continueHelp')}</ThemedText>
-              <PrimaryButton
-                label={rememberedName ? t('setup.continue', { name: rememberedName }) : t('setup.continuePlain')}
-                onPress={continuePrevious}
-              />
-              <SecondaryButton label={t('setup.startNew')} onPress={() => setStep('erase')} />
-            </>
-          ) : (
-            <>
-              <ThemedText themeColor="textSecondary">
-                {t('setup.goneBody', { name: remembered?.nodeName ?? DEFAULT_NODE_NAME })}
-              </ThemedText>
-              {remembered ? (
-                <PrimaryButton
-                  label={busy ? t('setup.starting') : t('setup.again')}
-                  disabled={busy}
-                  // A joining phone needs a fresh link code from the other network: same answers, new scan.
-                  onPress={() => (remembered.connection === 'join' ? setStep('scan') : void startNew(remembered))}
-                />
-              ) : null}
-              <SecondaryButton label={t('setup.changeSettings')} disabled={busy} onPress={() => setStep('type')} />
-            </>
-          )}
+          <ThemedText themeColor="textSecondary">{t('setup.continueHelp')}</ThemedText>
+          <PrimaryButton
+            label={rememberedName ? t('setup.continue', { name: rememberedName }) : t('setup.continuePlain')}
+            onPress={continuePrevious}
+          />
+          <SecondaryButton label={t('setup.startNew')} onPress={() => setStep('erase')} />
           <Pressable
             accessibilityRole="button"
             onPress={() => {
@@ -233,20 +219,24 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
         <>
           <ThemedText type="subtitle">{t('setup.typeTitle')}</ThemedText>
           <ThemedText themeColor="textSecondary">{t('setup.typeBody')}</ThemedText>
+          {/* Each kind is a button: choosing one moves straight on (the last choice is highlighted). */}
           {PRESETS.map((option) => (
             <Choice
               key={option.preset}
-              selected={preset === option.preset}
-              onPress={() => setPreset(option.preset)}
+              icon={option.icon}
+              // No "last time" highlight: each option is a button, and marking the previous choice would
+              // tell anyone holding the phone what kind of network it ran before.
+              selected={false}
+              advances
+              onPress={() => {
+                setPreset(option.preset);
+                setStep('name');
+              }}
               title={t(option.title)}
               body={t(option.body)}
               note={option.note ? t(option.note) : undefined}
             />
           ))}
-          <ThemedText type="small" themeColor="textSecondary">
-            {t('setup.resetNote')}
-          </ThemedText>
-          <PrimaryButton label={t('setup.next')} onPress={() => setStep('name')} />
         </>
       );
       break;
@@ -280,6 +270,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
           {CONNECTIONS.map((option) => (
             <Choice
               key={option.connection}
+              icon={option.icon}
               selected={connection === option.connection}
               onPress={() => setConnection(option.connection)}
               title={t(option.title)}
@@ -338,7 +329,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-            {step === 'language' || (step === 'type' && !continuable && !remembered) ? (
+            {step === 'language' || (step === 'type' && !continuable) ? (
               <View style={styles.welcome}>
                 <ThemedText type="title">{t('setup.welcomeTitle')}</ThemedText>
                 <ThemedText themeColor="textSecondary">{t('setup.welcomeBody')}</ThemedText>
@@ -362,15 +353,22 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
   );
 }
 
-/** One option in a list of choices: a card with a title, a plain description, and an optional caveat. */
+/**
+ * One option in a list of choices: a card with an icon, a title, a plain description and an optional
+ * caveat. `advances` makes it a button that moves on (with a chevron) rather than a selection to confirm.
+ */
 function Choice({
+  advances = false,
   body,
+  icon,
   note,
   onPress,
   selected,
   title,
 }: {
+  advances?: boolean;
   body: string;
+  icon: Icon;
   note?: string;
   onPress: () => void;
   selected: boolean;
@@ -379,23 +377,29 @@ function Choice({
   const theme = useTheme();
   return (
     <Pressable
-      accessibilityRole="radio"
-      accessibilityState={{ selected }}
+      accessibilityRole={advances ? 'button' : 'radio'}
+      accessibilityState={advances ? undefined : { selected }}
       onPress={onPress}
-      style={[
+      style={({ pressed }) => [
         styles.choice,
         {
-          backgroundColor: selected ? theme.backgroundSelected : theme.backgroundElement,
+          backgroundColor: selected || pressed ? theme.backgroundSelected : theme.backgroundElement,
           borderColor: selected ? theme.primary : theme.backgroundSelected,
         },
       ]}>
-      <ThemedText type="smallBold">{title}</ThemedText>
-      <ThemedText type="small">{body}</ThemedText>
-      {note ? (
-        <ThemedText type="small" themeColor="textSecondary">
-          {note}
-        </ThemedText>
-      ) : null}
+      <View style={[styles.choiceIcon, { backgroundColor: theme.background }]}>
+        <SymbolView name={icon} size={26} tintColor={theme.primary} type="monochrome" />
+      </View>
+      <View style={styles.choiceText}>
+        <ThemedText type="smallBold">{title}</ThemedText>
+        <ThemedText type="small">{body}</ThemedText>
+        {note ? (
+          <ThemedText type="small" themeColor="textSecondary">
+            {note}
+          </ThemedText>
+        ) : null}
+      </View>
+      {advances ? <SymbolView name={{ android: 'chevron_right', ios: 'chevron.right' }} size={22} tintColor={theme.textSecondary} /> : null}
     </Pressable>
   );
 }
@@ -439,7 +443,16 @@ const styles = StyleSheet.create({
   welcome: { gap: Spacing.two, paddingBottom: Spacing.two },
   languages: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   language: { paddingHorizontal: Spacing.three, paddingVertical: Spacing.two, borderRadius: Spacing.four },
-  choice: { gap: Spacing.one, padding: Spacing.three, borderRadius: Spacing.three, borderWidth: 2 },
+  choice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    padding: Spacing.three,
+    borderRadius: Spacing.three,
+    borderWidth: 2,
+  },
+  choiceIcon: { width: 48, height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  choiceText: { flex: 1, gap: Spacing.one },
   input: { borderWidth: 1, borderRadius: Spacing.three, paddingHorizontal: Spacing.three, paddingVertical: Spacing.two, fontSize: 18 },
   button: { alignItems: 'center', paddingVertical: Spacing.three, borderRadius: Spacing.four },
   secondary: { borderWidth: 1, backgroundColor: 'transparent' },

@@ -9441,6 +9441,33 @@ describe("transport auth-binding (docs/20)", () => {
     expect(other.currentUser.id).toBe(resumed.currentUser.id);
   });
 
+  it("a repeat resume on a bound session reports the user as they are now, not as they were bound", async () => {
+    // The Android host's WebView binds as a pending newcomer on an approval-only network, claims admin with
+    // the host token, and resumes again on its next boot pass. That resume used to replay the snapshot
+    // taken at bind time (pending, not admin), sending the host back to the queue.
+    const hostToken = "host-token-resume-0123456789abcdefghijklmnopq";
+    const app = await makeApp({ security: { profile: "hardened" } }, { hostToken });
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1);
+    expect(bound.currentUser.pending).toBe(true);
+
+    const claim = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/tunnel",
+      headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: {
+        enc: sealSeq(session.key, 2, TUNNEL_AAD, { m: "POST", p: "/api/admin/claim", body: { secret: hostToken } }),
+      },
+    });
+    expect(claim.statusCode).toBe(200);
+
+    const again = await resumeIdentity(app, session, 3);
+    expect(again.currentUser.id).toBe(bound.currentUser.id);
+    expect(again.currentUser.isAdmin).toBe(true);
+    expect(again.currentUser.pending).toBe(false);
+    expect(again.token).toBe(bound.token);
+  });
+
   it("response binding: the tunnel descriptor echoes the exact { s, m, p } it answers (docs/20 §9)", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
     const session = await openTransport08(app);

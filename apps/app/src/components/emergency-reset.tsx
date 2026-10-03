@@ -10,15 +10,18 @@ import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import type { BridgeChannel } from '@/lib/db-encryption';
 import { requestEmergencyReset } from '@/lib/emergency-reset';
+import { closeApp } from '../../modules/loam-hotspot';
 import { t } from '@/lib/i18n';
 
-type Phase = { kind: 'idle' } | { kind: 'working' } | { kind: 'done' } | { kind: 'incomplete' } | { kind: 'failed'; error: string };
+type Phase = { kind: 'idle' } | { kind: 'working' } | { kind: 'failed'; error: string };
 
 /**
  * Emergency reset, from the host menu: one screen, a plain explanation, and a press-and-hold button. The
  * wipe runs in the server through the launcher bridge (no admin session needed: whoever holds this phone
- * owns the network). Clients clear themselves through the server's `wipe` broadcast, and an encrypted
- * fixed-key node restarts with a new key through the existing launcher protocol.
+ * owns the network). Clients clear themselves through the server's `wipe` broadcast. Once the wipe has
+ * run, LOAM closes itself completely: there's no "erased" screen to give away what just happened, and the
+ * next launch is a clean start on the setup screens. (An encrypted fixed-key node's key clearing, if it
+ * hadn't finished, is resumed by the launcher on that next start.)
  */
 export function EmergencyResetOverlay({
   channel,
@@ -36,9 +39,11 @@ export function EmergencyResetOverlay({
   async function erase(): Promise<void> {
     setPhase({ kind: 'working' });
     const result = await requestEmergencyReset(channel);
-    setPhase(
-      result.ok ? (result.complete ? { kind: 'done' } : { kind: 'incomplete' }) : { kind: 'failed', error: result.error },
-    );
+    if (result.ok) {
+      closeApp();
+      return;
+    }
+    setPhase({ kind: 'failed', error: result.error });
   }
 
   function close(): void {
@@ -57,32 +62,22 @@ export function EmergencyResetOverlay({
             <ThemedView style={styles.header}>
               <ThemedText type="subtitle">{t('reset.title')}</ThemedText>
               <Pressable onPress={close} accessibilityRole="button" hitSlop={Spacing.two} disabled={phase.kind === 'working'}>
-                <ThemedText type="link">{phase.kind === 'done' ? t('common.close') : t('common.cancel')}</ThemedText>
+                <ThemedText type="link">{t('common.cancel')}</ThemedText>
               </Pressable>
             </ThemedView>
             <ScrollView contentContainerStyle={styles.body}>
               <ThemedText>{t('reset.body')}</ThemedText>
-              {phase.kind === 'done' ? (
-                <ThemedText type="smallBold">{t('reset.done')}</ThemedText>
-              ) : phase.kind === 'incomplete' ? (
-                <ThemedText type="smallBold" style={{ color: theme.danger }}>
-                  {t('reset.incomplete')}
+              {phase.kind === 'failed' ? (
+                <ThemedText type="small" style={{ color: theme.danger }}>
+                  {t('reset.failed', { error: phase.error })}
                 </ThemedText>
-              ) : (
-                <>
-                  {phase.kind === 'failed' ? (
-                    <ThemedText type="small" style={{ color: theme.danger }}>
-                      {t('reset.failed', { error: phase.error })}
-                    </ThemedText>
-                  ) : null}
-                  <HoldToConfirm
-                    disabled={phase.kind === 'working'}
-                    holdingLabel={t('reset.holding')}
-                    label={phase.kind === 'working' ? t('reset.working') : t('reset.hold')}
-                    onConfirm={() => void erase()}
-                  />
-                </>
-              )}
+              ) : null}
+              <HoldToConfirm
+                disabled={phase.kind === 'working'}
+                holdingLabel={t('reset.holding')}
+                label={phase.kind === 'working' ? t('reset.working') : t('reset.hold')}
+                onConfirm={() => void erase()}
+              />
             </ScrollView>
           </SafeAreaView>
         </ThemedView>

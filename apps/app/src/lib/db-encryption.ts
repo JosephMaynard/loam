@@ -21,7 +21,7 @@ export const DB_ENCRYPTION_MODES: readonly DbEncryptionMode[] = ['off', 'ephemer
 
 /** One-line description shown next to each mode in the picker UI. */
 export const DB_ENCRYPTION_MODE_DESCRIPTIONS: Record<DbEncryptionMode, string> = {
-  off: 'The on-device database is stored in plain SQLite: the default.',
+  off: "Messages are stored as plain SQLite, readable by anyone with access to the phone's storage. For testing or seeing how LOAM works.",
   ephemeral: 'A random key generated at each launch, held only in memory. Wipes the database on every restart: nothing survives a reboot.',
   persistent: 'A random key generated once and stored in the device Keystore. Survives reboots; the database stays encrypted at rest.',
   passphrase:

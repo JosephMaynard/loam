@@ -43,6 +43,9 @@ export type RouteState =
     }
   | {
       screen: "mesh";
+    }
+  | {
+      screen: "privacy";
     };
 
 export type MessageResponse = {
@@ -143,6 +146,10 @@ function parseRouteUnsafe(path: string): RouteState {
 
   if (path === "/mesh") {
     return { screen: "mesh" };
+  }
+
+  if (path === "/privacy") {
+    return { screen: "privacy" };
   }
 
   const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);

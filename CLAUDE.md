@@ -223,7 +223,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   random bits, retried until it collides with no user or session — `mintSessionUserId`) + a 256-bit
   base64url token and `Set-Cookie`s it (HttpOnly, SameSite=Lax). **Bound** (a QR-pinned client): a
   sealed `POST /api/session/resume` with a separate identity token promotes the transport session; its
-  identity is the session key, never a cookie, and content is reachable only through the tunnel. The
+  identity is the session key, never a cookie, and content is reachable only through the tunnel. A repeat
+  resume on a bound session returns the same token but the user record as it is NOW (a claim or approval
+  since binding must not be undone by the client's next boot pass). The
   client's locally generated id is a pre-hydration placeholder replaced by the server-confirmed
   `currentUser`.
 - **Admin**: comes only from the config-selected **bootstrap strategy** (`admin.bootstrap`):
@@ -232,8 +234,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   compared), `passphrase` (same endpoint, reusable secret from config), `hostDevice` (the Android
   host: the launcher mints a per-boot token — `LOAM_HOST_TOKEN` → `AppOptions.hostToken` — which
   forces this strategy as a read-time projection over the persisted one; only a claim presenting that
-  token becomes admin, and only the host's own WebView receives it, injected as
-  `window.__loamHostDeviceToken`, so no LAN session can take `firstUser` during the boot window), or
+  token becomes admin, and only the host's own WebView receives it, as `h=` in the start URL's fragment
+  (read and stripped before render by the client's `lib/host-token.ts`; also injected as
+  `window.__loamHostDeviceToken`), so no LAN session can take `firstUser` during the boot window), or
   `none`. A successful claim persists `{isAdmin, pending:false}`, so on an approval-policy node the
   claimer is an active admin. The legacy demo users `user.1234`/`user.5678` are **deleted at boot** (their
   messages tombstoned via the normal delete path, sessions/identity tokens purged); a fresh node never
@@ -402,7 +405,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   that skips the QR (a manually-typed URL, curl) can **still connect in plaintext** — `optional` accepts
   both. `required` is what refuses plaintext clients outright. So `optional` closes *accidental* plaintext
   for normal joiners at zero UX cost, without breaking odd clients; `required`/`hardened` is the strict
-  posture. **`off` is not an operator-settable posture**: it's absent from the default, the profiles, and
+  posture. The client reads `#k=` (`captureJoinKey`, `main.tsx`) before the router's `/` → `/channels`
+  redirect can drop the fragment. **`off` is not an operator-settable posture**: it's absent from the default, the profiles, and
   the admin UI. The ONLY plaintext-everything path is **Developer Mode** — see below.
 - **Developer Mode** (`LOAM_DEV_MODE=1`): forces the *effective* `transportEncryption` to `off` and turns
   on verbose (`debug`) server logging, so wire traffic is inspectable while debugging. The override is a
@@ -526,8 +530,7 @@ kill switch. See `docs/09-security-profiles.md`.
   "Report this user" in a human DM's header; a blocked DM shows a banner with Unblock and a disabled
   composer; in channels and search results a blocked author's posts/replies collapse to a placeholder with
   Show, and their reactions, typing, toasts, reply counts and unread counts are dropped. `BlockedUsersPanel` in Settings lists them for
-  unblocking, and Settings links the privacy policy (`https://loamnet.com/privacy`; the Android host menu
-  links it too, `apps/app/src/constants/links.ts`).
+  unblocking, and Settings links the privacy policy, which the node serves itself at `/privacy` (`views/PrivacyView.tsx`, text in `lib/privacy-policy.ts`, kept in step with `apps/site/privacy.html`; the Android host menu opens the same page in its WebView), so it reads offline and never sends anyone to another website.
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
   `DOMPurify`, hardens links (safe protocols only, `rel=noreferrer target=_blank`) and strips `#k=`
   fragments. Any new rendered-HTML path must go through this — never inject raw message HTML.
