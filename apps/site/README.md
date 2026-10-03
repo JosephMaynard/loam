@@ -32,7 +32,6 @@ pins the build command, output directory, and a few security headers. Set the pr
   isn't set at build time). The CSP in `vercel.json` allows only the EU ingest host.
 - `public/shots/`: the screenshots, all real (see `scripts/android-shots.md` to retake them).
 - `public/og-image.png`: the 1200×630 share image (`scripts/og-image.mjs`).
-- `public/contours.svg`: the hero's contour-line texture.
 - `scripts/`: the screenshot tooling (dev-only; `playwright-core` drives the installed Chrome).
 
 Content is intentionally framed to protect ordinary people, not to advertise concealment, mirroring

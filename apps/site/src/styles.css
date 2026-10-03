@@ -422,8 +422,8 @@ code {
   position: relative;
   width: 300px;
   max-width: 100%;
-  padding: 9px;
-  border-radius: 46px;
+  padding: 8px;
+  border-radius: 28px;
   background: linear-gradient(160deg, #2b3430, #0d1210 55%, #222a26);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset, var(--shadow-lift);
 }
@@ -431,7 +431,7 @@ code {
 
 .phone img {
   width: 100%;
-  border-radius: 38px;
+  border-radius: 20px;
   background: var(--surface);
 }
 
@@ -491,32 +491,22 @@ code {
 
 /* ---- Hero ------------------------------------------------------------------ */
 
+/* The off-grid map illustration fills the hero under a dark scrim (heavier behind the headline, lighter
+   where the artwork shows round the product shots). Dark in both colour schemes, so its text uses the
+   fixed on-deep colours. */
 .hero {
   position: relative;
-  padding: clamp(40px, 7vw, 88px) 0 clamp(56px, 7vw, 88px);
+  padding: clamp(56px, 8vw, 104px) 0 clamp(56px, 7vw, 88px);
   isolation: isolate;
-}
-
-.hero::before {
-  content: "";
-  position: absolute;
-  inset: -68px 0 0;
-  z-index: -2;
-  background: url("/contours.svg") center / cover no-repeat;
-  opacity: 0.16;
-  mask-image: linear-gradient(to bottom, #000 40%, transparent 95%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 40%, transparent 95%);
-}
-
-.hero-glow {
-  position: absolute;
-  inset: -68px 0 0;
-  z-index: -1;
+  color: var(--on-deep);
   background:
-    radial-gradient(48% 55% at 78% 30%, var(--glow-ember), transparent 70%),
-    radial-gradient(40% 50% at 12% 70%, var(--glow-moss), transparent 70%);
-  pointer-events: none;
+    radial-gradient(70% 55% at 50% 22%, rgba(8, 13, 10, 0.9), rgba(8, 13, 10, 0.55) 70%),
+    linear-gradient(180deg, rgba(8, 13, 10, 0.55), rgba(8, 13, 10, 0.35) 55%, rgba(8, 13, 10, 0.85)),
+    url("/loam-hero-bkg.jpg") center / cover no-repeat,
+    var(--deep-2);
+  border-bottom: 1px solid var(--deep-line);
 }
+
 
 .hero-inner {
   display: flex;
@@ -533,29 +523,11 @@ code {
   text-align: center;
 }
 
-.kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 14px 7px 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface) 80%, transparent);
-  border: 1px solid var(--line);
-  color: var(--ink-2);
-  font-size: 14px;
-  font-weight: 500;
-}
 
-.kicker-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #3fb57a;
-  box-shadow: 0 0 0 4px rgba(63, 181, 122, 0.18);
-}
 
 .hero h1 {
-  margin-top: 24px;
+  margin-top: 0;
+  color: var(--on-deep);
   font-size: clamp(42px, 6.4vw, 84px);
   line-height: 1;
   letter-spacing: -0.04em;
@@ -567,7 +539,7 @@ code {
 }
 
 .hero h1 .accent {
-  color: var(--ember-ink);
+  color: #d14900; /* the logo's orange */
 }
 
 .lede {
@@ -591,14 +563,18 @@ code {
   justify-content: flex-start;
 }
 
+.hero .lede {
+  color: var(--on-deep-2);
+}
+
 .hero-note {
   margin-top: 18px;
   font-size: 14px;
-  color: var(--muted);
+  color: var(--on-deep-2);
 }
 
 .hero-note a {
-  color: var(--ink-2);
+  color: var(--on-deep);
   font-weight: 500;
 }
 
@@ -616,11 +592,11 @@ code {
   width: 27%;
   min-width: 130px;
   padding: 8px;
-  border-radius: 40px;
+  border-radius: 28px;
 }
 
 .phone-hero img {
-  border-radius: 33px;
+  border-radius: 20px;
 }
 
 
@@ -708,9 +684,9 @@ code {
 .places li {
   padding: 8px 16px;
   border-radius: 999px;
-  border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
-  color: var(--ink-2);
+  border: 1px solid var(--deep-line);
+  background: rgba(234, 241, 236, 0.06);
+  color: var(--on-deep-2);
   font-size: 15px;
   font-weight: 500;
 }
@@ -801,7 +777,7 @@ code {
   width: 240px;
   height: 330px;
   overflow: hidden;
-  border-radius: 40px 40px 0 0;
+  border-radius: 28px 28px 0 0;
   padding-bottom: 0;
   mask-image: linear-gradient(to bottom, #000 72%, transparent);
   -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent);
@@ -809,7 +785,7 @@ code {
 }
 
 .step-shot img {
-  border-radius: 32px 32px 0 0;
+  border-radius: 20px 20px 0 0;
 }
 
 .step-text {
@@ -1059,12 +1035,12 @@ code {
 .phone-xs {
   width: 100%;
   padding: 5px;
-  border-radius: 24px;
+  border-radius: 16px;
   box-shadow: var(--shadow-soft);
 }
 
 .phone-xs img {
-  border-radius: 20px;
+  border-radius: 11px;
 }
 
 .t-qr {
@@ -1246,14 +1222,14 @@ code {
   height: 330px;
   margin-top: 48px;
   overflow: hidden;
-  border-radius: 40px 40px 0 0;
+  border-radius: 28px 28px 0 0;
   padding-bottom: 0;
   mask-image: linear-gradient(to bottom, #000 70%, transparent);
   -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
 }
 
 .privacy-phone img {
-  border-radius: 32px 32px 0 0;
+  border-radius: 20px 20px 0 0;
 }
 
 @media (min-width: 940px) {
