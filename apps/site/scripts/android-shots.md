@@ -50,8 +50,15 @@ $ADB shell input swipe 540 2233 540 2233 2600                   # hold to leave 
 $ADB shell input swipe 540 1900 540 500 300 && a tap "Show a link code"
 # Set the demo clock to the device's real time first, so the code's expiry matches it.
 a shot android-link
-a tap Close && a tap Done && a tap "Open host menu" && a tap "Emergency reset" && a shot android-reset
+a tap Close && a tap Done && a tap "Open host menu" && a tap Encryption
+# On a Community network Emergency reset is at the bottom of Encryption settings (the menu has it only on
+# private networks): scroll down and tap its button, then:
+a shot android-reset
 ```
+
+For the `-dark` versions run the same steps after `$ADB shell cmd uimode night yes` (clear the app's data
+first, and switch modes before launching: a running app doesn't always repaint). If the Wi-Fi icon drops
+out of the status bar, re-send `network -e wifi show -e level 4 -e fully true`.
 
 ## Share image
 

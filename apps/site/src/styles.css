@@ -1191,6 +1191,86 @@ code {
   font-size: 15.5px;
 }
 
+/* ---- iPhone ---------------------------------------------------------------- */
+
+.iphone-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(32px, 5vw, 64px);
+  align-items: start;
+}
+
+@media (min-width: 960px) {
+  .iphone-grid {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  }
+
+  .iphone-head {
+    position: sticky;
+    top: 112px;
+  }
+}
+
+.iphone-head .section-lede {
+  margin-top: 18px;
+}
+
+.reasons {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: reason;
+}
+
+.reason {
+  position: relative;
+  padding: 26px 26px 26px 84px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  counter-increment: reason;
+}
+
+.reason::before {
+  content: counter(reason);
+  position: absolute;
+  top: 24px;
+  left: 26px;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: var(--moss-soft);
+  color: var(--moss);
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.reason h3 {
+  font-size: 21px;
+  margin-bottom: 8px;
+}
+
+.reason p {
+  color: var(--ink-2);
+  font-size: 15.5px;
+}
+
+@media (max-width: 520px) {
+  .reason {
+    padding: 22px;
+  }
+
+  .reason::before {
+    position: static;
+    margin-bottom: 14px;
+  }
+}
+
 /* ---- Privacy --------------------------------------------------------------- */
 
 .privacy-grid {
