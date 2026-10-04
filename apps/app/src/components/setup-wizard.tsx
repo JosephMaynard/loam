@@ -159,7 +159,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'language':
       content = (
         <>
-          <ThemedText type="subtitle">{t('setup.languageTitle')}</ThemedText>
+          <StepHeading title={t('setup.languageTitle')} />
           <View style={styles.languages}>
             {APP_LOCALES.map((code) => (
               <Pressable
@@ -167,11 +167,13 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
                 accessibilityRole="button"
                 accessibilityState={{ selected: code === locale }}
                 onPress={() => chooseLanguage(code)}
-                style={[
+                style={({ pressed }) => [
                   styles.language,
-                  { backgroundColor: code === locale ? theme.backgroundSelected : theme.backgroundElement },
+                  code === locale
+                    ? { backgroundColor: theme.primarySoft, borderColor: theme.primaryInk }
+                    : { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement, borderColor: theme.border },
                 ]}>
-                <ThemedText>{LOCALE_NAMES[code]}</ThemedText>
+                <ThemedText style={styles.languageLabel}>{LOCALE_NAMES[code]}</ThemedText>
               </Pressable>
             ))}
           </View>
@@ -182,9 +184,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'home':
       content = (
         <>
-          <Logo />
-          <ThemedText type="subtitle">{t('setup.backTitle')}</ThemedText>
-          <ThemedText themeColor="textSecondary">{t('setup.continueHelp')}</ThemedText>
+          <Hero title={t('setup.backTitle')} body={t('setup.continueHelp')} />
           <PrimaryButton
             label={rememberedName ? t('setup.continue', { name: rememberedName }) : t('setup.continuePlain')}
             onPress={continuePrevious}
@@ -196,8 +196,11 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
               setAfterLanguage('home');
               setStep('language');
             }}
-            hitSlop={Spacing.two}>
-            <ThemedText type="link">{t('setup.languageLink', { language: LOCALE_NAMES[locale] })}</ThemedText>
+            hitSlop={Spacing.two}
+            style={styles.textLink}>
+            <ThemedText style={[styles.linkLabel, { color: theme.primaryInk }]}>
+              {t('setup.languageLink', { language: LOCALE_NAMES[locale] })}
+            </ThemedText>
           </Pressable>
         </>
       );
@@ -206,10 +209,10 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'erase':
       content = (
         <>
-          <ThemedText type="subtitle">{t('setup.eraseTitle')}</ThemedText>
-          <ThemedText>
-            {rememberedName ? t('setup.eraseBody', { name: rememberedName }) : t('setup.eraseBodyPlain')}
-          </ThemedText>
+          <StepHeading
+            title={t('setup.eraseTitle')}
+            body={rememberedName ? t('setup.eraseBody', { name: rememberedName }) : t('setup.eraseBodyPlain')}
+          />
           <HoldToConfirm label={t('setup.eraseHold')} holdingLabel={t('setup.eraseHolding')} onConfirm={() => setStep('type')} />
           <SecondaryButton label={t('common.cancel')} onPress={() => setStep('home')} />
         </>
@@ -219,8 +222,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'type':
       content = (
         <>
-          <ThemedText type="subtitle">{t('setup.typeTitle')}</ThemedText>
-          <ThemedText themeColor="textSecondary">{t('setup.typeBody')}</ThemedText>
+          <StepHeading title={t('setup.typeTitle')} body={t('setup.typeBody')} />
           {/* Each kind is a button: choosing one moves straight on. */}
           {PRESETS.map((option) => (
             <Choice
@@ -246,8 +248,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'name':
       content = (
         <>
-          <ThemedText type="subtitle">{t('setup.nameTitle')}</ThemedText>
-          <ThemedText themeColor="textSecondary">{t('setup.nameBody')}</ThemedText>
+          <StepHeading title={t('setup.nameTitle')} body={t('setup.nameBody')} />
           <TextInput
             value={nodeName}
             onChangeText={setNodeName}
@@ -258,7 +259,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
             autoCorrect={false}
             returnKeyType="next"
             onSubmitEditing={() => setStep('connect')}
-            style={[styles.input, { color: theme.text, backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected }]}
+            style={[styles.input, { color: theme.text, backgroundColor: theme.backgroundElement, borderColor: theme.border }]}
           />
           <PrimaryButton label={t('setup.next')} onPress={() => setStep('connect')} />
         </>
@@ -268,7 +269,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'connect':
       content = (
         <>
-          <ThemedText type="subtitle">{t('setup.connectTitle')}</ThemedText>
+          <StepHeading title={t('setup.connectTitle')} />
           {CONNECTIONS.map((option) => (
             <Choice
               key={option.connection}
@@ -295,8 +296,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'scan':
       content = (
         <>
-          <ThemedText type="subtitle">{t('setup.scanTitle')}</ThemedText>
-          <ThemedText themeColor="textSecondary">{t('setup.scanBody')}</ThemedText>
+          <StepHeading title={t('setup.scanTitle')} body={t('setup.scanBody')} />
           {peer ? (
             <>
               <ThemedText type="smallBold">{t('setup.scanFound', { url: peer.url })}</ThemedText>
@@ -331,23 +331,29 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+            {back && !busy ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => {
+                  setError(undefined);
+                  setStep(back);
+                }}
+                hitSlop={Spacing.two}
+                style={styles.back}>
+                <SymbolView name={{ android: 'chevron_left', ios: 'chevron.left' }} size={20} tintColor={theme.textSecondary} />
+                <ThemedText themeColor="textSecondary" style={styles.backLabel}>
+                  {t('setup.back')}
+                </ThemedText>
+              </Pressable>
+            ) : null}
             {step === 'language' || (step === 'type' && !continuable) ? (
-              <View style={styles.welcome}>
-                <Logo />
-                <ThemedText type="title">{t('setup.welcomeTitle')}</ThemedText>
-                <ThemedText themeColor="textSecondary">{t('setup.welcomeBody')}</ThemedText>
-              </View>
+              <Hero title={t('setup.welcomeTitle')} body={t('setup.welcomeBody')} />
             ) : null}
             {content}
             {error ? (
               <ThemedText type="small" style={{ color: theme.danger }}>
                 {error}
               </ThemedText>
-            ) : null}
-            {back && !busy ? (
-              <Pressable accessibilityRole="button" onPress={() => setStep(back)} hitSlop={Spacing.two} style={styles.back}>
-                <ThemedText type="link">{t('setup.back')}</ThemedText>
-              </Pressable>
             ) : null}
           </ScrollView>
         </KeyboardAvoidingView>
@@ -357,8 +363,52 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
 }
 
 /**
- * One option in a list of choices: a card with an icon, a title, a plain description and an optional
- * caveat. `advances` makes it a button that moves on (with a chevron) rather than a selection to confirm.
+ * The top of the first screens: the LOAM mark with the screen's title beside it, and a line about it below.
+ */
+function Hero({ body, title }: { body?: string; title: string }) {
+  return (
+    <View style={styles.hero}>
+      <View style={styles.heroRow}>
+        <Image
+          source={require('../../assets/images/loam-splash.png')}
+          style={styles.logo}
+          contentFit="cover"
+          accessibilityLabel="LOAM"
+          accessibilityRole="image"
+        />
+        <ThemedText style={styles.heroTitle} accessibilityRole="header">
+          {title}
+        </ThemedText>
+      </View>
+      {body ? (
+        <ThemedText themeColor="textSecondary" style={styles.lead}>
+          {body}
+        </ThemedText>
+      ) : null}
+    </View>
+  );
+}
+
+/** A step's question, and an optional line explaining it. */
+function StepHeading({ body, title }: { body?: string; title: string }) {
+  return (
+    <View style={styles.stepHeading}>
+      <ThemedText style={styles.stepTitle} accessibilityRole="header">
+        {title}
+      </ThemedText>
+      {body ? (
+        <ThemedText themeColor="textSecondary" style={styles.lead}>
+          {body}
+        </ThemedText>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * One option in a list of choices: a card with its icon in the corner, a title, a plain description and an
+ * optional caveat set apart below. `advances` makes it a button that moves on (with a chevron) rather than
+ * a selection to confirm (with a radio mark).
  */
 function Choice({
   advances = false,
@@ -386,37 +436,37 @@ function Choice({
       style={({ pressed }) => [
         styles.choice,
         {
-          backgroundColor: selected || pressed ? theme.backgroundSelected : theme.backgroundElement,
-          borderColor: selected ? theme.primary : theme.backgroundSelected,
+          backgroundColor: selected ? theme.primarySoft : pressed ? theme.backgroundSelected : theme.backgroundElement,
+          borderColor: selected ? theme.primaryInk : theme.border,
         },
       ]}>
-      <View style={[styles.choiceIcon, { backgroundColor: theme.background }]}>
-        <SymbolView name={icon} size={26} tintColor={theme.primary} type="monochrome" />
+      <View style={[styles.choiceIcon, { backgroundColor: selected ? theme.backgroundElement : theme.primarySoft }]}>
+        <SymbolView name={icon} size={22} tintColor={theme.primaryInk} type="monochrome" />
       </View>
       <View style={styles.choiceText}>
-        <ThemedText type="smallBold">{title}</ThemedText>
-        <ThemedText type="small">{body}</ThemedText>
+        <ThemedText style={styles.choiceTitle}>{title}</ThemedText>
+        <ThemedText themeColor="textSecondary" style={styles.choiceBody}>
+          {body}
+        </ThemedText>
         {note ? (
-          <ThemedText type="small" themeColor="textSecondary">
-            {note}
-          </ThemedText>
+          <View style={[styles.choiceNote, { borderTopColor: theme.border }]}>
+            <SymbolView name={{ android: 'info', ios: 'info.circle' }} size={16} tintColor={theme.textSecondary} />
+            <ThemedText themeColor="textSecondary" style={styles.choiceNoteText}>
+              {note}
+            </ThemedText>
+          </View>
         ) : null}
       </View>
-      {advances ? <SymbolView name={{ android: 'chevron_right', ios: 'chevron.right' }} size={22} tintColor={theme.textSecondary} /> : null}
+      {advances ? (
+        <View style={styles.choiceEnd}>
+          <SymbolView name={{ android: 'chevron_right', ios: 'chevron.right' }} size={22} tintColor={theme.textSecondary} />
+        </View>
+      ) : (
+        <View style={[styles.radio, { borderColor: selected ? theme.primaryInk : theme.textSecondary }]}>
+          {selected ? <View style={[styles.radioDot, { backgroundColor: theme.primaryInk }]} /> : null}
+        </View>
+      )}
     </Pressable>
-  );
-}
-
-/** The LOAM mark (the app icon's wordmark tile), at the top of the first setup screens. */
-function Logo() {
-  return (
-    <Image
-      source={require('../../assets/images/loam-splash.png')}
-      style={styles.logo}
-      contentFit="cover"
-      accessibilityLabel="LOAM"
-      accessibilityRole="image"
-    />
   );
 }
 
@@ -429,9 +479,7 @@ function PrimaryButton({ disabled, label, onPress }: { disabled?: boolean; label
       disabled={disabled}
       onPress={onPress}
       style={[styles.button, { backgroundColor: theme.primary, opacity: disabled ? 0.6 : 1 }]}>
-      <ThemedText type="smallBold" style={styles.primaryLabel}>
-        {label}
-      </ThemedText>
+      <ThemedText style={[styles.buttonLabel, styles.primaryLabel]}>{label}</ThemedText>
     </Pressable>
   );
 }
@@ -444,8 +492,8 @@ function SecondaryButton({ disabled, label, onPress }: { disabled?: boolean; lab
       accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={onPress}
-      style={[styles.button, styles.secondary, { borderColor: theme.primary, opacity: disabled ? 0.6 : 1 }]}>
-      <ThemedText type="smallBold">{label}</ThemedText>
+      style={[styles.button, styles.secondary, { borderColor: theme.primaryInk, opacity: disabled ? 0.6 : 1 }]}>
+      <ThemedText style={[styles.buttonLabel, { color: theme.primaryInk }]}>{label}</ThemedText>
     </Pressable>
   );
 }
@@ -454,25 +502,48 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: { flex: 1, width: '100%', maxWidth: MaxContentWidth, alignSelf: 'center' },
   flex: { flex: 1 },
-  content: { padding: Spacing.four, gap: Spacing.three, flexGrow: 1 },
+  content: { paddingHorizontal: Spacing.four, paddingTop: Spacing.four, paddingBottom: Spacing.five, gap: Spacing.three, flexGrow: 1 },
   loading: { flex: 1 },
-  welcome: { gap: Spacing.two, paddingBottom: Spacing.two },
-  logo: { width: 88, height: 88, borderRadius: 22, marginBottom: Spacing.two },
-  languages: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
-  language: { paddingHorizontal: Spacing.three, paddingVertical: Spacing.two, borderRadius: Spacing.four },
+  back: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: Spacing.half, marginLeft: -6 },
+  backLabel: { fontSize: 15, lineHeight: 20 },
+  hero: { gap: Spacing.three, marginBottom: Spacing.three },
+  heroRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
+  logo: { width: 60, height: 60, borderRadius: 15 },
+  heroTitle: { flex: 1, fontSize: 30, lineHeight: 36, fontWeight: 700 },
+  lead: { fontSize: 16, lineHeight: 24, fontWeight: 400 },
+  stepHeading: { gap: 6, marginBottom: Spacing.one },
+  stepTitle: { fontSize: 24, lineHeight: 30, fontWeight: 700 },
+  languages: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  language: { paddingHorizontal: Spacing.three, paddingVertical: 10, borderRadius: 999, borderWidth: 1 },
+  languageLabel: { fontSize: 15, lineHeight: 20 },
   choice: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.three,
+    alignItems: 'flex-start',
+    gap: 14,
     padding: Spacing.three,
-    borderRadius: Spacing.three,
-    borderWidth: 2,
+    borderRadius: 18,
+    borderWidth: 1.5,
   },
-  choiceIcon: { width: 48, height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  choiceIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   choiceText: { flex: 1, gap: Spacing.one },
-  input: { borderWidth: 1, borderRadius: Spacing.three, paddingHorizontal: Spacing.three, paddingVertical: Spacing.two, fontSize: 18 },
-  button: { alignItems: 'center', paddingVertical: Spacing.three, borderRadius: Spacing.four },
-  secondary: { borderWidth: 1, backgroundColor: 'transparent' },
+  choiceTitle: { fontSize: 17, lineHeight: 22, fontWeight: 700 },
+  choiceBody: { fontSize: 15, lineHeight: 21, fontWeight: 400 },
+  choiceNote: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: Spacing.two,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  choiceNoteText: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: 400 },
+  choiceEnd: { alignSelf: 'center' },
+  radio: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, alignItems: 'center', justifyContent: 'center', marginTop: 9 },
+  radioDot: { width: 10, height: 10, borderRadius: 5 },
+  input: { borderWidth: 1.5, borderRadius: 14, paddingHorizontal: Spacing.three, paddingVertical: 14, fontSize: 18 },
+  button: { alignItems: 'center', paddingVertical: 15, borderRadius: 14 },
+  buttonLabel: { fontSize: 16, lineHeight: 22, fontWeight: 700 },
+  secondary: { borderWidth: 1.5, backgroundColor: 'transparent' },
   primaryLabel: { color: '#ffffff' },
-  back: { alignSelf: 'flex-start' },
+  textLink: { alignSelf: 'flex-start', paddingVertical: Spacing.one },
+  linkLabel: { fontSize: 15, lineHeight: 20, fontWeight: 600 },
 });
