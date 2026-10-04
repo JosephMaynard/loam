@@ -1,284 +1,233 @@
-# 12 — Operator's guide (running a LOAM node)
+# 12. Operator's guide: running a LOAM network
 
-> **Audience: the host.** The one person who runs LOAM on a device so everyone nearby can talk. This
-> is the end-to-end walkthrough — choose a device, become admin, shape the network, invite people,
-> moderate, mesh with other nodes, and lock it down in an emergency. It ties together the deeper docs
-> ([02](02-kill-switch.md) kill switch, [04](04-android-host-app.md) Android host, [09](09-security-profiles.md)
-> security profiles, [11](11-node-sync.md) node sync); reach for those when you want the full story.
+> **Audience: the host,** the person who runs LOAM so everyone nearby can talk. This walks through
+> choosing a device, starting a network, letting people in, shaping and moderating it, linking it to
+> other networks, and erasing it in a hurry. The deeper docs are linked as you go: [02](02-kill-switch.md)
+> Emergency reset, [04](04-android-host-app.md) the Android app, [08](08-transport-security.md) transport
+> encryption, [09](09-security-profiles.md) security profiles, [11](11-node-sync.md) linking networks.
 
-LOAM has **no accounts and no setup wizard**. You start a server, the first person to open it becomes
-the admin, and everything else is configured live from the in-app admin area. Nothing leaves the local
-network.
+LOAM has no accounts. The host device runs the whole network; nothing it holds leaves the local
+network unless you link it to another LOAM network.
 
 ## 1. Choosing a host
 
-Any device that can run the server and offer a network the others can reach works. Three shapes:
-
-| Host | Command | Good for |
+| Host | How | Good for |
 |---|---|---|
-| **Laptop / desktop** | `npx loamnet` (the published CLI, see `cli/README.md`), or from a checkout `pnpm build && pnpm --filter @loam/server start` | Quick setup where a laptop is already on the LAN or hotspot. |
-| **Raspberry Pi** (or any always-on Linux box) | same as above | A fixed-site node that stays up; pairs well with node-to-node sync. |
-| **Android phone** | `pnpm --filter app apk` → install → **Share · Host** | Truly off-grid: the phone runs the embedded server *and* raises its own WiFi hotspot. |
+| **Android phone** | the LOAM app ([latest release](https://github.com/JosephMaynard/loam/releases/latest)) | Anywhere: the phone makes its own Wi-Fi, so no router or internet is needed. |
+| **Mac, Linux or Windows computer** | `npx loamnet` | A laptop already on a Wi-Fi network, or one sharing its own hotspot. |
+| **Raspberry Pi** (or any always-on box) | `npx loamnet` | A fixed spot that stays up; a good partner for a phone network to link with. |
 
-**Laptop / Pi.** After `pnpm build`, `pnpm --filter @loam/server start` serves the built client and the
-API from **one origin**, defaulting to **`PORT=3000`**. People join by pointing a browser at
-`http://<this-device-lan-ip>:3000`. The device must offer a network the others share — join them to the
-same router, or run a hotspot on the host. (In dev, `pnpm dev` splits the client onto `:3000` and the
-server onto `:3001` and prints a join QR to the terminal — handy for testing, not how you run it for
-real.)
+iPhones can join any network but can't host one: iOS doesn't let an app start a hotspot, and pauses apps
+in the background. A Mac can host with `npx loamnet`.
 
-**Android phone.** `pnpm --filter app apk` builds `apps/app/loam-host.apk`; `adb install -r` it onto the
-phone, launch **LOAM**, and tap **Share · Host**. The app brings up a local-only WiFi hotspot, runs the
-server on the phone, and shows the join QR. See [docs/04](04-android-host-app.md) for the full build and
-join flow. Note: on-device database encryption now **ships** on Android (SQLCipher via a vendored arm64
-prebuild, keyed per the `security.dbEncryption` mode) — pending final on-device runtime verification
-(docs/01, docs/04). It **fails closed**: if an encrypted mode's SQLCipher driver won't load, the host
-locks with a "driver missing" screen (**Retry**, or a confirmed **Start without encryption** that
-switches the mode to Off) rather than quietly storing data in plaintext.
+## 2. Starting a network
 
-**Environment variables** (laptop/Pi; the Android host sets its own):
+### On an Android phone
 
-| Var | Effect |
+Install the APK and open LOAM. Setup asks four things:
+
+1. **Language.** For the app and for the network: everyone who joins sees LOAM in it. An admin can
+   change it later in the admin area.
+2. **Kind of network:**
+   - **Community:** anyone nearby can join, people choose a name and photo, messages are kept, and the
+     database is encrypted with a key held in the phone's keystore, so it survives a restart.
+   - **Private and short-lived:** random names and pictures, messages gone after an hour, each person
+     approved before they can join, encrypted connections only, and nobody can see who's online. The
+     database key exists only while LOAM runs: once LOAM closes or the phone restarts, the network is
+     gone for good (pictures and files are deleted the next time LOAM starts).
+   - **Choose every setting myself:** standard settings, opening the admin area so you can set
+     everything. Stored encrypted unless you turn that off.
+3. **Name.** What people see when they join (blank means "LOAM").
+4. **How people connect:**
+   - **Hotspot:** the phone makes its own Wi-Fi. Works with no router and no internet. Android asks for
+     Nearby devices and location permission to start it (LOAM never reads your location).
+   - **Wi-Fi:** everyone on the Wi-Fi the phone is already on. No hotspot, no extra permission. Guest,
+     hotel and campus Wi-Fi often stop devices reaching each other; if nobody can connect, use Hotspot.
+   - **Join another LOAM network:** this phone becomes a second node of a network that's already
+     running (see [§6](#6-linking-networks)).
+
+The host phone is the network's admin automatically: the app hands its own screen a one-off token that
+nobody on the network can see. The next time you open LOAM it offers **Continue** with the same network,
+or **Start a new network**, which erases the old one (press and hold to confirm). A Private network that
+has ended just shows setup again.
+
+**The host menu** (top right) has **AI model**, **Encryption**, **Share · Host** and **Privacy
+policy**, plus **Emergency reset** on a Private network.
+
+### On a computer or Raspberry Pi
+
+```bash
+npx loamnet                 # or: npm install -g loamnet && loam
+```
+
+It prints the address to open and a QR code. **Open it yourself first:** on a computer the first person to
+open a new network becomes its admin. Your admin identity lives in that browser, so keep using it. Useful
+options (`loam --help` has them all):
+
+| Option | Effect |
 |---|---|
-| `PORT` | Port the server listens on (default `3000` in production). |
-| `HOST` / `LOAM_JOIN_HOST` | Bind address / the host used in the printed join URL. |
-| `LOAM_DATA_DIR` | Where the `.loam/` data dir (DB + avatars) lives. |
-| `LOAM_CONFIG_FILE` | Path to a JSON config file to seed defaults (otherwise `.loam/config.json`). |
-| `LOAM_DB_KEY` | **Encryption at rest.** Unset = plain SQLite. A passphrase = SQLCipher (AES-256), same passphrase needed on every start. `ephemeral` = a random in-memory key that never touches disk. See §7. (The `loam` CLI's `--encrypt` reads this variable, or prompts for the passphrase without echoing it.) |
+| `--port <n>` | Listen on another port (default 3000, or the next free one). |
+| `--data-dir <dir>` | Where the data lives (default `$XDG_DATA_HOME/loam` or `~/.loam`). |
+| `--encrypt` | Encrypt the database. The passphrase comes from `$LOAM_DB_KEY` or a prompt; `--encrypt ephemeral` uses a key that lives only in memory. |
 
-## 2. First run — becoming admin
-
-By default the node uses the **`firstUser`** admin bootstrap: **the first person to open the app on a
-fresh node becomes the admin.** So open the app yourself, first, before you hand the QR around. That's
-it — no password. Your admin identity is the server session cookie in that browser; keep that browser/
-device.
-
-Once you're admin, the **admin area lives at `/admin`** ("Node configuration"), reachable from
-**Settings → Admin tools → Open the admin area**. People management is a separate view at `/people`
-("People and moderation").
-
-If you'd rather not rely on "whoever opens it first," change the bootstrap strategy in the config file
-or in **Admin → Bootstrap**:
+Prefer not to rely on "whoever opens it first"? Choose another way to become admin in the config file or
+**Admin → Bootstrap**:
 
 | Strategy | How admin is claimed |
 |---|---|
-| `firstUser` (default) | First session on a fresh node is admin automatically. |
-| `setupCode` | A one-time code is logged to the server console at startup; enter it in **Settings → Admin access**. |
-| `passphrase` | A reusable secret from config; same **Settings → Admin access** box. |
-| `none` | No in-app claiming; nobody becomes admin. |
-| `hostDevice` | The Android host. The launcher mints a per-boot token that only the host's own screen receives, and that screen claims admin with it automatically — no form, and nobody on the LAN can take admin by being first. |
+| `firstUser` (default) | The first person on a new network. |
+| `setupCode` | A one-time code printed in the server log at start-up, entered in **Settings → Admin access**. |
+| `passphrase` | A secret from the config, entered the same way. Stored hashed, never in the clear. |
+| `none` | Nobody can claim admin. |
 
-`setupCode`/`passphrase` are exchanged via **Settings → Admin access → "Setup code or passphrase" →
-Unlock admin**. Claiming is rate-limited and the secret is constant-time compared; a stored passphrase
-is scrypt-hashed, never kept in the clear.
+(The Android app uses its own `hostDevice` strategy, whatever is configured.)
 
-## 3. Naming and shaping your network
+## 3. Letting people in
 
-Everything below is edited in **Admin → Node configuration** and saved with one **Save** at the bottom;
-changes broadcast live to connected clients (`configUpdated`).
+**The code is the whole invitation.** People connect to the same Wi-Fi or hotspot, scan the code, and
+LOAM opens in their browser. Nothing to install, no account, and the code carries the network's
+encryption key, so their connection is encrypted from the first request.
 
-**Name it.** In the **Network** panel, set the node name (config key `node.name`, default `LOAM local`).
-It's shown to everyone in the client sidebar and on the join screen — call it "Camp 3 Mesh" or
-"Riverside Outage" so joiners know they're in the right place.
+- **From the host phone:** **Share · Host** shows the codes. On Hotspot there are two, the hotspot's
+  Wi-Fi first and then LOAM; on Wi-Fi there's one. The address is printed beside it for anyone who'd
+  rather type. **Display mode** shows the codes full screen, as large as the screen allows, keeps the
+  screen on and pins LOAM in front; press and hold to leave it. The network keeps running with the
+  screen off either way.
+- **From inside LOAM:** admins and greeters have **Invite someone** in the sidebar, with the code, a
+  **Copy link** button and a note on how to join. It includes the encryption key only when that device
+  joined by scanning, so a key can't be passed on second-hand.
 
-**Pick a security posture.** The **Profile** panel is the fastest way to get a coherent configuration.
-A named profile is *authoritative* — it forces its bundled axes and locks those individual controls
-until you switch back to **Custom** (docs/09):
+**Approval.** On a network that approves newcomers (Private does), people who join wait on a "You're in
+the queue" screen until an admin or greeter lets them in from **People and moderation → Pending
+joins** (**Approve**, or **Deny**, which bans them). Give someone the **greeter** role so you aren't the
+only one at the door. The host phone's code also carries an **invite code** that lets people straight
+in. It changes every 10 minutes, so a photo of an old one stops working within 20, and an Emergency
+reset retires them all.
 
-| Profile | Who can join | Retention | Kill switch | Transport encryption |
+## 4. Shaping the network
+
+Everything is in the admin area, **Admin** in the sidebar (`/admin`, "Node configuration"), saved with
+one **Save** at the bottom. Changes reach connected phones at once.
+
+**Name.** In **Network**: shown in the sidebar and on the join screen. "Camp 3" or "Riverside Outage"
+tells people they're in the right place.
+
+**Profile.** The quickest way to a consistent setup. A named profile sets these together and locks them
+until you switch back to **Custom** ([docs/09](09-security-profiles.md)):
+
+| Profile | Who can join | Messages kept | Emergency reset from the admin area | Connections |
 |---|---|---|---|---|
-| **Open** | anyone, immediately | kept forever | off | optional |
-| **Standard** | anyone with the link | kept forever | off | optional |
-| **Hardened** | approval required | messages expire after **1 hour** | **armed** | **required** |
-| **Custom** *(default)* | set each axis yourself | set yourself | set yourself | set yourself (optional by default) |
+| **Open** / **Standard** | anyone | until deleted | off | encrypted for everyone who scans |
+| **Hardened** (the Private network) | approved first | 1 hour | on | encrypted only; others refused |
+| **Custom** (the default) | your choice | your choice | your choice | your choice |
 
-Open and Standard apply the **same enforced settings today** — the axis that would separate them
-(invite tokens) isn't built yet, so they differ only in intent. `custom` is the default so a fresh node
-never has its raw settings silently overridden.
+(Open and Standard currently set the same things.)
 
-**Transport encryption** has two settings. **Optional** (the default) encrypts every device that joins
-by scanning the QR code, but still accepts a device that typed the URL by hand, unencrypted. **Required**
-refuses unencrypted devices and hides which pages they request, too. There is no "off" setting: an
-`"off"` in a config file is read as optional (with a warning), and the only unencrypted mode is the
-developer-only `LOAM_DEV_MODE`, which shows every client a red "unencrypted" banner (docs/08).
+**Connections.** **Optional** encrypts everyone who joins by scanning but still lets in a device that
+typed the address by hand, unencrypted. **Required** refuses those devices and also hides which pages
+anyone asks for. There is no "off": only a developer debugging mode (`LOAM_DEV_MODE`, never on a
+released app) runs unencrypted, and it shows everyone a red warning ([docs/08](08-transport-security.md)).
 
-**The individual axes** (editable under Custom, or forced by a profile):
+**The other settings:**
 
-- **Messaging features** — toggle public/private/user channels, replies, DMs, reactions, markdown,
-  image attachments. These are enforced server-side, not just hidden.
-- **Identity permissions** — whether users may edit their display name/avatar or upload avatar images,
-  and whether admins may edit other users.
-- **Message retention** — delete messages after N minutes (blank = keep forever). Expired messages are
-  reaped from the node and connected clients roughly every 30s. The proactive companion to the kill
-  switch.
-- **Kill switch + panic token** — see §7.
-- **Presence** — the `enablePresence` flag (default **on**) shows a dot next to members who are
-  currently connected. **Turn it off for high-risk deployments** — presence reveals who is online right
-  now, which is exactly the metadata a hostile observer wants. Hardened operators should disable it.
+- **Messaging:** public, private and user-made channels, replies, direct messages, reactions,
+  formatting, pictures and files. Turning one off stops it on the server, not just in the app.
+- **Identity:** whether people can change their name and picture or upload a photo.
+- **Message retention:** delete messages after a set time (blank keeps them).
+- **Presence:** shows who's online. It's on by default; **turn it off when that is itself sensitive**,
+  because it tells anyone watching who is here right now. The Private network has it off.
 
-## 4. Inviting people
-
-**The join QR is the whole invite.** Greeters and admins get an **Invite someone** control in the
-sidebar that expands the node's join URL as a QR plus the URL text; the same URL appears under
-**Settings → Join this LOAM node**. Anyone already on the LAN/hotspot scans it (or types the URL) and
-the PWA opens — no install, no account. The QR a member shows carries the host's encryption key only
-when their own connection came from a verified QR scan; if the key they were given doesn't match, the
-invite QR is hidden with a warning instead of passing on a possibly-substituted key. WiFi credentials themselves are shared out-of-band (or by the
-Android hotspot); the QR only carries the URL.
-
-**Join policy** decides what happens next:
-
-- **Open** — the joiner participates immediately.
-- **Approval** — the joiner lands in a "You're in the queue" holding screen until a greeter or admin
-  approves them. Pending people can't read or post.
-
-Under approval, **Admin/greeter → People and moderation → Pending joins** lists everyone waiting, with
-**Approve** (let them in) and **Deny** (bans them and drops their session). Delegate this by granting the
-**greeter** role (§5) so you're not the only one letting people in.
+**Storage encryption on the host phone** is under **Encryption** in the host menu: **Encrypted
+(recommended)** with a keystore-held key, **Encrypted, new key every start**, **Encrypted with a
+passphrase** (asked at every start, never stored), or **No encryption (for testing)**, which asks you to
+confirm. Encryption applies to a new database, so switching erases what's on the phone.
 
 ## 5. Managing people
 
-**People and moderation** (`/people`) is open to admins, moderators, and greeters. The moderator roster
-(`GET /api/moderation/users`) lists every human — including banned and shadow-banned people so you can
-reverse it — with per-person controls:
+**People and moderation** (`/people`) is for admins, moderators and greeters:
 
-| Action | Who can do it | Effect |
+| Action | Who | Effect |
 |---|---|---|
-| **Ban / Unban** | admin, moderator | Locks the person out entirely and tears down their sessions. |
-| **Shadow-ban** | admin, moderator | They can still post, but their new messages are broadcast only back to themselves. Quietly defuses a spammer. |
-| **Timeout** | admin, moderator | Mutes them for a chosen duration (at most **7 days**). The expiry is computed on the node's clock, so a moderator's phone with a wrong clock can't set a years-long or already-expired timeout. |
-| **Remove a message** | admin, moderator | An honest tombstone: the body and attachments are deleted and readers see "removed by a moderator" (with an optional reason). A removed message can't be edited by its author, replied to, or newly reacted to, and a sync peer's later edit can't restore it. |
-| **Moderator / Greeter role** | admin only | Grant moderation powers or greeter (approve-joins) powers. |
-| **Make admin** | admin only | Promote a member to a full admin. |
-| **Delete a message** | admin (any message); author (their own, if no one else has replied) | Removes it from the node and every client; a tombstone stops sync re-importing it. |
+| **Ban / Unban** | admin, moderator | Locks the person out and ends their sessions. |
+| **Shadow-ban** | admin, moderator | They can still post, but only they see their new messages. |
+| **Timeout** | admin, moderator | Mutes them for up to 7 days, timed on the host's clock. |
+| **Remove a message** | admin, moderator | Readers see "removed by a moderator" (with an optional reason); it can't be edited, replied to or reacted to afterwards. |
+| **Moderator / Greeter role** | admin | Moderation powers, or letting people in. |
+| **Make admin** | admin | Promotes someone to admin. There's no demote: see the end of this guide. |
+| **Delete a message** | admin (any), author (their own, if nobody else has replied) | Removes it everywhere; a linked network can't bring it back. |
 
-Admins and yourself can't be moderated (no self-ban, no banning another admin). Roles and moderation
-state are stripped from any profile that arrives over sync — a peer's moderator is a stranger here.
+Admins can't be moderated, and nobody can moderate themselves. Roles never travel to a linked network: a
+moderator there is a stranger here.
 
-**On promoting admins:** there is **deliberately no "demote admin" button.** Admin is a trust ceiling,
-not a dial — removing an admin is done by re-bootstrapping the node (or firing the kill switch and
-starting fresh), *not* by one admin stripping another. This avoids mutual-demotion wars where two
-admins race to remove each other. Promote carefully.
+**Reports.** Anyone can report a message or a person; reports go to the moderators.
 
-**Members can block each other.** Anyone can block another person from the **Block** button in their DM
-header, and unblock them from the DM or from **Settings → Blocked people**. This is personal, not
-moderation:
+**Blocking** is personal, not moderation. Anyone can block someone from their direct message (and unblock
+them there or in **Settings → Blocked people**). It stops direct messages both ways, and on the blocker's
+phone that person's posts collapse to "Message from a blocked user" (with **Show**) and their reactions
+and typing disappear. Nobody else sees the block list, it never leaves the network, and the blocked
+person isn't told, though they may work it out. It doesn't replace a report: only moderators can ban,
+time out or remove messages.
 
-- A block list is private to the member who made it. No admin view or API shows it, it isn't broadcast or
-  synced to other nodes, and Emergency Reset clears it with everything else.
-- It stops DMs **both ways** (new messages, reactions and edits of older ones; typing indicators too). On
-  the blocker's device, the blocked person's posts and replies in channels collapse to "Message from a
-  blocked user" (with Show) and their reactions, typing and notifications disappear. The node still
-  delivers channel content to everyone; the hiding happens on the blocker's device.
-- The blocked person isn't notified. A DM to someone who blocked them gets a generic "Direct messages to
-  this person aren't available" that doesn't say why, and neither can invite the other into a private
-  channel or hand them one ("This person isn't available for this channel").
-- It doesn't replace reports. Harassment you should know about still needs **Report this user**, and only
-  moderators can ban, time out or remove messages.
+## 6. Linking networks
 
-Known limits: the blocked person can still work it out (the recipient is plainly active but their DMs
-fail; a banned or not-yet-approved member gets the same DM answer, but those are hidden from the member
-list, so it doesn't disguise the block); a mesh sender can't be blocked (mesh mail arrives outside the
-normal message path); and because the client keeps the list in
-memory only, a device that reloads while it can't reach the node shows cached posts from blocked people
-until it reconnects.
+Two LOAM networks that can reach each other can share their **public channels** both ways, so separate
+hotspots become one conversation. Direct messages, private channels and anything from a shadow-banned
+person never leave either network.
 
-## 6. Linking nodes into a mesh
+**With a link code** (the usual way). On the network that's already running, show a link code: on the
+host phone, **Share · Host → Link another LOAM node → Show a link code**; in the admin area,
+**Node-to-node sync → Link another node**. On the other phone, during setup choose **Join another LOAM
+network** and scan it. That's all: the two networks sync from then on, with nothing to approve. A code
+works once, for 10 minutes, so show it only to the phone you mean to link. The plain join code can't link
+a network.
 
-Two LOAM nodes that can reach each other can **sync their public channels** so separate hotspots
-converge into one conversation. It's off by default; turn it on in **Admin → Node-to-node sync**.
+**By hand.** In **Admin → Node-to-node sync**, turn sync on and add a peer by its join address, then
+**Sync now**. Each side pulls from the other only if it lists the other, so add it on both. A **shared
+mesh token** limits sync to networks that know it.
 
-**Pairing.** The panel shows **this** node's link address as a QR + copy button ("Link another node") —
-it's the *same* URL as the join QR. To pair, take a peer's link address (scan its QR or paste its URL,
-`http://192.168.0.10:3000`) into **Add peer**, save, and hit **Sync now**. Two nodes that each list the
-other converge in both directions.
+**What phones can do** ([docs/11](11-node-sync.md)): two phones each running a hotspot usually can't see
+each other. Linking works when one network can reach the other: a phone on the other's hotspot or Wi-Fi,
+or both on the same Wi-Fi. Taking turns works on every phone: join the other network's Wi-Fi for a minute
+to catch up, then go back.
 
-**What syncs, and what never does:**
+Linking shares your public channels with the networks you link, and a linked network keeps what it has
+already pulled: an Emergency reset here doesn't reach it.
 
-- **Syncs:** posts, replies, and reactions in **public, non-archived** channels, plus the author
-  profiles needed to render them (stripped of admin/role/moderation state).
-- **Never leaves a node:** DMs, private channels and their member lists, in-flight LLM streams, and
-  messages by shadow-banned authors.
-- **Tombstones:** a deletion here is remembered so a peer that still holds the message can't hand it
-  back. But **deletes don't propagate** — each operator moderates their own node, and a peer keeps
-  whatever it already pulled. A kill switch wipes *this* node only.
+## 7. Emergency reset
 
-**The phone reality** (see [docs/11](11-node-sync.md) for the full table):
+Erasing a network deletes every message, person, picture and file, and tells every phone connected to it
+to clear its copy and show a neutral disconnected screen. A phone that was offline clears its copy the
+next time it reaches the network.
 
-- **Sequential "courier" sync always works.** Pause your hotspot, join the other node's WiFi, let the
-  pull loop catch up, resume. Works on every phone; your own clients drop for a minute.
-- **Simultaneous hotspot + join** (host and connect at once) is **device-dependent** — many newer
-  Android phones manage it, budget/older hardware may not.
-- **No cellular peer-to-peer.** Two phones on mobile data can't reach each other without an internet
-  relay, which is against LOAM's off-grid design. Not planned.
+- **On the host phone:** **Emergency reset** is in the host menu on a Private network, and at the bottom
+  of **Encryption** on every network. Press and hold for three seconds. When it has finished, LOAM closes
+  completely, and next time it opens on setup. If something couldn't be erased, the screen says so and
+  stays open: closing LOAM and opening it again finishes the job.
+- **From the admin area:** **Emergency Reset**, once enabled there (the Hardened profile enables it).
+  The settings survive, so the network starts again empty.
+- **Without logging in:** set a **panic token** (16 characters or more) in the same panel, and a request
+  to `POST /api/panic` with it erases the network, from a bookmark or another device. The token is stored
+  hashed, and the address answers "not found" unless a token is set.
 
-Enabling sync exposes this node's public content to anyone who can reach it while it's on — an explicit
-operator choice. Peers can be authenticated with an optional shared `sync.token` (the `x-loam-sync-token`
-header, sealed inside the transport envelope on encrypted links; a missing/wrong token 404s exactly like
-sync being off). The token is **never sent over an unencrypted link** (except in Developer Mode): if a peer
-can only be reached in plaintext, the pull goes ahead without it — public data only — and a peer that
-needs the token simply refuses; a `required` node refuses plaintext pulls outright. Hardened deployments
-should set a token, pair it with approval joins, or leave sync off.
-Depth and limits are in [docs/11](11-node-sync.md).
+**How thorough it is.** With an encrypted database, the files are deleted and the key is replaced (on the
+host phone, and on a computer using a key that lives only in memory), so whatever is left on the storage
+can't be read. A computer using a fixed passphrase deletes the files but keeps the passphrase. Without
+encryption it's an ordinary delete, which can leave traces on flash storage ([docs/02](02-kill-switch.md)).
 
-## 7. Emergency posture
-
-For the protest / surveillance threat model, layer these — and be honest that they raise the bar rather
-than guarantee safety (a host seized while powered on, with the key in RAM, is still the weak case).
-
-**Encryption at rest** (`LOAM_DB_KEY` or `loam --encrypt` on a laptop/Pi; the **Database encryption**
-setting on the Android host, which adds a Keystore-held `persistent` mode):
-
-- **unset** — plain SQLite on disk.
-- **a passphrase** — SQLCipher (AES-256); the same passphrase is required on every start.
-- **`ephemeral`** — a random key generated in memory, **never written to disk**. Data is readable only
-  while the process runs; a reboot loses the key forever.
-
-An encrypted setting never falls back to plaintext: if the SQLCipher driver is missing, the CLI stops
-before starting and the Android host locks (see §1).
-
-**Kill switch** (**Admin → Kill switch**, or armed automatically by the Hardened profile). Firing it:
-
-1. deletes all messages, users, sessions, and avatars on the node,
-2. remotely **purges every connected client** (IndexedDB, localStorage, service-worker caches) and drops
-   them to a neutral "Disconnected" screen,
-3. re-seeds defaults so the node is usable again. **Node config survives**, so the switch can fire again.
-
-With encryption on, the wipe is *cryptographic*: it closes the store, deletes the DB files, and rotates
-to a fresh key (`ephemeral` mode in-process; on the Android host, for `persistent`/`passphrase`, the
-launcher clears the Keystore-held device secret the key is derived from, so even the same passphrase yields
-a new key), so bytes still physically on flash become unreadable. A
-laptop/Pi using a fixed `LOAM_DB_KEY` passphrase can't rotate it in-process: the files are deleted but the
-fresh database is keyed with the same passphrase. Without encryption it's a logical `DELETE` —
-recoverable pages may remain on flash (docs/02).
-
-**Panic token.** Set a token (≥16 chars) in the kill-switch panel to enable an unauthenticated
-`POST /api/panic` — fire the wipe from a bookmark or second device without logging into the admin UI
-during a raid. The token is scrypt-hashed, so a seized config doesn't reveal it; the endpoint 404s
-entirely unless a token is configured. Require typed confirmation (default on) for team use; leave it off
-for the one-tap raid case.
-
-**What survives a wipe, and what peers keep.** A kill switch wipes *your* node and *its* connected
-clients. A phone that was disconnected at the time keeps its cached copy until it next reaches this node:
-it then gets a different identity than the one it last had confirmed, and purges its cache before
-showing anything. A phone that never reconnects keeps its copy. It does **not** reach peer nodes. If you enabled
-sync, a peer keeps every public message it already pulled. That is the point of a mesh, and worth knowing
-before you both enable sync *and* rely on the kill switch.
+**Be honest about the limits.** This raises the bar; it doesn't guarantee safety. A host taken while it's
+running, with the key in memory, can give up what it holds, and the host can always read every message.
+See [`SECURITY.md`](../SECURITY.md).
 
 ## Decisions recorded here
 
-- **No "demote admin" button.** Admin removal is intentionally out of the moderation UI — it happens via
-  re-bootstrap or the kill switch. Rationale: prevent mutual-demotion wars between admins. Promote with
-  care; there is no undo short of re-bootstrapping.
-- **Presence defaults on, disable when hardened.** The online-dot (`enablePresence`) is on by default for
-  ordinary use, but it leaks who is currently connected — high-risk operators should turn it off.
-- **Sync trust model is node-level and pull-only.** A peer's public content is trusted enough to import
-  (schema-validated, private data and moderation state never cross); peers can be authenticated with an
-  optional shared `sync.token`, deletes don't propagate, and enabling sync deliberately exposes this
-  node's public content to anyone who can reach it (a token-holder, if one is set).
-- **Unguessable-URL model for images.** Avatar images (`/api/avatars/…`) are served behind long random
-  ids with no per-request authorization — anyone on the LAN who has the id can fetch one, consistent with
-  the public, trusted-host model. Message **attachments** (`/api/attachments/…`) use the same random-id
-  scheme but are additionally *audience-gated to their owning message*: attachments on public messages are
-  anonymously fetchable (so peer nodes can copy them), while DM / private-channel attachments are served
-  only to people who may read that message.
+- **No "demote admin" button.** Removing an admin means starting a new network (or an Emergency reset),
+  not one admin stripping another, so two admins can't race to remove each other. Promote with care.
+- **Presence defaults on, off when it matters.** Seeing who's online is useful day to day and sensitive
+  when people are at risk, so the Private network turns it off.
+- **Linking is between networks, not people.** A linked network's public content is trusted enough to
+  import (checked against the schema; private data and moderation never cross), deletes don't travel, and
+  linking deliberately shares your public channels with the networks you choose.
+- **Pictures behind unguessable addresses.** Profile pictures are served under long random ids with no
+  further check, matching the trusted-host model. Message attachments use the same ids but are also
+  limited to the people who may read their message: public ones are open (so linked networks can copy
+  them), direct-message and private-channel ones are not.

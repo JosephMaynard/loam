@@ -408,31 +408,29 @@
             <h2 id="iphone-title">iPhones can join. They can't host.</h2>
             <p class="section-lede">
               Anyone with an iPhone can join a LOAM network: scan the code and it opens in Safari, with nothing
-              to install. But there won't be a LOAM app for iPhone, and that's on purpose.
+              to install. Hosting one is different, because iOS doesn't let an app do two things a host needs.
             </p>
           </header>
           <ol class="reasons">
             <li class="reason reveal">
-              <h3>iOS won't let an app run a network</h3>
+              <h3>An app can't start a hotspot</h3>
               <p>
-                An iPhone app can't start a Wi-Fi hotspot, and iOS pauses apps soon after you switch away from
-                them. A network hosted on an iPhone would stop the moment its screen locked.
+                A LOAM phone makes its own Wi-Fi, so people can join anywhere, with no router. On an iPhone, only
+                you can turn on Personal Hotspot, in Settings, and it needs a mobile plan that allows it.
               </p>
             </li>
             <li class="reason reveal">
-              <h3>Apple decides what an iPhone can install</h3>
+              <h3>Apps pause in the background</h3>
               <p>
-                Every iPhone app needs Apple's approval, even from the alternative app stores now allowed in the
-                EU. Apple removes apps when governments ask it to, and has done so with messaging apps before.
-                An app it removed would simply stop being installable.
+                iOS pauses an app soon after you switch away from it or lock the screen, and an app can't keep a
+                server running. A network hosted on an iPhone would stop the moment its screen went dark.
               </p>
             </li>
             <li class="reason reveal">
-              <h3>LOAM has to be there when it's needed</h3>
+              <h3>Got a Mac? Host from that</h3>
               <p>
-                A tool for emergencies and disrupted networks can't depend on a single store. On Android, LOAM
-                is also a file: download it, pass it from phone to phone, and install it with no store in
-                between.
+                <code>npx loamnet</code> runs on macOS, as well as Linux and Windows. One command and your Mac
+                is the host, with iPhones and everything else joining from the browser.
               </p>
             </li>
           </ol>
@@ -492,7 +490,7 @@
           </div>
           <div class="open-actions">
             <a class="btn btn-primary" href="https://github.com/JosephMaynard/loam" rel="noreferrer">View on GitHub</a>
-            <a class="btn btn-ghost" href="https://github.com/JosephMaynard/loam/issues/new" rel="noreferrer">Report a problem</a>
+            <a class="btn btn-ghost" href="https://github.com/JosephMaynard/loam/blob/master/docs/12-operators-guide.md" rel="noreferrer">Read the guide</a>
           </div>
         </div></div>
       </section>

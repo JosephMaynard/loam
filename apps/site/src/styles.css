@@ -1260,6 +1260,15 @@ code {
   font-size: 15.5px;
 }
 
+.reason code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--moss-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
 @media (max-width: 520px) {
   .reason {
     padding: 22px;
