@@ -51,7 +51,8 @@ LOAM is local communication for places where the internet is missing, overloaded
 tool: an outage, an emergency, a festival, a campsite, a community space. One device becomes the
 **host** and runs the network. Everyone nearby scans its code, LOAM opens in their browser, and they
 can post in channels, reply in threads, send direct messages, share pictures and react. Everything
-stays on the host and on the phones of the people using it.
+stays on the host and on the phones of the people using it, plus any other LOAM network the host links
+to, which receives the public channels.
 
 Its priorities, in order: **simplicity** (scan and go), **privacy** (no accounts, nothing collected)
 and **resilience** (low bandwidth, connections that come and go).
@@ -128,7 +129,7 @@ The Android app's setup offers three. Everything can be changed later in the adm
 | | Who can join | Names | Messages | Stored on the host |
 |---|---|---|---|---|
 | **Community** | anyone nearby | people choose a name and photo | kept until erased | encrypted, survives a restart |
-| **Private and short-lived** | each person approved first | random names and pictures | disappear after an hour | encrypted under a key that exists only while LOAM runs |
+| **Private and short-lived** | each person approved first | random names and pictures | disappear after an hour (by default) | encrypted under a key that exists only while LOAM runs |
 | **Choose every setting myself** | your choice | your choice | your choice | encrypted unless you turn it off |
 
 A Private network also only accepts encrypted connections and doesn't show who is online. On a

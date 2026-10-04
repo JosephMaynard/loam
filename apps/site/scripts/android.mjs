@@ -19,13 +19,20 @@ const here = dirname(fileURLToPath(import.meta.url));
 const adb = join(process.env.ANDROID_HOME ?? join(homedir(), "Library/Android/sdk"), "platform-tools", "adb");
 const run = (...args) => execFileSync(adb, args, { maxBuffer: 64 * 1024 * 1024 });
 
+const XML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
+
+/** Decode uiautomator's XML entities in one pass (so `&amp;quot;` stays `&quot;`, never becomes `"`). */
+function decodeXml(value) {
+  return value.replace(/&(amp|lt|gt|quot|#39);/g, (_match, name) => XML_ENTITIES[name]);
+}
+
 /** Every node in the current UI with its text/label and centre point. */
 function nodes() {
   run("shell", "uiautomator", "dump", "/sdcard/ui.xml");
   const xml = run("shell", "cat", "/sdcard/ui.xml").toString("utf8");
   return [...xml.matchAll(/<node [^>]*?text="([^"]*)"[^>]*?content-desc="([^"]*)"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/g)].map(
     ([, text, desc, x1, y1, x2, y2]) => ({
-      label: (text || desc).replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"'),
+      label: decodeXml(text || desc),
       x: Math.round((Number(x1) + Number(x2)) / 2),
       y: Math.round((Number(y1) + Number(y2)) / 2),
     }),

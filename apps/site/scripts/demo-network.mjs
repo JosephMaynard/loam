@@ -229,7 +229,13 @@ function retime() {
 }
 
 await startServer();
-const people = await seed();
+let people;
+try {
+  people = await seed();
+} catch (error) {
+  server.kill("SIGINT"); // don't leave the half-seeded node running
+  throw error;
+}
 await stopServer();
 retime();
 await startServer();

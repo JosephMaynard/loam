@@ -31,10 +31,11 @@ Install the APK and open LOAM. Setup asks four things:
 2. **Kind of network:**
    - **Community:** anyone nearby can join, people choose a name and photo, messages are kept, and the
      database is encrypted with a key held in the phone's keystore, so it survives a restart.
-   - **Private and short-lived:** random names and pictures, messages gone after an hour, each person
-     approved before they can join, encrypted connections only, and nobody can see who's online. The
-     database key exists only while LOAM runs: once LOAM closes or the phone restarts, the network is
-     gone for good (pictures and files are deleted the next time LOAM starts).
+   - **Private and short-lived:** random names and pictures, messages gone after an hour by default (a
+     channel can be set to keep them longer), each person approved before they can join, encrypted
+     connections only, and nobody can see who's online. The database key exists only while LOAM runs:
+     once LOAM closes or the phone restarts, the network is gone for good (pictures and files are
+     deleted the next time LOAM starts).
    - **Choose every setting myself:** standard settings, opening the admin area so you can set
      everything. Stored encrypted unless you turn that off.
 3. **Name.** What people see when they join (blank means "LOAM").
@@ -118,7 +119,7 @@ until you switch back to **Custom** ([docs/09](09-security-profiles.md)):
 | Profile | Who can join | Messages kept | Emergency reset from the admin area | Connections |
 |---|---|---|---|---|
 | **Open** / **Standard** | anyone | until deleted | off | encrypted for everyone who scans |
-| **Hardened** (the Private network) | approved first | 1 hour | on | encrypted only; others refused |
+| **Hardened** (the Private network) | approved first | 1 hour by default (a channel can keep longer) | on | encrypted only; others refused |
 | **Custom** (the default) | your choice | your choice | your choice | your choice |
 
 (Open and Standard currently set the same things.)

@@ -37,27 +37,29 @@ async function apiAs(person, path) {
   const response = await fetch(`${info.base}${path}`, { headers: { cookie: info.cookies[person] } });
   return response.json();
 }
-const general = await apiAs("maya", "/api/messages/general");
-const picnic = general.find((message) => message.body?.startsWith("We're setting up a picnic"));
-const users = await apiAs("maya", "/api/users");
-const tom = users.find((user) => user.displayName.startsWith("Tom"));
-
-// 2. The views. Each is taken in light and dark.
-const PHONE = { width: 390, height: 844, scale: 2, mobile: true };
-const DESKTOP = { width: 1440, height: 900, scale: 2, mobile: false };
-const views = [
-  { name: "desktop-general", as: "maya", size: DESKTOP, path: "/channel/general" },
-  { name: "phone-general", as: "maya", size: PHONE, path: "/channel/general" },
-  { name: "phone-channels", as: "maya", size: PHONE, path: "/channels" },
-  { name: "phone-thread", as: "maya", size: PHONE, path: `/channel/general/thread/${picnic.id}` },
-  { name: "phone-dm", as: "maya", size: PHONE, path: `/dm/${tom.id}` },
-  { name: "desktop-admin", as: "jo", size: DESKTOP, path: "/admin" },
-];
-
-const browser = await chromium.launch({ channel: "chrome" });
-// WebP is encoded on a blank page: the client's own CSP (rightly) refuses the data: URL it needs.
-const encoder = await browser.newPage();
+// Everything from here on runs with the demo node up: stop it (and Chrome, if it started) whatever happens.
+let browser;
 try {
+  const general = await apiAs("maya", "/api/messages/general");
+  const picnic = general.find((message) => message.body?.startsWith("We're setting up a picnic"));
+  const users = await apiAs("maya", "/api/users");
+  const tom = users.find((user) => user.displayName.startsWith("Tom"));
+
+  // 2. The views. Each is taken in light and dark.
+  const PHONE = { width: 390, height: 844, scale: 2, mobile: true };
+  const DESKTOP = { width: 1440, height: 900, scale: 2, mobile: false };
+  const views = [
+    { name: "desktop-general", as: "maya", size: DESKTOP, path: "/channel/general" },
+    { name: "phone-general", as: "maya", size: PHONE, path: "/channel/general" },
+    { name: "phone-channels", as: "maya", size: PHONE, path: "/channels" },
+    { name: "phone-thread", as: "maya", size: PHONE, path: `/channel/general/thread/${picnic.id}` },
+    { name: "phone-dm", as: "maya", size: PHONE, path: `/dm/${tom.id}` },
+    { name: "desktop-admin", as: "jo", size: DESKTOP, path: "/admin" },
+  ];
+
+  browser = await chromium.launch({ channel: "chrome" });
+  // WebP is encoded on a blank page: the client's own CSP (rightly) refuses the data: URL it needs.
+  const encoder = await browser.newPage();
   for (const view of views.filter((candidate) => !only.length || only.includes(candidate.name))) {
     for (const scheme of ["light", "dark"]) {
       const context = await browser.newContext({
@@ -96,6 +98,6 @@ try {
     }
   }
 } finally {
-  await browser.close();
+  await browser?.close();
   demo.kill("SIGINT");
 }
