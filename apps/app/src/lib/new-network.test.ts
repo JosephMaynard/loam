@@ -115,6 +115,19 @@ describe('prepareNewNetwork', () => {
     expect((await keyResponse()).newNetwork).toBeUndefined();
   });
 
+  it('leaves the previous network openable when preparing fails: its key and mode are untouched', async () => {
+    await setDbEncryptionMode('persistent');
+    const oldKey = (await resolveDbKey('persistent')).key;
+    failing.add(HINT);
+
+    const result = await prepareNewNetwork({ preset: 'private', nodeName: 'Camp', connection: 'wifi' }, 'en');
+
+    expect(result).toMatchObject({ ok: false });
+    expect(await getDbEncryptionMode()).toBe('persistent');
+    expect((await resolveDbKey('persistent')).key).toBe(oldKey);
+    expect((await keyResponse()).newNetwork).toBeUndefined();
+  });
+
   it('gives a new passphrase network a new key, even with the same passphrase', async () => {
     await setPassphraseCandidate('correct horse');
     await setDbEncryptionMode('passphrase');

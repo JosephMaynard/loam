@@ -85,12 +85,17 @@ export function saveSetupRecord(record: SetupRecord): Promise<void> {
 export type PrepareResult = { ok: true } | { ok: false; error: string };
 
 /**
- * Get everything ready for a new network, before the server starts: set the preset's storage mode, forget
- * the previous network's device keys (so anything of it left on flash stays unreadable, and a new
- * passphrase network derives a new key even from the same passphrase), record the mode for the launcher,
- * and queue the starting configuration, which also tells the launcher to empty the data folder first. A
- * passphrase network chosen through "Choose every setting myself" keeps its passphrase (it is asked for at
- * start-up anyway; `clearStoredDbKeys` never touches it).
+ * Get everything ready for a new network, before the server starts: set the preset's storage mode, record
+ * it for the launcher, forget the previous network's device keys (so anything of it left on flash stays
+ * unreadable, and a new passphrase network derives a new key even from the same passphrase), and queue the
+ * starting configuration, which also tells the launcher to empty the data folder first. A passphrase
+ * network chosen through "Choose every setting myself" keeps its passphrase (it is asked for at start-up
+ * anyway; `clearStoredDbKeys` never touches it).
+ *
+ * The keys are the one thing that can't be put back, so they go last: the mode and the hint (plain,
+ * reversible writes) are set first, and if anything fails before the keys are cleared, both go back to how
+ * they were. A failed preparation therefore leaves the previous network openable, not locked out of its
+ * own database.
  */
 export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale): Promise<PrepareResult> {
   const current = await getDbEncryptionMode();
@@ -101,13 +106,12 @@ export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale):
   // Community: an unset mode reads as 'off' (that's how installs from before encryption read), and a new
   // network must never be unencrypted by default. Plaintext stays a later opt-in, in Encryption settings.
   const target = presetDbMode(record.preset) ?? (current === 'off' ? 'persistent' : current);
-  const cleared = await clearStoredDbKeys();
-  if (!cleared.ok) {
-    return { ok: false, error: cleared.error ?? "Couldn't clear the previous network's keys." };
-  }
-  if (current === 'passphrase' && target !== 'passphrase') {
-    await clearStoredPassphrase();
-  }
+  const restore = async (): Promise<void> => {
+    if (target !== current) {
+      await setDbEncryptionMode(current);
+    }
+    await writeModeHint(current);
+  };
   if (target !== current) {
     const set = await setDbEncryptionMode(target);
     if (!set.ok) {
@@ -115,7 +119,16 @@ export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale):
     }
   }
   if (!(await writeModeHint(target))) {
+    await restore();
     return { ok: false, error: "Couldn't save the storage setting where the network reads it." };
+  }
+  const cleared = await clearStoredDbKeys();
+  if (!cleared.ok) {
+    await restore();
+    return { ok: false, error: cleared.error ?? "Couldn't clear the previous network's keys." };
+  }
+  if (current === 'passphrase' && target !== 'passphrase') {
+    await clearStoredPassphrase();
   }
   setPendingNewNetwork(presetConfig(record.preset, record.nodeName, locale, record.connection === 'join' ? record.peer : undefined));
   return { ok: true };
