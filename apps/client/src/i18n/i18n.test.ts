@@ -38,6 +38,19 @@ function isPlural(value: unknown): value is PluralMessage {
 }
 
 describe("i18n catalogs", () => {
+  it("contain no em-dashes in any language (house style: a full stop, colon or comma instead)", () => {
+    const offenders: string[] = [];
+    for (const [locale, catalog] of Object.entries(ALL_CATALOGS)) {
+      for (const [key, value] of Object.entries(catalog)) {
+        const texts = isPlural(value) ? Object.values(value) : [value];
+        if (texts.some((text) => typeof text === "string" && text.includes("\u2014"))) {
+          offenders.push(`${locale} ${key}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it("no locale has keys outside en's set (stray-key check; missing keys fall back to en)", () => {
     // Non-en catalogs are Partial: a translation MAY omit keys it hasn't localized yet — `t()` falls back
     // to en at runtime (en.ts `Translation`). So completeness is no longer required; what IS forbidden is a

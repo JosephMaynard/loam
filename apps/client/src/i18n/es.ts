@@ -36,7 +36,7 @@ export const es: Translation = {
   "composer.send": "Enviar",
 
   "composer.shareLocation": "Compartir ubicación",
-  "composer.shareLocationHint": "Comparte un lugar — una etiqueta funciona incluso sin GPS",
+  "composer.shareLocationHint": "Comparte un lugar: una etiqueta funciona incluso sin GPS",
   "composer.locationLabel": "Etiqueta de ubicación",
   "composer.locationLabelPlaceholder": "p. ej. la puerta norte",
   "composer.locationLat": "Latitud (-90 a 90)",
@@ -138,7 +138,7 @@ export const es: Translation = {
   "admin.flagReactions": "Reacciones",
   "admin.flagMarkdown": "Renderizado de Markdown",
   "admin.flagAttachments": "Imágenes adjuntas",
-  "admin.flagPresence": "Presencia en línea (revela quién está conectado — desactivar en entornos sensibles a la privacidad)",
+  "admin.flagPresence": "Presencia en línea (revela quién está conectado; desactivar en entornos sensibles a la privacidad)",
   "admin.flagLocationSharing": "Compartir ubicación (voluntario; permite adjuntar la ubicación a los mensajes)",
   "admin.identityDisplayName": "Los usuarios pueden editar su nombre visible",
   "admin.identityAvatarEdit": "Los usuarios pueden editar su avatar",
@@ -146,7 +146,7 @@ export const es: Translation = {
   "admin.identityAdminEdit": "Los administradores pueden editar a otros usuarios",
   "admin.profileOpenTitle": "Abierto",
   "admin.profileOpenSummary":
-    "Cualquiera se une y publica de inmediato. Los mensajes se conservan y el Restablecimiento de emergencia está desactivado — máximo acceso, para uso tipo ayuda humanitaria.",
+    "Cualquiera se une y publica de inmediato. Los mensajes se conservan y el Restablecimiento de emergencia está desactivado: máximo acceso, para uso tipo ayuda humanitaria.",
   "admin.profileStandardTitle": "Estándar",
   "admin.profileStandardSummary":
     "Cualquiera con el enlace de acceso participa; los mensajes se conservan y el Restablecimiento de emergencia está desactivado. (Por ahora aplica los mismos ajustes que Abierto).",
@@ -188,14 +188,14 @@ export const es: Translation = {
   "admin.identityHeading": "Identidad",
   "admin.networkName": "Nombre de red",
   "admin.networkNameNote":
-    "Visible para todos los que se unen — en la barra lateral y en la pantalla de acceso. Dale a tu red un nombre reconocible (p. ej. \"Ayuda Ribera\").",
+    "Visible para todos los que se unen, en la barra lateral y en la pantalla de acceso. Dale a tu red un nombre reconocible (p. ej. \"Ayuda Ribera\").",
   "admin.language": "Idioma de la interfaz",
   "admin.languageNote": "Se aplica a la interfaz de todos en este nodo.",
   "admin.profileHeading": "Perfil",
   "admin.posture": "Postura",
   "admin.whoCanJoin": "Quién puede unirse",
-  "admin.joinOpen": "Abierto — cualquiera con el enlace se une",
-  "admin.joinApproval": "Aprobación — un recepcionista o administrador deja entrar",
+  "admin.joinOpen": "Abierto: cualquiera con el enlace se une",
+  "admin.joinApproval": "Aprobación: un recepcionista o administrador deja entrar",
   "admin.axesManaged":
     "El acceso, la retención y el Restablecimiento de emergencia los gestiona el perfil {profile}. Cambia a {custom} para editarlos por separado.",
   "admin.featuresEyebrow": "Funciones",
@@ -323,11 +323,11 @@ export const es: Translation = {
 
   "mesh.title": "Correo en malla",
   "mesh.myCardTitle": "Tu tarjeta de malla",
-  "mesh.myCardNote": "Compártela con quien quieras que te envíe correo sellado — escanea el código o cópiala y envíasela como prefieras.",
+  "mesh.myCardNote": "Compártela con quien quieras que te envíe correo sellado. Escanea el código o cópiala y envíasela como prefieras.",
   "mesh.myCardLoading": "Cargando tu tarjeta de malla…",
   "mesh.myCardLoadError": "No se pudo cargar tu tarjeta de malla.",
   "mesh.myCardUnrecognised": "El servidor devolvió una tarjeta de malla no reconocida.",
-  "mesh.myCardQrTooLarge": "Esta tarjeta es demasiado larga para un código QR aquí — cópiala en su lugar.",
+  "mesh.myCardQrTooLarge": "Esta tarjeta es demasiado larga para un código QR aquí. Cópiala en su lugar.",
   "mesh.copyCard": "Copiar tarjeta",
   "mesh.copyCardCopied": "Copiada",
   "mesh.addContactTitle": "Añadir la tarjeta de un contacto",
@@ -357,10 +357,12 @@ export const es: Translation = {
 
   "nodeLink.hide": "× Ocultar enlace",
   "nodeLink.show": "⧉ Enlazar otro nodo",
-  "nodeLink.note":
-    "En la pantalla de administración del otro nodo, activa la sincronización y añade esta dirección como par (escanea el código o pega la URL).",
-  "nodeLink.copied": "Copiado",
-  "nodeLink.copy": "Copiar dirección",
+  "nodeLink.note": "Escanéalo desde las pantallas de configuración del otro teléfono, en «Unirse a otra red LOAM». Las redes enlazadas comparten sus canales públicos en ambos sentidos; los mensajes directos y los canales privados nunca salen de ninguna.",
+  "nodeLink.expires": "Funciona una vez, hasta las {time}.",
+  "nodeLink.needsKey": "Este dispositivo no se unió escaneando el código QR de la red, así que no puede garantizar la clave de la red. Muestra el código de enlace desde la pantalla de compartir del teléfono anfitrión, o desde un dispositivo que se unió escaneando.",
+  "nodeLink.again": "Código nuevo",
+  "admin.peerLinking": "enlazando…",
+  "admin.peerLinkRefused": "Su código de enlace fue rechazado (caducado o ya usado). Pide uno nuevo a esa red.",
 
   "unreadBadge.label": "{n} sin leer",
 
@@ -394,9 +396,10 @@ export const es: Translation = {
   "gate.pendingTitle": "Estás en la cola",
   "gate.pendingBody":
     "Esperando a que alguien de este nodo te deje entrar. Esta pantalla se actualiza en cuanto te aprueben.",
+  "gate.inviteRefused": "Ese código de invitación ha caducado. Vuelve a escanear el código de la pantalla del anfitrión o espera aquí a que te dejen entrar.",
   "gate.connection": "Conexión: {status}",
   "gate.needsQrTitle": "Escanea el QR de acceso para conectarte de forma segura",
-  "gate.needsQrBody": "Escanea el QR de acceso de este nodo con tu dispositivo para conectarte — no hay otra forma segura de hacerlo.",
+  "gate.needsQrBody": "Escanea el QR de acceso de este nodo con tu dispositivo para conectarte. No hay otra forma segura de hacerlo.",
 
   "confirm.deleteMessage": "¿Eliminar este mensaje? No se puede deshacer.",
 
@@ -432,6 +435,13 @@ export const es: Translation = {
   "error.invalid_admin_claim": "Solicitud de obtención de administrador no válida",
   "error.invalid_admin_secret": "Secreto de administrador no válido",
   "error.invalid_attachment_upload": "Solicitud de subida de adjunto no válida",
+  "error.invalid_invite_redeem": "Solicitud de invitación no válida",
+  "error.invite_invalid": "Este código de invitación ha caducado o no es válido",
+  "error.invite_not_allowed": "Esta cuenta no puede usar una invitación",
+  "error.invalid_link_request": "Solicitud de enlace no válida",
+  "error.link_code_invalid": "Este código de enlace ha caducado o ya se usó",
+  "error.link_unencrypted": "Enlazar requiere una conexión cifrada",
+  "error.link_peer_limit": "Este nodo ya se sincroniza con el máximo de pares posible",
   "error.invalid_avatar_upload": "Solicitud de subida de imagen de avatar no válida",
   "error.invalid_channel_create": "Solicitud de creación de canal no válida",
   "error.invalid_channel_update": "Solicitud de actualización de canal no válida",
@@ -474,7 +484,7 @@ export const es: Translation = {
   "error.passphrase_required": "La estrategia de arranque por frase de acceso requiere una frase de acceso",
   "error.message_streaming": "Este mensaje aún se está escribiendo",
   "error.session_invalid": "Esta sesión ya no es válida",
-  "error.thread_has_replies": "Este hilo tiene respuestas de otras personas — solo un administrador puede eliminarlo",
+  "error.thread_has_replies": "Este hilo tiene respuestas de otras personas. Solo un administrador puede eliminarlo",
   "error.too_many_attempts": "Demasiados intentos",
   "error.too_many_claim_attempts": "Demasiados intentos de obtención; inténtalo de nuevo más tarde",
   "error.message_create_failed": "No se pudo crear el mensaje",
@@ -500,9 +510,9 @@ export const es: Translation = {
   "admin.deleteChannel": "Eliminar",
   "admin.deleteChannelAria": "Eliminar permanentemente el canal {name}",
   "admin.deleteChannelConfirm":
-    "¿Eliminar permanentemente «{name}»? Todos sus mensajes y adjuntos se borrarán y no se podrán recuperar — a diferencia de archivar, no se puede deshacer.",
+    "¿Eliminar permanentemente «{name}»? Todos sus mensajes y adjuntos se borrarán y no se podrán recuperar. A diferencia de archivar, no se puede deshacer.",
   "gate.needsQrKeyChanged":
-    "La clave de este nodo ya no coincide con la que escaneaste — puede que el anfitrión se haya reiniciado o la haya restablecido, o que esta red no sea lo que dice ser. Escanea el QR de acceso actual del nodo para reconectarte.",
+    "La clave de este nodo ya no coincide con la que escaneaste. Puede que el anfitrión se haya reiniciado o la haya restablecido, o que esta red no sea lo que dice ser. Escanea el QR de acceso actual del nodo para reconectarte.",
   "message.report": "Denunciar",
   "message.removedByModerator": "Eliminado por un moderador",
   "report.messageTitle": "Denunciar este mensaje",
@@ -522,7 +532,7 @@ export const es: Translation = {
   "report.error": "No se pudo enviar la denuncia",
   "report.cancel": "Cancelar",
   "composer.timedOut": "Un moderador te ha suspendido temporalmente y ahora no puedes publicar.",
-  "composer.archived": "Este canal está archivado — puedes leerlo, pero no se puede publicar nada nuevo.",
+  "composer.archived": "Este canal está archivado. Puedes leerlo, pero no se puede publicar nada nuevo.",
   "sidebar.archivedTag": "archivado",
   "moderation.timeout": "Suspender (1 h)",
   "moderation.timeoutClear": "Quitar suspensión",
@@ -556,7 +566,7 @@ export const es: Translation = {
   "common.back": "Atrás",
   "common.dismiss": "Cerrar",
   "devMode.banner":
-    "⚠️ Modo desarrollador — los mensajes se envían sin cifrar y cualquiera en esta red puede leerlos. No lo uses para nada privado.",
+    "⚠️ Modo desarrollador: los mensajes se envían sin cifrar y cualquiera en esta red puede leerlos. No lo uses para nada privado.",
   "composer.fileTooLarge": "{name} es demasiado grande para enviarse (límite {limit}).",
   "conversation.notFoundTitle": "Conversación no disponible",
   "conversation.notFoundBody": "Este canal no existe, se eliminó o no eres miembro.",
@@ -566,7 +576,7 @@ export const es: Translation = {
   "app.crashReload": "Recargar",
   "transport.pinChangeTitle": "Este enlace trae una clave de seguridad distinta",
   "transport.pinChangeBody":
-    "Te uniste a este nodo con otra clave. Usa la nueva clave solo si acabas de escanear en persona el QR de acceso actual del nodo — de lo contrario, alguien podría estar suplantándolo.",
+    "Te uniste a este nodo con otra clave. Usa la nueva clave solo si acabas de escanear en persona el QR de acceso actual del nodo. De lo contrario, alguien podría estar suplantándolo.",
   "transport.pinChangeCurrent": "Clave con la que te uniste: {fingerprint}",
   "transport.pinChangeNew": "Clave de este enlace: {fingerprint}",
   "transport.pinChangeAccept": "Usar la nueva clave",

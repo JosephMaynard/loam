@@ -25,8 +25,11 @@ vi.mock('react-native', () => ({
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: () => null }));
 vi.mock('react-native-webview', () => ({ WebView: () => null }));
 vi.mock('@/components/db-encryption-settings', () => ({ DbEncryptionSettingsOverlay: () => null }));
+vi.mock('@/components/emergency-reset', () => ({ EmergencyResetOverlay: () => null }));
+vi.mock('@/hooks/use-app-locale', () => ({ useAppLocale: () => 'en' }));
 vi.mock('@/components/host-share-overlay', () => ({ HostShareOverlay: () => null }));
 vi.mock('@/components/model-manager', () => ({ ModelManagerOverlay: () => null }));
+vi.mock('@/components/setup-wizard', () => ({ SetupWizard: () => null }));
 vi.mock('@/components/themed-text', () => ({ ThemedText: () => null }));
 vi.mock('@/components/themed-view', () => ({ ThemedView: () => null }));
 vi.mock('@/constants/theme', () => ({
@@ -37,6 +40,7 @@ vi.mock('@/hooks/use-theme', () => ({ useTheme: () => ({}) }));
 vi.mock('@/lib/on-device-llm', () => ({ registerOnDeviceLlm: () => () => undefined }));
 vi.mock('@/mesh/mesh-courier', () => ({ registerMeshCourier: () => () => undefined }));
 vi.mock('../../modules/loam-hotspot', () => ({
+  closeApp: vi.fn(),
   startHostService: vi.fn(),
   startKiosk: vi.fn(),
   stopKiosk: vi.fn(),

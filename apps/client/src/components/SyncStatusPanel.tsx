@@ -11,15 +11,31 @@ function parseSyncStatusReport(payload: unknown): SyncStatusReport | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 
+/** How often the panel re-reads the status, so a node that links itself while it's open shows up. */
+const REFRESH_MS = 15_000;
+
 /**
  * Live per-peer sync status (`GET /api/admin/sync`) with a "Sync now" trigger. Reflects the
- * *saved* config — peers added above appear here after saving.
+ * *saved* config — peers added above appear here after saving. Re-reads itself every 15 s, and hands
+ * every fresh report to `onReport`, so the admin form can take in a peer that linked itself with a code.
  */
-export function SyncStatusPanel() {
+export function SyncStatusPanel({ onReport }: { onReport?: (report: SyncStatusReport) => void } = {}) {
   const [report, setReport] = useState<SyncStatusReport>();
   const [error, setError] = useState<string>();
   const [running, setRunning] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setReloadKey((key) => key + 1), REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (report) {
+      onReport?.(report);
+    }
+    // Only a new report matters; the callback is a fresh closure on every parent render.
+  }, [report]);
 
   useEffect(() => {
     let active = true;
@@ -148,7 +164,9 @@ export function SyncStatusPanel() {
                   : peer.status?.lastSuccessAt
                     ? `${t("admin.peerLastSyncedAt", { time: displayTime(peer.status.lastSuccessAt) })} · ${t("admin.peerImported", { n: peer.status.imported })}`
                     : t("admin.peerNotSynced")}
+                {peer.link === "linking" ? ` · ${t("admin.peerLinking")}` : null}
               </span>
+              {peer.link === "refused" ? <span className="row-meta row-meta-danger">{t("admin.peerLinkRefused")}</span> : null}
             </div>
           </li>
         ))}

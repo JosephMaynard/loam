@@ -21,8 +21,9 @@ export const DB_ENCRYPTION_MODES: readonly DbEncryptionMode[] = ['off', 'ephemer
 
 /** One-line description shown next to each mode in the picker UI. */
 export const DB_ENCRYPTION_MODE_DESCRIPTIONS: Record<DbEncryptionMode, string> = {
-  off: 'The on-device database is stored in plain SQLite — the default.',
-  ephemeral: 'A random key generated at each launch, held only in memory. Wipes the database on every restart — nothing survives a reboot.',
+  off: "Messages are stored as plain SQLite, readable by anyone with access to the phone's storage. For testing or seeing how LOAM works.",
+  ephemeral:
+    "A random key made at each start and held only in memory: once LOAM closes the database can't be read, and the next start deletes it, along with any pictures and files (those are stored outside the encrypted database until then).",
   persistent: 'A random key generated once and stored in the device Keystore. Survives reboots; the database stays encrypted at rest.',
   passphrase:
     'A key derived from a passphrase you enter every time the host app starts, mixed with a device secret held in the Keystore. The passphrase itself is never stored on the device: the database survives reboots but stays locked until it is entered.',
@@ -450,6 +451,59 @@ async function clearStoredDbKeysUnlocked(): Promise<ClearDbKeysResult> {
   return errors.length > 0 ? { ok: false, error: errors.join('; ') } : { ok: true };
 }
 
+/** The stored device-key items, exactly as they were (null = absent), so setup can put them back. */
+export type StoredDbKeys = { deviceSecret: string | null; legacyKey: string | null };
+
+/**
+ * Read both device-key items before setup clears them (new-network.ts `prepareNewNetwork`), so a
+ * preparation that fails afterwards can restore them and leave the previous database openable.
+ * `undefined` when either read fails: without a snapshot the clear must not go ahead. Never logged.
+ */
+export function snapshotStoredDbKeys(): Promise<StoredDbKeys | undefined> {
+  return withDeviceSecretLock(async () => {
+    try {
+      return {
+        deviceSecret: await SecureStore.getItemAsync(DEVICE_SECRET_ITEM),
+        legacyKey: await SecureStore.getItemAsync(PERSISTENT_KEY_ITEM),
+      };
+    } catch {
+      return undefined;
+    }
+  });
+}
+
+/**
+ * Put back a {@link snapshotStoredDbKeys} snapshot after a failed {@link clearStoredDbKeys} (one item may
+ * already be gone), and verify each item reads back as it was. True only when both match.
+ */
+export function restoreStoredDbKeys(snapshot: StoredDbKeys): Promise<boolean> {
+  return withDeviceSecretLock(async () => {
+    let restored = true;
+    for (const [item, value] of [
+      [DEVICE_SECRET_ITEM, snapshot.deviceSecret],
+      [PERSISTENT_KEY_ITEM, snapshot.legacyKey],
+    ] as const) {
+      try {
+        const now = await SecureStore.getItemAsync(item);
+        if (now === value) {
+          continue;
+        }
+        if (value === null) {
+          await SecureStore.deleteItemAsync(item);
+        } else {
+          await SecureStore.setItemAsync(item, value);
+        }
+        if ((await SecureStore.getItemAsync(item)) !== value) {
+          restored = false;
+        }
+      } catch {
+        restored = false;
+      }
+    }
+    return restored;
+  });
+}
+
 /**
  * Resolve the DB-encryption key material for `mode`, generating/persisting it as needed:
  *   - 'off'        → no key.
@@ -578,6 +632,26 @@ export async function resolveDbKey(mode: DbEncryptionMode): Promise<ResolvedDbKe
  *
  * Never logs `key`/`legacyKey`/the passphrase. Returns a cleanup that removes both listeners.
  */
+/**
+ * A new network from the setup screens: an operation id and its starting configuration. It rides every key
+ * response until the launcher acknowledges it (`loam-new-network-applied` with the same id): the launcher
+ * empties the data folder and writes the configuration as config.json before booting (main.js
+ * `startNewNetwork`). A response the launcher never received (it timed out waiting) is simply sent again
+ * with the next request. The id makes a repeat harmless: once the launcher has created the network it
+ * records the id in the folder, and the same operation arriving again never empties it a second time.
+ */
+type NewNetworkOperation = { id: string; config: Record<string, unknown> };
+let pendingNewNetwork: NewNetworkOperation | undefined;
+
+/** Queue a new network for the next boot (a fresh operation id each time), or cancel one with undefined. */
+export function setPendingNewNetwork(config: Record<string, unknown> | undefined): void {
+  pendingNewNetwork = config ? { id: newOperationId(), config } : undefined;
+}
+
+function newOperationId(): string {
+  return Crypto.getRandomBytes(12).reduce((text, byte) => text + byte.toString(16).padStart(2, '0'), '');
+}
+
 export function registerDbEncryption(channel: BridgeChannel): () => void {
   const onRequest = (payload: unknown): void => {
     // Echo main.js's correlation id (Sol Fable-round P1-1) so a late answer to an already-timed-out
@@ -613,9 +687,19 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
         response = { mode: DB_ENCRYPTION_MODE_READ_ERROR };
       }
       try {
-        const payload: { mode: DbEncryptionModeOrError; key?: string; legacyKey?: string; requestId?: string } = {
+        const payload: {
+          mode: DbEncryptionModeOrError;
+          key?: string;
+          legacyKey?: string;
+          requestId?: string;
+          newNetwork?: NewNetworkOperation;
+        } = {
           mode: response.mode,
         };
+        // Kept (not cleared) until the launcher acknowledges it; never alongside a read error, which locks.
+        if (pendingNewNetwork && response.mode !== DB_ENCRYPTION_MODE_READ_ERROR) {
+          payload.newNetwork = pendingNewNetwork;
+        }
         if (requestId !== undefined) {
           payload.requestId = requestId;
         }
@@ -640,11 +724,21 @@ export function registerDbEncryption(channel: BridgeChannel): () => void {
     void markPassphraseKeyMigrated(requestId);
   };
 
+  // The launcher created the new network: stop sending it (only that exact operation; a newer one stays).
+  const onNewNetworkApplied = (payload: unknown): void => {
+    const id = (payload as { id?: unknown } | undefined)?.id;
+    if (pendingNewNetwork && typeof id === 'string' && id === pendingNewNetwork.id) {
+      pendingNewNetwork = undefined;
+    }
+  };
+
   channel.addListener('loam-db-key-request', onRequest);
   channel.addListener('loam-db-key-migrated', onMigrated);
+  channel.addListener('loam-new-network-applied', onNewNetworkApplied);
   return () => {
     channel.removeAllListeners('loam-db-key-request');
     channel.removeAllListeners('loam-db-key-migrated');
+    channel.removeAllListeners('loam-new-network-applied');
   };
 }
 

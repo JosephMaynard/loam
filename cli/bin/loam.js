@@ -46,7 +46,7 @@ function requiredValue(name) {
 }
 
 if (args.includes("--help") || args.includes("-h")) {
-  console.log(`loam — run a local LOAM node (off-grid messaging over your LAN)
+  console.log(`loam: run a local LOAM node (off-grid messaging over your LAN)
 
 Usage: loam [options]
 
@@ -57,8 +57,8 @@ Options:
                     (default $XDG_DATA_HOME/loam or ~/.loam)
   --encrypt         Encrypt the database at rest (SQLCipher). The passphrase comes
                     from $LOAM_DB_KEY if set, otherwise you are prompted for it
-                    (not echoed). For a new database, an empty answer — or no
-                    terminal to prompt on — uses an ephemeral RAM-only key (data
+                    (not echoed). For a new database, an empty answer (or no
+                    terminal to prompt on) uses an ephemeral RAM-only key (data
                     unreadable after exit); an existing database needs its passphrase.
   --encrypt ephemeral
                     Use an ephemeral RAM-only key without prompting.
@@ -114,7 +114,7 @@ if (requestedPort !== undefined) {
     process.exit(1);
   }
   if (port !== 3000) {
-    console.log(`Port 3000 is in use by another program — using ${port} instead.`);
+    console.log(`Port 3000 is in use by another program, so LOAM is using ${port} instead.`);
   }
 }
 
@@ -199,7 +199,7 @@ async function resolveEncryptionKey() {
     return process.env.LOAM_DB_KEY;
   }
   if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
-    console.warn("--encrypt: no $LOAM_DB_KEY and no terminal to prompt on — using an ephemeral RAM-only key.");
+    console.warn("--encrypt: no $LOAM_DB_KEY and no terminal to prompt on, so using an ephemeral RAM-only key.");
     return "ephemeral";
   }
   const databasePath = join(dataDir, "loam.db");
@@ -227,13 +227,13 @@ async function resolveEncryptionKey() {
     if (confirmation === passphrase) {
       return passphrase;
     }
-    console.error("The passphrases didn't match — try again.");
+    console.error("The passphrases didn't match. Try again.");
   }
 }
 
 const bundlePath = join(pkgRoot, "dist/loam-server.js");
 if (!existsSync(bundlePath)) {
-  console.error(`Missing ${bundlePath}. The package looks incomplete — reinstall loamnet.`);
+  console.error(`Missing ${bundlePath}. The package looks incomplete. Reinstall loamnet.`);
   process.exit(1);
 }
 
@@ -313,7 +313,7 @@ process.env.LOAM_JOIN_HOST = joinHost;
 const joinUrl = `http://${joinHost}:${port}`;
 
 console.log("");
-console.log(`LOAM node — data in ${dataDir}`);
+console.log(`LOAM node: data in ${dataDir}`);
 
 try {
   // Start FIRST, then print the QR: the QR must carry the host's transport public key as a
@@ -334,7 +334,7 @@ try {
     console.log(renderQRToTerminal(encodeQR(qrUrl), { quietZone: 2 }));
     console.log("");
     if (transportKey) {
-      console.log("Scan the QR to join — it carries this node's encryption key, so scanned joins are");
+      console.log("Scan the QR to join: it carries this node's encryption key, so scanned joins are");
       console.log("protected against impersonation. Depending on this node's security settings, a");
       console.log("hand-typed URL may connect without that protection, or be refused entirely.");
       console.log("");
@@ -347,7 +347,7 @@ try {
     // address is merely the most likely cause).
     console.log("(Couldn't render a join QR for this address.)");
     if (transportKey) {
-      console.log("Share this exact link instead — copied whole, it keeps the encryption key:");
+      console.log("Share this exact link instead. Copied whole, it keeps the encryption key:");
       console.log(qrUrl);
     } else {
       console.log("Share the URL above instead.");

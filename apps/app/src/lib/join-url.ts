@@ -72,3 +72,23 @@ export function hostJoinDisplay(opts: JoinUrlOptions): {
     addresses: opts.hotspotRunning ? [] : opts.addresses,
   };
 }
+
+/**
+ * Add the host's invite code (server `invites.ts`) to a join fragment: `#k=<key>&i=<code>`, or `#i=<code>`
+ * with no key. The client takes `i=` out before reading `#k=`, then redeems it to skip the approval queue.
+ * No code (an open node, or none fetched yet) leaves the fragment as it was.
+ */
+export function withInviteCode(fragment: string, code: string | undefined): string {
+  if (!code || !/^[A-Za-z0-9_-]+$/.test(code)) {
+    return fragment;
+  }
+  return fragment ? `${fragment}&i=${code}` : `#i=${code}`;
+}
+
+/**
+ * The address to print beside a join QR: the URL without its fragment. The key and invite code (`#k=…&i=…`)
+ * only work scanned, and nobody can type them anyway.
+ */
+export function typedAddress(url: string): string {
+  return url.split('#')[0]!;
+}

@@ -68,7 +68,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 |------|------|
 | `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. `src/app.ts` is the composition root (`buildApp()`, testable via `inject`) plus the domain core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain routes are sibling modules over one `AppContext` (see "Server architecture"). `src/server.ts` is the thin entry point (env, listen, SIGINT). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2.2k lines: `LoamApp` state, boot, WebSocket, routing). Screens in `src/views/`, components in `src/components/`, libs in `src/lib/`, styles in `src/styles/` (see `apps/client/DESIGN.md`). |
-| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). The Step-2 join address is **discovered, never assumed**: Android gives a LocalOnlyHotspot a random address per start (`192.168.49.1` is Wi-Fi Direct's, not a hotspot's), so the Kotlin module enumerates interfaces (`hotspotAddressCandidates`, with upstream / pre-existing hints) and `src/lib/hotspot-address.ts` scores them; no confident pick → Step 2 shows the manual "Gateway" route, not a guess (docs/04 "The Step-2 address"). The share overlay has a persisted **host mode** (`HostMode = 'hotspot' | 'wifi'`, SecureStore `loam.hostMode`, default hotspot): Wi-Fi mode starts no hotspot, never asks for location, and advertises the phone's Wi-Fi station address via the pure `pickWifiAddress` (`src/lib/host-mode.ts`; native `wifiStationInfo()`), see docs/04 "Hosting modes". Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored; run `fetch:native` first — it fails without both SQLite prebuilds unless `LOAM_ALLOW_MISSING_NATIVE=1`) and the host UI (`HostPanel`, `QRCode`). Both android-arm64 SQLite prebuilds (plain `better-sqlite3` and `multiple-ciphers`) are **vendored** under `native-prebuilds/`, sha256-pinned — nothing is downloaded from upstream releases. Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
+| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). The Step-2 join address is **discovered, never assumed**: Android gives a LocalOnlyHotspot a random address per start (`192.168.49.1` is Wi-Fi Direct's, not a hotspot's), so the Kotlin module enumerates interfaces (`hotspotAddressCandidates`, with upstream / pre-existing hints) and `src/lib/hotspot-address.ts` scores them; no confident pick → Step 2 shows the manual "Gateway" route, not a guess (docs/04 "The Step-2 address"). The share overlay has a persisted **host mode** (`HostMode = 'hotspot' \| 'wifi'`, SecureStore `loam.hostMode`, default hotspot): Wi-Fi mode starts no hotspot, never asks for location, and advertises the phone's Wi-Fi station address via the pure `pickWifiAddress` (`src/lib/host-mode.ts`; native `wifiStationInfo()`), see docs/04 "Hosting modes". Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored; run `fetch:native` first — it fails without both SQLite prebuilds unless `LOAM_ALLOW_MISSING_NATIVE=1`) and the host UI (`HostPanel`, `QRCode`). Both android-arm64 SQLite prebuilds (plain `better-sqlite3` and `multiple-ciphers`) are **vendored** under `native-prebuilds/`, sha256-pinned — nothing is downloaded from upstream releases. **Setup screens** (`src/components/setup-wizard.tsx`, logic in `src/lib/setup.ts` + `new-network.ts`, docs/04 "Setup screens") run every launch before the runtime starts: language, kind of network (Private and short-lived / Community / Choose every setting myself = a security profile + identity/presence flags + DB encryption mode), name, Hotspot or Wi-Fi; later launches offer one-tap Continue or a hold-to-confirm new network. A new network rides every `loam-db-key-response` as `newNetwork {id, config}` until main.js acknowledges it; main.js (`new-network.js`) marks the folder `.loam-setup-pending`, empties it (keeping that marker and the mode hint), durably writes `config.json` and records the id (a repeat is a no-op), staying locked if that fails, and on every boot while the marker names an unapplied operation; setup also writes the chosen mode into the launcher's mode hint first, so a failed key handoff on a fresh install locks instead of booting plaintext. The host app has its own i18n (`src/lib/i18n`, all 15 locales, parity-tested). Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
 | `packages/avatar` | Deterministic SVG avatar from an id. Three modes: `face` (SVG template), `initial`, `pattern`. OKLCH colour derivation with WCAG contrast fixups. Has a standalone `demo/`. |
@@ -223,7 +223,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   random bits, retried until it collides with no user or session — `mintSessionUserId`) + a 256-bit
   base64url token and `Set-Cookie`s it (HttpOnly, SameSite=Lax). **Bound** (a QR-pinned client): a
   sealed `POST /api/session/resume` with a separate identity token promotes the transport session; its
-  identity is the session key, never a cookie, and content is reachable only through the tunnel. The
+  identity is the session key, never a cookie, and content is reachable only through the tunnel. A repeat
+  resume on a bound session returns the same token but the user record as it is NOW (a claim or approval
+  since binding must not be undone by the client's next boot pass). The
   client's locally generated id is a pre-hydration placeholder replaced by the server-confirmed
   `currentUser`.
 - **Admin**: comes only from the config-selected **bootstrap strategy** (`admin.bootstrap`):
@@ -233,7 +235,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   host: the launcher mints a per-boot token — `LOAM_HOST_TOKEN` → `AppOptions.hostToken` — which
   forces this strategy as a read-time projection over the persisted one; only a claim presenting that
   token becomes admin, and only the host's own WebView receives it, injected as
-  `window.__loamHostDeviceToken`, so no LAN session can take `firstUser` during the boot window), or
+  `window.__loamHostDeviceToken` (never in a URL: anyone can craft one), so no LAN session can take
+  `firstUser` during the boot window), or
   `none`. A successful claim persists `{isAdmin, pending:false}`, so on an approval-policy node the
   claimer is an active admin. The legacy demo users `user.1234`/`user.5678` are **deleted at boot** (their
   messages tombstoned via the normal delete path, sessions/identity tokens purged); a fresh node never
@@ -351,6 +354,16 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   (unless this node itself is in Developer Mode); a `required` node refuses plaintext pulls; a peer that
   negotiated encryption this boot is never silently downgraded. Admin: `GET /api/admin/sync`,
   `POST /api/admin/sync/run`, and the admin-UI peers panel. A peer's join URL is its sync address.
+  **Linking nodes** (`sync-links.ts`): only through a single-use, 10-minute link code an admin
+  (`POST /api/admin/sync/link-code`, web admin "Link another node") or the host phone
+  (`POST /api/host/link-code`, launcher-only; share screen "Link another LOAM node") chooses to show, as a
+  QR `#k=<key>&l=<code>`. The new node (Android setup "Join another LOAM network", expo-camera; it accepts
+  nothing else) starts with that peer pinned and `linkCode` set, and presents the code in a **sealed**
+  `POST /api/sync/link {code, port, transportKey, name}`; a valid code adds the asker as a pinned peer
+  (source address + port, loopback refused), turns sync on (shared `commitAdminConfig`), and returns the
+  node's name + `sync.token`; the asker then drops the spent code (an answer that comes back after an admin
+  turned sync off or removed/changed that peer is ignored, so it can't reinstall a token). Codes are in memory, ≤4, cleared by the
+  kill switch; admin saves can't add or restore a `linkCode`.
 - **Security headers**: an `onSend` hook sets `X-Content-Type-Options: nosniff` on every response and
   a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
   (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session
@@ -393,7 +406,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   that skips the QR (a manually-typed URL, curl) can **still connect in plaintext** — `optional` accepts
   both. `required` is what refuses plaintext clients outright. So `optional` closes *accidental* plaintext
   for normal joiners at zero UX cost, without breaking odd clients; `required`/`hardened` is the strict
-  posture. **`off` is not an operator-settable posture**: it's absent from the default, the profiles, and
+  posture. The client reads `#k=` (`captureJoinKey`, `main.tsx`) before the router's `/` → `/channels`
+  redirect can drop the fragment. **`off` is not an operator-settable posture**: it's absent from the default, the profiles, and
   the admin UI. The ONLY plaintext-everything path is **Developer Mode** — see below.
 - **Developer Mode** (`LOAM_DEV_MODE=1`): forces the *effective* `transportEncryption` to `off` and turns
   on verbose (`debug`) server logging, so wire traffic is inspectable while debugging. The override is a
@@ -427,7 +441,10 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `PATCH /api/admin/users/:userId/roles` + `POST /api/admin/users/:userId/promote` (admin),
   `POST /api/attachments` + `GET /api/attachments/:fileName`, `GET /api/host/clients` (launcher-only: loopback + host token; the
   distinct non-loopback peer addresses of admitted sockets, for the share screen's "N phones connected" and
-  hotspot-interface confirmation), `POST /api/admin/claim`,
+  hotspot-interface confirmation), `GET /api/host/invite` (launcher-only, same rule: the rotating invite code
+  for the host's join QR on an approval-only node, else null; `invites.ts`, 10-minute windows, secret rotated
+  by the kill switch), `POST /api/access/redeem` (a queued session redeems that code from the QR's `#…&i=`
+  fragment, `apps/client/src/lib/invite.ts`; never lifts a ban), `POST /api/admin/claim`,
   `GET/PATCH /api/admin/config` (admin),
   `GET /api/admin/channels` (admin), `POST /api/admin/kill-switch`
   (admin + `killSwitch.enabled`), `POST /api/panic` (unauthenticated pre-shared token; 404 unless
@@ -514,8 +531,7 @@ kill switch. See `docs/09-security-profiles.md`.
   "Report this user" in a human DM's header; a blocked DM shows a banner with Unblock and a disabled
   composer; in channels and search results a blocked author's posts/replies collapse to a placeholder with
   Show, and their reactions, typing, toasts, reply counts and unread counts are dropped. `BlockedUsersPanel` in Settings lists them for
-  unblocking, and Settings links the privacy policy (`https://loamnet.com/privacy`; the Android host menu
-  links it too, `apps/app/src/constants/links.ts`).
+  unblocking, and Settings links the privacy policy, which the node serves itself at `/privacy` (`views/PrivacyView.tsx`, text in `lib/privacy-policy.ts`, kept in step with `apps/site/privacy.html`; the Android host menu opens the same page in its WebView), so it reads offline and never sends anyone to another website.
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
   `DOMPurify`, hardens links (safe protocols only, `rel=noreferrer target=_blank`) and strips `#k=`
   fragments. Any new rendered-HTML path must go through this — never inject raw message HTML.
@@ -551,8 +567,8 @@ kill switch. See `docs/09-security-profiles.md`.
   search would fall out of the RAG embeddings (docs/06) if that lands.
 - `security.profile` is wired (see the feature-flag note). Transport encryption is enforced, so now
   **every named profile encrypts**: `open` and `standard` both force `optional`, `hardened` forces
-  `required`. `open`/`standard` therefore differ only in intent for now (invite tokens — docs/08 — would
-  be the axis to split them, still unbuilt). Plaintext (`off`) is no longer any profile's posture.
+  `required`. `open`/`standard` therefore differ only in intent for now. Rotating invite codes (docs/08,
+  `invites.ts`) are built but apply to any approval-only node rather than being a profile axis. Plaintext (`off`) is no longer any profile's posture.
 - On-device SQLCipher (encrypted Android DB) now SHIPS: the multiple-ciphers ABI-108 android-arm64
   prebuild is cross-compiled + vendored (`apps/app/native-prebuilds/multiple-ciphers/`, sha256-pinned
   tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the plain

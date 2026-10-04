@@ -1061,6 +1061,34 @@ describe("kill switch", () => {
   });
 });
 
+describe("emergency reset from the host device", () => {
+  it("wipes the node through the in-process hook, even with the remote kill switch disabled", async () => {
+    const app = await makeApp({ killSwitch: { enabled: false } });
+    const admin = await newSession(app);
+    await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "on the phone" },
+    });
+    expect(app.store.loadMessages().length).toBe(1);
+
+    // The remote route stays refused while the switch is off...
+    const remote = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(remote.statusCode).toBe(403);
+    expect(app.store.loadMessages().length).toBe(1);
+
+    // ...but the phone's owner can always wipe it from the host menu.
+    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: false });
+    expect(app.store.loadMessages()).toEqual([]);
+  });
+});
+
 describe("panic endpoint", () => {
   async function panic(app: LoamApp, token: string) {
     return app.server.inject({ method: "POST", url: "/api/panic", payload: { token } });
@@ -1894,6 +1922,13 @@ describe("encryption at rest + key-discard kill switch", () => {
     // recorder, not a real launcher).
     expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
     expect(readJournalPhase(dataDir)).toBe("key-clear-ready");
+  });
+
+  it("the host menu's Emergency reset reports a handed-off device-key clear, so the app waits for it before closing", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app } = await makeEncryptedApp({ dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" });
+    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: true });
+    expect(hook.calls).toBe(1);
   });
 
   it("P1-2(a): a concurrent request during the slow file-deletion await already sees the lockdown (503), never stale in-memory data", async () => {
@@ -9411,6 +9446,33 @@ describe("transport auth-binding (docs/20)", () => {
     // token, must NOT rebind — it returns the cached identity from the first bind.
     const other = await resumeIdentity(app, s2, 2, minted.token);
     expect(other.currentUser.id).toBe(resumed.currentUser.id);
+  });
+
+  it("a repeat resume on a bound session reports the user as they are now, not as they were bound", async () => {
+    // The Android host's WebView binds as a pending newcomer on an approval-only network, claims admin with
+    // the host token, and resumes again on its next boot pass. That resume used to replay the snapshot
+    // taken at bind time (pending, not admin), sending the host back to the queue.
+    const hostToken = "host-token-resume-0123456789abcdefghijklmnopq";
+    const app = await makeApp({ security: { profile: "hardened" } }, { hostToken });
+    const session = await openTransport08(app);
+    const bound = await resumeIdentity(app, session, 1);
+    expect(bound.currentUser.pending).toBe(true);
+
+    const claim = await app.server.inject({
+      method: "POST",
+      url: "/api/transport/tunnel",
+      headers: { "x-loam-enc": session.sessionId, "content-type": "application/json" },
+      payload: {
+        enc: sealSeq(session.key, 2, TUNNEL_AAD, { m: "POST", p: "/api/admin/claim", body: { secret: hostToken } }),
+      },
+    });
+    expect(claim.statusCode).toBe(200);
+
+    const again = await resumeIdentity(app, session, 3);
+    expect(again.currentUser.id).toBe(bound.currentUser.id);
+    expect(again.currentUser.isAdmin).toBe(true);
+    expect(again.currentUser.pending).toBe(false);
+    expect(again.token).toBe(bound.token);
   });
 
   it("response binding: the tunnel descriptor echoes the exact { s, m, p } it answers (docs/20 §9)", async () => {

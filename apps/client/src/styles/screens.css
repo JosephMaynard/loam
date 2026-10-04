@@ -1071,3 +1071,51 @@
     padding-inline: var(--space-3);
   }
 }
+
+/* ---------- Privacy policy (views/PrivacyView.tsx) ---------- */
+
+.privacy-policy {
+  max-width: 680px;
+  line-height: 1.6;
+}
+
+.privacy-policy h2 {
+  margin: var(--space-6) 0 var(--space-2);
+  font-size: var(--text-xl);
+}
+
+.privacy-policy p,
+.privacy-policy li {
+  color: var(--fg-muted);
+  font-size: var(--text-base);
+}
+
+.privacy-policy p + p,
+.privacy-policy ul + p,
+.privacy-policy p + ul {
+  margin-top: var(--space-3);
+}
+
+.privacy-policy ul {
+  margin: 0;
+  padding-left: var(--space-5);
+}
+
+.privacy-policy li + li {
+  margin-top: var(--space-2);
+}
+
+.privacy-policy strong {
+  color: var(--fg);
+}
+
+.privacy-policy code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+  font-size: 0.9em;
+}
+
+.privacy-policy > .screen-footnote {
+  text-align: left;
+}

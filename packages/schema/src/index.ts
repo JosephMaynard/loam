@@ -558,6 +558,11 @@ export const SyncPeerSchema = z.object({
     .min(1)
     .max(64)
     .optional(),
+  /**
+   * The single-use code from the peer's "Link a node" QR (docs/11), kept only until this node has used it
+   * to link both ways, then removed. Only ever sent sealed to the pinned `transportKey`.
+   */
+  linkCode: z.string().regex(/^[A-Za-z0-9_-]{16}$/).optional(),
 });
 export type SyncPeer = z.infer<typeof SyncPeerSchema>;
 
@@ -645,6 +650,22 @@ export const AdminClaimRequestSchema = z.object({
   secret: z.string().min(1).max(256),
 });
 export type AdminClaimRequest = z.infer<typeof AdminClaimRequestSchema>;
+
+/**
+ * Redeem a rotating invite code from the host's screen (`#…&i=<code>` in the join URL): on an
+ * approval-only node it admits the caller without waiting in the queue.
+ */
+export const InviteRedeemRequestSchema = z.object({
+  code: z.string().min(1).max(64),
+});
+export type InviteRedeemRequest = z.infer<typeof InviteRedeemRequestSchema>;
+
+/** The host app's current invite code (`GET /api/host/invite`); null when the node admits everyone anyway. */
+export const HostInviteResponseSchema = z.object({
+  code: z.string().nullable(),
+  expiresAt: z.number().int().nullable(),
+});
+export type HostInviteResponse = z.infer<typeof HostInviteResponseSchema>;
 
 export const PanicRequestSchema = z.object({
   token: z.string().min(1).max(256),
@@ -1197,10 +1218,47 @@ export const SyncPeerStatusSchema = z.object({
 });
 export type SyncPeerStatus = z.infer<typeof SyncPeerStatusSchema>;
 
+/** A "Link a node" code (server `sync-links.ts`): 12 random bytes, base64url, single-use, 10 minutes. */
+export const SyncLinkCodeSchema = z.string().regex(/^[A-Za-z0-9_-]{16}$/, "must be a link code");
+
+/**
+ * A new node linking itself to this one with the code it scanned (`POST /api/sync/link`, docs/11, sealed):
+ * the code, the port it serves on (its address is the one the request came from), its transport key to
+ * pin, and its name.
+ */
+export const SyncLinkRequestSchema = z.object({
+  code: SyncLinkCodeSchema,
+  port: z.number().int().min(1).max(65_535),
+  transportKey: SyncPeerSchema.shape.transportKey,
+  name: z.string().trim().min(1).max(80).optional(),
+});
+export type SyncLinkRequest = z.infer<typeof SyncLinkRequestSchema>;
+
+/** A successful link: the linked node's name, and its mesh token when it uses one (`sync.token`). */
+export const SyncLinkResponseSchema = z.object({
+  name: z.string().max(80),
+  token: z.string().min(1).max(256).optional(),
+});
+export type SyncLinkResponse = z.infer<typeof SyncLinkResponseSchema>;
+
+/** A freshly shown "Link a node" code (`POST /api/admin/sync/link-code`, `POST /api/host/link-code`). */
+export const SyncLinkCodeResponseSchema = z.object({
+  code: SyncLinkCodeSchema,
+  expiresAt: TimestampSchema,
+});
+export type SyncLinkCodeResponse = z.infer<typeof SyncLinkCodeResponseSchema>;
+
 export const SyncStatusReportSchema = z.object({
   enabled: z.boolean(),
   intervalMs: z.number().int().positive(),
-  peers: z.array(SyncPeerSchema.extend({ status: SyncPeerStatusSchema.optional() })),
+  peers: z.array(
+    SyncPeerSchema.extend({
+      status: SyncPeerStatusSchema.optional(),
+      /** A peer still holding a link code: "linking" until the link is made, "refused" when the code was
+       *  expired or already used (the other network's admin has to show a new one). */
+      link: z.enum(["linking", "refused"]).optional(),
+    }),
+  ),
 });
 export type SyncStatusReport = z.infer<typeof SyncStatusReportSchema>;
 
@@ -1234,6 +1292,13 @@ export const SERVER_ERROR_CODES = [
   "greeter_required",
   "invalid_admin_claim",
   "invalid_admin_secret",
+  "invalid_invite_redeem",
+  "invalid_link_request",
+  "link_code_invalid",
+  "link_unencrypted",
+  "link_peer_limit",
+  "invite_invalid",
+  "invite_not_allowed",
   "invalid_attachment_upload",
   "invalid_avatar_upload",
   "invalid_channel_create",

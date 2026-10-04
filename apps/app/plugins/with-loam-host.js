@@ -233,6 +233,9 @@ const OPTIONAL_FEATURES = [
   "android.hardware.location",
   "android.hardware.location.gps",
   "android.hardware.location.network",
+  // CAMERA (expo-camera, for scanning another network's join code in setup) implies these.
+  "android.hardware.camera",
+  "android.hardware.camera.autofocus",
 ];
 
 /** Declare every OPTIONAL_FEATURES entry `required="false"` on a parsed manifest (pure, tested). An existing

@@ -72,7 +72,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     sizeBytes: 806_058_272,
     sha256: '8270790f3ab69fdfe860b7b64008d9a19986d8df7e407bb018184caa08798ebd',
     minRamBytes: 3 * GIB,
-    note: 'The safe default — smallest and fastest, with headroom to spare on most phones.',
+    note: 'The safe default: smallest and fastest, with headroom to spare on most phones.',
   },
   {
     id: 'gemma-3-4b-it-q4_k_m',
@@ -107,7 +107,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     sizeBytes: 4_539_054_208,
     sha256: '43b489bb77a81bda85180e7c490d40ad7f1d5c2ce654c9b05e15e104bd3c777e',
     minRamBytes: 8 * GIB,
-    note: 'The largest offered model — best quality, but needs a high-RAM phone and the most storage.',
+    note: 'The largest offered model: best quality, but needs a high-RAM phone and the most storage.',
   },
 ];
 

@@ -43,7 +43,7 @@ export const ar: Translation = {
   "composer.send": "إرسال",
 
   "composer.shareLocation": "مشاركة الموقع",
-  "composer.shareLocationHint": "شارك مكانًا — تعمل التسمية حتى بدون GPS",
+  "composer.shareLocationHint": "شارك مكانًا: تعمل التسمية حتى بدون GPS",
   "composer.locationLabel": "تسمية الموقع",
   "composer.locationLabelPlaceholder": "مثال: البوابة الشمالية",
   "composer.locationLat": "خط العرض (-90 إلى 90)",
@@ -90,7 +90,7 @@ export const ar: Translation = {
   "settings.securityEyebrow": "الأمان",
   "settings.wipeTitle": "مسح هذا الجهاز",
   "settings.wipeBody":
-    "يمسح النسخة المحلية لهذا المتصفح — الرسائل وهويتك والبيانات المخزّنة مؤقتًا. لا يمسح العقدة ولا جهاز أي شخص آخر.",
+    "يمسح النسخة المحلية لهذا المتصفح: الرسائل وهويتك والبيانات المخزّنة مؤقتًا. لا يمسح العقدة ولا جهاز أي شخص آخر.",
   "settings.wipeConfirmBefore": "اكتب",
   "settings.wipeConfirmAfter": "للتأكيد",
   "settings.wiping": "جارٍ المسح…",
@@ -122,7 +122,7 @@ export const ar: Translation = {
   "moderation.loading": "جارٍ تحميل الأشخاص…",
   "moderation.empty": "لا أشخاص لعرضهم بعد.",
   "moderation.promoteConfirm":
-    "جعل {name} إداريًا؟ لا يمكن سحب صلاحية الإداري من هنا — فقط بإعادة إعداد العقدة.",
+    "جعل {name} إداريًا؟ لا يمكن سحب صلاحية الإداري من هنا, فقط بإعادة إعداد العقدة.",
   "moderation.thatsYou": "هذا أنت.",
   "moderation.adminsProtected": "لا يمكن الإشراف على الإداريين.",
   "moderation.roleModerator": "مشرف",
@@ -145,7 +145,7 @@ export const ar: Translation = {
   "admin.flagReactions": "التفاعلات",
   "admin.flagMarkdown": "عرض Markdown",
   "admin.flagAttachments": "الصور المرفقة",
-  "admin.flagPresence": "الحضور المتصل (يكشف من المتصل — أوقفه في البيئات الحساسة للخصوصية)",
+  "admin.flagPresence": "الحضور المتصل (يكشف من المتصل; أوقفه في البيئات الحساسة للخصوصية)",
   "admin.flagLocationSharing": "مشاركة الموقع (اختيارية؛ تتيح للأشخاص إرفاق موقعهم بالرسائل)",
   "admin.identityDisplayName": "يمكن للمستخدمين تعديل اسمهم المعروض",
   "admin.identityAvatarEdit": "يمكن للمستخدمين تعديل صورتهم الرمزية",
@@ -153,7 +153,7 @@ export const ar: Translation = {
   "admin.identityAdminEdit": "يمكن للإداريين تعديل المستخدمين الآخرين",
   "admin.profileOpenTitle": "مفتوح",
   "admin.profileOpenSummary":
-    "ينضم الجميع وينشرون فورًا. تُحفظ الرسائل وإعادة الضبط الطارئة مُطفأة — أقصى وصول، للاستخدام على نمط الإغاثة.",
+    "ينضم الجميع وينشرون فورًا. تُحفظ الرسائل وإعادة الضبط الطارئة مُطفأة: أقصى وصول، للاستخدام على نمط الإغاثة.",
   "admin.profileStandardTitle": "قياسي",
   "admin.profileStandardSummary":
     "يشارك كل من لديه رابط الانضمام؛ تُحفظ الرسائل وإعادة الضبط الطارئة مُطفأة. (يطبّق حاليًا نفس إعدادات الوضع المفتوح.)",
@@ -195,14 +195,14 @@ export const ar: Translation = {
   "admin.identityHeading": "الهوية",
   "admin.networkName": "اسم الشبكة",
   "admin.networkNameNote":
-    "يظهر لكل من ينضم — في الشريط الجانبي وشاشة الانضمام. امنح شبكتك اسمًا يتعرّف عليه الناس (مثل \"إغاثة النهر\").",
+    "يظهر لكل من ينضم, في الشريط الجانبي وشاشة الانضمام. امنح شبكتك اسمًا يتعرّف عليه الناس (مثل \"إغاثة النهر\").",
   "admin.language": "لغة الواجهة",
   "admin.languageNote": "تُطبّق على واجهة الجميع على هذه العقدة.",
   "admin.profileHeading": "الملف",
   "admin.posture": "الوضع",
   "admin.whoCanJoin": "من يمكنه الانضمام",
-  "admin.joinOpen": "مفتوح — ينضم كل من لديه الرابط",
-  "admin.joinApproval": "موافقة — مرحّب أو مشرف يُدخل الأشخاص",
+  "admin.joinOpen": "مفتوح: ينضم كل من لديه الرابط",
+  "admin.joinApproval": "موافقة: مرحّب أو مشرف يُدخل الأشخاص",
   "admin.axesManaged":
     "الوصول والحفظ وإعادة الضبط الطارئة يُدار بواسطة ملف {profile}. بدّل إلى {custom} لتعديلها كلًّا على حدة.",
   "admin.featuresEyebrow": "الميزات",
@@ -337,11 +337,11 @@ export const ar: Translation = {
 
   "mesh.title": "بريد الميش",
   "mesh.myCardTitle": "بطاقة الميش الخاصة بك",
-  "mesh.myCardNote": "شاركها مع من تريد أن يرسل لك بريدًا مختومًا — امسح الرمز أو انسخها وأرسلها بالطريقة التي تناسبك.",
+  "mesh.myCardNote": "شاركها مع من تريد أن يرسل لك بريدًا مختومًا. امسح الرمز أو انسخها وأرسلها بالطريقة التي تناسبك.",
   "mesh.myCardLoading": "جارٍ تحميل بطاقة الميش الخاصة بك…",
   "mesh.myCardLoadError": "تعذّر تحميل بطاقة الميش الخاصة بك.",
   "mesh.myCardUnrecognised": "أعاد الخادم بطاقة ميش غير معروفة.",
-  "mesh.myCardQrTooLarge": "هذه البطاقة طويلة جدًا لرمز QR هنا — انسخها بدلًا من ذلك.",
+  "mesh.myCardQrTooLarge": "هذه البطاقة طويلة جدًا لرمز QR هنا. انسخها بدلًا من ذلك.",
   "mesh.copyCard": "نسخ البطاقة",
   "mesh.copyCardCopied": "تم النسخ",
   "mesh.addContactTitle": "إضافة بطاقة جهة اتصال",
@@ -371,10 +371,12 @@ export const ar: Translation = {
 
   "nodeLink.hide": "× إخفاء الرابط",
   "nodeLink.show": "⧉ ربط عقدة أخرى",
-  "nodeLink.note":
-    "في شاشة إدارة العقدة الأخرى، فعّل المزامنة وأضف هذا العنوان كنظير (امسح الرمز أو الصق العنوان).",
-  "nodeLink.copied": "تم النسخ",
-  "nodeLink.copy": "نسخ العنوان",
+  "nodeLink.note": "امسحه من شاشات إعداد الهاتف الآخر، ضمن «الانضمام إلى شبكة LOAM أخرى». تتشارك الشبكات المرتبطة قنواتها العامة في الاتجاهين؛ الرسائل المباشرة والقنوات الخاصة لا تغادر أيًّا منهما أبدًا.",
+  "nodeLink.expires": "يعمل مرة واحدة، حتى {time}.",
+  "nodeLink.needsKey": "لم ينضم هذا الجهاز بمسح رمز QR الخاص بالشبكة، لذا لا يمكنه ضمان مفتاح الشبكة. اعرض رمز الربط من شاشة المشاركة في الهاتف المضيف بدلًا من ذلك، أو من جهاز انضم بالمسح.",
+  "nodeLink.again": "رمز جديد",
+  "admin.peerLinking": "جارٍ الربط…",
+  "admin.peerLinkRefused": "رُفض رمز الربط الخاص به (منتهٍ أو مستخدم). اطلب رمزًا جديدًا من تلك الشبكة.",
 
   "unreadBadge.label": "{n} غير مقروءة",
 
@@ -408,9 +410,10 @@ export const ar: Translation = {
   "gate.pendingTitle": "أنت في قائمة الانتظار",
   "gate.pendingBody":
     "بانتظار أن يسمح لك أحد على هذه العقدة بالدخول. تتحدّث هذه الشاشة فور الموافقة عليك.",
+  "gate.inviteRefused": "انتهت صلاحية رمز الدعوة هذا. امسح الرمز على شاشة المضيف مرة أخرى، أو انتظر هنا حتى يُسمح لك بالدخول.",
   "gate.connection": "الاتصال: {status}",
   "gate.needsQrTitle": "امسح رمز الانضمام للاتصال بأمان",
-  "gate.needsQrBody": "امسح رمز انضمام هذه العقدة بجهازك للاتصال — لا توجد طريقة آمنة أخرى للاتصال.",
+  "gate.needsQrBody": "امسح رمز انضمام هذه العقدة بجهازك للاتصال. لا توجد طريقة آمنة أخرى للاتصال.",
 
   "confirm.deleteMessage": "حذف هذه الرسالة؟ لا يمكن التراجع عن ذلك.",
 
@@ -446,6 +449,13 @@ export const ar: Translation = {
   "error.invalid_admin_claim": "طلب الحصول على المشرف غير صالح",
   "error.invalid_admin_secret": "سرّ المشرف غير صالح",
   "error.invalid_attachment_upload": "طلب رفع المرفق غير صالح",
+  "error.invalid_invite_redeem": "طلب دعوة غير صالح",
+  "error.invite_invalid": "انتهت صلاحية رمز الدعوة هذا أو أنه غير صالح",
+  "error.invite_not_allowed": "لا يمكن لهذا الحساب استخدام دعوة",
+  "error.invalid_link_request": "طلب ربط غير صالح",
+  "error.link_code_invalid": "انتهت صلاحية رمز الربط هذا أو سبق استخدامه",
+  "error.link_unencrypted": "يتطلب الربط اتصالًا مشفرًا",
+  "error.link_peer_limit": "هذه العقدة تتزامن بالفعل مع أقصى عدد ممكن من النظراء",
   "error.invalid_avatar_upload": "طلب رفع الصورة الرمزية غير صالح",
   "error.invalid_channel_create": "طلب إنشاء القناة غير صالح",
   "error.invalid_channel_update": "طلب تحديث القناة غير صالح",
@@ -488,7 +498,7 @@ export const ar: Translation = {
   "error.passphrase_required": "تتطلب استراتيجية التهيئة بعبارة المرور عبارة مرور",
   "error.message_streaming": "لا تزال هذه الرسالة قيد الكتابة",
   "error.session_invalid": "لم تعد هذه الجلسة صالحة",
-  "error.thread_has_replies": "تحتوي هذه السلسلة على ردود من أشخاص آخرين — يمكن للمشرف فقط حذفها",
+  "error.thread_has_replies": "تحتوي هذه السلسلة على ردود من أشخاص آخرين. يمكن للمشرف فقط حذفها",
   "error.too_many_attempts": "محاولات كثيرة جدًا",
   "error.too_many_claim_attempts": "محاولات حصول كثيرة جدًا؛ حاول مرة أخرى لاحقًا",
   "error.message_create_failed": "تعذّر إنشاء الرسالة",
@@ -514,9 +524,9 @@ export const ar: Translation = {
   "admin.deleteChannel": "حذف",
   "admin.deleteChannelAria": "حذف القناة {name} نهائيًا",
   "admin.deleteChannelConfirm":
-    "حذف «{name}» نهائيًا؟ ستُزال كل الرسائل والمرفقات فيها ولا يمكن استعادتها — على عكس الأرشفة، لا يمكن التراجع.",
+    "حذف «{name}» نهائيًا؟ ستُزال كل الرسائل والمرفقات فيها ولا يمكن استعادتها. على عكس الأرشفة، لا يمكن التراجع.",
   "gate.needsQrKeyChanged":
-    "لم يعد مفتاح هذه العقدة يطابق المفتاح الذي مسحته — ربما أُعيد تشغيل المضيف أو أعاد ضبطه، أو أن هذه الشبكة ليست ما تدّعيه. امسح رمز الانضمام الحالي للعقدة لإعادة الاتصال.",
+    "لم يعد مفتاح هذه العقدة يطابق المفتاح الذي مسحته. ربما أُعيد تشغيل المضيف أو أعاد ضبطه، أو أن هذه الشبكة ليست ما تدّعيه. امسح رمز الانضمام الحالي للعقدة لإعادة الاتصال.",
   "message.report": "إبلاغ",
   "message.removedByModerator": "أزاله أحد المشرفين",
   "report.messageTitle": "الإبلاغ عن هذه الرسالة",
@@ -536,7 +546,7 @@ export const ar: Translation = {
   "report.error": "تعذّر إرسال البلاغ",
   "report.cancel": "إلغاء",
   "composer.timedOut": "أوقفك أحد المشرفين مؤقتًا ولا يمكنك النشر الآن.",
-  "composer.archived": "هذه القناة مؤرشفة — يمكنك قراءتها، لكن لا يمكن نشر أي شيء جديد فيها.",
+  "composer.archived": "هذه القناة مؤرشفة. يمكنك قراءتها، لكن لا يمكن نشر أي شيء جديد فيها.",
   "sidebar.archivedTag": "مؤرشفة",
   "moderation.timeout": "إيقاف مؤقت (ساعة)",
   "moderation.timeoutClear": "إلغاء الإيقاف المؤقت",
@@ -570,7 +580,7 @@ export const ar: Translation = {
   "common.back": "رجوع",
   "common.dismiss": "إغلاق",
   "devMode.banner":
-    "⚠️ وضع المطوّر — تُرسل الرسائل دون تشفير ويمكن لأي شخص على هذه الشبكة قراءتها. لا تستخدمه لأي شيء خاص.",
+    "⚠️ وضع المطوّر: تُرسل الرسائل دون تشفير ويمكن لأي شخص على هذه الشبكة قراءتها. لا تستخدمه لأي شيء خاص.",
   "composer.fileTooLarge": "{name} أكبر من أن يُرسل (الحد {limit}).",
   "conversation.notFoundTitle": "المحادثة غير متاحة",
   "conversation.notFoundBody": "هذه القناة غير موجودة، أو أُزيلت، أو لست عضوًا فيها.",
@@ -580,7 +590,7 @@ export const ar: Translation = {
   "app.crashReload": "إعادة التحميل",
   "transport.pinChangeTitle": "يحمل هذا الرابط مفتاح أمان مختلفًا",
   "transport.pinChangeBody":
-    "انضممت إلى هذه العقدة بمفتاح مختلف. لا تستخدم المفتاح الجديد إلا إذا كنت قد مسحت للتو رمز الانضمام الحالي للعقدة بنفسك وجهًا لوجه — وإلا فقد يكون أحدهم ينتحل صفتها.",
+    "انضممت إلى هذه العقدة بمفتاح مختلف. لا تستخدم المفتاح الجديد إلا إذا كنت قد مسحت للتو رمز الانضمام الحالي للعقدة بنفسك وجهًا لوجه. وإلا فقد يكون أحدهم ينتحل صفتها.",
   "transport.pinChangeCurrent": "المفتاح الذي انضممت به: {fingerprint}",
   "transport.pinChangeNew": "المفتاح في هذا الرابط: {fingerprint}",
   "transport.pinChangeAccept": "استخدام المفتاح الجديد",

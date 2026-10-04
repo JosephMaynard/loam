@@ -10,11 +10,11 @@ export function GettingStartedPanel() {
     <div className="card getting-started">
       <CardHeader title={t("admin.gettingStartedTitle")} />
       <ol className="getting-started-steps">
-        <li><strong>{t("admin.step1Title")}</strong> — {t("admin.step1Body")}</li>
-        <li><strong>{t("admin.step2Title")}</strong> — {t("admin.step2Body")}</li>
-        <li><strong>{t("admin.step3Title")}</strong> — {t("admin.step3Body")}</li>
-        <li><strong>{t("admin.step4Title")}</strong> — {t("admin.step4Body")}</li>
-        <li><strong>{t("admin.step5Title")}</strong> — {t("admin.step5Body")}</li>
+        <li><strong>{t("admin.step1Title")}</strong>: {t("admin.step1Body")}</li>
+        <li><strong>{t("admin.step2Title")}</strong>: {t("admin.step2Body")}</li>
+        <li><strong>{t("admin.step3Title")}</strong>: {t("admin.step3Body")}</li>
+        <li><strong>{t("admin.step4Title")}</strong>: {t("admin.step4Body")}</li>
+        <li><strong>{t("admin.step5Title")}</strong>: {t("admin.step5Body")}</li>
       </ol>
       <p className="form-note">
         {t("admin.gettingStartedNoteBefore")}{" "}

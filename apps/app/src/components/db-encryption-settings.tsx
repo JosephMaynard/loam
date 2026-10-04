@@ -6,8 +6,8 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { t } from '@/lib/i18n';
 import {
-  DB_ENCRYPTION_MODES,
   DB_ENCRYPTION_MODE_DESCRIPTIONS,
   DB_ENCRYPTION_MODE_READ_ERROR,
   applyDbModeChange,
@@ -30,14 +30,19 @@ type DbEncryptionSettingsOverlayProps = {
   // The nodejs-mobile bridge channel (from index.tsx). Used only to write the mode-NAME hint
   // transactionally with a selection (P1-b) — optional so the overlay still renders without it.
   channel?: BridgeChannel;
+  /** Opens Emergency reset (the network must be running); the section is hidden without it. */
+  onEmergencyReset?: () => void;
 };
 
 const MODE_LABELS: Record<DbEncryptionMode, string> = {
-  off: 'Off (plaintext)',
-  ephemeral: 'Ephemeral',
-  persistent: 'Persistent',
-  passphrase: 'Passphrase',
+  persistent: 'Encrypted (recommended)',
+  ephemeral: 'Encrypted, new key every start',
+  passphrase: 'Encrypted with a passphrase',
+  off: 'No encryption (for testing)',
 };
+
+/** The order the picker lists the modes in: encrypted first, plaintext last (an opt-in for testing). */
+const MODE_ORDER: readonly DbEncryptionMode[] = ['persistent', 'ephemeral', 'passphrase', 'off'];
 
 /**
  * The on-device DB-encryption mode picker (PR B — docs/01, docs/21): off / ephemeral / persistent /
@@ -49,7 +54,7 @@ const MODE_LABELS: Record<DbEncryptionMode, string> = {
  * (nodejs-project-template/main.js's request/response handoff) and nodejs-mobile can't restart its
  * runtime in-process.
  */
-export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEncryptionSettingsOverlayProps) {
+export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmergencyReset }: DbEncryptionSettingsOverlayProps) {
   const theme = useTheme();
   const [mode, setMode] = useState<DbEncryptionMode>('off');
   // P1-3 (Sol round 7): TRI-STATE presence of a committed passphrase — `'error'` (a SecureStore read
@@ -89,7 +94,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
         // (unknown, on this read) choice. Keep the last-known/default display and surface the failure
         // instead of silently overwriting it.
         if (currentMode === DB_ENCRYPTION_MODE_READ_ERROR) {
-          setStatusMessage("Couldn't read the current encryption setting (a device security-store error) — showing the last-known selection.");
+          setStatusMessage("Couldn't read the current encryption setting (a device security-store error): showing the last-known selection.");
         } else {
           setMode(currentMode);
         }
@@ -134,7 +139,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
         setMode(outcome.committedMode);
       }
       if (!outcome.applied) {
-        setStatusMessage(`Couldn't save — ${outcome.error ?? 'unknown error'}. The change was NOT applied; try again.`);
+        setStatusMessage(`Couldn't save: ${outcome.error ?? 'unknown error'}. The change was NOT applied; try again.`);
         return;
       }
       if (next === 'off') {
@@ -170,7 +175,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
           ' (No connection to the host to reset now; if an existing database blocks startup it will be handled from the boot Encryption-recovery screen on the next start.)';
       }
       setStatusMessage(
-        `${MODE_LABELS[next]} selected. Encryption applies to a fresh database — the existing database and any messages in it are permanently deleted when the host app is next restarted.${startFreshNote}`,
+        `${MODE_LABELS[next]} selected. Encryption applies to a fresh database: the existing database and any messages in it are permanently deleted when the host app is next restarted.${startFreshNote}`,
       );
     } finally {
       transitionInFlight.current = false;
@@ -192,7 +197,16 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
       return;
     }
     if (!dbModeSelectionIsDestructive(next)) {
-      void applyModeChange(next);
+      // Plaintext is an opt-in for testing, never a quiet default: say what it means first.
+      Alert.alert(
+        'Store messages without encryption?',
+        "Messages on this phone would be stored as plain files that anyone with access to the phone's storage " +
+          'could read. Use this only for testing or to see how LOAM works. It takes effect the next time LOAM starts.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Turn encryption off', style: 'destructive', onPress: () => void applyModeChange(next) },
+        ],
+      );
       return;
     }
     // Hold the guard from the moment the confirmation opens so a second tap can't stack another dialog.
@@ -216,13 +230,13 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
       // under the kept device secret — so the confirmation now honestly states permanent deletion in every case.
       next === 'ephemeral'
         ? 'Ephemeral mode starts a fresh on-device database on every app restart and holds the key only in ' +
-            'memory — nothing survives a reboot. The existing database and all messages in it are permanently ' +
+            'memory: nothing survives a reboot. The existing database and all messages in it are permanently ' +
             'deleted the next time the host app is restarted. This cannot be undone.'
         : mode === 'off'
-          ? 'Encryption can only apply to a fresh database — existing data cannot be converted in place. ' +
+          ? 'Encryption can only apply to a fresh database: existing data cannot be converted in place. ' +
               'Continuing permanently deletes the existing database and all messages in it, then starts a fresh ' +
               'encrypted database the next time the host app is restarted. This cannot be undone.'
-          : 'Encryption can only apply to a fresh database — an existing encrypted database cannot be reopened ' +
+          : 'Encryption can only apply to a fresh database: an existing encrypted database cannot be reopened ' +
               'with a new key. Continuing permanently deletes the existing database and all messages in it, then ' +
               'starts a fresh encrypted database the next time the host app is restarted. This cannot be undone.',
       [
@@ -255,7 +269,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     try {
       await setPassphraseCandidate(trimmed);
     } catch (err) {
-      setStatusMessage(`Couldn't save — ${err instanceof Error ? err.message : String(err)}. Try again.`);
+      setStatusMessage(`Couldn't save: ${err instanceof Error ? err.message : String(err)}. Try again.`);
       return;
     }
     setPassphraseInput('');
@@ -273,7 +287,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
   const forgetPassphrase = async () => {
     const result = await clearStoredPassphrase();
     if (!result.ok) {
-      setStatusMessage(`Couldn't forget the passphrase — ${result.error ?? 'unknown error'}. It is still set; try again.`);
+      setStatusMessage(`Couldn't forget the passphrase: ${result.error ?? 'unknown error'}. It is still set; try again.`);
       return;
     }
     setPassphrasePresence('absent');
@@ -288,7 +302,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
     Alert.alert(
       'Forget the passphrase?',
       'The passphrase is never stored on this device, so this only clears the record that one is set and any ' +
-        'pending entry. The database is NOT deleted and still needs the same passphrase at the next start — if ' +
+        'pending entry. The database is NOT deleted and still needs the same passphrase at the next start: if ' +
         'you have forgotten it, the data can no longer be opened. Continue?',
       [
         { text: 'Cancel', style: 'cancel' },
@@ -322,16 +336,15 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
             </ThemedView>
             <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
               <ThemedText type="small" themeColor="textSecondary">
-                Choose how the on-device message database is protected at rest. Off by default.
+                Choose how the messages stored on this phone are protected. Changes take effect the next time
+                LOAM starts.
               </ThemedText>
 
               <ThemedView type="backgroundElement" style={styles.noteCard}>
                 <ThemedText type="small" themeColor="textSecondary">
-                  Encrypted modes (ephemeral/persistent/passphrase) need an app build that includes the
-                  SQLCipher native module — not every build has it yet. If it&apos;s missing, the host
-                  starts unencrypted and shows a clear warning rather than failing to boot. Encryption
-                  applies to a fresh database — there is no in-place conversion, so turning it on clears
-                  any existing messages. Changes take effect the next time the host app is restarted.
+                  Encryption applies to a new database: there is no converting the one you have, so switching
+                  between modes erases the messages on this phone. If this phone can&apos;t load the encryption
+                  module, LOAM won&apos;t start rather than silently store messages unencrypted.
                 </ThemedText>
               </ThemedView>
 
@@ -342,7 +355,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
               ) : null}
 
               {loaded
-                ? DB_ENCRYPTION_MODES.map((entry) => (
+                ? MODE_ORDER.map((entry) => (
                     <Pressable
                       key={entry}
                       onPress={() => handleSelect(entry)}
@@ -383,7 +396,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                         starts; it is never stored on this device. It can&apos;t be changed here: there is no
                         in-place passphrase rekey, so a different passphrase would make the existing encrypted
                         database permanently unreadable. To change it you must start fresh (from the boot
-                        Encryption recovery screen), which discards the existing encrypted data — this cannot
+                        Encryption recovery screen), which discards the existing encrypted data: this cannot
                         be undone. &quot;Forget&quot; only clears this record and any pending entry; the
                         database itself still needs the same passphrase at the next start.
                       </ThemedText>
@@ -438,7 +451,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                       <ThemedText type="small" themeColor="textSecondary">
                         {candidatePending
                           ? 'A passphrase has been entered for the NEXT start only: it is used once, confirmed if the database opens under it, and you will be asked for it again at every later start. Enter a different one to replace the pending entry.'
-                          : 'No passphrase entered yet — the host asks for one when it next starts (you can pre-enter it here for that one start). It is never stored on this device.'}
+                          : 'No passphrase entered yet: the host asks for one when it next starts (you can pre-enter it here for that one start). It is never stored on this device.'}
                       </ThemedText>
                       <TextInput
                         value={passphraseInput}
@@ -465,6 +478,23 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
                   )}
                 </ThemedView>
               ) : null}
+              {/* Emergency reset lives here on every network (on a private one it's in the main menu too). */}
+              {onEmergencyReset ? (
+                <ThemedView type="backgroundElement" style={styles.noteCard}>
+                  <ThemedText type="smallBold">{t('reset.title')}</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {t('reset.settingsBody')}
+                  </ThemedText>
+                  <Pressable
+                    onPress={onEmergencyReset}
+                    accessibilityRole="button"
+                    style={[styles.resetButton, { borderColor: theme.danger }]}>
+                    <ThemedText type="smallBold" style={{ color: theme.danger }}>
+                      {t('reset.open')}
+                    </ThemedText>
+                  </Pressable>
+                </ThemedView>
+              ) : null}
             </ScrollView>
           </SafeAreaView>
         </ThemedView>
@@ -474,6 +504,14 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel }: DbEnc
 }
 
 const styles = StyleSheet.create({
+  resetButton: {
+    alignSelf: 'flex-start',
+    marginTop: Spacing.two,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    borderRadius: Spacing.four,
+    borderWidth: 1,
+  },
   container: {
     flex: 1,
   },

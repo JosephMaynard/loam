@@ -214,6 +214,69 @@ parsing, address choice, panel projection and persistence are covered by `host-m
 `host-mode-store.test.ts`. It has not yet been run on a physical phone: the station read, the SSID
 redaction behaviour and the no-internet-router case all need a device test.
 
+### Setup screens
+
+The host app opens on its setup screens (`src/components/setup-wizard.tsx`) every launch, and the
+embedded runtime only starts once they finish, so a new network's settings exist before the server first
+reads its data folder.
+
+- **First launch:** language (the app's own catalogs, `src/lib/i18n`; also the new node's `node.locale`),
+  then the kind of network, its name, and Hotspot or Wi-Fi (the persisted host mode).
+- **Later launches:** one screen. If the data folder holds a database that wasn't ephemeral, it offers
+  **Continue** (one tap, nothing changes) or **Start a new network**, which takes a press-and-hold to
+  erase the old one. If the last network was ephemeral (already unreadable), it offers to start a new one
+  with the remembered answers, or to change them.
+
+The three kinds (`src/lib/setup.ts`) are a named security profile (docs/09) plus the identity and
+presence flags no profile covers, and a storage mode (docs/01):
+
+| | Private and short-lived | Community | Choose every setting myself |
+|---|---|---|---|
+| `security.profile` | `hardened` (approval, 1 h messages, kill switch, `required`) | `standard` (open, kept, `optional`) | unchanged defaults |
+| Names and photos | off | on | defaults |
+| Presence | hidden | shown | default |
+| DB encryption mode | `ephemeral` | `persistent` | unchanged |
+
+After setup the host screen opens the share screen (the join codes), or the admin settings for the
+third choice.
+
+**Joining another network as a node.** The connection step's third choice, "Join another LOAM network",
+makes this phone another node of a running network (docs/11 "Linking nodes"): connect to that network's
+Wi-Fi in the phone's settings, then scan the **link code** its host shows (share screen → "Link another
+LOAM node", `src/components/link-node.tsx`, which shows the hotspot's Wi-Fi code first) or its admin shows
+in the web admin. `src/components/code-scanner.tsx` (expo-camera, QR only) accepts nothing else:
+`src/lib/join-code.ts` recognises an ordinary join code ("that's for people; ask for the link code") and
+a `WIFI:` code ("join that Wi-Fi first"), and refuses a link code without a key. There is no typed-address
+fallback. The new node's config gets the scanned node as an enabled peer with its key pinned and the
+code in `linkCode`; it hosts in Wi-Fi mode on the joined network, and its first sync round uses the code
+to link both ways. The camera permission is only requested on this step; `RECORD_AUDIO` is blocked and the
+camera hardware features are declared optional, so camera-less devices still install.
+
+**How a new network starts.** `prepareNewNetwork` (`src/lib/new-network.ts`) sets the storage mode,
+writes it into the launcher's mode hint (`.loam-db-mode-hint`, read back to verify), clears the stored
+device keys (so anything of the old network left on flash stays unreadable, and a new passphrase network
+gets a new key even from the same passphrase) and queues the starting configuration under a fresh
+operation id. Both key items are read first (`snapshotStoredDbKeys`; no snapshot, no change), and the
+clear goes last: if the hint or the clear fails (the clear may remove one item before failing on the
+other), the keys, the mode and the hint are put back and verified, so a failed preparation leaves the
+previous network openable. A rollback that doesn't fully land says so in the error. The hint matters on a fresh install: if the key handoff then fails (a
+timeout, a Keystore error), the launcher sees an encrypted choice and locks instead of booting
+unencrypted with no hint and no database. The operation rides every `loam-db-key-response` as
+`newNetwork { id, config }` until the launcher acknowledges it (`loam-new-network-applied`), so a response
+the launcher timed out on is simply resent. main.js applies it through `new-network.js`
+`applyNewNetwork` before the boot decision reads the folder: durably write a `.loam-setup-pending` marker
+naming the operation, empty the folder (keeping the marker and the mode hint, which already holds the
+new network's mode), durably write `config.json`, then record the id in `.loam-setup-applied` and drop
+the marker. The same id arriving again is a no-op, so a retry can never empty the network it already
+created. If the folder can't be fully emptied or the configuration isn't durably written, the launcher
+stays locked (Retry resends it) rather than booting under defaults, and while the marker names an
+operation the folder doesn't record (`setupUnfinished`) every boot locks, even one whose key response
+didn't bring the operation back: a half-erased folder must never read as a fresh install, which may
+start unencrypted (review 2026-10-03 #2). Detecting a previous network errs towards keeping it: an unreadable database counts as
+present and an unreadable ephemeral marker as absent. The remembered answers never keep a joining
+node's link code (it is single-use), so "start a new one like last time" for a joining phone goes back to
+the scan step.
+
 ### Native prebuild (SQLite drivers — plain + encrypted)
 `fetch:native` (`apps/app/scripts/fetch-native-modules.mjs`) places **both** SQLite native modules
 into the embedded project's `node_modules` (the DAL, `apps/server/src/db.ts`, lazy-`require`s whichever
@@ -468,6 +531,20 @@ support it); avoid Android-only Easy Connect for v1.
   network-security-config, since there's no TLS on a local hotspot).
 - The client already supports a configurable server origin (`loam.serverUrl` in localStorage) and uses
   `credentials: "include"` — but same-origin (WebView → localhost) is simplest; prefer that.
+- **Emergency reset from the host app** (in the host menu on a private, `hardened` network; at the bottom
+  of Encryption settings on every network) closes the app once everything is erased: the native
+  `closeApp()` (loam-hotspot module) stops the host service, finishes the task and kills the process. A
+  nodejs-mobile runtime can't be started twice in one process, and reattaching to the wiped server left the
+  launcher stuck ("Couldn't finish starting LOAM"), so the next launch is a fresh process that opens on the
+  setup screens. Setup never mentions the erased network, and doesn't highlight the last choice. Only then,
+  though (`resetOutcome`, `src/lib/emergency-reset.ts`): an erase the server couldn't verify complete
+  (`complete: false`, the node stays 503-locked) stays on screen saying so, with a Close button (reopening
+  retries the erase); and on a fixed-key node the screen waits for the device-key clear the server handed
+  off (`keyClearRequested`), which `attemptWipeKeyClear` closes the app after, or shows the failure of
+  with a retry.
+- **The host token and key reach the WebView only by injection** (`injectedJavaScriptBeforeContentLoaded`),
+  never in the start URL: the client trusts those globals over a pin, and a URL is something anyone can
+  craft (review 2026-10-03 #1).
 - **After an Emergency Reset** the node rotates its transport key. The host screen re-fetches
   `/api/bootstrap` for the new `#k=` and remounts the WebView when the client reports the `wipe` event
   (which also clears its old pin). The WebView is also handed the node's key directly: alongside the

@@ -25,6 +25,7 @@ const { installStartFreshMarker } = require('./start-fresh-marker');
 // Sol Fable-round P1-4: the three-outcome durable config.json write (durable / failed / indeterminate),
 // split out for the same unit-testability reason (injected `fs` — see config-write.js's doc comment).
 const { durableWriteConfig } = require('./config-write');
+const { applyNewNetwork, setupUnfinished } = require('./new-network');
 // Sol Fable-round-3 P1: the pure per-attempt boot-env decision (clear-all-then-set-branch), split out so the
 // "every attempt is a FRESH boot configuration — no stale LOAM_DB_KEY leaks across in-process retries" rule
 // is unit-testable (see boot-config.js's doc comment).
@@ -194,7 +195,8 @@ function lanInterfaces() {
  * `addresses` is the flat list older host screens read; `interfaces` pairs each with its interface;
  * `clients` is who is connected to the server from OFF this phone (`GET /api/host/clients`, launcher-only)
  * — the share screen's "N phones connected" and its proof of which interface the hotspot is on. `null`
- * when the server couldn't be asked this tick (not yet listening): the screen keeps its last answer. */
+ * when the server couldn't be asked this tick (not yet listening): the screen keeps its last answer.
+ * `invite` is the code the join QR carries on an approval-only node (`GET /api/host/invite`). */
 function postHostInfo() {
   // Runs from a timer and a bridge listener: nothing here may throw, or the whole embedded runtime goes
   // down with it. An enumeration failure (os.networkInterfaces() can throw on an odd ROM) just reports no
@@ -212,6 +214,9 @@ function postHostInfo() {
     }),
     interfaces: interfaces,
     clients: null,
+    // The invite code for the join QR (`GET /api/host/invite`): a string on an approval-only node, null
+    // when there is none (an open node, or the server didn't answer this tick).
+    invite: null,
   };
   const post = function () {
     try {
@@ -225,7 +230,16 @@ function postHostInfo() {
       if (!err && status === 200 && json && Array.isArray(json.clients)) {
         info.clients = json.clients;
       }
-      post();
+      try {
+        meshRequest('GET', '/api/host/invite', undefined, function (inviteErr, inviteStatus, inviteJson) {
+          if (!inviteErr && inviteStatus === 200 && inviteJson && typeof inviteJson.code === 'string') {
+            info.invite = inviteJson.code;
+          }
+          post();
+        });
+      } catch (inviteErr) {
+        post();
+      }
     });
   } catch (err) {
     console.error('Failed to ask the server who is connected', err);
@@ -789,7 +803,13 @@ function requestDbKey(timeoutMs) {
       // Return THIS request's id (Sol Fable-round-2 P1-B): the boot that follows threads it into the embedded
       // server as an IMMUTABLE per-boot value, so the migration ack the server later emits carries the id of
       // the attempt that actually opened the DB — never a mutable launcher global a later attempt overwrote.
-      finish({ mode: mode, key: key, legacyKey: legacyKey, requestId: requestId });
+      // A new network from the setup screens carries its starting configuration; the data folder is emptied
+      // and the configuration written before anything below reads the folder (startNewNetwork).
+      var newNetwork =
+        payload && payload.newNetwork && typeof payload.newNetwork === 'object' && !Array.isArray(payload.newNetwork)
+          ? payload.newNetwork
+          : undefined;
+      finish({ mode: mode, key: key, legacyKey: legacyKey, requestId: requestId, newNetwork: newNetwork });
     }
 
     var timer = setTimeout(function () {
@@ -901,6 +921,28 @@ function readDbModeHint() {
 // P1-b (Sol round 6): whether an on-disk DB file exists — the fail-closed input to the locked-error
 // plaintext decision below. `existsSync` throwing (unexpected) errs on the SAFE side: assume a DB may be
 // present, so a locked-error with an absent hint LOCKS rather than downgrades.
+/**
+ * A new network from the setup screens (new-network.js `applyNewNetwork`): empty the data folder, durably
+ * write the chosen configuration, record the operation, and acknowledge it so RN stops resending it. RN
+ * sends it only after the person confirmed erasing any previous network, and has already cleared that
+ * network's stored keys. Returns false when it couldn't be applied: the caller stays locked (Retry resends
+ * it), because booting anyway would start the network under defaults (open admission, optional
+ * encryption) rather than what the person chose.
+ */
+function startNewNetwork(operation) {
+  var outcome = applyNewNetwork(fs, path, dataDir, operation);
+  console.warn('LOAM-SETUP: new network ' + outcome);
+  if (outcome === 'failed') {
+    return false;
+  }
+  try {
+    rnBridge.channel.post('loam-new-network-applied', { id: operation.id });
+  } catch (postErr) {
+    // RN resends it with the next key response; the applied record makes that a no-op.
+  }
+  return true;
+}
+
 function dbFileExists() {
   try {
     return fs.existsSync(path.join(dataDir, 'loam.db'));
@@ -1006,6 +1048,67 @@ function fsyncDir(dir) {
 // and killing the recovered server.
 var startFreshRebootInFlight = false;
 
+// Emergency Reset from the host menu (index.tsx). The server installs `global.__loamEmergencyReset` once it
+// has booted (embedded-main.ts); it runs the same wipe as the admin kill switch, in-process, so there's no
+// HTTP request, no session and nothing on the network involved. Encrypted fixed-key modes then hand back
+// to the launcher for the key-clear restart through the existing `loam-wipe-restart` protocol.
+// A "Link a node" code for the share screen (server sync-links.ts, `POST /api/host/link-code`): the host
+// phone shows it so another LOAM phone can link to this network. Launcher-only, like the other host routes.
+rnBridge.channel.on('loam-link-code', function (payload) {
+  var requestId = payload && payload.requestId;
+  function reply(result) {
+    try {
+      rnBridge.channel.post('loam-link-code-result', Object.assign({ requestId: requestId }, result));
+    } catch (postErr) {
+      // RN side isn't listening; nothing more to do.
+    }
+  }
+  try {
+    meshRequest('POST', '/api/host/link-code', undefined, function (err, status, json) {
+      if (!err && status === 200 && json && typeof json.code === 'string' && typeof json.expiresAt === 'number') {
+        reply({ ok: true, code: json.code, expiresAt: json.expiresAt });
+      } else {
+        reply({ ok: false, error: err ? err.message : 'The host answered ' + status });
+      }
+    });
+  } catch (err) {
+    reply({ ok: false, error: err && err.message ? err.message : String(err) });
+  }
+});
+
+rnBridge.channel.on('loam-emergency-reset', function (payload) {
+  var requestId = payload && payload.requestId;
+  function reply(result) {
+    try {
+      rnBridge.channel.post('loam-emergency-reset-result', Object.assign({ requestId: requestId }, result));
+    } catch (postErr) {
+      // RN side isn't listening; nothing more to do.
+    }
+  }
+  var reset = global.__loamEmergencyReset;
+  if (typeof reset !== 'function') {
+    reply({ ok: false, error: 'The host is not running yet, so there is nothing to reset.' });
+    return;
+  }
+  Promise.resolve()
+    .then(function () {
+      return reset();
+    })
+    .then(
+      function (result) {
+        reply({
+          ok: true,
+          complete: !!(result && result.complete),
+          // The device-key clear was handed to RN (`loam-wipe-restart`): RN closes the app once it's verified.
+          keyClear: !!(result && result.keyClearRequested),
+        });
+      },
+      function (err) {
+        reply({ ok: false, error: err && err.message ? err.message : String(err) });
+      },
+    );
+});
+
 rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   var requestId = payload && payload.requestId;
 
@@ -1060,9 +1163,9 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
     // 'indeterminate' must NOT claim the reset was cancelled/unscheduled.
     var error =
       outcome === 'indeterminate'
-        ? 'The reset could NOT be confirmed and MAY still take effect on the next app restart — do NOT ' +
+        ? 'The reset could NOT be confirmed and MAY still take effect on the next app restart: do NOT ' +
           'assume it was cancelled. Restart the app to let it complete, or check the database state before retrying.'
-        : 'The reset was not scheduled — nothing was written to disk. It is safe to try again.';
+        : 'The reset was not scheduled: nothing was written to disk. It is safe to try again.';
     try {
       rnBridge.channel.post('loam-db-start-fresh-result', {
         requestId: requestId,
@@ -1303,7 +1406,7 @@ var WIPE_RESUME_TIMEOUT_MS = 20000;
 function deleteStaleEphemeralDb() {
   if (!hasEphemeralMarker()) {
     console.warn(
-      'Booting in ephemeral DB-encryption mode, but the previous boot was not marked ephemeral — ' +
+      'Booting in ephemeral DB-encryption mode, but the previous boot was not marked ephemeral: ' +
         'this deletion may be destroying data from a different (non-ephemeral) mode.',
     );
   }
@@ -1386,6 +1489,25 @@ function resolveDbEncryptionAndBoot() {
       // request-id from an earlier (e.g. encrypted) attempt can never leak into an off/locked/downgrade retry
       // in the SAME process (db.ts gives encryptionKey precedence over the plaintext driver, so a leaked key
       // would silently keep an "off" retry on SQLCipher, mis-report posture, and mislead the mode hint).
+      if (result && result.newNetwork && !startNewNetwork(result.newNetwork)) {
+        applyBootEnv({});
+        global.__loamReportBootError(
+          "Couldn't set up the new network's storage on this phone: refusing to start it with default settings. Retry.",
+          'db_encryption_locked',
+        );
+        return 'locked';
+      }
+      // A setup that erased the previous network but never finished (and this response didn't bring the
+      // operation back, e.g. a key-request timeout): the folder is neither the old network nor the new one.
+      // Booting it could start unencrypted under defaults; stay locked until Retry resends the operation.
+      if (setupUnfinished(fs, path, dataDir)) {
+        applyBootEnv({});
+        global.__loamReportBootError(
+          "Setting up the new network didn't finish: refusing to start it with default settings. Retry.",
+          'db_encryption_locked',
+        );
+        return 'locked';
+      }
       var cfg = computeDbBootEnv(result, {
         hint: readDbModeHint(),
         dbExists: dbFileExists(),
@@ -1424,7 +1546,7 @@ function resolveDbEncryptionAndBoot() {
       applyBootEnv({});
       console.error('Unexpected error resolving DB encryption for boot', err);
       global.__loamReportBootError(
-        'An unexpected error occurred while preparing on-device encryption — refusing to start. Retry once the app is responsive.',
+        'An unexpected error occurred while preparing on-device encryption: refusing to start. Retry once the app is responsive.',
         'db_encryption_locked',
       );
       return 'locked';
@@ -1549,7 +1671,7 @@ function bootWithWipeResume() {
       if (clearWipePhase() !== true) {
         notify('error', {
           message:
-            'The security reset cleared the encryption key, but a cleanup step is still pending — reopen ' +
+            'The security reset cleared the encryption key, but a cleanup step is still pending: reopen ' +
             'the app to finish it. The database was not reopened.',
           code: 'db_encryption_locked',
         });
@@ -1571,7 +1693,7 @@ function bootWithWipeResume() {
       // in the `finally` below.
       notify('error', {
         message:
-          'A security reset is still finishing on this device — reopen the app to complete it. The database was not reopened.',
+          'A security reset is still finishing on this device: reopen the app to complete it. The database was not reopened.',
         code: 'db_encryption_locked',
       });
       resolve('locked');
@@ -1587,7 +1709,7 @@ function bootWithWipeResume() {
       rnBridge.channel.removeListener('loam-wipe-complete', proceed);
       console.error('Failed to post loam-wipe-restart for a resumed wipe handoff', err);
       notify('error', {
-        message: 'A security reset could not be completed on this device — reopen the app to retry.',
+        message: 'A security reset could not be completed on this device: reopen the app to retry.',
         code: 'db_encryption_locked',
       });
       resolve('locked');

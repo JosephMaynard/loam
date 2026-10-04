@@ -10,6 +10,7 @@
     "@loam/qr": "workspace:*",
     "@loam/schema": "workspace:*",
     "expo": "~57.0.26",
+    "expo-camera": "~57.0.6",
     "expo-constants": "~57.0.20",
     "expo-crypto": "~57.0.3",
     "expo-device": "~57.0.2",

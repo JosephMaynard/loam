@@ -36,7 +36,7 @@ export const my: Translation = {
   "composer.send": "ပို့ရန်",
 
   "composer.shareLocation": "တည်နေရာ မျှဝေရန်",
-  "composer.shareLocationHint": "နေရာတစ်ခု မျှဝေပါ — GPS မရှိလည်း label က အလုပ်လုပ်သည်",
+  "composer.shareLocationHint": "နေရာတစ်ခု မျှဝေပါ: GPS မရှိလည်း label က အလုပ်လုပ်သည်",
   "composer.locationLabel": "တည်နေရာ label",
   "composer.locationLabelPlaceholder": "ဥပမာ- မြောက်ဘက်တံခါး",
   "composer.locationLat": "လတ္တီတွဒ် (-90 မှ 90)",
@@ -83,7 +83,7 @@ export const my: Translation = {
   "settings.securityEyebrow": "လုံခြုံရေး",
   "settings.wipeTitle": "ဤစက်ကို ဖျက်ရန်",
   "settings.wipeBody":
-    "ဤ browser ၏ ဒေသတွင်းမိတ္တူကို ဖျက်သည် — စာများ၊ သင့်မှတ်ပုံနှင့် သိမ်းဆည်းထားသောဒေတာ။ node သို့မဟုတ် အခြားသူ၏ စက်ကို မဖျက်ပါ။",
+    "ဤ browser ၏ ဒေသတွင်းမိတ္တူကို ဖျက်သည်: စာများ၊ သင့်မှတ်ပုံနှင့် သိမ်းဆည်းထားသောဒေတာ။ node သို့မဟုတ် အခြားသူ၏ စက်ကို မဖျက်ပါ။",
   "settings.wipeConfirmBefore": "ရိုက်ထည့်ပါ",
   "settings.wipeConfirmAfter": "အတည်ပြုရန်",
   "settings.wiping": "ဖျက်နေသည်…",
@@ -115,7 +115,7 @@ export const my: Translation = {
   "moderation.loading": "လူများ ဖွင့်နေသည်…",
   "moderation.empty": "ပြသရန် လူမရှိသေးပါ။",
   "moderation.promoteConfirm":
-    "{name} ကို အက်ဒမင် ပြုလုပ်မလား။ အက်ဒမင် ဝင်ရောက်ခွင့်ကို ဤနေရာမှ ရုပ်သိမ်း၍မရ — node ကို ပြန်စနစ်ချမှသာ ရနိုင်သည်။",
+    "{name} ကို အက်ဒမင် ပြုလုပ်မလား။ အက်ဒမင် ဝင်ရောက်ခွင့်ကို ဤနေရာမှ ရုပ်သိမ်း၍မရ, node ကို ပြန်စနစ်ချမှသာ ရနိုင်သည်။",
   "moderation.thatsYou": "အဲဒါ သင်ပါ။",
   "moderation.adminsProtected": "အက်ဒမင်များကို ကြီးကြပ်၍မရပါ။",
   "moderation.roleModerator": "Moderator",
@@ -138,7 +138,7 @@ export const my: Translation = {
   "admin.flagReactions": "တုံ့ပြန်မှုများ",
   "admin.flagMarkdown": "Markdown ပြသခြင်း",
   "admin.flagAttachments": "ပုံ ပူးတွဲမှုများ",
-  "admin.flagPresence": "အွန်လိုင်း ရှိနေမှု (မည်သူ ချိတ်ဆက်ထားသည်ကို ဖော်ပြသည် — ကိုယ်ရေးကိုယ်တာ ထိခိုက်လွယ်သော ပတ်ဝန်းကျင်များတွင် ပိတ်ပါ)",
+  "admin.flagPresence": "အွန်လိုင်း ရှိနေမှု (မည်သူ ချိတ်ဆက်ထားသည်ကို ဖော်ပြသည်; ကိုယ်ရေးကိုယ်တာ ထိခိုက်လွယ်သော ပတ်ဝန်းကျင်များတွင် ပိတ်ပါ)",
   "admin.flagLocationSharing": "တည်နေရာ မျှဝေခြင်း (ရွေးချယ်နိုင်; စာများတွင် မိမိတည်နေရာကို ပူးတွဲခွင့်ပြုသည်)",
   "admin.identityDisplayName": "အသုံးပြုသူများ ၎င်းတို့၏ ပြသနာမည်ကို တည်းဖြတ်နိုင်သည်",
   "admin.identityAvatarEdit": "အသုံးပြုသူများ ၎င်းတို့၏ avatar ကို တည်းဖြတ်နိုင်သည်",
@@ -146,7 +146,7 @@ export const my: Translation = {
   "admin.identityAdminEdit": "အက်ဒမင်များ အခြားအသုံးပြုသူများကို တည်းဖြတ်နိုင်သည်",
   "admin.profileOpenTitle": "ဖွင့်",
   "admin.profileOpenSummary":
-    "မည်သူမဆို ချက်ချင်း ဝင်ရောက်ပြီး တင်နိုင်သည်။ စာများကို သိမ်းထားပြီး အရေးပေါ် ပြန်လည်သတ်မှတ်ခြင်း ပိတ်ထားသည် — အများဆုံး ဝင်ရောက်ခွင့်၊ ကယ်ဆယ်ရေးပုံစံ အသုံးပြုမှုအတွက်။",
+    "မည်သူမဆို ချက်ချင်း ဝင်ရောက်ပြီး တင်နိုင်သည်။ စာများကို သိမ်းထားပြီး အရေးပေါ် ပြန်လည်သတ်မှတ်ခြင်း ပိတ်ထားသည်: အများဆုံး ဝင်ရောက်ခွင့်၊ ကယ်ဆယ်ရေးပုံစံ အသုံးပြုမှုအတွက်။",
   "admin.profileStandardTitle": "စံ",
   "admin.profileStandardSummary":
     "ဝင်ရောက်ရန် လင့်ခ်ရှိသူတိုင်း ပါဝင်သည်။ စာများ သိမ်းထားပြီး အရေးပေါ် ပြန်လည်သတ်မှတ်ခြင်း ပိတ်ထားသည်။ (လက်ရှိတွင် Open နှင့် တူညီသော ဆက်တင်များကို အသုံးပြုသည်။)",
@@ -188,14 +188,14 @@ export const my: Translation = {
   "admin.identityHeading": "ကိုယ်ပိုင်မှတ်ပုံ",
   "admin.networkName": "ကွန်ရက်အမည်",
   "admin.networkNameNote":
-    "ဝင်ရောက်သူတိုင်းအား ပြသသည် — sidebar နှင့် ဝင်ရောက်မှုစာမျက်နှာတွင်။ လူများ မှတ်မိမည့် အမည်ပေးပါ (ဥပမာ \"Riverside Relief\")။",
+    "ဝင်ရောက်သူတိုင်းအား ပြသသည်, sidebar နှင့် ဝင်ရောက်မှုစာမျက်နှာတွင်။ လူများ မှတ်မိမည့် အမည်ပေးပါ (ဥပမာ \"Riverside Relief\")။",
   "admin.language": "အင်တာဖေ့စ် ဘာသာစကား",
   "admin.languageNote": "ဤ node ရှိ လူတိုင်း၏ အင်တာဖေ့စ်တွင် သက်ရောက်သည်။",
   "admin.profileHeading": "ပရိုဖိုင်",
   "admin.posture": "အနေအထား",
   "admin.whoCanJoin": "မည်သူ ဝင်ရောက်နိုင်သည်",
-  "admin.joinOpen": "Open — လင့်ခ်ရှိသူတိုင်း ဝင်ရောက်သည်",
-  "admin.joinApproval": "Approval — ကြိုဆိုသူ သို့မဟုတ် အက်ဒမင်က ဝင်ခွင့်ပေးသည်",
+  "admin.joinOpen": "Open: လင့်ခ်ရှိသူတိုင်း ဝင်ရောက်သည်",
+  "admin.joinApproval": "Approval: ကြိုဆိုသူ သို့မဟုတ် အက်ဒမင်က ဝင်ခွင့်ပေးသည်",
   "admin.axesManaged":
     "ဝင်ရောက်ခွင့်၊ သိမ်းဆည်းမှုနှင့် အရေးပေါ် ပြန်လည်သတ်မှတ်ခြင်း ကို {profile} ပရိုဖိုင်က စီမံသည်။ သီးခြားစီ တည်းဖြတ်ရန် {custom} သို့ ပြောင်းပါ။",
   "admin.featuresEyebrow": "လုပ်ဆောင်ချက်များ",
@@ -323,11 +323,11 @@ export const my: Translation = {
 
   "mesh.title": "Mesh စာ",
   "mesh.myCardTitle": "သင့် Mesh ကတ်",
-  "mesh.myCardNote": "တံဆိပ်ခတ်ထားသော စာများ လက်ခံလိုသူထံ ဤကတ်ကို မျှဝေပါ — ကုဒ်ကို scan ဖတ်ပါ သို့မဟုတ် ကူးယူပြီး သင်နှစ်သက်ရာ နည်းလမ်းဖြင့် ပို့ပါ။",
+  "mesh.myCardNote": "တံဆိပ်ခတ်ထားသော စာများ လက်ခံလိုသူထံ ဤကတ်ကို မျှဝေပါ. ကုဒ်ကို scan ဖတ်ပါ သို့မဟုတ် ကူးယူပြီး သင်နှစ်သက်ရာ နည်းလမ်းဖြင့် ပို့ပါ။",
   "mesh.myCardLoading": "သင့် Mesh ကတ် ဖွင့်နေသည်…",
   "mesh.myCardLoadError": "သင့် Mesh ကတ် ဖွင့်၍မရပါ။",
   "mesh.myCardUnrecognised": "ဆာဗာက အသိအမှတ်မပြုနိုင်သော Mesh ကတ် ပြန်ပို့သည်။",
-  "mesh.myCardQrTooLarge": "ဤကတ်သည် ဤနေရာတွင် QR ကုဒ်အတွက် ရှည်လွန်းသည် — ယင်းအစား ကူးယူပါ။",
+  "mesh.myCardQrTooLarge": "ဤကတ်သည် ဤနေရာတွင် QR ကုဒ်အတွက် ရှည်လွန်းသည်. ယင်းအစား ကူးယူပါ။",
   "mesh.copyCard": "ကတ် ကူးရန်",
   "mesh.copyCardCopied": "ကူးပြီး",
   "mesh.addContactTitle": "အဆက်အသွယ်၏ ကတ် ထည့်ရန်",
@@ -357,10 +357,12 @@ export const my: Translation = {
 
   "nodeLink.hide": "× လင့်ခ် ဖျောက်ရန်",
   "nodeLink.show": "⧉ အခြား node ချိတ်ရန်",
-  "nodeLink.note":
-    "အခြား node ၏ အက်ဒမင် စာမျက်နှာတွင် sync ဖွင့်ပြီး ဤလိပ်စာကို peer အဖြစ် ထည့်ပါ (ကုဒ်ကို scan ဖတ်ပါ သို့မဟုတ် URL ကို paste လုပ်ပါ)။",
-  "nodeLink.copied": "ကူးပြီး",
-  "nodeLink.copy": "လိပ်စာ ကူးရန်",
+  "nodeLink.note": "၎င်းကို အခြားဖုန်း၏ စနစ်ထည့်သွင်းမျက်နှာပြင်များရှိ \"အခြား LOAM ကွန်ရက်သို့ ဝင်ပါ\" အောက်တွင် စကင်ဖတ်ပါ။ ချိတ်ဆက်ထားသော ကွန်ရက်များသည် ၎င်းတို့၏ အများသုံးချန်နယ်များကို နှစ်ဖက်စလုံး မျှဝေသည်; တိုက်ရိုက်မက်ဆေ့ချ်နှင့် သီးသန့်ချန်နယ်များသည် မည်သည့်ကွန်ရက်မှမျှ ထွက်မသွားပါ။",
+  "nodeLink.expires": "တစ်ကြိမ်သာ၊ {time} အထိ အလုပ်လုပ်သည်။",
+  "nodeLink.needsKey": "ဤစက်သည် ကွန်ရက်၏ QR ကုဒ်ကို စကင်ဖတ်၍ ဝင်ရောက်ခြင်း မဟုတ်သဖြင့် ကွန်ရက်၏ ကီးကို အာမခံ၍ မရပါ။ ချိတ်ဆက်ကုဒ်ကို လက်ခံဖုန်း၏ မျှဝေမျက်နှာပြင်မှ သို့မဟုတ် စကင်ဖတ်၍ ဝင်ရောက်ထားသော စက်မှ ပြပါ။",
+  "nodeLink.again": "ကုဒ်အသစ်",
+  "admin.peerLinking": "ချိတ်ဆက်နေသည်…",
+  "admin.peerLinkRefused": "၎င်း၏ ချိတ်ဆက်ကုဒ်ကို ငြင်းပယ်ခဲ့သည် (သက်တမ်းကုန် သို့မဟုတ် သုံးပြီး)။ ထိုကွန်ရက်ထံ အသစ်တောင်းပါ။",
 
   "unreadBadge.label": "မဖတ်ရသေး {n} ခု",
 
@@ -394,9 +396,10 @@ export const my: Translation = {
   "gate.pendingTitle": "သင် စောင့်ဆိုင်းစာရင်းတွင် ရှိသည်",
   "gate.pendingBody":
     "ဤ node ရှိ တစ်စုံတစ်ဦးက သင့်ကို ဝင်ခွင့်ပေးရန် စောင့်နေသည်။ သင် အတည်ပြုခံရသည်နှင့် ဤစာမျက်နှာ ချက်ချင်း အပ်ဒိတ်ဖြစ်သည်။",
+  "gate.inviteRefused": "ဤဖိတ်ကြားကုဒ် သက်တမ်းကုန်သွားပြီ။ လက်ခံစက်၏ မျက်နှာပြင်ပေါ်ရှိ ကုဒ်ကို ထပ်မံ စကင်ဖတ်ပါ၊ သို့မဟုတ် ဝင်ခွင့်ပေးသည်အထိ ဤနေရာတွင် စောင့်ပါ။",
   "gate.connection": "ချိတ်ဆက်မှု- {status}",
   "gate.needsQrTitle": "လုံခြုံစွာ ချိတ်ဆက်ရန် join QR ကို စကင်ဖတ်ပါ",
-  "gate.needsQrBody": "ဤနုဒ်နှင့် ချိတ်ဆက်ရန် သင့်စက်ပစ္စည်းဖြင့် join QR ကို စကင်ဖတ်ပါ — အခြားလုံခြုံသော နည်းလမ်း မရှိပါ။",
+  "gate.needsQrBody": "ဤနုဒ်နှင့် ချိတ်ဆက်ရန် သင့်စက်ပစ္စည်းဖြင့် join QR ကို စကင်ဖတ်ပါ. အခြားလုံခြုံသော နည်းလမ်း မရှိပါ။",
 
   "confirm.deleteMessage": "ဤစာကို ဖျက်မလား။ ၎င်းကို ပြန်ပြင်၍မရပါ။",
 
@@ -432,6 +435,13 @@ export const my: Translation = {
   "error.invalid_admin_claim": "မမှန်ကန်သော အက်ဒမင်ရယူမှု တောင်းဆိုချက်",
   "error.invalid_admin_secret": "မမှန်ကန်သော အက်ဒမင် လျှို့ဝှက်ချက်",
   "error.invalid_attachment_upload": "မမှန်ကန်သော ပူးတွဲတင်မှု တောင်းဆိုချက်",
+  "error.invalid_invite_redeem": "ဖိတ်ကြားချက် တောင်းဆိုမှု မမှန်ကန်ပါ",
+  "error.invite_invalid": "ဤဖိတ်ကြားကုဒ် သက်တမ်းကုန်သွားပြီ သို့မဟုတ် မမှန်ကန်ပါ",
+  "error.invite_not_allowed": "ဤအကောင့်သည် ဖိတ်ကြားချက်ကို မသုံးနိုင်ပါ",
+  "error.invalid_link_request": "ချိတ်ဆက်ရန် တောင်းဆိုမှု မမှန်ကန်ပါ",
+  "error.link_code_invalid": "ဤချိတ်ဆက်ကုဒ် သက်တမ်းကုန်သွားပြီ သို့မဟုတ် သုံးပြီးဖြစ်သည်",
+  "error.link_unencrypted": "ချိတ်ဆက်ရန် ကုဒ်ဝှက်ထားသော ချိတ်ဆက်မှု လိုအပ်သည်",
+  "error.link_peer_limit": "ဤ node သည် ဖြစ်နိုင်သမျှ အများဆုံး peer များနှင့် ချိန်ကိုက်နေပြီ",
   "error.invalid_avatar_upload": "မမှန်ကန်သော avatar ပုံတင်မှု တောင်းဆိုချက်",
   "error.invalid_channel_create": "မမှန်ကန်သော channel ဖန်တီးမှု တောင်းဆိုချက်",
   "error.invalid_channel_update": "မမှန်ကန်သော channel အပ်ဒိတ် တောင်းဆိုချက်",
@@ -474,7 +484,7 @@ export const my: Translation = {
   "error.passphrase_required": "Passphrase bootstrap နည်းဗျူဟာသည် passphrase လိုအပ်သည်",
   "error.message_streaming": "ဤစာကို ရေးနေဆဲဖြစ်သည်",
   "error.session_invalid": "ဤ session သည် အကျုံးမဝင်တော့ပါ",
-  "error.thread_has_replies": "ဤ thread တွင် အခြားသူများ၏ ပြန်စာများ ရှိသည် — အက်ဒမင်သာ ဖျက်နိုင်သည်",
+  "error.thread_has_replies": "ဤ thread တွင် အခြားသူများ၏ ပြန်စာများ ရှိသည်. အက်ဒမင်သာ ဖျက်နိုင်သည်",
   "error.too_many_attempts": "ကြိုးပမ်းမှု များလွန်းသည်",
   "error.too_many_claim_attempts": "ရယူမှု ကြိုးပမ်းချက် များလွန်းသည်; နောက်မှ ထပ်စမ်းပါ",
   "error.message_create_failed": "စာ ဖန်တီး၍မရပါ",
@@ -500,9 +510,9 @@ export const my: Translation = {
   "admin.deleteChannel": "ဖျက်ရန်",
   "admin.deleteChannelAria": "{name} channel ကို အပြီးအပိုင် ဖျက်ရန်",
   "admin.deleteChannelConfirm":
-    "“{name}” ကို အပြီးအပိုင် ဖျက်မလား။ ၎င်းအတွင်းရှိ စာနှင့် ပူးတွဲဖိုင်အားလုံး ဖယ်ရှားခံရပြီး ပြန်လည်ရယူ၍ မရပါ — မှတ်တမ်းသိမ်းခြင်းနှင့် မတူဘဲ ပြန်ပြင်၍ မရပါ။",
+    "“{name}” ကို အပြီးအပိုင် ဖျက်မလား။ ၎င်းအတွင်းရှိ စာနှင့် ပူးတွဲဖိုင်အားလုံး ဖယ်ရှားခံရပြီး ပြန်လည်ရယူ၍ မရပါ. မှတ်တမ်းသိမ်းခြင်းနှင့် မတူဘဲ ပြန်ပြင်၍ မရပါ။",
   "gate.needsQrKeyChanged":
-    "ဤ node ၏ key သည် သင်စကင်ဖတ်ခဲ့သည့် key နှင့် မကိုက်ညီတော့ပါ — host ကို ပြန်စတင်ခဲ့ခြင်း သို့မဟုတ် ၎င်းကို ပြန်လည်သတ်မှတ်ခဲ့ခြင်း ဖြစ်နိုင်သည်၊ သို့မဟုတ် ဤကွန်ရက်သည် ၎င်းဆိုထားသည့်အတိုင်း မဟုတ်နိုင်ပါ။ ပြန်ချိတ်ဆက်ရန် node ၏ လက်ရှိ join QR ကုဒ်ကို စကင်ဖတ်ပါ။",
+    "ဤ node ၏ key သည် သင်စကင်ဖတ်ခဲ့သည့် key နှင့် မကိုက်ညီတော့ပါ. Host ကို ပြန်စတင်ခဲ့ခြင်း သို့မဟုတ် ၎င်းကို ပြန်လည်သတ်မှတ်ခဲ့ခြင်း ဖြစ်နိုင်သည်၊ သို့မဟုတ် ဤကွန်ရက်သည် ၎င်းဆိုထားသည့်အတိုင်း မဟုတ်နိုင်ပါ။ ပြန်ချိတ်ဆက်ရန် node ၏ လက်ရှိ join QR ကုဒ်ကို စကင်ဖတ်ပါ။",
   "message.report": "တိုင်ကြားရန်",
   "message.removedByModerator": "Moderator တစ်ဦးက ဖယ်ရှားခဲ့သည်",
   "report.messageTitle": "ဤစာကို တိုင်ကြားရန်",
@@ -522,7 +532,7 @@ export const my: Translation = {
   "report.error": "တိုင်ကြားချက် ပို့၍ မရပါ",
   "report.cancel": "ပယ်ဖျက်ရန်",
   "composer.timedOut": "Moderator တစ်ဦးက သင့်ကို ခေတ္တ ရပ်ဆိုင်းထားသဖြင့် ယခု စာတင်၍ မရပါ။",
-  "composer.archived": "ဤ channel ကို မှတ်တမ်းသိမ်းထားသည် — ဖတ်နိုင်သော်လည်း အသစ် တင်၍ မရပါ။",
+  "composer.archived": "ဤ channel ကို မှတ်တမ်းသိမ်းထားသည်. ဖတ်နိုင်သော်လည်း အသစ် တင်၍ မရပါ။",
   "sidebar.archivedTag": "မှတ်တမ်းသိမ်းပြီး",
   "moderation.timeout": "ခေတ္တရပ်ဆိုင်းရန် (၁ နာရီ)",
   "moderation.timeoutClear": "ခေတ္တရပ်ဆိုင်းမှု ဖြေရန်",
@@ -556,7 +566,7 @@ export const my: Translation = {
   "common.back": "နောက်သို့",
   "common.dismiss": "ပိတ်ရန်",
   "devMode.banner":
-    "⚠️ Developer Mode — စာများကို ကုဒ်မဝှက်ဘဲ ပို့ပြီး ဤကွန်ရက်ပေါ်ရှိ မည်သူမဆို ဖတ်နိုင်သည်။ သီးသန့်ကိစ္စများအတွက် မသုံးပါနှင့်။",
+    "⚠️ Developer Mode: စာများကို ကုဒ်မဝှက်ဘဲ ပို့ပြီး ဤကွန်ရက်ပေါ်ရှိ မည်သူမဆို ဖတ်နိုင်သည်။ သီးသန့်ကိစ္စများအတွက် မသုံးပါနှင့်။",
   "composer.fileTooLarge": "{name} သည် ပို့ရန် အလွန်ကြီးသည် (ကန့်သတ်ချက် {limit})။",
   "conversation.notFoundTitle": "စကားဝိုင်း မရနိုင်ပါ",
   "conversation.notFoundBody": "ဤ channel မရှိပါ၊ ဖယ်ရှားခံရပြီ၊ သို့မဟုတ် သင်သည် ၎င်း၏ အဖွဲ့ဝင် မဟုတ်ပါ။",
@@ -566,7 +576,7 @@ export const my: Translation = {
   "app.crashReload": "ပြန်ဖွင့်ရန်",
   "transport.pinChangeTitle": "ဤလင့်ခ်တွင် မတူညီသော လုံခြုံရေး key ပါဝင်သည်",
   "transport.pinChangeBody":
-    "သင်သည် ဤ node သို့ မတူညီသော key ဖြင့် ဝင်ရောက်ခဲ့သည်။ node ၏ လက်ရှိ join QR ကုဒ်ကို ယခုလေးတင် ကိုယ်တိုင် စကင်ဖတ်ခဲ့မှသာ key အသစ်ကို သုံးပါ — မဟုတ်ပါက တစ်စုံတစ်ဦးက ၎င်းကို အယောင်ဆောင်နေနိုင်သည်။",
+    "သင်သည် ဤ node သို့ မတူညီသော key ဖြင့် ဝင်ရောက်ခဲ့သည်။ node ၏ လက်ရှိ join QR ကုဒ်ကို ယခုလေးတင် ကိုယ်တိုင် စကင်ဖတ်ခဲ့မှသာ key အသစ်ကို သုံးပါ. မဟုတ်ပါက တစ်စုံတစ်ဦးက ၎င်းကို အယောင်ဆောင်နေနိုင်သည်။",
   "transport.pinChangeCurrent": "သင်ဝင်ရောက်ခဲ့သည့် key- {fingerprint}",
   "transport.pinChangeNew": "ဤလင့်ခ်ရှိ key- {fingerprint}",
   "transport.pinChangeAccept": "Key အသစ်ကို သုံးရန်",

@@ -36,7 +36,7 @@ export const tr: Translation = {
   "composer.send": "Gönder",
 
   "composer.shareLocation": "Konum paylaş",
-  "composer.shareLocationHint": "Bir yer paylaşın — GPS olmadan da bir etiket işe yarar",
+  "composer.shareLocationHint": "Bir yer paylaşın: GPS olmadan da bir etiket işe yarar",
   "composer.locationLabel": "Konum etiketi",
   "composer.locationLabelPlaceholder": "ör. kuzey kapı",
   "composer.locationLat": "Enlem (-90 ile 90 arası)",
@@ -83,7 +83,7 @@ export const tr: Translation = {
   "settings.securityEyebrow": "Güvenlik",
   "settings.wipeTitle": "Bu cihazı sil",
   "settings.wipeBody":
-    "Bu tarayıcının yerel kopyasını siler — mesajlar, kimliğiniz ve önbelleğe alınan veriler. Düğümü veya başkasının cihazını silmez.",
+    "Bu tarayıcının yerel kopyasını siler: mesajlar, kimliğiniz ve önbelleğe alınan veriler. Düğümü veya başkasının cihazını silmez.",
   "settings.wipeConfirmBefore": "Yazın:",
   "settings.wipeConfirmAfter": "onaylamak için",
   "settings.wiping": "Siliniyor…",
@@ -115,7 +115,7 @@ export const tr: Translation = {
   "moderation.loading": "Kişiler yükleniyor…",
   "moderation.empty": "Gösterilecek kişi yok.",
   "moderation.promoteConfirm":
-    "{name} yönetici yapılsın mı? Yönetici erişimi buradan geri alınamaz — yalnızca düğümü yeniden kurarak.",
+    "{name} yönetici yapılsın mı? Yönetici erişimi buradan geri alınamaz, yalnızca düğümü yeniden kurarak.",
   "moderation.thatsYou": "Bu sizsiniz.",
   "moderation.adminsProtected": "Yöneticiler modere edilemez.",
   "moderation.roleModerator": "Moderatör",
@@ -138,7 +138,7 @@ export const tr: Translation = {
   "admin.flagReactions": "Tepkiler",
   "admin.flagMarkdown": "Markdown görüntüleme",
   "admin.flagAttachments": "Görsel ekleri",
-  "admin.flagPresence": "Çevrimiçi varlık (kimin bağlı olduğunu gösterir — gizliliğe duyarlı ortamlarda kapatın)",
+  "admin.flagPresence": "Çevrimiçi varlık (kimin bağlı olduğunu gösterir; gizliliğe duyarlı ortamlarda kapatın)",
   "admin.flagLocationSharing": "Konum paylaşımı (isteğe bağlı; kişilerin konumlarını mesajlara eklemesine olanak tanır)",
   "admin.identityDisplayName": "Kullanıcılar görünen adını düzenleyebilir",
   "admin.identityAvatarEdit": "Kullanıcılar avatarını düzenleyebilir",
@@ -146,7 +146,7 @@ export const tr: Translation = {
   "admin.identityAdminEdit": "Yöneticiler diğer kullanıcıları düzenleyebilir",
   "admin.profileOpenTitle": "Açık",
   "admin.profileOpenSummary":
-    "Herkes hemen katılır ve paylaşır. Mesajlar saklanır ve acil sıfırlama kapalıdır — azami erişim, afet yardımı tarzı kullanım için.",
+    "Herkes hemen katılır ve paylaşır. Mesajlar saklanır ve acil sıfırlama kapalıdır: azami erişim, afet yardımı tarzı kullanım için.",
   "admin.profileStandardTitle": "Standart",
   "admin.profileStandardSummary":
     "Katılma bağlantısı olan herkes katılır; mesajlar saklanır ve acil sıfırlama kapalıdır. (Şimdilik Açık ile aynı ayarları uygular.)",
@@ -188,14 +188,14 @@ export const tr: Translation = {
   "admin.identityHeading": "Kimlik",
   "admin.networkName": "Ağ adı",
   "admin.networkNameNote":
-    "Katılan herkese görünür — kenar çubuğunda ve katılma ekranında. Ağınıza tanınacak bir ad verin (örn. \"Nehir Yardımı\").",
+    "Katılan herkese görünür, kenar çubuğunda ve katılma ekranında. Ağınıza tanınacak bir ad verin (örn. \"Nehir Yardımı\").",
   "admin.language": "Arayüz dili",
   "admin.languageNote": "Bu düğümdeki herkesin arayüzüne uygulanır.",
   "admin.profileHeading": "Profil",
   "admin.posture": "Duruş",
   "admin.whoCanJoin": "Kim katılabilir",
-  "admin.joinOpen": "Açık — bağlantısı olan herkes katılır",
-  "admin.joinApproval": "Onay — bir karşılayıcı veya yönetici içeri alır",
+  "admin.joinOpen": "Açık: bağlantısı olan herkes katılır",
+  "admin.joinApproval": "Onay: bir karşılayıcı veya yönetici içeri alır",
   "admin.axesManaged":
     "Erişim, saklama ve acil sıfırlama {profile} profili tarafından yönetilir. Bunları ayrı ayrı düzenlemek için {custom} profiline geçin.",
   "admin.featuresEyebrow": "Özellikler",
@@ -323,11 +323,11 @@ export const tr: Translation = {
 
   "mesh.title": "Mesh posta",
   "mesh.myCardTitle": "Mesh kartınız",
-  "mesh.myCardNote": "Bunu mühürlü posta almak istediğiniz biriyle paylaşın — kodu tarayın veya kopyalayıp istediğiniz şekilde gönderin.",
+  "mesh.myCardNote": "Bunu mühürlü posta almak istediğiniz biriyle paylaşın. Kodu tarayın veya kopyalayıp istediğiniz şekilde gönderin.",
   "mesh.myCardLoading": "Mesh kartınız yükleniyor…",
   "mesh.myCardLoadError": "Mesh kartınız yüklenemedi.",
   "mesh.myCardUnrecognised": "Sunucu tanınmayan bir mesh kart döndürdü.",
-  "mesh.myCardQrTooLarge": "Bu kart burada bir QR kodu için çok uzun — bunun yerine kopyalayın.",
+  "mesh.myCardQrTooLarge": "Bu kart burada bir QR kodu için çok uzun. Bunun yerine kopyalayın.",
   "mesh.copyCard": "Kartı kopyala",
   "mesh.copyCardCopied": "Kopyalandı",
   "mesh.addContactTitle": "Bir kişinin kartını ekle",
@@ -357,10 +357,12 @@ export const tr: Translation = {
 
   "nodeLink.hide": "× Bağlantıyı gizle",
   "nodeLink.show": "⧉ Başka bir düğüm bağla",
-  "nodeLink.note":
-    "Diğer düğümün yönetim ekranında eşitlemeyi açın ve bu adresi eş olarak ekleyin (kodu tarayın veya URL’yi yapıştırın).",
-  "nodeLink.copied": "Kopyalandı",
-  "nodeLink.copy": "Adresi kopyala",
+  "nodeLink.note": "Bunu diğer telefonun kurulum ekranlarından, \"Başka bir LOAM ağına katıl\" altında tarayın. Bağlı ağlar herkese açık kanallarını iki yönde paylaşır; doğrudan mesajlar ve özel kanallar hiçbirinden çıkmaz.",
+  "nodeLink.expires": "Bir kez, {time} saatine kadar çalışır.",
+  "nodeLink.needsKey": "Bu cihaz ağın QR kodunu tarayarak katılmadı, bu yüzden ağın anahtarına kefil olamaz. Bağlantı kodunu bunun yerine sunucu telefonun paylaşım ekranından veya tarayarak katılmış bir cihazdan gösterin.",
+  "nodeLink.again": "Yeni kod",
+  "admin.peerLinking": "bağlanıyor…",
+  "admin.peerLinkRefused": "Bağlantı kodu reddedildi (süresi dolmuş veya kullanılmış). O ağdan yenisini isteyin.",
 
   "unreadBadge.label": "{n} okunmamış",
 
@@ -394,9 +396,10 @@ export const tr: Translation = {
   "gate.pendingTitle": "Sıradasınız",
   "gate.pendingBody":
     "Bu düğümdeki birinin sizi içeri almasını bekliyorsunuz. Onaylandığınız anda bu ekran güncellenir.",
+  "gate.inviteRefused": "Bu davet kodunun süresi doldu. Sunucunun ekranındaki kodu yeniden tarayın veya içeri alınmayı burada bekleyin.",
   "gate.connection": "Bağlantı: {status}",
   "gate.needsQrTitle": "Güvenli bağlanmak için katılım QR kodunu tarayın",
-  "gate.needsQrBody": "Bağlanmak için bu düğümün katılım QR kodunu cihazınızla tarayın — güvenli başka bir yol yok.",
+  "gate.needsQrBody": "Bağlanmak için bu düğümün katılım QR kodunu cihazınızla tarayın. Güvenli başka bir yol yok.",
 
   "confirm.deleteMessage": "Bu mesaj silinsin mi? Bu geri alınamaz.",
 
@@ -432,6 +435,13 @@ export const tr: Translation = {
   "error.invalid_admin_claim": "Geçersiz yönetici alma isteği",
   "error.invalid_admin_secret": "Geçersiz yönetici sırrı",
   "error.invalid_attachment_upload": "Geçersiz ek yükleme isteği",
+  "error.invalid_invite_redeem": "Geçersiz davet isteği",
+  "error.invite_invalid": "Bu davet kodunun süresi doldu veya geçerli değil",
+  "error.invite_not_allowed": "Bu hesap davet kullanamaz",
+  "error.invalid_link_request": "Geçersiz bağlantı isteği",
+  "error.link_code_invalid": "Bu bağlantı kodunun süresi doldu veya zaten kullanıldı",
+  "error.link_unencrypted": "Bağlantı için şifreli bir bağlantı gerekir",
+  "error.link_peer_limit": "Bu düğüm zaten olabilecek en çok eşle eşitleniyor",
   "error.invalid_avatar_upload": "Geçersiz avatar görseli yükleme isteği",
   "error.invalid_channel_create": "Geçersiz kanal oluşturma isteği",
   "error.invalid_channel_update": "Geçersiz kanal güncelleme isteği",
@@ -474,7 +484,7 @@ export const tr: Translation = {
   "error.passphrase_required": "Parola başlatma stratejisi bir parola gerektirir",
   "error.message_streaming": "Bu mesaj hâlâ yazılıyor",
   "error.session_invalid": "Bu oturum artık geçerli değil",
-  "error.thread_has_replies": "Bu konuda başkalarının yanıtları var — yalnızca bir yönetici silebilir",
+  "error.thread_has_replies": "Bu konuda başkalarının yanıtları var. Yalnızca bir yönetici silebilir",
   "error.too_many_attempts": "Çok fazla deneme",
   "error.too_many_claim_attempts": "Çok fazla alma denemesi; daha sonra tekrar deneyin",
   "error.message_create_failed": "Mesaj oluşturulamadı",
@@ -500,9 +510,9 @@ export const tr: Translation = {
   "admin.deleteChannel": "Sil",
   "admin.deleteChannelAria": "{name} kanalını kalıcı olarak sil",
   "admin.deleteChannelConfirm":
-    "“{name}” kalıcı olarak silinsin mi? İçindeki tüm mesajlar ve ekler kaldırılır ve geri yüklenemez — arşivlemenin aksine bu işlem geri alınamaz.",
+    "“{name}” kalıcı olarak silinsin mi? İçindeki tüm mesajlar ve ekler kaldırılır ve geri yüklenemez. Arşivlemenin aksine bu işlem geri alınamaz.",
   "gate.needsQrKeyChanged":
-    "Bu düğümün anahtarı artık taradığınız anahtarla eşleşmiyor — ana bilgisayar yeniden başlatılmış veya anahtarı sıfırlamış olabilir veya bu ağ iddia ettiği ağ olmayabilir. Yeniden bağlanmak için düğümün güncel katılma QR kodunu tarayın.",
+    "Bu düğümün anahtarı artık taradığınız anahtarla eşleşmiyor. Ana bilgisayar yeniden başlatılmış veya anahtarı sıfırlamış olabilir veya bu ağ iddia ettiği ağ olmayabilir. Yeniden bağlanmak için düğümün güncel katılma QR kodunu tarayın.",
   "message.report": "Bildir",
   "message.removedByModerator": "Bir moderatör tarafından kaldırıldı",
   "report.messageTitle": "Bu mesajı bildir",
@@ -522,7 +532,7 @@ export const tr: Translation = {
   "report.error": "Bildirim gönderilemedi",
   "report.cancel": "İptal",
   "composer.timedOut": "Bir moderatör sizi geçici olarak susturdu; şu anda paylaşım yapamazsınız.",
-  "composer.archived": "Bu kanal arşivlendi — okuyabilirsiniz ancak yeni bir şey paylaşılamaz.",
+  "composer.archived": "Bu kanal arşivlendi. Okuyabilirsiniz ancak yeni bir şey paylaşılamaz.",
   "sidebar.archivedTag": "arşivlendi",
   "moderation.timeout": "Geçici sustur (1 sa)",
   "moderation.timeoutClear": "Susturmayı kaldır",
@@ -556,7 +566,7 @@ export const tr: Translation = {
   "common.back": "Geri",
   "common.dismiss": "Kapat",
   "devMode.banner":
-    "⚠️ Geliştirici Modu — mesajlar şifrelenmeden gönderilir ve bu ağdaki herkes tarafından okunabilir. Gizli hiçbir şey için kullanmayın.",
+    "⚠️ Geliştirici Modu: mesajlar şifrelenmeden gönderilir ve bu ağdaki herkes tarafından okunabilir. Gizli hiçbir şey için kullanmayın.",
   "composer.fileTooLarge": "{name} göndermek için çok büyük (sınır {limit}).",
   "conversation.notFoundTitle": "Sohbet kullanılamıyor",
   "conversation.notFoundBody": "Bu kanal yok, kaldırıldı veya bu kanalın üyesi değilsiniz.",
@@ -566,7 +576,7 @@ export const tr: Translation = {
   "app.crashReload": "Yeniden yükle",
   "transport.pinChangeTitle": "Bu bağlantı farklı bir güvenlik anahtarı içeriyor",
   "transport.pinChangeBody":
-    "Bu düğüme farklı bir anahtarla katıldınız. Yeni anahtarı yalnızca düğümün güncel katılma QR kodunu az önce bizzat taradıysanız kullanın — aksi hâlde biri onun kimliğine bürünüyor olabilir.",
+    "Bu düğüme farklı bir anahtarla katıldınız. Yeni anahtarı yalnızca düğümün güncel katılma QR kodunu az önce bizzat taradıysanız kullanın. Aksi hâlde biri onun kimliğine bürünüyor olabilir.",
   "transport.pinChangeCurrent": "Katıldığınız anahtar: {fingerprint}",
   "transport.pinChangeNew": "Bu bağlantıdaki anahtar: {fingerprint}",
   "transport.pinChangeAccept": "Yeni anahtarı kullan",

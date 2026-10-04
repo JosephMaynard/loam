@@ -54,7 +54,7 @@ export const QRCode = memo(function QRCode({ value, size = 220, ecLevel }: QRCod
   if (!rows) {
     return (
       <View style={[styles.fallback, { width: size, height: size }]}>
-        <Text style={styles.fallbackText}>QR unavailable — use the text below</Text>
+        <Text style={styles.fallbackText}>QR unavailable: use the text below</Text>
       </View>
     );
   }

@@ -133,6 +133,47 @@ class LoamHotspotModule : Module() {
       }
     }
 
+    // Close LOAM completely: the hotspot, the foreground service, screen pinning, the task (so it leaves the
+    // recents list), then the process itself. The embedded Node runtime can only start once per process, so
+    // after an Emergency reset this is the only way back to a clean start (the setup screens), rather than a
+    // reopened activity reattaching to the old, wiped runtime. Best effort at every step; the process exit
+    // is deferred a moment so the task removal can finish on the UI thread.
+    Function("closeApp") {
+      try {
+        reservation?.close()
+      } catch (error: Throwable) {
+        android.util.Log.w("LoamHotspot", "closeApp: hotspot close failed", error)
+      }
+      reservation = null
+      appContext.reactContext?.applicationContext?.let { context ->
+        try {
+          LoamHostService.stop(context)
+        } catch (error: Throwable) {
+          android.util.Log.w("LoamHotspot", "closeApp: stopHostService failed", error)
+        }
+      }
+      val activity = appContext.currentActivity
+      if (activity == null) {
+        android.os.Process.killProcess(android.os.Process.myPid())
+      } else {
+        activity.runOnUiThread {
+          try {
+            activity.stopLockTask()
+          } catch (error: Throwable) {
+            // Not pinned.
+          }
+          try {
+            activity.finishAndRemoveTask()
+          } catch (error: Throwable) {
+            android.util.Log.w("LoamHotspot", "closeApp: finishAndRemoveTask failed", error)
+          }
+          Handler(Looper.getMainLooper()).postDelayed({
+            android.os.Process.killProcess(android.os.Process.myPid())
+          }, 300)
+        }
+      }
+    }
+
     Function("stopKiosk") {
       val activity = appContext.currentActivity
       if (activity != null) {

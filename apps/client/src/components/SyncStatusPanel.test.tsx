@@ -79,4 +79,23 @@ describe("SyncStatusPanel", () => {
     expect(host.textContent).toContain("http://192.168.0.11:3000");
     expect(host.textContent).toContain("connection refused");
   });
+
+  it("shows each peer's link state and hands every report to the form", async () => {
+    report = {
+      enabled: true,
+      intervalMs: 60_000,
+      peers: [
+        { url: "http://192.168.4.20:3000", link: "linking" },
+        { url: "http://192.168.4.21:3000", link: "refused" },
+      ],
+    } as SyncStatusReport;
+    const onReport = vi.fn();
+
+    const host = mount(<SyncStatusPanel onReport={onReport} />);
+    await flush();
+
+    expect(host.textContent).toContain("linking…");
+    expect(host.textContent).toContain("link code was refused");
+    expect(onReport).toHaveBeenCalledWith(expect.objectContaining({ peers: report.peers }));
+  });
 });

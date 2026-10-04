@@ -1,18 +1,23 @@
 import Constants from 'expo-constants';
 import { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { readWifiStationInfo, type WifiStationInfo } from '../../modules/loam-hotspot';
+import { DisplayModeScreen } from '@/components/display-mode';
 import { HostPanel } from '@/components/host-panel';
+import { LinkNodeScreen } from '@/components/link-node';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { setHostMode, useHostMode } from '@/hooks/use-host-mode';
 import { ensureHotspot, shutdownHotspot, useHotspot } from '@/hooks/use-hotspot';
+import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
+import type { BridgeChannel } from '@/lib/db-encryption';
 import { deriveWifiJoinDisplay, toWifiPanelState, type HostMode } from '@/lib/host-mode';
 import { ensureHostService, hostingNotificationDenied } from '@/lib/host-service';
+import { t, type AppCatalogKey } from '@/lib/i18n';
 import { deriveJoinDisplay, toHostPanelState, type HostInterface } from '@/lib/join-display';
 
 // How often Wi-Fi mode re-reads the phone's Wi-Fi state while the share screen is open — the same cadence
@@ -20,17 +25,9 @@ import { deriveJoinDisplay, toHostPanelState, type HostInterface } from '@/lib/j
 const WIFI_STATION_POLL_MS = 5_000;
 
 /** The segmented control's options and the one line under it that says what each means. */
-const MODE_OPTIONS: { mode: HostMode; label: string; help: string }[] = [
-  {
-    mode: 'hotspot',
-    label: 'Hotspot',
-    help: 'This phone creates its own Wi-Fi network. Works with no internet or router.',
-  },
-  {
-    mode: 'wifi',
-    label: 'Wi-Fi',
-    help: 'Everyone already on the same Wi-Fi as this phone can join. No hotspot, no extra permission.',
-  },
+const MODE_OPTIONS: { mode: HostMode; label: AppCatalogKey; help: AppCatalogKey }[] = [
+  { mode: 'hotspot', label: 'share.hotspot', help: 'share.hotspotHelp' },
+  { mode: 'wifi', label: 'share.wifi', help: 'share.wifiHelp' },
 ];
 
 type HostShareOverlayProps = {
@@ -49,12 +46,16 @@ type HostShareOverlayProps = {
   interfaces: HostInterface[];
   /** Peer addresses of the devices connected to LOAM from off this phone (launcher-reported). */
   connectedClients: string[];
-  /** Whether to keep the screen on while hosting (for a host left on display). */
-  keepAwake: boolean;
-  onKeepAwakeChange: (value: boolean) => void;
-  /** Whether to pin the app (Android screen pinning) so it can't be left without the device PIN. */
-  kiosk: boolean;
-  onKioskChange: (value: boolean) => void;
+  /**
+   * Display mode: the join codes full screen, for a phone left out on display. While it's on, the caller
+   * keeps the screen awake and pins the app (Android screen pinning), and this overlay shows the codes.
+   */
+  displayMode: boolean;
+  onDisplayModeChange: (value: boolean) => void;
+  /** The network's name, shown above the codes in display mode. */
+  nodeName?: string;
+  /** The launcher bridge, for a "Link a node" code (lib/link-code.ts). */
+  channel: BridgeChannel;
 };
 
 /**
@@ -73,14 +74,16 @@ export function HostShareOverlay({
   addresses,
   interfaces,
   connectedClients,
-  keepAwake,
-  onKeepAwakeChange,
-  kiosk,
-  onKioskChange,
+  displayMode,
+  onDisplayModeChange,
+  nodeName,
+  channel,
 }: HostShareOverlayProps) {
+  useAppLocale();
   const hotspot = useHotspot();
   const { mode, loaded } = useHostMode();
   const theme = useTheme();
+  const [linkOpen, setLinkOpen] = useState(false);
   const version = Constants.expoConfig?.version ?? '?';
   // The last Wi-Fi station read (Wi-Fi mode only); `undefined` until the first read after opening.
   const [station, setStation] = useState<WifiStationInfo | undefined>();
@@ -169,7 +172,7 @@ export function HostShareOverlay({
           <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
             <ThemedView style={styles.header}>
               <Pressable onPress={onClose} accessibilityRole="button" hitSlop={Spacing.two}>
-                <ThemedText type="link">Done</ThemedText>
+                <ThemedText type="link">{t('share.done')}</ThemedText>
               </Pressable>
             </ThemedView>
             <ScrollView
@@ -178,7 +181,7 @@ export function HostShareOverlay({
               <View style={styles.modeBlock}>
                 <View
                   accessibilityRole="radiogroup"
-                  accessibilityLabel="How people join"
+                  accessibilityLabel={t('share.howPeopleJoin')}
                   style={[styles.segmented, { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected }]}>
                   {MODE_OPTIONS.map((option) => {
                     const selected = option.mode === mode;
@@ -190,46 +193,61 @@ export function HostShareOverlay({
                         accessibilityState={{ checked: selected }}
                         style={[styles.segment, selected && { backgroundColor: theme.accent }]}>
                         <ThemedText type="smallBold" style={selected ? { color: theme.onAccent } : undefined}>
-                          {option.label}
+                          {t(option.label)}
                         </ThemedText>
                       </Pressable>
                     );
                   })}
                 </View>
                 <ThemedText type="small" themeColor="textSecondary" style={styles.modeHelp}>
-                  {help}
+                  {help ? t(help) : null}
                 </ThemedText>
               </View>
 
               {/* Held until the stored mode is known, so a Wi-Fi host doesn't flash the hotspot steps. */}
               {loaded ? <HostPanel state={state} /> : null}
 
+              {/* Display mode: "kiosk" and "keep screen on" as one plainly named choice. The screen staying
+                  on only matters for showing the codes; the network itself keeps running with the screen
+                  off (the foreground service and its wake lock), so there's no separate switch for it. */}
               <ThemedView type="backgroundElement" style={styles.settingRow}>
                 <ThemedView style={styles.settingText}>
-                  <ThemedText type="smallBold">Keep screen on</ThemedText>
+                  <ThemedText type="smallBold">{t('share.displayTitle')}</ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    For a host left on display (e.g. taped to a wall). Uses more battery.
+                    {t('share.displayBody')}
                   </ThemedText>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => onDisplayModeChange(true)}
+                    style={[styles.displayButton, { backgroundColor: theme.primary }]}>
+                    <ThemedText type="smallBold" style={{ color: '#ffffff' }}>
+                      {t('share.displayStart')}
+                    </ThemedText>
+                  </Pressable>
                 </ThemedView>
-                <Switch value={keepAwake} onValueChange={onKeepAwakeChange} />
               </ThemedView>
 
+              {/* Linking another LOAM node: only ever through a code shown here on purpose (or from the admin
+                  sync settings), never from the ordinary join code above. */}
               <ThemedView type="backgroundElement" style={styles.settingRow}>
                 <ThemedView style={styles.settingText}>
-                  <ThemedText type="smallBold">Kiosk mode</ThemedText>
+                  <ThemedText type="smallBold">{t('link.title')}</ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    Pins LOAM to the screen so it can&apos;t be left. To exit, swipe up and hold (or
-                    hold Back + Recents on 3-button nav) — the phone&apos;s own screen-lock PIN is
-                    required (set one first).
+                    {t('link.summary')}
                   </ThemedText>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={!loaded}
+                    onPress={() => setLinkOpen(true)}
+                    style={[styles.displayButton, styles.linkButton, { borderColor: theme.primary }]}>
+                    <ThemedText type="smallBold">{t('link.show')}</ThemedText>
+                  </Pressable>
                 </ThemedView>
-                <Switch value={kiosk} onValueChange={onKioskChange} />
               </ThemedView>
 
               {hostingNotificationDenied() ? (
                 <ThemedText type="small" themeColor="textSecondary">
-                  Notifications are off for LOAM, so Android hides the “LOAM is hosting” notice. Hosting
-                  still works; allow notifications in the system settings to see it.
+                  {t('share.notificationsOff')}
                 </ThemedText>
               ) : null}
 
@@ -239,6 +257,17 @@ export function HostShareOverlay({
             </ScrollView>
           </SafeAreaView>
         </ThemedView>
+        {loaded ? (
+          <DisplayModeScreen
+            nodeName={nodeName}
+            onExit={() => onDisplayModeChange(false)}
+            state={state}
+            visible={visible && displayMode}
+          />
+        ) : null}
+        {loaded ? (
+          <LinkNodeScreen channel={channel} onClose={() => setLinkOpen(false)} state={state} visible={visible && linkOpen} />
+        ) : null}
       </SafeAreaProvider>
     </Modal>
   );
@@ -300,5 +329,15 @@ const styles = StyleSheet.create({
   version: {
     textAlign: 'center',
     paddingTop: Spacing.two,
+  },
+  linkButton: {
+    borderWidth: 1,
+  },
+  displayButton: {
+    alignSelf: 'flex-start',
+    marginTop: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.three,
   },
 });

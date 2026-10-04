@@ -13,12 +13,12 @@ export type DownloadDisclosure = { title: string; message: string; confirmLabel:
 export function modelDownloadDisclosure(name: string, sizeLabel: string | undefined): DownloadDisclosure {
   const sizePart = sizeLabel
     ? `This downloads ${sizeLabel}.`
-    : "The size of a custom model isn't known until the download starts — models are usually 0.5–5 GB.";
+    : "The size of a custom model isn't known until the download starts: models are usually 0.5–5 GB.";
   return {
     title: sizeLabel ? `Download ${name} (${sizeLabel})?` : `Download ${name}?`,
     message:
       `${sizePart} Use Wi-Fi if you can: on mobile data or a metered connection this can use a large part ` +
-      'of your data allowance and may cost money. Keep LOAM open until it finishes — leaving the app ' +
+      'of your data allowance and may cost money. Keep LOAM open until it finishes: leaving the app ' +
       'cancels the download.',
     confirmLabel: 'Download',
   };

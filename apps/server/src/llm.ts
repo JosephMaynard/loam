@@ -16,7 +16,7 @@ import type { Runtime } from "./runtime.js";
 export const MAX_CONCURRENT_ASSISTANT_REPLIES = 2;
 
 /** The body an assistant reply is left with when it was cut off (crash/restart mid-stream) before any text. */
-export const INTERRUPTED_ASSISTANT_BODY = "(No response — the assistant was interrupted.)";
+export const INTERRUPTED_ASSISTANT_BODY = "(No response: the assistant was interrupted.)";
 
 /** Build the LLM layer over the runtime view: bot user, backend selection, and the streaming assistant reply. */
 export function createLlmLayer(rt: Runtime) {

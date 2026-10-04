@@ -20,6 +20,15 @@ export const Colors = {
     onAccent: '#1d2622',
     /** Moss green: borders and emphasis. */
     primary: '#2f5f4c',
+    /** Destructive actions (Emergency reset), with its legible ink. */
+    danger: '#b3261e',
+    onDanger: '#ffffff',
+    /** Moss for icons, radio marks and selected outlines: legible on the background in both schemes. */
+    primaryInk: '#2f5f4c',
+    /** A faint moss wash: icon tiles and selected choices. */
+    primarySoft: '#e4ece6',
+    /** Hairlines: card outlines and dividers. */
+    border: '#e1dcd1',
   },
   dark: {
     text: '#e9ebe6',
@@ -30,6 +39,11 @@ export const Colors = {
     accent: '#f26b1d',
     onAccent: '#1d2622',
     primary: '#3a745b',
+    danger: '#e5534b',
+    onDanger: '#1d2622',
+    primaryInk: '#8cc4a8',
+    primarySoft: '#1b2a22',
+    border: '#272d29',
   },
 } as const;
 

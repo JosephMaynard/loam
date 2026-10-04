@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { hostJoinDisplay, isPrivate10or172, joinUrl, preferredLanAddress } from './join-url';
+import { hostJoinDisplay, isPrivate10or172, joinUrl, preferredLanAddress, typedAddress, withInviteCode } from './join-url';
 
 describe('joinUrl', () => {
   it('targets the discovered hotspot address when the hotspot is running, never a reported LAN address', () => {
@@ -89,5 +89,24 @@ describe('hostJoinDisplay', () => {
       serverUrl: 'http://192.168.86.23:3000',
       addresses: ['192.168.86.23'],
     });
+  });
+});
+
+describe('withInviteCode', () => {
+  it('appends the code after the key, or starts a fragment without one', () => {
+    expect(withInviteCode('#k=abc', 'CODE_1')).toBe('#k=abc&i=CODE_1');
+    expect(withInviteCode('', 'CODE_1')).toBe('#i=CODE_1');
+  });
+
+  it('leaves the fragment alone with no code or a malformed one', () => {
+    expect(withInviteCode('#k=abc', undefined)).toBe('#k=abc');
+    expect(withInviteCode('#k=abc', 'a&k=evil')).toBe('#k=abc');
+  });
+});
+
+describe('typedAddress', () => {
+  it('drops the key and invite code that only work scanned', () => {
+    expect(typedAddress('http://10.0.2.16:3000#k=abc&i=CODE')).toBe('http://10.0.2.16:3000');
+    expect(typedAddress('http://10.0.2.16:3000')).toBe('http://10.0.2.16:3000');
   });
 });

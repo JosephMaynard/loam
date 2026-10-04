@@ -371,10 +371,12 @@ export function createTransportServer(ctx: AppContext) {
    * from encryption. Both carry public data only (DMs/private channels/shadow-banned authors never
    * export). See `sync-transport.ts` (the puller half).
    */
+  // `/api/sync/link` (sync-links.ts) is the same kind of node-to-node call, sent by the same client.
   const DIRECT_SEALED_SYNC_ROUTES = new Set([
     "/api/sync/digest",
     "/api/sync/messages",
     "/api/sync/attachment",
+    "/api/sync/link",
   ]);
 
   /**
@@ -387,8 +389,9 @@ export function createTransportServer(ctx: AppContext) {
    * from the transport-session requirement ONLY for an authorized bridge caller (loopback AND the launcher's
    * per-boot host token — `meshBridgeCallerAuthorized`), so the exemption can never widen LAN exposure.
    */
-  // `/api/host/clients` (the share screen's "N phones connected") rides the same launcher-only channel.
-  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients"]);
+  // `/api/host/clients` (the share screen's "N phones connected"), `/api/host/invite` (its invite code) and
+  // `/api/host/link-code` (its "Link a node" code) ride the same launcher-only channel.
+  const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients", "/api/host/invite", "/api/host/link-code"]);
 
   /**
    * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches (Sol P2-6).
@@ -770,11 +773,19 @@ export function registerTransportRoutes(ctx: AppContext): void {
     // second mint, never a rebind to a different identity. Re-stamp the response's bound sequence `s` to
     // THIS request's sequence (docs/20 §9) so a retrying client's response-binding check passes — the
     // user + token are identical, only the sequence it answers differs. `m`/`p` are constant.
+    // The user is read live, never from the cached result: the identity was bound with whatever the record
+    // said then, and an admin claim or a join approval since would otherwise be undone on the client's next
+    // boot pass (the host's own WebView looped back into the queue that way).
     if (activeSession.authMode === "bound") {
       if (!activeSession.resumeResult) {
         return reply.code(409).send(errorBody("Session already bound"));
       }
-      return { ...activeSession.resumeResult, s: ctx.transportRequestSeq.get(request) };
+      const liveUser = ctx.data.users.find((user) => user.id === activeSession.userId);
+      return {
+        ...activeSession.resumeResult,
+        ...(liveUser ? { currentUser: ctx.rolesVisibleUser(liveUser) } : {}),
+        s: ctx.transportRequestSeq.get(request),
+      };
     }
 
     const body = request.body as { token?: unknown } | undefined;

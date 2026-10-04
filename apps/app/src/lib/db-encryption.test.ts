@@ -37,6 +37,7 @@ const {
   setDbEncryptionMode,
   setDbModeHint,
   setPassphraseCandidate,
+  setPendingNewNetwork,
 } = await import("@/lib/db-encryption");
 type BridgeChannel = import("@/lib/db-encryption").BridgeChannel;
 type DbEncryptionMode = import("@/lib/db-encryption").DbEncryptionMode;
@@ -301,6 +302,38 @@ describe("registerDbEncryption", () => {
       expect(channel.posted).toEqual([{ name: "loam-db-key-response", payload: { mode: "error" } }]);
     } finally {
       cleanup();
+    }
+  });
+
+  it("sends a new network with every key response until the launcher acknowledges it, never with a read error", async () => {
+    const config = { node: { name: "Camp", locale: "en" } };
+    setPendingNewNetwork(config);
+    const channel = makeFakeChannel();
+    const cleanup = registerDbEncryption(channel);
+    const ask = async (requestId: string) => {
+      channel.emit("loam-db-key-request", { requestId });
+      await flushMicrotasks();
+      return (channel.posted.at(-1)!.payload as { newNetwork?: { id: string; config: unknown } }).newNetwork;
+    };
+    try {
+      failSecureStoreItem("loam-db-encryption-mode", new Error("Keystore unavailable"));
+      expect(await ask("r1")).toBeUndefined();
+      clearSecureStoreFailure("loam-db-encryption-mode");
+
+      // The launcher timed out on r2's answer and asks again: the same operation is resent.
+      const first = await ask("r2");
+      expect(first).toEqual({ id: expect.stringMatching(/^[0-9a-f]{24}$/), config });
+      expect(await ask("r3")).toEqual(first);
+
+      // An acknowledgement for some other operation changes nothing; the right one ends it.
+      channel.emit("loam-new-network-applied", { id: "someone-else" });
+      expect(await ask("r4")).toEqual(first);
+      channel.emit("loam-new-network-applied", { id: first!.id });
+      // Later requests (an unlock retry, a wipe's restart) never carry it again.
+      expect(await ask("r5")).toBeUndefined();
+    } finally {
+      cleanup();
+      setPendingNewNetwork(undefined);
     }
   });
 

@@ -28,12 +28,14 @@ import { Sidebar } from "./components/Sidebar";
 import { ToastStack, type ToastItem } from "./components/ToastStack";
 import { MeshView } from "./views/MeshView";
 import { PeopleView } from "./views/PeopleView";
+import { PrivacyView } from "./views/PrivacyView";
 import { SearchView } from "./views/SearchView";
 import { SettingsView } from "./views/SettingsView";
 import { ApiError, fetchJson, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
 import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
 import { confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity } from "./lib/identity";
+import { takeInviteCode } from "./lib/invite";
 import {
   compareCreatedAt,
   conversationMessages,
@@ -408,7 +410,8 @@ function LoamApp() {
     routeState.screen === "people" ||
     routeState.screen === "admin" ||
     routeState.screen === "search" ||
-    routeState.screen === "mesh"
+    routeState.screen === "mesh" ||
+    routeState.screen === "privacy"
       ? "settings-open"
       : undefined,
   ]
@@ -476,6 +479,8 @@ function LoamApp() {
   // Set when this node requires transport encryption (docs/08) but no host public key is available
   // from a scanned join QR — there is no safe way to talk to it, so the app renders a gate instead.
   const [needsQr, setNeedsQr] = useState<false | "missing" | "changed">(false);
+  // An invite code from the host's screen was refused (usually expired): the queue still works, so say so.
+  const [inviteRefused, setInviteRefused] = useState(false);
   // True until the node confirmed this browser's identity (or couldn't be reached, or IDENTITY_GATE_MAX_MS
   // passed): the shell renders a splash instead of hydrated content that might belong to a previous identity.
   const [identityGate, setIdentityGate] = useState(true);
@@ -1172,6 +1177,35 @@ function LoamApp() {
     [upsertUsers],
   );
 
+  /**
+   * Redeem an invite code from the host's screen (lib/invite.ts): admits this session if it is waiting in
+   * the approval queue. Resolves to the admitted user, or undefined when the code was refused (expired, or
+   * the request failed); never throws, since the queue is still a working fallback.
+   */
+  const redeemInvite = useCallback(
+    async (code: string): Promise<User | undefined> => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await encryptedFetch("POST", "/api/access/redeem", { code }, { signal: controller.signal });
+        if (!response.ok) {
+          return undefined;
+        }
+        const user = UserSchema.parse(await response.json());
+        setCurrentUser(user);
+        upsertUsers([user]);
+        setConfig((previous) => (previous ? { ...previous, currentUser: user } : previous));
+        return user;
+      } catch {
+        return undefined;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
   const claimAdmin = useCallback(
     async (secret: string) => {
       const controller = new AbortController();
@@ -1192,6 +1226,7 @@ function LoamApp() {
         setCurrentUser(user);
         upsertUsers([user]);
         setConfig((previous) => (previous ? { ...previous, currentUser: user } : previous));
+        return user;
       } finally {
         window.clearTimeout(timeout);
       }
@@ -1339,7 +1374,7 @@ function LoamApp() {
       console.warn(
         "%cLOAM DEVELOPER MODE",
         "font-weight:bold;color:#b91c1c",
-        "— transport encryption is OFF. Traffic is plaintext and readable by anyone on this LAN. Never use for real messaging.",
+        "Transport encryption is OFF. Traffic is plaintext and readable by anyone on this LAN. Never use for real messaging.",
       );
     }
   }, [config?.networkConfig.devMode]);
@@ -1497,17 +1532,19 @@ function LoamApp() {
           previous.filter((user) => user.id !== currentUser.id || user.id === nextConfig.currentUser.id),
         );
 
-        // The Android host's own WebView (never a LAN joiner) carries the launcher's per-boot host token:
-        // claim admin with it (`hostDevice` bootstrap, review 2026-09-04). The token is consumed only on
-        // SUCCESS — a transient failure (a rate-limited claim, a blip) keeps it for the next boot pass, since
-        // with `hostDevice` there is no other way for this node to gain an admin (round-2 review). One claim
-        // at a time; the server treats a claim by an existing admin as a no-op anyway.
+        // The Android host's own WebView (never a LAN joiner) is injected with the launcher's per-boot host
+        // token: claim admin with it (`hostDevice` bootstrap, review 2026-09-04). It is kept for the life of
+        // the page: a failed claim (a rate limit, a blip) retries on the next boot pass, and a new
+        // identity (after a wipe) claims again, since with `hostDevice` there is no other way for this node to
+        // gain an admin. One claim at a time; the server treats a claim by an existing admin as a no-op. Boot
+        // then carries on as the claimed admin: the snapshot it started from still says pending on an
+        // approval-only network, and acting on that would skip loading the channels.
         const hostToken = window.__loamHostDeviceToken;
         if (typeof hostToken === "string" && hostToken.length > 0 && !nextConfig.currentUser.isAdmin && !hostClaimInFlightRef.current) {
           hostClaimInFlightRef.current = true;
           try {
-            await claimAdmin(hostToken);
-            window.__loamHostDeviceToken = undefined;
+            const claimed = await claimAdmin(hostToken);
+            nextConfig = { ...nextConfig, currentUser: claimed };
           } catch {
             // Keep the token; retried on the next resync (WS reconnect / boot retry).
           } finally {
@@ -1518,11 +1555,30 @@ function LoamApp() {
           }
         }
 
+        // A newcomer who scanned the host's screen carries an invite code: redeem it instead of queueing.
+        if (nextConfig.currentUser.pending) {
+          const inviteCode = takeInviteCode();
+          if (inviteCode) {
+            const admitted = await redeemInvite(inviteCode);
+            if (!active) {
+              return;
+            }
+            if (admitted) {
+              nextConfig = { ...nextConfig, currentUser: admitted };
+            } else {
+              setInviteRefused(true);
+            }
+          }
+        }
+
         if (nextConfig.currentUser.banned || nextConfig.currentUser.pending) {
           // Gated sessions must not keep previously hydrated content around (a banned user's
-          // cached history stays readable otherwise): clear memory and the IndexedDB caches.
+          // cached history stays readable otherwise): clear memory and the IndexedDB caches. That includes
+          // the DM inbox: its partners and unread dots, and any inbox request still in flight.
           setChannels([]);
           setMessages([]);
+          invalidateInboxRequests();
+          setDmInbox(undefined);
 
           for (const storeName of ["channels", "messages"] as const) {
             const cachedRecords = await getAllRecords<{ id: string }>(storeName).catch(() => []);
@@ -1618,6 +1674,7 @@ function LoamApp() {
     };
   }, [
     claimAdmin,
+    redeemInvite,
     currentUser.id,
     currentUser.banned,
     currentUser.pending,
@@ -2195,6 +2252,7 @@ function LoamApp() {
       <GateScreen>
         <h1>{t("gate.pendingTitle")}</h1>
         <p>{t("gate.pendingBody")}</p>
+        {inviteRefused ? <p>{t("gate.inviteRefused")}</p> : null}
         <p className={`gate-status status-pill status-${connection}`}>
           <span aria-hidden="true" className="status-dot" />
           {t("gate.connection", {
@@ -2268,6 +2326,8 @@ function LoamApp() {
         <SearchView blockedUserIds={blockedUserIds} channels={channels} currentUser={currentUser} usersById={usersById} />
       ) : routeState.screen === "mesh" && config?.networkConfig.enableMesh ? (
         <MeshView />
+      ) : routeState.screen === "privacy" ? (
+        <PrivacyView />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           blockedUserIds={blockedUserIds}
@@ -2275,7 +2335,9 @@ function LoamApp() {
           currentUser={currentUser}
           onSetBlocked={setBlocked}
           usersById={usersById}
-          onClaimAdmin={claimAdmin}
+          onClaimAdmin={async (secret) => {
+            await claimAdmin(secret);
+          }}
           onUpdateCurrentUser={updateCurrentUser}
           onUploadAvatarImage={uploadAvatarImage}
           onWipeDevice={() => purgeLocalData("device")}

@@ -80,7 +80,7 @@ function computeDbBootEnv(result, ctx) {
       bootError: {
         message:
           'Could not determine the on-device encryption mode this boot (a device security-store read ' +
-          'failed, the request timed out, or the response was malformed) — refusing to start unencrypted. ' +
+          'failed, the request timed out, or the response was malformed): refusing to start unencrypted. ' +
           'Retry once the app is responsive.',
         code: 'db_encryption_locked',
       },
@@ -111,7 +111,7 @@ function computeDbBootEnv(result, ctx) {
           'Encryption mode "' +
           mode +
           '" is selected but no key is available yet (no passphrase entered, or a device Keystore/RNG ' +
-          'failure) — refusing to start unencrypted.' +
+          'failure): refusing to start unencrypted.' +
           (mode === 'passphrase' ? ' Enter the passphrase to unlock.' : ' Retry, or open Encryption settings.'),
         code: 'db_encryption_locked',
       },
@@ -138,7 +138,7 @@ function computeDbBootEnv(result, ctx) {
         message:
           'Encryption mode "' +
           mode +
-          '" is selected, but the encrypted-storage (SQLCipher) module failed to load on this device — ' +
+          '" is selected, but the encrypted-storage (SQLCipher) module failed to load on this device: ' +
           'refusing to start unencrypted. Retry, or switch encryption off to start WITHOUT encryption.',
         code: DB_ENCRYPTION_DRIVER_MISSING_CODE,
       },

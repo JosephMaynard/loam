@@ -36,7 +36,7 @@ export const fr: Translation = {
   "composer.send": "Envoyer",
 
   "composer.shareLocation": "Partager la position",
-  "composer.shareLocationHint": "Partagez un lieu — une étiquette fonctionne même sans GPS",
+  "composer.shareLocationHint": "Partagez un lieu: une étiquette fonctionne même sans GPS",
   "composer.locationLabel": "Étiquette de position",
   "composer.locationLabelPlaceholder": "p. ex. la porte nord",
   "composer.locationLat": "Latitude (-90 à 90)",
@@ -83,7 +83,7 @@ export const fr: Translation = {
   "settings.securityEyebrow": "Sécurité",
   "settings.wipeTitle": "Effacer cet appareil",
   "settings.wipeBody":
-    "Efface la copie locale de ce navigateur — messages, votre identité et données en cache. Cela n’efface ni le nœud ni l’appareil de quelqu’un d’autre.",
+    "Efface la copie locale de ce navigateur: messages, votre identité et données en cache. Cela n’efface ni le nœud ni l’appareil de quelqu’un d’autre.",
   "settings.wipeConfirmBefore": "Tapez",
   "settings.wipeConfirmAfter": "pour confirmer",
   "settings.wiping": "Effacement…",
@@ -115,7 +115,7 @@ export const fr: Translation = {
   "moderation.loading": "Chargement des personnes…",
   "moderation.empty": "Aucune personne à afficher pour l’instant.",
   "moderation.promoteConfirm":
-    "Faire de {name} un administrateur ? L’accès admin ne peut pas être révoqué d’ici — seulement en reconfigurant le nœud.",
+    "Faire de {name} un administrateur ? L’accès admin ne peut pas être révoqué d’ici, seulement en reconfigurant le nœud.",
   "moderation.thatsYou": "C’est vous.",
   "moderation.adminsProtected": "Les administrateurs ne peuvent pas être modérés.",
   "moderation.roleModerator": "Modérateur",
@@ -138,7 +138,7 @@ export const fr: Translation = {
   "admin.flagReactions": "Réactions",
   "admin.flagMarkdown": "Rendu Markdown",
   "admin.flagAttachments": "Images jointes",
-  "admin.flagPresence": "Présence en ligne (révèle qui est connecté — à désactiver dans les contextes sensibles à la confidentialité)",
+  "admin.flagPresence": "Présence en ligne (révèle qui est connecté; à désactiver dans les contextes sensibles à la confidentialité)",
   "admin.flagLocationSharing": "Partage de position (facultatif ; permet de joindre sa position aux messages)",
   "admin.identityDisplayName": "Les utilisateurs peuvent modifier leur nom affiché",
   "admin.identityAvatarEdit": "Les utilisateurs peuvent modifier leur avatar",
@@ -146,7 +146,7 @@ export const fr: Translation = {
   "admin.identityAdminEdit": "Les administrateurs peuvent modifier les autres utilisateurs",
   "admin.profileOpenTitle": "Ouvert",
   "admin.profileOpenSummary":
-    "Tout le monde rejoint et publie immédiatement. Les messages sont conservés et la Réinitialisation d’urgence est désactivée — accès maximal, pour un usage type secours d’urgence.",
+    "Tout le monde rejoint et publie immédiatement. Les messages sont conservés et la Réinitialisation d’urgence est désactivée: accès maximal, pour un usage type secours d’urgence.",
   "admin.profileStandardTitle": "Standard",
   "admin.profileStandardSummary":
     "Quiconque a le lien participe ; les messages sont conservés et la Réinitialisation d’urgence est désactivée. (Applique pour l’instant les mêmes réglages qu’Ouvert.)",
@@ -188,14 +188,14 @@ export const fr: Translation = {
   "admin.identityHeading": "Identité",
   "admin.networkName": "Nom du réseau",
   "admin.networkNameNote":
-    "Visible par tous ceux qui rejoignent — dans la barre latérale et sur l’écran d’accès. Donnez à votre réseau un nom reconnaissable (p. ex. « Secours Rivière »).",
+    "Visible par tous ceux qui rejoignent, dans la barre latérale et sur l’écran d’accès. Donnez à votre réseau un nom reconnaissable (p. ex. « Secours Rivière »).",
   "admin.language": "Langue de l’interface",
   "admin.languageNote": "S’applique à l’interface de tout le monde sur ce nœud.",
   "admin.profileHeading": "Profil",
   "admin.posture": "Posture",
   "admin.whoCanJoin": "Qui peut rejoindre",
-  "admin.joinOpen": "Ouvert — quiconque a le lien rejoint",
-  "admin.joinApproval": "Approbation — un accueillant ou un administrateur laisse entrer",
+  "admin.joinOpen": "Ouvert: quiconque a le lien rejoint",
+  "admin.joinApproval": "Approbation: un accueillant ou un administrateur laisse entrer",
   "admin.axesManaged":
     "L’accès, la conservation et la Réinitialisation d’urgence sont gérés par le profil {profile}. Passez à {custom} pour les modifier individuellement.",
   "admin.featuresEyebrow": "Fonctionnalités",
@@ -323,11 +323,11 @@ export const fr: Translation = {
 
   "mesh.title": "Courrier maillé",
   "mesh.myCardTitle": "Votre carte maillée",
-  "mesh.myCardNote": "Partagez-la avec quelqu’un dont vous voulez recevoir du courrier scellé — scannez le code ou copiez-la et envoyez-la comme vous voulez.",
+  "mesh.myCardNote": "Partagez-la avec quelqu’un dont vous voulez recevoir du courrier scellé. Scannez le code ou copiez-la et envoyez-la comme vous voulez.",
   "mesh.myCardLoading": "Chargement de votre carte maillée…",
   "mesh.myCardLoadError": "Impossible de charger votre carte maillée.",
   "mesh.myCardUnrecognised": "Le serveur a renvoyé une carte maillée non reconnue.",
-  "mesh.myCardQrTooLarge": "Cette carte est trop longue pour un code QR ici — copiez-la plutôt.",
+  "mesh.myCardQrTooLarge": "Cette carte est trop longue pour un code QR ici. Copiez-la plutôt.",
   "mesh.copyCard": "Copier la carte",
   "mesh.copyCardCopied": "Copiée",
   "mesh.addContactTitle": "Ajouter la carte d’un contact",
@@ -357,10 +357,12 @@ export const fr: Translation = {
 
   "nodeLink.hide": "× Masquer le lien",
   "nodeLink.show": "⧉ Relier un autre nœud",
-  "nodeLink.note":
-    "Sur l’écran d’administration de l’autre nœud, activez la synchronisation et ajoutez cette adresse comme pair (scannez le code ou collez l’URL).",
-  "nodeLink.copied": "Copié",
-  "nodeLink.copy": "Copier l’adresse",
+  "nodeLink.note": "Scannez-le depuis les écrans de configuration de l'autre téléphone, sous « Rejoindre un autre réseau LOAM ». Les réseaux liés partagent leurs canaux publics dans les deux sens ; les messages directs et les canaux privés ne quittent jamais aucun des deux.",
+  "nodeLink.expires": "Il fonctionne une fois, jusqu'à {time}.",
+  "nodeLink.needsKey": "Cet appareil n'a pas rejoint le réseau en scannant son QR code, il ne peut donc pas garantir la clé du réseau. Affichez plutôt le code de liaison depuis l'écran de partage du téléphone hôte, ou depuis un appareil qui a rejoint en scannant.",
+  "nodeLink.again": "Nouveau code",
+  "admin.peerLinking": "liaison…",
+  "admin.peerLinkRefused": "Son code de liaison a été refusé (expiré ou déjà utilisé). Demandez-en un nouveau à ce réseau.",
 
   "unreadBadge.label": "{n} non lus",
 
@@ -394,9 +396,10 @@ export const fr: Translation = {
   "gate.pendingTitle": "Vous êtes dans la file",
   "gate.pendingBody":
     "En attente que quelqu’un de ce nœud vous laisse entrer. Cet écran se met à jour dès que vous êtes approuvé.",
+  "gate.inviteRefused": "Ce code d'invitation a expiré. Scannez à nouveau le code sur l'écran de l'hôte, ou attendez ici qu'on vous laisse entrer.",
   "gate.connection": "Connexion : {status}",
   "gate.needsQrTitle": "Scannez le QR d'accès pour vous connecter en toute sécurité",
-  "gate.needsQrBody": "Scannez le QR d'accès de ce nœud avec votre appareil pour vous connecter — il n'y a pas d'autre moyen sûr de le faire.",
+  "gate.needsQrBody": "Scannez le QR d'accès de ce nœud avec votre appareil pour vous connecter. Il n'y a pas d'autre moyen sûr de le faire.",
 
   "confirm.deleteMessage": "Supprimer ce message ? Cette action est irréversible.",
 
@@ -432,6 +435,13 @@ export const fr: Translation = {
   "error.invalid_admin_claim": "Demande d’obtention d’admin non valide",
   "error.invalid_admin_secret": "Secret admin non valide",
   "error.invalid_attachment_upload": "Demande d’envoi de pièce jointe non valide",
+  "error.invalid_invite_redeem": "Demande d'invitation non valide",
+  "error.invite_invalid": "Ce code d'invitation a expiré ou n'est pas valide",
+  "error.invite_not_allowed": "Ce compte ne peut pas utiliser d'invitation",
+  "error.invalid_link_request": "Demande de liaison non valide",
+  "error.link_code_invalid": "Ce code de liaison a expiré ou a déjà été utilisé",
+  "error.link_unencrypted": "La liaison nécessite une connexion chiffrée",
+  "error.link_peer_limit": "Ce nœud se synchronise déjà avec le nombre maximal de pairs",
   "error.invalid_avatar_upload": "Demande d’envoi d’image d’avatar non valide",
   "error.invalid_channel_create": "Demande de création de canal non valide",
   "error.invalid_channel_update": "Demande de mise à jour de canal non valide",
@@ -474,7 +484,7 @@ export const fr: Translation = {
   "error.passphrase_required": "La stratégie d’amorçage par phrase secrète requiert une phrase secrète",
   "error.message_streaming": "Ce message est encore en cours d’écriture",
   "error.session_invalid": "Cette session n’est plus valide",
-  "error.thread_has_replies": "Ce fil contient des réponses d’autres personnes — seul un administrateur peut le supprimer",
+  "error.thread_has_replies": "Ce fil contient des réponses d’autres personnes. Seul un administrateur peut le supprimer",
   "error.too_many_attempts": "Trop de tentatives",
   "error.too_many_claim_attempts": "Trop de tentatives d’obtention ; réessayez plus tard",
   "error.message_create_failed": "Impossible de créer le message",
@@ -500,9 +510,9 @@ export const fr: Translation = {
   "admin.deleteChannel": "Supprimer",
   "admin.deleteChannelAria": "Supprimer définitivement le canal {name}",
   "admin.deleteChannelConfirm":
-    "Supprimer définitivement « {name} » ? Tous ses messages et pièces jointes seront effacés sans possibilité de restauration — contrairement à l’archivage, c’est irréversible.",
+    "Supprimer définitivement « {name} » ? Tous ses messages et pièces jointes seront effacés sans possibilité de restauration. Contrairement à l’archivage, c’est irréversible.",
   "gate.needsQrKeyChanged":
-    "La clé de ce nœud ne correspond plus à celle que vous avez scannée — l’hôte a peut-être redémarré ou l’a réinitialisée, ou ce réseau n’est pas celui qu’il prétend être. Scannez le QR d’accès actuel du nœud pour vous reconnecter.",
+    "La clé de ce nœud ne correspond plus à celle que vous avez scannée. L’hôte a peut-être redémarré ou l’a réinitialisée, ou ce réseau n’est pas celui qu’il prétend être. Scannez le QR d’accès actuel du nœud pour vous reconnecter.",
   "message.report": "Signaler",
   "message.removedByModerator": "Retiré par un modérateur",
   "report.messageTitle": "Signaler ce message",
@@ -522,7 +532,7 @@ export const fr: Translation = {
   "report.error": "Impossible d’envoyer le signalement",
   "report.cancel": "Annuler",
   "composer.timedOut": "Un modérateur vous a temporairement exclu : vous ne pouvez pas publier pour le moment.",
-  "composer.archived": "Ce canal est archivé — vous pouvez le lire, mais plus rien ne peut y être publié.",
+  "composer.archived": "Ce canal est archivé. Vous pouvez le lire, mais plus rien ne peut y être publié.",
   "sidebar.archivedTag": "archivé",
   "moderation.timeout": "Exclure temporairement (1 h)",
   "moderation.timeoutClear": "Lever l’exclusion",
@@ -556,7 +566,7 @@ export const fr: Translation = {
   "common.back": "Retour",
   "common.dismiss": "Fermer",
   "devMode.banner":
-    "⚠️ Mode développeur — les messages sont envoyés sans chiffrement et peuvent être lus par n’importe qui sur ce réseau. Ne l’utilisez pour rien de privé.",
+    "⚠️ Mode développeur: les messages sont envoyés sans chiffrement et peuvent être lus par n’importe qui sur ce réseau. Ne l’utilisez pour rien de privé.",
   "composer.fileTooLarge": "{name} est trop volumineux pour être envoyé (limite {limit}).",
   "conversation.notFoundTitle": "Conversation indisponible",
   "conversation.notFoundBody": "Ce canal n’existe pas, a été supprimé, ou vous n’en êtes pas membre.",
@@ -566,7 +576,7 @@ export const fr: Translation = {
   "app.crashReload": "Recharger",
   "transport.pinChangeTitle": "Ce lien contient une clé de sécurité différente",
   "transport.pinChangeBody":
-    "Vous avez rejoint ce nœud avec une autre clé. N’utilisez la nouvelle clé que si vous venez de scanner en personne le QR d’accès actuel du nœud — sinon, quelqu’un pourrait se faire passer pour lui.",
+    "Vous avez rejoint ce nœud avec une autre clé. N’utilisez la nouvelle clé que si vous venez de scanner en personne le QR d’accès actuel du nœud. Sinon, quelqu’un pourrait se faire passer pour lui.",
   "transport.pinChangeCurrent": "Clé utilisée pour rejoindre : {fingerprint}",
   "transport.pinChangeNew": "Clé dans ce lien : {fingerprint}",
   "transport.pinChangeAccept": "Utiliser la nouvelle clé",

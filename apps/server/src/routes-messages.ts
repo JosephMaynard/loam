@@ -222,7 +222,7 @@ export function registerMessageRoutes(ctx: AppContext): void {
       if (removesOthersContent) {
         return reply
           .code(403)
-          .send(errorBody("This thread has replies from other people — only an admin can delete it"));
+          .send(errorBody("This thread has replies from other people: only an admin can delete it"));
       }
     }
 

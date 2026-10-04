@@ -319,6 +319,15 @@ Only viable for **self-hosters with a domain**, *not* a mass-distributed app:
 - Static vs **rotating** QR token: static suits a printed poster; rotating limits a photographed QR's
   lifetime. **Make it configurable** (`qr.mode: none|static|rotating`) — see the profile model in
   [09](09-security-profiles.md). Rotation only affects new joins; connected sessions are undisturbed.
+  **Built (rotating, approval-only nodes):** `apps/server/src/invites.ts` issues an HMAC of the current
+  10-minute window under an in-memory secret (new at boot and on every kill switch), accepted for its own
+  window and the next. The Android host reads it through the launcher-only `GET /api/host/invite` (null on
+  an open node) and adds it to its join QR as `#k=<key>&i=<code>`, on the share screen and in display mode.
+  The client strips `i=` before the transport reads `#k=` (`lib/invite.ts`) and, if its session is waiting
+  in the approval queue, redeems it with `POST /api/access/redeem` (rate-limited; never lifts a ban). It is
+  multi-use within its lifetime: it proves the person saw the host's screen recently, which is the point of
+  a phone left on display. A member's own invite QR never carries one. Not built: `static` codes for a
+  printed poster, and a configurable interval.
 - Offline PWA off-grid: accept the loss under Layer 1, or pursue the real-cert path for self-hosters, or
   investigate whether the **Android app's own WebView** can be given a trusted local cert (helps only the
   host device, not remote joiners' browsers).

@@ -25,7 +25,6 @@ export type SettingsConfig = {
 const AVATAR_MODES = ["face", "initial", "pattern"] as const;
 type AvatarModeChoice = (typeof AVATAR_MODES)[number];
 /** LOAM's public privacy policy, linked from Settings (docs/30 B2). */
-const PRIVACY_POLICY_URL = "https://loamnet.com/privacy";
 
 /** The translated name of each generated-avatar style (the choice tiles' captions). */
 function avatarModeLabel(mode: AvatarModeChoice): string {
@@ -291,12 +290,10 @@ export function SettingsView({
           />
           <BlockedUsersPanel blockedUserIds={blockedUserIds} onSetBlocked={onSetBlocked} usersById={usersById} />
           {config?.networkConfig.securityProfile === "hardened" ? <DeviceWipePanel onWipeDevice={onWipeDevice} /> : null}
-          {/* Play's user-data policy wants the privacy policy linked in-app. It's on the public web, so on
-              an offline LAN it simply won't load (and the Android host opens it in the system browser). */}
+          {/* The privacy policy is served by this node (/privacy, lib/privacy-policy.ts): it reads with no
+              internet and never sends anyone to another website. */}
           <p className="screen-footnote privacy-policy-link">
-            <a href={PRIVACY_POLICY_URL} rel="noreferrer" target="_blank">
-              {t("settings.privacyPolicy")}
-            </a>
+            <a href="/privacy">{t("settings.privacyPolicy")}</a>
           </p>
         </div>
       </div>

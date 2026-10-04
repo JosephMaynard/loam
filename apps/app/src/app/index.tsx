@@ -21,15 +21,18 @@ import { WebView } from 'react-native-webview';
 
 
 import { DbEncryptionSettingsOverlay } from '@/components/db-encryption-settings';
+import { EmergencyResetOverlay } from '@/components/emergency-reset';
 import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
+import { SetupWizard, type SetupOutcome } from '@/components/setup-wizard';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { PRIVACY_POLICY_URL } from '@/constants/links';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import { colorSchemeForClientMessage } from '@/lib/client-theme';
-import { SERVER_PORT } from '@/lib/join-url';
+import { t } from '@/lib/i18n';
+import { SERVER_PORT, withInviteCode } from '@/lib/join-url';
 import {
   clearStoredDbKeys,
   DB_ENCRYPTION_DRIVER_MISSING_CODE,
@@ -52,7 +55,7 @@ import { noteConnectedClients, noteLauncherInterfaces } from '@/hooks/use-hotspo
 import { parseHostClients, parseHostInterfaces, type HostInterface } from '@/lib/join-display';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
-import { startKiosk, stopKiosk } from '../../modules/loam-hotspot';
+import { closeApp, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
 // The embedded server (main.js → loam-server.js) always listens on this port; the host phone's
 // WebView loads it over loopback. Remote joiners use the hotspot's own (discovered) address or the LAN one.
@@ -217,7 +220,7 @@ type HostStatus = 'starting' | 'ready' | 'error';
 // it only ever updates the separate `notice` state below, so it can never regress a 'ready' host back
 // to a spinner/error screen, and — unlike 'error' before this fix — is never cleared by a later 'ready'.
 type StatusPayload = { status?: HostStatus | 'notice'; message?: string; code?: string; hostToken?: string };
-type HostInfoPayload = { port?: number; addresses?: string[]; interfaces?: unknown; clients?: unknown };
+type HostInfoPayload = { port?: number; addresses?: string[]; interfaces?: unknown; clients?: unknown; invite?: unknown };
 
 // nodejs-mobile allows exactly one runtime per process; a screen remount must not start it twice,
 // and — since the runtime can't restart and won't re-emit — the last status is kept at module scope
@@ -233,13 +236,40 @@ let nodeHostToken: string | undefined;
 // once set it's never cleared by a status change, only by the operator dismissing it in this render.
 let nodeNotice: BootNotice | undefined;
 
+// The setup screens run once per process, before the runtime starts (it can't restart, so a remount after
+// that goes straight to the host screen). `afterSetup` is what setup asked the host screen to open first.
+let setupComplete = false;
+let afterSetup: { path: string; openShare: boolean } = { path: '', openShare: false };
+
+/**
+ * The app's root: the setup screens (language, kind of network, name, how people connect; or one tap to
+ * continue the last network), then the host screen, which starts the server.
+ */
+export default function HostRoot() {
+  const [ready, setReady] = useState(() => setupComplete || nodeStarted || Platform.OS !== 'android');
+  if (!ready) {
+    return (
+      <SetupWizard
+        onDone={(outcome: SetupOutcome) => {
+          setupComplete = true;
+          // "Choose every setting myself" lands on the admin settings; anything else shows how to join.
+          const custom = outcome.newNetwork && outcome.record.preset === 'custom';
+          afterSetup = { path: custom ? '/admin' : '', openShare: !custom };
+          setReady(true);
+        }}
+      />
+    );
+  }
+  return <HostScreen />;
+}
+
 /**
  * The LOAM Android host screen. Boots the embedded Node server on first mount, waits for its
  * readiness signal (posted by main.js once /api/config answers), then loads the served LOAM client
  * in a WebView with cookies + WebSocket enabled. Shows a "starting host…" state until then, since
  * cold start can take ~80s (docs/04).
  */
-export default function HostScreen() {
+function HostScreen() {
   // Initialise from the module-level status so a remount after the node is already ready/errored
   // doesn't get stuck showing "starting" (the runtime won't re-emit).
   const [status, setStatus] = useState<HostStatus>(() => nodeStatus);
@@ -274,7 +304,10 @@ export default function HostScreen() {
   const [wipeClearFailure, setWipeClearFailure] = useState<string | undefined>();
   const [wipeClearBusy, setWipeClearBusy] = useState(false);
   // Whether the "Share / Host" overlay (hotspot + two-step join QRs) is open.
-  const [shareOpen, setShareOpen] = useState(false);
+  // Opened straight after setup (the join codes, or the admin settings for a hand-configured network).
+  const [shareOpen, setShareOpen] = useState(() => afterSetup.openShare);
+  const [initialPath] = useState(() => afterSetup.path);
+  const [resetOpen, setResetOpen] = useState(false);
   // Whether the on-device LLM model manager overlay (docs/06) is open.
   const [modelManagerOpen, setModelManagerOpen] = useState(false);
   // Whether the on-device DB-encryption mode picker overlay (docs/01, docs/21) is open.
@@ -295,6 +328,8 @@ export default function HostScreen() {
   const [hostInterfaces, setHostInterfaces] = useState<HostInterface[]>([]);
   // Peer addresses of the devices connected from off this phone — shown as "N phones connected".
   const [hostClients, setHostClients] = useState<string[]>([]);
+  // The invite code the join QR carries on an approval-only node, so a scan skips the queue (launcher-polled).
+  const [hostInvite, setHostInvite] = useState<string>();
   // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
   // ready. Empty when transport encryption is off (or the fetch hasn't resolved yet) — plain URLs,
   // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
@@ -322,17 +357,23 @@ export default function HostScreen() {
   // bumps `bootstrapAttempt` to re-run the effect from scratch.
   const [bootstrapError, setBootstrapError] = useState(false);
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
-  // Optional "keep the screen on" — for a wall-mounted host showing the join QRs to a room.
-  const [keepAwake, setKeepAwake] = useState(false);
-  // Optional kiosk mode — pin the app (Android screen pinning) so a passer-by can't wander off into
-  // other apps; exiting requires the device's own screen-lock PIN.
-  const [kiosk, setKiosk] = useState(false);
+  // Display mode (the share screen): the join codes full screen for a phone left out on display. While on,
+  // the screen stays awake and the app is pinned (Android screen pinning), so a passer-by can't wander off
+  // into other apps; leaving the pin needs the device's own screen-lock PIN. The network keeps running
+  // with the screen off either way (the foreground service), so awake only matters for showing codes.
+  const [displayMode, setDisplayMode] = useState(false);
+  // The network's name from /api/bootstrap, shown above the codes in display mode.
+  const [hostNodeName, setHostNodeName] = useState<string>();
+  // A private network (the hardened profile): Emergency reset sits in the main menu, to hand in a hurry.
+  // On any other network it lives in Encryption settings, out of the way.
+  const [privateNetwork, setPrivateNetwork] = useState(false);
   const webViewRef = useRef<WebView>(null);
   // Whether the WebView (the LOAM web client, which routes with preact-iso via the History API) has
   // in-app history to go back through. A ref, not state: the hardware-back listener reads it without
   // needing to re-subscribe on every navigation, and there's no render that depends on it.
   const canGoBackRef = useRef(false);
   const theme = useTheme();
+  useAppLocale(); // re-render native text when the language changes
   // Bottom system-nav-bar inset (Android renders edge-to-edge by default): used both to hold a solid
   // strip below the WebView (so its content never draws under the on-screen nav bar) and, when needed,
   // to keep the boot/error screen's content clear of it too.
@@ -412,42 +453,28 @@ export default function HostScreen() {
     }
 
     setWipeClearFailure(undefined);
-    try {
-      nodejs.start('main.js', { redirectOutputToLogcat: true });
-    } catch {
-      // Expected on today's nodejs-mobile (one runtime per process) — see the comment on the
-      // `loam-wipe-restart` listener below. The restart prompt is the real recovery path either way.
-    }
-    Alert.alert(
-      'Restart LOAM',
-      'The database encryption key was cleared for the emergency reset. Close and reopen the app now to finish starting a fresh database.',
-    );
+    // The wiped runtime can't restart in this process (nodejs-mobile starts once per process), and a
+    // reopened activity would only reattach to it, stuck. Close LOAM completely instead: the next launch is
+    // a clean start on the setup screens.
+    closeApp();
   };
 
+  // Display mode: keep the screen awake and pin the app while it's on. Both are best-effort no-ops when
+  // unsupported; on unmount we release both so the app is never left stuck in lock-task.
   useEffect(() => {
     const tag = 'loam-host';
-    if (keepAwake) {
+    if (displayMode) {
       void activateKeepAwakeAsync(tag).catch(() => undefined);
-    } else {
-      void deactivateKeepAwake(tag).catch(() => undefined);
-    }
-    return () => {
-      void deactivateKeepAwake(tag).catch(() => undefined);
-    };
-  }, [keepAwake]);
-
-  // Enter/leave Android screen pinning as the kiosk toggle flips. Both calls are best-effort no-ops
-  // when unsupported; on unmount we unpin so the app is never left stuck in lock-task.
-  useEffect(() => {
-    if (kiosk) {
       startKiosk();
     } else {
+      void deactivateKeepAwake(tag).catch(() => undefined);
       stopKiosk();
     }
     return () => {
+      void deactivateKeepAwake(tag).catch(() => undefined);
       stopKiosk();
     };
-  }, [kiosk]);
+  }, [displayMode]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -560,6 +587,8 @@ export default function HostScreen() {
         setHostClients(clients);
         noteConnectedClients(clients);
       }
+      // Re-read every tick: it rotates, and becomes null when the node stops requiring approval.
+      setHostInvite(typeof payload?.invite === 'string' ? payload.invite : undefined);
     };
 
     // P1-2 (Sol round 3/4): the server's kill switch posts this when a `persistent`/`passphrase`-
@@ -686,7 +715,16 @@ export default function HostScreen() {
           // A non-2xx from the just-booted loopback server — we couldn't learn the posture, so gate.
           return { gated: true } as const;
         }
-        return { gated: false, fragment: fragmentFor((await response.json()) as unknown) } as const;
+        const body = (await response.json()) as unknown;
+        const networkConfig = (body as { networkConfig?: { nodeName?: unknown; securityProfile?: unknown } } | null)
+          ?.networkConfig;
+        if (typeof networkConfig?.nodeName === 'string' && networkConfig.nodeName && !cancelled) {
+          setHostNodeName(networkConfig.nodeName);
+        }
+        if (!cancelled) {
+          setPrivateNetwork(networkConfig?.securityProfile === 'hardened');
+        }
+        return { gated: false, fragment: fragmentFor(body) } as const;
       })
       .then((outcome) => {
         if (cancelled || settled) {
@@ -793,7 +831,7 @@ export default function HostScreen() {
       // was cancelled). Either way re-tapping just re-writes a same-intent, idempotent marker, so we let the
       // operator retry — but we show the launcher's exact wording rather than a blanket "failed".
       setStartFreshBusy(false);
-      setStartFreshMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}.`);
+      setStartFreshMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}.`);
       return;
     }
     // RF2: main.js's `loam-db-start-fresh` listener retries boot immediately after this ack. Leave
@@ -804,8 +842,8 @@ export default function HostScreen() {
     // both now also guard against that directly, but the UI should never even offer the chance.
     setStartFreshMessage(
       intent === 'delete'
-        ? 'Confirmed — the existing data will be deleted and a fresh encrypted database is starting now…'
-        : 'Confirmed — the old database is preserved on disk and a fresh one is starting now…',
+        ? 'Confirmed: the existing data will be deleted and a fresh encrypted database is starting now…'
+        : 'Confirmed: the old database is preserved on disk and a fresh one is starting now…',
     );
   };
 
@@ -832,7 +870,7 @@ export default function HostScreen() {
       await setPassphraseCandidate(trimmed);
     } catch (error) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't save the passphrase — ${error instanceof Error ? error.message : 'unknown error'}. You can try again.`);
+      setUnlockMessage(`Couldn't save the passphrase: ${error instanceof Error ? error.message : 'unknown error'}. You can try again.`);
       return;
     }
     // P1-b (Sol round 6): transactionally record the mode-name hint so a later transient key-request
@@ -843,7 +881,7 @@ export default function HostScreen() {
     const result = await requestDbUnlock(nodejs.channel);
     if (!result.ok) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      setUnlockMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}. You can try again.`);
       return;
     }
     // The retry's OUTCOME (ready / still locked / a different boot error) arrives the normal way, via
@@ -866,7 +904,7 @@ export default function HostScreen() {
     });
     if (!result.ok) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't confirm — ${result.error ?? 'unknown error'}. You can try again.`);
+      setUnlockMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}. You can try again.`);
       return;
     }
     setUnlockMessage('Retrying…');
@@ -892,8 +930,8 @@ export default function HostScreen() {
       setRevertBusy(false);
       setRevertMessage(
         outcome.failed === 'mode'
-          ? `Couldn't switch encryption off — ${outcome.error}. You can try again.`
-          : `Couldn't retry — ${outcome.error}. You can try again.`,
+          ? `Couldn't switch encryption off: ${outcome.error}. You can try again.`
+          : `Couldn't retry: ${outcome.error}. You can try again.`,
       );
       return;
     }
@@ -1035,18 +1073,40 @@ export default function HostScreen() {
                   <ThemedText type="smallBold">Share · Host</ThemedText>
                 </Pressable>
                 <View style={styles.menuDivider} />
-                {/* Play's user-data policy wants the privacy policy reachable in-app. It opens in the
-                    system browser; with no internet (the usual hosting case) it just won't load yet. */}
+                {/* The privacy policy is served by this node (the web client's /privacy page): it opens in
+                    this WebView, with no internet and no other website involved. */}
                 <Pressable
                   onPress={() => {
                     setMenuOpen(false);
-                    void Linking.openURL(PRIVACY_POLICY_URL).catch(() => undefined);
+                    webViewRef.current?.injectJavaScript(
+                      "history.pushState(null, '', '/privacy'); dispatchEvent(new PopStateEvent('popstate')); true;",
+                    );
                   }}
                   accessibilityRole="link"
-                  accessibilityLabel="Open the LOAM privacy policy in your browser"
+                  accessibilityLabel={t('menu.privacy')}
                   style={styles.menuItem}>
-                  <ThemedText type="smallBold">Privacy policy</ThemedText>
+                  <ThemedText type="smallBold">{t('menu.privacy')}</ThemedText>
                 </Pressable>
+                {/* Emergency reset, on a private network only: last, set apart and in red, so it's easy to
+                    find in a hurry but not the item a thumb lands on by habit. Its own screen asks for a
+                    press-and-hold. Elsewhere it's at the bottom of Encryption settings. */}
+                {privateNetwork ? (
+                  <>
+                    <View style={[styles.menuDivider, styles.menuDangerDivider]} />
+                    <Pressable
+                      onPress={() => {
+                        setMenuOpen(false);
+                        setResetOpen(true);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={t('reset.menu')}
+                      style={styles.menuItem}>
+                      <ThemedText type="smallBold" style={{ color: theme.danger }}>
+                        {t('reset.menu')}
+                      </ThemedText>
+                    </Pressable>
+                  </>
+                ) : null}
               </ThemedView>
             </View>
           </Pressable>
@@ -1106,12 +1166,14 @@ export default function HostScreen() {
           <WebView
             key={webViewKey}
             ref={webViewRef}
-            source={{ uri: `${LOAM_URL}${transportKeyFragment}` }}
+            source={{ uri: `${LOAM_URL}${initialPath}${transportKeyFragment}` }}
             style={styles.flex}
             // Hand the launcher's per-boot host token to the LOAM client running in THIS WebView (and only
-            // here — a LAN joiner never sees it): the client claims admin with it on its first boot under the
-            // `hostDevice` bootstrap (review 2026-09-04). `originWhitelist` + `onShouldStartLoadWithRequest`
-            // below pin this frame to the loopback origin, so the injected global can't reach another page.
+            // here — a LAN joiner never sees it): the client claims admin with it under the `hostDevice`
+            // bootstrap (review 2026-09-04). Only by injection, never in the URL: the client trusts these
+            // globals (the key below overrides a pin), and a URL is something anyone can craft (review
+            // 2026-10-03 #1). `originWhitelist` + `onShouldStartLoadWithRequest` below pin this frame to the
+            // loopback origin, so the injected globals can't reach another page.
             // Also hand over the host's transport key (read from the loopback bootstrap above) as
             // `__loamHostTransportKey`: the client trusts it over a stale pin, since a node with an ephemeral
             // DB key mints a new transport key every boot and would otherwise break the host's own pin
@@ -1201,14 +1263,14 @@ export default function HostScreen() {
         <HostShareOverlay
           visible={shareOpen}
           onClose={() => setShareOpen(false)}
-          transportKeyFragment={transportKeyFragment}
+          transportKeyFragment={withInviteCode(transportKeyFragment, hostInvite)}
           addresses={hostAddresses}
           interfaces={hostInterfaces}
           connectedClients={hostClients}
-          keepAwake={keepAwake}
-          onKeepAwakeChange={setKeepAwake}
-          kiosk={kiosk}
-          onKioskChange={setKiosk}
+          displayMode={displayMode}
+          onDisplayModeChange={setDisplayMode}
+          nodeName={hostNodeName}
+          channel={nodejs.channel}
         />
         <ModelManagerOverlay
           visible={modelManagerOpen}
@@ -1219,6 +1281,18 @@ export default function HostScreen() {
           visible={dbEncryptionOpen}
           onClose={() => setDbEncryptionOpen(false)}
           channel={nodejs.channel}
+          onEmergencyReset={() => {
+            setDbEncryptionOpen(false);
+            setResetOpen(true);
+          }}
+        />
+        <EmergencyResetOverlay
+          channel={nodejs.channel}
+          onClose={() => setResetOpen(false)}
+          visible={resetOpen}
+          keyClearError={wipeClearFailure}
+          keyClearBusy={wipeClearBusy}
+          onRetryKeyClear={() => void attemptWipeKeyClear()}
         />
       </SafeAreaView>
     );
@@ -1399,11 +1473,11 @@ export default function HostScreen() {
           <ThemedText type="smallBold">Encryption is on, but the existing database is unencrypted.</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {errorMessage ??
-              'The selected encrypted mode can only apply to a fresh database — an existing plaintext database cannot be converted in place.'}
+              'The selected encrypted mode can only apply to a fresh database: an existing plaintext database cannot be converted in place.'}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             Delete the existing data and start a fresh encrypted database, or switch encryption back off to
-            keep the existing (unencrypted) data. In-place conversion is a future enhancement — not yet
+            keep the existing (unencrypted) data. In-place conversion is a future enhancement: not yet
             available.
           </ThemedText>
           <ThemedView style={styles.noticeBannerActions}>
@@ -1437,7 +1511,7 @@ export default function HostScreen() {
           is the only way to plaintext, behind a confirmation. A subsequent `ready` clears this (onStatus). */}
       {dbDriverMissing ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">Encrypted storage is unavailable — the host did not start.</ThemedText>
+          <ThemedText type="smallBold">Encrypted storage is unavailable: the host did not start.</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {errorMessage ?? 'The encrypted-storage module failed to load on this device.'}
           </ThemedText>
@@ -1664,6 +1738,10 @@ const styles = StyleSheet.create({
   menuDivider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: 'rgba(128,128,128,0.3)',
+  },
+  // A wider gap above Emergency reset, so it reads as its own group.
+  menuDangerDivider: {
+    marginTop: Spacing.two,
   },
   // Bottom system-nav-bar inset strip (Issue 1) — a solid `backgroundElement`-coloured bar reserved
   // below the WebView, sized to `insets.bottom` at render time (see the inline style merge).

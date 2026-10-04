@@ -7,6 +7,39 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Linking networks both ways, with a link code.** An admin (web admin sync settings) or the host phone
+  (share screen) can show a "Link another LOAM node" code. It works once, for 10 minutes. Another LOAM
+  phone scans it in setup and the two networks then share their public channels both ways, with nothing
+  else to approve. The ordinary join code can't link a node. Direct messages and private channels still
+  never leave either network.
+- **Invite codes for approval-only networks.** The host phone's join QR (share screen and display mode)
+  carries a code that changes every 10 minutes. Someone who scans it is let straight in instead of waiting
+  in the queue; a photo of an old code stops working within 20 minutes, and an Emergency Reset retires
+  every code at once.
+- **Setup screens on the Android host.** The first launch asks for a language, the kind of network,
+  its name and how people connect (Hotspot or Wi-Fi). The kinds are plain choices:
+  - **Private and short-lived:** random names and pictures, messages gone after an hour, each joiner
+    approved, encrypted connections only, and messages stored under a key that exists only while the
+    app runs (pictures and files are deleted the next time it starts).
+  - **Community:** names and photos, open to anyone nearby, and messages kept, stored encrypted.
+  - **Choose every setting myself:** opens the admin settings.
+
+  Later launches show one screen: continue the last network in one tap, or start a new one (erasing the
+  old one takes a press-and-hold).
+- **Join another LOAM network from the setup screens.** Scan the other network's link code and this phone
+  becomes another node of it, syncing public channels both ways. The camera is asked for only on that
+  step.
+- **Display mode on the Android host** (replacing the separate "Keep screen on" and "Kiosk mode"
+  switches): one button on the share screen shows the join codes full screen, as large as the screen
+  allows with no scrolling (one code on Wi-Fi; two on a hotspot, side by side in landscape), keeps the
+  screen on and pins LOAM in front. Leaving it takes a press-and-hold. The network keeps running with the
+  screen off either way; the screen only stays on so the codes can be seen.
+- **The Android host's own screens are translated**: the share screen, join codes, display mode and
+  Emergency reset now follow the chosen language (all 15).
+- **Emergency reset from the Android host's menu.** The last item in the menu, in red, opens one screen
+  that explains what will be erased and asks you to press and hold for three seconds: quick when it
+  matters, hard to trigger by accident. It runs in the server on the phone itself (no admin login needed,
+  and it works whether or not the remote kill switch is enabled), and connected phones clear their copy.
 - **Direct Messages lists your conversations, not everyone.** The sidebar shows only people you've
   actually messaged (newest first, plus the assistant if there is one), and **New message** opens a
   searchable picker of everyone on the node. A new `GET /api/dms` inbox tells each device about DMs that
@@ -26,6 +59,20 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **Joining by QR code lost the network's key.** The web app's first redirect (`/` to `/channels`) dropped
+  the `#k=` part of the link before it was read. On a network that only accepts encrypted connections,
+  everyone who scanned the code was told to scan it; elsewhere they connected without the protection the
+  code is meant to give. The key is now read before anything touches the address. This had been the case
+  since transport encryption arrived.
+- **The host phone could land in the queue of its own new network**, and an approved newcomer could fall
+  back into it. Asking the node "who am I?" again on an already-encrypted connection answered with the
+  person as they were when the connection was set up, so an admin claim or an approval made since was
+  undone on the next refresh (and the host's page retried its claim until it was rate-limited). The node
+  now answers with the person as they are.
+- **After an Emergency reset the host app could get stuck** ("Couldn't finish starting LOAM", recoverable
+  only by clearing the app's data) or quietly restart an empty network. LOAM now closes completely once
+  everything is erased, and opens on the setup screens next time. If something couldn't be erased, the
+  reset screen says so and stays open instead.
 - **`npx loamnet` no longer crashes when port 3000 is taken.** With no port chosen it moves to the next
   free one (3000–3019) and says so; an explicit `--port` / `$PORT` that is taken exits with a short
   message instead of a stack trace. A port counts as free only if loopback is free too, so
@@ -38,6 +85,17 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **Setup:** "Community" comes first, each kind of network has an icon, and choosing one moves straight on.
+  The screen saying a private network "was erased" is gone: setup just starts again.
+- **Emergency reset** is in the host menu on private networks, and at the bottom of Encryption settings on
+  every network.
+- **The privacy policy is served by the network itself** (`/privacy`), so it reads offline and the app
+  never sends anyone to a website for it.
+- **Storage encryption:** unencrypted storage is now the last option, labelled as for testing, and asks
+  for confirmation. A network set up with "Choose every setting myself" is encrypted by default.
+- **Plainer punctuation everywhere.** Every em-dash is gone from the interface in all 16 languages, the
+  Android host app, the server's user-facing messages, the `loam` CLI and the website, rewritten as full
+  stops, colons or commas. A test keeps the translations dash-free.
 - **Android host: no more blank bands.** The page no longer pads for the status and navigation bars
   inside the host app, which already keeps clear of them.
 - **Tidier conversations.** On wide screens the conversation keeps a centred reading column (your own
