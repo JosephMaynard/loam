@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cryptoMock, resetCryptoMock, resetSecureStoreMock, secureStoreMock } from '@/test-utils/mocks';
 
+const LEGACY_KEY_ITEM = 'loam-db-encryption-persistent-key';
+
 // A tiny file system: existing paths, their text, and paths whose reads or writes fail.
 const files = new Map<string, string>();
 const failing = new Set<string>();
@@ -124,6 +126,33 @@ describe('prepareNewNetwork', () => {
 
     expect(result).toMatchObject({ ok: false });
     expect(await getDbEncryptionMode()).toBe('persistent');
+    expect((await resolveDbKey('persistent')).key).toBe(oldKey);
+    expect((await keyResponse()).newNetwork).toBeUndefined();
+    // The hint can't be written back either, and the error says the rollback didn't fully land.
+    expect(result).toMatchObject({ error: expect.stringContaining("couldn't all be put back") });
+  });
+
+  it('puts the previous key back when clearing the keys fails half-way', async () => {
+    // CodeRabbit (PR #142): the clear deletes the device secret, then fails on the second item. Restoring
+    // only the mode and hint would leave the previous database with no key.
+    await setDbEncryptionMode('persistent');
+    const oldKey = (await resolveDbKey('persistent')).key;
+    const realDelete = secureStoreMock.deleteItemAsync;
+    const deleteSpy = vi.spyOn(secureStoreMock, 'deleteItemAsync').mockImplementation(async (key: string) => {
+      if (key === LEGACY_KEY_ITEM) {
+        throw new Error('Keystore busy');
+      }
+      return realDelete(key);
+    });
+    try {
+      const result = await prepareNewNetwork({ preset: 'private', nodeName: 'Camp', connection: 'wifi' }, 'en');
+      expect(result).toMatchObject({ ok: false });
+      expect(result).not.toMatchObject({ error: expect.stringContaining("couldn't all be put back") });
+    } finally {
+      deleteSpy.mockRestore();
+    }
+    expect(await getDbEncryptionMode()).toBe('persistent');
+    expect(files.get(HINT)).toBe('persistent');
     expect((await resolveDbKey('persistent')).key).toBe(oldKey);
     expect((await keyResponse()).newNetwork).toBeUndefined();
   });

@@ -12,7 +12,9 @@ import {
   clearStoredPassphrase,
   DB_ENCRYPTION_MODE_READ_ERROR,
   getDbEncryptionMode,
+  restoreStoredDbKeys,
   setDbEncryptionMode,
+  snapshotStoredDbKeys,
   setPendingNewNetwork,
 } from '@/lib/db-encryption';
 import type { AppLocale } from '@/lib/i18n';
@@ -92,10 +94,11 @@ export type PrepareResult = { ok: true } | { ok: false; error: string };
  * network chosen through "Choose every setting myself" keeps its passphrase (it is asked for at start-up
  * anyway; `clearStoredDbKeys` never touches it).
  *
- * The keys are the one thing that can't be put back, so they go last: the mode and the hint (plain,
- * reversible writes) are set first, and if anything fails before the keys are cleared, both go back to how
- * they were. A failed preparation therefore leaves the previous network openable, not locked out of its
- * own database.
+ * A failed preparation must leave the previous network openable, not locked out of its own database. So
+ * both key items are read first (no snapshot, no change at all), the reversible writes (mode, hint) come
+ * before the key clear, and on any failure everything goes back in reverse: the keys (the clear may have
+ * removed one item before failing on the other), then the mode, then the hint. A rollback that doesn't
+ * fully land says so, rather than passing for a clean failure.
  */
 export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale): Promise<PrepareResult> {
   const current = await getDbEncryptionMode();
@@ -106,11 +109,18 @@ export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale):
   // Community: an unset mode reads as 'off' (that's how installs from before encryption read), and a new
   // network must never be unencrypted by default. Plaintext stays a later opt-in, in Encryption settings.
   const target = presetDbMode(record.preset) ?? (current === 'off' ? 'persistent' : current);
-  const restore = async (): Promise<void> => {
-    if (target !== current) {
-      await setDbEncryptionMode(current);
-    }
-    await writeModeHint(current);
+  const keys = await snapshotStoredDbKeys();
+  if (!keys) {
+    return { ok: false, error: "Couldn't read this phone's storage keys." };
+  }
+  /** Undo everything done so far; the error says whether the previous network was fully put back. */
+  const rollBack = async (error: string, keysTouched: boolean): Promise<PrepareResult> => {
+    const keysBack = keysTouched ? await restoreStoredDbKeys(keys) : true;
+    const modeBack = target === current || (await setDbEncryptionMode(current)).ok;
+    const hintBack = await writeModeHint(current);
+    return keysBack && modeBack && hintBack
+      ? { ok: false, error }
+      : { ok: false, error: `${error} The previous network's storage settings couldn't all be put back.` };
   };
   if (target !== current) {
     const set = await setDbEncryptionMode(target);
@@ -119,13 +129,11 @@ export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale):
     }
   }
   if (!(await writeModeHint(target))) {
-    await restore();
-    return { ok: false, error: "Couldn't save the storage setting where the network reads it." };
+    return rollBack("Couldn't save the storage setting where the network reads it.", false);
   }
   const cleared = await clearStoredDbKeys();
   if (!cleared.ok) {
-    await restore();
-    return { ok: false, error: cleared.error ?? "Couldn't clear the previous network's keys." };
+    return rollBack(cleared.error ?? "Couldn't clear the previous network's keys.", true);
   }
   if (current === 'passphrase' && target !== 'passphrase') {
     await clearStoredPassphrase();

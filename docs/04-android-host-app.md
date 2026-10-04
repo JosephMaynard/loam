@@ -256,9 +256,10 @@ camera hardware features are declared optional, so camera-less devices still ins
 writes it into the launcher's mode hint (`.loam-db-mode-hint`, read back to verify), clears the stored
 device keys (so anything of the old network left on flash stays unreadable, and a new passphrase network
 gets a new key even from the same passphrase) and queues the starting configuration under a fresh
-operation id. The keys go last because they're the one step that can't be undone: if the mode, hint or
-key clear fails, the mode and hint are put back, so a failed preparation leaves the previous network
-openable. The hint matters on a fresh install: if the key handoff then fails (a
+operation id. Both key items are read first (`snapshotStoredDbKeys`; no snapshot, no change), and the
+clear goes last: if the hint or the clear fails (the clear may remove one item before failing on the
+other), the keys, the mode and the hint are put back and verified, so a failed preparation leaves the
+previous network openable. A rollback that doesn't fully land says so in the error. The hint matters on a fresh install: if the key handoff then fails (a
 timeout, a Keystore error), the launcher sees an encrypted choice and locks instead of booting
 unencrypted with no hint and no database. The operation rides every `loam-db-key-response` as
 `newNetwork { id, config }` until the launcher acknowledges it (`loam-new-network-applied`), so a response

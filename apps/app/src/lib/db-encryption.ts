@@ -451,6 +451,59 @@ async function clearStoredDbKeysUnlocked(): Promise<ClearDbKeysResult> {
   return errors.length > 0 ? { ok: false, error: errors.join('; ') } : { ok: true };
 }
 
+/** The stored device-key items, exactly as they were (null = absent), so setup can put them back. */
+export type StoredDbKeys = { deviceSecret: string | null; legacyKey: string | null };
+
+/**
+ * Read both device-key items before setup clears them (new-network.ts `prepareNewNetwork`), so a
+ * preparation that fails afterwards can restore them and leave the previous database openable.
+ * `undefined` when either read fails: without a snapshot the clear must not go ahead. Never logged.
+ */
+export function snapshotStoredDbKeys(): Promise<StoredDbKeys | undefined> {
+  return withDeviceSecretLock(async () => {
+    try {
+      return {
+        deviceSecret: await SecureStore.getItemAsync(DEVICE_SECRET_ITEM),
+        legacyKey: await SecureStore.getItemAsync(PERSISTENT_KEY_ITEM),
+      };
+    } catch {
+      return undefined;
+    }
+  });
+}
+
+/**
+ * Put back a {@link snapshotStoredDbKeys} snapshot after a failed {@link clearStoredDbKeys} (one item may
+ * already be gone), and verify each item reads back as it was. True only when both match.
+ */
+export function restoreStoredDbKeys(snapshot: StoredDbKeys): Promise<boolean> {
+  return withDeviceSecretLock(async () => {
+    let restored = true;
+    for (const [item, value] of [
+      [DEVICE_SECRET_ITEM, snapshot.deviceSecret],
+      [PERSISTENT_KEY_ITEM, snapshot.legacyKey],
+    ] as const) {
+      try {
+        const now = await SecureStore.getItemAsync(item);
+        if (now === value) {
+          continue;
+        }
+        if (value === null) {
+          await SecureStore.deleteItemAsync(item);
+        } else {
+          await SecureStore.setItemAsync(item, value);
+        }
+        if ((await SecureStore.getItemAsync(item)) !== value) {
+          restored = false;
+        }
+      } catch {
+        restored = false;
+      }
+    }
+    return restored;
+  });
+}
+
 /**
  * Resolve the DB-encryption key material for `mode`, generating/persisting it as needed:
  *   - 'off'        → no key.
