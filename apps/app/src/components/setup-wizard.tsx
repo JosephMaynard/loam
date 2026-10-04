@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Image } from 'expo-image';
 import { SymbolView, type AndroidSymbol, type SFSymbol } from 'expo-symbols';
 
 import { CodeScanner } from '@/components/code-scanner';
@@ -181,6 +182,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     case 'home':
       content = (
         <>
+          <Logo />
           <ThemedText type="subtitle">{t('setup.backTitle')}</ThemedText>
           <ThemedText themeColor="textSecondary">{t('setup.continueHelp')}</ThemedText>
           <PrimaryButton
@@ -331,6 +333,7 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             {step === 'language' || (step === 'type' && !continuable) ? (
               <View style={styles.welcome}>
+                <Logo />
                 <ThemedText type="title">{t('setup.welcomeTitle')}</ThemedText>
                 <ThemedText themeColor="textSecondary">{t('setup.welcomeBody')}</ThemedText>
               </View>
@@ -404,6 +407,19 @@ function Choice({
   );
 }
 
+/** The LOAM mark (the app icon's wordmark tile), at the top of the first setup screens. */
+function Logo() {
+  return (
+    <Image
+      source={require('../../assets/images/loam-splash.png')}
+      style={styles.logo}
+      contentFit="cover"
+      accessibilityLabel="LOAM"
+      accessibilityRole="image"
+    />
+  );
+}
+
 function PrimaryButton({ disabled, label, onPress }: { disabled?: boolean; label: string; onPress: () => void }) {
   const theme = useTheme();
   return (
@@ -441,6 +457,7 @@ const styles = StyleSheet.create({
   content: { padding: Spacing.four, gap: Spacing.three, flexGrow: 1 },
   loading: { flex: 1 },
   welcome: { gap: Spacing.two, paddingBottom: Spacing.two },
+  logo: { width: 88, height: 88, borderRadius: 22, marginBottom: Spacing.two },
   languages: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   language: { paddingHorizontal: Spacing.three, paddingVertical: Spacing.two, borderRadius: Spacing.four },
   choice: {
