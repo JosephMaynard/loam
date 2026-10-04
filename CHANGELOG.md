@@ -19,7 +19,8 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 - **Setup screens on the Android host.** The first launch asks for a language, the kind of network,
   its name and how people connect (Hotspot or Wi-Fi). The kinds are plain choices:
   - **Private and short-lived:** random names and pictures, messages gone after an hour, each joiner
-    approved, encrypted connections only, and nothing readable once the app closes.
+    approved, encrypted connections only, and messages stored under a key that exists only while the
+    app runs (pictures and files are deleted the next time it starts).
   - **Community:** names and photos, open to anyone nearby, and messages kept, stored encrypted.
   - **Choose every setting myself:** opens the admin settings.
 
