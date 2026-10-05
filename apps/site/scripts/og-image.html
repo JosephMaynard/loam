@@ -1,0 +1,103 @@
+<!doctype html>
+<!-- The 1200×630 share image (public/og-image.png), rendered by scripts/og-image.mjs through the dev
+     server so it uses the site's own fonts and colours. Not part of the built site. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <style>
+      html,
+      body {
+        width: 1200px;
+        height: 630px;
+        margin: 0;
+        overflow: hidden;
+        color-scheme: light;
+      }
+      .og {
+        position: relative;
+        display: grid;
+        grid-template-columns: 560px 1fr;
+        align-items: center;
+        width: 1200px;
+        height: 630px;
+        padding: 0 0 0 72px;
+        background:
+          linear-gradient(100deg, rgba(8, 13, 10, 0.94) 0%, rgba(8, 13, 10, 0.8) 45%, rgba(8, 13, 10, 0.4) 100%),
+          url("/loam-hero-bkg.jpg") center / cover no-repeat,
+          #0b1912;
+        overflow: hidden;
+      }
+      .og-copy {
+        position: relative;
+      }
+      .og-brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        font: 800 30px/1 var(--font-display);
+        letter-spacing: 0.02em;
+        color: #eaf1ec;
+      }
+      .og-brand img {
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+      }
+      .og h1 {
+        margin-top: 34px;
+        font-size: 70px;
+        line-height: 1;
+        letter-spacing: -0.04em;
+        color: #eaf1ec;
+      }
+      .og h1 span {
+        display: block;
+        color: #d14900;
+      }
+      .og p {
+        margin-top: 24px;
+        font-size: 23px;
+        line-height: 1.45;
+        color: #a9bfb2;
+      }
+      .og-visual {
+        position: relative;
+        height: 100%;
+      }
+      .og-visual .browser {
+        position: absolute;
+        left: 40px;
+        top: 110px;
+        width: 760px;
+      }
+      .og-visual .phone {
+        position: absolute;
+        left: 400px;
+        top: 70px;
+        width: 230px;
+        padding: 7px;
+        border-radius: 24px;
+      }
+      .og-visual .phone img {
+        border-radius: 17px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="og">
+      <div class="og-copy">
+        <div class="og-brand"><img src="/loam.svg" alt="" />LOAM</div>
+        <h1>Talk to everyone around you. <span>No internet needed.</span></h1>
+        <p>A private messaging network for everyone nearby. Scan a code to join: no accounts, no cloud.</p>
+      </div>
+      <div class="og-visual">
+        <div class="browser">
+          <div class="browser-bar"><span></span><span></span><span></span><em>192.168.4.1:3000</em></div>
+          <img src="/shots/desktop-general-light.webp" alt="" />
+        </div>
+        <div class="phone"><img src="/shots/phone-thread-light.webp" alt="" /></div>
+      </div>
+    </div>
+  </body>
+</html>

@@ -59,6 +59,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **The privacy policy, README and website overstated connection encryption.** Joining by the code
+  encrypts messages, but on a network that doesn't require encryption (the default) pictures and files
+  are downloaded unencrypted. They now say so, and that the website also counts copies of the
+  `npx loamnet` command.
 - **Joining by QR code lost the network's key.** The web app's first redirect (`/` to `/channels`) dropped
   the `#k=` part of the link before it was read. On a network that only accepts encrypted connections,
   everyone who scanned the code was told to scan it; elsewhere they connected without the protection the
@@ -93,6 +97,15 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   never sends anyone to a website for it.
 - **Storage encryption:** unencrypted storage is now the last option, labelled as for testing, and asks
   for confirmation. A network set up with "Choose every setting myself" is encrypted by default.
+- **New website.** A redesigned loamnet.com with real screenshots of the web app (light and dark) and the
+  Android app, a quick start for Android and for `npx loamnet`, and new fonts (Bricolage Grotesque and
+  Inter, self-hosted), and a "What about iPhone?" section: iPhones join from Safari, but iOS doesn't let an
+  app start a hotspot or keep a server running, so a Mac (`npx loamnet`) is the way to host for iPhone
+  people. The footer's analytics note now matches the privacy policy: visits are counted without cookies
+  or profiles, and PostHog does see your IP address.
+- **README and operator's guide rewritten** for how LOAM works today: the Android setup screens,
+  `npx loamnet` on Mac, Linux, Windows or a Pi, joining from any browser, invite and link codes, and
+  where Emergency reset lives.
 - **Plainer punctuation everywhere.** Every em-dash is gone from the interface in all 16 languages, the
   Android host app, the server's user-facing messages, the `loam` CLI and the website, rewritten as full
   stops, colons or commas. A test keeps the translations dash-free.
