@@ -1020,6 +1020,30 @@ export const ReactionMessageSchema = BaseMessageSchema.extend({
 export type ReactionMessage = z.infer<typeof ReactionMessageSchema>;
 
 /**
+ * Exactly one emoji: one RGI emoji, so a flag, keycap, skin-tone or ZWJ sequence counts as one. Built at
+ * runtime because the `v` flag needs a 2023+ engine; an older browser falls back to a looser pictograph
+ * check (the server, on Node 24, always has the precise one).
+ */
+const SINGLE_EMOJI = (() => {
+  try {
+    return new RegExp("^\\p{RGI_Emoji}$", "v");
+  } catch {
+    return /^(?:\p{Extended_Pictographic}[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f\u{e0020}-\u{e007f}]*|\p{Regional_Indicator}{2}|[#*0-9]\ufe0f?\u20e3)$/u;
+  }
+})();
+
+/**
+ * Whether `value` is usable as a new reaction: a single emoji and nothing else. The server refuses any
+ * other new reaction; the wire schema stays a plain string so older stored or synced reactions still load.
+ *
+ * @param value - The candidate reaction.
+ * @returns `true` when `value` is exactly one emoji.
+ */
+export function isReactionEmoji(value: string): boolean {
+  return value.length <= 64 && SINGLE_EMOJI.test(value);
+}
+
+/**
  * A **sealed mailbox** message (opportunistic-mesh / DTN — docs/16). End-to-end encrypted to a single
  * recipient's key so intermediaries carry it as opaque bytes: `authorId` is the neutral sentinel
  * `"mesh.sealed"` (the real sender is authenticated *inside* the ciphertext), `toTag` is the routing
@@ -1368,6 +1392,7 @@ export const SERVER_ERROR_CODES = [
   "dm_blocked_by_you",
   "block_not_allowed",
   "channel_member_unavailable",
+  "reaction_invalid",
 ] as const;
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 

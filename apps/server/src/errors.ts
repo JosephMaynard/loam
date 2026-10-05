@@ -101,6 +101,7 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Avatar image type does not match the uploaded data": "avatar_type_mismatch",
   "Cannot change the roles of an admin": "roles_admin_immutable",
   "Cannot react to this message": "reaction_not_allowed",
+  "Reaction must be a single emoji": "reaction_invalid",
   "Channel does not exist": "channel_not_found",
   "Channel posting is disabled on this LOAM node": "channel_posting_disabled",
   "Creating channels is disabled on this LOAM node": "channel_create_disabled",

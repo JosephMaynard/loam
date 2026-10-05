@@ -317,6 +317,72 @@ describe("MessageItem", () => {
     expect(onReact).toHaveBeenCalledWith("msg.1", quick.textContent?.trim());
   });
 
+  it("opens the full reaction grid from the toolbar's smiley button", async () => {
+    const host = mount(
+      <MessageItem currentUser={currentUser} message={post()} reactions={[]} usersById={new Map()} {...noop} />,
+    );
+
+    host.querySelector<HTMLButtonElement>('[aria-label="More reactions"]')!.click();
+    await tick();
+
+    const tiles = Array.from(host.querySelectorAll<HTMLButtonElement>(".message-sheet .sheet-reaction"));
+    // Fifteen emoji, then the "+" tile (no recent picks on a fresh device).
+    expect(tiles).toHaveLength(16);
+    expect(tiles.slice(0, 5).map((tile) => tile.textContent)).toEqual(["👍", "👎", "❤️", "🙏", "🤞"]);
+    expect(tiles[15]!.getAttribute("aria-label")).toBe("Other emoji");
+  });
+
+  it("reacts with any emoji typed into the sheet's emoji field, refuses plain text, and remembers the pick", async () => {
+    localStorage.clear();
+    const onReact = vi.fn(async () => {});
+    const host = mount(
+      <MessageItem
+        currentUser={currentUser}
+        message={post()}
+        reactions={[]}
+        usersById={new Map()}
+        {...noop}
+        onReact={onReact}
+      />,
+    );
+
+    async function openField(): Promise<HTMLInputElement> {
+      host.querySelector<HTMLButtonElement>("button.message-time")!.click();
+      await tick();
+      const more = host.querySelector<HTMLButtonElement>('.sheet-reaction[aria-label="Other emoji"]')!;
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      more.click();
+      await tick();
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+      return host.querySelector<HTMLInputElement>(".sheet-emoji-field input")!;
+    }
+
+    function type(input: HTMLInputElement, value: string): Promise<void> {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      return tick();
+    }
+
+    const input = await openField();
+    // Focused for the keyboard straight away (after Preact's deferred effect).
+    await vi.waitFor(() => expect(document.activeElement).toBe(input));
+    await type(input, "lol");
+    expect(host.querySelector(".sheet-emoji-field .field-error")?.textContent).toBe(
+      "Only an emoji can be used as a reaction.",
+    );
+    expect(onReact).not.toHaveBeenCalled();
+
+    await type(input, "lol 🦔");
+    expect(onReact).toHaveBeenCalledWith("msg.1", "🦔");
+    expect(host.querySelector(".message-sheet")).toBeNull();
+
+    // Next time the pick sits right after the "+" tile, one tap away.
+    await openField();
+    const tiles = Array.from(host.querySelectorAll<HTMLButtonElement>(".message-sheet .sheet-reaction"));
+    expect(tiles.map((tile) => tile.textContent).slice(16)).toEqual(["🦔"]);
+    localStorage.clear();
+  });
+
   it("invokes onOpenThread with the reply affordance when provided", () => {
     const onOpenThread = vi.fn();
     const host = mount(

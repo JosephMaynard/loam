@@ -51,6 +51,12 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   Dark, as tiles that preview each palette. The choice applies at once, is remembered in that browser, and
   follows across open tabs. The browser's top bar colour follows it, and inside the Android host the native
   top bar and status bar switch to match.
+- **More reactions, and any emoji.** The actions sheet now offers 15 reactions in three rows of five
+  (👍 👎 ❤️ 🙏 🤞 / 😂 😊 😮 😢 😩 / 😠 😐 🤔 🎉 ✅), and the desktop hover toolbar has 👍 👎 ❤️ 😂 ✅ plus a
+  smiley button that opens the full set. A "+" tile under the grid opens a field for any emoji from the
+  device keyboard (or pasted); the last four picks are remembered on that device, one tap away, and are
+  cleared by a wipe. The server now accepts only a single emoji as a new reaction (`reaction_invalid`);
+  an older reaction stored before this can still be removed.
 
 ### Security
 - **The panic route no longer gives itself away through rate-limit headers.** `/api/panic` answers every

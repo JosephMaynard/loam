@@ -3,6 +3,7 @@ import {
   ChannelSchema,
   DbEncryptionModeSchema,
   IdSchema,
+  isReactionEmoji,
   LoamConfigSchema,
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
@@ -537,5 +538,19 @@ describe("schema refinements", () => {
       expect(ok("A".repeat(1_398_108))).toBe(false);
       expect(ok("A".repeat(1_398_104))).toBe(true);
     });
+  });
+});
+
+describe("isReactionEmoji", () => {
+  it("accepts one emoji, including multi-code-point sequences", () => {
+    for (const emoji of ["👍", "❤️", "😐", "🤞", "✅", "👍🏽", "👩‍👩‍👧", "🇬🇧", "1️⃣", "🏴󠁧󠁢󠁳󠁣󠁴󠁿"]) {
+      expect(isReactionEmoji(emoji), emoji).toBe(true);
+    }
+  });
+
+  it("refuses text, several emoji, padding and the empty string", () => {
+    for (const value of ["", "lol", "a", "1", "#", "👍👍", "👍 ", " 👍", "👍x", "❤"]) {
+      expect(isReactionEmoji(value), JSON.stringify(value)).toBe(false);
+    }
   });
 });
