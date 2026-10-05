@@ -47,7 +47,7 @@
       <div class="wrap legal-body">
         <p class="eyebrow">Legal</p>
         <h1>Privacy policy</h1>
-        <p class="legal-meta">Last updated 25 September 2026</p>
+        <p class="legal-meta">Last updated 5 October 2026</p>
 
         <p>
           This policy covers two things: the <strong>LOAM app</strong> (the Android host app, the web client
@@ -127,7 +127,9 @@
         <p>
           In the default setup, nothing leaves the host device except the messages delivered to the people
           on that network, over the local Wi-Fi or hotspot. When you join by scanning the host's QR code, the
-          app encrypts the traffic between your device and the host. Data leaves the host device only if the host turns on one of these features:
+          app encrypts the messages between your device and the host. Pictures and files are encrypted too
+          when the host requires encrypted connections; otherwise they travel unencrypted on the local
+          network. Data leaves the host device only if the host turns on one of these features:
         </p>
         <ul>
           <li>
@@ -179,7 +181,8 @@
         <h2 id="website">The loamnet.com website</h2>
         <p>
           The website uses <a href="https://posthog.com" rel="noreferrer">PostHog</a> analytics, hosted in the
-          EU, to count page visits and clicks on the download and GitHub links. It sets no cookies and stores
+          EU, to count page visits, clicks on the download and GitHub links, and copies of the
+          <code>npx loamnet</code> command. It sets no cookies and stores
           nothing on your device, and it creates no profile of you. PostHog receives the page address, your
           browser type and your IP address, from which it derives an approximate country. The site is hosted
           by Vercel, which keeps standard server logs.

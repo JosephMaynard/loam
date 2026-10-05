@@ -69,7 +69,7 @@ options (`loam --help` has them all):
 |---|---|
 | `--port <n>` | Listen on another port (default 3000, or the next free one). |
 | `--data-dir <dir>` | Where the data lives (default `$XDG_DATA_HOME/loam` or `~/.loam`). |
-| `--encrypt` | Encrypt the database. The passphrase comes from `$LOAM_DB_KEY` or a prompt; `--encrypt ephemeral` uses a key that lives only in memory. |
+| `--encrypt` | Encrypt the database (pictures and files are stored beside it, unencrypted). The passphrase comes from `$LOAM_DB_KEY` or a prompt; `--encrypt ephemeral` uses a key that lives only in memory. |
 
 Prefer not to rely on "whoever opens it first"? Choose another way to become admin in the config file or
 **Admin → Bootstrap**:
@@ -87,7 +87,8 @@ Prefer not to rely on "whoever opens it first"? Choose another way to become adm
 
 **The code is the whole invitation.** People connect to the same Wi-Fi or hotspot, scan the code, and
 LOAM opens in their browser. Nothing to install, no account, and the code carries the network's
-encryption key, so their connection is encrypted from the first request.
+encryption key, so their messages are encrypted from the first request. (Pictures and files are
+encrypted too only when the network requires encryption: see **Connections** in [§4](#4-shaping-the-network).)
 
 - **From the host phone:** **Share · Host** shows the codes. On Hotspot there are two, the hotspot's
   Wi-Fi first and then LOAM; on Wi-Fi there's one. The address is printed beside it for anyone who'd
@@ -124,9 +125,10 @@ until you switch back to **Custom** ([docs/09](09-security-profiles.md)):
 
 (Open and Standard currently set the same things.)
 
-**Connections.** **Optional** encrypts everyone who joins by scanning but still lets in a device that
-typed the address by hand, unencrypted. **Required** refuses those devices and also hides which pages
-anyone asks for. There is no "off": only a developer debugging mode (`LOAM_DEV_MODE`, never on a
+**Connections.** **Optional** encrypts the messages of everyone who joins by scanning, but downloads
+pictures and files unencrypted, and still lets in a device that typed the address by hand, unencrypted.
+**Required** encrypts pictures and files too, refuses those devices, and hides which pages anyone asks
+for. There is no "off": only a developer debugging mode (`LOAM_DEV_MODE`, never on a
 released app) runs unencrypted, and it shows everyone a red warning ([docs/08](08-transport-security.md)).
 
 **The other settings:**
@@ -172,8 +174,9 @@ time out or remove messages.
 ## 6. Linking networks
 
 Two LOAM networks that can reach each other can share their **public channels** both ways, so separate
-hotspots become one conversation. Direct messages, private channels and anything from a shadow-banned
-person never leave either network.
+hotspots become one conversation. Only messages in open public channels are sent: an archived channel's
+messages stay where they are. Direct messages, private channels and anything from a shadow-banned person
+never leave either network.
 
 **With a link code** (the usual way). On the network that's already running, show a link code: on the
 host phone, **Share · Host → Link another LOAM node → Show a link code**; in the admin area,
@@ -205,7 +208,10 @@ next time it reaches the network.
   completely, and next time it opens on setup. If something couldn't be erased, the screen says so and
   stays open: closing LOAM and opening it again finishes the job.
 - **From the admin area:** **Emergency Reset**, once enabled there (the Hardened profile enables it).
-  The settings survive, so the network starts again empty.
+  The settings survive, so the network starts again empty. Sync settings survive too: if this network is
+  linked, the next sync round pulls the linked networks' public channels back in. To keep it empty, turn
+  sync off or remove the peers first. On a computer using a fixed passphrase, the shared mesh token isn't
+  kept (it's never written to disk unencrypted): set it again before syncing with networks that need it.
 - **Without logging in:** set a **panic token** (16 characters or more) in the same panel, and a request
   to `POST /api/panic` with it erases the network, from a bookmark or another device. The token is stored
   hashed, and the address answers "not found" unless a token is set.

@@ -59,6 +59,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **The privacy policy, README and website overstated connection encryption.** Joining by the code
+  encrypts messages, but on a network that doesn't require encryption (the default) pictures and files
+  are downloaded unencrypted. They now say so, and that the website also counts copies of the
+  `npx loamnet` command.
 - **Joining by QR code lost the network's key.** The web app's first redirect (`/` to `/channels`) dropped
   the `#k=` part of the link before it was read. On a network that only accepts encrypted connections,
   everyone who scanned the code was told to scan it; elsewhere they connected without the protection the

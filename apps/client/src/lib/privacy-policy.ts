@@ -8,7 +8,7 @@
 export type PolicyBlock = { kind: "p"; text: string } | { kind: "list"; items: string[] };
 export type PolicySection = { heading: string; blocks: PolicyBlock[] };
 
-export const PRIVACY_POLICY_UPDATED = "3 October 2026";
+export const PRIVACY_POLICY_UPDATED = "5 October 2026";
 
 export const PRIVACY_POLICY: PolicySection[] = [
   {
@@ -89,8 +89,9 @@ export const PRIVACY_POLICY: PolicySection[] = [
         text:
           "Normally nothing leaves the host device except the messages delivered to the people on that network, " +
           "over the local Wi-Fi or hotspot. When you join by scanning the host's code, LOAM encrypts the " +
-          "connection between your device and the host. Data leaves the host device only if the host turns on " +
-          "one of these:",
+          "messages between your device and the host. Pictures and files are encrypted too when the host requires " +
+          "encrypted connections; otherwise they travel unencrypted on the local network. Data leaves the host " +
+          "device only if the host turns on one of these:",
       },
       {
         kind: "list",

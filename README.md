@@ -88,7 +88,8 @@ first person to open a new network becomes its admin. Needs [Node.js](https://no
 ```bash
 npx loamnet --port 8080            # another port (by default 3000, or the next free one)
 npx loamnet --data-dir ~/loam      # where to keep the data (default ~/.loam)
-npx loamnet --encrypt              # encrypt everything stored (asks for a passphrase)
+npx loamnet --encrypt              # encrypt the database (asks for a passphrase); pictures and
+                                   # files are stored beside it, unencrypted
 npm install -g loamnet && loam     # install it for good
 ```
 
@@ -98,7 +99,7 @@ More in the [`loamnet` README](cli/README.md).
 
 Any phone, tablet or computer joins from its browser, iPhones included: connect to the same Wi-Fi or
 hotspot, scan the code, and LOAM opens. There is nothing to install and no account to make. The code
-also carries the network's encryption key, so the connection to the host is encrypted from the start.
+also carries the network's encryption key, so messages to and from the host are encrypted from the start.
 
 ## What you can do
 
@@ -112,7 +113,8 @@ also carries the network's encryption key, so the connection to the host is encr
   It changes every 10 minutes, so an old photo of it stops working.
 - **Link networks.** Two LOAM networks can share their public channels both ways. The existing network
   shows a single-use link code; the other phone scans it during setup. Direct messages and private
-  channels never leave either network.
+  channels never leave either network. (Mesh mail, experimental and off by default, can travel through
+  linked networks, sealed so that only its recipient's network can open it.)
 - **Emergency reset.** Press and hold to erase the whole network at once, on the host and on every phone
   connected to it.
 - **Fifteen languages,** left to right and right to left: English, Español, Français, العربية, فارسی,
@@ -141,11 +143,14 @@ computer, the same settings live in the admin area as **security profiles**
 - **Nothing to collect.** No accounts, no analytics, no advertising, no crash reporting. Messages stay
   on the host and on the phones that received them.
 - **Encrypted connections.** Joining by the code sets up an encrypted connection to the host (an X25519
-  handshake and XChaCha20-Poly1305), so nobody else on the Wi-Fi can read along. A network can also
-  refuse anyone who didn't join by the code ([docs/08](docs/08-transport-security.md)).
+  handshake and XChaCha20-Poly1305), so nobody else on the Wi-Fi can read the messages. By default,
+  pictures and files are downloaded unencrypted, so someone on the same Wi-Fi could see them; a network
+  that requires encryption (the Private one does) encrypts those too, and refuses anyone who didn't join
+  by the code ([docs/08](docs/08-transport-security.md)).
 - **Encrypted storage.** The host can keep its database encrypted with SQLCipher, under a key held in
   the phone's keystore, a passphrase, or a key that lives only in memory. An encrypted setting never
-  falls back to storing data unencrypted.
+  falls back to storing data unencrypted. Pictures and files are stored beside the database, not
+  encrypted; an Emergency reset deletes them.
 - **Emergency reset.** Erases every message, person, picture and file, and tells connected phones to
   clear their copy. On the Android app, and on a computer using a key that lives only in memory, the key
   is replaced too, so what's left on the storage can't be read ([docs/02](docs/02-kill-switch.md)).
