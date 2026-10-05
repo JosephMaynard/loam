@@ -98,11 +98,10 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
-          # This version's default is "tools platform-tools", and Google has removed the legacy `tools`
-          # package from the SDK repository, so the default now fails with "Failed to find package 'tools'"
-          # (the v0.5.0 tag build, 2026-09-28). Only platform-tools is needed here; the NDK, CMake, build
-          # tools and platforms come from the sdkmanager step below and from Gradle. (setup-android v4
-          # changed its default to exactly this.)
+          # Only platform-tools is needed here; the NDK, CMake, build tools and platforms come from the
+          # sdkmanager step below and from Gradle. v4's default is already this; it's spelled out because v3's
+          # default ("tools platform-tools") broke the v0.5.0 tag build (2026-09-28) once Google removed the
+          # legacy `tools` package ("Failed to find package 'tools'").
           packages: platform-tools
 
       - name: Install NDK + CMake
