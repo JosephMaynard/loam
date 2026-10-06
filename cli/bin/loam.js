@@ -555,7 +555,17 @@ function printPlain(app) {
       console.log("");
       return;
     }
-    writeFileSync(linkFile, `${link}\n`, { mode: 0o600 });
+    // Remove first: `mode` only applies to a new file, so an existing one (left with looser permissions, or a
+    // symlink pointing elsewhere) would otherwise keep its permissions or send the code somewhere else.
+    try {
+      rmSync(linkFile, { force: true });
+      writeFileSync(linkFile, `${link}\n`, { mode: 0o600, flag: "wx" });
+    } catch (error) {
+      // Something put a file back in between (or the folder isn't writable): don't write through it.
+      retireCurrent();
+      console.error(`Couldn't write the one-time admin link to ${linkFile} (${error?.code ?? error}). Trying again shortly.`);
+      return;
+    }
     console.log(`Nobody is admin yet. A one-time admin link (renewed every 10 minutes) is in ${linkFile}`);
   };
   const adminTimer = setInterval(offerAdminLink, 30_000);
