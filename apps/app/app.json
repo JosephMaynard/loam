@@ -14,7 +14,7 @@
       "package": "com.loamnet.host",
       "versionCode": 7,
       "adaptiveIcon": {
-        "backgroundColor": "#d14900",
+        "backgroundColor": "#d84000",
         "foregroundImage": "./assets/images/loam-icon.png",
         "monochromeImage": "./assets/images/loam-icon-monochrome.png"
       },
@@ -36,7 +36,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#d14900",
+          "backgroundColor": "#d84000",
           "image": "./assets/images/loam-splash.png",
           "imageWidth": 200
         }

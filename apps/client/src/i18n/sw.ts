@@ -600,6 +600,7 @@ export const sw: Translation = {
   "settings.blockedNote": "Watu unaowazuia hawawezi kukutumia ujumbe wa moja kwa moja, na jumbe zao kwenye vituo hufichwa kwako. LOAM haiwajulishi.",
   "settings.blockedEmpty": "Hujamzuia mtu yeyote.",
   "settings.privacyPolicy": "Sera ya faragha",
+  "settings.reportProblems": "LOAM haina takwimu za matumizi wala ripoti za hitilafu, kwa hivyo tunajua tu matatizo unayotuambia. Tujulishe:",
   "error.dm_unavailable": "Ujumbe wa moja kwa moja kwa mtu huyu haupatikani",
   "error.dm_blocked_by_you": "Umemzuia mtu huyu. Ondoa kizuizi ili kumtumia ujumbe",
   "error.channel_member_unavailable": "Mtu huyu hapatikani kwa kituo hiki",

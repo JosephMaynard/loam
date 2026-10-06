@@ -614,6 +614,7 @@ export const ar: Translation = {
   "settings.blockedNote": "لا يمكن للأشخاص الذين تحظرهم إرسال رسائل مباشرة إليك، وتُخفى رسائلهم في القنوات عنك. لا يُعلمهم LOAM بذلك.",
   "settings.blockedEmpty": "لم تحظر أحدًا.",
   "settings.privacyPolicy": "سياسة الخصوصية",
+  "settings.reportProblems": "لا يحتوي LOAM على أي تحليلات أو تقارير أعطال، لذلك لا نعرف بالمشكلات إلا إذا أبلغتنا بها. أخبرنا:",
   "error.dm_unavailable": "الرسائل المباشرة إلى هذا الشخص غير متاحة",
   "error.dm_blocked_by_you": "لقد حظرت هذا الشخص. ألغِ حظره لترسل إليه رسالة",
   "error.channel_member_unavailable": "هذا الشخص غير متاح لهذه القناة",

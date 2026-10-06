@@ -600,6 +600,7 @@ export const fr: Translation = {
   "settings.blockedNote": "Les personnes que vous bloquez ne peuvent pas vous envoyer de messages directs, et leurs messages dans les canaux vous sont masqués. LOAM ne les en avertit pas.",
   "settings.blockedEmpty": "Vous n’avez bloqué personne.",
   "settings.privacyPolicy": "Politique de confidentialité",
+  "settings.reportProblems": "LOAM n'a ni statistiques d'utilisation ni rapports de plantage : nous n'apprenons un problème que si vous nous le signalez. Écrivez-nous :",
   "error.dm_unavailable": "Les messages directs à cette personne ne sont pas disponibles",
   "error.dm_blocked_by_you": "Vous avez bloqué cette personne. Débloquez-la pour lui envoyer un message",
   "error.channel_member_unavailable": "Cette personne n’est pas disponible pour ce canal",

@@ -600,6 +600,7 @@ export const ps: Translation = {
   "settings.blockedNote": "هغه خلک چې تاسو یې بندوئ تاسو ته مستقیم پیغامونه نه شي لېږلای، او په چینلونو کې یې پیغامونه له تاسو پټ وي. LOAM هغوی ته خبر نه ورکوي.",
   "settings.blockedEmpty": "تاسو هېڅوک نه دي بند کړي.",
   "settings.privacyPolicy": "د محرمیت تګلاره",
+  "settings.reportProblems": "LOAM هېڅ تحلیلونه یا د خرابیو راپورونه نه لري، نو موږ یوازې د هغو ستونزو په اړه خبرېږو چې تاسو یې راته ووایئ. موږ ته خبر راکړئ:",
   "error.dm_unavailable": "دې کس ته مستقیم پیغامونه شتون نه لري",
   "error.dm_blocked_by_you": "تاسو دا کس بند کړی دی. د پیغام لېږلو لپاره یې بندیز لرې کړئ",
   "error.channel_member_unavailable": "دا کس د دې چینل لپاره شتون نه لري",

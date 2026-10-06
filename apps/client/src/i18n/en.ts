@@ -673,6 +673,7 @@ export const en = {
   "settings.blockedNote": "People you block can't send you direct messages, and their channel messages are hidden from you. LOAM doesn't notify them.",
   "settings.blockedEmpty": "You haven't blocked anyone.",
   "settings.privacyPolicy": "Privacy policy",
+  "settings.reportProblems": "LOAM has no analytics or crash reporting, so we only hear about problems you report. Please tell us:",
   "error.dm_unavailable": "Direct messages to this person aren't available",
   "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
   "error.channel_member_unavailable": "This person isn't available for this channel",

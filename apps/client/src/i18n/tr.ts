@@ -600,6 +600,7 @@ export const tr: Translation = {
   "settings.blockedNote": "Engellediğiniz kişiler size doğrudan mesaj gönderemez ve kanallardaki mesajları sizden gizlenir. LOAM onlara bildirmez.",
   "settings.blockedEmpty": "Kimseyi engellemediniz.",
   "settings.privacyPolicy": "Gizlilik politikası",
+  "settings.reportProblems": "LOAM'da analiz veya çökme raporu yoktur, bu yüzden yalnızca bize bildirdiğiniz sorunlardan haberimiz olur. Bize bildirin:",
   "error.dm_unavailable": "Bu kişiye doğrudan mesaj gönderilemiyor",
   "error.dm_blocked_by_you": "Bu kişiyi engellediniz. Mesaj göndermek için engeli kaldırın",
   "error.channel_member_unavailable": "Bu kişi bu kanal için uygun değil",

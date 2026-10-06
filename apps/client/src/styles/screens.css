@@ -50,6 +50,12 @@
   text-align: center;
 }
 
+/* Settings' problem-report footnote: the address and email must stay copyable on a narrow phone. */
+.report-problems span {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 /* ---------- Stacks ----------
    Most screen parts are a grid of children with a 12px (or 8px) gap; declared once here. */
 

@@ -165,7 +165,10 @@ computer, the same settings live in the admin area as **security profiles**
 ## Privacy and security
 
 - **Nothing to collect.** No accounts, no analytics, no advertising, no crash reporting. Messages stay
-  on the host and on the phones that received them.
+  on the host and on the phones that received them. That also means LOAM never tells us when something
+  goes wrong, so if you find a problem, please
+  [open an issue](https://github.com/JosephMaynard/loam/issues) or email Magic Zebra Ltd at
+  magicaltrailsapp@gmail.com.
 - **Encrypted connections.** Joining by the code sets up an encrypted connection to the host (an X25519
   handshake and XChaCha20-Poly1305), so nobody else on the Wi-Fi can read the messages. By default,
   pictures and files are downloaded unencrypted, so someone on the same Wi-Fi could see them; a network

@@ -8,7 +8,11 @@
 export type PolicyBlock = { kind: "p"; text: string } | { kind: "list"; items: string[] };
 export type PolicySection = { heading: string; blocks: PolicyBlock[] };
 
-export const PRIVACY_POLICY_UPDATED = "5 October 2026";
+export const PRIVACY_POLICY_UPDATED = "6 October 2026";
+
+/** Where people report problems: LOAM has no telemetry, so these are the only way we hear of one. */
+export const ISSUE_TRACKER = "github.com/JosephMaynard/loam/issues";
+export const CONTACT_EMAIL = "magicaltrailsapp@gmail.com";
 
 export const PRIVACY_POLICY: PolicySection[] = [
   {
@@ -33,6 +37,12 @@ export const PRIVACY_POLICY: PolicySection[] = [
         text:
           "LOAM has no sign-up, and it never asks for an email address, phone number or real name. It contains " +
           "no analytics, advertising, crash reporting or third-party tracking code.",
+      },
+      {
+        kind: "p",
+        text:
+          "That also means LOAM never tells us when something goes wrong. If you find a problem, please let us " +
+          `know: open an issue at \`${ISSUE_TRACKER}\`, or email Magic Zebra Ltd at \`${CONTACT_EMAIL}\`.`,
       },
     ],
   },
@@ -148,7 +158,8 @@ export const PRIVACY_POLICY: PolicySection[] = [
         kind: "p",
         text:
           "Questions about data on this network go to its host, who holds it. Questions about this policy go to " +
-          "Magic Zebra Ltd through the LOAM project's issue tracker (`github.com/JosephMaynard/loam`). Changes " +
+          "Magic Zebra Ltd through the LOAM project's issue tracker (`github.com/JosephMaynard/loam`) or by email " +
+          `(\`${CONTACT_EMAIL}\`). Changes ` +
           "are published with a new date.",
       },
     ],
