@@ -9,6 +9,7 @@ import { type Line, padEnd, text } from "../ansi.js";
 import { isChar } from "../keys.js";
 import { textField } from "../modal.js";
 import { qrBlock } from "../qr.js";
+import { paragraph, withQrIfItFits } from "./join.js";
 import type { Screen, View } from "../types.js";
 
 type Row = {
@@ -275,12 +276,18 @@ function showLinkCode(view: View): void {
   view.open({
     kind: "panel",
     title: "Link another LOAM network",
-    lines: [
-      text("On the other LOAM phone: setup, then Join another LOAM network, and scan this.", { dim: true }),
-      text("The two networks then share their public channels both ways. It works once, for 10 minutes.", { dim: true }),
-      [],
-      ...(qr ? qr.lines : [text(link, { fg: "cyan" })]),
-    ],
+    lines: (width, height) =>
+      withQrIfItFits(
+        paragraph(
+          "On the other LOAM phone: setup, then Join another LOAM network, and scan this. The two networks then share their public channels both ways. It works once, for 10 minutes.",
+          width,
+          { dim: true },
+        ),
+        qr,
+        link,
+        width,
+        height,
+      ),
   });
 }
 

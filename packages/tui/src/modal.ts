@@ -110,7 +110,8 @@ export type ChoiceModal = {
 export type PanelModal = {
   kind: "panel";
   title: string;
-  lines: Line[];
+  /** The content, or a function that lays it out for the room there is (a QR only when it fits whole). */
+  lines: Line[] | ((width: number, height: number) => Line[]);
   /** Shown at the bottom; Escape or Enter closes the panel. */
   footer?: string;
 };
@@ -160,14 +161,17 @@ export async function modalKey(modal: Modal, key: Key): Promise<boolean> {
   }
 }
 
-/** The modal's lines, `width` columns wide at most. */
-export function modalLines(modal: Modal, width: number): Line[] {
+/** The modal's lines, `width` columns wide and `height` rows tall at most (borders not counted). */
+export function modalLines(modal: Modal, width: number, height: number): Line[] {
   const inner = Math.max(10, width - 4);
   const lines: Line[] = [text(modal.title, { bold: true }), []];
   const body = modal.kind === "panel" ? [] : modal.body;
-  for (const paragraph of body) {
+  body.forEach((paragraph, index) => {
+    if (index > 0) {
+      lines.push([]);
+    }
     lines.push(...wrap(paragraph, inner).map((line) => text(line)));
-  }
+  });
   if (body.length) {
     lines.push([]);
   }
@@ -197,12 +201,26 @@ export function modalLines(modal: Modal, width: number): Line[] {
       lines.push(text("↑↓ choose · Enter to pick · Esc to cancel", { dim: true }));
       break;
     case "panel":
-      lines.push(...modal.lines);
+      lines.push(...(typeof modal.lines === "function" ? modal.lines(inner, Math.max(0, height - 4)) : modal.lines));
       lines.push([]);
       lines.push(text(modal.footer ?? "Esc to close", { dim: true }));
       break;
   }
   return lines;
+}
+
+/** A link split into `width`-column pieces: never cut short, since a shortened link doesn't work. */
+export function breakLink(value: string, width: number): string[] {
+  const pieces: string[] = [];
+  let current = "";
+  for (const char of value) {
+    if (textWidth(current + char) > width) {
+      pieces.push(current);
+      current = "";
+    }
+    current += char;
+  }
+  return current ? [...pieces, current] : pieces;
 }
 
 /** Word-wrap `value` to `width` columns. */

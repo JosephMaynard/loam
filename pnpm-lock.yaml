@@ -53,6 +53,9 @@ importers:
       '@loam/qr':
         specifier: workspace:*
         version: link:packages/qr
+      '@loam/tui':
+        specifier: workspace:*
+        version: link:packages/tui
       esbuild:
         specifier: 'catalog:'
         version: 0.28.2

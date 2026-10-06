@@ -9,7 +9,9 @@
 //      health check and the web client there;
 //   4. an explicit `--port` that is taken is refused with a message (exit 1), not a stack trace;
 //   5. `--encrypt` with $LOAM_DB_KEY starts, writes a database that isn't plaintext SQLite, and reopens
-//      it with the same key.
+//      it with the same key;
+//   6. without a terminal it prints the plain join output (no line per request, and a one-time admin
+//      link while nobody is admin), refuses `--kiosk`, and starts on a port saved in cli.json.
 //
 // Needs `pnpm build` first (it runs scripts/build-cli.mjs itself). Uses the network for `npm install`.
 // Usage: node scripts/cli-smoke.mjs
@@ -143,10 +145,33 @@ async function main() {
     check(health.ok && (await health.json()).ok === true, "the health check answers on the chosen port");
     const shell = await fetch(`http://127.0.0.1:${node.port}/channels`);
     check(shell.ok && (await shell.text()).includes("<html"), "the web client is served (SPA route → shell)");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    check(!/incoming request|request completed/.test(node.output()), "plain mode prints no line per request");
+    check(
+      /Nobody is admin yet[^\n]*\n\s+http:\/\/\S+#k=[A-Za-z0-9_-]+&a=[A-Za-z0-9_-]{22}/.test(node.output()),
+      "plain mode prints a one-time admin link while nobody is admin",
+    );
     await node.stop();
   } finally {
     await releaseDefault?.();
   }
+
+  // --kiosk needs the terminal UI.
+  const kiosk = spawnSync(process.execPath, [bin, "--kiosk", "--data-dir", join(work, "kiosk")], {
+    encoding: "utf8",
+    env: baseEnv,
+    timeout: 30_000,
+  });
+  check(kiosk.status === 1 && /--kiosk needs the terminal UI/.test(kiosk.stderr), "--kiosk without a terminal is refused");
+
+  // A port saved from the terminal UI (cli.json) is used when no --port is given.
+  const savedDir = join(work, "saved");
+  const savedPort = await freePort();
+  run("mkdir", ["-p", savedDir]);
+  writeFileSync(join(savedDir, "cli.json"), JSON.stringify({ port: savedPort }));
+  const savedNode = await startLoam(bin, ["--data-dir", savedDir], baseEnv);
+  check(savedNode.port === savedPort, `the port saved in cli.json (${savedPort}) is used`);
+  await savedNode.stop();
 
   // Explicit port taken → refused.
   const takenPort = await freePort();

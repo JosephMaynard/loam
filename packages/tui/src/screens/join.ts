@@ -2,9 +2,9 @@
  * Join (the home screen): the join QR, kept on screen, with the addresses beside it. From here the operator
  * hides the QR, picks which network address to advertise, and opens LOAM in the browser as admin.
  */
-import { type Line, text } from "../ansi.js";
+import { type Line, type Style, text } from "../ansi.js";
 import { isChar } from "../keys.js";
-import { wrap } from "../modal.js";
+import { breakLink, wrap } from "../modal.js";
 import { qrBlock, type QrBlock } from "../qr.js";
 import type { Screen, View } from "../types.js";
 
@@ -22,7 +22,7 @@ export function qrFor(value: string): QrBlock | undefined {
 function infoLines(view: View, width: number): Line[] {
   const { status } = view;
   const lines: Line[] = [
-    text("Join from a phone or laptop on this network", { dim: true }),
+    ...paragraph("Join from a phone or laptop on this network", width, { dim: true }),
     text(view.joinUrl(), { bold: true, fg: "cyan" }),
     [],
     text("On this computer", { dim: true }),
@@ -137,21 +137,45 @@ export async function openAsAdmin(view: View): Promise<void> {
   const opened = await system.openUrl(local);
 
   const phoneLink = `${view.joinUrl()}${fragment(host.adminClaimCode().code)}`;
-  const qr = qrFor(phoneLink);
-  const lines: Line[] = [
-    ...(opened
-      ? [text("LOAM is opening in your browser, signed in as admin.", { fg: "green" })]
-      : [
-          text("Couldn't open a browser on this computer.", { fg: "yellow" }),
-          text("Open this on this computer instead:", { dim: true }),
-          text(local, { fg: "cyan" }),
-        ]),
+  const qr = qrBlock(phoneLink);
+  view.open({
+    kind: "panel",
+    title: "Open as admin",
+    lines: (width, height) =>
+      withQrIfItFits(
+        [
+          ...(opened
+            ? paragraph("LOAM is opening in your browser, signed in as admin.", width, { fg: "green" })
+            : [
+                ...paragraph("Couldn't open a browser on this computer. Open this on this computer instead:", width, { fg: "yellow" }),
+                ...breakLink(local, width).map((piece) => text(piece, { fg: "cyan" })),
+              ]),
+          [],
+          ...paragraph("To make a phone admin instead, scan this with it. Each link works once, for 10 minutes.", width, { dim: true }),
+        ],
+        qr,
+        phoneLink,
+        width,
+        height,
+      ),
+  });
+}
+
+/** `value` word-wrapped to `width`, one style throughout. */
+export function paragraph(value: string, width: number, style?: Style): Line[] {
+  return wrap(value, width).map((line) => text(line, style));
+}
+
+/** `before`, then the QR when it fits whole in the room left, else the link as text. */
+export function withQrIfItFits(before: Line[], qr: QrBlock | undefined, link: string, width: number, height: number): Line[] {
+  if (qr && qr.width <= width && before.length + 1 + qr.lines.length <= height) {
+    return [...before, [], ...qr.lines];
+  }
+  return [
+    ...before,
     [],
-    text("To make a phone admin instead, scan this with it.", { dim: true }),
-    text("Each link works once, for 10 minutes.", { dim: true }),
-    [],
-    ...(qr ? qr.lines : [text(phoneLink, { fg: "cyan" })]),
+    ...breakLink(link, width).map((piece) => text(piece, { fg: "cyan" })),
+    ...paragraph("Make the window bigger to show this as a QR code.", width, { dim: true }),
   ];
-  view.open({ kind: "panel", title: "Open as admin", lines });
 }
 

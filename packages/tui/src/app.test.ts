@@ -166,6 +166,25 @@ describe("the Join screen", () => {
     expect(tui.modal).toBeUndefined();
   });
 
+  it("shows the phone QR whole or not at all, with the link in full when there's no room", async () => {
+    const qrRows = (screen: string) => screen.split("\n").filter((line) => line.includes("│") && /[█▀▄]/.test(line)).length;
+
+    const roomy = setup();
+    await roomy.tui.input("o");
+    expect(qrRows(roomy.screenText())).toBeGreaterThanOrEqual(18);
+
+    const cramped = setup({ terminal: fakeTerminal(70, 26) });
+    vi.mocked(cramped.system.openUrl).mockResolvedValue(false);
+    await cramped.tui.input("o");
+    const screen = cramped.screenText();
+    expect(qrRows(screen)).toBe(0);
+    expect(screen).toContain("Couldn't open a browser");
+    expect(screen).toContain("Make the window bigger to show this as a QR code.");
+    // The local link, broken across lines but never cut short.
+    const joined = screen.split("\n").map((line) => line.replace(/^.*│ /, "").replace(/ *│.*$/, "")).join("");
+    expect(joined).toContain(`http://localhost:3000#k=${KEY}&a=abcdefghijklmnopqrstuv`);
+  });
+
   it("pins the join address and remembers it", async () => {
     const { tui, host, saved, screenText } = setup();
     await tui.input("a");

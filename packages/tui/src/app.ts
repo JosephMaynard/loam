@@ -165,7 +165,7 @@ export function createTui(options: TuiOptions): Tui {
       return body;
     }
     const inner = Math.min(width - 4, Math.max(50, Math.min(76, width - 8)));
-    const content = modalLines(modal, inner);
+    const content = modalLines(modal, inner, height - 2);
     const boxWidth = Math.min(width, Math.max(inner, ...content.map(lineWidth)) + 4);
     const shown = content.slice(0, Math.max(1, height - 2));
     const left = " ".repeat(Math.max(0, Math.floor((width - boxWidth) / 2)));
