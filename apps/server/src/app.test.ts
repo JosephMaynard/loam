@@ -1348,6 +1348,53 @@ describe("message authorization", () => {
     expect(participant.statusCode).toBe(201);
   });
 
+  it("takes any single emoji as a new reaction, refuses anything else, and still removes an older one", async () => {
+    const { app, dataDir } = await makeApp();
+    const alice = await newSession(app);
+
+    const post = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: alice.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "hello" },
+    });
+    expect(post.statusCode).toBe(201);
+    const postId = (post.json() as { message: { id: string } }).message.id;
+
+    async function react(reaction: string, current = app) {
+      return current.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: alice.cookie },
+        payload: { type: "reaction", targetMessageId: postId, reaction },
+      });
+    }
+
+    // Not on the client's built-in list, but one emoji from the keyboard: accepted.
+    expect((await react("🦔")).statusCode).toBe(201);
+    expect((await react("👩‍👩‍👧")).statusCode).toBe(201);
+
+    for (const reaction of ["lol", "👍👍", " 👍", "❤"]) {
+      const refused = await react(reaction);
+      expect(refused.statusCode, reaction).toBe(400);
+      expect((refused.json() as { code?: string }).code).toBe("reaction_invalid");
+    }
+
+    // A reaction stored before the rule (here seeded straight into the DB) can still be toggled off.
+    app.store.insertMessage({
+      id: "react_legacy",
+      type: "reaction",
+      authorId: alice.userId,
+      targetMessageId: postId,
+      reaction: "+1",
+      createdAt: Date.now(),
+    });
+    const reopened = await reopenApp(app, dataDir);
+    const removed = await react("+1", reopened);
+    expect(removed.statusCode).toBe(200);
+    expect((removed.json() as { deletedMessageId?: string }).deletedMessageId).toBe("react_legacy");
+  });
+
   it("rejects DMs when enableDMs is off", async () => {
     const app = await makeApp({ features: { enableDMs: false } });
     const alice = await newSession(app);

@@ -1,7 +1,7 @@
 import type { Message, User } from "@loam/schema";
 import { generateDisplayName } from "@loam/display-name";
 import type { ComponentChildren } from "preact";
-import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { isImageAttachment } from "../lib/attachments";
@@ -11,19 +11,15 @@ import { renderMarkdownCached } from "../lib/markdown";
 import { placeToolbar } from "../lib/toolbar-placement";
 import { bodyFor, displayTime } from "../lib/message-format";
 import { isJumboEmoji, type ReactionSummary } from "../lib/messages";
+import { firstEmoji, QUICK_REACTIONS, readRecentReactions, rememberReaction, SHEET_REACTIONS } from "../lib/reactions";
 import { useLongPress } from "../lib/use-long-press";
 import { AttachmentFile } from "./AttachmentFile";
 import { AttachmentImage } from "./AttachmentImage";
 import { Avatar } from "./Avatar";
 import { Dialog } from "./Dialog";
-import { IconChevronRight, IconCopy, IconEdit, IconFlag, IconReply, IconTrash } from "./icons";
+import { IconChevronRight, IconCopy, IconEdit, IconFlag, IconPlus, IconReply, IconSmile, IconTrash } from "./icons";
 import { LocationCard } from "./LocationCard";
 import { Menu, type MenuItem } from "./Menu";
-
-/** One-tap reactions on the desktop hover toolbar. */
-const QUICK_REACTIONS = ["👍", "❤️", "✅"];
-/** The touch sheet has room for a few more. */
-const SHEET_REACTIONS = ["👍", "❤️", "😂", "😮", "🙏", "✅"];
 
 interface MessageItemProps {
   currentUser: User;
@@ -128,6 +124,10 @@ export function MessageItem({
   const [draft, setDraft] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
+  // The sheet's "any emoji" field (lib/reactions.ts): shown by its "+" tile, gone when the sheet closes.
+  const [emojiFieldOpen, setEmojiFieldOpen] = useState(false);
+  const [emojiFieldRefused, setEmojiFieldRefused] = useState(false);
+  const emojiFieldRef = useRef<HTMLInputElement>(null);
   // A blocked author's message stays collapsed until the reader deliberately taps "Show" (per message).
   const [revealed, setRevealed] = useState(false);
   const longPress = useLongPress(() => {
@@ -178,6 +178,36 @@ export function MessageItem({
   function react(reaction: string): void {
     void onReact(message.id, reaction).catch(() => {});
   }
+
+  function closeSheet(): void {
+    setSheetOpen(false);
+    setEmojiFieldOpen(false);
+    setEmojiFieldRefused(false);
+  }
+
+  /** React from the sheet: closes it first, as every sheet action does. */
+  function reactFromSheet(reaction: string): void {
+    closeSheet();
+    react(reaction);
+  }
+
+  /** The emoji field takes the first emoji typed into it; plain text gets a hint instead. */
+  function onEmojiFieldInput(value: string): void {
+    const emoji = firstEmoji(value);
+
+    if (emoji) {
+      rememberReaction(emoji);
+      reactFromSheet(emoji);
+    } else {
+      setEmojiFieldRefused(value.trim() !== "");
+    }
+  }
+
+  useEffect(() => {
+    if (emojiFieldOpen) {
+      emojiFieldRef.current?.focus();
+    }
+  }, [emojiFieldOpen]);
 
   // Everything behind the ⋮ menu (desktop) and below the reactions in the sheet (touch), in one order.
   const menuActions: MessageAction[] = [
@@ -461,6 +491,17 @@ export function MessageItem({
                     </button>
                   ))
                 : null}
+              {canReact ? (
+                <button
+                  aria-haspopup="dialog"
+                  aria-label={t("message.moreReactions")}
+                  className="btn btn-icon btn-sm btn-ghost"
+                  onClick={() => setSheetOpen(true)}
+                  type="button"
+                >
+                  <IconSmile size={18} />
+                </button>
+              ) : null}
               {replyAction ? (
                 <button
                   aria-label={replyAction.label}
@@ -517,30 +558,67 @@ export function MessageItem({
         <Dialog
           className="menu-sheet message-sheet"
           hideTitle
-          onClose={() => setSheetOpen(false)}
+          onClose={closeSheet}
           title={t("message.actionsTitle")}
           variant="sheet"
         >
           {canReact ? (
             <div className="message-sheet-reactions">
-              {SHEET_REACTIONS.map((reaction) => {
-                const active = reactions.some((summary) => summary.reaction === reaction && summary.active);
-                return (
-                  <button
-                    aria-label={t("message.reactWith", { emoji: reaction })}
-                    aria-pressed={active}
-                    className={active ? "sheet-reaction is-active" : "sheet-reaction"}
-                    key={reaction}
-                    onClick={() => {
-                      setSheetOpen(false);
-                      react(reaction);
-                    }}
-                    type="button"
+              <div className="sheet-reaction-grid">
+                {[...SHEET_REACTIONS, null, ...readRecentReactions()].map((reaction) => {
+                  if (reaction === null) {
+                    // The "any emoji" tile opens the fourth row, followed by this device's recent picks.
+                    return (
+                      <button
+                        aria-expanded={emojiFieldOpen}
+                        aria-label={t("message.otherEmoji")}
+                        className={`sheet-reaction sheet-reaction-more${emojiFieldOpen ? " is-active" : ""}`}
+                        key="more"
+                        onClick={() => setEmojiFieldOpen((open) => !open)}
+                        type="button"
+                      >
+                        <IconPlus size={22} />
+                      </button>
+                    );
+                  }
+
+                  const active = reactions.some((summary) => summary.reaction === reaction && summary.active);
+                  return (
+                    <button
+                      aria-label={t("message.reactWith", { emoji: reaction })}
+                      aria-pressed={active}
+                      className={active ? "sheet-reaction is-active" : "sheet-reaction"}
+                      key={reaction}
+                      onClick={() => reactFromSheet(reaction)}
+                      type="button"
+                    >
+                      {reaction}
+                    </button>
+                  );
+                })}
+              </div>
+              {emojiFieldOpen ? (
+                <div className="sheet-emoji-field">
+                  <input
+                    aria-describedby={`emoji-hint-${message.id}`}
+                    aria-label={t("message.otherEmoji")}
+                    autoComplete="off"
+                    className="input"
+                    enterKeyHint="done"
+                    onInput={(event) => onEmojiFieldInput(event.currentTarget.value)}
+                    placeholder={t("message.emojiFieldPlaceholder")}
+                    ref={emojiFieldRef}
+                    type="text"
+                  />
+                  <p
+                    className={emojiFieldRefused ? "field-error" : "field-hint"}
+                    id={`emoji-hint-${message.id}`}
+                    role={emojiFieldRefused ? "alert" : undefined}
                   >
-                    {reaction}
-                  </button>
-                );
-              })}
+                    {emojiFieldRefused ? t("message.emojiFieldRefused") : t("message.emojiFieldHint")}
+                  </p>
+                </div>
+              ) : null}
             </div>
           ) : null}
           {sheetActions.length ? (
@@ -551,7 +629,7 @@ export function MessageItem({
                   key={action.key}
                   onClick={() => {
                     // Close first, so an action that opens its own dialog (report) gets focus cleanly.
-                    setSheetOpen(false);
+                    closeSheet();
                     action.onSelect();
                   }}
                   type="button"

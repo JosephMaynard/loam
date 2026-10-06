@@ -774,10 +774,16 @@
 /* ---------- Actions: the sheet (touch long-press, or the time button) ---------- */
 
 .message-sheet-reactions {
-  display: flex;
-  justify-content: space-between;
   border-bottom: 1px solid var(--border);
   padding: 0 var(--space-1) var(--space-4);
+}
+
+/* Rows of five (lib/reactions.ts): the fixed fifteen, then the "+" tile and this device's recent picks. */
+.sheet-reaction-grid {
+  display: grid;
+  grid-template-columns: repeat(5, auto);
+  justify-content: space-between;
+  row-gap: var(--space-3);
 }
 
 .sheet-reaction {
@@ -798,6 +804,16 @@
 .sheet-reaction.is-active {
   background-color: var(--primary-soft);
   box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+.sheet-reaction-more {
+  color: var(--fg-muted);
+}
+
+.sheet-emoji-field {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
 }
 
 @media (max-width: 359.98px) {

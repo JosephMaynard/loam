@@ -57,6 +57,7 @@ import {
   putRecord,
   putRecords,
 } from "./lib/local-store";
+import { clearRecentReactions } from "./lib/reactions";
 import { reconcileRoster, sortUsers } from "./lib/roster";
 import { createLivenessWatchdog, type LivenessWatchdog } from "./lib/ws-liveness";
 import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
@@ -956,6 +957,7 @@ function LoamApp() {
     localStorage.removeItem(CURRENT_USER_KEY);
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
+    clearRecentReactions();
     forgetConfirmedIdentity();
     tabIdentityRef.current = undefined;
     // In-memory residue: decrypted avatar/attachment `blob:` URLs and rendered message HTML would
@@ -1029,6 +1031,7 @@ function LoamApp() {
     } catch {
       // Nothing durable to clear.
     }
+    clearRecentReactions();
     await clearAllRecords();
   }, []);
 
