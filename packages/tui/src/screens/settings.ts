@@ -3,7 +3,7 @@
  * (so the two always agree), a few actions, and what this computer remembers for the next `loam` start.
  * The web app's admin page has the rest.
  */
-import { type LoamConfig, type LoamConfigUpdate, type SecurityProfile } from "@loam/schema";
+import type { LoamConfig, LoamConfigUpdate, SecurityProfile } from "@loam/schema";
 
 import { type Line, padEnd, text } from "../ansi.js";
 import { isChar } from "../keys.js";
