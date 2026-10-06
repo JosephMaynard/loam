@@ -17,7 +17,25 @@ npm install -g loamnet
 loam
 ```
 
-From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code it prints (or open the printed URL). That device joins the node instantly. Requires Node.js 22.14 or newer (23.6 or newer on the 23 line).
+From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code (or open the address shown beside it). That device joins the node instantly. Requires Node.js 22.14 or newer (23.6 or newer on the 23 line).
+
+## The terminal screen
+
+In a terminal, `loam` takes over the window (like `top`; your scrollback comes back when it stops) and keeps the join QR on screen. Five screens are a number key away, and `?` lists every key:
+
+1. **Join**: the QR code and the addresses. `o` opens LOAM in your browser as the network's admin (or shows a QR that makes a phone admin), `a` picks which network address to advertise when the computer has more than one, `h` hides the QR.
+2. **Activity**: requests and server messages as they happen. `e` shows only problems, space pauses.
+3. **People**: who has joined and who is online. `m` makes someone an admin.
+4. **Settings**: the network's name, security profile, who can join, encryption, how long messages last, and more, changed live. Also a link code for joining another LOAM network, Emergency Reset, and what to remember for next time (port, kiosk mode).
+5. **Debug**: versions, how the node is set up, recent problems, detailed logging, and a diagnostics file to attach to a bug report (it leaves out names, messages, keys and addresses).
+
+Messages, approvals and moderation happen in the web app.
+
+**Becoming admin.** Nobody becomes admin by being first to open a new network. Press `o` on the Join screen: your browser opens LOAM already signed in as admin, using a link that works once, for 10 minutes. Or make anyone who has joined an admin from the People screen.
+
+**Kiosk mode.** Press `k` (or start with `--kiosk`) and choose a password: the screen then shows only the join QR, the network's name and how many devices are connected, and every key but Enter (unlock) is ignored, `q` and Ctrl-C included. Settings can make it start locked every time. It locks this screen, not the computer: anyone at an unlocked keyboard can still close the window or open another terminal, so for a computer left alone, run `loam` under its own user account.
+
+**Without a terminal** (a service, or output sent to a file), or with `--plain`, `loam` prints the addresses and the QR code instead, plus a one-time admin link while nobody is admin. Settings chosen on the terminal screen that apply at start-up (the port, the join address, kiosk mode) are kept in `cli.json` in the data folder; flags and environment variables win over them.
 
 ## Options
 
@@ -38,6 +56,11 @@ loam [options]
                     Use an ephemeral RAM-only key without prompting.
   --encrypt <pass>  Use <pass> directly. Discouraged: other users can see it in
                     `ps` and it lands in your shell history.
+  --kiosk           Start locked in kiosk mode: only the join QR shows until the
+                    kiosk password is entered (you choose one if none is saved)
+  --plain           Print the join QR and addresses instead of the full-screen
+                    view (automatic when there is no terminal)
+  --verbose         In plain mode, also print a log line for every request
   -h, --help        Show help
 ```
 

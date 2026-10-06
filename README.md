@@ -82,14 +82,18 @@ Android 8 or newer.
 npx loamnet
 ```
 
-It prints the address to open and a QR code to scan. Open it on the computer first: on a computer, the
-first person to open a new network becomes its admin. Needs [Node.js](https://nodejs.org) 22.14 or newer.
+In a terminal it opens a full-screen view with the QR code to scan, which stays on screen, plus
+Activity, People, Settings and Debug screens. Press **o** to open LOAM in your browser as the network's
+admin; nobody becomes admin just by opening it first. **k** locks the screen in kiosk mode, so a
+computer can be left out for people to join from. Needs [Node.js](https://nodejs.org) 22.14 or newer.
 
 ```bash
 npx loamnet --port 8080            # another port (by default 3000, or the next free one)
 npx loamnet --data-dir ~/loam      # where to keep the data (default ~/.loam)
 npx loamnet --encrypt              # encrypt the database (asks for a passphrase); pictures and
                                    # files are stored beside it, unencrypted
+npx loamnet --kiosk                # start locked, showing only the join QR
+npx loamnet --plain                # print the QR and addresses instead (also what a service gets)
 npm install -g loamnet && loam     # install it for good
 ```
 

@@ -73,6 +73,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
 | `packages/avatar` | Deterministic SVG avatar from an id. Three modes: `face` (SVG template), `initial`, `pattern`. OKLCH colour derivation with WCAG contrast fixups. Has a standalone `demo/`. |
 | `packages/qr` | Dependency-free QR encoder + SVG/terminal renderers and payload helpers. |
+| `packages/tui` | `@loam/tui`, the `loamnet` terminal UI (no dependencies: alternate screen, raw keys, ANSI). Screens Join (QR kept on screen; `o` = open as admin via a one-time code), Activity (pino log lines → `createLogBook`), People (make admin), Settings (live config via the host API; `cli.json` startup settings), Debug; kiosk mode (scrypt-hashed password, backoff). Drives the node ONLY through the in-process host API (`LoamApp.host`, `HostApi` in `@loam/schema`, server `host-api.ts`). All text from others goes through `clean()` (no control chars reach the terminal). |
 | `scripts/dev.ts` | Root dev launcher: prints a join QR + LAN URL, spawns server and client. |
 
 ## Commands
@@ -81,7 +82,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 pnpm install          # install workspace deps
 pnpm dev              # root: runs server + client together, prints join QR (see ports below)
 pnpm build            # pnpm -r build: builds all packages, then server (tsc) and client (tsc -b && vite build)
-pnpm test             # pnpm -r --if-present test: runs vitest in the 5 packages + apps/server + apps/client + apps/app
+pnpm test             # pnpm -r --if-present test: runs vitest in the 6 packages + apps/server + apps/client + apps/app
 ```
 
 There is **no lint script**. Type-checking happens as part of `build` (`tsc`), except `apps/app`,
@@ -97,7 +98,7 @@ typecheck, then signs; a separate least-privilege release job attaches the APK. 
 app aab` and upload the Play bundle as the `loam-host-aab` workflow artifact (never attached to the
 Release). Dependabot (`.github/dependabot.yml`) bumps npm deps and the SHA-pinned `github-actions` weekly.
 
-**Tests**: `packages/*` (schema, display-name, avatar, qr, crypto), `apps/server` (`src/db.test.ts` for the
+**Tests**: `packages/*` (schema, display-name, avatar, qr, crypto, tui), `apps/server` (`src/db.test.ts` for the
 DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
 matrix, config API, flag enforcement, kill switch, retention, private channels, search, WebSocket
 privacy filtering via a real listener — plus focused suites: `realtime`, `llm`, `mesh-bridge`,
@@ -238,7 +239,13 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `window.__loamHostDeviceToken` (never in a URL: anyone can craft one), so no LAN session can take
   `firstUser` during the boot window), or
   `none`. A successful claim persists `{isAdmin, pending:false}`, so on an approval-policy node the
-  claimer is an active admin. The legacy demo users `user.1234`/`user.5678` are **deleted at boot** (their
+  claimer is an active admin. **`loamnet` mints a host token too** (`cli/bin/loam.js`), so it is always
+  `hostDevice`: admin comes from the terminal UI's one-time claim codes (`admin-links.ts`: single-use,
+  10 min, in memory, cleared by the kill switch; the claim route accepts one under `hostDevice`; the client
+  reads `#…&a=<code>` in `lib/admin-link.ts`), its People screen (`host.makeAdmin`), or plain mode's
+  printed admin link. The **host API** (`LoamApp.host`, `host-api.ts`) is in-process only (status, config
+  via the shared `applyConfigUpdate`, `promoteUser`, link/invite/claim codes, join host, log level,
+  Emergency Reset); never expose it over HTTP. The legacy demo users `user.1234`/`user.5678` are **deleted at boot** (their
   messages tombstoned via the normal delete path, sessions/identity tokens purged); a fresh node never
   creates them. Admin-only endpoints check `currentUser.isAdmin`; client gating is cosmetic.
 - **Config**: layered defaults ← `config.json` ← DB-persisted admin edits (`config` table), all

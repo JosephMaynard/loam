@@ -7,6 +7,15 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **A terminal screen for `loamnet`.** In a terminal, `loam` now keeps the join QR on screen instead of
+  scrolling it away under a line per request, with Activity, People, Settings and Debug screens a key
+  away. Press `o` to open LOAM in the browser as the network's admin (or show a QR that makes a phone
+  admin); change the main network settings live; make someone an admin; link another network; run an
+  Emergency Reset; turn on detailed logging or write a diagnostics file. Messages and moderation stay in
+  the web app. No new dependencies.
+- **Kiosk mode** for a computer left out for people to join from: only the join QR, the network's name
+  and the number of connected devices show until a password is entered. Press `k`, or start with
+  `loam --kiosk`; Settings can make it start locked every time. It locks the screen, not the computer.
 - **Linking networks both ways, with a link code.** An admin (web admin sync settings) or the host phone
   (share screen) can show a "Link another LOAM node" code. It works once, for 10 minutes. Another LOAM
   phone scans it in setup and the two networks then share their public channels both ways, with nothing
@@ -89,6 +98,12 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **`loamnet` no longer makes the first person to open a new network its admin.** As on the Android
+  host, admin comes from the host's own screen: `o` in the terminal view, the People screen, or (without a
+  terminal) a one-time admin link printed while nobody is admin. The `admin.bootstrap` setting no longer
+  applies to a node run with `loamnet`.
+- **`loam` without a terminal, or with `--plain`, prints no line per request** (`--verbose` brings them
+  back), so its QR code stays visible.
 - **Setup:** "Community" comes first, each kind of network has an icon, and choosing one moves straight on.
   The screen saying a private network "was erased" is gone: setup just starts again.
 - **Emergency reset** is in the host menu on private networks, and at the bottom of Encryption settings on
